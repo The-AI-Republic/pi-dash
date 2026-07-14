@@ -1967,6 +1967,161 @@ pub async fn enroll_runner(
         .map_err(|e| TransportError::Protocol(format!("enroll body: {e}")))
 }
 
+// ---------------------------------------------------------------------------
+// Machine control session (dev-machine scoped)
+// ---------------------------------------------------------------------------
+
+/// Response of `POST /api/v1/runner/dev-machines/<mid>/sessions/`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MachineOpenResponse {
+    pub session_id: Uuid,
+    #[serde(default)]
+    pub welcome: Json,
+}
+
+/// HTTP client for the per-dev-machine control session.
+///
+/// The machine-scoped twin of the per-runner session methods on
+/// `RunnerCloudClient`, but far simpler: the shared `mt_` MachineToken
+/// is a long-lived bearer (no access-token refresh dance) and there is
+/// no per-runner state to attach. Exists even when the machine hosts
+/// zero runners — that's the whole point (cloud-driven first-runner
+/// creation).
+#[derive(Clone)]
+pub struct MachineClient {
+    transport: SharedHttpTransport,
+    dev_machine_id: Uuid,
+    machine_token: String,
+}
+
+impl MachineClient {
+    pub fn new(
+        transport: SharedHttpTransport,
+        dev_machine_id: Uuid,
+        machine_token: String,
+    ) -> Self {
+        Self {
+            transport,
+            dev_machine_id,
+            machine_token,
+        }
+    }
+
+    pub fn dev_machine_id(&self) -> Uuid {
+        self.dev_machine_id
+    }
+
+    pub fn transport(&self) -> &SharedHttpTransport {
+        &self.transport
+    }
+
+    pub fn machine_token(&self) -> &str {
+        &self.machine_token
+    }
+
+    fn base(&self) -> String {
+        format!(
+            "{}/api/v1/runner/dev-machines/{}",
+            self.transport.cloud_url(),
+            self.dev_machine_id
+        )
+    }
+
+    /// `POST …/sessions/` — open (or take over) the machine session.
+    pub async fn open_session(&self) -> Result<MachineOpenResponse, TransportError> {
+        let url = format!("{}/sessions/", self.base());
+        let resp = self
+            .transport
+            .http()
+            .post(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.machine_token))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .map_err(classify_send_error)?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(map_session_error(status, &body));
+        }
+        resp.json::<MachineOpenResponse>()
+            .await
+            .map_err(|e| TransportError::Protocol(format!("machine session body: {e}")))
+    }
+
+    /// `POST …/sessions/<sid>/poll` — long-poll for control messages.
+    /// Mirrors the per-runner poll's 409→SessionEvicted mapping and
+    /// per-request timeout override.
+    pub async fn poll(
+        &self,
+        session_id: &Uuid,
+        ack: Vec<String>,
+        long_poll_interval_secs: u64,
+    ) -> Result<PollResponse, TransportError> {
+        let url = format!("{}/sessions/{}/poll", self.base(), session_id);
+        let request_timeout = Duration::from_secs(long_poll_interval_secs.saturating_add(5));
+        let resp = self
+            .transport
+            .http()
+            .post(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.machine_token))
+            .json(&serde_json::json!({ "ack": ack }))
+            .timeout(request_timeout)
+            .send()
+            .await
+            .map_err(classify_send_error)?;
+        let status = resp.status();
+        if status == StatusCode::CONFLICT {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(TransportError::SessionEvicted { reason: body });
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(map_auth_error(status, &body));
+        }
+        resp.json::<PollResponse>()
+            .await
+            .map_err(|e| TransportError::Protocol(format!("machine poll body: {e}")))
+    }
+
+    /// `DELETE …/sessions/<sid>/` — best-effort clean shutdown.
+    pub async fn close_session(&self, session_id: &Uuid) {
+        let url = format!("{}/sessions/{}/", self.base(), session_id);
+        let _ = self
+            .transport
+            .http()
+            .delete(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.machine_token))
+            .send()
+            .await;
+    }
+
+    /// `POST …/commands/<request_id>/result/` — report a machine
+    /// command's outcome so the web UI's status poll can complete.
+    pub async fn post_command_result(
+        &self,
+        request_id: &str,
+        body: &Json,
+    ) -> Result<(), TransportError> {
+        let url = format!("{}/commands/{}/result/", self.base(), request_id);
+        let resp = self
+            .transport
+            .http()
+            .post(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.machine_token))
+            .json(body)
+            .send()
+            .await
+            .map_err(classify_send_error)?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(map_auth_error(status, &body));
+        }
+        Ok(())
+    }
+}
+
 /// Read a per-runner `credentials.toml` from disk and return a
 /// `CredentialsHandle` ready for use with `RunnerCloudClient`. Centralised
 /// here so the supervisor and the CLI/TUI remove flow share one parser.

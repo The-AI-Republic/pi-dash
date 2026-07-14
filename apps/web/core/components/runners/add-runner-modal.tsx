@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { observer } from "mobx-react";
 import type { SubmitHandler } from "react-hook-form";
 import { Controller, useForm } from "react-hook-form";
@@ -13,8 +13,8 @@ import useSWR from "swr";
 import { API_BASE_URL } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
-import { PodService } from "@pi-dash/services";
-import type { IPod, TPartialProject } from "@pi-dash/types";
+import { PodService, RunnerService } from "@pi-dash/services";
+import type { IDevMachine, IPod, TPartialProject } from "@pi-dash/types";
 import { CustomSelect, EModalPosition, EModalWidth, Input, ModalCore } from "@pi-dash/ui";
 // app
 import { RunnerCliCommand } from "@/components/runners/runner-cli-command";
@@ -41,7 +41,15 @@ const DEFAULT_AGENT: TAgent = "claude-code";
 const RUNNER_NAME_WHITESPACE_RE = /\s/;
 const RUNNER_NAME_RE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 
+/** Sentinel devMachineId meaning "show the command, don't auto-create". */
+const MANUAL_MACHINE = "";
+/** How long the modal waits for the daemon to report back. */
+const REMOTE_CREATE_TIMEOUT_MS = 90_000;
+const REMOTE_CREATE_POLL_MS = 2_000;
+
 interface FormValues {
+  /** Target connected dev machine; `MANUAL_MACHINE` = command panel. */
+  devMachineId: string;
   projectIdentifier: string;
   podName: string;
   name: string;
@@ -58,7 +66,16 @@ type RunnerCommandValues = Pick<FormValues, "projectIdentifier" | "podName" | "n
   reasoningEffort?: string;
 };
 
+/** Progress of a cloud-driven creation on a connected dev machine. */
+type RemoteCreateState = {
+  phase: "creating" | "ok" | "error" | "timeout";
+  machineLabel: string;
+  runnerName?: string;
+  error?: string;
+};
+
 const DEFAULT_VALUES: FormValues = {
+  devMachineId: MANUAL_MACHINE,
   projectIdentifier: "",
   podName: "",
   name: "",
@@ -69,6 +86,11 @@ const DEFAULT_VALUES: FormValues = {
 
 const podService = new PodService();
 const projectService = new ProjectService();
+const runnerService = new RunnerService();
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const machineDisplayLabel = (machine: IDevMachine): string => machine.label || machine.host_label || machine.id;
 
 export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   const { isOpen, onClose, workspaceId, workspaceSlug } = props;
@@ -92,15 +114,64 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   } = useForm<FormValues>({ defaultValues: DEFAULT_VALUES });
 
   const [runnerCommand, setRunnerCommand] = useState<RunnerCommandValues | null>(null);
+  const [remoteCreate, setRemoteCreate] = useState<RemoteCreateState | null>(null);
+  // Stashed on submit so a failed remote create can fall back to the
+  // manual command panel with the same values.
+  const [lastSubmitted, setLastSubmitted] = useState<RunnerCommandValues | null>(null);
+  // Flipped on close so an in-flight status poll stops writing state
+  // into a modal the user already dismissed.
+  const pollCancelled = useRef(false);
+  // One-shot per open: auto-select the first connected machine once the
+  // machine list arrives, unless the user already touched the picker.
+  const autoSelectedMachine = useRef(false);
 
   // Reset everything on close→open. State persists between consecutive
   // opens otherwise (RHF + local command state would carry the stale
   // last-submission and confuse the next user).
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      pollCancelled.current = true;
+      return;
+    }
+    pollCancelled.current = false;
+    autoSelectedMachine.current = false;
     setRunnerCommand(null);
+    setRemoteCreate(null);
+    setLastSubmitted(null);
     reset(DEFAULT_VALUES);
   }, [isOpen, reset]);
+
+  // Connected dev machines for the picker. Kept fresh while the modal
+  // is open so a machine coming online mid-flow becomes selectable.
+  const { data: devMachines, error: devMachinesError } = useSWR<IDevMachine[]>(
+    isOpen && workspaceId ? ["dev-machines", workspaceId] : null,
+    () => runnerService.listDevMachines(workspaceId),
+    { refreshInterval: 15_000 }
+  );
+  const connectedMachines = useMemo(
+    () => (devMachines ?? []).filter((m) => m.control_online && !m.revoked_at),
+    [devMachines]
+  );
+  const selectedDevMachineId = watch("devMachineId");
+  const selectedMachine = connectedMachines.find((m) => m.id === selectedDevMachineId);
+
+  // Default the picker to the first connected machine — cloud-driven
+  // creation is the preferred path; manual command stays one click away.
+  useEffect(() => {
+    if (autoSelectedMachine.current || !isOpen) return;
+    if (!connectedMachines.length) return;
+    autoSelectedMachine.current = true;
+    if (!selectedDevMachineId) {
+      setValue("devMachineId", connectedMachines[0].id);
+    }
+  }, [connectedMachines, isOpen, selectedDevMachineId, setValue]);
+
+  // A machine can drop offline between selection and submit; snap the
+  // picker back to manual so the button's promise stays honest.
+  useEffect(() => {
+    if (!selectedDevMachineId || selectedMachine) return;
+    setValue("devMachineId", MANUAL_MACHINE);
+  }, [selectedDevMachineId, selectedMachine, setValue]);
 
   // Project picker + pod picker load whenever the modal is open. Pod
   // list re-fetches when the chosen project changes; the picker shows
@@ -166,9 +237,64 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
     setValue("model", DEFAULT_MODEL_BY_AGENT[selectedAgent]);
   }, [selectedAgent, setValue]);
 
+  // Drive the cloud → daemon creation and poll the daemon's result.
+  // Transient status-poll failures are retried until the deadline; a
+  // deadline without a verdict shows the timeout panel (the runner may
+  // still appear — the daemon just didn't report back in time).
+  const runRemoteCreate = async (machine: IDevMachine, cmd: RunnerCommandValues) => {
+    const machineLabel = machineDisplayLabel(machine);
+    setRemoteCreate({ phase: "creating", machineLabel });
+    let requestId: string;
+    try {
+      const resp = await runnerService.createRunnerOnMachine(machine.id, workspaceId, {
+        project: cmd.projectIdentifier,
+        pod: cmd.podName || undefined,
+        name: cmd.name || undefined,
+        working_dir: cmd.workingDir || undefined,
+        agent: cmd.agent,
+        model: cmd.model,
+        reasoning_effort: cmd.reasoningEffort,
+      });
+      requestId = resp.request_id;
+    } catch (e: unknown) {
+      const code = (e as { error?: string } | undefined)?.error;
+      setRemoteCreate({
+        phase: "error",
+        machineLabel,
+        error:
+          code === "machine_offline"
+            ? t("The dev machine went offline before the command could be delivered.")
+            : (code ?? t("Could not reach the cloud to start the runner creation.")),
+      });
+      return;
+    }
+    const deadline = Date.now() + REMOTE_CREATE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (pollCancelled.current) return;
+      // eslint-disable-next-line no-await-in-loop -- deliberate sequential status polling
+      await sleep(REMOTE_CREATE_POLL_MS);
+      let status;
+      try {
+        // eslint-disable-next-line no-await-in-loop -- deliberate sequential status polling
+        status = await runnerService.getCreateRunnerOnMachineStatus(machine.id, requestId, workspaceId);
+      } catch {
+        continue; // transient — keep polling until the deadline
+      }
+      if (status.status === "ok") {
+        setRemoteCreate({ phase: "ok", machineLabel, runnerName: status.runner_name });
+        return;
+      }
+      if (status.status === "error") {
+        setRemoteCreate({ phase: "error", machineLabel, error: status.error });
+        return;
+      }
+    }
+    if (!pollCancelled.current) setRemoteCreate({ phase: "timeout", machineLabel });
+  };
+
   const onSubmit: SubmitHandler<FormValues> = (values) => {
     const { model, reasoningEffort } = resolveRunnerModel(values.agent, values.model);
-    setRunnerCommand({
+    const cmd: RunnerCommandValues = {
       projectIdentifier: values.projectIdentifier,
       podName: values.podName,
       name: values.name.trim(),
@@ -176,21 +302,136 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
       agent: values.agent,
       model,
       reasoningEffort,
-    });
+    };
+    setLastSubmitted(cmd);
+    const machine = connectedMachines.find((m) => m.id === values.devMachineId);
+    if (machine) {
+      void runRemoteCreate(machine, cmd);
+      return;
+    }
+    setRunnerCommand(cmd);
   };
 
-  // Two layouts: form (before submit) and command panel (after).
-  // Splitting them keeps state clean — the command panel doesn't
-  // need RHF/Controller wiring.
+  // Three layouts: form (before submit), remote-create progress panel
+  // (machine-targeted submit), and command panel (manual submit).
+  // Splitting them keeps state clean — the panels don't need
+  // RHF/Controller wiring.
   return (
     <ModalCore isOpen={isOpen} handleClose={onClose} position={EModalPosition.CENTER} width={EModalWidth.XXL}>
-      {runnerCommand === null ? (
+      {remoteCreate !== null ? (
+        <div className="flex flex-col gap-4 p-5">
+          <div>
+            <div className="text-18 font-medium text-primary">
+              {remoteCreate.phase === "ok" ? t("Runner created") : t("Add runner")}
+            </div>
+            {remoteCreate.phase === "creating" && (
+              <p className="mt-1 text-13 text-secondary">
+                {t("Creating runner on")} <span className="font-medium">{remoteCreate.machineLabel}</span>…{" "}
+                {t("Waiting for the dev machine to report back. This usually takes a few seconds.")}
+              </p>
+            )}
+            {remoteCreate.phase === "ok" && (
+              <p className="mt-1 text-13 text-secondary">
+                {remoteCreate.runnerName ? (
+                  <>
+                    <code className="text-12">{remoteCreate.runnerName}</code>{" "}
+                  </>
+                ) : null}
+                {t("is now running on")} <span className="font-medium">{remoteCreate.machineLabel}</span>.
+              </p>
+            )}
+            {remoteCreate.phase === "error" && (
+              <p className="mt-1 text-13 text-danger-primary">
+                {t("Runner creation failed")}
+                {remoteCreate.error ? `: ${remoteCreate.error}` : "."}
+              </p>
+            )}
+            {remoteCreate.phase === "timeout" && (
+              <p className="mt-1 text-13 text-secondary">
+                {t(
+                  "The dev machine did not report back in time. The runner may still appear shortly — check the runners list, or run the command manually."
+                )}
+              </p>
+            )}
+          </div>
+
+          <div className="flex justify-end gap-2">
+            {remoteCreate.phase === "creating" ? (
+              <Button variant="secondary" onClick={onClose}>
+                {t("Close")}
+              </Button>
+            ) : remoteCreate.phase === "ok" ? (
+              <Button onClick={onClose}>{t("Done")}</Button>
+            ) : (
+              <>
+                <Button variant="secondary" onClick={() => setRemoteCreate(null)}>
+                  {t("Back")}
+                </Button>
+                {lastSubmitted && (
+                  <Button
+                    onClick={() => {
+                      setRunnerCommand(lastSubmitted);
+                      setRemoteCreate(null);
+                    }}
+                  >
+                    {t("Show manual command")}
+                  </Button>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      ) : runnerCommand === null ? (
         <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-5 p-5">
           <div>
             <div className="text-18 font-medium text-primary">{t("Add runner")}</div>
             <p className="mt-1 text-13 text-secondary">
-              {t("Generate a `pidash runner add` command for the machine that will host this runner.")}
+              {t(
+                "Create a runner on a connected dev machine, or generate a `pidash runner add` command to run manually."
+              )}
             </p>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label htmlFor="add-runner-dev-machine" className="text-13 font-medium text-primary">
+              {t("Dev machine")}
+            </label>
+            <Controller
+              control={control}
+              name="devMachineId"
+              render={({ field }) => (
+                <CustomSelect
+                  value={field.value}
+                  label={selectedMachine ? machineDisplayLabel(selectedMachine) : t("Run `pidash runner add` manually")}
+                  onChange={field.onChange}
+                  buttonClassName="border border-subtle"
+                  input
+                  maxHeight="lg"
+                  placement="bottom-start"
+                >
+                  <>
+                    {connectedMachines.map((machine) => (
+                      <CustomSelect.Option key={machine.id} value={machine.id}>
+                        {machineDisplayLabel(machine)}
+                      </CustomSelect.Option>
+                    ))}
+                    <CustomSelect.Option value={MANUAL_MACHINE}>
+                      {t("Run `pidash runner add` manually")}
+                    </CustomSelect.Option>
+                  </>
+                </CustomSelect>
+              )}
+            />
+            <p className="text-12 text-secondary">
+              {connectedMachines.length
+                ? t("Connected dev machines can create the runner directly — no copy-paste needed.")
+                : t(
+                    "No connected dev machines. Install and start the pidash daemon on your machine, or generate the command to run manually."
+                  )}
+            </p>
+            {devMachinesError && (
+              <span className="text-12 text-danger-primary">{t("Could not load dev machines.")}</span>
+            )}
           </div>
 
           <div className="flex flex-col gap-1">
@@ -387,7 +628,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
             <Button variant="secondary" onClick={onClose}>
               {t("Cancel")}
             </Button>
-            <Button type="submit">{t("Generate command")}</Button>
+            <Button type="submit">{t("Generate Runner")}</Button>
           </div>
         </form>
       ) : (

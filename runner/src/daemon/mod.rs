@@ -1,3 +1,4 @@
+pub mod machine_control;
 pub mod observability;
 mod run_event_mirror;
 pub mod runner_instance;

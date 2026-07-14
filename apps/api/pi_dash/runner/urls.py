@@ -21,6 +21,7 @@ from pi_dash.runner.views import (
     ChatMessageStartedEndpoint,
     ChatStartedEndpoint,
     HealthEndpoint,
+    MachineCommandResultEndpoint,
     MachineSessionDeleteEndpoint,
     MachineSessionOpenEndpoint,
     MachineTokenRedeemEndpoint,
@@ -121,6 +122,12 @@ urlpatterns = [
         "dev-machines/<uuid:dev_machine_id>/sessions/<uuid:sid>/poll",
         machine_session_poll,
         name="machine-session-poll",
+    ),
+    # Daemon-side result write-back for machine-scoped commands.
+    path(
+        "dev-machines/<uuid:dev_machine_id>/commands/<uuid:request_id>/result/",
+        MachineCommandResultEndpoint.as_view(),
+        name="machine-command-result",
     ),
     # Run-lifecycle + event upstream.
     path(

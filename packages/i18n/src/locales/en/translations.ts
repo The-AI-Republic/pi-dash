@@ -688,6 +688,27 @@ export default {
     "Generate a `pidash runner add` command for the machine that will host this runner.",
   "Generate a token to sign-in to the webhook payload": "Generate a token to sign-in to the webhook payload",
   "Generate command": "Generate command",
+  "Generate Runner": "Generate Runner",
+  "Create a runner on a connected dev machine, or generate a `pidash runner add` command to run manually.":
+    "Create a runner on a connected dev machine, or generate a `pidash runner add` command to run manually.",
+  "Dev machine": "Dev machine",
+  "Run `pidash runner add` manually": "Run `pidash runner add` manually",
+  "Connected dev machines can create the runner directly — no copy-paste needed.":
+    "Connected dev machines can create the runner directly — no copy-paste needed.",
+  "No connected dev machines. Install and start the pidash daemon on your machine, or generate the command to run manually.":
+    "No connected dev machines. Install and start the pidash daemon on your machine, or generate the command to run manually.",
+  "Runner created": "Runner created",
+  "Creating runner on": "Creating runner on",
+  "Waiting for the dev machine to report back. This usually takes a few seconds.":
+    "Waiting for the dev machine to report back. This usually takes a few seconds.",
+  "is now running on": "is now running on",
+  "Runner creation failed": "Runner creation failed",
+  "The dev machine did not report back in time. The runner may still appear shortly — check the runners list, or run the command manually.":
+    "The dev machine did not report back in time. The runner may still appear shortly — check the runners list, or run the command manually.",
+  "Show manual command": "Show manual command",
+  "The dev machine went offline before the command could be delivered.":
+    "The dev machine went offline before the command could be delivered.",
+  "Could not reach the cloud to start the runner creation.": "Could not reach the cloud to start the runner creation.",
   "Generate secure API tokens to connect your workspace with external systems and applications.":
     "Generate secure API tokens to connect your workspace with external systems and applications.",
   "Generate secure API tokens to integrate your data with external systems and applications.":

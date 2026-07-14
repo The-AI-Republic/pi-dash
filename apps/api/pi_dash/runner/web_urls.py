@@ -25,6 +25,8 @@ from pi_dash.runner.views import (
     DevMachineListEndpoint,
     DevMachineRevokeEndpoint,
     DevMachineRotateEndpoint,
+    MachineCreateRunnerEndpoint,
+    MachineCreateRunnerStatusEndpoint,
     MachineTokenTicketEndpoint,
     PodDetailEndpoint,
     PodListEndpoint,
@@ -49,6 +51,17 @@ urlpatterns = [
         "dev-machines/<uuid:machine_id>/rotate/",
         DevMachineRotateEndpoint.as_view(),
         name="dev-machine-rotate",
+    ),
+    # Cloud-driven runner creation on a connected dev machine.
+    path(
+        "dev-machines/<uuid:machine_id>/create-runner/",
+        MachineCreateRunnerEndpoint.as_view(),
+        name="dev-machine-create-runner",
+    ),
+    path(
+        "dev-machines/<uuid:machine_id>/create-runner/<uuid:request_id>/",
+        MachineCreateRunnerStatusEndpoint.as_view(),
+        name="dev-machine-create-runner-status",
     ),
     # Deprecated token-mint route retained only to return a clear 410.
     # New runners are created by `pidash runner add` through the

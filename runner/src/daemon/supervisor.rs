@@ -9,14 +9,14 @@ use crate::agent::{AgentBridge, AgentCursor, BridgeEvent, RunPayload};
 use crate::approval::policy::Policy;
 use crate::approval::router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource};
 use crate::cloud::http::{
-    AckEntry, AttachBody, CredentialsHandle, HttpLoop, InboundEnvelope, PollStatus,
+    AckEntry, AttachBody, CredentialsHandle, HttpLoop, InboundEnvelope, MachineClient, PollStatus,
     RunnerCloudClient, RunnerCredentials, SharedHttpTransport,
 };
 use crate::cloud::protocol::{
     ClientMsg, FailureReason, RunnerStatus, ServerMsg, TokenUsage as WireTokenUsage, WIRE_VERSION,
     WorkspaceState,
 };
-use crate::config::schema::{AgentKind, Config, Credentials};
+use crate::config::schema::{AgentKind, Config, Credentials, DaemonConfig, RunnerConfig};
 use crate::daemon::run_event_mirror::RunEventMirror;
 use crate::daemon::runner_instance::RunnerInstance;
 use crate::daemon::runner_out::RunnerOut;
@@ -96,20 +96,14 @@ impl Supervisor {
 
         let mut instances: Vec<RunnerInstance> = Vec::new();
         for runner_cfg in &config.runners {
-            let inst = if let Some(shared) = &transport {
-                let runner_paths = paths.for_runner(runner_cfg.runner_id);
-                let creds = load_runner_credentials(
-                    &runner_paths,
-                    &runner_cfg.name,
-                    shared_machine_token.as_deref(),
-                )
-                .await?;
-                let client = RunnerCloudClient::new(runner_cfg.runner_id, creds, shared.clone());
-                RunnerInstance::new_http(runner_cfg.clone(), &paths, client, config.daemon.clone())
-            } else {
-                RunnerInstance::new_offline(runner_cfg.clone(), &paths, config.daemon.clone())
-            };
-            inst.paths.ensure()?;
+            let inst = build_runner_instance(
+                runner_cfg.clone(),
+                transport.as_ref(),
+                shared_machine_token.as_deref(),
+                &paths,
+                &config.daemon,
+            )
+            .await?;
             instances.push(inst);
         }
 
@@ -192,121 +186,60 @@ impl Supervisor {
             tracing::info!("offline mode: HTTP transport disabled");
         }
 
+        // Shared context for bringing a runner's tasks up — used by the
+        // startup loop below and by the machine control session's
+        // cloud-driven `create_runner` hot-add path.
+        let spawn_ctx = RunnerSpawnCtx {
+            transport: transport.clone(),
+            shared_machine_token: shared_machine_token.clone(),
+            paths: paths.clone(),
+            daemon: config.daemon.clone(),
+            pools: pools.clone(),
+            mailboxes: mailboxes.clone(),
+            hello_runners: hello_runners.clone(),
+            daemon_state: state.clone(),
+        };
+
         // One RunnerLoop per instance. Each consumes from its mailbox.
         let mut loop_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
         let mut http_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
         let mut refresh_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
         for inst in &instances {
-            let mailbox_rx = match inst.take_mailbox_rx().await {
-                Some(rx) => rx,
-                None => {
-                    tracing::error!(
-                        %inst.runner_id,
-                        "mailbox already taken — refusing to spawn a duplicate RunnerLoop"
-                    );
-                    continue;
-                }
-            };
-            let runner_paths = inst.paths.clone();
-            let runner_config = inst.config.clone();
-            let inst_state = inst.state.clone();
-            let inst_approvals = inst.approvals.clone();
-            let inst_out = inst.out.clone();
-            let inst_ack_tx = inst.ack_tx.clone();
-            let inst_remove_tx = inst.remove_tx.clone();
-            let live_mailboxes = mailboxes.clone();
-            let live_hello_runners = hello_runners.clone();
-            let daemon_paths = paths.clone();
-            // Resolve this runner's pool (if it references a work dir). Cloned
-            // handle is cheap (wraps an mpsc sender).
-            let inst_pool = runner_config
-                .workdir
-                .as_deref()
-                .and_then(|name| pools.get(name).cloned());
-            let h = tokio::spawn(async move {
-                let run = RunnerLoop {
-                    runner_paths,
-                    paths: daemon_paths,
-                    runner_config,
-                    pool: inst_pool,
-                    out: inst_out,
-                    state: inst_state,
-                    approvals: inst_approvals,
-                    inbound: mailbox_rx,
-                    ack_tx: inst_ack_tx,
-                    remove_tx: inst_remove_tx,
-                    live_mailboxes,
-                    live_hello_runners,
-                    current_run: None,
-                    current_chat: None,
-                };
-                if let Err(e) = run.run().await {
-                    tracing::error!("runner loop exited: {e:#}");
-                }
-            });
-            loop_handles.push(h);
-
-            if let Some(client) = inst.client.clone() {
-                let ack_rx = match inst.take_ack_rx().await {
-                    Some(rx) => rx,
-                    None => {
-                        tracing::error!(
-                            %inst.runner_id,
-                            "ack receiver already taken — refusing to spawn a duplicate HttpLoop"
-                        );
-                        continue;
-                    }
-                };
-                let http_loop = HttpLoop::new(
-                    client.clone(),
-                    inst.mailbox_tx.clone(),
-                    ack_rx,
-                    inst.state.rx_status.clone(),
-                    inst.state.rx_in_flight.clone(),
-                    inst.state.shutdown_notified(),
-                    attach_body_for_instance(inst),
-                )
-                .with_state(inst.state.clone())
-                .with_pool(
-                    inst.config
-                        .workdir
-                        .as_deref()
-                        .and_then(|name| pools.get(name).cloned()),
-                )
-                .with_teardown_rx(inst.remove_tx.subscribe());
-                let close_client = client.clone();
-                let local_state = inst.state.clone();
-                let daemon_state = state.clone();
-                let http_handle = tokio::spawn(async move {
-                    if let Err(e) = http_loop.run().await {
-                        if e.is_expected_teardown() {
-                            tracing::info!("http loop exited after runner teardown: {e:#}");
-                        } else {
-                            tracing::error!("http loop exited: {e:#}");
-                        }
-                        local_state.set_connected(false).await;
-                        let _ = tokio::time::timeout(
-                            Duration::from_secs(2),
-                            close_client.close_session(),
-                        )
-                        .await;
-                        if e.requires_daemon_restart() {
-                            tracing::error!(
-                                "http loop hit a local invariant failure; requesting daemon restart"
-                            );
-                            daemon_state.shutdown();
-                        }
-                    }
-                });
-                http_handles.push(http_handle);
-
-                let refresh_state = inst.state.clone();
-                let refresh_handle = tokio::spawn(async move {
-                    refresh_loop(client, refresh_state).await;
-                });
-                refresh_handles.push(refresh_handle);
-            }
+            let tasks = spawn_instance_tasks(inst, &spawn_ctx).await;
+            loop_handles.extend(tasks.runner_loop);
+            http_handles.extend(tasks.http_loop);
+            refresh_handles.extend(tasks.refresh);
         }
+
+        // Machine-level control session: lets the cloud push
+        // machine-scoped commands (``create_runner``) down to this
+        // machine even when it hosts zero runners. Requires the shared
+        // machine token and a persisted dev_machine_id — both written
+        // by `pidash auth login` / modern enrollments; legacy installs
+        // without them simply don't get the channel.
+        let machine_handle = match (
+            transport.clone(),
+            shared_machine_token.clone(),
+            config.daemon.dev_machine_id,
+        ) {
+            (Some(shared), Some(token), Some(dev_machine_id)) => {
+                let client = MachineClient::new(shared, dev_machine_id, token);
+                let control = crate::daemon::machine_control::MachineControl::new(
+                    client,
+                    spawn_ctx.clone(),
+                    state.clone(),
+                );
+                Some(tokio::spawn(async move { control.run().await }))
+            }
+            _ => {
+                if !opts.offline {
+                    tracing::info!(
+                        "machine control session disabled (missing dev_machine_id or mt_ token in config)"
+                    );
+                }
+                None
+            }
+        };
 
         let shutdown = state.shutdown_notified();
         let sig = crate::util::signal::shutdown();
@@ -345,9 +278,221 @@ impl Supervisor {
         for h in refresh_handles {
             h.abort();
         }
+        if let Some(h) = machine_handle {
+            h.abort();
+        }
         ipc_handle.abort();
         Ok(())
     }
+}
+
+/// Construct (but don't start) a `RunnerInstance` from its config
+/// block. Shared by the startup loop and the machine control session's
+/// hot-add path.
+async fn build_runner_instance(
+    runner_cfg: RunnerConfig,
+    transport: Option<&SharedHttpTransport>,
+    shared_machine_token: Option<&str>,
+    paths: &Paths,
+    daemon: &DaemonConfig,
+) -> Result<RunnerInstance> {
+    let inst = if let Some(shared) = transport {
+        let runner_paths = paths.for_runner(runner_cfg.runner_id);
+        let creds =
+            load_runner_credentials(&runner_paths, &runner_cfg.name, shared_machine_token).await?;
+        let client = RunnerCloudClient::new(runner_cfg.runner_id, creds, shared.clone());
+        RunnerInstance::new_http(runner_cfg, paths, client, daemon.clone())
+    } else {
+        RunnerInstance::new_offline(runner_cfg, paths, daemon.clone())
+    };
+    inst.paths.ensure()?;
+    Ok(inst)
+}
+
+/// Everything a post-startup code path needs to bring a new runner up
+/// in-process (cloud `create_runner` → daemon hot-add, no restart).
+/// All fields are cheap clones of the supervisor's shared state.
+#[derive(Clone)]
+pub(crate) struct RunnerSpawnCtx {
+    transport: Option<SharedHttpTransport>,
+    shared_machine_token: Option<String>,
+    pub(crate) paths: Paths,
+    daemon: DaemonConfig,
+    pools: Arc<HashMap<String, PoolHandle>>,
+    mailboxes: Arc<RwLock<HashMap<uuid::Uuid, mpsc::Sender<InboundEnvelope>>>>,
+    hello_runners: Arc<RwLock<HelloRunnerMap>>,
+    daemon_state: StateHandle,
+}
+
+impl RunnerSpawnCtx {
+    pub(crate) fn cloud_url(&self) -> String {
+        self.daemon.cloud_url.clone()
+    }
+
+    /// Hot-add: bring a freshly configured runner up in-process.
+    ///
+    /// Registers the instance in the shared mailbox / hello maps and
+    /// spawns the same three tasks the startup loop spawns. Handles are
+    /// deliberately detached: on daemon shutdown the tasks die with the
+    /// process, and the graceful drain walks `hello_runners`, which
+    /// includes hot-added runners. Known gap: the IPC server's instance
+    /// snapshot is built at startup, so the TUI won't list this runner
+    /// until the next daemon restart.
+    pub(crate) async fn add_runner(&self, runner_cfg: RunnerConfig) -> Result<()> {
+        let inst = build_runner_instance(
+            runner_cfg,
+            self.transport.as_ref(),
+            self.shared_machine_token.as_deref(),
+            &self.paths,
+            &self.daemon,
+        )
+        .await?;
+        {
+            let mut mailboxes = self.mailboxes.write().await;
+            mailboxes.insert(inst.runner_id, inst.mailbox_tx.clone());
+        }
+        {
+            let mut hello = self.hello_runners.write().await;
+            hello.insert(
+                inst.runner_id,
+                (
+                    inst.out.clone(),
+                    inst.state.clone(),
+                    inst.config.project_slug.clone(),
+                ),
+            );
+        }
+        let _tasks = spawn_instance_tasks(&inst, self).await;
+        tracing::info!(runner_id = %inst.runner_id, name = %inst.name, "hot-added runner from machine control session");
+        Ok(())
+    }
+}
+
+/// Handles of the tasks that drive one runner. `None` entries mean the
+/// corresponding task was not spawned (offline mode has no HTTP/refresh
+/// loop; a taken mailbox refuses a duplicate RunnerLoop).
+struct SpawnedInstanceTasks {
+    runner_loop: Option<tokio::task::JoinHandle<()>>,
+    http_loop: Option<tokio::task::JoinHandle<()>>,
+    refresh: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Spawn the RunnerLoop + HttpLoop + refresh loop for one instance.
+/// Extracted from `Supervisor::run`'s startup loop so the machine
+/// control session's hot-add path spawns byte-identical machinery.
+async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> SpawnedInstanceTasks {
+    let mut tasks = SpawnedInstanceTasks {
+        runner_loop: None,
+        http_loop: None,
+        refresh: None,
+    };
+    let mailbox_rx = match inst.take_mailbox_rx().await {
+        Some(rx) => rx,
+        None => {
+            tracing::error!(
+                %inst.runner_id,
+                "mailbox already taken — refusing to spawn a duplicate RunnerLoop"
+            );
+            return tasks;
+        }
+    };
+    let runner_paths = inst.paths.clone();
+    let runner_config = inst.config.clone();
+    let inst_state = inst.state.clone();
+    let inst_approvals = inst.approvals.clone();
+    let inst_out = inst.out.clone();
+    let inst_ack_tx = inst.ack_tx.clone();
+    let inst_remove_tx = inst.remove_tx.clone();
+    let live_mailboxes = ctx.mailboxes.clone();
+    let live_hello_runners = ctx.hello_runners.clone();
+    let daemon_paths = ctx.paths.clone();
+    // Resolve this runner's pool (if it references a work dir). Cloned
+    // handle is cheap (wraps an mpsc sender).
+    let inst_pool = runner_config
+        .workdir
+        .as_deref()
+        .and_then(|name| ctx.pools.get(name).cloned());
+    let h = tokio::spawn(async move {
+        let run = RunnerLoop {
+            runner_paths,
+            paths: daemon_paths,
+            runner_config,
+            pool: inst_pool,
+            out: inst_out,
+            state: inst_state,
+            approvals: inst_approvals,
+            inbound: mailbox_rx,
+            ack_tx: inst_ack_tx,
+            remove_tx: inst_remove_tx,
+            live_mailboxes,
+            live_hello_runners,
+            current_run: None,
+            current_chat: None,
+        };
+        if let Err(e) = run.run().await {
+            tracing::error!("runner loop exited: {e:#}");
+        }
+    });
+    tasks.runner_loop = Some(h);
+
+    if let Some(client) = inst.client.clone() {
+        let ack_rx = match inst.take_ack_rx().await {
+            Some(rx) => rx,
+            None => {
+                tracing::error!(
+                    %inst.runner_id,
+                    "ack receiver already taken — refusing to spawn a duplicate HttpLoop"
+                );
+                return tasks;
+            }
+        };
+        let http_loop = HttpLoop::new(
+            client.clone(),
+            inst.mailbox_tx.clone(),
+            ack_rx,
+            inst.state.rx_status.clone(),
+            inst.state.rx_in_flight.clone(),
+            inst.state.shutdown_notified(),
+            attach_body_for_instance(inst),
+        )
+        .with_state(inst.state.clone())
+        .with_pool(
+            inst.config
+                .workdir
+                .as_deref()
+                .and_then(|name| ctx.pools.get(name).cloned()),
+        )
+        .with_teardown_rx(inst.remove_tx.subscribe());
+        let close_client = client.clone();
+        let local_state = inst.state.clone();
+        let daemon_state = ctx.daemon_state.clone();
+        let http_handle = tokio::spawn(async move {
+            if let Err(e) = http_loop.run().await {
+                if e.is_expected_teardown() {
+                    tracing::info!("http loop exited after runner teardown: {e:#}");
+                } else {
+                    tracing::error!("http loop exited: {e:#}");
+                }
+                local_state.set_connected(false).await;
+                let _ = tokio::time::timeout(Duration::from_secs(2), close_client.close_session())
+                    .await;
+                if e.requires_daemon_restart() {
+                    tracing::error!(
+                        "http loop hit a local invariant failure; requesting daemon restart"
+                    );
+                    daemon_state.shutdown();
+                }
+            }
+        });
+        tasks.http_loop = Some(http_handle);
+
+        let refresh_state = inst.state.clone();
+        let refresh_handle = tokio::spawn(async move {
+            refresh_loop(client, refresh_state).await;
+        });
+        tasks.refresh = Some(refresh_handle);
+    }
+    tasks
 }
 
 /// On daemon shutdown, send `RunFailed{DaemonRestart}` for every
@@ -1262,8 +1407,7 @@ impl RunnerLoop {
                     // leave a stale `.git/worktrees/<name>` admin entry behind
                     // (otherwise pruned only at the next pool init).
                     if let Some(pool) = &self.pool {
-                        let chat_wt =
-                            crate::workspace::chat_worktree::path_for(&self.runner_paths);
+                        let chat_wt = crate::workspace::chat_worktree::path_for(&self.runner_paths);
                         if chat_wt.exists() {
                             let _ = crate::workspace::git::worktree_remove(
                                 pool.canonical(),

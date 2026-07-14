@@ -27,6 +27,7 @@ compatible.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, Iterable, List, Optional
 from uuid import UUID
@@ -320,6 +321,50 @@ def ack_for_session(
     return int(
         client.xack(stream_key(dev_machine_id), group_name(dev_machine_id), *ids)
     )
+
+
+# ---- Command result tracking -----------------------------------------------
+#
+# Machine-scoped commands (``create_runner``) are fire-and-forget on the
+# stream; the web UI needs to know whether the daemon actually executed
+# them. Results live in a short-TTL Redis key per ``request_id``:
+# ``pending`` is written at enqueue time, and the daemon overwrites it
+# with ``ok`` / ``error`` via the result endpoint. Expiry (not cleanup)
+# bounds storage — an expired key reads as "unknown", which the UI
+# treats as a timeout.
+
+_COMMAND_RESULT_TTL_SECS = 900
+
+
+def command_result_key(request_id: UUID | str) -> str:
+    return f"machine_cmd_result:{request_id}"
+
+
+def set_command_result(request_id: UUID | str, payload: Dict[str, Any]) -> None:
+    client = redis_instance()
+    if client is None:
+        logger.warning("redis unavailable; cannot record command result %s", request_id)
+        return
+    client.set(
+        command_result_key(request_id),
+        json.dumps(payload, default=str),
+        ex=_COMMAND_RESULT_TTL_SECS,
+    )
+
+
+def get_command_result(request_id: UUID | str) -> Optional[Dict[str, Any]]:
+    client = redis_instance()
+    if client is None:
+        return None
+    raw = client.get(command_result_key(request_id))
+    if not raw:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode()
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 # ---- Session-eviction signaling -------------------------------------------

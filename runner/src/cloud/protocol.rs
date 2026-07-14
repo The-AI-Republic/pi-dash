@@ -380,6 +380,58 @@ pub enum ServerMsg {
     },
 }
 
+/// Machine-scoped control messages delivered over the per-dev-machine
+/// control session (``/api/v1/runner/dev-machines/<mid>/sessions/…``).
+///
+/// Wire-compatible with the per-runner stream framing (same
+/// mid/type/payload envelope + stream-id acks) but a deliberately
+/// separate enum: the machine channel accepts only machine-level
+/// commands (cloud-side allowlist in ``services/machine_outbox.py``).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MachineMsg {
+    /// Session-open greeting; also present as the open response's
+    /// ``welcome`` field. Ack-only when seen on the stream.
+    Welcome {
+        #[serde(default)]
+        dev_machine_id: Option<Uuid>,
+    },
+    /// Liveness probe; ack-only.
+    Ping {},
+    /// Cloud-driven runner creation (the web "Add runner" modal's
+    /// "Generate Runner" against a connected machine).
+    CreateRunner(CreateRunnerCmd),
+    /// Reserved for config distribution; ack + ignore for now.
+    ConfigPush {},
+}
+
+/// Payload of [`MachineMsg::CreateRunner`]. Mirrors the fields the web
+/// modal collects; empty strings mean "unset" (cloud-side default pod /
+/// auto-assigned name / sandbox working dir / agent default model).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateRunnerCmd {
+    #[serde(default)]
+    pub request_id: String,
+    #[serde(default)]
+    pub workspace_slug: String,
+    #[serde(default)]
+    pub project: String,
+    #[serde(default)]
+    pub pod: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub working_dir: String,
+    /// Agent CLI kind in kebab-case (``claude-code`` / ``codex`` / …),
+    /// matching `AgentKind`'s clap ValueEnum spelling.
+    #[serde(default)]
+    pub agent: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub reasoning_effort: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerStatus {
