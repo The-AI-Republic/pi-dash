@@ -8,12 +8,14 @@ Open source: every user brings their own LLM key (BYOK). The cloud build
 overlays this module to additionally offer platform-provided keys to paid
 plans (see ``.ai_design/integrate_ai_agent/04-cloud.md`` §3). The assistant
 runtime calls :func:`resolve_model_for_user` rather than the BYOK resolver
-directly, so the overlay is the single switch point.
+directly, and lightweight assistant actions call :func:`generate_title_for_user`
+instead of BYOK direct helpers, so the overlay is the single switch point.
 """
 
 from __future__ import annotations
 
 from pi_dash.assistant.runtime.llm import resolve_byok_model
+from pi_dash.assistant.runtime.title import generate_byok_title_for_user
 
 
 def resolve_model_for_user(user):
@@ -24,3 +26,8 @@ def resolve_model_for_user(user):
     usable configuration.
     """
     return resolve_byok_model(user)
+
+
+def generate_title_for_user(user, description: str) -> str:
+    """Return a single-prompt generated title for ``user`` (CE: BYOK only)."""
+    return generate_byok_title_for_user(user, description)

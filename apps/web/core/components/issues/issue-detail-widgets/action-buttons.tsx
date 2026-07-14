@@ -93,7 +93,7 @@ export function IssueDetailWidgetActionButtons(props: Props) {
           issueServiceType={issueServiceType}
         />
       )}
-      <RunAIActionButton workspaceSlug={workspaceSlug} issueId={issueId} disabled={disabled} />
+      <RunAIActionButton workspaceSlug={workspaceSlug} projectId={projectId} issueId={issueId} disabled={disabled} />
       <WorkItemAdditionalWidgetActionButtons
         disabled={disabled}
         hideWidgets={hideWidgets ?? []}

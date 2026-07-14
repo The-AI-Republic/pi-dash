@@ -33,6 +33,7 @@ from pi_dash.app.views import (
     WorkItemDescriptionVersionEndpoint,
     IssueMetaEndpoint,
     IssueDetailIdentifierEndpoint,
+    IssueMoveEndpoint,
 )
 
 urlpatterns = [
@@ -304,5 +305,10 @@ urlpatterns = [
         "workspaces/<str:slug>/work-items/<str:project_identifier>-<str:issue_identifier>/",
         IssueDetailIdentifierEndpoint.as_view(),
         name="issue-detail-identifier",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:pk>/move/",
+        IssueMoveEndpoint.as_view(http_method_names=["post"]),
+        name="work-item-move",
     ),
 ]

@@ -88,6 +88,8 @@ package-lock.json
 
 .secrets
 tmp/
+.pidash/
+.pnpm-store/
 
 ## packages
 dist
