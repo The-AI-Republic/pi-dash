@@ -39,6 +39,7 @@ fn non_service_commands_still_present() {
         "tui",
         "doctor",
         "remove",
+        "ai",
         "issue",
         "comment",
         "state",
