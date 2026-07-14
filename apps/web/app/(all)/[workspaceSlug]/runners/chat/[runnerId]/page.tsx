@@ -14,8 +14,8 @@ import { RunnerService, getRunnerDetail } from "@pi-dash/services";
 import type { IAgentChatEvent, IAgentChatMessage, IAgentChatSession, IRunner } from "@pi-dash/types";
 import { Badge, Button } from "@pi-dash/ui";
 import { ChatComposer } from "@/components/chat/composer";
+import { ChatContainer } from "@/components/chat/container";
 import { ChatMessage } from "@/components/chat/message";
-import { ChatMessageList } from "@/components/chat/message-list";
 import { useAgentChatEvents } from "@/components/runners/chat/use-agent-chat-events";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
@@ -300,42 +300,43 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     ));
 
   return (
-    <div className="flex h-full min-h-[640px] flex-col overflow-hidden">
-      <div className="flex h-12 shrink-0 items-center justify-between border-b border-subtle">
-        <div className="min-w-0">
-          <div className="text-15 truncate font-semibold text-primary">{runner?.name ?? "Runner"}</div>
-          <div className="text-12 text-secondary">{runner?.pod_detail?.name ?? runner?.status ?? ""}</div>
+    <ChatContainer
+      className="min-h-[640px]"
+      header={
+        <div className="flex h-12 shrink-0 items-center justify-between border-b border-subtle">
+          <div className="min-w-0">
+            <div className="text-15 truncate font-semibold text-primary">{runner?.name ?? "Runner"}</div>
+            <div className="text-12 text-secondary">{runner?.pod_detail?.name ?? runner?.status ?? ""}</div>
+          </div>
+          <div className="flex items-center gap-2">
+            {runner && (
+              <Badge variant={runner.status === "online" ? "accent-success" : "accent-neutral"}>{runner.status}</Badge>
+            )}
+            {session && (
+              <Button variant="neutral-primary" size="sm" onClick={close}>
+                <X className="size-4" />
+              </Button>
+            )}
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          {runner && (
-            <Badge variant={runner.status === "online" ? "accent-success" : "accent-neutral"}>{runner.status}</Badge>
-          )}
-          {session && (
-            <Button variant="neutral-primary" size="sm" onClick={close}>
-              <X className="size-4" />
-            </Button>
-          )}
-        </div>
-      </div>
-
-      <ChatMessageList
-        messages={rows}
-        renderMessage={(m) => <ChatMessage role={m.role} content={m.content} status={m.status} />}
-        emptyState={<div className="py-16 text-center text-13 text-secondary">No messages</div>}
-        footer={eventStrip.length > 0 ? <>{eventStrip}</> : undefined}
-      />
-
-      <ChatComposer
-        draft={draft}
-        onDraftChange={setDraft}
-        onSend={send}
-        onStop={stop}
-        busy={busy}
-        sending={sending}
-        disabledReason={reason}
-        placeholder="Message this runner…"
-      />
-    </div>
+      }
+      messages={rows}
+      renderMessage={(m) => <ChatMessage role={m.role} content={m.content} status={m.status} />}
+      emptyState={<div className="py-16 text-center text-13 text-secondary">No messages</div>}
+      listFooter={eventStrip.length > 0 ? <>{eventStrip}</> : undefined}
+      composer={
+        <ChatComposer
+          draft={draft}
+          onDraftChange={setDraft}
+          onSend={send}
+          onStop={stop}
+          busy={busy}
+          sending={sending}
+          disabledReason={reason}
+          placeholder="Message this runner…"
+        />
+      }
+    />
   );
 });
 
