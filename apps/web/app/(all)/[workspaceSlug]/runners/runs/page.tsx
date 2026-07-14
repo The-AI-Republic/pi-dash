@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { observer } from "mobx-react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 import useSWR from "swr";
@@ -79,6 +79,17 @@ function errorKindLabel(kind: string, t: (text: string) => string): string {
 
 function isTerminal(status: TAgentRunStatus): boolean {
   return AGENT_RUN_TERMINAL_STATUSES.includes(status);
+}
+
+// The runner mirrors the agent's human-readable narrative (the prose a user
+// sees in their terminal when driving the agent CLI directly) as
+// `agent/message` run events with the text in `payload.text`
+// (schema `runner_agent_message_v1`). Surface that text so a run reads like
+// a live CLI session; other event kinds stay metadata-only rows.
+function agentNarrativeText(event: { kind: string; payload: Record<string, unknown> }): string | null {
+  if (event.kind !== "agent/message") return null;
+  const text = event.payload.text;
+  return typeof text === "string" && text.trim() !== "" ? text : null;
 }
 
 export const RunnerRunsPage = observer(function RunnerRunsPage() {
@@ -300,13 +311,30 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {(detail.events ?? []).map((e) => (
-                        <tr key={e.id} className="border-t border-subtle">
-                          <td className="font-mono px-2 py-1">{e.seq}</td>
-                          <td className="font-mono px-2 py-1">{e.kind}</td>
-                          <td className="px-2 py-1">{new Date(e.created_at).toLocaleTimeString()}</td>
-                        </tr>
-                      ))}
+                      {(detail.events ?? []).map((e) => {
+                        const narrative = agentNarrativeText(e);
+                        return (
+                          <Fragment key={e.id}>
+                            <tr className="border-t border-subtle">
+                              <td className="font-mono px-2 py-1">{e.seq}</td>
+                              <td className="font-mono px-2 py-1">{e.kind}</td>
+                              <td className="px-2 py-1 whitespace-nowrap">
+                                {new Date(e.created_at).toLocaleTimeString()}
+                              </td>
+                            </tr>
+                            {narrative !== null && (
+                              <tr>
+                                <td />
+                                <td colSpan={2} className="px-2 pt-0 pb-2">
+                                  <pre className="font-sans m-0 rounded bg-layer-1 p-2 whitespace-pre-wrap text-primary">
+                                    {narrative}
+                                  </pre>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
