@@ -161,6 +161,7 @@ export default {
   "AI Agents": "AI Agents",
   "AI Dev Machines": "AI Dev Machines",
   "AI Prompt Templates": "AI Prompt Templates",
+  "AI Workers": "AI Workers",
   All: "All",
   "All permissions set to true within the workspace.": "All permissions set to true within the workspace.",
   "All Projects": "All Projects",
@@ -892,11 +893,12 @@ export default {
   "Make public": "Make public",
   "Manage features": "Manage features",
   "Manage widgets": "Manage widgets",
-  "Manage your AI Agent connectivities": "Manage your AI Agent connectivities",
+  "Manage your AI Worker connectivities": "Manage your AI Worker connectivities",
   Manifest: "Manifest",
   Manual: "Manual",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.",
+  "Manually Run AI": "Manually Run AI",
   "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
     "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.": "Map your project goals to Modules and track easily.",
@@ -988,6 +990,7 @@ export default {
   "No matching cycles": "No matching cycles",
   "No matching members": "No matching members",
   "No matching projects": "No matching projects",
+  "No other projects available to move this work item to.": "No other projects available to move this work item to.",
   "No matching results": "No matching results",
   "No matching results.": "No matching results.",
   "No matching work items found": "No matching work items found",
@@ -1130,6 +1133,7 @@ export default {
   Personal: "Personal",
   "Personal Access Tokens": "Personal Access Tokens",
   "Pi Chat": "Pi Chat",
+  "Pi Dash AI": "Pi Dash AI",
   "Pi Dash default": "Pi Dash default",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:",
@@ -1211,6 +1215,7 @@ export default {
   "Project updated successfully": "Project updated successfully",
   Projects: "Projects",
   "Projects and work items": "Projects and work items",
+  "Projects could not be loaded. Please try again.": "Projects could not be loaded. Please try again.",
   Prompt: "Prompt",
   "Prompt is required.": "Prompt is required.",
   "Prompt saved": "Prompt saved",
@@ -1289,7 +1294,6 @@ export default {
   Rotate: "Rotate",
   "Rotate dev machine token?": "Rotate dev machine token?",
   "Run {runId} · requested {at}": "Run {runId} · requested {at}",
-  "Run AI": "Run AI",
   "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.":
     "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.",
   "Run this on the machine that will host the runner:": "Run this on the machine that will host the runner:",
@@ -1559,7 +1563,13 @@ export default {
   Timezone: "Timezone",
   "Timezone updated successfully.": "Timezone updated successfully.",
   Title: "Title",
+  "Title is optional — Pi Dash AI will generate it": "Title is optional — Pi Dash AI will generate it",
   "Title is required": "Title is required",
+  "Add a description so Pi Dash AI can generate a title.": "Add a description so Pi Dash AI can generate a title.",
+  "Generating title": "Generating title",
+  "Pi Dash AI is generating a title.": "Pi Dash AI is generating a title.",
+  "Pi Dash AI couldn't generate a title. Try again or enter a title manually.":
+    "Pi Dash AI couldn't generate a title. Try again or enter a title manually.",
   "Title should be less than {length} characters": "Title should be less than {length} characters",
   "Title should be less than 255 characters": "Title should be less than 255 characters",
   "To create work items or manage your work, you need to create a project or be a part of one.":
@@ -1704,6 +1714,7 @@ export default {
     "Work item could not be added to the cycle. Please try again.",
   "Work item could not be archived. Please try again.": "Work item could not be archived. Please try again.",
   "Work item could not be created. Please try again.": "Work item could not be created. Please try again.",
+  "Work item could not be moved. Please try again.": "Work item could not be moved. Please try again.",
   "Work item could not be removed from the cycle. Please try again.":
     "Work item could not be removed from the cycle. Please try again.",
   "Work item could not be removed from the module. Please try again.":
@@ -1717,6 +1728,7 @@ export default {
   "Work item does not exist": "Work item does not exist",
   "Work item ID copied to clipboard.": "Work item ID copied to clipboard.",
   "Work item link copied to clipboard": "Work item link copied to clipboard",
+  "Work item moved successfully.": "Work item moved successfully.",
   "Work item removed from the cycle successfully.": "Work item removed from the cycle successfully.",
   "Work item removed from the module successfully.": "Work item removed from the module successfully.",
   "Work item subscribed successfully": "Work item subscribed successfully",

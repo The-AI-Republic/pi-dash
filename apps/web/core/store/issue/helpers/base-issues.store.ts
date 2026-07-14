@@ -64,6 +64,7 @@ export interface IBaseIssuesStore {
 
   //actions
   removeIssue: (workspaceSlug: string, projectId: string, issueId: string) => Promise<void>;
+  moveIssue: (workspaceSlug: string, projectId: string, issueId: string, targetProjectId: string) => Promise<TIssue>;
   clear(shouldClearPaginationOptions?: boolean): void;
   // helper methods
   getIssueIds: (groupId?: string, subGroupId?: string) => string[] | undefined;
@@ -234,6 +235,7 @@ export abstract class BaseIssuesStore implements IBaseIssuesStore {
       updateIssueDates: action,
       issueQuickAdd: action.bound,
       removeIssue: action.bound,
+      moveIssue: action.bound,
       issueArchive: action.bound,
       removeBulkIssues: action.bound,
       bulkArchiveIssues: action.bound,
@@ -609,6 +611,35 @@ export abstract class BaseIssuesStore implements IBaseIssuesStore {
     this.fetchParentStats(workspaceSlug, projectId);
     // Remove issue from main issue Map store
     this.rootIssueStore.issues.removeIssue(issueId);
+  }
+
+  /**
+   * This method moves an issue to another project in the same workspace.
+   * The move is a heavy backend operation (see IssueMoveEndpoint) — on success
+   * the issue leaves the source project entirely, so we drop it from this
+   * store's lists and the shared issue map just like a delete.
+   * @param workspaceSlug
+   * @param projectId source project id
+   * @param issueId
+   * @param targetProjectId destination project id
+   * @returns the moved issue as it exists in its new project
+   */
+  async moveIssue(workspaceSlug: string, projectId: string, issueId: string, targetProjectId: string) {
+    const issueBeforeMove = clone(this.rootIssueStore.issues.getIssueById(issueId));
+    // Make API call — throws (and leaves the store untouched) on failure.
+    const response = await this.issueService.moveIssue(workspaceSlug, projectId, issueId, {
+      project: targetProjectId,
+    });
+    // update parent stats optimistically since the issue left this project
+    this.updateParentStats(issueBeforeMove, undefined);
+    runInAction(() => {
+      // Remove from the source project's Id list and the main issue Map store.
+      this.removeIssueFromList(issueId);
+      this.rootIssueStore.issues.removeIssue(issueId);
+    });
+    // refresh parent stats for the source project
+    this.fetchParentStats(workspaceSlug, projectId);
+    return response;
   }
 
   /**

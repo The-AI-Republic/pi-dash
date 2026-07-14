@@ -6,12 +6,12 @@
 
 import { useState } from "react";
 import { observer } from "mobx-react";
-import { useNavigate, useParams } from "react-router";
+import { useNavigate, useParams, useSearchParams } from "react-router";
 import useSWR from "swr";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { RunnerService } from "@pi-dash/services";
-import type { IAgentRun, TAgentRunErrorSource, TAgentRunStatus } from "@pi-dash/types";
+import type { IAgentRun, IAgentRunPage, TAgentRunErrorSource, TAgentRunStatus } from "@pi-dash/types";
 import { AGENT_RUN_TERMINAL_STATUSES } from "@pi-dash/types";
 import type { TBadgeVariant } from "@pi-dash/ui";
 import { AlertModalCore, Badge, Button, Spinner } from "@pi-dash/ui";
@@ -86,14 +86,31 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { workspaceSlug, runId } = useParams<{ workspaceSlug: string; runId?: string }>();
+  const [searchParams, setSearchParams] = useSearchParams();
   const workspaceId = currentWorkspace?.id;
   const selected = runId ?? null;
 
-  const { data: runs, mutate } = useSWR<IAgentRun[]>(
-    workspaceId ? ["runner-runs", workspaceId] : null,
-    () => service.listRuns(workspaceId),
+  // Current page comes from the URL (`?page=N`, 1-based) so a specific page is
+  // directly linkable; missing/invalid values fall back to page 1.
+  const parsedPage = Number.parseInt(searchParams.get("page") ?? "", 10);
+  const page = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+
+  const { data: runsPage, mutate } = useSWR<IAgentRunPage>(
+    workspaceId ? ["runner-runs", workspaceId, page] : null,
+    () => service.listRuns(workspaceId, page),
     { refreshInterval: 5_000 }
   );
+
+  const runs = runsPage?.results;
+  const totalPages = runsPage?.total_pages ?? 1;
+  const totalCount = runsPage?.total_count ?? 0;
+
+  function goToPage(next: number) {
+    const params = new URLSearchParams(searchParams);
+    if (next <= 1) params.delete("page");
+    else params.set("page", String(next));
+    setSearchParams(params, { replace: true });
+  }
 
   const { data: detail, error: detailError } = useSWR<IAgentRun>(
     selected ? ["runner-run-detail", selected] : null,
@@ -109,7 +126,9 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
 
   function selectRun(id: string) {
     if (!workspaceSlug) return;
-    navigate(`/${workspaceSlug}/runners/runs/${id}`, { replace: true });
+    // Preserve the `?page=` query so selecting a run doesn't reset pagination.
+    const search = searchParams.toString();
+    navigate(`/${workspaceSlug}/runners/runs/${id}${search ? `?${search}` : ""}`, { replace: true });
   }
 
   async function confirmCancel() {
@@ -140,42 +159,62 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
       <PageHead title={pageTitle} />
       <RunnersTabs />
       <div className="grid min-h-0 flex-1 grid-cols-[400px_1fr] gap-4 overflow-hidden">
-        <div className="overflow-auto rounded-md border border-subtle">
-          <table className="w-full text-13">
-            <thead className="sticky top-0 z-10 bg-layer-1 text-left text-secondary">
-              <tr>
-                <th className="px-3 py-2">{t("Started")}</th>
-                <th className="px-3 py-2">{t("Status")}</th>
-                <th className="px-3 py-2">{t("Prompt")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(runs ?? []).map((r) => (
-                <tr
-                  key={r.id}
-                  onClick={() => selectRun(r.id)}
-                  className={`cursor-pointer border-t border-subtle ${
-                    selected === r.id ? "bg-accent-subtle" : "hover:bg-layer-1"
-                  }`}
-                >
-                  <td className="px-3 py-2 whitespace-nowrap">{new Date(r.created_at).toLocaleString()}</td>
-                  <td className="px-3 py-2">
-                    <Badge variant={STATUS_BADGE_VARIANT[r.status]} size="sm">
-                      {t(RUN_STATUS_I18N_LABELS[r.status])}
-                    </Badge>
-                  </td>
-                  <td className="font-mono max-w-[180px] truncate px-3 py-2 text-11">{r.prompt}</td>
-                </tr>
-              ))}
-              {(runs ?? []).length === 0 && (
+        <div className="flex min-h-0 flex-col rounded-md border border-subtle">
+          <div className="min-h-0 flex-1 overflow-auto">
+            <table className="w-full text-13">
+              <thead className="sticky top-0 z-10 bg-layer-1 text-left text-secondary">
                 <tr>
-                  <td colSpan={3} className="px-3 py-8 text-center text-secondary">
-                    {t("No runs yet.")}
-                  </td>
+                  <th className="px-3 py-2">{t("Started")}</th>
+                  <th className="px-3 py-2">{t("Status")}</th>
+                  <th className="px-3 py-2">{t("Prompt")}</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {(runs ?? []).map((r) => (
+                  <tr
+                    key={r.id}
+                    onClick={() => selectRun(r.id)}
+                    className={`cursor-pointer border-t border-subtle ${
+                      selected === r.id ? "bg-accent-subtle" : "hover:bg-layer-1"
+                    }`}
+                  >
+                    <td className="px-3 py-2 whitespace-nowrap">{new Date(r.created_at).toLocaleString()}</td>
+                    <td className="px-3 py-2">
+                      <Badge variant={STATUS_BADGE_VARIANT[r.status]} size="sm">
+                        {t(RUN_STATUS_I18N_LABELS[r.status])}
+                      </Badge>
+                    </td>
+                    <td className="font-mono max-w-[180px] truncate px-3 py-2 text-11">{r.prompt}</td>
+                  </tr>
+                ))}
+                {(runs ?? []).length === 0 && (
+                  <tr>
+                    <td colSpan={3} className="px-3 py-8 text-center text-secondary">
+                      {t("No runs yet.")}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          {totalCount > 0 && (
+            <div className="flex items-center justify-between gap-2 border-t border-subtle bg-layer-1 px-3 py-2 text-11 text-secondary">
+              <span>{t("Page {page} of {total}", { page, total: totalPages })}</span>
+              <div className="flex items-center gap-2">
+                <Button variant="neutral-primary" size="sm" disabled={page <= 1} onClick={() => goToPage(page - 1)}>
+                  {t("Previous")}
+                </Button>
+                <Button
+                  variant="neutral-primary"
+                  size="sm"
+                  disabled={page >= totalPages}
+                  onClick={() => goToPage(page + 1)}
+                >
+                  {t("Next")}
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="overflow-auto rounded-md border border-subtle p-4">

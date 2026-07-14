@@ -25,6 +25,7 @@ import { DuplicateWorkItemModal } from "@/pi-dash-web/components/issues/issue-la
 // helper
 import { ArchiveIssueModal } from "../../archive-issue-modal";
 import { DeleteIssueModal } from "../../delete-issue-modal";
+import { MoveIssueModal } from "../../move-issue-modal";
 import { CreateUpdateIssueModal } from "../../issue-modal/modal";
 import type { IQuickActionProps } from "../list/list-view-types";
 import type { MenuItemFactoryProps } from "./helper";
@@ -36,6 +37,7 @@ type TWorkItemDetailQuickActionProps = IQuickActionProps & {
   toggleDeleteIssueModal?: (value: boolean) => void;
   toggleDuplicateIssueModal?: (value: boolean) => void;
   toggleArchiveIssueModal?: (value: boolean) => void;
+  toggleMoveIssueModal?: (value: boolean) => void;
   isPeekMode?: boolean;
 };
 
@@ -56,6 +58,7 @@ export const WorkItemDetailQuickActions = observer(function WorkItemDetailQuickA
     toggleDeleteIssueModal,
     toggleDuplicateIssueModal,
     toggleArchiveIssueModal,
+    toggleMoveIssueModal,
     isPeekMode = false,
   } = props;
   // router
@@ -66,6 +69,7 @@ export const WorkItemDetailQuickActions = observer(function WorkItemDetailQuickA
   const [deleteIssueModal, setDeleteIssueModal] = useState(false);
   const [archiveIssueModal, setArchiveIssueModal] = useState(false);
   const [duplicateWorkItemModal, setDuplicateWorkItemModal] = useState(false);
+  const [moveIssueModal, setMoveIssueModal] = useState(false);
   // store hooks
   const { allowPermissions } = useUserPermissions();
   const { issuesFilter } = useIssues(EIssuesStoreType.PROJECT);
@@ -125,6 +129,11 @@ export const WorkItemDetailQuickActions = observer(function WorkItemDetailQuickA
     if (handleRestore) await handleRestore();
   };
 
+  const customMoveAction = () => {
+    setMoveIssueModal(true);
+    if (toggleMoveIssueModal) toggleMoveIssueModal(true);
+  };
+
   // Menu items and modals using helper
   const menuItemProps: MenuItemFactoryProps = {
     issue,
@@ -141,6 +150,7 @@ export const WorkItemDetailQuickActions = observer(function WorkItemDetailQuickA
     setDeleteIssueModal: customDeleteAction,
     setArchiveIssueModal: customArchiveAction,
     setDuplicateWorkItemModal: customDuplicateAction,
+    setMoveIssueModal: customMoveAction,
     handleDelete: customDeleteAction,
     handleUpdate,
     handleArchive: customArchiveAction,
@@ -155,23 +165,15 @@ export const WorkItemDetailQuickActions = observer(function WorkItemDetailQuickA
     .map((item) => {
       // Customize edit action for work item
       if (item.key === "edit") {
-        return {
-          ...item,
+        return Object.assign({}, item, {
           shouldRender: isEditingAllowed && !isPeekMode,
-        };
-      }
-      // Customize delete action for work item
-      if (item.key === "delete") {
-        return {
-          ...item,
-        };
+        });
       }
       // Hide copy link in peek mode
       if (item.key === "copy-link") {
-        return {
-          ...item,
+        return Object.assign({}, item, {
           shouldRender: !isPeekMode,
-        };
+        });
       }
       return item;
     })
@@ -224,6 +226,17 @@ export const WorkItemDetailQuickActions = observer(function WorkItemDetailQuickA
         storeType={EIssuesStoreType.PROJECT}
         fetchIssueDetails={false}
       />
+      {issue.project_id && (
+        <MoveIssueModal
+          isOpen={moveIssueModal}
+          onClose={() => {
+            setMoveIssueModal(false);
+            if (toggleMoveIssueModal) toggleMoveIssueModal(false);
+          }}
+          issueId={issue.id}
+          projectId={issue.project_id}
+        />
+      )}
       {issue.project_id && workspaceSlug && (
         <DuplicateWorkItemModal
           workItemId={issue.id}

@@ -7,6 +7,7 @@
 import { API_BASE_URL } from "@pi-dash/constants";
 import type {
   IAgentRun,
+  IAgentRunPage,
   IAgentChatApprovalRequest,
   IAgentChatMessage,
   IAgentChatSession,
@@ -108,9 +109,16 @@ export class RunnerService extends APIService {
       });
   }
 
-  async listRuns(workspaceId?: string): Promise<IAgentRun[]> {
-    const params = workspaceId ? { params: { workspace: workspaceId } } : {};
-    return this.get("/api/runners/runs/", params)
+  /**
+   * List agent runs one page at a time. ``page`` is 1-based; the server
+   * defaults to 30 items per page. Returns the paginated envelope so callers
+   * can render page controls and only the requested page is loaded.
+   */
+  async listRuns(workspaceId?: string, page = 1, perPage?: number): Promise<IAgentRunPage> {
+    const params: Record<string, string | number> = { page };
+    if (workspaceId) params.workspace = workspaceId;
+    if (perPage !== undefined) params.per_page = perPage;
+    return this.get("/api/runners/runs/", { params })
       .then((r) => r?.data)
       .catch((e) => {
         throw e?.response?.data;

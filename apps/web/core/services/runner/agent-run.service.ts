@@ -48,6 +48,29 @@ export type TAgentRun = {
   // because the UI does not consume them yet.
 };
 
+/**
+ * Re-tick dispatch — re-grants a fresh phase-sized ticking budget to an
+ * issue whose agent-ticker budget is exhausted, and re-arms the ticker.
+ * The server enforces the guardrails (issue must be in a ticking state and
+ * its budget exhausted); when they don't hold it responds ``granted:
+ * false`` with a machine-readable ``reason`` rather than an error.
+ *
+ * Server-side wiring: ``apps/api/pi_dash/runner/views/runs.py``
+ * ``AgentReTickEndpoint``.
+ */
+export type TReTickPayload = {
+  work_item: string;
+};
+
+export type TReTickResponse = {
+  granted: boolean;
+  reason: string;
+  tick_count?: number;
+  max_ticks?: number;
+  enabled?: boolean;
+  next_run_at?: string | null;
+};
+
 export class AgentRunService extends APIService {
   constructor() {
     super(API_BASE_URL);
@@ -72,6 +95,19 @@ export class AgentRunService extends APIService {
    */
   async commentAndRun(data: TCommentAndRunPayload): Promise<TAgentRun> {
     return this.post(`/api/runners/runs/`, { ...data, triggered_by: "comment_and_run" })
+      .then((response) => response?.data)
+      .catch((error) => {
+        throw error?.response?.data ?? error;
+      });
+  }
+
+  /**
+   * Re-grant a fresh ticking budget to an exhausted issue ticker. No-op
+   * (``granted: false``) when the issue is not in a ticking state or its
+   * budget is not exhausted — the server decides, not the client.
+   */
+  async reTick(data: TReTickPayload): Promise<TReTickResponse> {
+    return this.post(`/api/runners/re-tick/`, data)
       .then((response) => response?.data)
       .catch((error) => {
         throw error?.response?.data ?? error;
