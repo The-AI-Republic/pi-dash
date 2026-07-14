@@ -4,9 +4,9 @@
   "display": "standalone",
   "scope": "/",
   "start_url": "/",
-  "name": "Pi Dash | Accelerate software development with peace.",
+  "name": "Pi Dash | Open-source AI agent orchestration platform",
   "short_name": "Pi Dash",
-  "description": "Pi Dash accelerated the software development by order of magnitude for agencies and product companies.",
+  "description": "Pi Dash is an open-source AI agent orchestration platform built for As Coding — define what needs to be built and let coding agents handle the implementation in the background.",
   "icons": [
     {
       "src": "/icon-192x192.png",
