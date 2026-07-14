@@ -7,6 +7,118 @@
 import { differenceInDays, format, formatDistanceToNow, isAfter, isEqual, isValid, parseISO } from "date-fns";
 import { isNumber } from "lodash-es";
 
+// Display Timezone Helpers
+// -------------------------
+// Timestamps are stored and transported in UTC. The UI, however, should render
+// them in the viewer's timezone. These helpers expose a single "display
+// timezone" that the date/time formatters below use. It defaults to the
+// browser's detected timezone and falls back to UTC when detection is not
+// possible (e.g. server-side execution or an unusable timezone id). The
+// storage layer is never touched — this is a UI-only concern.
+const UTC_TIME_ZONE = "UTC";
+
+let displayTimeZoneOverride: string | undefined;
+let detectedDisplayTimeZone: string | undefined;
+
+/**
+ * @returns {boolean} whether the provided string is a valid IANA timezone id
+ * @description Validates a timezone id by attempting to build an Intl formatter with it
+ */
+const isUsableTimeZone = (timeZone: string | undefined | null): timeZone is string => {
+  if (!timeZone || !timeZone.trim()) return false;
+  try {
+    // Constructing with an invalid timezone id throws a RangeError.
+    return Boolean(new Intl.DateTimeFormat("en-US", { timeZone }).resolvedOptions().timeZone);
+  } catch (_e) {
+    return false;
+  }
+};
+
+/**
+ * @description Explicitly set the timezone used to render timestamps in the UI.
+ * Pass a falsy/invalid value to clear the override and fall back to browser detection.
+ * @param {string | undefined | null} timeZone an IANA timezone id (e.g. "America/New_York")
+ */
+export const setDisplayTimeZone = (timeZone: string | undefined | null): void => {
+  displayTimeZoneOverride = isUsableTimeZone(timeZone) ? timeZone : undefined;
+  // Reset detection cache so a cleared override re-detects on next read.
+  if (!displayTimeZoneOverride) detectedDisplayTimeZone = undefined;
+};
+
+/**
+ * @returns {string} the timezone used to render timestamps in the UI
+ * @description Resolution order: explicit override -> detected browser timezone -> UTC
+ */
+export const getDisplayTimeZone = (): string => {
+  if (displayTimeZoneOverride) return displayTimeZoneOverride;
+  if (detectedDisplayTimeZone) return detectedDisplayTimeZone;
+  let detected: string | undefined;
+  try {
+    detected = typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : undefined;
+  } catch (_e) {
+    detected = undefined;
+  }
+  detectedDisplayTimeZone = isUsableTimeZone(detected) ? detected : UTC_TIME_ZONE;
+  return detectedDisplayTimeZone;
+};
+
+// Matches strings that carry a time-of-day component (e.g. ISO datetimes such
+// as "2024-01-01T13:00:00Z" or "2024-01-01 13:00"), as opposed to date-only
+// strings like "2024-01-01" which represent a calendar date with no timezone.
+const TIME_COMPONENT_REGEX = /\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}/;
+
+const hasTimeComponent = (value: string): boolean => TIME_COMPONENT_REGEX.test(value);
+
+// Building an Intl.DateTimeFormat is comparatively expensive, and these
+// formatters are invoked once per rendered timestamp (potentially hundreds of
+// times per list view). Cache one formatter per timezone id.
+const wallClockFormatterCache = new Map<string, Intl.DateTimeFormat>();
+
+const getWallClockFormatter = (zone: string): Intl.DateTimeFormat => {
+  const cached = wallClockFormatterCache.get(zone);
+  if (cached) return cached;
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: zone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    // hourCycle "h23" pins midnight to 00 across engines; some default to h24
+    // (formatting midnight as "24") under hour12:false.
+    hourCycle: "h23",
+  });
+  wallClockFormatterCache.set(zone, formatter);
+  return formatter;
+};
+
+/**
+ * @returns {Date | undefined} a "wall clock" Date, or undefined for an invalid instant
+ * @description Converts an instant to a Date whose LOCAL fields equal the date/time
+ * observed in `timeZone`. Feeding the result to date-fns `format` yields tokens
+ * (month names, AM/PM, day-of-week, etc.) rendered as they appear in that timezone,
+ * regardless of the runtime's own timezone.
+ * @param {Date} instant the point in time to convert
+ * @param {string} timeZone target IANA timezone id (falls back to UTC when unusable)
+ */
+const getWallClockDateInTimeZone = (instant: Date, timeZone: string): Date | undefined => {
+  if (!isValid(instant)) return undefined;
+  const zone = isUsableTimeZone(timeZone) ? timeZone : UTC_TIME_ZONE;
+  const parts = getWallClockFormatter(zone).formatToParts(instant);
+
+  const lookup: Record<string, number> = {};
+  for (const part of parts) {
+    if (part.type !== "literal") {
+      lookup[part.type] = parseInt(part.value, 10);
+    }
+  }
+
+  // Safety net: normalize any stray "24" (h24) for midnight to 0.
+  const hour = (lookup.hour ?? 0) % 24;
+  return new Date(lookup.year, lookup.month - 1, lookup.day, hour, lookup.minute, lookup.second);
+};
+
 // Format Date Helpers
 /**
  * @returns {string | null} formatted date in the desired format or platform default format (MMM dd, yyyy)
@@ -20,8 +132,14 @@ export const renderFormattedDate = (
   date: string | Date | undefined | null,
   formatToken: string = "MMM dd, yyyy"
 ): string | undefined => {
-  // Parse the date to check if it is valid
-  const parsedDate = getDate(date);
+  // Timestamp strings (those carrying a time component) are converted to the
+  // viewer's display timezone so the calendar date matches their local time.
+  // Date-only strings and Date objects keep their existing, offset-free
+  // behavior so calendar-date fields (e.g. due dates) are never shifted.
+  const parsedDate =
+    typeof date === "string" && hasTimeComponent(date)
+      ? getWallClockDateInTimeZone(new Date(date), getDisplayTimeZone())
+      : getDate(date);
   // return if undefined
   if (!parsedDate) return;
   // Check if the parsed date is valid before formatting
@@ -44,8 +162,12 @@ export const renderFormattedDate = (
  * @example renderShortDateFormat("2024-01-01") // Jan 01
  */
 export const renderFormattedDateWithoutYear = (date: string | Date): string => {
-  // Parse the date to check if it is valid
-  const parsedDate = getDate(date);
+  // Timestamp strings are rendered in the viewer's display timezone; date-only
+  // strings and Date objects keep their offset-free behavior. See renderFormattedDate.
+  const parsedDate =
+    typeof date === "string" && hasTimeComponent(date)
+      ? getWallClockDateInTimeZone(new Date(date), getDisplayTimeZone())
+      : getDate(date);
   // return if undefined
   if (!parsedDate) return "";
   // Check if the parsed date is valid before formatting
@@ -83,12 +205,12 @@ export const renderFormattedPayloadDate = (date: Date | string | undefined | nul
  * @example renderFormattedTime("2024-01-01 13:00:00", "12-hour") // 01:00 PM
  */
 export const renderFormattedTime = (date: string | Date, timeFormat: "12-hour" | "24-hour" = "24-hour"): string => {
-  // Parse the date to check if it is valid
-  const parsedDate = new Date(date);
-  // return if undefined
-  if (!parsedDate) return "";
+  // Parse the instant to check if it is valid
+  const instant = new Date(date);
   // Check if the parsed date is valid
-  if (!isValid(parsedDate)) return ""; // Return empty string for invalid dates
+  if (!isValid(instant)) return ""; // Return empty string for invalid dates
+  // Render the time in the viewer's display timezone (falls back to UTC).
+  const parsedDate = getWallClockDateInTimeZone(instant, getDisplayTimeZone()) ?? instant;
   // Format the date in 12 hour format if in12HourFormat is true
   if (timeFormat === "12-hour") {
     const formattedTime = format(parsedDate, "hh:mm a");

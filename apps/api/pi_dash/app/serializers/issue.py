@@ -81,7 +81,10 @@ def _comment_is_actively_synced(comment) -> bool:
         return False
     from pi_dash.db.models import GitCommentSync, GithubCommentSync
 
-    return GitCommentSync.objects.filter(comment=comment).exists() or GithubCommentSync.objects.filter(comment=comment).exists()
+    return (
+        GitCommentSync.objects.filter(comment=comment).exists()
+        or GithubCommentSync.objects.filter(comment=comment).exists()
+    )
 
 
 class IssueFlatSerializer(BaseSerializer):
@@ -1175,6 +1178,16 @@ class IssueDetailSerializer(IssueSerializer):
 
         if ticker is None:
             return None
+        # ``can_re_tick`` is the single source of truth for the "re-tick"
+        # affordance: true only when a fresh budget grant would actually do
+        # something — the issue is still in a ticking state AND the current
+        # budget is exhausted. Mirrors the guardrails in
+        # ``scheduling.re_tick_ticker`` so the button never appears when the
+        # server would no-op (e.g. a cap-hit issue already auto-paused out
+        # of a ticking state).
+        from pi_dash.orchestration.agent_phases import is_ticking_state
+
+        can_re_tick = is_ticking_state(obj.state) and ticker.cap_reached()
         return {
             "enabled": ticker.enabled,
             "user_disabled": ticker.user_disabled,
@@ -1184,6 +1197,7 @@ class IssueDetailSerializer(IssueSerializer):
             "next_run_at": ticker.next_run_at.isoformat() if ticker.next_run_at else None,
             "last_tick_at": ticker.last_tick_at.isoformat() if ticker.last_tick_at else None,
             "disarm_reason": ticker.disarm_reason,
+            "can_re_tick": can_re_tick,
         }
 
     def _serialize_agent_live_state(self, state):

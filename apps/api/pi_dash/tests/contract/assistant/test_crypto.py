@@ -3,6 +3,7 @@
 # See the LICENSE file for details.
 
 import pytest
+from cryptography.fernet import Fernet
 
 from pi_dash.assistant import crypto
 from pi_dash.assistant.errors import AssistantNotConfigured
@@ -29,6 +30,37 @@ def test_missing_key_raises(settings, monkeypatch):
     assert not crypto.is_configured()
     with pytest.raises(AssistantNotConfigured):
         crypto.encrypt("x")
+
+
+def test_fernet_roundtrip(settings, monkeypatch):
+    settings.ASSISTANT_CRYPTO_BACKEND = "fernet"
+    settings.ASSISTANT_ENCRYPTION_KEY = Fernet.generate_key().decode()
+    monkeypatch.setattr(crypto, "_backend", None)
+
+    token = crypto.encrypt("sk-local")
+    assert token != b"sk-local"
+    assert b"sk-local" not in token
+    assert crypto.decrypt(token) == "sk-local"
+
+
+def test_fernet_rotate_uses_first_key(settings, monkeypatch):
+    old_key = Fernet.generate_key().decode()
+    new_key = Fernet.generate_key().decode()
+
+    settings.ASSISTANT_CRYPTO_BACKEND = "fernet"
+    settings.ASSISTANT_ENCRYPTION_KEY = old_key
+    monkeypatch.setattr(crypto, "_backend", None)
+    token = crypto.encrypt("sk-rotate-local")
+
+    settings.ASSISTANT_ENCRYPTION_KEY = f"{new_key},{old_key}"
+    monkeypatch.setattr(crypto, "_backend", None)
+    rotated = crypto.rotate(token)
+    assert crypto.decrypt(rotated) == "sk-rotate-local"
+
+    settings.ASSISTANT_ENCRYPTION_KEY = old_key
+    monkeypatch.setattr(crypto, "_backend", None)
+    with pytest.raises(AssistantNotConfigured):
+        crypto.decrypt(rotated)
 
 
 def test_unknown_backend_raises(settings, monkeypatch):

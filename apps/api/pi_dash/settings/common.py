@@ -5,7 +5,9 @@
 """Global Settings"""
 
 # Python imports
+import logging as _logging_runner_version
 import os
+import re as _re_runner_version
 from urllib.parse import urlparse
 from urllib.parse import urljoin
 
@@ -36,11 +38,7 @@ IS_SELF_MANAGED = True
 # Allowed Hosts
 ALLOWED_HOSTS = get_config("ALLOWED_HOSTS", "*").split(",")
 
-GITLAB_ALLOWED_HOSTS = [
-    host.strip()
-    for host in get_config("GITLAB_ALLOWED_HOSTS", "").split(",")
-    if host.strip()
-]
+GITLAB_ALLOWED_HOSTS = [host.strip() for host in get_config("GITLAB_ALLOWED_HOSTS", "").split(",") if host.strip()]
 
 # Application definition
 INSTALLED_APPS = [
@@ -104,6 +102,7 @@ REST_FRAMEWORK = {
         # AI assistant: the only platform-compute brake in the BYOK-only MVP.
         "assistant_message": "30/hour",
         "assistant_llm_test": "6/minute",
+        "assistant_llm_generate_title": "20/minute",
     },
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_RENDERER_CLASSES": ("rest_framework.renderers.JSONRenderer",),
@@ -183,8 +182,7 @@ else:
 # migrations) is unaffected.
 DATABASES["default"].setdefault("OPTIONS", {})
 DATABASES["default"]["OPTIONS"]["options"] = (
-    DATABASES["default"]["OPTIONS"].get("options", "")
-    + " -c idle_in_transaction_session_timeout=60000"
+    DATABASES["default"]["OPTIONS"].get("options", "") + " -c idle_in_transaction_session_timeout=60000"
 ).strip()
 
 
@@ -217,18 +215,17 @@ REDIS_HEALTH_CHECK_INTERVAL = get_config("REDIS_HEALTH_CHECK_INTERVAL", 30)
 REDIS_MAX_CONNECTIONS = get_config("REDIS_MAX_CONNECTIONS")
 
 # AI Assistant — see .ai_design/integrate_ai_agent/
-# BYOK keys are encrypted at rest via AWS KMS (pi_dash.assistant.crypto).
-# ASSISTANT_KMS_KEY_ID is the CMK (id / ARN / alias) used to encrypt+decrypt;
-# region comes from AWS_REGION. When unset, BYOK keys cannot be stored (the
-# config endpoint reports assistant_not_configured). ASSISTANT_KMS_ENDPOINT_URL
-# optionally points the KMS client at a compatible endpoint (e.g. LocalStack)
-# for local / self-hosted setups without a real AWS account.
+# BYOK keys are encrypted at rest through pi_dash.assistant.crypto.
 # Which crypto backend encrypts BYOK keys (pi_dash.assistant.crypto). Only
-# "aws-kms" ships today; the seam exists so other providers (GCP KMS, Azure
-# Key Vault, Vault Transit) can be added without touching call sites.
+# "aws-kms" and "fernet" ship today; the seam exists so other providers
+# (GCP KMS, Azure Key Vault, Vault Transit) can be added without touching call
+# sites. AWS KMS uses ASSISTANT_KMS_KEY_ID. Fernet uses
+# ASSISTANT_ENCRYPTION_KEY, a comma-separated key list where the first key
+# encrypts new values and later keys decrypt older values.
 ASSISTANT_CRYPTO_BACKEND = get_config("ASSISTANT_CRYPTO_BACKEND", "aws-kms")
 ASSISTANT_KMS_KEY_ID = get_config("ASSISTANT_KMS_KEY_ID", "")
 ASSISTANT_KMS_ENDPOINT_URL = get_config("ASSISTANT_KMS_ENDPOINT_URL", "")
+ASSISTANT_ENCRYPTION_KEY = get_config("ASSISTANT_ENCRYPTION_KEY", "")
 # Short-lived in-process cache of decrypted BYOK keys, so the assistant doesn't
 # call KMS Decrypt on every turn. In-memory per worker (plaintext never leaves
 # the process — unlike a shared store); keyed by a hash of the ciphertext so a
@@ -451,16 +448,12 @@ if _raw_long_poll_secs < _LONG_POLL_MIN_SECS or _raw_long_poll_secs > _LONG_POLL
         _LONG_POLL_MIN_SECS,
         _LONG_POLL_MAX_SECS,
     )
-LONG_POLL_INTERVAL_SECS = max(
-    _LONG_POLL_MIN_SECS, min(_raw_long_poll_secs, _LONG_POLL_MAX_SECS)
-)
+LONG_POLL_INTERVAL_SECS = max(_LONG_POLL_MIN_SECS, min(_raw_long_poll_secs, _LONG_POLL_MAX_SECS))
 ACCESS_TOKEN_TTL_SECS = int(get_config("ACCESS_TOKEN_TTL_SECS", 3600))
 RUNNER_OFFLINE_THRESHOLD_SECS = int(get_config("RUNNER_OFFLINE_THRESHOLD_SECS", 50))
 OFFLINE_STREAM_TTL_SECS = int(get_config("OFFLINE_STREAM_TTL_SECS", 86400))
 OFFLINE_STREAM_MAXLEN = int(get_config("OFFLINE_STREAM_MAXLEN", 1000))
-RUNNER_STREAM_MIN_RETENTION_SECS = int(
-    get_config("RUNNER_STREAM_MIN_RETENTION_SECS", 3600)
-)
+RUNNER_STREAM_MIN_RETENTION_SECS = int(get_config("RUNNER_STREAM_MIN_RETENTION_SECS", 3600))
 EVENT_BATCH_MAX_AGE_MS = int(get_config("EVENT_BATCH_MAX_AGE_MS", 250))
 EVENT_BATCH_MAX_BYTES = int(get_config("EVENT_BATCH_MAX_BYTES", 65536))
 RUN_MESSAGE_DEDUPE_TTL_SECS = int(get_config("RUN_MESSAGE_DEDUPE_TTL_SECS", 604800))
@@ -475,9 +468,6 @@ RUNNER_PROTOCOL_VERSION = 4
 # `version_lt` ignores values it can't parse, so a typo silently disables
 # the advisory. We log a warning at startup so operator mistakes are
 # noisy rather than invisible.
-import re as _re_runner_version
-import logging as _logging_runner_version
-
 _RUNNER_VERSION_RE = _re_runner_version.compile(r"^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$")
 
 
@@ -485,8 +475,7 @@ def _validated_runner_version(name):
     raw = get_config(name, "") or None
     if raw is not None and not _RUNNER_VERSION_RE.match(raw):
         _logging_runner_version.getLogger(__name__).warning(
-            "%s=%r does not match MAJOR.MINOR.PATCH[-pre]; "
-            "runners will treat the advisory as malformed and skip it",
+            "%s=%r does not match MAJOR.MINOR.PATCH[-pre]; runners will treat the advisory as malformed and skip it",
             name,
             raw,
         )
@@ -500,16 +489,12 @@ MIN_RUNNER_VERSION = _validated_runner_version("MIN_RUNNER_VERSION")
 # ``.ai_design/runner_agent_bridge/design.md`` §4.5.3.
 # 360s is slightly longer than the runner's own 5-minute internal stall
 # watchdog, so the cloud acts as a backstop rather than racing the runner.
-RUNNER_AGENT_STALL_THRESHOLD_SECS = int(
-    get_config("RUNNER_AGENT_STALL_THRESHOLD_SECS", 360)
-)
+RUNNER_AGENT_STALL_THRESHOLD_SECS = int(get_config("RUNNER_AGENT_STALL_THRESHOLD_SECS", 360))
 # Snapshot-row freshness guard. The watchdog only acts on runners whose
 # poll-driven `RunnerLiveState.updated_at` is newer than this. Covers
 # roughly three missed 25s polls; stale rows from disabled / downgraded
 # runners age out instead of failing active runs.
-RUNNER_AGENT_OBSERVABILITY_STALE_SECS = int(
-    get_config("RUNNER_AGENT_OBSERVABILITY_STALE_SECS", 90)
-)
+RUNNER_AGENT_OBSERVABILITY_STALE_SECS = int(get_config("RUNNER_AGENT_OBSERVABILITY_STALE_SECS", 90))
 # Access-token signing key ring. Each entry: {kid, secret, status} where
 # status ∈ {"active", "verify_only"}. Exactly one key is active.
 # Default to a deterministic per-instance key derived from SECRET_KEY so

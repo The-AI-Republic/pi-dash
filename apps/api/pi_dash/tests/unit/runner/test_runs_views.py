@@ -150,7 +150,7 @@ def test_get_runs_lists_by_created_by(db, session_client, workspace, project):
     )
     resp = session_client.get("/api/runners/runs/")
     assert resp.status_code == status.HTTP_200_OK
-    prompts = [r["prompt"] for r in resp.data]
+    prompts = [r["prompt"] for r in resp.data["results"]]
     assert "mine" in prompts
     assert "not mine" not in prompts
 
@@ -274,7 +274,7 @@ def test_get_runs_includes_tick_runs_on_issue_user_created(db, session_client, w
     )
     resp = session_client.get("/api/runners/runs/")
     assert resp.status_code == status.HTTP_200_OK
-    assert "tick run on my issue" in [r["prompt"] for r in resp.data]
+    assert "tick run on my issue" in [r["prompt"] for r in resp.data["results"]]
 
 
 @pytest.mark.unit
@@ -293,7 +293,7 @@ def test_get_runs_includes_tick_runs_on_issue_user_assigned(db, session_client, 
     )
     resp = session_client.get("/api/runners/runs/")
     assert resp.status_code == status.HTTP_200_OK
-    assert "tick run on assigned issue" in [r["prompt"] for r in resp.data]
+    assert "tick run on assigned issue" in [r["prompt"] for r in resp.data["results"]]
 
 
 @pytest.mark.unit
@@ -312,7 +312,7 @@ def test_get_runs_excludes_runs_on_unrelated_issues(db, session_client, workspac
     )
     resp = session_client.get("/api/runners/runs/")
     assert resp.status_code == status.HTTP_200_OK
-    assert "run on unrelated issue" not in [r["prompt"] for r in resp.data]
+    assert "run on unrelated issue" not in [r["prompt"] for r in resp.data["results"]]
 
 
 @pytest.mark.unit
@@ -330,8 +330,87 @@ def test_get_runs_does_not_duplicate_when_user_satisfies_multiple_clauses(db, se
     )
     resp = session_client.get("/api/runners/runs/")
     assert resp.status_code == status.HTTP_200_OK
-    prompts = [r["prompt"] for r in resp.data]
+    prompts = [r["prompt"] for r in resp.data["results"]]
     assert prompts.count("multi-match run") == 1
+
+
+# ---------------------------------------------------------------------------
+# GET /api/runners/runs/ — page-number pagination.
+# ---------------------------------------------------------------------------
+
+
+def _bulk_create_runs(workspace, project, count, prefix="run"):
+    pod = Pod.default_for_project(project)
+    AgentRun.objects.bulk_create(
+        [
+            AgentRun(
+                workspace=workspace,
+                created_by=workspace.owner,
+                pod=pod,
+                prompt=f"{prefix}-{i:03d}",
+            )
+            for i in range(count)
+        ]
+    )
+
+
+@pytest.mark.unit
+def test_get_runs_defaults_to_first_page_of_thirty(db, session_client, workspace, project):
+    """With no page param, only the first 30 runs come back and the envelope
+    reports the true totals."""
+    _bulk_create_runs(workspace, project, 60)
+    resp = session_client.get("/api/runners/runs/")
+    assert resp.status_code == status.HTTP_200_OK
+    assert resp.data["page"] == 1
+    assert resp.data["per_page"] == 30
+    assert resp.data["total_count"] == 60
+    assert resp.data["total_pages"] == 2
+    assert resp.data["count"] == 30
+    assert len(resp.data["results"]) == 30
+
+
+@pytest.mark.unit
+def test_get_runs_second_page_returns_remainder(db, session_client, workspace, project):
+    """Page 2 returns the remaining items and does not overlap page 1."""
+    _bulk_create_runs(workspace, project, 45)
+    page1 = session_client.get("/api/runners/runs/", {"page": 1})
+    page2 = session_client.get("/api/runners/runs/", {"page": 2})
+    assert page2.status_code == status.HTTP_200_OK
+    assert page2.data["page"] == 2
+    assert len(page2.data["results"]) == 15
+    ids1 = {r["id"] for r in page1.data["results"]}
+    ids2 = {r["id"] for r in page2.data["results"]}
+    assert ids1.isdisjoint(ids2)
+
+
+@pytest.mark.unit
+def test_get_runs_out_of_range_page_is_empty_with_real_totals(db, session_client, workspace, project):
+    """A page beyond the last returns an empty result set but keeps the real
+    total_pages so the UI can recover."""
+    _bulk_create_runs(workspace, project, 10)
+    resp = session_client.get("/api/runners/runs/", {"page": 99})
+    assert resp.status_code == status.HTTP_200_OK
+    assert resp.data["results"] == []
+    assert resp.data["total_count"] == 10
+    assert resp.data["total_pages"] == 1
+
+
+@pytest.mark.unit
+def test_get_runs_per_page_is_capped(db, session_client, workspace, project):
+    """per_page above the cap is clamped rather than honored verbatim."""
+    resp = session_client.get("/api/runners/runs/", {"per_page": 100000})
+    assert resp.status_code == status.HTTP_200_OK
+    assert resp.data["per_page"] == 200
+
+
+@pytest.mark.unit
+def test_get_runs_invalid_page_falls_back_to_one(db, session_client, workspace, project):
+    """Garbage or non-positive page values fall back to page 1 instead of
+    erroring."""
+    for bad in ("abc", "0", "-3", ""):
+        resp = session_client.get("/api/runners/runs/", {"page": bad})
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.data["page"] == 1
 
 
 # ---------------------------------------------------------------------------

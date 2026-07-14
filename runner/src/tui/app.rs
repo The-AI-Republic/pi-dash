@@ -805,6 +805,19 @@ impl App {
             return KeyHandled::NotConsumed;
         }
 
+        // Stale-leaf guard: a tab's focus tree can shrink between frames — e.g.
+        // switching to a runner whose `agent.kind` hides the agent field the
+        // user had dived into. Pop any trailing segments that no longer resolve
+        // in the current tree so navigation never strands on a leaf that isn't
+        // there; the focus settles on the nearest still-present ancestor.
+        loop {
+            let segs = self.focus_for(self.tab).segments().to_vec();
+            if segs.is_empty() || locate(&tree, &segs).is_some() {
+                break;
+            }
+            self.focus_for_mut(self.tab).pop();
+        }
+
         let focus = self.focus_for(self.tab).clone();
         let active_ctxs = self.active_tab().active_contexts(&focus);
         let text_input_only = active_ctxs == [Context::TextInput];
@@ -1240,7 +1253,8 @@ impl App {
                     };
                     let _ = view.handle_paste(text, &mut ctx);
                 } else {
-                    self.with_tab_ctx(|tab, ctx| tab.handle_paste(text, ctx));
+                    let focus = self.focus_for(self.tab).clone();
+                    self.with_tab_ctx(|tab, ctx| tab.handle_paste(text, ctx, &focus));
                 }
                 self.frame.schedule_frame();
                 Ok(true)

@@ -147,8 +147,15 @@ pub trait Tab {
         KeyHandled::NotConsumed
     }
 
-    /// Accept a paste burst (bracketed-paste path). Default: ignore.
-    fn handle_paste(&mut self, _text: String, _ctx: &mut TabCtx<'_>) -> KeyHandled {
+    /// Accept a paste burst (bracketed-paste path). `focus` is the tab's
+    /// current focus path so the tab can route the paste to whichever
+    /// text field is focused. Default: ignore.
+    fn handle_paste(
+        &mut self,
+        _text: String,
+        _ctx: &mut TabCtx<'_>,
+        _focus: &FocusPath,
+    ) -> KeyHandled {
         KeyHandled::NotConsumed
     }
 

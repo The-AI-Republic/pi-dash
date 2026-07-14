@@ -570,3 +570,99 @@ def test_disarm_ticker_persists_reason(seeded, issue, states):
     out = scheduling.disarm_ticker(issue, reason=TickerDisarmReason.CAP_HIT)
     assert out.enabled is False
     assert out.disarm_reason == TickerDisarmReason.CAP_HIT
+
+
+# ---------------------------------------------------------------------------
+# re_tick_ticker
+# ---------------------------------------------------------------------------
+
+
+def _exhaust(sched, cap):
+    """Drive a ticker to its cap so ``cap_reached()`` is true, mirroring the
+    disarmed state ``fire_tick`` leaves behind on the final tick."""
+    sched.tick_count = cap
+    sched.enabled = False
+    sched.disarm_reason = TickerDisarmReason.CAP_HIT
+    sched.save(update_fields=["tick_count", "enabled", "disarm_reason"])
+
+
+@pytest.mark.unit
+def test_re_tick_grants_extra_budget_when_exhausted(seeded, issue, states):
+    _to_in_progress(issue, states)
+    sched = scheduling.arm_ticker(issue)
+    cap = sched.effective_max_ticks()  # project default (24) for In Progress
+    _exhaust(sched, cap)
+
+    result = scheduling.re_tick_ticker(issue)
+
+    assert result["granted"] is True
+    assert result["reason"] == "granted"
+    ticker = result["ticker"]
+    # Cap grows by one fresh phase budget; tick_count is NOT reset.
+    assert ticker.effective_max_ticks() == cap * 2
+    assert ticker.tick_count == cap
+    assert ticker.cap_reached() is False
+    # Re-armed: enabled, clock restarted, disarm cause cleared.
+    assert ticker.enabled is True
+    assert ticker.disarm_reason == TickerDisarmReason.NONE
+    assert ticker.next_run_at > timezone.now()
+
+
+@pytest.mark.unit
+def test_re_tick_noop_when_budget_not_exhausted(seeded, issue, states):
+    _to_in_progress(issue, states)
+    sched = scheduling.arm_ticker(issue)
+    sched.tick_count = 1  # well under the cap
+    sched.save(update_fields=["tick_count"])
+    before = sched.effective_max_ticks()
+
+    result = scheduling.re_tick_ticker(issue)
+
+    assert result["granted"] is False
+    assert result["reason"] == "budget_not_exhausted"
+    sched.refresh_from_db()
+    assert sched.effective_max_ticks() == before  # unchanged
+    assert sched.tick_count == 1
+
+
+@pytest.mark.unit
+def test_re_tick_noop_when_not_ticking_state(seeded, issue, states):
+    # Issue stays in Todo (not a ticking state) but has an exhausted ticker.
+    sched = scheduling.arm_ticker(issue)
+    _exhaust(sched, sched.effective_max_ticks())
+    before = sched.effective_max_ticks()
+
+    result = scheduling.re_tick_ticker(issue)
+
+    assert result["granted"] is False
+    assert result["reason"] == "not_ticking_state"
+    sched.refresh_from_db()
+    assert sched.effective_max_ticks() == before
+    assert sched.enabled is False  # not re-armed
+
+
+@pytest.mark.unit
+def test_re_tick_noop_when_no_ticker(seeded, issue, states):
+    _to_in_progress(issue, states)
+    result = scheduling.re_tick_ticker(issue)
+    assert result["granted"] is False
+    assert result["reason"] == "no_ticker"
+    assert result["ticker"] is None
+
+
+@pytest.mark.unit
+def test_re_tick_respects_user_disabled(seeded, issue, states):
+    _to_in_progress(issue, states)
+    sched = scheduling.arm_ticker(issue)
+    cap = sched.effective_max_ticks()
+    _exhaust(sched, cap)
+    sched.user_disabled = True
+    sched.save(update_fields=["user_disabled"])
+
+    result = scheduling.re_tick_ticker(issue)
+
+    # Budget is still granted, but ticking stays disabled per user's choice.
+    assert result["granted"] is True
+    ticker = result["ticker"]
+    assert ticker.effective_max_ticks() == cap * 2
+    assert ticker.enabled is False

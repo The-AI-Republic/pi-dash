@@ -24,6 +24,7 @@ import { DuplicateWorkItemModal } from "@/pi-dash-web/components/issues/issue-la
 // helper
 import { ArchiveIssueModal } from "../../archive-issue-modal";
 import { DeleteIssueModal } from "../../delete-issue-modal";
+import { MoveIssueModal } from "../../move-issue-modal";
 import { CreateUpdateIssueModal } from "../../issue-modal/modal";
 import type { IQuickActionProps } from "../list/list-view-types";
 import type { MenuItemFactoryProps } from "./helper";
@@ -49,6 +50,7 @@ export const ProjectIssueQuickActions = observer(function ProjectIssueQuickActio
   const [deleteIssueModal, setDeleteIssueModal] = useState(false);
   const [archiveIssueModal, setArchiveIssueModal] = useState(false);
   const [duplicateWorkItemModal, setDuplicateWorkItemModal] = useState(false);
+  const [moveIssueModal, setMoveIssueModal] = useState(false);
   // store hooks
   const { allowPermissions } = useUserPermissions();
   const { issuesFilter } = useIssues(EIssuesStoreType.PROJECT);
@@ -94,6 +96,7 @@ export const ProjectIssueQuickActions = observer(function ProjectIssueQuickActio
     setDeleteIssueModal,
     setArchiveIssueModal,
     setDuplicateWorkItemModal,
+    setMoveIssueModal,
     handleDelete,
     handleUpdate,
     handleArchive,
@@ -145,6 +148,14 @@ export const ProjectIssueQuickActions = observer(function ProjectIssueQuickActio
           isOpen={duplicateWorkItemModal}
           onClose={() => setDuplicateWorkItemModal(false)}
           workspaceSlug={workspaceSlug.toString()}
+          projectId={issue.project_id}
+        />
+      )}
+      {issue.project_id && (
+        <MoveIssueModal
+          isOpen={moveIssueModal}
+          onClose={() => setMoveIssueModal(false)}
+          issueId={issue.id}
           projectId={issue.project_id}
         />
       )}

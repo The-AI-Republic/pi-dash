@@ -6,6 +6,7 @@ from django.urls import path
 
 from pi_dash.assistant.views.events import assistant_event_stream
 from pi_dash.assistant.views.llm_config import (
+    AssistantGenerateTitleEndpoint,
     UserLLMConfigEndpoint,
     UserLLMConfigTestEndpoint,
 )
@@ -18,7 +19,7 @@ from pi_dash.assistant.views.threads import (
     AssistantThreadListCreateEndpoint,
 )
 
-_ASSIST = "workspaces/<str:slug>/assistant"
+_ASSIST = "workspaces/<str:slug>/ai-assistant"
 
 urlpatterns = [
     path(f"{_ASSIST}/threads/", AssistantThreadListCreateEndpoint.as_view(), name="assistant-threads"),
@@ -42,6 +43,15 @@ urlpatterns = [
         AssistantCancelEndpoint.as_view(),
         name="assistant-cancel",
     ),
-    path("users/me/llm-config/", UserLLMConfigEndpoint.as_view(), name="assistant-llm-config"),
-    path("users/me/llm-config/test/", UserLLMConfigTestEndpoint.as_view(), name="assistant-llm-config-test"),
+    path(
+        f"{_ASSIST}/generate-title/",
+        AssistantGenerateTitleEndpoint.as_view(),
+        name="assistant-generate-title",
+    ),
+    path("users/me/ai-assistant/config/", UserLLMConfigEndpoint.as_view(), name="ai-assistant-config"),
+    path(
+        "users/me/ai-assistant/config/test/",
+        UserLLMConfigTestEndpoint.as_view(),
+        name="ai-assistant-config-test",
+    ),
 ]

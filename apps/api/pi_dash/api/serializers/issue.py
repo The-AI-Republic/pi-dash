@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+# Python imports
+import uuid
+
 # Django imports
 from django.utils import timezone
 from lxml import html
@@ -45,6 +48,20 @@ from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
 
 
+def _same_uuid(a, b) -> bool:
+    """Compare two UUID-ish values by canonical form.
+
+    ``project_id`` reaches the serializer as a raw ``<str:project_id>`` URL
+    kwarg, so a non-canonical (uppercase / unhyphenated) UUID must not falsely
+    fail an equality check against a canonical DB UUID. Falls back to plain
+    string equality when either side is not a parseable UUID.
+    """
+    try:
+        return uuid.UUID(str(a)) == uuid.UUID(str(b))
+    except (ValueError, TypeError, AttributeError):
+        return str(a) == str(b)
+
+
 class IssueSerializer(BaseSerializer):
     """
     Comprehensive work item serializer with full relationship management.
@@ -84,6 +101,34 @@ class IssueSerializer(BaseSerializer):
             and data.get("start_date", None) > data.get("target_date", None)
         ):
             raise serializers.ValidationError("Start date cannot exceed target date")
+
+        # ``assigned_pod`` is the pod this issue's agent runs dispatch to. It is
+        # optional — omitting it lets ``Issue.save`` resolve the project's default
+        # pod. Mirrors the guards the app-tier serializer already enforces.
+        if "assigned_pod" in data:
+            pod = data["assigned_pod"]  # may be None when clearing the pod
+            if pod is not None:
+                # Must belong to the issue's *own* project: pods are project-scoped,
+                # so accepting any pod would let a caller route this project's runs
+                # to another project's runners (a cross-project escape hatch).
+                project_id = self.context.get("project_id")
+                if project_id is None and self.instance is not None:
+                    project_id = self.instance.project_id
+                if project_id is not None and not _same_uuid(pod.project_id, project_id):
+                    raise serializers.ValidationError({"assigned_pod": "pod is in a different project"})
+            # Block changing the pod once a run is active: the run's pod FK is
+            # immutable, so the change would only take effect on the next dispatch
+            # and silently desync the live run from the issue's routing. Fires on
+            # any real change — assign, reassign, or clear — including from the NULL
+            # (default-pod) state a live run may already have dispatched onto, so
+            # the gate is the value change itself, not "currently has a pod".
+            # ``has_active_run`` is checked last so its query only runs on a change.
+            if self.instance is not None:
+                new_pod_id = pod.id if pod is not None else None
+                if str(new_pod_id) != str(self.instance.assigned_pod_id) and self.instance.has_active_run:
+                    raise serializers.ValidationError(
+                        {"assigned_pod": "cannot reassign pod while the issue has an active run"}
+                    )
 
         try:
             if data.get("description_html", None) is not None:

@@ -15,6 +15,7 @@ import type { EditorRefApi } from "@pi-dash/editor";
 import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { AssistantService } from "@pi-dash/services";
 import type { TIssue, TWorkspaceDraftIssue } from "@pi-dash/types";
 // hooks
 import { ToggleSwitch } from "@pi-dash/ui";
@@ -27,6 +28,7 @@ import {
   getTabIndex,
 } from "@pi-dash/utils";
 // components
+import { useLLMConfig } from "@/components/assistant/use-llm-config";
 import {
   IssueDefaultProperties,
   IssueDescriptionEditor,
@@ -50,6 +52,9 @@ import { DuplicateModalRoot } from "@/pi-dash-web/components/de-dupe/duplicate-m
 import { IssueTypeSelect, WorkItemTemplateSelect } from "@/pi-dash-web/components/issues/issue-modal";
 import { WorkItemModalAdditionalProperties } from "@/pi-dash-web/components/issues/issue-modal/modal-additional-properties";
 import { useDebouncedDuplicateIssues } from "@/pi-dash-web/hooks/use-debounced-duplicate-issues";
+
+const assistantService = new AssistantService();
+const AI_TITLE_GENERATION_TIMEOUT_MS = 30_000;
 
 export interface IssueFormProps {
   data?: Partial<TIssue>;
@@ -106,6 +111,16 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
   // states
   const [gptAssistantModal, setGptAssistantModal] = useState(false);
   const [isMoving, setIsMoving] = useState<boolean>(false);
+  const [isGeneratingTitle, setIsGeneratingTitle] = useState<boolean>(false);
+
+  // Pi Dash AI assistant availability — when configured, the title becomes
+  // optional and is generated from the description on save. This only applies
+  // to creating a brand-new (non-draft) work item: editing a saved issue keeps
+  // the title required, and drafts skip generation so closing the modal never
+  // silently spends an AI call.
+  const { config: llmConfig } = useLLMConfig();
+  const aiAvailable = Boolean(llmConfig?.has_api_key);
+  const titleOptional = aiAvailable && !data?.id && !isDraft;
 
   // refs
   const editorRef = useRef<EditorRefApi>(null);
@@ -153,6 +168,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
     control,
     getValues,
     setValue,
+    clearErrors,
   } = methods;
 
   const projectId = watch("project_id");
@@ -164,7 +180,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
 
   // derived values
   const projectDetails = projectId ? getProjectById(projectId) : undefined;
-  const isDisabled = isSubmitting || isApplyingTemplate;
+  const isDisabled = isSubmitting || isApplyingTemplate || isGeneratingTitle;
 
   const { getIndex } = getTabIndex(ETabIndices.ISSUE_FORM, isMobile);
 
@@ -190,6 +206,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
     if (data) {
       reset({ ...DEFAULT_WORK_ITEM_FORM_VALUES, project_id: projectId, ...data });
     }
+    clearErrors("name");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...dataResetProperties]);
 
@@ -218,7 +235,29 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workItemTemplateId]);
 
+  const generateTitleWithTimeout = async (descriptionText: string) => {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, AI_TITLE_GENERATION_TIMEOUT_MS);
+
+    try {
+      return await assistantService.generateTitle(workspaceSlug?.toString() ?? "", descriptionText, {
+        signal: controller.signal,
+      });
+    } catch (error: unknown) {
+      if (timedOut) throw new Error("title-generation-timeout", { cause: error });
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+
   const handleFormSubmit = async (formData: Partial<TIssue>, is_draft_issue = false) => {
+    if (isGeneratingTitle) return;
+
     // Check if the editor is ready to discard
     if (!editorRef.current?.isEditorReadyToDiscard()) {
       setToast({
@@ -239,6 +278,41 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
     )
       return;
 
+    // If the user left the title blank on a new work item and has a Pi Dash AI
+    // assistant configured, generate a title from the description before saving.
+    // `titleOptional` already excludes edits and drafts.
+    const titleIsBlank = (formData.name ?? "").trim() === "";
+    if (titleOptional && titleIsBlank) {
+      const descriptionText = getTextContent(formData.description_html ?? "").trim();
+      if (!descriptionText) {
+        setToast({
+          type: TOAST_TYPE.ERROR,
+          title: t("Error"),
+          message: t("Add a description so Pi Dash AI can generate a title."),
+        });
+        return;
+      }
+      try {
+        setIsGeneratingTitle(true);
+        const { title } = await generateTitleWithTimeout(descriptionText);
+        const generatedTitle = (title ?? "").trim();
+        if (!generatedTitle) throw new Error("empty-title");
+        formData.name = generatedTitle;
+        setValue<"name">("name", generatedTitle);
+        clearErrors("name");
+      } catch (error: unknown) {
+        const detail = (error as { detail?: string })?.detail;
+        setToast({
+          type: TOAST_TYPE.ERROR,
+          title: t("Error"),
+          message: detail ?? t("Pi Dash AI couldn't generate a title. Try again or enter a title manually."),
+        });
+        return;
+      } finally {
+        setIsGeneratingTitle(false);
+      }
+    }
+
     const submitData = !data?.id
       ? formData
       : {
@@ -255,6 +329,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
     await onSubmit(submitData, is_draft_issue)
       .then(() => {
         setGptAssistantModal(false);
+        clearErrors("name");
         if (isCreateMoreToggleEnabled && workItemTemplateId) {
           handleTemplateChange({
             workspaceSlug: workspaceSlug?.toString(),
@@ -309,6 +384,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
     (watch("name") && watch("name") !== "") || (watch("description_html") && watch("description_html") !== "<p></p>");
 
   const handleFormChange = () => {
+    if ((getValues<"name">("name") ?? "").trim()) clearErrors("name");
     if (!onChange) return;
 
     if (isDirty && condition) onChange(watch());
@@ -389,10 +465,10 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
             <div className="rounded-t-lg bg-surface-1 p-5">
               <h3 className="pb-2 text-h4-medium text-secondary">{modalTitle}</h3>
               <div className="flex items-center justify-between pt-2 pb-4">
-                <div className="flex items-center gap-x-1">
+                <div className={cn("flex items-center gap-x-1", isGeneratingTitle && "pointer-events-none opacity-60")}>
                   <IssueProjectSelect
                     control={control}
-                    disabled={!!data?.id || !!data?.sourceIssueId || isProjectSelectionDisabled}
+                    disabled={!!data?.id || !!data?.sourceIssueId || isProjectSelectionDisabled || isGeneratingTitle}
                     handleFormChange={handleFormChange}
                   />
                   {projectId && (
@@ -400,7 +476,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                       control={control}
                       projectId={projectId}
                       editorRef={editorRef}
-                      disabled={!!data?.sourceIssueId}
+                      disabled={!!data?.sourceIssueId || isGeneratingTitle}
                       handleFormChange={handleFormChange}
                       renderChevron
                     />
@@ -422,16 +498,20 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                   )}
                 </div>
                 {duplicateIssues.length > 0 && (
-                  <DeDupeButtonRoot
-                    workspaceSlug={workspaceSlug?.toString()}
-                    isDuplicateModalOpen={isDuplicateModalOpen}
-                    label={
-                      duplicateIssues.length === 1
-                        ? `${duplicateIssues.length} ${t("Duplicate work item found")}`
-                        : `${duplicateIssues.length} ${t("Duplicate work items found")}`
-                    }
-                    handleOnClick={() => handleDuplicateIssueModal(!isDuplicateModalOpen)}
-                  />
+                  <div className={cn(isGeneratingTitle && "pointer-events-none opacity-60")}>
+                    <DeDupeButtonRoot
+                      workspaceSlug={workspaceSlug?.toString()}
+                      isDuplicateModalOpen={isDuplicateModalOpen}
+                      label={
+                        duplicateIssues.length === 1
+                          ? `${duplicateIssues.length} ${t("Duplicate work item found")}`
+                          : `${duplicateIssues.length} ${t("Duplicate work items found")}`
+                      }
+                      handleOnClick={() => {
+                        if (!isGeneratingTitle) handleDuplicateIssueModal(!isDuplicateModalOpen);
+                      }}
+                    />
+                  </div>
                 )}
               </div>
               {watch("parent_id") && selectedParentIssue && (
@@ -450,7 +530,18 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                   issueTitleRef={issueTitleRef}
                   formState={formState}
                   handleFormChange={handleFormChange}
+                  aiAvailable={titleOptional}
+                  disabled={isGeneratingTitle}
                 />
+                {isGeneratingTitle && (
+                  <div
+                    className="rounded-md border border-accent-subtle bg-accent-subtle px-3 py-2 text-body-xs-medium text-accent-primary"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    {t("Pi Dash AI is generating a title.")}
+                  </div>
+                )}
               </div>
             </div>
             <div
@@ -519,10 +610,21 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                   {!data?.id && (
                     <button
                       type="button"
-                      className="inline-flex cursor-pointer items-center gap-1.5"
-                      onClick={() => onCreateMoreToggleChange(!isCreateMoreToggleEnabled)}
+                      className={cn(
+                        "inline-flex items-center gap-1.5",
+                        isGeneratingTitle ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+                      )}
+                      disabled={isGeneratingTitle}
+                      onClick={() => {
+                        if (!isGeneratingTitle) onCreateMoreToggleChange(!isCreateMoreToggleEnabled);
+                      }}
                     >
-                      <ToggleSwitch value={isCreateMoreToggleEnabled} onChange={() => {}} size="sm" />
+                      <ToggleSwitch
+                        value={isCreateMoreToggleEnabled}
+                        onChange={() => {}}
+                        size="sm"
+                        disabled={isGeneratingTitle}
+                      />
                       <span className="text-caption-sm-regular">{t("Create more")}</span>
                     </button>
                   )}
@@ -531,7 +633,9 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                       <Button
                         variant="secondary"
                         size="lg"
+                        disabled={isGeneratingTitle}
                         onClick={() => {
+                          if (isGeneratingTitle) return;
                           if (editorRef.current?.isEditorReadyToDiscard()) {
                             onClose();
                           } else {
@@ -552,10 +656,14 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                         size="lg"
                         type="submit"
                         ref={submitBtnRef}
-                        loading={isSubmitting}
+                        loading={isSubmitting || isGeneratingTitle}
                         disabled={isDisabled}
                       >
-                        {isSubmitting ? primaryButtonText.loading : primaryButtonText.default}
+                        {isGeneratingTitle
+                          ? t("Generating title")
+                          : isSubmitting
+                            ? primaryButtonText.loading
+                            : primaryButtonText.default}
                       </Button>
                     </div>
 
@@ -565,7 +673,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                         type="button"
                         loading={isMoving}
                         onClick={handleMoveToProjects}
-                        disabled={isMoving}
+                        disabled={isMoving || isGeneratingTitle}
                         size="lg"
                       >
                         {t("Add to project")}

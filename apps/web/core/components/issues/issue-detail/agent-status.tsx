@@ -4,17 +4,19 @@
  * See the LICENSE file for details.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { LucideIcon } from "lucide-react";
-import { CircleAlert, CircleCheck, CirclePause, Clock3, LoaderCircle } from "lucide-react";
+import { CircleAlert, CircleCheck, CirclePause, Clock3, LoaderCircle, RotateCw } from "lucide-react";
 import { useTranslation } from "@pi-dash/i18n";
 // pi dash imports
 import { Badge } from "@pi-dash/propel/badge";
 import type { TBadgeVariant } from "@pi-dash/propel/badge";
+import { Button } from "@pi-dash/propel/button";
 import type { TAgentRunStatus, TIssue, TIssueAgentRunSummary, TIssueAgentTicker } from "@pi-dash/types";
 import { cn } from "@pi-dash/utils";
 // local imports
 import type { TIssueOperations } from "./root";
+import { useReTick } from "./use-re-tick";
 
 type TranslationFn = ReturnType<typeof useTranslation>["t"];
 
@@ -334,6 +336,15 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
   const activeRunStatus = activeRun?.status;
   const hasActiveAgentRun = Boolean(activeRunStatus && ACTIVE_RUN_STATUSES.has(activeRunStatus));
   const view = useMemo(() => getAgentStatusView(issue, now, t), [issue, now, t]);
+  const canReTick = Boolean(ticker?.can_re_tick);
+  const { reTick, isSubmitting: isReTicking } = useReTick();
+
+  const handleReTick = useCallback(async () => {
+    const result = await reTick(issueId);
+    // Refresh the card so the new budget / re-armed schedule shows even
+    // when the grant was a no-op (state may have drifted since load).
+    if (result) void issueOperations.fetch(workspaceSlug, projectId, issueId);
+  }, [reTick, issueId, issueOperations, workspaceSlug, projectId]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 60_000);
@@ -402,6 +413,25 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
               <span className="text-primary">{tickBudget}</span>
             </div>
           ) : null}
+        </div>
+      )}
+
+      {canReTick && (
+        <div className="mt-3 flex flex-col gap-1.5">
+          <Button
+            variant="secondary"
+            size="base"
+            onClick={handleReTick}
+            disabled={isReTicking}
+            loading={isReTicking}
+            className="w-full"
+          >
+            <RotateCw className="size-3.5 flex-shrink-0" />
+            <span className="text-body-xs-medium">{t("Re-tick")}</span>
+          </Button>
+          <p className="text-caption-sm-regular text-tertiary">
+            {t("Grant a fresh ticking budget so the AI agent resumes on its schedule.")}
+          </p>
         </div>
       )}
     </section>
