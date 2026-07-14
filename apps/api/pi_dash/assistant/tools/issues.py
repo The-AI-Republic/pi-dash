@@ -26,6 +26,11 @@ _NAME_CAP = 200
 _DESC_CAP = 2000
 _COMMENT_CAP = 500
 
+# Sentinel default for update_issue's parent_issue_id: lets us tell "argument
+# omitted" (leave the parent untouched) apart from an explicit ``null`` (unlink),
+# since both would otherwise arrive as Python ``None``.
+_PARENT_UNSET = "__unset__"
+
 
 def _identifier(issue) -> str:
     ident = getattr(issue.project, "identifier", "") if issue.project_id else ""
@@ -40,6 +45,7 @@ def _brief(issue) -> dict:
         "project_id": str(issue.project_id),
         "name": _results.wrap_untrusted(name),
         "name_truncated": name_trunc,
+        "parent_id": str(issue.parent_id) if issue.parent_id else None,
         "state": issue.state.name if issue.state_id else None,
         "state_group": issue.state.group if issue.state_id else None,
         "priority": issue.priority,
@@ -135,6 +141,39 @@ def _resolve_state(deps, project_id, state_id):
     return states.filter(default=True).first() or states.order_by("sequence").first()
 
 
+def _resolve_parent(deps, project_id, parent_issue_id, child_id=None) -> Issue:
+    """Resolve + validate a parent issue for a child living in ``project_id``.
+
+    Enforces the same constraints the native sub-issue UI does: the parent must
+    be accessible to the user, live in the same project as the child, and the
+    link must not introduce a cycle (self-parenting or making the child one of
+    its own descendants). Returns the parent Issue, or raises ModelRetry.
+    """
+    parent = _scoping.get_issue(deps, parent_issue_id)  # scope check + ToolNotFound
+    if str(parent.project_id) != str(project_id):
+        raise ModelRetry("The parent issue must be in the same project as the child issue.")
+    if child_id is not None:
+        if str(parent.id) == str(child_id):
+            raise ModelRetry("An issue can't be its own parent.")
+        # Walk the proposed parent's ancestor chain; if the child appears in it,
+        # linking would create a cycle. ``seen`` guards against traversing a
+        # pre-existing cycle forever.
+        ancestor_parent_id = parent.parent_id
+        seen: set = set()
+        while ancestor_parent_id is not None:
+            if str(ancestor_parent_id) == str(child_id):
+                raise ModelRetry("That parent link would create a cycle.")
+            if ancestor_parent_id in seen:
+                break
+            seen.add(ancestor_parent_id)
+            ancestor_parent_id = (
+                Issue.objects.filter(pk=ancestor_parent_id)
+                .values_list("parent_id", flat=True)
+                .first()
+            )
+    return parent
+
+
 @assistant.tool
 def create_issue(
     ctx: RunContext[AssistantDeps],
@@ -143,9 +182,11 @@ def create_issue(
     description_md: Optional[str] = None,
     state_id: Optional[str] = None,
     priority: Optional[str] = None,
+    parent_issue_id: Optional[str] = None,
 ) -> dict:
-    """Create an issue. Requires Member or Admin role. (Assignees/labels: set them
-    afterwards in the UI — not yet supported by this tool.)"""
+    """Create an issue. Requires Member or Admin role. Pass parent_issue_id to
+    link it as a sub-issue of another issue in the same project. (Assignees/labels:
+    set them afterwards in the UI — not yet supported by this tool.)"""
     deps = ctx.deps
     project = _scoping.get_project(deps, project_id)
     _scoping.require_project_write(deps, project_id)
@@ -156,6 +197,7 @@ def create_issue(
     if prio not in _VALID_PRIORITIES:
         raise ModelRetry(f"Priority must be one of {sorted(_VALID_PRIORITIES)}.")
     state = _resolve_state(deps, project_id, state_id)
+    parent = _resolve_parent(deps, project_id, parent_issue_id) if parent_issue_id else None
     user = _scoping.user_for(deps)
 
     # impersonate so BaseModel.save() attributes created_by to the acting user
@@ -178,6 +220,7 @@ def create_issue(
             state=state,
             project=project,
             workspace=project.workspace,
+            parent=parent,
             created_by=user,
             created_via=deps.created_via,
         )
@@ -198,10 +241,13 @@ def update_issue(
     description_md: Optional[str] = None,
     state_id: Optional[str] = None,
     priority: Optional[str] = None,
+    parent_issue_id: Optional[str] = _PARENT_UNSET,
 ) -> dict:
     """Update an issue's name, description, state, or priority. Requires write access.
     Changing the state may dispatch a coding run if it moves the issue into a
-    delegated/ticking state (same as moving it in the UI)."""
+    delegated/ticking state (same as moving it in the UI). Pass parent_issue_id to
+    re-parent the issue (must be another issue in the same project); pass null to
+    unlink it from its current parent; omit it to leave the parent unchanged."""
     deps = ctx.deps
     issue = _scoping.get_issue(deps, issue_id)
     _scoping.require_project_write(deps, str(issue.project_id))
@@ -215,7 +261,18 @@ def update_issue(
     to_state = None
     if state_id is not None:
         to_state = _resolve_state(deps, str(issue.project_id), state_id)
-    if name is None and description_md is None and prio is None and to_state is None:
+    # parent_issue_id: sentinel = untouched, None/"" = unlink, else resolve+validate.
+    parent_touched = parent_issue_id != _PARENT_UNSET
+    new_parent = None
+    if parent_touched and parent_issue_id:
+        new_parent = _resolve_parent(deps, str(issue.project_id), parent_issue_id, child_id=issue.id)
+    if (
+        name is None
+        and description_md is None
+        and prio is None
+        and to_state is None
+        and not parent_touched
+    ):
         raise ModelRetry("Nothing to update — provide at least one field to change.")
 
     user = _scoping.user_for(deps)
@@ -244,6 +301,10 @@ def update_issue(
             locked.state = to_state
             changed.append("state")
             update_fields.append("state")
+        if parent_touched:
+            locked.parent = new_parent
+            changed.append("parent")
+            update_fields.append("parent")
         # include audit columns so update_fields doesn't drop them (BaseModel.save
         # sets updated_by from the impersonated user; updated_at is auto_now).
         update_fields += ["updated_at", "updated_by"]
