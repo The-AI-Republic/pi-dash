@@ -151,6 +151,34 @@ class WorkspaceJoinRequestSerializer(BaseSerializer):
         ]
 
 
+class UserWorkspaceJoinRequestSerializer(BaseSerializer):
+    """Requester-facing serializer for a user's own join requests.
+
+    Deliberately omits the resolved ``workspace`` (name/slug/logo). Exposing it
+    would let a requester read their own request list to tell whether the typed
+    email belonged to a real workspace admin — the exact enumeration the neutral
+    create response is meant to prevent. The onboarding "pending" state must look
+    identical whether or not the email resolved. ``requester`` is always the
+    current user, so it is safe to expose.
+    """
+
+    requester = UserLiteSerializer(read_only=True)
+
+    class Meta:
+        model = WorkspaceJoinRequest
+        fields = [
+            "id",
+            "requester",
+            "admin_email",
+            "message",
+            "status",
+            "responded_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
 class WorkspaceThemeSerializer(BaseSerializer):
     class Meta:
         model = WorkspaceTheme

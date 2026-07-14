@@ -19,6 +19,7 @@ from .workspace import (
     WorkSpaceMemberSerializer,
     WorkSpaceMemberInviteSerializer,
     WorkspaceJoinRequestSerializer,
+    UserWorkspaceJoinRequestSerializer,
     WorkspaceLiteSerializer,
     WorkspaceThemeSerializer,
     WorkspaceMemberAdminSerializer,

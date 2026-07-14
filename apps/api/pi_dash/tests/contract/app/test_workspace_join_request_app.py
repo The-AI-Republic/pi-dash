@@ -144,6 +144,29 @@ class TestListOwnJoinRequests:
         assert len(results) == 1
         assert str(results[0]["requester"]["id"]) == str(create_user.id)
 
+    @pytest.mark.django_db
+    def test_own_request_list_does_not_leak_workspace(self, session_client, create_user, admin_workspace):
+        """The requester's own list must not expose the resolved workspace.
+
+        Exposing it would let a requester enumerate real workspace admins by
+        submitting emails and reading back their own request list — defeating the
+        neutral create response.
+        """
+        WorkspaceJoinRequest.objects.create(
+            requester=create_user, workspace=admin_workspace, admin_email="admin@example.com"
+        )
+
+        url = reverse("user-workspace-join-requests")
+        response = session_client.get(url)
+
+        assert response.status_code == status.HTTP_200_OK
+        results = response.data["results"] if isinstance(response.data, dict) else response.data
+        assert len(results) == 1
+        # No workspace identity (name/slug/id/logo) may appear in the payload.
+        assert "workspace" not in results[0]
+        assert admin_workspace.slug not in str(results[0])
+        assert admin_workspace.name not in str(results[0])
+
 
 @pytest.mark.contract
 class TestAdminListJoinRequests:

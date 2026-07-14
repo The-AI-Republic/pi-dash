@@ -5,6 +5,8 @@
 # Django imports
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
+from django.db import IntegrityError, transaction
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
 # Third party modules
@@ -13,7 +15,10 @@ from rest_framework.response import Response
 
 # Module imports
 from pi_dash.app.permissions import WorkSpaceAdminPermission
-from pi_dash.app.serializers import WorkspaceJoinRequestSerializer
+from pi_dash.app.serializers import (
+    UserWorkspaceJoinRequestSerializer,
+    WorkspaceJoinRequestSerializer,
+)
 from pi_dash.app.views.base import BaseViewSet
 from pi_dash.bgtasks.event_tracking_task import track_event
 from pi_dash.db.models import Profile, Workspace, WorkspaceJoinRequest, WorkspaceMember
@@ -32,12 +37,12 @@ class UserWorkspaceJoinRequestViewSet(BaseViewSet):
     ``/users/me/`` so it is reachable by a user who has no workspace slug yet.
     """
 
-    serializer_class = WorkspaceJoinRequestSerializer
+    serializer_class = UserWorkspaceJoinRequestSerializer
     model = WorkspaceJoinRequest
 
     def get_queryset(self):
         return self.filter_queryset(
-            super().get_queryset().filter(requester=self.request.user).select_related("workspace", "requester")
+            super().get_queryset().filter(requester=self.request.user).select_related("requester")
         )
 
     def create(self, request):
@@ -87,18 +92,31 @@ class UserWorkspaceJoinRequestViewSet(BaseViewSet):
                 ).exists()
                 if already_pending:
                     continue
-                WorkspaceJoinRequest.objects.create(
-                    requester=request.user,
-                    workspace_id=workspace_id,
-                    admin_email=admin_email,
-                    message=message,
-                    created_by=request.user,
-                )
+                # A concurrent submit can pass the check above and race to
+                # create; the partial unique constraint turns the loser into an
+                # IntegrityError, which we swallow to keep the endpoint idempotent.
+                try:
+                    with transaction.atomic():
+                        WorkspaceJoinRequest.objects.create(
+                            requester=request.user,
+                            workspace_id=workspace_id,
+                            admin_email=admin_email,
+                            message=message,
+                            created_by=request.user,
+                        )
+                except IntegrityError:
+                    pass
         else:
             # The email did not resolve to any workspace admin. Record an
             # unresolved request (workspace=None) so the requester still lands in
             # the onboarding "pending" state — identical to the resolved case, so
             # an outsider cannot tell whether the email was a real admin.
+            #
+            # NOTE: the partial unique constraint does NOT cover this branch —
+            # Postgres treats NULL workspaces as distinct, so it cannot enforce
+            # uniqueness here. The exists() check is the only guard; a concurrent
+            # submit can still create a second unresolved pending row (harmless,
+            # de-duped on read).
             already_pending = WorkspaceJoinRequest.objects.filter(
                 requester=request.user,
                 workspace__isnull=True,
@@ -148,7 +166,7 @@ class WorkspaceJoinRequestViewSet(BaseViewSet):
         url_params=True,
     )
     def approve(self, request, slug, pk):
-        join_request = WorkspaceJoinRequest.objects.get(pk=pk, workspace__slug=slug)
+        join_request = get_object_or_404(WorkspaceJoinRequest, pk=pk, workspace__slug=slug)
 
         if join_request.status != WorkspaceJoinRequest.Status.PENDING:
             return Response(
@@ -159,28 +177,32 @@ class WorkspaceJoinRequestViewSet(BaseViewSet):
         workspace = join_request.workspace
         requester = join_request.requester
 
-        # Create the membership, or reactivate a previously deactivated one.
-        workspace_member = WorkspaceMember.objects.filter(workspace=workspace, member=requester).first()
-        if workspace_member is not None:
-            workspace_member.is_active = True
-            workspace_member.role = join_request.role
-            workspace_member.save()
-        else:
-            WorkspaceMember.objects.create(
-                workspace=workspace,
-                member=requester,
-                role=join_request.role,
-                created_by=request.user,
-            )
+        # Membership creation, the profile pointer and the status transition must
+        # all land together — a partial approval would leave a member added but
+        # the request still PENDING (approvable again).
+        with transaction.atomic():
+            # Create the membership, or reactivate a previously deactivated one.
+            workspace_member = WorkspaceMember.objects.filter(workspace=workspace, member=requester).first()
+            if workspace_member is not None:
+                workspace_member.is_active = True
+                workspace_member.role = join_request.role
+                workspace_member.save()
+            else:
+                WorkspaceMember.objects.create(
+                    workspace=workspace,
+                    member=requester,
+                    role=join_request.role,
+                    created_by=request.user,
+                )
 
-        # Point the requester at the workspace they just joined so post-login
-        # routing lands them there. ``last_workspace_id`` lives on Profile.
-        Profile.objects.filter(user=requester).update(last_workspace_id=workspace.id)
+            # Point the requester at the workspace they just joined so post-login
+            # routing lands them there. ``last_workspace_id`` lives on Profile.
+            Profile.objects.filter(user=requester).update(last_workspace_id=workspace.id)
 
-        join_request.status = WorkspaceJoinRequest.Status.APPROVED
-        join_request.responded_at = timezone.now()
-        join_request.responded_by = request.user
-        join_request.save()
+            join_request.status = WorkspaceJoinRequest.Status.APPROVED
+            join_request.responded_at = timezone.now()
+            join_request.responded_by = request.user
+            join_request.save()
 
         track_event.delay(
             user_id=requester.id,
@@ -198,7 +220,7 @@ class WorkspaceJoinRequestViewSet(BaseViewSet):
         return Response({"message": "Request approved"}, status=status.HTTP_200_OK)
 
     def deny(self, request, slug, pk):
-        join_request = WorkspaceJoinRequest.objects.get(pk=pk, workspace__slug=slug)
+        join_request = get_object_or_404(WorkspaceJoinRequest, pk=pk, workspace__slug=slug)
 
         if join_request.status != WorkspaceJoinRequest.Status.PENDING:
             return Response(
