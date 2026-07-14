@@ -3037,7 +3037,28 @@ impl AssignWorker {
         self.state
             .note_agent_event(Utc::now(), &kind, Some(&summary))
             .await;
-        if run_events.push(kind, summary) {
+        // When a Raw frame carries the agent's human-readable narrative (the
+        // "let me first explore…" prose a terminal user sees), mirror it to
+        // the cloud verbatim as its own `agent/message` run event so the
+        // AgentRun record reads like a live CLI session. Everything else
+        // (lifecycle milestones, high-frequency token deltas) keeps the
+        // sanitised summary / compaction path so event volume stays bounded.
+        let narrative = if let BridgeEvent::Raw { method, params, .. } = &ev {
+            crate::daemon::observability::extract_agent_message_text(method, params)
+        } else {
+            None
+        };
+        let should_flush = match narrative {
+            Some(text) => run_events.push_content(
+                "agent/message".to_string(),
+                serde_json::json!({
+                    "schema": "runner_agent_message_v1",
+                    "text": text,
+                }),
+            ),
+            None => run_events.push(kind, summary),
+        };
+        if should_flush {
             run_events.flush(&self.out).await;
         }
         if let BridgeEvent::Raw { method, params, .. } = &ev {

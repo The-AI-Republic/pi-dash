@@ -308,6 +308,84 @@ fn parse_claude_tool_results(message: &serde_json::Value) -> Vec<ExecCommandComp
         .collect()
 }
 
+/// Maximum length for a forwarded agent narrative message. Bounds the
+/// mirrored payload so a single very long assistant turn can't balloon a
+/// `RunEvents` batch (the cloud additionally caps event payload bytes and
+/// truncates, but we cap at the source too to keep the wire small).
+pub const AGENT_MESSAGE_TEXT_MAX: usize = 4000;
+
+/// Extract the agent's human-readable narrative — the "let me first explore
+/// the original color of the button…" prose a user sees in their terminal
+/// when running the agent CLI directly — from a `BridgeEvent::Raw`
+/// `(method, params)`. Returns `Some(text)` only for the per-message
+/// narrative frames we know how to read today; high-frequency token deltas
+/// (`stream_event/*`, codex `*/delta`) are intentionally *not* matched here
+/// so they stay compacted and the mirrored event volume stays bounded.
+///
+/// Unlike [`summary_of`], this DOES surface model output verbatim — that is
+/// the whole point of the feature (the agent-run transcript). It is only
+/// ever routed to durable run-event records, never to the structure-only
+/// observability `last_event_summary` field.
+///
+/// Agent-agnostic:
+///   - Claude: `assistant/message` → concatenated `text` content blocks.
+///   - Codex: `item/completed` with an `agentMessage` item → its `text`.
+///
+/// The result is trimmed and length-capped to [`AGENT_MESSAGE_TEXT_MAX`];
+/// an empty or whitespace-only narrative yields `None`.
+pub fn extract_agent_message_text(method: &str, params: &serde_json::Value) -> Option<String> {
+    let text = match method {
+        "assistant/message" => parse_claude_assistant_text(params),
+        "item/completed" => parse_codex_agent_message_text(params),
+        _ => None,
+    }?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(truncate(trimmed, AGENT_MESSAGE_TEXT_MAX))
+}
+
+/// Concatenate the visible `text` content blocks of a Claude
+/// `assistant/message` frame into a single narrative string. `thinking` and
+/// `tool_use` blocks are intentionally skipped — the former is internal
+/// reasoning, the latter is captured through the command-hint path — so the
+/// result mirrors the assistant prose a terminal user reads. Blocks are
+/// joined with a blank line, matching how the CLI renders successive text
+/// segments.
+fn parse_claude_assistant_text(message: &serde_json::Value) -> Option<String> {
+    let content = message.get("content")?.as_array()?;
+    let mut parts: Vec<&str> = Vec::new();
+    for block in content {
+        if block.get("type").and_then(|v| v.as_str()) != Some("text") {
+            continue;
+        }
+        if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+            let text = text.trim();
+            if !text.is_empty() {
+                parts.push(text);
+            }
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join("\n\n"))
+}
+
+/// Pull the agent's message text out of a codex `item/completed` frame when
+/// the completed item is an `agentMessage`. Command/file-change/reasoning
+/// items carry no user-facing narrative and are skipped.
+fn parse_codex_agent_message_text(params: &serde_json::Value) -> Option<String> {
+    let item = params.get("item")?;
+    if item.get("type").and_then(|v| v.as_str()) != Some("agentMessage") {
+        return None;
+    }
+    item.get("text")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -703,5 +781,87 @@ mod tests {
         assert!(extract_exec_command_hint("turn/started", &params).is_none());
         assert!(extract_exec_command_hint("codex/event/token_count", &params).is_none());
         assert!(extract_exec_command_hint("totally/made/up", &params).is_none());
+    }
+
+    #[test]
+    fn extract_agent_message_text_reads_claude_text_blocks() {
+        // A Claude assistant message mixing narrative text with a tool_use
+        // block: only the visible prose is surfaced, tool_use is dropped.
+        let params = json!({
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Let me first explore the original color of the home page button."},
+                {"type": "tool_use", "name": "Bash", "input": {"command": "grep -r button"}},
+                {"type": "text", "text": "Found it — updating the class."},
+            ],
+        });
+        let text = extract_agent_message_text("assistant/message", &params).expect("narrative");
+        assert_eq!(
+            text,
+            "Let me first explore the original color of the home page button.\n\nFound it — updating the class."
+        );
+    }
+
+    #[test]
+    fn extract_agent_message_text_skips_claude_thinking_only() {
+        // Thinking is internal reasoning, not the terminal narrative.
+        let params = json!({
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "internal chain of thought"},
+            ],
+        });
+        assert!(extract_agent_message_text("assistant/message", &params).is_none());
+    }
+
+    #[test]
+    fn extract_agent_message_text_reads_codex_agent_message() {
+        let params = json!({
+            "item": {
+                "id": "it_9",
+                "type": "agentMessage",
+                "text": "Let me first explore the original color of the button.",
+            },
+        });
+        let text = extract_agent_message_text("item/completed", &params).expect("narrative");
+        assert_eq!(text, "Let me first explore the original color of the button.");
+    }
+
+    #[test]
+    fn extract_agent_message_text_skips_codex_non_message_items() {
+        let params = json!({
+            "item": {"id": "it_1", "type": "commandExecution", "command": "ls"},
+        });
+        assert!(extract_agent_message_text("item/completed", &params).is_none());
+    }
+
+    #[test]
+    fn extract_agent_message_text_ignores_token_deltas_and_unknowns() {
+        // High-frequency delta frames must NOT be surfaced here — they stay
+        // compacted so mirrored event volume stays bounded.
+        assert!(
+            extract_agent_message_text("stream_event/content_block_delta", &json!({"event": {}}))
+                .is_none()
+        );
+        assert!(
+            extract_agent_message_text("item/agentMessage/delta", &json!({"delta": "x"})).is_none()
+        );
+        assert!(extract_agent_message_text("user/toolResult", &json!({})).is_none());
+    }
+
+    #[test]
+    fn extract_agent_message_text_caps_length() {
+        let long = "a".repeat(AGENT_MESSAGE_TEXT_MAX + 500);
+        let params = json!({
+            "content": [{"type": "text", "text": long}],
+        });
+        let text = extract_agent_message_text("assistant/message", &params).expect("narrative");
+        assert_eq!(text.len(), AGENT_MESSAGE_TEXT_MAX);
+    }
+
+    #[test]
+    fn extract_agent_message_text_none_on_empty_text() {
+        let params = json!({"content": [{"type": "text", "text": "   "}]});
+        assert!(extract_agent_message_text("assistant/message", &params).is_none());
     }
 }
