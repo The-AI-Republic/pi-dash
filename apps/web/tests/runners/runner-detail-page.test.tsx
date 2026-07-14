@@ -65,7 +65,14 @@ const RUNNER: IRunner = {
   last_heartbeat_at: "2026-05-23T00:00:00Z",
   owner: "user-1",
   pod: "pod-1",
-  pod_detail: { id: "pod-1", name: "pod-a", is_default: false },
+  pod_detail: {
+    id: "pod-1",
+    name: "pod-a",
+    is_default: false,
+    project: "proj-1",
+    project_identifier: "BROWSERXTE",
+  },
+  dev_machine_detail: { id: "dm-1", host_label: "mac-mini.local", label: "Rich's Mac mini" },
   connection: "conn-1",
   live_state: null,
   enrolled_at: "2026-05-22T00:00:00Z",
@@ -94,6 +101,8 @@ describe("RunnerDetailPage", () => {
     expect(screen.getByText("linux / x86_64")).toBeTruthy();
     expect(screen.getByText("0.1.12")).toBeTruthy();
     expect(screen.getByText("pod-a")).toBeTruthy();
+    expect(screen.getByText("BROWSERXTE")).toBeTruthy();
+    expect(screen.getByText("Rich's Mac mini")).toBeTruthy();
     expect(screen.getByText("codex")).toBeTruthy();
     expect(screen.getByText("claude")).toBeTruthy();
     expect(screen.getByTestId("agent-status-panel")).toBeTruthy();

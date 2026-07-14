@@ -246,6 +246,9 @@ class RunnerListEndpoint(APIView):
         qs = (
             Runner.objects.filter(workspace_id=workspace_id)
             .filter(runner_visible_to_user_q(request.user))
+            # ``pod__project`` and ``dev_machine`` are read by the runner
+            # serializer's nested mini serializers; join them to avoid N+1.
+            .select_related("pod__project", "dev_machine")
             .order_by("-updated_at")
         )
         pod_id = request.query_params.get("pod")
@@ -261,7 +264,9 @@ class RunnerDetailEndpoint(APIView):
     permission_classes = [IsAuthenticated]
 
     def _get_runner(self, request, runner_id):
-        runner = Runner.objects.filter(pk=runner_id).first()
+        runner = (
+            Runner.objects.select_related("pod__project", "dev_machine").filter(pk=runner_id).first()
+        )
         if runner is None:
             return None
         if not is_workspace_member(request.user, runner.workspace_id):

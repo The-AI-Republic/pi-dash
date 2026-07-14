@@ -123,14 +123,33 @@ class DevMachineSerializer(serializers.ModelSerializer):
 
 
 class PodMiniSerializer(serializers.ModelSerializer):
+    # The runner detail page shows which project a runner is bound to.
+    # ``project`` is the FK uuid; ``project_identifier`` is the
+    # human-friendly slug (e.g. ``PDASHOSS01``) rendered in the UI.
+    project_identifier = serializers.CharField(source="project.identifier", read_only=True)
+
     class Meta:
         model = Pod
-        fields = ["id", "name", "is_default"]
+        fields = ["id", "name", "is_default", "project", "project_identifier"]
+        read_only_fields = fields
+
+
+class DevMachineMiniSerializer(serializers.ModelSerializer):
+    """Identity of the dev machine a runner is bound to, for the runner
+    detail page. ``label`` is the user-chosen name; ``host_label`` is the
+    hostname hint reported by the local CLI."""
+
+    class Meta:
+        model = DevMachine
+        fields = ["id", "host_label", "label"]
         read_only_fields = fields
 
 
 class RunnerSerializer(serializers.ModelSerializer):
     pod_detail = PodMiniSerializer(source="pod", read_only=True)
+    # Identity of the dev machine this runner runs on. ``None`` when the
+    # dev_machine FK is unset (legacy ``pidash connect`` enrollments).
+    dev_machine_detail = DevMachineMiniSerializer(source="dev_machine", read_only=True)
     # Optional one-to-one observability snapshot. ``None`` when the row
     # doesn't exist yet (pre-flag runner that has never reported).
     live_state = RunnerLiveStateSerializer(read_only=True)
@@ -150,6 +169,7 @@ class RunnerSerializer(serializers.ModelSerializer):
             "last_heartbeat_at",
             "owner",
             "dev_machine",
+            "dev_machine_detail",
             "visibility",
             "pod",
             "pod_detail",
@@ -171,6 +191,7 @@ class RunnerSerializer(serializers.ModelSerializer):
             "last_heartbeat_at",
             "owner",
             "dev_machine",
+            "dev_machine_detail",
             "visibility",
             "pod_detail",
             "live_state",
