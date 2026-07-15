@@ -116,6 +116,21 @@ class TestCreateJoinRequest:
         )
 
     @pytest.mark.django_db
+    def test_already_member_is_routed_in_not_stranded(self, session_client, create_user, admin_workspace):
+        """If the typed email administers only workspace(s) the requester already
+        belongs to, don't strand them in an un-approvable pending request — route
+        them into the existing workspace instead."""
+        WorkspaceMember.objects.create(workspace=admin_workspace, member=create_user, role=MEMBER_ROLE)
+
+        url = reverse("user-workspace-join-requests")
+        response = session_client.post(url, {"admin_email": "admin@example.com"}, format="json")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["workspace_slug"] == admin_workspace.slug
+        # No phantom request is recorded.
+        assert WorkspaceJoinRequest.objects.count() == 0
+
+    @pytest.mark.django_db
     def test_requires_authentication(self, api_client, admin_workspace):
         url = reverse("user-workspace-join-requests")
         response = api_client.post(url, {"admin_email": "admin@example.com"}, format="json")
@@ -195,6 +210,18 @@ class TestAdminListJoinRequests:
         response = session_client.get(url)
         assert response.status_code == status.HTTP_403_FORBIDDEN
 
+    @pytest.mark.django_db
+    def test_regular_member_cannot_list(self, session_client, create_user, admin_workspace):
+        """A regular (non-admin) member may not review join requests — admin only."""
+        WorkspaceMember.objects.create(workspace=admin_workspace, member=create_user, role=MEMBER_ROLE)
+        requester = User.objects.create(email="requester@example.com", username="requester_user")
+        WorkspaceJoinRequest.objects.create(
+            requester=requester, workspace=admin_workspace, admin_email="admin@example.com"
+        )
+        url = reverse("workspace-join-requests", kwargs={"slug": admin_workspace.slug})
+        response = session_client.get(url)
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
 
 @pytest.mark.contract
 class TestApproveDenyJoinRequest:
@@ -255,3 +282,17 @@ class TestApproveDenyJoinRequest:
         url = reverse("workspace-join-request-approve", kwargs={"slug": admin_workspace.slug, "pk": jr.id})
         response = session_client.post(url, {}, format="json")
         assert response.status_code == status.HTTP_403_FORBIDDEN
+
+    @pytest.mark.django_db
+    def test_regular_member_cannot_approve(self, session_client, create_user, admin_workspace):
+        """A regular (non-admin) member may not approve join requests — admin only."""
+        WorkspaceMember.objects.create(workspace=admin_workspace, member=create_user, role=MEMBER_ROLE)
+        requester = User.objects.create(email="requester@example.com", username="requester_user")
+        jr = WorkspaceJoinRequest.objects.create(
+            requester=requester, workspace=admin_workspace, admin_email="admin@example.com"
+        )
+        url = reverse("workspace-join-request-approve", kwargs={"slug": admin_workspace.slug, "pk": jr.id})
+        response = session_client.post(url, {}, format="json")
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        jr.refresh_from_db()
+        assert jr.status == WorkspaceJoinRequest.Status.PENDING
