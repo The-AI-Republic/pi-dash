@@ -8,11 +8,22 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { apiBaseUrl, listPods, listProjects, setToast } = vi.hoisted(() => ({
+const {
+  apiBaseUrl,
+  listPods,
+  listProjects,
+  setToast,
+  listDevMachines,
+  createRunnerOnMachine,
+  getCreateRunnerOnMachineStatus,
+} = vi.hoisted(() => ({
   apiBaseUrl: { value: "http://localhost:8000" },
   listPods: vi.fn(),
   listProjects: vi.fn(),
   setToast: vi.fn(),
+  listDevMachines: vi.fn(),
+  createRunnerOnMachine: vi.fn(),
+  getCreateRunnerOnMachineStatus: vi.fn(),
 }));
 
 vi.mock("@pi-dash/constants", () => ({
@@ -24,6 +35,11 @@ vi.mock("@pi-dash/constants", () => ({
 vi.mock("@pi-dash/services", () => ({
   PodService: class {
     list = listPods;
+  },
+  RunnerService: class {
+    listDevMachines = listDevMachines;
+    createRunnerOnMachine = createRunnerOnMachine;
+    getCreateRunnerOnMachineStatus = getCreateRunnerOnMachineStatus;
   },
 }));
 
@@ -113,11 +129,29 @@ const PODS = [
   },
 ];
 
+const CONNECTED_MACHINE = {
+  id: "machine-1",
+  host_label: "work-pc",
+  label: "Work PC",
+  visibility: 0,
+  runner_count: 1,
+  online_runner_count: 0,
+  control_online: true,
+  last_seen_at: "2026-07-14T00:00:00Z",
+  last_heartbeat_at: null,
+  revoked_at: null,
+  created_at: "2026-05-23T00:00:00Z",
+  updated_at: "2026-07-14T00:00:00Z",
+};
+
 describe("AddRunnerModal", () => {
   beforeEach(() => {
     apiBaseUrl.value = "http://localhost:8000";
     listPods.mockReset().mockResolvedValue(PODS);
     listProjects.mockReset().mockResolvedValue(PROJECTS);
+    listDevMachines.mockReset().mockResolvedValue([]);
+    createRunnerOnMachine.mockReset();
+    getCreateRunnerOnMachineStatus.mockReset();
     setToast.mockReset();
   });
 
@@ -125,9 +159,11 @@ describe("AddRunnerModal", () => {
     vi.clearAllMocks();
   });
 
-  function renderModal() {
+  // SWR caches by key across tests in this file; pass a unique
+  // workspaceId when a test needs fresh dev-machine data.
+  function renderModal(workspaceId = "workspace-1") {
     const onClose = vi.fn();
-    const utils = render(<AddRunnerModal isOpen onClose={onClose} workspaceId="workspace-1" workspaceSlug="acme" />);
+    const utils = render(<AddRunnerModal isOpen onClose={onClose} workspaceId={workspaceId} workspaceSlug="acme" />);
     return { ...utils, onClose };
   }
 
@@ -139,13 +175,14 @@ describe("AddRunnerModal", () => {
 
     await screen.findByRole("option", { name: "BrowserX" });
 
+    // selects: [0]=dev machine, [1]=project, [2]=pod, [3]=agent, [4]=model
     const selects = screen.getAllByTestId("select");
-    await user.selectOptions(selects[0], "BROWSERX");
-    await user.selectOptions(selects[1], "pod-a");
+    await user.selectOptions(selects[1], "BROWSERX");
+    await user.selectOptions(selects[2], "pod-a");
     await user.type(screen.getByPlaceholderText("my-laptop-runner"), runnerName);
     await user.type(screen.getByPlaceholderText("local dev machine project working dir"), workingDir);
-    await user.selectOptions(selects[2], "codex");
-    await user.click(screen.getByRole("button", { name: "Generate command" }));
+    await user.selectOptions(selects[3], "codex");
+    await user.click(screen.getByRole("button", { name: "Generate Runner" }));
 
     const command = await screen.findByText(
       (_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre"
@@ -170,9 +207,9 @@ describe("AddRunnerModal", () => {
 
     await screen.findByRole("option", { name: "BrowserX" });
 
-    await user.selectOptions(screen.getAllByTestId("select")[0], "BROWSERX");
+    await user.selectOptions(screen.getAllByTestId("select")[1], "BROWSERX");
     await user.type(screen.getByPlaceholderText("my-laptop-runner"), runnerName);
-    await user.click(screen.getByRole("button", { name: "Generate command" }));
+    await user.click(screen.getByRole("button", { name: "Generate Runner" }));
 
     await screen.findByText((_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre");
     await user.click(screen.getByRole("button", { name: "Back" }));
@@ -186,9 +223,9 @@ describe("AddRunnerModal", () => {
 
     await screen.findByRole("option", { name: "BrowserX" });
 
-    await user.selectOptions(screen.getAllByTestId("select")[0], "BROWSERX");
+    await user.selectOptions(screen.getAllByTestId("select")[1], "BROWSERX");
     await user.type(screen.getByPlaceholderText("my-laptop-runner"), "test runner");
-    await user.click(screen.getByRole("button", { name: "Generate command" }));
+    await user.click(screen.getByRole("button", { name: "Generate Runner" }));
 
     const error = await screen.findByText(RUNNER_NAME_ERROR);
     expect(error).toBeInTheDocument();
@@ -205,13 +242,13 @@ describe("AddRunnerModal", () => {
     await screen.findByRole("option", { name: "BrowserX" });
 
     const selects = screen.getAllByTestId("select");
-    await user.selectOptions(selects[0], "BROWSERX");
+    await user.selectOptions(selects[1], "BROWSERX");
     await user.type(screen.getByPlaceholderText("my-laptop-runner"), "rich.runner");
     await user.type(
       screen.getByPlaceholderText("local dev machine project working dir"),
       String.raw`C:\\Users\\rich\\My Project`
     );
-    await user.click(screen.getByRole("button", { name: "Generate command" }));
+    await user.click(screen.getByRole("button", { name: "Generate Runner" }));
     await user.click(screen.getByRole("button", { name: "PowerShell" }));
 
     const command = await screen.findByText(
@@ -228,8 +265,8 @@ describe("AddRunnerModal", () => {
     renderModal();
 
     await screen.findByRole("option", { name: "BrowserX" });
-    await user.selectOptions(screen.getAllByTestId("select")[0], "BROWSERX");
-    await user.click(screen.getByRole("button", { name: "Generate command" }));
+    await user.selectOptions(screen.getAllByTestId("select")[1], "BROWSERX");
+    await user.click(screen.getByRole("button", { name: "Generate Runner" }));
 
     const command = await screen.findByText(
       (_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre"
@@ -238,5 +275,57 @@ describe("AddRunnerModal", () => {
     expect(
       screen.getByText("Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.")
     ).toBeInTheDocument();
+  });
+
+  it("creates the runner remotely on a connected dev machine", async () => {
+    listDevMachines.mockResolvedValue([CONNECTED_MACHINE]);
+    createRunnerOnMachine.mockResolvedValue({ request_id: "req-1" });
+    getCreateRunnerOnMachineStatus.mockResolvedValue({
+      request_id: "req-1",
+      status: "ok",
+      runner_id: "runner-uuid-1",
+      runner_name: "runner_001",
+    });
+    const user = userEvent.setup();
+    renderModal("workspace-remote-ok");
+
+    await screen.findByRole("option", { name: "BrowserX" });
+    // The connected machine is auto-selected; pick a project and submit.
+    await screen.findByRole("option", { name: "Work PC" });
+    await user.selectOptions(screen.getAllByTestId("select")[1], "BROWSERX");
+    await user.click(screen.getByRole("button", { name: "Generate Runner" }));
+
+    expect(await screen.findByText("Runner created", undefined, { timeout: 8000 })).toBeInTheDocument();
+    expect(screen.getByText("runner_001")).toBeInTheDocument();
+    expect(createRunnerOnMachine).toHaveBeenCalledWith(
+      "machine-1",
+      "workspace-remote-ok",
+      expect.objectContaining({ project: "BROWSERX", agent: "claude-code" })
+    );
+    // No command panel in the remote flow.
+    expect(
+      screen.queryByText((_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre")
+    ).not.toBeInTheDocument();
+  }, 15_000);
+
+  it("surfaces failure and offers the manual command when the machine is offline", async () => {
+    listDevMachines.mockResolvedValue([CONNECTED_MACHINE]);
+    createRunnerOnMachine.mockRejectedValue({ error: "machine_offline" });
+    const user = userEvent.setup();
+    renderModal("workspace-remote-offline");
+
+    await screen.findByRole("option", { name: "BrowserX" });
+    await screen.findByRole("option", { name: "Work PC" });
+    await user.selectOptions(screen.getAllByTestId("select")[1], "BROWSERX");
+    await user.click(screen.getByRole("button", { name: "Generate Runner" }));
+
+    await screen.findByText(/Runner creation failed/);
+    await user.click(screen.getByRole("button", { name: "Show manual command" }));
+
+    const command = await screen.findByText(
+      (_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre"
+    );
+    expect(command.textContent).toContain("pidash runner add");
+    expect(command.textContent).toContain("--project BROWSERX");
   });
 });

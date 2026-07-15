@@ -103,6 +103,11 @@ class DevMachineSerializer(serializers.ModelSerializer):
     runner_count = serializers.IntegerField(read_only=True)
     online_runner_count = serializers.IntegerField(read_only=True)
     last_heartbeat_at = serializers.DateTimeField(read_only=True)
+    # True when the machine has a recently-seen machine control session,
+    # i.e. the daemon can execute cloud-pushed commands (``create_runner``)
+    # right now. Annotated by the list endpoint; defaults False when the
+    # queryset didn't annotate it.
+    control_online = serializers.BooleanField(read_only=True, default=False)
 
     class Meta:
         model = DevMachine
@@ -113,6 +118,7 @@ class DevMachineSerializer(serializers.ModelSerializer):
             "visibility",
             "runner_count",
             "online_runner_count",
+            "control_online",
             "last_seen_at",
             "last_heartbeat_at",
             "revoked_at",

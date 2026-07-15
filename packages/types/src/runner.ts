@@ -72,11 +72,34 @@ export interface IDevMachine {
   visibility: number;
   runner_count: number;
   online_runner_count: number;
+  /** True when the machine's control session polled recently, i.e. the
+   * daemon can execute cloud-pushed commands (create runner) right now. */
+  control_online: boolean;
   last_seen_at: string | null;
   last_heartbeat_at: string | null;
   revoked_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** Body of ``POST /api/runners/dev-machines/<mid>/create-runner/``. */
+export interface ICreateRunnerOnMachineRequest {
+  project: string;
+  pod?: string;
+  name?: string;
+  working_dir?: string;
+  agent?: string;
+  model?: string;
+  reasoning_effort?: string;
+}
+
+/** Daemon-reported outcome of a cloud-driven runner creation. */
+export interface ICreateRunnerOnMachineStatus {
+  request_id: string;
+  status: "pending" | "ok" | "error";
+  runner_id?: string;
+  runner_name?: string;
+  error?: string;
 }
 
 export interface IRunner {
