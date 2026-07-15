@@ -182,6 +182,21 @@ def test_enqueue_offline_machine_fails_fast(
 
 
 @pytest.mark.unit
+def test_enqueue_delivery_failure_returns_503(
+    db, session_client, workspace, dev_machine, machine_token, live_session, _fake_redis
+):
+    # Redis write blows up mid-enqueue: the operator must get an
+    # immediate 503, not a 202 that polls "pending" to timeout.
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("redis down")
+
+    _fake_redis.xadd = _boom
+    resp = _enqueue(session_client, dev_machine, workspace)
+    assert resp.status_code == 503, resp.data
+    assert resp.data["error"] == "delivery_failed"
+
+
+@pytest.mark.unit
 def test_enqueue_rejects_bad_runner_name(
     db, session_client, workspace, dev_machine, machine_token, live_session
 ):
@@ -287,6 +302,69 @@ def test_result_writeback_rejects_other_machine_token(
     )
     assert result.status_code == 403
     assert result.data["error"] == "dev_machine_mismatch"
+
+    # Machine binding: even a token correctly bound to machine B (URL and
+    # token match) cannot report a result for a request issued FOR
+    # machine A — reads as unknown so existence doesn't leak.
+    result = api_client.post(
+        _result_url(other_machine.id, request_id),
+        {"status": "ok", "runner_name": "forged"},
+        format="json",
+    )
+    assert result.status_code == 404
+    assert result.data["error"] == "unknown_request"
+    # And the original pending marker is untouched.
+    stored = machine_outbox.get_command_result(request_id)
+    assert stored["status"] == "pending"
+
+
+@pytest.mark.unit
+def test_result_writeback_unknown_request_404s(
+    db, api_client, workspace, dev_machine, machine_token, live_session
+):
+    api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {machine_token}")
+    result = api_client.post(
+        _result_url(dev_machine.id, "00000000-0000-0000-0000-000000000000"),
+        {"status": "ok"},
+        format="json",
+    )
+    assert result.status_code == 404
+    assert result.data["error"] == "unknown_request"
+
+
+@pytest.mark.unit
+def test_status_read_is_machine_bound(
+    db, session_client, create_user, workspace, dev_machine, machine_token, live_session
+):
+    resp = _enqueue(session_client, dev_machine, workspace)
+    request_id = resp.data["request_id"]
+
+    # Reading the result through a different machine's URL reads as
+    # unknown, even for the same (authorized) web user.
+    other_machine = DevMachine.objects.create(owner=create_user, host_label="host-c")
+    minted = tokens.mint_machine_token()
+    MachineToken.objects.create(
+        user=create_user,
+        workspace=workspace,
+        dev_machine=other_machine,
+        host_label="host-c",
+        token_hash=minted.hashed,
+        token_fingerprint=minted.fingerprint,
+        label="machine: host-c",
+        is_service=True,
+    )
+    status_resp = session_client.get(
+        _status_url(other_machine.id, request_id), {"workspace": str(workspace.id)}
+    )
+    assert status_resp.status_code == 404
+
+    # The right machine still reads it, without leaking the binding field.
+    status_resp = session_client.get(
+        _status_url(dev_machine.id, request_id), {"workspace": str(workspace.id)}
+    )
+    assert status_resp.status_code == 200
+    assert status_resp.data["status"] == "pending"
+    assert "dev_machine_id" not in status_resp.data
 
 
 @pytest.mark.unit

@@ -138,20 +138,44 @@ class MachineCreateRunnerEndpoint(APIView):
         # write must land on an existing key semantics-wise (overwrites
         # are fine either way, but the marker also lets the status
         # endpoint distinguish "in flight" from "unknown request").
+        # ``dev_machine_id`` binds the request to its target machine —
+        # the result write-back and status read both verify it, so a
+        # token minted for machine B cannot forge / read machine A's
+        # command results even with a leaked request_id.
         machine_outbox.set_command_result(
             request_id,
-            {"status": "pending", "requested_at": timezone.now().isoformat()},
+            {
+                "status": "pending",
+                "dev_machine_id": str(machine.id),
+                "requested_at": timezone.now().isoformat(),
+            },
         )
         try:
-            send_to_machine(machine.id, message)
+            delivered = send_to_machine(machine.id, message)
         except MachineOfflineError:
             machine_outbox.set_command_result(
                 request_id,
-                {"status": "error", "error": "machine_offline"},
+                {"status": "error", "error": "machine_offline", "dev_machine_id": str(machine.id)},
             )
             return Response(
                 {"error": "machine_offline"},
                 status=status.HTTP_409_CONFLICT,
+            )
+        except Exception:
+            logger.exception("create_runner enqueue failed for machine %s", machine.id)
+            delivered = None
+        if delivered is None:
+            # create_runner is offline-reject, so a None return can only
+            # mean Redis was unavailable — nothing was delivered. Tell
+            # the operator now instead of letting the modal poll a
+            # "pending" marker to its timeout.
+            machine_outbox.set_command_result(
+                request_id,
+                {"status": "error", "error": "delivery_failed", "dev_machine_id": str(machine.id)},
+            )
+            return Response(
+                {"error": "delivery_failed"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
         return Response({"request_id": request_id}, status=status.HTTP_202_ACCEPTED)
@@ -177,8 +201,11 @@ class MachineCreateRunnerStatusEndpoint(APIView):
             return err
 
         result = machine_outbox.get_command_result(request_id)
-        if result is None:
+        # Machine binding: a request_id issued for another machine is
+        # indistinguishable from an unknown one (don't leak existence).
+        if result is None or result.get("dev_machine_id") not in ("", None, str(machine_id)):
             return Response({"error": "unknown_request"}, status=status.HTTP_404_NOT_FOUND)
+        result.pop("dev_machine_id", None)
         return Response({"request_id": str(request_id), **result})
 
 
@@ -201,12 +228,21 @@ class MachineCommandResultEndpoint(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
+        # The pending marker binds request_id → target machine. Only the
+        # machine the command was issued FOR may report its result — a
+        # token for a different machine (even a valid one) gets the same
+        # 404 as an expired / unknown request so existence doesn't leak.
+        existing = machine_outbox.get_command_result(request_id)
+        if existing is None or existing.get("dev_machine_id") not in ("", None, str(machine.id)):
+            return Response({"error": "unknown_request"}, status=status.HTTP_404_NOT_FOUND)
+
         result_status = str(request.data.get("status") or "")
         if result_status not in _RESULT_STATUSES:
             return Response({"error": "invalid_status"}, status=status.HTTP_400_BAD_REQUEST)
 
         payload = {
             "status": result_status,
+            "dev_machine_id": str(machine.id),
             "runner_id": str(request.data.get("runner_id") or ""),
             "runner_name": str(request.data.get("runner_name") or "")[:128],
             "error": str(request.data.get("error") or "")[:512],
