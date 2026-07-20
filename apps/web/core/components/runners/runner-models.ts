@@ -64,6 +64,7 @@ const CODEX_OPTIONS: IRunnerModelOption[] = CODEX_MODELS.flatMap((m) =>
 // Claude Code: model ids are Anthropic slugs; `[1m]` selects the 1M-context
 // variant.
 const CLAUDE_OPTIONS: IRunnerModelOption[] = [
+  { id: "claude-fable-5", label: "Fable 5", model: "claude-fable-5" },
   { id: "claude-opus-4-8", label: "Opus 4.8", model: "claude-opus-4-8" },
   { id: "claude-sonnet-4-6", label: "Sonnet 4.6", model: "claude-sonnet-4-6" },
   { id: "claude-sonnet-4-6-1m", label: "Sonnet 4.6 (1M context)", model: "claude-sonnet-4-6[1m]" },
