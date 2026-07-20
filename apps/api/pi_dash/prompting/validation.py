@@ -78,6 +78,17 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
                 "full_name": "sample-org/sample-repo",
                 "code_review_term": "pull request",
             },
+            "code_reviews": [
+                {
+                    "url": "https://github.com/sample-org/sample-repo/pull/7",
+                    "title": "Sample PR title",
+                    "state": "open",
+                    "merged": False,
+                    "draft": False,
+                    "provider": "github",
+                    "external_iid": "7",
+                },
+            ],
             "parent": {
                 "identifier": "SAMPLE-0",
                 "title": "Parent issue",
@@ -136,6 +147,7 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
             "full_name": None,
             "code_review_term": "code review",
         },
+        "code_reviews": [],
         "parent": None,
         "lineage": None,
         "run": {

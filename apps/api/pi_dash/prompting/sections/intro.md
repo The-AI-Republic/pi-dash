@@ -58,3 +58,11 @@ Repository:
 {% else %}
 - Work in the runner's configured working directory. Do not clone or touch any other path.
 {% endif %}
+{% if code_reviews %}
+
+Associated {{ repo.code_review_term }}s (git PRs/MRs already linked to this issue):
+{% for cr in code_reviews %}
+- {{ cr.title or cr.url }} — {{ cr.url }} (state: {{ cr.state }}{% if cr.merged %}, merged{% endif %}{% if cr.draft %}, draft{% endif %})
+{% endfor %}
+These are existing code reviews already attached to this issue. Inspect any that are relevant before starting — your task may build on this prior work. When you open a new {{ repo.code_review_term }}, do not duplicate one that is already open here; reuse it instead.
+{% endif %}
