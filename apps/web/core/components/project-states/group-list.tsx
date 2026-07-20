@@ -37,6 +37,7 @@ export const GroupList = observer(function GroupList(props: TGroupList) {
     "backlog",
     "unstarted",
     "started",
+    "test",
     "completed",
     "cancelled",
   ]);
