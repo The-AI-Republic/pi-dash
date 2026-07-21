@@ -14,7 +14,7 @@ from rest_framework import status
 from rest_framework.response import Response
 
 # Module imports
-from pi_dash.app.permissions import WorkSpaceAdminPermission
+from pi_dash.app.permissions import WorkspaceOwnerPermission
 from pi_dash.app.serializers import (
     UserWorkspaceJoinRequestSerializer,
     WorkspaceJoinRequestSerializer,
@@ -82,6 +82,23 @@ class UserWorkspaceJoinRequestViewSet(BaseViewSet):
         )
         target_workspace_ids -= already_member_ids
 
+        # The typed email administers only workspace(s) the requester already
+        # belongs to, and nothing else. Recording a pending request here would
+        # strand them: it targets no new workspace, so an admin can never approve
+        # it. Route them straight into their existing workspace instead. Safe to
+        # name the slug — they are already a member, so it leaks nothing.
+        if not target_workspace_ids and already_member_ids:
+            slug = (
+                Workspace.objects.filter(id__in=already_member_ids)
+                .order_by("created_at")
+                .values_list("slug", flat=True)
+                .first()
+            )
+            return Response(
+                {"message": "You are already a member of this workspace", "workspace_slug": slug},
+                status=status.HTTP_200_OK,
+            )
+
         if target_workspace_ids:
             for workspace_id in target_workspace_ids:
                 # Idempotent: do not duplicate a pending request to a workspace.
@@ -144,7 +161,9 @@ class WorkspaceJoinRequestViewSet(BaseViewSet):
 
     serializer_class = WorkspaceJoinRequestSerializer
     model = WorkspaceJoinRequest
-    permission_classes = [WorkSpaceAdminPermission]
+    # Admin-only: only a workspace Admin (not a regular Member) may review join
+    # requests. WorkspaceOwnerPermission gates on role == Admin.
+    permission_classes = [WorkspaceOwnerPermission]
 
     def get_queryset(self):
         return self.filter_queryset(
