@@ -94,6 +94,9 @@ const RunnerDetailPage = observer(function RunnerDetailPage() {
               </MetaRow>
               <MetaRow label={t("OS / Arch")}>{runner.os ? `${runner.os} / ${runner.arch}` : "—"}</MetaRow>
               <MetaRow label={t("Version")}>{runner.runner_version || "—"}</MetaRow>
+              <MetaRow label={t("Working directory")}>
+                {runner.working_dir ? <span className="font-mono text-11 break-all">{runner.working_dir}</span> : "—"}
+              </MetaRow>
               <MetaRow label={t("Protocol version")}>{runner.protocol_version}</MetaRow>
               <MetaRow label={t("Capabilities")}>
                 {runner.capabilities.length > 0 ? (

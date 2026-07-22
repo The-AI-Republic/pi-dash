@@ -407,6 +407,10 @@ class Runner(models.Model):
     os = models.CharField(max_length=32, blank=True, default="")
     arch = models.CharField(max_length=32, blank=True, default="")
     runner_version = models.CharField(max_length=32, blank=True, default="")
+    # Absolute path of the runner's local dev-machine working directory,
+    # reported in the session-open (Hello) body and surfaced in runner detail.
+    # Blank on runners that predate the feature or never reported it.
+    working_dir = models.CharField(max_length=1024, blank=True, default="")
     protocol_version = models.PositiveIntegerField(default=1)
     last_heartbeat_at = models.DateTimeField(null=True, blank=True)
     # Free worktree count in this runner's work-dir pool, reported in the

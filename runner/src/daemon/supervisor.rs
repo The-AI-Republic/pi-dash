@@ -453,7 +453,7 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
             inst.state.rx_status.clone(),
             inst.state.rx_in_flight.clone(),
             inst.state.shutdown_notified(),
-            attach_body_for_instance(inst),
+            attach_body_for_instance(inst, resolve_working_dir(inst, &ctx.pools)),
         )
         .with_state(inst.state.clone())
         .with_pool(
@@ -624,7 +624,25 @@ async fn load_runner_credentials(
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-fn attach_body_for_instance(inst: &RunnerInstance) -> AttachBody {
+/// Resolve the local dev-machine working directory the cloud should
+/// display for this runner. Pooled runners (those referencing a
+/// `[[workdir]]`) report the workdir's canonical clone path; legacy
+/// runners report their `workspace.working_dir`. A pooled runner whose
+/// pool failed to construct falls back to `workspace.working_dir` so the
+/// field is never empty for an otherwise-healthy runner.
+fn resolve_working_dir(
+    inst: &RunnerInstance,
+    pools: &HashMap<String, PoolHandle>,
+) -> std::path::PathBuf {
+    inst.config
+        .workdir
+        .as_deref()
+        .and_then(|name| pools.get(name))
+        .map(|pool| pool.canonical().to_path_buf())
+        .unwrap_or_else(|| inst.config.workspace.working_dir.clone())
+}
+
+fn attach_body_for_instance(inst: &RunnerInstance, working_dir: std::path::PathBuf) -> AttachBody {
     let mut agent_versions = HashMap::new();
     agent_versions.insert(
         format!("{:?}", inst.config.agent.kind).to_ascii_lowercase(),
@@ -642,6 +660,7 @@ fn attach_body_for_instance(inst: &RunnerInstance) -> AttachBody {
         in_flight_run: *inst.state.rx_in_flight.borrow(),
         project_slug: inst.config.project_slug.clone(),
         host_label: hostname().unwrap_or_else(|| inst.config.name.clone()),
+        working_dir: working_dir.to_string_lossy().into_owned(),
         agent_versions,
     }
 }

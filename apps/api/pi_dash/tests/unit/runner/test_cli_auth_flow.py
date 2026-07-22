@@ -224,6 +224,7 @@ def test_runner_create_succeeds_with_api_key(db, api_key_client, create_user, wo
             "status": "idle",
             "project_slug": project.identifier,
             "host_label": "test-host",
+            "working_dir": "/home/dev/projects/acme",
             "agent_versions": {},
         },
         format="json",
@@ -232,6 +233,10 @@ def test_runner_create_succeeds_with_api_key(db, api_key_client, create_user, wo
     )
     assert session.status_code == 201, session.data
     assert session.data["welcome"]["rid"] == str(runner.id)
+    # Session-open persists the runner's local dev-machine working directory
+    # so it can be surfaced in runner detail.
+    runner.refresh_from_db()
+    assert runner.working_dir == "/home/dev/projects/acme"
 
 
 @pytest.mark.unit

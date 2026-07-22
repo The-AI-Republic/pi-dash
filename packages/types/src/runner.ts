@@ -109,6 +109,9 @@ export interface IRunner {
   os: string;
   arch: string;
   runner_version: string;
+  /** Absolute path of the runner's local dev-machine working directory,
+   * reported at session-open. Empty on runners that predate the feature. */
+  working_dir: string;
   protocol_version: number;
   capabilities: string[];
   last_heartbeat_at: string | null;

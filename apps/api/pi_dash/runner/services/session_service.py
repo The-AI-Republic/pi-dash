@@ -57,14 +57,21 @@ def apply_hello(runner: Runner, body: Dict[str, Any]) -> None:
     """Update runner metadata + reap stale busy runs.
 
     ``body`` is the session-open / Hello payload. Persists ``os``,
-    ``arch``, ``version``, and bumps ``last_heartbeat_at``.
+    ``arch``, ``version``, ``working_dir``, and bumps ``last_heartbeat_at``.
     """
     runner.os = body.get("os", "") or runner.os
     runner.arch = body.get("arch", "") or runner.arch
     runner.runner_version = body.get("version", "") or runner.runner_version
+    runner.working_dir = (body.get("working_dir", "") or runner.working_dir)[:1024]
     runner.last_heartbeat_at = timezone.now()
     runner.save(
-        update_fields=["os", "arch", "runner_version", "last_heartbeat_at"]
+        update_fields=[
+            "os",
+            "arch",
+            "runner_version",
+            "working_dir",
+            "last_heartbeat_at",
+        ]
     )
     # Session open redelivers ASSIGNED / WAITING_FOR_WORKTREE runs the
     # restarted daemon no longer reports (design §6.3) — reaping them here

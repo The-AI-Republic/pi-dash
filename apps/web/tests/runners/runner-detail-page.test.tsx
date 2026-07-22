@@ -60,6 +60,7 @@ const RUNNER: IRunner = {
   os: "linux",
   arch: "x86_64",
   runner_version: "0.1.12",
+  working_dir: "/home/dev/projects/browserx",
   protocol_version: 3,
   capabilities: ["codex", "claude"],
   last_heartbeat_at: "2026-05-23T00:00:00Z",
@@ -100,6 +101,7 @@ describe("RunnerDetailPage", () => {
     expect(screen.getByText("runner-1")).toBeTruthy();
     expect(screen.getByText("linux / x86_64")).toBeTruthy();
     expect(screen.getByText("0.1.12")).toBeTruthy();
+    expect(screen.getByText("/home/dev/projects/browserx")).toBeTruthy();
     expect(screen.getByText("pod-a")).toBeTruthy();
     expect(screen.getByText("BROWSERXTE")).toBeTruthy();
     expect(screen.getByText("Rich's Mac mini")).toBeTruthy();
