@@ -42,6 +42,8 @@ const DEFAULT_OPTION: IRunnerModelOption = {
 // Codex: model × reasoning effort. The effort tier is sent on `turn/start`;
 // `xhigh` is Codex's "extra high" tier.
 const CODEX_MODELS: Array<{ label: string; model: string }> = [
+  { label: "GPT-5.6", model: "gpt-5.6" },
+  { label: "GPT-5.6 Mini", model: "gpt-5.6-mini" },
   { label: "GPT-5.5", model: "gpt-5.5" },
   { label: "GPT-5.4", model: "gpt-5.4" },
   { label: "GPT-5.4 Mini", model: "gpt-5.4-mini" },
