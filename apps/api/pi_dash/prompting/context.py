@@ -278,6 +278,31 @@ def _repo_context(project, issue: Issue) -> Dict[str, Any]:
     return repo
 
 
+def _code_reviews_context(issue: Issue) -> list[Dict[str, Any]]:
+    """Return the git code reviews (PRs/MRs) attached to ``issue``.
+
+    Surfaces the ``GitCodeReviewLink`` rows created via ``pidash issue
+    attach-review`` or provider webhooks so the agent learns an issue already
+    has associated PRs before it opens a new one. Provider-neutral — the same
+    shape describes a GitHub pull request, a GitLab merge request, etc. The
+    reverse relation uses the model's default (soft-delete-filtering) manager,
+    so removed links never leak into the prompt. Ordered newest-first, matching
+    ``GitCodeReviewLink.Meta.ordering``.
+    """
+    return [
+        {
+            "url": cr.url,
+            "title": cr.title or "",
+            "state": cr.state,
+            "merged": bool(cr.merged),
+            "draft": bool(cr.draft),
+            "provider": cr.provider,
+            "external_iid": cr.external_iid,
+        }
+        for cr in issue.git_code_reviews.all()
+    ]
+
+
 def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
     """Build the dict passed into Jinja.
 
@@ -337,6 +362,10 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
             "description": project.description or "",
         },
         "repo": _repo_context(project, issue),
+        # Git PRs / code reviews already attached to this issue (empty list
+        # when none). Lets the template tell the agent about associated PRs so
+        # it can build on prior work and avoid opening a duplicate review.
+        "code_reviews": _code_reviews_context(issue),
         "parent": (
             {
                 "identifier": _issue_identifier(parent),

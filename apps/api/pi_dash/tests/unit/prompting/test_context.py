@@ -89,6 +89,62 @@ def test_context_attempt_increments_on_follow_up(
 
 
 @pytest.mark.unit
+def test_context_code_reviews_empty_when_none_attached(issue, run):
+    ctx = build_context(issue, run)
+    assert ctx["code_reviews"] == []
+
+
+@pytest.mark.unit
+def test_context_includes_attached_code_reviews(issue, run):
+    from pi_dash.db.models import GitCodeReviewLink
+
+    GitCodeReviewLink.objects.create(
+        issue=issue,
+        project=issue.project,
+        workspace=issue.workspace,
+        provider="github",
+        host_url="https://github.com",
+        namespace="acme",
+        repo_name="web",
+        external_iid="42",
+        url="https://github.com/acme/web/pull/42",
+        title="Add feature",
+        state="open",
+        draft=True,
+    )
+    ctx = build_context(issue, run)
+    assert len(ctx["code_reviews"]) == 1
+    cr = ctx["code_reviews"][0]
+    assert cr["url"] == "https://github.com/acme/web/pull/42"
+    assert cr["title"] == "Add feature"
+    assert cr["state"] == "open"
+    assert cr["merged"] is False
+    assert cr["draft"] is True
+    assert cr["provider"] == "github"
+    assert cr["external_iid"] == "42"
+
+
+@pytest.mark.unit
+def test_context_code_reviews_excludes_soft_deleted(issue, run):
+    from pi_dash.db.models import GitCodeReviewLink
+
+    link = GitCodeReviewLink.objects.create(
+        issue=issue,
+        project=issue.project,
+        workspace=issue.workspace,
+        provider="github",
+        host_url="https://github.com",
+        namespace="acme",
+        repo_name="web",
+        external_iid="43",
+        url="https://github.com/acme/web/pull/43",
+    )
+    link.delete()  # soft delete
+    ctx = build_context(issue, run)
+    assert ctx["code_reviews"] == []
+
+
+@pytest.mark.unit
 def test_context_includes_git_work_branch_when_set(issue, run):
     issue.git_work_branch = "feat/pinned-branch"
     issue.save(update_fields=["git_work_branch"])
