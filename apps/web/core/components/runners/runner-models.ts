@@ -18,7 +18,7 @@
  */
 
 // Mirrors the runner CLI's ``--agent`` value-enum (kebab-case).
-export type TRunnerAgent = "claude-code" | "codex" | "cursor-agent" | "open-claw";
+export type TRunnerAgent = "claude-code" | "codex" | "cursor-agent" | "open-claw" | "grok";
 
 export interface IRunnerModelOption {
   /** Unique select value within an agent's list. */
@@ -96,11 +96,20 @@ const CURSOR_OPTIONS: IRunnerModelOption[] = [
   { id: "grok-4.3", label: "Grok 4.3", model: "grok-4.3" },
 ];
 
+// Grok: xAI's Grok CLI drives its own model catalog; a small curated subset.
+// The runner accepts any non-empty slug and falls back to grok's default, so a
+// stale entry downgrades gracefully. Update as xAI's lineup changes.
+const GROK_OPTIONS: IRunnerModelOption[] = [
+  { id: "grok-4.3", label: "Grok 4.3", model: "grok-4.3" },
+  { id: "grok-code-fast-1", label: "Grok Code Fast 1", model: "grok-code-fast-1" },
+];
+
 export const RUNNER_MODEL_OPTIONS: Record<TRunnerAgent, IRunnerModelOption[]> = {
   "claude-code": [DEFAULT_OPTION, ...CLAUDE_OPTIONS],
   codex: [DEFAULT_OPTION, ...CODEX_OPTIONS],
   "cursor-agent": [DEFAULT_OPTION, ...CURSOR_OPTIONS],
   "open-claw": [DEFAULT_OPTION],
+  grok: [DEFAULT_OPTION, ...GROK_OPTIONS],
 };
 
 /**
@@ -114,6 +123,7 @@ export const DEFAULT_MODEL_BY_AGENT: Record<TRunnerAgent, string> = {
   codex: DEFAULT_MODEL_ID,
   "cursor-agent": DEFAULT_MODEL_ID,
   "open-claw": DEFAULT_MODEL_ID,
+  grok: DEFAULT_MODEL_ID,
 };
 
 /** Look up a selected option's label; falls back to the default label. */

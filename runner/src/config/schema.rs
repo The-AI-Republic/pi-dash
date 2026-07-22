@@ -174,6 +174,11 @@ pub struct RunnerConfig {
     /// `agent.kind == open_claw`.
     #[serde(default)]
     pub openclaw: OpenClawSection,
+    /// Grok settings. Missing section falls back to `GrokSection::default()`
+    /// so existing `config.toml` files (written before Grok support) still
+    /// parse. Only consulted when `agent.kind == grok`.
+    #[serde(default)]
+    pub grok: GrokSection,
     /// Missing section falls back to `ApprovalPolicySection::default()` so
     /// a minimal `config.toml` doesn't have to spell out every knob.
     #[serde(default)]
@@ -313,6 +318,9 @@ pub enum AgentKind {
     /// (`acpx --format json openclaw exec`), which drives OpenClaw over the
     /// Agent Client Protocol.
     OpenClaw,
+    /// xAI Grok via its native ACP server (`grok agent stdio`), which the
+    /// runner drives directly over the Agent Client Protocol.
+    Grok,
 }
 
 impl AgentKind {
@@ -341,9 +349,11 @@ impl AgentKind {
             // OpenClaw (driven via acpx), like Cursor and Claude, can be silent
             // for the full duration of a single tool call with no intra-tool
             // progress on the ACP stream. Use the same 15-minute envelope.
-            AgentKind::ClaudeCode | AgentKind::CursorAgent | AgentKind::OpenClaw => {
-                Duration::from_secs(15 * 60)
-            }
+            // Grok, also driven over ACP, has the same quiet-tool-call profile.
+            AgentKind::ClaudeCode
+            | AgentKind::CursorAgent
+            | AgentKind::OpenClaw
+            | AgentKind::Grok => Duration::from_secs(15 * 60),
         }
     }
 
@@ -355,6 +365,7 @@ impl AgentKind {
             AgentKind::ClaudeCode => "Claude Code",
             AgentKind::CursorAgent => "Cursor",
             AgentKind::OpenClaw => "OpenClaw",
+            AgentKind::Grok => "Grok",
         }
     }
 
@@ -370,6 +381,9 @@ impl AgentKind {
             // OpenClaw is driven through the `acpx` ACP client, so that's the
             // binary the runner invokes and `pidash runner add` probes for.
             AgentKind::OpenClaw => "acpx",
+            // Grok is its own ACP server (`grok agent stdio`), so the runner
+            // invokes `grok` directly.
+            AgentKind::Grok => "grok",
         }
     }
 
@@ -382,6 +396,7 @@ impl AgentKind {
             AgentKind::ClaudeCode => "https://docs.claude.com/en/docs/claude-code/setup",
             AgentKind::CursorAgent => "https://cursor.com/download",
             AgentKind::OpenClaw => "https://github.com/openclaw/acpx",
+            AgentKind::Grok => "https://x.ai/cli",
         }
     }
 }
@@ -453,6 +468,30 @@ impl Default for OpenClawSection {
     fn default() -> Self {
         Self {
             binary: default_openclaw_binary(),
+            model_default: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrokSection {
+    /// The `grok` CLI binary the runner spawns as an ACP server (`grok agent
+    /// stdio`). Per-field default so a partial `[grok]` block (e.g. only
+    /// `model_default`) still parses without spelling out `binary = "grok"`.
+    #[serde(default = "default_grok_binary")]
+    pub binary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_default: Option<String>,
+}
+
+fn default_grok_binary() -> String {
+    "grok".to_string()
+}
+
+impl Default for GrokSection {
+    fn default() -> Self {
+        Self {
+            binary: default_grok_binary(),
             model_default: None,
         }
     }
@@ -926,6 +965,7 @@ mod tests {
             claude_code: Default::default(),
             cursor_agent: Default::default(),
             openclaw: Default::default(),
+            grok: Default::default(),
             approval_policy: Default::default(),
         }
     }
@@ -1128,6 +1168,7 @@ mod tests {
             AgentKind::OpenClaw.default_binary(),
             OpenClawSection::default().binary
         );
+        assert_eq!(AgentKind::Grok.default_binary(), GrokSection::default().binary);
     }
 
     #[test]
@@ -1139,6 +1180,7 @@ mod tests {
             AgentKind::ClaudeCode,
             AgentKind::CursorAgent,
             AgentKind::OpenClaw,
+            AgentKind::Grok,
         ] {
             let url = kind.install_page_url();
             assert!(url.starts_with("https://"), "{kind:?} url not https: {url}");
