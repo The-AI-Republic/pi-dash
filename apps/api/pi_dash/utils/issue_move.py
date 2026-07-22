@@ -44,7 +44,7 @@ from pi_dash.db.models import (
     ProjectMember,
     State,
 )
-from pi_dash.runner.models import Pod
+from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod
 from pi_dash.utils.uuid import convert_uuid_to_integer
 
 
@@ -133,11 +133,12 @@ def move_work_item_to_project(*, slug, project_id, pk, target_ref, actor, origin
         ]
         next_sequence = last_sequence + 1 if last_sequence else 1
 
+        target_pod = Pod.default_for_project_id(target_project.id)
         issue.project = target_project
         issue.workspace = target_project.workspace
         issue.sequence_id = next_sequence
         issue.state = target_state
-        issue.assigned_pod = Pod.default_for_project_id(target_project.id)
+        issue.assigned_pod = target_pod
         issue.parent = None
         issue.estimate_point = None
         issue.type = None
@@ -154,6 +155,27 @@ def move_work_item_to_project(*, slug, project_id, pk, target_ref, actor, origin
                 "updated_at",
             ]
         )
+
+        # Repoint the issue's outstanding QUEUED agent run(s) onto the target
+        # project's default pod. The matcher only drains a run whose ``pod``
+        # matches an idle runner's pod (``next_for_runner`` filters
+        # ``pod=runner.pod``), so a queued run left on the *source* project's
+        # pod can never be picked up after the move — it sits in the queue
+        # forever. Worse, because a QUEUED run still counts as the issue's
+        # single active run (``orchestration._active_run_for``), no replacement
+        # run is ever created either, so the issue becomes permanently
+        # unrunnable. Clearing ``pinned_runner`` is required too: a runner
+        # pinned in the old pod is not eligible in the new one, which would keep
+        # the run stuck even on the correct pod. Runs already ASSIGNED/RUNNING
+        # on a live runner are intentionally left in place — they are mid-flight
+        # and finish (or fail) on the original runner. See PDASHOSS01-65.
+        repointed_run = False
+        if target_pod is not None:
+            repointed_run = bool(
+                AgentRun.objects.filter(work_item=issue, status=AgentRunStatus.QUEUED)
+                .exclude(pod=target_pod)
+                .update(pod=target_pod, pinned_runner=None)
+            )
 
         IssueSequence.objects.filter(issue=issue).exclude(project=target_project).update(issue=None)
         IssueSequence.objects.create(issue=issue, sequence=next_sequence, project=target_project)
@@ -197,6 +219,15 @@ def move_work_item_to_project(*, slug, project_id, pk, target_ref, actor, origin
         CommentReaction.objects.filter(comment_id__in=comment_ids).update(**update_kwargs)
         Description.objects.filter(id__in=description_ids).update(**update_kwargs)
         FileAsset.objects.filter(Q(issue=issue) | Q(comment_id__in=comment_ids)).update(**update_kwargs)
+
+        # Kick a drain of the target pod once the move commits so any run we
+        # just repointed is handed to an idle runner in the new project without
+        # waiting for the next heartbeat/registration drain. Registered inside
+        # the atomic block so it only fires on a successful commit.
+        if repointed_run:
+            from pi_dash.runner.services.matcher import drain_pod_by_id
+
+            transaction.on_commit(lambda pod_id=target_pod.id: drain_pod_by_id(pod_id))
 
     issue_activity.delay(
         type="issue.activity.updated",
