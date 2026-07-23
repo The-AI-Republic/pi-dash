@@ -376,7 +376,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     ));
 
   return (
-    <div className="flex min-h-[640px] w-full overflow-hidden rounded-md border border-subtle">
+    <div className="flex h-full min-h-[640px] w-full overflow-hidden">
       <ChatHistoryPanel
         heading="Chats"
         items={historyItems}
