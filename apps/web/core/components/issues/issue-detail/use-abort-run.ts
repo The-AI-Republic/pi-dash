@@ -14,10 +14,10 @@ const agentRunService = new AgentRunService();
 
 /**
  * Drives the "Abort run" affordance on the issue AgentRun card: signals the
- * associated runner to stop the active run and marks the AgentRun terminal
- * (``cancelled``) server-side. The runner stops as soon as it receives the
- * signal; the server rejects an already-terminal run. Returns ``true`` on a
- * successful abort so the caller can refresh the card.
+ * associated runner to stop the active run. The run remains active in
+ * ``cancel_requested`` until the runner confirms its agent process stopped,
+ * then becomes ``cancelled``. Returns ``true`` when the abort request was
+ * accepted so the caller can refresh the card.
  */
 export function useAbortRun() {
   const { t } = useTranslation();
@@ -30,7 +30,7 @@ export function useAbortRun() {
         await agentRunService.abortRun(runId, "user");
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("Run aborted"),
+          title: t("Abort requested"),
           message: t("The runner will stop this run as soon as it gets the signal."),
         });
         return true;

@@ -14,7 +14,8 @@ Schema (all gauges):
 - ``pi_dash_runner_offline``: count of runners in ``offline`` state
   (excludes revoked; revoked runners are retired, not a health signal).
 - ``pi_dash_runs_active``: count of AgentRuns in an in-flight status
-  (assigned / running / awaiting_approval / awaiting_reauth).
+  (assigned / running / cancel_requested / awaiting_approval /
+  awaiting_reauth).
 - ``pi_dash_approvals_pending``: count of ApprovalRequests with
   ``status=pending``.
 """
@@ -39,6 +40,7 @@ from pi_dash.runner.models import (
 ACTIVE_RUN_STATUSES = (
     AgentRunStatus.ASSIGNED,
     AgentRunStatus.RUNNING,
+    AgentRunStatus.CANCEL_REQUESTED,
     AgentRunStatus.AWAITING_APPROVAL,
     AgentRunStatus.AWAITING_REAUTH,
 )

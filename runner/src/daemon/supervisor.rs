@@ -795,6 +795,24 @@ struct CurrentChat {
     done_rx: oneshot::Receiver<()>,
 }
 
+async fn acknowledge_cancel_without_active_process(out: &RunnerOut, run_id: uuid::Uuid) {
+    if let Err(err) = out
+        .send(ClientMsg::RunCancelled {
+            run_id,
+            cancelled_at: Utc::now(),
+            tokens: None,
+            model: None,
+        })
+        .await
+    {
+        tracing::warn!(
+            %run_id,
+            error = %err,
+            "failed to acknowledge cancel for a run with no active process"
+        );
+    }
+}
+
 #[derive(Debug)]
 struct ChatTurn {
     message_id: uuid::Uuid,
@@ -1132,10 +1150,19 @@ impl RunnerLoop {
                             run.cancel.cancel();
                         } else {
                             tracing::warn!(
-                                "cancel for run {run_id} but active run is {active}; ignoring",
+                                "cancel for run {run_id} but active run is {active}; acknowledging stopped target",
                                 active = run.run_id,
                             );
+                            acknowledge_cancel_without_active_process(&self.out, run_id).await;
                         }
+                    } else {
+                        // The cloud may cancel an ASSIGNED run before its
+                        // Assign frame reaches this daemon, or redeliver a
+                        // persisted cancellation after a restart. With no
+                        // matching local worker there is no process to stop,
+                        // so acknowledge immediately instead of waiting for
+                        // heartbeat reconciliation.
+                        acknowledge_cancel_without_active_process(&self.out, run_id).await;
                     }
                 }
                 ServerMsg::Decide {
@@ -3033,6 +3060,24 @@ impl AssignWorker {
             lease.mark_success();
         }
 
+        if outcome.status_label == "cancelled" {
+            let terminal_metadata = self.run_metadata().await;
+            // Queue worktree salvage/release before acknowledging cancellation
+            // to the cloud. The cloud uses RunCancelled as the project-move
+            // handoff barrier, so it must not dispatch a replacement while
+            // this agent bridge is still alive.
+            drop(_lease.take());
+            self.state.set_current_run(None).await;
+            self.send(ClientMsg::RunCancelled {
+                run_id,
+                cancelled_at: Utc::now(),
+                tokens: terminal_metadata.tokens,
+                model: terminal_metadata.model,
+            })
+            .await;
+            return Ok(());
+        }
+
         self.state.set_current_run(None).await;
         Ok(())
     }
@@ -3079,13 +3124,6 @@ impl AssignWorker {
                 _ = cancel.cancelled(), if !cancelled => {
                     run_events.flush_before_lifecycle(&self.out).await;
                     bridge.interrupt().await.ok();
-                    let metadata = self.run_metadata().await;
-                    let _ = self.out.send(ClientMsg::RunCancelled {
-                        run_id: cursor.run_id(),
-                        cancelled_at: Utc::now(),
-                        tokens: metadata.tokens,
-                        model: metadata.model,
-                    }).await;
                     hist.append(&HistoryEntry::Lifecycle {
                         ts: Utc::now(),
                         state: "cancelled".into(),
@@ -3367,7 +3405,24 @@ impl AssignWorker {
                 // a Decide already arrived for this id.
 
                 loop {
-                    match rx.recv().await {
+                    let next = tokio::select! {
+                        biased;
+                        _ = self.cancel.cancelled() => {
+                            bridge.interrupt().await.ok();
+                            hist.append(&HistoryEntry::Lifecycle {
+                                ts: Utc::now(),
+                                state: "cancelled".into(),
+                                detail: Some("cancelled while awaiting approval".into()),
+                            })
+                            .await
+                            .ok();
+                            return Ok(Some(Outcome {
+                                status_label: "cancelled".into(),
+                            }));
+                        }
+                        next = rx.recv() => next,
+                    };
+                    match next {
                         Ok(ApprovalRecord {
                             approval_id: aid,
                             status:
@@ -3573,6 +3628,35 @@ mod tests {
         let working_dir = resolve_working_dir(&inst, &HashMap::new());
         assert_eq!(working_dir, None);
         assert_eq!(attach_body_for_instance(&inst, working_dir).working_dir, "");
+    }
+
+    #[tokio::test]
+    async fn cancel_without_active_process_is_acknowledged_immediately() {
+        let runner_id = uuid::Uuid::new_v4();
+        let run_id = uuid::Uuid::new_v4();
+        let (tx, mut rx) = mpsc::channel(1);
+        let out = RunnerOut::new(runner_id, tx);
+
+        acknowledge_cancel_without_active_process(&out, run_id).await;
+
+        let env = rx
+            .recv()
+            .await
+            .expect("expected RunCancelled acknowledgement");
+        assert_eq!(env.runner_id, Some(runner_id));
+        match env.body {
+            ClientMsg::RunCancelled {
+                run_id: acknowledged_run_id,
+                tokens,
+                model,
+                ..
+            } => {
+                assert_eq!(acknowledged_run_id, run_id);
+                assert_eq!(tokens, None);
+                assert_eq!(model, None);
+            }
+            other => panic!("expected RunCancelled, got {other:?}"),
+        }
     }
 
     #[test]

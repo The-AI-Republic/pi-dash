@@ -146,6 +146,7 @@ export type TAgentRunStatus =
   | "assigned"
   | "waiting_for_worktree"
   | "running"
+  | "cancel_requested"
   | "awaiting_approval"
   | "awaiting_reauth"
   | "paused_awaiting_input"

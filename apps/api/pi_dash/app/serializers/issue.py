@@ -1272,6 +1272,7 @@ class IssueDetailSerializer(IssueSerializer):
                     AgentRunStatus.ASSIGNED,
                     AgentRunStatus.WAITING_FOR_WORKTREE,
                     AgentRunStatus.RUNNING,
+                    AgentRunStatus.CANCEL_REQUESTED,
                     AgentRunStatus.AWAITING_APPROVAL,
                     AgentRunStatus.AWAITING_REAUTH,
                     AgentRunStatus.PAUSED_AWAITING_INPUT,

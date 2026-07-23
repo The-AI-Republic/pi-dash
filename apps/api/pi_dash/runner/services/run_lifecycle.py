@@ -47,6 +47,12 @@ BIGINT_MAX = 2**63 - 1
 _VALID_REFUSAL_CATEGORIES = frozenset(c.value for c in RefusalCategory)
 
 
+def _has_project_move_handoff(run: AgentRun) -> bool:
+    from pi_dash.orchestration.service import PROJECT_MOVE_HANDOFF_CONFIG_KEY
+
+    return bool((run.run_config or {}).get(PROJECT_MOVE_HANDOFF_CONFIG_KEY))
+
+
 def _normalize_model(raw: Any) -> str:
     return str(raw or "").strip()[:128]
 
@@ -74,15 +80,9 @@ def _token_updates(tokens: Any) -> Dict[str, int]:
     if not isinstance(tokens, dict):
         return {}
     fields = {
-        "input_tokens": _coerce_token(
-            tokens.get("input", tokens.get("input_tokens"))
-        ),
-        "output_tokens": _coerce_token(
-            tokens.get("output", tokens.get("output_tokens"))
-        ),
-        "total_tokens": _coerce_token(
-            tokens.get("total", tokens.get("total_tokens"))
-        ),
+        "input_tokens": _coerce_token(tokens.get("input", tokens.get("input_tokens"))),
+        "output_tokens": _coerce_token(tokens.get("output", tokens.get("output_tokens"))),
+        "total_tokens": _coerce_token(tokens.get("total", tokens.get("total_tokens"))),
     }
     return {key: value for key, value in fields.items() if value is not None}
 
@@ -141,15 +141,11 @@ def _apply_post_run_orchestration(run: AgentRun) -> None:
     try:
         maybe_disarm_on_terminal_signal(run)
     except Exception:
-        logger.exception(
-            "orchestration.error: terminal-disarm failed for run %s", run.pk
-        )
+        logger.exception("orchestration.error: terminal-disarm failed for run %s", run.pk)
     try:
         maybe_apply_deferred_pause(run)
     except Exception:
-        logger.exception(
-            "orchestration.error: deferred-pause failed for run %s", run.pk
-        )
+        logger.exception("orchestration.error: deferred-pause failed for run %s", run.pk)
 
 
 def apply_run_paused(
@@ -176,6 +172,7 @@ def apply_run_paused(
     updated = (
         AgentRun.objects.filter(id=run_id, runner=runner)
         .exclude(status__in=TERMINAL_RUN_STATUSES)
+        .exclude(status=AgentRunStatus.CANCEL_REQUESTED)
         .update(
             status=AgentRunStatus.PAUSED_AWAITING_INPUT,
             done_payload=payload,
@@ -206,9 +203,7 @@ def apply_run_paused(
                 )
             )
         if summary:
-            body_parts.append(
-                format_html("<p><em>Summary so far:</em> {}</p>", summary)
-            )
+            body_parts.append(format_html("<p><em>Summary so far:</em> {}</p>", summary))
         if body_parts:
             IssueComment.objects.create(
                 issue=run.work_item,
@@ -285,9 +280,7 @@ def apply_run_resume_unavailable(
     from pi_dash.runner.services.matcher import drain_pod_by_id
 
     if run.pod_id is not None:
-        transaction.on_commit(
-            lambda pid=run.pod_id: drain_pod_by_id(pid)
-        )
+        transaction.on_commit(lambda pid=run.pod_id: drain_pod_by_id(pid))
 
 
 def apply_assign_rejected_busy(
@@ -359,11 +352,7 @@ def _post_failure_comment(run_id: UUID | str, error_detail: str) -> None:
     if detail.startswith(_INFRA_FAILURE_DETAIL_PREFIXES):
         return
 
-    run = (
-        AgentRun.objects.select_related("work_item", "work_item__project")
-        .filter(pk=run_id)
-        .first()
-    )
+    run = AgentRun.objects.select_related("work_item", "work_item__project").filter(pk=run_id).first()
     if run is None or run.work_item_id is None:
         return
 
@@ -439,9 +428,9 @@ def finalize_run_terminal(
     model_value = _normalize_model(model)
     if model_value:
         updates["llm_model"] = model_value
-    updated = AgentRun.objects.filter(id=run_id, runner=runner).exclude(
-        status__in=TERMINAL_RUN_STATUSES
-    ).update(**updates)
+    updated = (
+        AgentRun.objects.filter(id=run_id, runner=runner).exclude(status__in=TERMINAL_RUN_STATUSES).update(**updates)
+    )
     if not updated:
         logger.info(
             "run_lifecycle: ignoring late terminal transition for closed run %s",
@@ -449,7 +438,10 @@ def finalize_run_terminal(
         )
         return
 
-    if new_status == AgentRunStatus.FAILED:
+    closed_run = AgentRun.objects.only("run_config").filter(pk=run_id).first()
+    has_project_move_handoff = bool(closed_run and _has_project_move_handoff(closed_run))
+
+    if new_status == AgentRunStatus.FAILED and not has_project_move_handoff:
         try:
             _post_failure_comment(run_id, error_detail)
         except Exception:
@@ -484,14 +476,22 @@ def finalize_run_terminal(
             .first()
         )
         if run is not None:
-            _apply_post_run_orchestration(run)
+            if _has_project_move_handoff(run):
+                from pi_dash.orchestration.service import (
+                    complete_project_move_handoff,
+                )
+
+                complete_project_move_handoff(run.id)
+            else:
+                # A source-project run being cancelled for a move must not
+                # disarm/pause the issue after it already belongs to the
+                # target project.
+                _apply_post_run_orchestration(run)
             if run.scheduler_binding_id is not None:
                 try:
                     update_scheduler_binding_on_terminate(run)
                 except Exception:
-                    logger.exception(
-                        "scheduler.terminate_hook: failed for run %s", rid
-                    )
+                    logger.exception("scheduler.terminate_hook: failed for run %s", rid)
         drain_for_runner_by_id(rnr)
         if pid is not None:
             drain_pod_by_id(pid)

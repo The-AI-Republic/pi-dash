@@ -103,9 +103,7 @@ def apply_hello(runner: Runner, body: Dict[str, Any]) -> None:
     reap_stale_busy_runs(runner, body, exclude_redeliverable=True)
 
 
-def reap_stale_busy_runs(
-    runner: Runner, body: Dict[str, Any], *, exclude_redeliverable: bool = False
-) -> None:
+def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeliverable: bool = False) -> None:
     """Cancel BUSY runs the daemon no longer claims.
 
     WAITING_FOR_WORKTREE runs are covered automatically via
@@ -130,11 +128,7 @@ def reap_stale_busy_runs(
     now = timezone.now()
     ts_raw = body.get("ts")
     try:
-        heartbeat_ts = (
-            datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
-            if isinstance(ts_raw, str)
-            else now
-        )
+        heartbeat_ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")) if isinstance(ts_raw, str) else now
     except (ValueError, AttributeError):
         heartbeat_ts = now
     heartbeat_ts = min(heartbeat_ts, now)
@@ -161,10 +155,9 @@ def reap_stale_busy_runs(
         redeliverable = (
             AgentRunStatus.ASSIGNED,
             AgentRunStatus.WAITING_FOR_WORKTREE,
+            AgentRunStatus.CANCEL_REQUESTED,
         )
-        reapable_statuses = tuple(
-            s for s in reapable_statuses if s not in redeliverable
-        )
+        reapable_statuses = tuple(s for s in reapable_statuses if s not in redeliverable)
 
     stale = AgentRun.objects.filter(
         runner=runner,
@@ -173,8 +166,51 @@ def reap_stale_busy_runs(
     )
     if in_flight_id:
         stale = stale.exclude(id=in_flight_id)
+        if not exclude_redeliverable and AgentRun.objects.filter(
+            id=in_flight_id,
+            runner=runner,
+            status=AgentRunStatus.CANCEL_REQUESTED,
+        ).exists():
+            # Re-enqueue on every poll until the daemon acknowledges. This
+            # recovers when the initial best-effort enqueue happened during a
+            # transient Redis outage without waiting for a session reconnect.
+            from pi_dash.runner.services.pubsub import send_to_runner
+
+            def _retry_cancel(rid=runner.id, run_id=in_flight_id):
+                try:
+                    send_to_runner(
+                        rid,
+                        {
+                            "v": 1,
+                            "type": "cancel",
+                            "run_id": str(run_id),
+                            "reason": "cancellation_pending",
+                        },
+                    )
+                except Exception:
+                    logger.exception(
+                        "session_service: failed to redeliver cancellation "
+                        "for run %s",
+                        run_id,
+                    )
+
+            transaction.on_commit(_retry_cancel)
+
+    # A cancellation request disappears from the daemon's in-flight report
+    # only after its worker has stopped. Treat that heartbeat as the same
+    # barrier as an explicit RunCancelled lifecycle frame.
+    stopped_cancel_ids = list(stale.filter(status=AgentRunStatus.CANCEL_REQUESTED).values_list("id", flat=True))
+    stopped_cancel_pod_ids = set(stale.filter(status=AgentRunStatus.CANCEL_REQUESTED).values_list("pod_id", flat=True))
+    if stopped_cancel_ids:
+        AgentRun.objects.filter(id__in=stopped_cancel_ids).update(
+            status=AgentRunStatus.CANCELLED,
+            ended_at=now,
+            queue_position=None,
+        )
+        stale = stale.exclude(id__in=stopped_cancel_ids)
+
     reaped = list(stale.values_list("id", "pod_id"))
-    if not reaped:
+    if not reaped and not stopped_cancel_ids:
         return
 
     AgentRun.objects.filter(id__in=[rid for rid, _ in reaped]).update(
@@ -186,9 +222,18 @@ def reap_stale_busy_runs(
         ),
     )
     pod_ids = {pid for _, pid in reaped if pid is not None}
+    pod_ids.update(pid for pid in stopped_cancel_pod_ids if pid is not None)
     runner_id = runner.id
 
-    def _drain_after_commit(rid=runner_id, pids=pod_ids):
+    def _drain_after_commit(
+        rid=runner_id,
+        pids=pod_ids,
+        handoff_ids=tuple(stopped_cancel_ids),
+    ):
+        from pi_dash.orchestration.service import complete_project_move_handoff
+
+        for handoff_id in handoff_ids:
+            complete_project_move_handoff(handoff_id)
         drain_for_runner_by_id(rid)
         for pid in pids:
             drain_pod_by_id(pid)
@@ -241,9 +286,7 @@ def parse_optional_uuid(raw: Any) -> Optional[UUID]:
     return UUID(str(raw))
 
 
-def upsert_runner_live_state(
-    runner: Runner, status_entry: Dict[str, Any]
-) -> None:
+def upsert_runner_live_state(runner: Runner, status_entry: Dict[str, Any]) -> None:
     """Apply the volatile observability snapshot from a poll body.
 
     ``status_entry`` is the dict the poll handler reads as
@@ -280,10 +323,7 @@ def upsert_runner_live_state(
 
     update_fields: list[str] = []
 
-    if (
-        "observed_run_id" in status_entry
-        and state.observed_run_id != incoming_run_id
-    ):
+    if "observed_run_id" in status_entry and state.observed_run_id != incoming_run_id:
         # New run, or idle/null after a completed run. Persist the full
         # wipe, not just the fields present on this poll.
         for f in SNAPSHOT_FIELDS:
@@ -309,9 +349,7 @@ def upsert_runner_live_state(
         update_fields.append("llm_model")
 
     if update_fields:
-        state.save(
-            update_fields=sorted(set(update_fields)) + ["updated_at"]
-        )
+        state.save(update_fields=sorted(set(update_fields)) + ["updated_at"])
 
 
 # ``Runner.free_worktrees`` is an IntegerField; Postgres rejects anything
@@ -340,9 +378,7 @@ def parse_free_worktrees(raw: Any) -> Optional[int]:
     return min(value, FREE_WORKTREES_MAX)
 
 
-def build_session_open_redeliver(
-    runner: Runner, in_flight_run_id: Optional[str]
-) -> Optional[Dict[str, Any]]:
+def build_session_open_redeliver(runner: Runner, in_flight_run_id: Optional[str]) -> Optional[Dict[str, Any]]:
     """Return an ``Assign``-shaped payload to redeliver at session open.
 
     After a daemon restart the runner's local worktree queue is gone, so a
@@ -366,6 +402,21 @@ def build_session_open_redeliver(
         except (ValueError, AttributeError):
             skip_id = None
 
+    cancel_qs = AgentRun.objects.filter(
+        runner=runner,
+        status=AgentRunStatus.CANCEL_REQUESTED,
+    )
+    if skip_id:
+        cancel_qs = cancel_qs.exclude(id=skip_id)
+    cancel_run = cancel_qs.order_by("assigned_at", "created_at").first()
+    if cancel_run is not None:
+        return {
+            "v": 1,
+            "type": "cancel",
+            "run_id": str(cancel_run.id),
+            "reason": "cancellation_pending_on_reconnect",
+        }
+
     qs = AgentRun.objects.filter(
         runner=runner,
         status__in=(
@@ -382,24 +433,16 @@ def build_session_open_redeliver(
 
 
 def mark_runner_online(runner_id: UUID | str) -> None:
-    Runner.objects.filter(pk=runner_id).update(
-        status=RunnerStatus.ONLINE, last_heartbeat_at=timezone.now()
-    )
+    Runner.objects.filter(pk=runner_id).update(status=RunnerStatus.ONLINE, last_heartbeat_at=timezone.now())
 
 
 def mark_runner_offline(runner_id: UUID | str) -> None:
-    Runner.objects.filter(pk=runner_id).exclude(
-        status=RunnerStatus.REVOKED
-    ).update(status=RunnerStatus.OFFLINE)
+    Runner.objects.filter(pk=runner_id).exclude(status=RunnerStatus.REVOKED).update(status=RunnerStatus.OFFLINE)
 
 
 def resolve_runner_project_slug(runner: Runner) -> Optional[str]:
     """Return ``runner.pod.project.identifier`` or ``None``."""
-    r = (
-        Runner.objects.select_related("pod__project")
-        .filter(pk=runner.pk)
-        .first()
-    )
+    r = Runner.objects.select_related("pod__project").filter(pk=runner.pk).first()
     if r is None or r.pod_id is None:
         return None
     project = r.pod.project
@@ -424,18 +467,19 @@ def build_resume_ack(runner: Runner, run_id: str) -> Optional[Dict[str, Any]]:
             "run_id": str(run_id),
             "reason": "unknown_run_on_reconnect",
         }
+    if run.status == AgentRunStatus.CANCEL_REQUESTED:
+        return {
+            "type": "cancel",
+            "run_id": str(run_id),
+            "reason": "cancellation_pending_on_reconnect",
+        }
     if run.is_terminal:
         return {
             "type": "cancel",
             "run_id": str(run_id),
             "reason": f"run_already_{run.status}",
         }
-    last_seq = (
-        AgentRunEvent.objects.filter(agent_run_id=run_id)
-        .order_by("-seq")
-        .values_list("seq", flat=True)
-        .first()
-    )
+    last_seq = AgentRunEvent.objects.filter(agent_run_id=run_id).order_by("-seq").values_list("seq", flat=True).first()
     return {
         "type": "resume_ack",
         "run_id": str(run_id),
