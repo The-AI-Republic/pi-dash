@@ -229,7 +229,16 @@ async fn cmd_create(
     let mut body: Map<String, Value> = Map::new();
     body.insert("name".into(), Value::String(args.title));
     if let Some(desc) = args.description {
-        body.insert("description".into(), Value::String(desc));
+        // Issue descriptions are stored as rich text: the API's serializer is a
+        // ModelSerializer over the `Issue` model, whose only description column
+        // is `description_html` (it has no plain `description` field). Sending a
+        // bare `description` key was silently dropped, so CLI-created issues had
+        // an empty body. Convert the plain-text/markdown input to minimal HTML
+        // and send it under the key the server actually persists.
+        body.insert(
+            "description_html".into(),
+            Value::String(description_to_html(&desc)),
+        );
     }
     if let Some(prio) = args.priority {
         body.insert("priority".into(), Value::String(prio));
@@ -342,6 +351,46 @@ fn percent_encode_value(v: &str) -> String {
     out
 }
 
+/// Convert the CLI's plain-text/markdown `--description` into the minimal HTML
+/// the web API stores in `description_html`.
+///
+/// Mirrors the server-side renderer
+/// (`apps/api/pi_dash/assistant/runtime/markdown.py::markdown_to_html`) so a
+/// description filed via the CLI reads identically to one filed by the in-app AI
+/// assistant: a blank line starts a new paragraph, a single newline becomes a
+/// `<br/>`, and empty input yields the model's default empty body. The server
+/// re-sanitizes the result via `validate_html_content`, so this only needs to be
+/// correct, not defensive.
+fn description_to_html(body: &str) -> String {
+    let paragraphs: Vec<String> = body
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| format!("<p>{}</p>", html_escape(p).replace('\n', "<br/>")))
+        .collect();
+    if paragraphs.is_empty() {
+        return "<p></p>".to_string();
+    }
+    paragraphs.join("")
+}
+
+/// Escape the five HTML-significant characters, matching Python's
+/// `html.escape(s, quote=True)` used by the server renderer.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> {
     let mut body: Map<String, Value> = Map::new();
 
@@ -349,10 +398,16 @@ async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> 
         body.insert("name".into(), Value::String(title.clone()));
     }
     if let Some(ref desc) = args.description {
-        // The Issue serializer exposes `description` as the plain text variant;
-        // richer formats (description_html / description_json) go through the
-        // web editor path, not the CLI.
-        body.insert("description".into(), Value::String(desc.clone()));
+        // Same rich-text contract as `cmd_create`: the server stores the body in
+        // `description_html`, and the PATCH view keys the description-version
+        // bookkeeping off `request.data.get("description_html")`. Convert the
+        // plain-text/markdown input and send it under that key; the model
+        // re-derives `description_stripped` and the serializer re-sanitizes the
+        // HTML on save.
+        body.insert(
+            "description_html".into(),
+            Value::String(description_to_html(desc)),
+        );
     }
     if let Some(ref prio) = args.priority {
         body.insert("priority".into(), Value::String(prio.clone()));
@@ -525,6 +580,49 @@ mod tests {
     #[test]
     fn build_query_string_empty_yields_empty() {
         assert_eq!(build_query_string(&[]), "");
+    }
+
+    #[test]
+    fn description_to_html_empty_yields_empty_paragraph() {
+        // Matches the model's default empty body so `--description ""` clears it.
+        assert_eq!(description_to_html(""), "<p></p>");
+        assert_eq!(description_to_html("   \n  "), "<p></p>");
+    }
+
+    #[test]
+    fn description_to_html_single_paragraph() {
+        assert_eq!(description_to_html("hello world"), "<p>hello world</p>");
+    }
+
+    #[test]
+    fn description_to_html_blank_line_splits_paragraphs() {
+        assert_eq!(
+            description_to_html("first para\n\nsecond para"),
+            "<p>first para</p><p>second para</p>"
+        );
+    }
+
+    #[test]
+    fn description_to_html_single_newline_becomes_br() {
+        assert_eq!(
+            description_to_html("line one\nline two"),
+            "<p>line one<br/>line two</p>"
+        );
+    }
+
+    #[test]
+    fn description_to_html_escapes_html_significant_chars() {
+        // Without escaping, `<`/`&` would corrupt the stored HTML (or be stripped
+        // by the server sanitizer), which is exactly how descriptions went missing.
+        assert_eq!(
+            description_to_html("a < b && c > d \"q\" 'x'"),
+            "<p>a &lt; b &amp;&amp; c &gt; d &quot;q&quot; &#x27;x&#x27;</p>"
+        );
+    }
+
+    #[test]
+    fn description_to_html_collapses_extra_blank_lines_and_trims() {
+        assert_eq!(description_to_html("  a  \n\n\n  b  "), "<p>a</p><p>b</p>");
     }
 
     #[test]
