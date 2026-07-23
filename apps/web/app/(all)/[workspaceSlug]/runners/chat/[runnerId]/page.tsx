@@ -386,7 +386,10 @@ const RunnerChatPage = observer(function RunnerChatPage() {
         busy={creatingChat}
         emptyState={<div className="px-2 py-4 text-12 text-tertiary">No chats yet.</div>}
       />
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+      {/* The chat internals (header/list/composer) carry no horizontal padding —
+          the host provides it (see the assistant thread page). Without this the
+          content sits flush against the history panel's border. */}
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden px-4">
         <ChatContainer
           className="min-h-0 flex-1"
           header={
