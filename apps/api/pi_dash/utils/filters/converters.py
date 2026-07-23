@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Union
 
 from dateutil.parser import parse as dateutil_parse
 
+from pi_dash.utils.constants import STATE_GROUP_ORDER
+
 
 class LegacyToRichFiltersConverter:
     # Default mapping from legacy filter names to new rich filter field names
@@ -41,7 +43,7 @@ class LegacyToRichFiltersConverter:
 
     # Default valid choices for choice fields
     DEFAULT_VALID_CHOICES = {
-        "state_group": ["backlog", "unstarted", "started", "review", "completed", "cancelled"],
+        "state_group": list(STATE_GROUP_ORDER),
         "priority": ["urgent", "high", "medium", "low", "none"],
     }
 

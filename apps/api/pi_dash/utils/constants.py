@@ -69,3 +69,20 @@ RESTRICTED_WORKSPACE_SLUGS = [
     "instances",
     "instance",
 ]
+
+# Lifecycle ordering shared by API sorting, grouping, filtering, analytics,
+# and maintenance tasks. Triage is intentionally excluded because it has its
+# own manager and intake workflow.
+STATE_GROUP_ORDER = (
+    "backlog",
+    "unstarted",
+    "started",
+    "review",
+    "test",
+    "completed",
+    "cancelled",
+)
+
+OPEN_STATE_GROUPS = STATE_GROUP_ORDER[:-2]
+ACTIVE_STATE_GROUPS = STATE_GROUP_ORDER[1:-2]
+CLOSED_STATE_GROUPS = STATE_GROUP_ORDER[-2:]

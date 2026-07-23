@@ -82,13 +82,13 @@ from pi_dash.db.models import (
     Project,
     ProjectMember,
     CycleIssue,
-    StateGroup,
     Workspace,
 )
 from pi_dash.settings.storage import S3Storage
 from pi_dash.bgtasks.storage_metadata_task import get_asset_object_metadata
 from .base import BaseAPIView
 from pi_dash.utils.host import base_host
+from pi_dash.utils.constants import CLOSED_STATE_GROUPS, OPEN_STATE_GROUPS, STATE_GROUP_ORDER
 from pi_dash.utils.issue_relation_mapper import get_actual_relation
 from pi_dash.search.issue import extract_snippet, issue_search_queryset
 from pi_dash.utils.issue_move import move_work_item_to_project, IssueMoveError
@@ -334,7 +334,7 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
 
         # Custom ordering for priority and state
         priority_order = ["urgent", "high", "medium", "low", "none"]
-        state_order = ["backlog", "unstarted", "started", "review", "completed", "cancelled"]
+        state_order = STATE_GROUP_ORDER
 
         order_by_param = request.GET.get("order_by", "-created_at")
 
@@ -2348,17 +2348,12 @@ class IssueAdvancedSearchEndpoint(BaseAPIView):
     # primary because users hit them right after creating issues.
     use_read_replica = True
 
-    _CLOSED_STATE_GROUPS = (StateGroup.COMPLETED.value, StateGroup.CANCELLED.value)
+    _CLOSED_STATE_GROUPS = CLOSED_STATE_GROUPS
     # Positive list — modelling "open" as `state__group IN (open)` instead
     # of `NOT IN (closed)` keeps stateless issues (state IS NULL) visible:
     # SQL `NULL NOT IN (...)` evaluates to NULL → row dropped, which would
     # silently hide just-created or state-less issues from `?status=open`.
-    _OPEN_STATE_GROUPS = (
-        StateGroup.BACKLOG.value,
-        StateGroup.UNSTARTED.value,
-        StateGroup.STARTED.value,
-        StateGroup.REVIEW.value,
-    )
+    _OPEN_STATE_GROUPS = OPEN_STATE_GROUPS
     _SORT_OPTIONS = {
         "rank": ("-_rank", "-created_at"),
         "-created": ("-created_at",),
