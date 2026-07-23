@@ -11,6 +11,7 @@ pub mod codex;
 pub mod config;
 pub mod cursor_agent;
 pub mod daemon;
+pub mod grok;
 pub mod history;
 pub mod ipc;
 pub mod openclaw;

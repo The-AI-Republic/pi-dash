@@ -190,11 +190,12 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         .unwrap_or_else(|| paths.runner_dir(resp.runner_id).join("workspace"));
 
     let agent_kind = args.agent.unwrap_or_default();
-    let (codex, claude_code, cursor_agent, openclaw) = crate::cli::runner_ops::agent_sections_for(
-        agent_kind,
-        args.model.as_deref(),
-        args.reasoning_effort.as_deref(),
-    );
+    let (codex, claude_code, cursor_agent, openclaw, grok) =
+        crate::cli::runner_ops::agent_sections_for(
+            agent_kind,
+            args.model.as_deref(),
+            args.reasoning_effort.as_deref(),
+        );
     let new_runner_block = RunnerConfig {
         name: resp.runner_name.clone(),
         runner_id: resp.runner_id,
@@ -208,6 +209,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         claude_code,
         cursor_agent,
         openclaw,
+        grok,
         approval_policy: Default::default(),
     };
 
@@ -525,6 +527,7 @@ pub async fn enroll_additional_runner(
         claude_code: Default::default(),
         cursor_agent: Default::default(),
         openclaw: Default::default(),
+        grok: Default::default(),
         approval_policy: Default::default(),
     };
     cfg.runners.push(new_runner.clone());
@@ -667,6 +670,7 @@ mod tests {
             claude_code: ClaudeCodeSection::default(),
             cursor_agent: CursorAgentSection::default(),
             openclaw: crate::config::schema::OpenClawSection::default(),
+            grok: crate::config::schema::GrokSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         }
     }
