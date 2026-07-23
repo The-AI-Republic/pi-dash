@@ -11,6 +11,7 @@ entry points stay byte-for-byte identical.
 """
 
 import json
+import logging
 
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import connection, transaction
@@ -46,6 +47,63 @@ from pi_dash.db.models import (
 )
 from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod
 from pi_dash.utils.uuid import convert_uuid_to_integer
+
+logger = logging.getLogger(__name__)
+
+_PROJECT_MOVE_HANDOFF_STATUSES = (
+    AgentRunStatus.QUEUED,
+    AgentRunStatus.ASSIGNED,
+    AgentRunStatus.WAITING_FOR_WORKTREE,
+    AgentRunStatus.RUNNING,
+    AgentRunStatus.CANCEL_REQUESTED,
+    AgentRunStatus.AWAITING_APPROVAL,
+    AgentRunStatus.AWAITING_REAUTH,
+    AgentRunStatus.PAUSED_AWAITING_INPUT,
+)
+
+_IMMEDIATE_HANDOFF_STATUSES = (
+    AgentRunStatus.QUEUED,
+    AgentRunStatus.PAUSED_AWAITING_INPUT,
+)
+
+
+def _send_project_move_cancel(runner_id, run_id) -> None:
+    """Best-effort cancellation request for a project-move handoff.
+
+    Cancel frames are deliberately not buffered for offline runners. The
+    persisted CANCEL_REQUESTED status makes session-open return a cancel frame
+    when that runner reconnects, so a transient delivery failure cannot lose
+    the handoff intent.
+    """
+    from pi_dash.runner.services.outbox import RunnerOfflineError
+    from pi_dash.runner.services.pubsub import send_to_runner
+
+    try:
+        send_to_runner(
+            runner_id,
+            {
+                "v": 1,
+                "type": "cancel",
+                "run_id": str(run_id),
+                "reason": "issue_moved_projects",
+            },
+        )
+    except RunnerOfflineError:
+        logger.info(
+            "issue_move: runner %s offline; cancellation for run %s will be "
+            "redelivered at session open",
+            runner_id,
+            run_id,
+        )
+    except Exception:
+        # Delivery is deliberately best-effort. The persisted
+        # CANCEL_REQUESTED status is authoritative and reconnect handling
+        # retries the cancel, so a transient outbox failure must not turn a
+        # successfully committed issue move into an HTTP 500.
+        logger.exception(
+            "issue_move: failed to deliver cancellation for run %s",
+            run_id,
+        )
 
 
 class IssueMoveError(Exception):
@@ -128,12 +186,27 @@ def move_work_item_to_project(*, slug, project_id, pk, target_ref, actor, origin
         with connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
 
+        # Lock the issue's outstanding work before changing its project. The
+        # source matcher uses SELECT FOR UPDATE SKIP LOCKED, so once these rows
+        # are held it cannot concurrently assign a QUEUED run in the old pod.
+        handoff_runs = list(
+            AgentRun.objects.select_for_update()
+            .filter(
+                work_item=issue,
+                status__in=_PROJECT_MOVE_HANDOFF_STATUSES,
+            )
+            .order_by("-created_at")
+        )
+
         last_sequence = IssueSequence.objects.filter(project=target_project).aggregate(largest=Max("sequence"))[
             "largest"
         ]
         next_sequence = last_sequence + 1 if last_sequence else 1
 
         target_pod = Pod.default_for_project_id(target_project.id)
+        if handoff_runs and target_pod is None:
+            raise IssueMoveError("Target project does not have a default runner pod", 409)
+        source_project_id = issue.project_id
         issue.project = target_project
         issue.workspace = target_project.workspace
         issue.sequence_id = next_sequence
@@ -142,6 +215,11 @@ def move_work_item_to_project(*, slug, project_id, pk, target_ref, actor, origin
         issue.parent = None
         issue.estimate_point = None
         issue.type = None
+        if handoff_runs:
+            # The state-change signal must still arm the target ticker, but it
+            # must not dispatch its own run. The explicit handoff below owns
+            # replacement creation after the source cancellation barrier.
+            issue._orchestration_dispatch_immediate = False
         issue.save(
             update_fields=[
                 "project",
@@ -156,26 +234,78 @@ def move_work_item_to_project(*, slug, project_id, pk, target_ref, actor, origin
             ]
         )
 
-        # Repoint the issue's outstanding QUEUED agent run(s) onto the target
-        # project's default pod. The matcher only drains a run whose ``pod``
-        # matches an idle runner's pod (``next_for_runner`` filters
-        # ``pod=runner.pod``), so a queued run left on the *source* project's
-        # pod can never be picked up after the move — it sits in the queue
-        # forever. Worse, because a QUEUED run still counts as the issue's
-        # single active run (``orchestration._active_run_for``), no replacement
-        # run is ever created either, so the issue becomes permanently
-        # unrunnable. Clearing ``pinned_runner`` is required too: a runner
-        # pinned in the old pod is not eligible in the new one, which would keep
-        # the run stuck even on the correct pod. Runs already ASSIGNED/RUNNING
-        # on a live runner are intentionally left in place — they are mid-flight
-        # and finish (or fail) on the original runner. See PDASHOSS01-65.
-        repointed_run = False
-        if target_pod is not None:
-            repointed_run = bool(
-                AgentRun.objects.filter(work_item=issue, status=AgentRunStatus.QUEUED)
-                .exclude(pod=target_pod)
-                .update(pod=target_pod, pinned_runner=None)
+        # A project move is a run handoff, not an in-place pod mutation:
+        #
+        # - QUEUED / PAUSED work has no executing agent, so close the source
+        #   row and create a fresh target-project row in this transaction.
+        # - ASSIGNED / WAITING / RUNNING / AWAITING work first enters
+        #   CANCEL_REQUESTED. The old row remains busy until the source runner
+        #   confirms its process has stopped; only then does the lifecycle hook
+        #   create the target-project replacement.
+        #
+        # The fresh row gets a newly rendered prompt/repository snapshot and no
+        # source-runner pin. Keeping the old row as parent preserves lineage
+        # without leaking source-project execution context.
+        immediate_handoff_parent = None
+        cancel_after_commit = None
+        source_pods_to_drain: set = set()
+        now = timezone.now()
+        if handoff_runs:
+            executing_runs = [
+                run
+                for run in handoff_runs
+                if run.status not in _IMMEDIATE_HANDOFF_STATUSES
+                and run.runner_id is not None
+            ]
+            if len(executing_runs) > 1:
+                # This should be prevented by orchestration's one-active-run
+                # rule. Refuse the move instead of declaring live duplicate
+                # processes cancelled in the database without stopping them.
+                raise IssueMoveError(
+                    "Issue has multiple active agent runs; cancel them before moving it",
+                    409,
+                )
+
+            handoff_parent = (
+                executing_runs[0] if executing_runs else handoff_runs[0]
             )
+            inert_runs = [
+                run for run in handoff_runs if run.id != handoff_parent.id
+            ]
+            if not executing_runs:
+                inert_runs.append(handoff_parent)
+
+            for inert_run in inert_runs:
+                inert_run.status = AgentRunStatus.CANCELLED
+                inert_run.ended_at = now
+                inert_run.queue_position = None
+                inert_run.save(
+                    update_fields=["status", "ended_at", "queue_position"]
+                )
+                if inert_run.pod_id:
+                    source_pods_to_drain.add(inert_run.pod_id)
+
+            if executing_runs:
+                from pi_dash.orchestration.service import (
+                    PROJECT_MOVE_HANDOFF_CONFIG_KEY,
+                )
+
+                run_config = dict(handoff_parent.run_config or {})
+                run_config[PROJECT_MOVE_HANDOFF_CONFIG_KEY] = {
+                    "source_project_id": str(source_project_id),
+                    "target_project_id": str(target_project.id),
+                    "target_pod_id": str(target_pod.id),
+                }
+                handoff_parent.status = AgentRunStatus.CANCEL_REQUESTED
+                handoff_parent.run_config = run_config
+                handoff_parent.queue_position = None
+                handoff_parent.save(update_fields=["status", "run_config", "queue_position"])
+                cancel_after_commit = (
+                    handoff_parent.runner_id,
+                    handoff_parent.id,
+                )
+            else:
+                immediate_handoff_parent = handoff_parent
 
         IssueSequence.objects.filter(issue=issue).exclude(project=target_project).update(issue=None)
         IssueSequence.objects.create(issue=issue, sequence=next_sequence, project=target_project)
@@ -220,14 +350,26 @@ def move_work_item_to_project(*, slug, project_id, pk, target_ref, actor, origin
         Description.objects.filter(id__in=description_ids).update(**update_kwargs)
         FileAsset.objects.filter(Q(issue=issue) | Q(comment_id__in=comment_ids)).update(**update_kwargs)
 
-        # Kick a drain of the target pod once the move commits so any run we
-        # just repointed is handed to an idle runner in the new project without
-        # waiting for the next heartbeat/registration drain. Registered inside
-        # the atomic block so it only fires on a successful commit.
-        if repointed_run:
+        if immediate_handoff_parent is not None and target_pod is not None:
+            from pi_dash.orchestration.service import (
+                _create_project_move_handoff_run,
+            )
+
+            _create_project_move_handoff_run(
+                issue=issue,
+                parent=immediate_handoff_parent,
+                pod=target_pod,
+            )
+
+        if cancel_after_commit is not None:
+            runner_id, run_id = cancel_after_commit
+            transaction.on_commit(lambda rid=runner_id, run=run_id: _send_project_move_cancel(rid, run))
+
+        if source_pods_to_drain:
             from pi_dash.runner.services.matcher import drain_pod_by_id
 
-            transaction.on_commit(lambda pod_id=target_pod.id: drain_pod_by_id(pod_id))
+            for source_pod_id in source_pods_to_drain:
+                transaction.on_commit(lambda pid=source_pod_id: drain_pod_by_id(pid))
 
     issue_activity.delay(
         type="issue.activity.updated",

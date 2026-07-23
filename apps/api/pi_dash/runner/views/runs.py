@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+import logging
 import math
 
 from django.db import transaction
@@ -33,6 +34,33 @@ from pi_dash.runner.services.validation import (
 
 DEFAULT_PER_PAGE = 30
 MAX_PER_PAGE = 200
+logger = logging.getLogger(__name__)
+
+
+def _send_cancel_best_effort(runner_id, run_id, reason) -> None:
+    from pi_dash.runner.services.outbox import RunnerOfflineError
+
+    try:
+        send_to_runner(
+            runner_id,
+            {
+                "v": 1,
+                "type": "cancel",
+                "run_id": str(run_id),
+                "reason": reason,
+            },
+        )
+    except RunnerOfflineError:
+        logger.info(
+            "run cancel: runner %s offline; run %s remains cancel-requested",
+            runner_id,
+            run_id,
+        )
+    except Exception:
+        logger.exception(
+            "run cancel: failed to deliver cancellation for run %s",
+            run_id,
+        )
 
 
 def _parse_pagination(query_params) -> tuple[int, int]:
@@ -359,9 +387,7 @@ class AgentReTickEndpoint(APIView):
             payload["tick_count"] = ticker.tick_count
             payload["max_ticks"] = ticker.effective_max_ticks()
             payload["enabled"] = ticker.enabled
-            payload["next_run_at"] = (
-                ticker.next_run_at.isoformat() if ticker.next_run_at else None
-            )
+            payload["next_run_at"] = ticker.next_run_at.isoformat() if ticker.next_run_at else None
         return Response(payload, status=status.HTTP_200_OK)
 
 
@@ -398,7 +424,7 @@ class AgentRunCancelEndpoint(APIView):
         if not _can_cancel_run(request.user, run):
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        runner_id = run.runner_id
+        runner_id = None
         with transaction.atomic():
             locked = AgentRun.objects.select_for_update().filter(id=run_id).first()
             if locked is None:
@@ -408,23 +434,36 @@ class AgentRunCancelEndpoint(APIView):
                     {"error": "run already terminal"},
                     status=status.HTTP_409_CONFLICT,
                 )
-            locked.status = AgentRunStatus.CANCELLED
-            locked.ended_at = timezone.now()
-            locked.save(update_fields=["status", "ended_at"])
-            run = locked
+            if locked.status == AgentRunStatus.CANCEL_REQUESTED:
+                run = locked
+            elif locked.runner_id is not None and locked.status not in {
+                AgentRunStatus.QUEUED,
+                AgentRunStatus.PAUSED_AWAITING_INPUT,
+            }:
+                # Do not free the runner in DB terms until its daemon confirms
+                # the agent process has stopped. This closes the race where a
+                # new Assign arrives while the cancelled process is still
+                # winding down.
+                locked.status = AgentRunStatus.CANCEL_REQUESTED
+                locked.queue_position = None
+                locked.save(update_fields=["status", "queue_position"])
+                run = locked
+            else:
+                locked.status = AgentRunStatus.CANCELLED
+                locked.ended_at = timezone.now()
+                locked.queue_position = None
+                locked.save(update_fields=["status", "ended_at", "queue_position"])
+                run = locked
+            runner_id = locked.runner_id
 
-        # Best-effort WS fan-out after commit; runner may already be offline or
-        # revoked, in which case the frame is dropped silently.
-        if runner_id:
+        # Best-effort cancellation after commit. Offline runners receive the
+        # persisted cancel request when they next open a session.
+        if runner_id and run.status == AgentRunStatus.CANCEL_REQUESTED:
             transaction.on_commit(
-                lambda rid=runner_id, reason=request.data.get("reason", ""): send_to_runner(
+                lambda rid=runner_id, reason=request.data.get("reason", ""): _send_cancel_best_effort(
                     rid,
-                    {
-                        "v": 1,
-                        "type": "cancel",
-                        "run_id": str(run_id),
-                        "reason": reason,
-                    },
+                    run_id,
+                    reason,
                 )
             )
         return Response(AgentRunSerializer(run).data)

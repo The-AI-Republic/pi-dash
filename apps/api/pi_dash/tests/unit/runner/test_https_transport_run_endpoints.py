@@ -136,9 +136,7 @@ def test_session_open_waits_for_first_poll_before_dispatch(
 
 
 @pytest.mark.unit
-def test_accept_endpoint_marks_running(
-    db, api_client, runner_token, assigned_run
-):
+def test_accept_endpoint_marks_running(db, api_client, runner_token, assigned_run):
     resp = api_client.post(
         f"/api/v1/runner/runs/{assigned_run.id}/accept/",
         format="json",
@@ -150,9 +148,7 @@ def test_accept_endpoint_marks_running(
 
 
 @pytest.mark.unit
-def test_run_endpoint_rejects_other_runner(
-    db, api_client, runner_token, assigned_run, create_user, workspace, pod
-):
+def test_run_endpoint_rejects_other_runner(db, api_client, runner_token, assigned_run, create_user, workspace, pod):
     """An access token issued for runner A must not be accepted on a
     run owned by runner B."""
     other_runner = Runner.objects.create(
@@ -182,9 +178,7 @@ def test_run_endpoint_rejects_other_runner(
 
 
 @pytest.mark.unit
-def test_idempotency_key_dedupes_duplicate(
-    db, api_client, runner_token, assigned_run
-):
+def test_idempotency_key_dedupes_duplicate(db, api_client, runner_token, assigned_run):
     msg_id = _uuid.uuid4().hex
     first = api_client.post(
         f"/api/v1/runner/runs/{assigned_run.id}/started/",
@@ -203,15 +197,11 @@ def test_idempotency_key_dedupes_duplicate(
     assert first.status_code == 200
     assert second.status_code == 200
     assert second.data.get("duplicate") is True
-    assert RunMessageDedupe.objects.filter(
-        run=assigned_run, message_id=msg_id
-    ).count() == 1
+    assert RunMessageDedupe.objects.filter(run=assigned_run, message_id=msg_id).count() == 1
 
 
 @pytest.mark.unit
-def test_complete_endpoint_marks_terminal_and_drains(
-    db, api_client, runner_token, assigned_run
-):
+def test_complete_endpoint_marks_terminal_and_drains(db, api_client, runner_token, assigned_run):
     resp = api_client.post(
         f"/api/v1/runner/runs/{assigned_run.id}/complete/",
         {"done_payload": {"summary": "done"}},
@@ -225,9 +215,7 @@ def test_complete_endpoint_marks_terminal_and_drains(
 
 
 @pytest.mark.unit
-def test_complete_endpoint_clears_stale_error(
-    db, api_client, runner_token, assigned_run
-):
+def test_complete_endpoint_clears_stale_error(db, api_client, runner_token, assigned_run):
     assigned_run.error = "daemon shutdown requested"
     assigned_run.save(update_fields=["error"])
 
@@ -245,9 +233,7 @@ def test_complete_endpoint_clears_stale_error(
 
 
 @pytest.mark.unit
-def test_late_complete_does_not_overwrite_failed_run(
-    db, api_client, runner_token, assigned_run
-):
+def test_late_complete_does_not_overwrite_failed_run(db, api_client, runner_token, assigned_run):
     failed = api_client.post(
         f"/api/v1/runner/runs/{assigned_run.id}/fail/",
         {"detail": "reaped by heartbeat"},
@@ -276,9 +262,7 @@ def test_late_complete_does_not_overwrite_failed_run(
 
 
 @pytest.mark.unit
-def test_late_started_does_not_revive_failed_run(
-    db, api_client, runner_token, assigned_run
-):
+def test_late_started_does_not_revive_failed_run(db, api_client, runner_token, assigned_run):
     assigned_run.status = AgentRunStatus.FAILED
     assigned_run.ended_at = timezone.now()
     assigned_run.error = "reaped by heartbeat"
@@ -297,6 +281,68 @@ def test_late_started_does_not_revive_failed_run(
     assert assigned_run.status == AgentRunStatus.FAILED
     assert assigned_run.thread_id == ""
     assert assigned_run.started_at is None
+
+
+@pytest.mark.unit
+def test_late_started_does_not_revive_cancel_requested_run(db, api_client, runner_token, assigned_run):
+    assigned_run.status = AgentRunStatus.CANCEL_REQUESTED
+    assigned_run.save(update_fields=["status"])
+
+    resp = api_client.post(
+        f"/api/v1/runner/runs/{assigned_run.id}/started/",
+        {"thread_id": "late_thread"},
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+    )
+
+    assert resp.status_code == 200, resp.data
+    assert resp.data.get("cancel_requested") is True
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.CANCEL_REQUESTED
+    assert assigned_run.thread_id == ""
+    assert assigned_run.started_at is None
+
+
+@pytest.mark.unit
+def test_cancelled_ack_closes_cancel_requested_run(db, api_client, runner_token, assigned_run):
+    assigned_run.status = AgentRunStatus.CANCEL_REQUESTED
+    assigned_run.save(update_fields=["status"])
+
+    resp = api_client.post(
+        f"/api/v1/runner/runs/{assigned_run.id}/cancelled/",
+        {},
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+    )
+
+    assert resp.status_code == 200, resp.data
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.CANCELLED
+    assert assigned_run.ended_at is not None
+
+
+@pytest.mark.unit
+def test_resume_unavailable_closes_cancel_requested_run(
+    db,
+    api_client,
+    runner_token,
+    assigned_run,
+):
+    assigned_run.status = AgentRunStatus.CANCEL_REQUESTED
+    assigned_run.save(update_fields=["status"])
+
+    resp = api_client.post(
+        f"/api/v1/runner/runs/{assigned_run.id}/fail/",
+        {"reason": "resume_unavailable"},
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+    )
+
+    assert resp.status_code == 200, resp.data
+    assert resp.data.get("cancelled") is True
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.CANCELLED
+    assert assigned_run.ended_at is not None
 
 
 @pytest.mark.unit
@@ -324,9 +370,7 @@ def test_late_resume_unavailable_does_not_requeue_failed_run(
 
 
 @pytest.mark.unit
-def test_fail_endpoint_resume_unavailable_requeues_instead_of_terminating(
-    db, api_client, runner_token, assigned_run
-):
+def test_fail_endpoint_resume_unavailable_requeues_instead_of_terminating(db, api_client, runner_token, assigned_run):
     """Regression guard: a RunFailed{reason: resume_unavailable} must
     re-queue the run, not stamp it FAILED. Cloud-side recovery for runs
     that miss their pinned session on disk lives here.
@@ -400,9 +444,7 @@ def test_late_assign_rejected_busy_does_not_requeue_failed_run(
 
 
 @pytest.mark.unit
-def test_fail_endpoint_refusal_records_refused_and_category(
-    db, api_client, runner_token, assigned_run
-):
+def test_fail_endpoint_refusal_records_refused_and_category(db, api_client, runner_token, assigned_run):
     """A RunFailed{reason: refusal} is recorded as terminal REFUSED with the
     safety-classifier category, not a generic FAILED. This is how a Claude
     Fable 5 cyber/bio decline stays queryable apart from a crash.
@@ -429,9 +471,7 @@ def test_fail_endpoint_refusal_records_refused_and_category(
 
 
 @pytest.mark.unit
-def test_fail_endpoint_refusal_unknown_category_normalizes(
-    db, api_client, runner_token, assigned_run
-):
+def test_fail_endpoint_refusal_unknown_category_normalizes(db, api_client, runner_token, assigned_run):
     """A refusal with a missing/unrecognized category is still recorded as
     REFUSED, with the category normalized to ``unknown`` so the column is
     always populated for a decline."""
@@ -449,9 +489,7 @@ def test_fail_endpoint_refusal_unknown_category_normalizes(
 
 
 @pytest.mark.unit
-def test_paused_endpoint_posts_question_to_issue_thread(
-    db, api_client, runner_token, enrolled_runner, workspace, pod
-):
+def test_paused_endpoint_posts_question_to_issue_thread(db, api_client, runner_token, enrolled_runner, workspace, pod):
     """Regression guard: RunPaused with a question_for_human must
     surface to the issue's comment thread. Without this, comment-and-run
     flows lose the agent's pause-question entirely.
@@ -469,9 +507,7 @@ def test_paused_endpoint_posts_question_to_issue_thread(
             workspace=workspace,
             created_by=enrolled_runner.owner,
         )
-        state = State.objects.create(
-            name="In Progress", project=project, group="started"
-        )
+        state = State.objects.create(name="In Progress", project=project, group="started")
         issue = Issue.objects.create(
             name="task",
             workspace=workspace,
@@ -495,9 +531,7 @@ def test_paused_endpoint_posts_question_to_issue_thread(
 
     # Run on_commit callbacks inline so the post-commit drain helpers
     # don't hold up the assertion.
-    with patch(
-        "django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()
-    ):
+    with patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()):
         resp = api_client.post(
             f"/api/v1/runner/runs/{paused_run.id}/pause/",
             {

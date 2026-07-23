@@ -53,6 +53,7 @@ NON_TERMINAL_STATUSES = (
     # .ai_design/worktree_pooling/design.md §6.2.
     AgentRunStatus.WAITING_FOR_WORKTREE,
     AgentRunStatus.RUNNING,
+    AgentRunStatus.CANCEL_REQUESTED,
     AgentRunStatus.AWAITING_APPROVAL,
     AgentRunStatus.AWAITING_REAUTH,
     AgentRunStatus.PAUSED_AWAITING_INPUT,
@@ -68,6 +69,7 @@ BUSY_STATUSES = (
     # longer claims) needs no change beyond this membership.
     AgentRunStatus.WAITING_FOR_WORKTREE,
     AgentRunStatus.RUNNING,
+    AgentRunStatus.CANCEL_REQUESTED,
     AgentRunStatus.AWAITING_APPROVAL,
     AgentRunStatus.AWAITING_REAUTH,
 )

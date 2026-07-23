@@ -44,6 +44,7 @@ const ACTIVE_RUN_STATUSES = new Set<TAgentRunStatus>([
   "assigned",
   "waiting_for_worktree",
   "running",
+  "cancel_requested",
   "awaiting_approval",
   "awaiting_reauth",
   "paused_awaiting_input",
@@ -201,6 +202,15 @@ function getRunView(
         icon: LoaderCircle,
         iconClassName: "animate-spin text-accent-primary",
       };
+    case "cancel_requested":
+      return {
+        title: t("Stopping the AI agent"),
+        detail: runnerDetail ?? t("Waiting for the runner to confirm cancellation."),
+        badge: t("Stopping"),
+        badgeVariant: "warning",
+        icon: LoaderCircle,
+        iconClassName: "animate-spin text-warning-primary",
+      };
     case "awaiting_approval":
       return {
         title: t("AI agent is waiting for approval"),
@@ -337,6 +347,7 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
   const activeRun = status?.active_run;
   const activeRunStatus = activeRun?.status;
   const hasActiveAgentRun = Boolean(activeRunStatus && ACTIVE_RUN_STATUSES.has(activeRunStatus));
+  const canAbortActiveRun = hasActiveAgentRun && activeRunStatus !== "cancel_requested";
   const view = useMemo(() => getAgentStatusView(issue, now, t), [issue, now, t]);
   const canReTick = Boolean(ticker?.can_re_tick);
   const { reTick, isSubmitting: isReTicking } = useReTick();
@@ -355,7 +366,7 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
     const aborted = await abortRun(activeRun.id);
     if (aborted) {
       setShowAbortConfirm(false);
-      // Refresh so the card reflects the now-terminal run.
+      // Refresh so the card reflects the cancellation-in-progress state.
       void issueOperations.fetch(workspaceSlug, projectId, issueId);
     }
   }, [abortRun, activeRun?.id, issueOperations, workspaceSlug, projectId, issueId]);
@@ -449,7 +460,7 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
         </div>
       )}
 
-      {hasActiveAgentRun && activeRun?.id && (
+      {canAbortActiveRun && activeRun?.id && (
         <div className="mt-3 flex flex-col gap-1.5">
           <Button
             variant="error-outline"

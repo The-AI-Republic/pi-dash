@@ -26,6 +26,7 @@ const STATUS_BADGE_VARIANT: Record<TAgentRunStatus, TBadgeVariant> = {
   assigned: "accent-primary",
   waiting_for_worktree: "accent-primary",
   running: "primary",
+  cancel_requested: "accent-warning",
   awaiting_approval: "accent-warning",
   awaiting_reauth: "accent-warning",
   paused_awaiting_input: "accent-warning",
@@ -40,6 +41,7 @@ const RUN_STATUS_I18N_LABELS: Record<TAgentRunStatus, string> = {
   assigned: "assigned",
   waiting_for_worktree: "waiting for worktree",
   running: "running",
+  cancel_requested: "cancellation requested",
   awaiting_approval: "awaiting approval",
   awaiting_reauth: "awaiting reauth",
   paused_awaiting_input: "paused awaiting input",
@@ -258,7 +260,7 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
                       )}
                   </div>
                 </div>
-                {!isTerminal(detail.status) && (
+                {!isTerminal(detail.status) && detail.status !== "cancel_requested" && (
                   <Button variant="tertiary-danger" size="sm" onClick={() => setCancelTarget(detail)}>
                     {t("Cancel run")}
                   </Button>
