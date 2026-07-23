@@ -389,7 +389,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
       {/* The chat internals (header/list/composer) carry no horizontal padding —
           the host provides it (see the assistant thread page). Without this the
           content sits flush against the history panel's border. */}
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden px-4">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden px-4 pb-4">
         <ChatContainer
           className="min-h-0 flex-1"
           header={

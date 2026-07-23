@@ -100,7 +100,7 @@ const RunnersListPage = observer(function RunnersListPage() {
   }
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-6 p-6">
       <PageHead title={pageTitle} />
 
       <RunnersTabs />
