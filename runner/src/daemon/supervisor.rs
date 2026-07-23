@@ -16,7 +16,9 @@ use crate::cloud::protocol::{
     ClientMsg, FailureReason, RunnerStatus, ServerMsg, TokenUsage as WireTokenUsage, WIRE_VERSION,
     WorkspaceState,
 };
-use crate::config::schema::{AgentKind, Config, Credentials, DaemonConfig, RunnerConfig};
+use crate::config::schema::{
+    AgentKind, Config, Credentials, DaemonConfig, RunnerConfig, canonical_for_compare,
+};
 use crate::daemon::run_event_mirror::RunEventMirror;
 use crate::daemon::runner_instance::RunnerInstance;
 use crate::daemon::runner_out::RunnerOut;
@@ -627,22 +629,25 @@ async fn load_runner_credentials(
 /// Resolve the local dev-machine working directory the cloud should
 /// display for this runner. Pooled runners (those referencing a
 /// `[[workdir]]`) report the workdir's canonical clone path; legacy
-/// runners report their `workspace.working_dir`. A pooled runner whose
-/// pool failed to construct falls back to `workspace.working_dir` so the
-/// field is never empty for an otherwise-healthy runner.
+/// runners report their `workspace.working_dir`. Both paths are normalized
+/// to absolute paths. A pooled runner with no pool reports no directory
+/// rather than its vestigial legacy path, which it refuses to execute in.
 fn resolve_working_dir(
     inst: &RunnerInstance,
     pools: &HashMap<String, PoolHandle>,
-) -> std::path::PathBuf {
-    inst.config
-        .workdir
-        .as_deref()
-        .and_then(|name| pools.get(name))
-        .map(|pool| pool.canonical().to_path_buf())
-        .unwrap_or_else(|| inst.config.workspace.working_dir.clone())
+) -> Option<std::path::PathBuf> {
+    match inst.config.workdir.as_deref() {
+        Some(name) => pools
+            .get(name)
+            .map(|pool| canonical_for_compare(pool.canonical())),
+        None => Some(canonical_for_compare(&inst.config.workspace.working_dir)),
+    }
 }
 
-fn attach_body_for_instance(inst: &RunnerInstance, working_dir: std::path::PathBuf) -> AttachBody {
+fn attach_body_for_instance(
+    inst: &RunnerInstance,
+    working_dir: Option<std::path::PathBuf>,
+) -> AttachBody {
     let mut agent_versions = HashMap::new();
     agent_versions.insert(
         format!("{:?}", inst.config.agent.kind).to_ascii_lowercase(),
@@ -660,7 +665,9 @@ fn attach_body_for_instance(inst: &RunnerInstance, working_dir: std::path::PathB
         in_flight_run: *inst.state.rx_in_flight.borrow(),
         project_slug: inst.config.project_slug.clone(),
         host_label: hostname().unwrap_or_else(|| inst.config.name.clone()),
-        working_dir: working_dir.to_string_lossy().into_owned(),
+        working_dir: working_dir
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         agent_versions,
     }
 }
@@ -3538,6 +3545,32 @@ mod tests {
             openclaw: OpenClawSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         }
+    }
+
+    #[test]
+    fn resolve_working_dir_absolutizes_legacy_runner_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let relative = PathBuf::from(format!("relative-wd-{}", uuid::Uuid::new_v4()));
+        let expected = std::path::absolute(&relative).unwrap();
+        let (out_tx, _out_rx) = mpsc::channel::<Envelope<ClientMsg>>(1);
+        let inst = RunnerInstance::new(runner_config("legacy", "WEB", relative), &paths, out_tx);
+
+        assert_eq!(resolve_working_dir(&inst, &HashMap::new()), Some(expected));
+    }
+
+    #[test]
+    fn resolve_working_dir_does_not_report_vestigial_path_without_pool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let mut config = runner_config("pooled", "WEB", tmp.path().join("vestigial"));
+        config.workdir = Some("missing-pool".into());
+        let (out_tx, _out_rx) = mpsc::channel::<Envelope<ClientMsg>>(1);
+        let inst = RunnerInstance::new(config, &paths, out_tx);
+
+        let working_dir = resolve_working_dir(&inst, &HashMap::new());
+        assert_eq!(working_dir, None);
+        assert_eq!(attach_body_for_instance(&inst, working_dir).working_dir, "");
     }
 
     #[test]

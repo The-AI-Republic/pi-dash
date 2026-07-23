@@ -53,6 +53,27 @@ OFFLINE_GRACE_SECS = 60
 ASSIGN_DELIVERY_GRACE_SECS = 60
 
 
+def _merge_dev_metadata(current: Any, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge whitelisted session-open metadata into a JSON object.
+
+    Older runners omit ``working_dir`` entirely, which preserves the last
+    reported value. Current runners send an explicit empty string when no
+    usable directory exists, which clears a stale value.
+    """
+    metadata = dict(current) if isinstance(current, dict) else {}
+    if "working_dir" not in body:
+        return metadata
+
+    working_dir = body.get("working_dir")
+    if not isinstance(working_dir, str):
+        return metadata
+    if working_dir:
+        metadata["working_dir"] = working_dir[:1024]
+    else:
+        metadata.pop("working_dir", None)
+    return metadata
+
+
 def apply_hello(runner: Runner, body: Dict[str, Any]) -> None:
     """Update runner metadata + reap stale busy runs.
 
@@ -63,11 +84,7 @@ def apply_hello(runner: Runner, body: Dict[str, Any]) -> None:
     runner.os = body.get("os", "") or runner.os
     runner.arch = body.get("arch", "") or runner.arch
     runner.runner_version = body.get("version", "") or runner.runner_version
-    dev_metadata = dict(runner.dev_metadata or {})
-    working_dir = body.get("working_dir")
-    if isinstance(working_dir, str) and working_dir:
-        dev_metadata["working_dir"] = working_dir[:1024]
-    runner.dev_metadata = dev_metadata
+    runner.dev_metadata = _merge_dev_metadata(runner.dev_metadata, body)
     runner.last_heartbeat_at = timezone.now()
     runner.save(
         update_fields=[
