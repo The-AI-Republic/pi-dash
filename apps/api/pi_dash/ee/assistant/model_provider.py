@@ -14,8 +14,19 @@ instead of BYOK direct helpers, so the overlay is the single switch point.
 
 from __future__ import annotations
 
-from pi_dash.assistant.runtime.llm import resolve_byok_model
+from pi_dash.assistant.runtime.llm import get_config, resolve_byok_model
 from pi_dash.assistant.runtime.title import generate_byok_title_for_user
+
+
+def has_usable_llm_config(user) -> bool:
+    """True when ``user`` has a usable LLM configuration (CE: a BYOK key).
+
+    Cheap presence check for request-time gating (e.g. rejecting a chat
+    message before enqueueing a turn) — must not build a model or decrypt
+    anything. The cloud overlay also accepts its platform credentials here.
+    """
+    cfg = get_config(user)
+    return bool(cfg and cfg.has_api_key)
 
 
 def resolve_model_for_user(user):
