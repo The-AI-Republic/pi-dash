@@ -33,6 +33,7 @@ function makeRunner(id: string, podId: string): IRunner {
     os: "linux",
     arch: "x86_64",
     runner_version: "1.0.0",
+    dev_metadata: {},
     protocol_version: 1,
     capabilities: [],
     last_heartbeat_at: null,

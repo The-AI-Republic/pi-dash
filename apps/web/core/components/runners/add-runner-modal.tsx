@@ -35,7 +35,7 @@ type Props = {
 
 // Mirrors the runner CLI's ``--agent`` value-enum (kebab-case). Keep in
 // sync with runner/src/config/schema.rs:AgentKind.
-const AGENT_OPTIONS = ["claude-code", "codex", "cursor-agent", "open-claw"] as const;
+const AGENT_OPTIONS = ["claude-code", "codex", "cursor-agent", "open-claw", "grok"] as const;
 type TAgent = (typeof AGENT_OPTIONS)[number];
 const DEFAULT_AGENT: TAgent = "claude-code";
 const RUNNER_NAME_WHITESPACE_RE = /\s/;
@@ -226,6 +226,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
     if (value === "claude-code") return t("Claude Code");
     if (value === "cursor-agent") return t("Cursor");
     if (value === "open-claw") return t("OpenClaw");
+    if (value === "grok") return t("Grok");
     return t("Codex");
   };
 

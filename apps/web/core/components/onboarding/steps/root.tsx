@@ -6,7 +6,7 @@
 
 import { useEffect, useRef } from "react";
 // pi dash imports
-import type { IWorkspaceMemberInvitation } from "@pi-dash/types";
+import type { IWorkspaceJoinRequest, IWorkspaceMemberInvitation } from "@pi-dash/types";
 import { EOnboardingSteps } from "@pi-dash/types";
 // local components
 import { CliInstallStep } from "./cli-install";
@@ -19,10 +19,11 @@ import { WorkspaceSetupStep } from "./workspace";
 type Props = {
   currentStep: EOnboardingSteps;
   invitations: IWorkspaceMemberInvitation[];
+  joinRequests: IWorkspaceJoinRequest[];
   handleStepChange: (step: EOnboardingSteps, skipInvites?: boolean) => void;
 };
 
-function OnboardingStepContent({ currentStep, invitations, handleStepChange }: Props) {
+function OnboardingStepContent({ currentStep, invitations, joinRequests, handleStepChange }: Props) {
   switch (currentStep) {
     case EOnboardingSteps.CLI_INSTALL:
       return <CliInstallStep handleStepChange={handleStepChange} />;
@@ -33,7 +34,13 @@ function OnboardingStepContent({ currentStep, invitations, handleStepChange }: P
     case EOnboardingSteps.USE_CASE_SETUP:
       return <UseCaseSetupStep handleStepChange={handleStepChange} />;
     case EOnboardingSteps.WORKSPACE_CREATE_OR_JOIN:
-      return <WorkspaceSetupStep invitations={invitations ?? []} handleStepChange={handleStepChange} />;
+      return (
+        <WorkspaceSetupStep
+          invitations={invitations ?? []}
+          joinRequests={joinRequests ?? []}
+          handleStepChange={handleStepChange}
+        />
+      );
     case EOnboardingSteps.INVITE_MEMBERS:
       return <InviteTeamStep handleStepChange={handleStepChange} />;
     default:

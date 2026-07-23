@@ -8,6 +8,8 @@ from datetime import timedelta
 
 from django.utils import timezone
 
+from pi_dash.utils.constants import ACTIVE_STATE_GROUPS, STATE_GROUP_ORDER
+
 # The date from pattern
 pattern = re.compile(r"\d+_(weeks|months)$")
 
@@ -295,12 +297,12 @@ def filter_completed_at(params, issue_filter, method, prefix=""):
 
 def filter_issue_state_type(params, issue_filter, method, prefix=""):
     type = params.get("type", "all")
-    group = ["backlog", "unstarted", "started", "review", "completed", "cancelled"]
+    group = list(STATE_GROUP_ORDER)
     if type == "backlog":
         group = ["backlog"]
     if type == "active":
-        # In Review issues are active work — same as Started for activity-list purposes.
-        group = ["unstarted", "started", "review"]
+        # Review and test issues are active work for activity-list purposes.
+        group = list(ACTIVE_STATE_GROUPS)
 
     issue_filter[f"{prefix}state__group__in"] = group
     return issue_filter

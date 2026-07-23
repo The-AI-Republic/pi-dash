@@ -18,7 +18,7 @@
  */
 
 // Mirrors the runner CLI's ``--agent`` value-enum (kebab-case).
-export type TRunnerAgent = "claude-code" | "codex" | "cursor-agent" | "open-claw";
+export type TRunnerAgent = "claude-code" | "codex" | "cursor-agent" | "open-claw" | "grok";
 
 export interface IRunnerModelOption {
   /** Unique select value within an agent's list. */
@@ -42,6 +42,11 @@ const DEFAULT_OPTION: IRunnerModelOption = {
 // Codex: model × reasoning effort. The effort tier is sent on `turn/start`;
 // `xhigh` is Codex's "extra high" tier.
 const CODEX_MODELS: Array<{ label: string; model: string }> = [
+  // GPT-5.6 is a three-tier family: Sol (flagship), Terra (balanced), Luna
+  // (fastest/cheapest). `gpt-5.6` aliases Sol; we pin explicit tier slugs.
+  { label: "GPT-5.6 Sol", model: "gpt-5.6-sol" },
+  { label: "GPT-5.6 Terra", model: "gpt-5.6-terra" },
+  { label: "GPT-5.6 Luna", model: "gpt-5.6-luna" },
   { label: "GPT-5.5", model: "gpt-5.5" },
   { label: "GPT-5.4", model: "gpt-5.4" },
   { label: "GPT-5.4 Mini", model: "gpt-5.4-mini" },
@@ -96,11 +101,20 @@ const CURSOR_OPTIONS: IRunnerModelOption[] = [
   { id: "grok-4.3", label: "Grok 4.3", model: "grok-4.3" },
 ];
 
+// Grok: xAI's Grok CLI drives its own model catalog; a small curated subset.
+// The runner accepts any non-empty slug and falls back to grok's default, so a
+// stale entry downgrades gracefully. Update as xAI's lineup changes.
+const GROK_OPTIONS: IRunnerModelOption[] = [
+  { id: "grok-4.3", label: "Grok 4.3", model: "grok-4.3" },
+  { id: "grok-code-fast-1", label: "Grok Code Fast 1", model: "grok-code-fast-1" },
+];
+
 export const RUNNER_MODEL_OPTIONS: Record<TRunnerAgent, IRunnerModelOption[]> = {
   "claude-code": [DEFAULT_OPTION, ...CLAUDE_OPTIONS],
   codex: [DEFAULT_OPTION, ...CODEX_OPTIONS],
   "cursor-agent": [DEFAULT_OPTION, ...CURSOR_OPTIONS],
   "open-claw": [DEFAULT_OPTION],
+  grok: [DEFAULT_OPTION, ...GROK_OPTIONS],
 };
 
 /**
@@ -114,6 +128,7 @@ export const DEFAULT_MODEL_BY_AGENT: Record<TRunnerAgent, string> = {
   codex: DEFAULT_MODEL_ID,
   "cursor-agent": DEFAULT_MODEL_ID,
   "open-claw": DEFAULT_MODEL_ID,
+  grok: DEFAULT_MODEL_ID,
 };
 
 /** Look up a selected option's label; falls back to the default label. */

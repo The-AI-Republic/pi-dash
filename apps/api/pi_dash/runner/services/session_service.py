@@ -53,18 +53,47 @@ OFFLINE_GRACE_SECS = 60
 ASSIGN_DELIVERY_GRACE_SECS = 60
 
 
+def _merge_dev_metadata(current: Any, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge whitelisted session-open metadata into a JSON object.
+
+    Older runners omit ``working_dir`` entirely, which preserves the last
+    reported value. Current runners send an explicit empty string when no
+    usable directory exists, which clears a stale value.
+    """
+    metadata = dict(current) if isinstance(current, dict) else {}
+    if "working_dir" not in body:
+        return metadata
+
+    working_dir = body.get("working_dir")
+    if not isinstance(working_dir, str):
+        return metadata
+    if working_dir:
+        metadata["working_dir"] = working_dir[:1024]
+    else:
+        metadata.pop("working_dir", None)
+    return metadata
+
+
 def apply_hello(runner: Runner, body: Dict[str, Any]) -> None:
     """Update runner metadata + reap stale busy runs.
 
     ``body`` is the session-open / Hello payload. Persists ``os``,
-    ``arch``, ``version``, and bumps ``last_heartbeat_at``.
+    ``arch``, ``version``, known development metadata, and bumps
+    ``last_heartbeat_at``.
     """
     runner.os = body.get("os", "") or runner.os
     runner.arch = body.get("arch", "") or runner.arch
     runner.runner_version = body.get("version", "") or runner.runner_version
+    runner.dev_metadata = _merge_dev_metadata(runner.dev_metadata, body)
     runner.last_heartbeat_at = timezone.now()
     runner.save(
-        update_fields=["os", "arch", "runner_version", "last_heartbeat_at"]
+        update_fields=[
+            "os",
+            "arch",
+            "runner_version",
+            "dev_metadata",
+            "last_heartbeat_at",
+        ]
     )
     # Session open redelivers ASSIGNED / WAITING_FOR_WORKTREE runs the
     # restarted daemon no longer reports (design §6.3) — reaping them here

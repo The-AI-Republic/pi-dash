@@ -43,7 +43,7 @@ from pi_dash.db.models import (
     Profile,
 )
 from pi_dash.app.permissions import ROLE, allow_permission
-from pi_dash.utils.constants import RESTRICTED_WORKSPACE_SLUGS
+from pi_dash.utils.constants import CLOSED_STATE_GROUPS, RESTRICTED_WORKSPACE_SLUGS
 from pi_dash.license.utils.instance_value import get_configuration_value
 from pi_dash.bgtasks.workspace_seed_task import workspace_seed
 from pi_dash.bgtasks.event_tracking_task import track_event
@@ -292,7 +292,7 @@ class UserWorkspaceDashboardEndpoint(BaseAPIView):
         assigned_issues = Issue.issue_objects.filter(workspace__slug=slug, assignees__in=[request.user]).count()
 
         pending_issues_count = Issue.issue_objects.filter(
-            ~Q(state__group__in=["completed", "cancelled"]),
+            ~Q(state__group__in=CLOSED_STATE_GROUPS),
             workspace__slug=slug,
             assignees__in=[request.user],
         ).count()
@@ -317,7 +317,7 @@ class UserWorkspaceDashboardEndpoint(BaseAPIView):
         )
 
         overdue_issues = Issue.issue_objects.filter(
-            ~Q(state__group__in=["completed", "cancelled"]),
+            ~Q(state__group__in=CLOSED_STATE_GROUPS),
             workspace__slug=slug,
             assignees__in=[request.user],
             target_date__lt=timezone.now(),
@@ -325,7 +325,7 @@ class UserWorkspaceDashboardEndpoint(BaseAPIView):
         ).values("id", "name", "workspace__slug", "project_id", "target_date")
 
         upcoming_issues = Issue.issue_objects.filter(
-            ~Q(state__group__in=["completed", "cancelled"]),
+            ~Q(state__group__in=CLOSED_STATE_GROUPS),
             start_date__gte=timezone.now(),
             workspace__slug=slug,
             assignees__in=[request.user],

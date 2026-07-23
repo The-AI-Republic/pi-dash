@@ -266,4 +266,46 @@ export type TOnboardingStep = EOnboardingSteps;
 export enum ECreateOrJoinWorkspaceViews {
   WORKSPACE_CREATE = "WORKSPACE_CREATE",
   WORKSPACE_JOIN = "WORKSPACE_JOIN",
+  // Type a workspace admin's email to request access.
+  WORKSPACE_JOIN_BY_EMAIL = "WORKSPACE_JOIN_BY_EMAIL",
+  // Holding view shown while a join request awaits admin approval.
+  WORKSPACE_JOIN_PENDING = "WORKSPACE_JOIN_PENDING",
+}
+
+export enum EWorkspaceJoinRequestStatus {
+  PENDING = "PENDING",
+  APPROVED = "APPROVED",
+  DENIED = "DENIED",
+}
+
+/**
+ * A requester-facing join request, as returned by
+ * `GET /api/users/me/workspaces/join-requests/`.
+ *
+ * Deliberately omits the resolved workspace (name/slug/logo): exposing it would
+ * let a requester tell whether the typed email belonged to a real workspace
+ * admin, the enumeration the neutral create response is designed to prevent.
+ */
+export interface IWorkspaceJoinRequest {
+  id: string;
+  requester: IUserLite;
+  admin_email: string;
+  message: string | null;
+  status: EWorkspaceJoinRequestStatus;
+  responded_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Response of `POST /api/users/me/workspaces/join-requests/`.
+ *
+ * The endpoint returns a neutral `{ message }` (HTTP 201) whether or not the
+ * email resolved to a real admin. The one exception: when the email resolves
+ * only to a workspace the requester is already a member of, it returns HTTP 200
+ * with `workspace_slug` so the client can route them straight in.
+ */
+export interface IWorkspaceJoinRequestCreateResponse {
+  message: string;
+  workspace_slug?: string;
 }

@@ -24,6 +24,8 @@ from pi_dash.db.models import (
 )
 from typing import Optional, Dict, Tuple, Any, Union, List
 
+from pi_dash.utils.constants import STATE_GROUP_ORDER
+
 
 def issue_queryset_grouper(
     queryset: QuerySet[Issue],
@@ -191,7 +193,7 @@ def issue_group_values(
         return ["low", "medium", "high", "urgent", "none"]
 
     if field == "state__group":
-        return ["backlog", "unstarted", "started", "review", "completed", "cancelled"]
+        return list(STATE_GROUP_ORDER)
 
     if field == "target_date":
         queryset = queryset.values_list("target_date", flat=True).distinct()
