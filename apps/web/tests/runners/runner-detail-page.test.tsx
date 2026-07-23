@@ -60,7 +60,7 @@ const RUNNER: IRunner = {
   os: "linux",
   arch: "x86_64",
   runner_version: "0.1.12",
-  working_dir: "/home/dev/projects/browserx",
+  dev_metadata: { working_dir: "/home/dev/projects/browserx" },
   protocol_version: 3,
   capabilities: ["codex", "claude"],
   last_heartbeat_at: "2026-05-23T00:00:00Z",

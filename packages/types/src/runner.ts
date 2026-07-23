@@ -102,6 +102,11 @@ export interface ICreateRunnerOnMachineStatus {
   error?: string;
 }
 
+export interface IRunnerDevMetadata {
+  /** Absolute path reported by the runner at session-open. */
+  working_dir?: string;
+}
+
 export interface IRunner {
   id: string;
   name: string;
@@ -109,9 +114,8 @@ export interface IRunner {
   os: string;
   arch: string;
   runner_version: string;
-  /** Absolute path of the runner's local dev-machine working directory,
-   * reported at session-open. Empty on runners that predate the feature. */
-  working_dir: string;
+  /** Extensible metadata reported by the runner's local development environment. */
+  dev_metadata: IRunnerDevMetadata;
   protocol_version: number;
   capabilities: string[];
   last_heartbeat_at: string | null;

@@ -57,19 +57,24 @@ def apply_hello(runner: Runner, body: Dict[str, Any]) -> None:
     """Update runner metadata + reap stale busy runs.
 
     ``body`` is the session-open / Hello payload. Persists ``os``,
-    ``arch``, ``version``, ``working_dir``, and bumps ``last_heartbeat_at``.
+    ``arch``, ``version``, known development metadata, and bumps
+    ``last_heartbeat_at``.
     """
     runner.os = body.get("os", "") or runner.os
     runner.arch = body.get("arch", "") or runner.arch
     runner.runner_version = body.get("version", "") or runner.runner_version
-    runner.working_dir = (body.get("working_dir", "") or runner.working_dir)[:1024]
+    dev_metadata = dict(runner.dev_metadata or {})
+    working_dir = body.get("working_dir")
+    if isinstance(working_dir, str) and working_dir:
+        dev_metadata["working_dir"] = working_dir[:1024]
+    runner.dev_metadata = dev_metadata
     runner.last_heartbeat_at = timezone.now()
     runner.save(
         update_fields=[
             "os",
             "arch",
             "runner_version",
-            "working_dir",
+            "dev_metadata",
             "last_heartbeat_at",
         ]
     )

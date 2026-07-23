@@ -14,7 +14,7 @@ class Migration(migrations.Migration):
     operations = [
         migrations.AddField(
             model_name="runner",
-            name="working_dir",
-            field=models.CharField(blank=True, default="", max_length=1024),
+            name="dev_metadata",
+            field=models.JSONField(blank=True, default=dict),
         ),
     ]
