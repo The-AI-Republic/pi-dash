@@ -32,6 +32,7 @@ import { WorkspaceViewQuickActions } from "@/components/workspace/views/quick-ac
 import { useGlobalView } from "@/hooks/store/use-global-view";
 import { useIssues } from "@/hooks/store/use-issues";
 import { useAppRouter } from "@/hooks/use-app-router";
+import { useGlobalViewId } from "@/hooks/use-global-view-id";
 import { GlobalViewLayoutSelection } from "@/pi-dash-web/components/views/helper";
 
 export const GlobalIssuesHeader = observer(function GlobalIssuesHeader() {
@@ -39,8 +40,8 @@ export const GlobalIssuesHeader = observer(function GlobalIssuesHeader() {
   const [createViewModal, setCreateViewModal] = useState(false);
   // router
   const router = useAppRouter();
-  const { workspaceSlug, globalViewId: routerGlobalViewId } = useParams();
-  const globalViewId = routerGlobalViewId ? routerGlobalViewId.toString() : undefined;
+  const { workspaceSlug } = useParams();
+  const globalViewId = useGlobalViewId();
   // store hooks
   const {
     issuesFilter: { filters, updateFilters },

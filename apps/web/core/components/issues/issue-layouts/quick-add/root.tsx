@@ -15,7 +15,13 @@ import { useTranslation } from "@pi-dash/i18n";
 import { PlusIcon } from "@pi-dash/propel/icons";
 import { setPromiseToast } from "@pi-dash/propel/toast";
 import type { IProject, TIssue, EIssueLayoutTypes } from "@pi-dash/types";
+import { EIssuesStoreType } from "@pi-dash/types";
 import { cn, createIssuePayload } from "@pi-dash/utils";
+// components
+import { ProjectDropdown } from "@/components/dropdowns/project/dropdown";
+// hooks
+import { useProject } from "@/hooks/store/use-project";
+import { useIssueStoreType } from "@/hooks/use-issue-layout-store";
 // pi dash web imports
 import { QuickAddIssueFormRoot } from "@/pi-dash-web/components/issues/quick-add";
 // local imports
@@ -67,9 +73,26 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
   // i18n
   const { t } = useTranslation();
   // router
-  const { workspaceSlug, projectId } = useParams();
+  const { workspaceSlug, projectId: routerProjectId } = useParams();
+  const paramProjectId = routerProjectId?.toString();
+  // store hooks
+  const storeType = useIssueStoreType();
+  const { joinedProjectIds } = useProject();
+  // At workspace scope (global "all issues") there is no project in the route,
+  // so the user picks one inline before the quick-add creates the issue.
+  const isWorkspaceLevel = storeType === EIssuesStoreType.GLOBAL && !paramProjectId;
   // states
   const [isOpen, setIsOpen] = useState(isQuickAddOpen ?? false);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | undefined>(undefined);
+  // The effective project for creation: the route project, else the picked one.
+  const effectiveProjectId = paramProjectId ?? selectedProjectId;
+
+  // Default the inline picker to the first joined project at workspace scope.
+  useEffect(() => {
+    if (isWorkspaceLevel && !selectedProjectId && joinedProjectIds.length > 0) {
+      setSelectedProjectId(joinedProjectIds[0]);
+    }
+  }, [isWorkspaceLevel, selectedProjectId, joinedProjectIds]);
   // form info
   const {
     reset,
@@ -98,17 +121,17 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
   };
 
   const onSubmitHandler = async (formData: TIssue) => {
-    if (isSubmitting || !workspaceSlug || !projectId) return;
+    if (isSubmitting || !workspaceSlug || !effectiveProjectId) return;
 
     reset({ ...defaultValues });
 
-    const payload = createIssuePayload(projectId.toString(), {
+    const payload = createIssuePayload(effectiveProjectId, {
       ...(prePopulatedData ?? {}),
       ...formData,
     });
 
     if (quickAddCallback) {
-      const quickAddPromise = quickAddCallback(projectId.toString(), { ...payload });
+      const quickAddPromise = quickAddCallback(effectiveProjectId, { ...payload });
       setPromiseToast<any>(quickAddPromise, {
         loading: isEpic ? t("Adding epic") : t("Adding work item"),
         success: {
@@ -118,7 +141,7 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
             // TODO: Translate here
             <CreateIssueToastActionItems
               workspaceSlug={workspaceSlug.toString()}
-              projectId={projectId.toString()}
+              projectId={effectiveProjectId}
               issueId={data.id}
               isEpic={isEpic}
             />
@@ -134,7 +157,7 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
     }
   };
 
-  if (!projectId) return null;
+  if (!effectiveProjectId) return null;
 
   return (
     <div
@@ -144,18 +167,32 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
       )}
     >
       {isOpen ? (
-        <QuickAddIssueFormRoot
-          isOpen={isOpen}
-          layout={layout}
-          prePopulatedData={prePopulatedData}
-          projectId={projectId?.toString()}
-          hasError={errors && errors?.name && errors?.name?.message ? true : false}
-          setFocus={setFocus}
-          register={register}
-          onSubmit={handleSubmit(onSubmitHandler)}
-          onClose={() => handleIsOpen(false)}
-          isEpic={isEpic}
-        />
+        <div className="flex w-full items-stretch">
+          {isWorkspaceLevel && (
+            <div className="flex flex-shrink-0 items-center border-r border-subtle bg-surface-1 px-2">
+              <ProjectDropdown
+                multiple={false}
+                value={effectiveProjectId}
+                onChange={(val: string) => setSelectedProjectId(val)}
+                buttonVariant="border-with-text"
+              />
+            </div>
+          )}
+          <div className="flex-grow">
+            <QuickAddIssueFormRoot
+              isOpen={isOpen}
+              layout={layout}
+              prePopulatedData={prePopulatedData}
+              projectId={effectiveProjectId}
+              hasError={errors && errors?.name && errors?.name?.message ? true : false}
+              setFocus={setFocus}
+              register={register}
+              onSubmit={handleSubmit(onSubmitHandler)}
+              onClose={() => handleIsOpen(false)}
+              isEpic={isEpic}
+            />
+          </div>
+        </div>
       ) : (
         <>
           {QuickAddButton && <QuickAddButton isEpic={isEpic} onClick={() => handleIsOpen(true)} />}

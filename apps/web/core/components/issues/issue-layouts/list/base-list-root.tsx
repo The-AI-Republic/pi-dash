@@ -11,8 +11,8 @@ import { useParams } from "next/navigation";
 // pi dash constants
 import { EIssueFilterType, EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
 // types
-import type { EIssuesStoreType, GroupByColumnTypes, TGroupedIssues, TIssueKanbanFilters } from "@pi-dash/types";
-import { EIssueLayoutTypes } from "@pi-dash/types";
+import type { GroupByColumnTypes, TGroupedIssues, TIssueKanbanFilters } from "@pi-dash/types";
+import { EIssueLayoutTypes, EIssuesStoreType } from "@pi-dash/types";
 // constants
 // hooks
 import { useIssues } from "@/hooks/store/use-issues";
@@ -35,6 +35,7 @@ type ListStoreType =
   | EIssuesStoreType.PROFILE
   | EIssuesStoreType.ARCHIVED
   | EIssuesStoreType.WORKSPACE_DRAFT
+  | EIssuesStoreType.GLOBAL
   | EIssuesStoreType.TEAM
   | EIssuesStoreType.TEAM_VIEW
   | EIssuesStoreType.EPIC;
@@ -91,10 +92,11 @@ export const BaseListRoot = observer(function BaseListRoot(props: IBaseListRoot)
   }, [fetchIssues, storeType, group_by, viewId]);
 
   const groupedIssueIds = issues?.groupedIssueIds as TGroupedIssues | undefined;
-  // auth
+  // auth — the global (workspace "all issues") store spans projects, so its
+  // create/edit gate is evaluated at the workspace level rather than per-project.
   const isEditingAllowed = allowPermissions(
     [EUserPermissions.ADMIN, EUserPermissions.MEMBER],
-    EUserPermissionsLevel.PROJECT
+    storeType === EIssuesStoreType.GLOBAL ? EUserPermissionsLevel.WORKSPACE : EUserPermissionsLevel.PROJECT
   );
   const { enableInlineEditing, enableQuickAdd, enableIssueCreation } = issues?.viewFlags || {};
 
@@ -108,7 +110,10 @@ export const BaseListRoot = observer(function BaseListRoot(props: IBaseListRoot)
     [canEditPropertiesBasedOnProject, enableInlineEditing, isEditingAllowed]
   );
 
-  const handleOnDrop = useGroupIssuesDragNDrop(storeType, orderBy, group_by);
+  const handleGroupDrop = useGroupIssuesDragNDrop(storeType, orderBy, group_by);
+  // The workspace "all issues" list spans projects, so reorder/regroup via drag
+  // and drop is disabled there.
+  const handleOnDrop = storeType === EIssuesStoreType.GLOBAL ? async () => {} : handleGroupDrop;
 
   const renderQuickActions: TRenderQuickActions = useCallback(
     ({ issue, parentRef }) => (

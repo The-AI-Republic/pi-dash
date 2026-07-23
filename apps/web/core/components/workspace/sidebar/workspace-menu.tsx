@@ -36,7 +36,7 @@ export const SidebarWorkspaceMenu = observer(function SidebarWorkspaceMenu() {
     {
       key: "views",
       labelTranslationKey: "Views",
-      href: `/${workspaceSlug}/workspace-views/all-issues/`,
+      href: `/${workspaceSlug}/all-issues/`,
       access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER, EUserWorkspaceRoles.GUEST],
       Icon: ViewsIcon,
     },

@@ -194,11 +194,27 @@ export const ISSUE_DISPLAY_FILTERS_BY_PAGE: TIssueFiltersToDisplayByPageType = {
       list: {
         display_properties: ISSUE_DISPLAY_PROPERTIES_KEYS,
         display_filters: {
+          // "state" groups by the projects' actual states; "state_detail.group"
+          // rolls them up into the shared state groups (cleaner across projects).
+          group_by: ["state", "state_detail.group", "priority", "project", "labels", "assignees", "created_by", null],
+          order_by: ["sort_order", "-created_at", "-updated_at", "start_date", "-priority"],
           type: ["active", "backlog"],
         },
         extra_options: {
           access: false,
-          values: [],
+          values: ["show_empty_groups"],
+        },
+      },
+      kanban: {
+        display_properties: ISSUE_DISPLAY_PROPERTIES_KEYS,
+        display_filters: {
+          group_by: ["state", "state_detail.group", "priority", "project", "labels", "assignees"],
+          order_by: ["sort_order", "-created_at", "-updated_at", "start_date", "-priority"],
+          type: ["active", "backlog"],
+        },
+        extra_options: {
+          access: false,
+          values: ["show_empty_groups"],
         },
       },
     },
