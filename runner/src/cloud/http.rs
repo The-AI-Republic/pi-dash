@@ -311,6 +311,11 @@ pub struct AttachBody {
     pub in_flight_run: Option<Uuid>,
     pub project_slug: Option<String>,
     pub host_label: String,
+    /// Absolute path of this runner's local dev-machine working directory —
+    /// the pooled runner's `[[workdir]]` canonical clone, or the legacy
+    /// runner's `workspace.working_dir`. Stable per session; the cloud
+    /// persists it on the Runner row and surfaces it in runner detail.
+    pub working_dir: String,
     pub agent_versions: HashMap<String, String>,
 }
 
@@ -2491,6 +2496,7 @@ mod tests {
             in_flight_run: None,
             project_slug: Some("p".into()),
             host_label: "h".into(),
+            working_dir: "/tmp/wd".into(),
             agent_versions: std::collections::HashMap::new(),
         }
     }
@@ -2542,6 +2548,7 @@ mod tests {
             "in_flight_run",
             "project_slug",
             "host_label",
+            "working_dir",
             "agent_versions",
         ]
         .iter()
