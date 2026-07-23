@@ -7,14 +7,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { observer } from "mobx-react";
 import { X } from "lucide-react";
-import { useParams } from "react-router";
+import { useParams, useSearchParams } from "react-router";
 import useSWR from "swr";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { RunnerService, getRunnerDetail } from "@pi-dash/services";
 import type { IAgentChatEvent, IAgentChatMessage, IAgentChatSession, IRunner } from "@pi-dash/types";
 import { Badge, Button } from "@pi-dash/ui";
+import { calculateTimeAgo, renderFormattedDate } from "@pi-dash/utils";
 import { ChatComposer } from "@/components/chat/composer";
 import { ChatContainer } from "@/components/chat/container";
+import { type ChatHistoryItem, ChatHistoryPanel } from "@/components/chat/history-panel";
 import { ChatMessage } from "@/components/chat/message";
 import { useAgentChatEvents } from "@/components/runners/chat/use-agent-chat-events";
 import { useWorkspace } from "@/hooks/store/use-workspace";
@@ -89,12 +91,26 @@ function disabledReason(runner?: IRunner, session?: IAgentChatSession | null): s
   return null;
 }
 
+function sessionHistoryItem(session: IAgentChatSession, activeId: string | undefined): ChatHistoryItem {
+  // Sessions have no title/first-message field, so entries are labelled by
+  // their last activity time. renderFormattedDate falls back gracefully on a
+  // freshly-created session that has no last_message_at yet.
+  const stamp = session.last_message_at ?? session.created_at;
+  const title = renderFormattedDate(stamp, "MMM dd, HH:mm") ?? "New chat";
+  const statusSuffix = session.status === "open" ? "" : ` · ${session.status}`;
+  const subtitle = session.last_message_at ? `${calculateTimeAgo(stamp)}${statusSuffix}` : `New chat${statusSuffix}`;
+  return { id: session.id, title, subtitle, active: session.id === activeId };
+}
+
 const RunnerChatPage = observer(function RunnerChatPage() {
   const { runnerId } = useParams<{ runnerId: string }>();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedSessionId = searchParams.get("sessionId");
   const { currentWorkspace } = useWorkspace();
   const workspaceId = currentWorkspace?.id;
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  const [creatingChat, setCreatingChat] = useState(false);
   const [events, setEvents] = useState<IAgentChatEvent[]>([]);
   const [liveMessages, setLiveMessages] = useState<IAgentChatMessage[]>([]);
   const warmSessionRef = useRef<string | null>(null);
@@ -111,13 +127,21 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     () => service.listChatSessions(workspaceId!, runnerId)
   );
 
-  const session = useMemo(
-    () =>
-      (sessions ?? []).find((s) => s.status === "open" && s.last_message_at !== null) ??
-      (sessions ?? []).find((s) => s.status === "open") ??
-      null,
-    [sessions]
-  );
+  const session = useMemo(() => {
+    const available = sessions ?? [];
+    // An explicit ?sessionId (chosen from the history panel) wins, even for a
+    // closed session so the user can read it back. A stale/unknown id (e.g. a
+    // shared link to a session on another runner) falls through to auto-select.
+    if (requestedSessionId) {
+      const requested = available.find((s) => s.id === requestedSessionId);
+      if (requested) return requested;
+    }
+    return (
+      available.find((s) => s.status === "open" && s.last_message_at !== null) ??
+      available.find((s) => s.status === "open") ??
+      null
+    );
+  }, [sessions, requestedSessionId]);
 
   useEffect(() => {
     if (!sessions) return;
@@ -161,6 +185,10 @@ const RunnerChatPage = observer(function RunnerChatPage() {
         }
         return;
       }
+      // Explicitly viewing a resolved session from the history panel (which may
+      // be closed): don't silently spin up a brand-new session behind the user's
+      // back. A stale ?sessionId (session?.id won't match) still auto-creates.
+      if (session && session.id === requestedSessionId) return;
       if (!sessions) return;
       const key = `${workspaceId}:${runnerId}`;
       if (createWarmKeyRef.current === key) return;
@@ -189,7 +217,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [mutateSessions, runner, runnerId, session, sessions, workspaceId]);
+  }, [mutateSessions, requestedSessionId, runner, runnerId, session, sessions, workspaceId]);
 
   const { data: messages, mutate: mutateMessages } = useSWR<IAgentChatMessage[]>(
     session?.id ? ["runner-chat-messages", session.id] : null,
@@ -284,6 +312,54 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     mutateSessions();
   }
 
+  function selectSession(sessionId: string) {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.set("sessionId", sessionId);
+        return next;
+      },
+      { replace: true }
+    );
+  }
+
+  async function newChat() {
+    if (!workspaceId || !runnerId || creatingChat) return;
+    setCreatingChat(true);
+    try {
+      const created = await service.createChatSession({ workspace: workspaceId, runner: runnerId });
+      precreatedSessionRef.current = created;
+      warmSessionRef.current = created.id;
+      await mutateSessions((current) => {
+        const currentSessions = current ?? [];
+        return currentSessions.some((item) => item.id === created.id) ? currentSessions : [created, ...currentSessions];
+      }, false);
+      // Warm in the background; the session is usable without waiting for it.
+      service.warmChatSession(created.id).catch(() => {});
+      selectSession(created.id);
+    } catch (e: unknown) {
+      const err = e as { error?: string } | null;
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: "Unable to start chat",
+        message: err?.error ?? "Could not create a new chat session",
+      });
+    } finally {
+      setCreatingChat(false);
+    }
+  }
+
+  const historyItems = useMemo(() => {
+    // Copy before sorting so we never mutate the SWR-cached sessions array.
+    // eslint-disable-next-line unicorn/no-array-sort -- toSorted() isn't in the project's TS lib target
+    const sorted = [...(sessions ?? [])].sort((a, b) => {
+      const aTime = Date.parse(a.last_message_at ?? a.created_at);
+      const bTime = Date.parse(b.last_message_at ?? b.created_at);
+      return bTime - aTime;
+    });
+    return sorted.map((item) => sessionHistoryItem(item, session?.id));
+  }, [sessions, session?.id]);
+
   const reason = disabledReason(runner, session);
   const rows = liveMessages;
   const busy = !!(session?.active_message_id || session?.active_turn_id);
@@ -300,43 +376,58 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     ));
 
   return (
-    <ChatContainer
-      className="min-h-[640px]"
-      header={
-        <div className="flex h-12 shrink-0 items-center justify-between border-b border-subtle">
-          <div className="min-w-0">
-            <div className="text-15 truncate font-semibold text-primary">{runner?.name ?? "Runner"}</div>
-            <div className="text-12 text-secondary">{runner?.pod_detail?.name ?? runner?.status ?? ""}</div>
-          </div>
-          <div className="flex items-center gap-2">
-            {runner && (
-              <Badge variant={runner.status === "online" ? "accent-success" : "accent-neutral"}>{runner.status}</Badge>
-            )}
-            {session && (
-              <Button variant="neutral-primary" size="sm" onClick={close}>
-                <X className="size-4" />
-              </Button>
-            )}
-          </div>
-        </div>
-      }
-      messages={rows}
-      renderMessage={(m) => <ChatMessage role={m.role} content={m.content} status={m.status} />}
-      emptyState={<div className="py-16 text-center text-13 text-secondary">No messages</div>}
-      listFooter={eventStrip.length > 0 ? <>{eventStrip}</> : undefined}
-      composer={
-        <ChatComposer
-          draft={draft}
-          onDraftChange={setDraft}
-          onSend={send}
-          onStop={stop}
-          busy={busy}
-          sending={sending}
-          disabledReason={reason}
-          placeholder="Message this runner…"
+    <div className="flex min-h-[640px] w-full overflow-hidden rounded-md border border-subtle">
+      <ChatHistoryPanel
+        heading="Chats"
+        items={historyItems}
+        onSelect={selectSession}
+        onNewChat={newChat}
+        newChatLabel="New chat"
+        busy={creatingChat}
+        emptyState={<div className="px-2 py-4 text-12 text-tertiary">No chats yet.</div>}
+      />
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <ChatContainer
+          className="min-h-0 flex-1"
+          header={
+            <div className="flex h-12 shrink-0 items-center justify-between border-b border-subtle">
+              <div className="min-w-0">
+                <div className="text-15 truncate font-semibold text-primary">{runner?.name ?? "Runner"}</div>
+                <div className="text-12 text-secondary">{runner?.pod_detail?.name ?? runner?.status ?? ""}</div>
+              </div>
+              <div className="flex items-center gap-2">
+                {runner && (
+                  <Badge variant={runner.status === "online" ? "accent-success" : "accent-neutral"}>
+                    {runner.status}
+                  </Badge>
+                )}
+                {session && (
+                  <Button variant="neutral-primary" size="sm" onClick={close}>
+                    <X className="size-4" />
+                  </Button>
+                )}
+              </div>
+            </div>
+          }
+          messages={rows}
+          renderMessage={(m) => <ChatMessage role={m.role} content={m.content} status={m.status} />}
+          emptyState={<div className="py-16 text-center text-13 text-secondary">No messages</div>}
+          listFooter={eventStrip.length > 0 ? <>{eventStrip}</> : undefined}
+          composer={
+            <ChatComposer
+              draft={draft}
+              onDraftChange={setDraft}
+              onSend={send}
+              onStop={stop}
+              busy={busy}
+              sending={sending}
+              disabledReason={reason}
+              placeholder="Message this runner…"
+            />
+          }
         />
-      }
-    />
+      </div>
+    </div>
   );
 });
 
