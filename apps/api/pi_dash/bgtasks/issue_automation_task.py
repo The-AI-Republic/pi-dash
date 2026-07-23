@@ -16,6 +16,7 @@ from django.utils import timezone
 # Module imports
 from pi_dash.bgtasks.issue_activities_task import issue_activity
 from pi_dash.db.models import Issue, Project, State
+from pi_dash.utils.constants import CLOSED_STATE_GROUPS, OPEN_STATE_GROUPS
 from pi_dash.utils.exception_logger import log_exception
 
 
@@ -40,7 +41,7 @@ def archive_old_issues():
                     project=project_id,
                     archived_at__isnull=True,
                     updated_at__lte=(timezone.now() - timedelta(days=archive_in * 30)),
-                    state__group__in=["completed", "cancelled"],
+                    state__group__in=CLOSED_STATE_GROUPS,
                 ),
                 Q(issue_cycle__isnull=True)
                 | (Q(issue_cycle__cycle__end_date__lt=timezone.now()) & Q(issue_cycle__isnull=False)),
@@ -101,7 +102,7 @@ def close_old_issues():
                     project=project_id,
                     archived_at__isnull=True,
                     updated_at__lte=(timezone.now() - timedelta(days=close_in * 30)),
-                    state__group__in=["backlog", "unstarted", "started", "review"],
+                    state__group__in=OPEN_STATE_GROUPS,
                 ),
                 Q(issue_cycle__isnull=True)
                 | (Q(issue_cycle__cycle__end_date__lt=timezone.now()) & Q(issue_cycle__isnull=False)),
