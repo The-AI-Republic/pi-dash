@@ -5,5 +5,7 @@
  */
 
 export * from "./create";
+export * from "./join-by-email";
 export * from "./join-invites";
+export * from "./pending-approval";
 export * from "./root";
