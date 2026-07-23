@@ -168,7 +168,7 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
     : t("AI Agents");
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-6">
+    <div className="flex h-full min-h-0 flex-col gap-6 p-6">
       <PageHead title={pageTitle} />
       <RunnersTabs />
       <div className="grid min-h-0 flex-1 grid-cols-[400px_1fr] gap-4 overflow-hidden">

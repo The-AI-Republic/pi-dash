@@ -46,7 +46,7 @@ const RunnerDetailPage = observer(function RunnerDetailPage() {
   });
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-6 p-6">
       <PageHead title={runner?.name ? t("Runner {name}", { name: runner.name }) : t("Runner detail")} />
 
       <div className="flex items-center justify-between gap-3">
