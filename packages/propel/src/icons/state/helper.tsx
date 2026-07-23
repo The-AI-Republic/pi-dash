@@ -23,7 +23,7 @@ export interface IIntakeStateGroupIcon {
   percentage?: number;
 }
 
-export type TStateGroups = "backlog" | "unstarted" | "started" | "review" | "completed" | "cancelled";
+export type TStateGroups = "backlog" | "unstarted" | "started" | "review" | "test" | "completed" | "cancelled";
 
 export const STATE_GROUP_COLORS: {
   [key in TStateGroups]: string;
@@ -32,6 +32,7 @@ export const STATE_GROUP_COLORS: {
   unstarted: "#60646C",
   started: "#F59E0B",
   review: "#3B82F6",
+  test: "#14B8A6",
   completed: "#46A758",
   cancelled: "#9AA4BC",
 };

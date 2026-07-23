@@ -113,4 +113,20 @@ export class AgentRunService extends APIService {
         throw error?.response?.data ?? error;
       });
   }
+
+  /**
+   * Abort an in-flight run. Signals the associated runner to stop the run
+   * and marks the AgentRun terminal (``cancelled``) server-side. The server
+   * enforces authorization and rejects an already-terminal run.
+   *
+   * Server-side wiring: ``apps/api/pi_dash/runner/views/runs.py``
+   * ``AgentRunCancelEndpoint``.
+   */
+  async abortRun(runId: string, reason?: string): Promise<TAgentRun> {
+    return this.post(`/api/runners/runs/${runId}/cancel/`, { reason: reason ?? "" })
+      .then((response) => response?.data)
+      .catch((error) => {
+        throw error?.response?.data ?? error;
+      });
+  }
 }

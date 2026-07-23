@@ -20,6 +20,7 @@ const iconComponents = {
   cancelled: CancelledGroupIcon,
   completed: CompletedGroupIcon,
   review: StartedGroupIcon,
+  test: StartedGroupIcon,
   started: StartedGroupIcon,
   unstarted: UnstartedGroupIcon,
 };
