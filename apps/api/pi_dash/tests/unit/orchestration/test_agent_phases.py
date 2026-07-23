@@ -64,6 +64,14 @@ def test_is_ticking_state_true_for_started_in_progress():
 
 
 @pytest.mark.unit
+def test_test_group_is_manual_and_does_not_tick():
+    state = _StubState(StateGroup.TEST.value, "In Test")
+
+    assert StateGroup.TEST.value not in agent_phases.PHASES
+    assert agent_phases.is_ticking_state(state) is False
+
+
+@pytest.mark.unit
 def test_is_ticking_state_false_for_started_with_custom_name():
     # Workspaces with custom state names within a ticking group still
     # do not tick — the registry pins the literal state name per group.

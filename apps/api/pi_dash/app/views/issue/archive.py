@@ -38,6 +38,7 @@ from pi_dash.utils.grouper import (
     issue_queryset_grouper,
 )
 from pi_dash.utils.issue_filters import issue_filters
+from pi_dash.utils.constants import CLOSED_STATE_GROUPS
 from pi_dash.utils.order_queryset import order_issue_queryset
 from pi_dash.utils.paginator import GroupedOffsetPaginator, SubGroupedOffsetPaginator
 from pi_dash.app.permissions import allow_permission, ROLE
@@ -256,7 +257,7 @@ class IssueArchiveViewSet(BaseViewSet):
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
     def archive(self, request, slug, project_id, pk=None):
         issue = Issue.issue_objects.get(workspace__slug=slug, project_id=project_id, pk=pk)
-        if issue.state.group not in ["completed", "cancelled"]:
+        if issue.state.group not in CLOSED_STATE_GROUPS:
             return Response(
                 {"error": "Can only archive completed or cancelled state group issue"},
                 status=status.HTTP_400_BAD_REQUEST,

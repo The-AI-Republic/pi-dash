@@ -58,6 +58,7 @@ from pi_dash.utils.grouper import (
     issue_on_results,
     issue_queryset_grouper,
 )
+from pi_dash.utils.constants import CLOSED_STATE_GROUPS
 from pi_dash.utils.issue_filters import issue_filters
 from pi_dash.utils.order_queryset import order_issue_queryset
 from pi_dash.utils.paginator import GroupedOffsetPaginator, SubGroupedOffsetPaginator
@@ -458,7 +459,7 @@ class WorkspaceUserProfileStatsEndpoint(BaseAPIView):
 
         pending_issues_count = (
             Issue.issue_objects.filter(
-                ~Q(state__group__in=["completed", "cancelled"]),
+                ~Q(state__group__in=CLOSED_STATE_GROUPS),
                 (Q(assignees__in=[user_id]) & Q(issue_assignee__deleted_at__isnull=True)),
                 workspace__slug=slug,
                 project__project_projectmember__member=request.user,
