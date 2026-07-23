@@ -42,6 +42,11 @@ const DEFAULT_OPTION: IRunnerModelOption = {
 // Codex: model × reasoning effort. The effort tier is sent on `turn/start`;
 // `xhigh` is Codex's "extra high" tier.
 const CODEX_MODELS: Array<{ label: string; model: string }> = [
+  // GPT-5.6 is a three-tier family: Sol (flagship), Terra (balanced), Luna
+  // (fastest/cheapest). `gpt-5.6` aliases Sol; we pin explicit tier slugs.
+  { label: "GPT-5.6 Sol", model: "gpt-5.6-sol" },
+  { label: "GPT-5.6 Terra", model: "gpt-5.6-terra" },
+  { label: "GPT-5.6 Luna", model: "gpt-5.6-luna" },
   { label: "GPT-5.5", model: "gpt-5.5" },
   { label: "GPT-5.4", model: "gpt-5.4" },
   { label: "GPT-5.4 Mini", model: "gpt-5.4-mini" },
