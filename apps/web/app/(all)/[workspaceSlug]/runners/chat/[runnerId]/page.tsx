@@ -111,6 +111,12 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [creatingChat, setCreatingChat] = useState(false);
+  // Bridges the gap between choosing a session (panel click / New chat) and
+  // the ?sessionId param landing: setSearchParams is transition-deferred, so
+  // without this the memo below can transiently re-resolve the OLD session
+  // and the warm effect re-warms it — which used to bounce the runner's chat
+  // runtime back and forth between the two sessions.
+  const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const [events, setEvents] = useState<IAgentChatEvent[]>([]);
   const [liveMessages, setLiveMessages] = useState<IAgentChatMessage[]>([]);
   const warmSessionRef = useRef<string | null>(null);
@@ -129,19 +135,29 @@ const RunnerChatPage = observer(function RunnerChatPage() {
 
   const session = useMemo(() => {
     const available = sessions ?? [];
-    // An explicit ?sessionId (chosen from the history panel) wins, even for a
-    // closed session so the user can read it back. A stale/unknown id (e.g. a
-    // shared link to a session on another runner) falls through to auto-select.
-    if (requestedSessionId) {
-      const requested = available.find((s) => s.id === requestedSessionId);
-      if (requested) return requested;
+    // An explicit selection (panel click / New chat, tracked in
+    // pendingSessionId until ?sessionId lands) wins, even for a closed session
+    // so the user can read it back. A stale/unknown id (e.g. a shared link to
+    // a session on another runner) falls through to auto-select.
+    const requested = pendingSessionId ?? requestedSessionId;
+    if (requested) {
+      const match = available.find((s) => s.id === requested);
+      if (match) return match;
+      // A session created by New chat can be selected before the SWR list
+      // catches up; the ref is set before pendingSessionId, so it's current.
+      const precreated = precreatedSessionRef.current;
+      if (precreated?.id === requested) return precreated;
     }
     return (
       available.find((s) => s.status === "open" && s.last_message_at !== null) ??
       available.find((s) => s.status === "open") ??
       null
     );
-  }, [sessions, requestedSessionId]);
+  }, [sessions, requestedSessionId, pendingSessionId]);
+
+  useEffect(() => {
+    if (pendingSessionId && requestedSessionId === pendingSessionId) setPendingSessionId(null);
+  }, [requestedSessionId, pendingSessionId]);
 
   useEffect(() => {
     if (!sessions) return;
@@ -155,6 +171,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     warmSessionRef.current = null;
     createWarmKeyRef.current = null;
     precreatedSessionRef.current = null;
+    setPendingSessionId(null);
     setEvents([]);
   }, [runnerId]);
 
@@ -188,7 +205,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
       // Explicitly viewing a resolved session from the history panel (which may
       // be closed): don't silently spin up a brand-new session behind the user's
       // back. A stale ?sessionId (session?.id won't match) still auto-creates.
-      if (session && session.id === requestedSessionId) return;
+      if (session && session.id === (pendingSessionId ?? requestedSessionId)) return;
       if (!sessions) return;
       const key = `${workspaceId}:${runnerId}`;
       if (createWarmKeyRef.current === key) return;
@@ -217,7 +234,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [mutateSessions, requestedSessionId, runner, runnerId, session, sessions, workspaceId]);
+  }, [mutateSessions, pendingSessionId, requestedSessionId, runner, runnerId, session, sessions, workspaceId]);
 
   const { data: messages, mutate: mutateMessages } = useSWR<IAgentChatMessage[]>(
     session?.id ? ["runner-chat-messages", session.id] : null,
@@ -313,6 +330,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   }
 
   function selectSession(sessionId: string) {
+    setPendingSessionId(sessionId);
     setSearchParams(
       (prev) => {
         const next = new URLSearchParams(prev);
@@ -330,6 +348,9 @@ const RunnerChatPage = observer(function RunnerChatPage() {
       const created = await service.createChatSession({ workspace: workspaceId, runner: runnerId });
       precreatedSessionRef.current = created;
       warmSessionRef.current = created.id;
+      // Select before mutating so no render can resolve (and re-warm) the old
+      // session between the list update and the ?sessionId change.
+      setPendingSessionId(created.id);
       await mutateSessions((current) => {
         const currentSessions = current ?? [];
         return currentSessions.some((item) => item.id === created.id) ? currentSessions : [created, ...currentSessions];
