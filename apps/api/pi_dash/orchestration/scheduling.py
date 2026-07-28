@@ -789,6 +789,21 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
     if not is_ticking_state(state):
         return False
 
+    # In Review is deliberately excluded from the cap-hit auto-pause. When
+    # the *review* budget is exhausted the issue must simply stay In Review
+    # for a human to close — the runner never promotes or reparks a review
+    # issue on its own (PDASHOSS01-68). The ticker is already disarmed
+    # above, so leaving the state untouched here does not resurrect ticking.
+    from pi_dash.db.models.state import StateGroup
+
+    if state.group == StateGroup.REVIEW.value:
+        logger.info(
+            "agent_ticker: review cap hit for issue=%s — leaving it In Review, "
+            "no auto-pause",
+            issue.pk,
+        )
+        return False
+
     # Other active runs (besides the one that just terminated) keep the
     # issue alive in In Progress — the next terminate will check again.
     from pi_dash.orchestration import service as orchestration_service

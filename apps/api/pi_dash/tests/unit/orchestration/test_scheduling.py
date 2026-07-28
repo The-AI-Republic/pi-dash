@@ -316,6 +316,38 @@ def test_deferred_pause_applies_when_cap_hit_and_no_active_runs(
 
 
 @pytest.mark.unit
+def test_deferred_pause_skips_when_issue_is_in_review(
+    seeded, issue, states, runner_for_workspace, create_user
+):
+    """When the *review* budget is exhausted the issue must stay In Review
+    for a human to close — the review phase is excluded from the cap-hit
+    auto-pause (PDASHOSS01-68). Even with a Paused state available and the
+    CAP_HIT reason set, an In Review issue is left in place."""
+    with impersonate(create_user):
+        in_review = State.objects.create(
+            name="In Review", project=issue.project, group="review"
+        )
+    Issue.all_objects.filter(pk=issue.pk).update(state=in_review)
+    issue.refresh_from_db()
+    sched = scheduling.arm_ticker(issue)
+    sched.enabled = False
+    sched.disarm_reason = TickerDisarmReason.CAP_HIT
+    sched.save(update_fields=["enabled", "disarm_reason"])
+    run = AgentRun.objects.create(
+        workspace=issue.workspace,
+        created_by=create_user,
+        pod=runner_for_workspace.pod,
+        work_item=issue,
+        status=AgentRunStatus.COMPLETED,
+        prompt="x",
+    )
+    applied = scheduling.maybe_apply_deferred_pause(run)
+    assert applied is False
+    issue.refresh_from_db()
+    assert issue.state == in_review
+
+
+@pytest.mark.unit
 def test_deferred_pause_skips_when_disarm_reason_is_terminal_signal(
     seeded, issue, states, runner_for_workspace, create_user
 ):

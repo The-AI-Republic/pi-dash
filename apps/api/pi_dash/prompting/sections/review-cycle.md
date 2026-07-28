@@ -49,11 +49,16 @@ All cycles share this shape:
 
 ## Step 3 — Emit a done-signal
 
-The review pass concludes by moving the issue to the state that matches
-the outcome (see "Available states" and "Ending the run"):
+The review pass concludes by matching the outcome (see "Available states"
+and "Ending the run"):
 
-- **approved** — review satisfied, no further automatic ticking needed.
-  Move the issue to a `completed`-group state.
+- **approved** — review satisfied. Post your summary comment and **leave
+  the issue In Review**. Do **not** move it to a `completed`/Done state:
+  the runner never promotes an issue to Done — a human closes it once
+  they've seen the review, or a separate supporting process does. (Review
+  ticking is bounded; once it's exhausted the issue simply stays In Review.
+  If a later tick finds nothing has changed, emit a **noop** and exit
+  without moving state.)
 - **changes needed** — real issues found that you could not auto-fix and
   that need human attention. Follow "Blocking the run" (post the summary
   comment, move to "Blocked" if the project has that state).
