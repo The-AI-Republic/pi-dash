@@ -150,7 +150,7 @@ class Project(BaseModel):
     agent_default_interval_seconds = models.IntegerField(default=10800)  # 3 h
     agent_default_max_ticks = models.IntegerField(default=24)            # 3 days
     agent_review_default_interval_seconds = models.IntegerField(default=10800)  # 3 h
-    agent_review_default_max_ticks = models.IntegerField(default=8)             # 24 h window
+    agent_review_default_max_ticks = models.IntegerField(default=4)             # 12 h window
     agent_ticking_enabled = models.BooleanField(default=True)
 
     def __init__(self, *args, **kwargs):
