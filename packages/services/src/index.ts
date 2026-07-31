@@ -16,6 +16,7 @@ export * from "./intake";
 export * from "./module";
 export * from "./user";
 export * from "./project";
+export * from "./prompt-label";
 export * from "./prompt-section";
 export * from "./scheduler";
 export * from "./workspace";

@@ -46,9 +46,17 @@ from pi_dash.prompting.composer import (
     resolve_section,
 )
 from pi_dash.prompting.context import build_context, build_scheduler_context
-from pi_dash.prompting.models import PromptSectionOverride
+from pi_dash.prompting.models import (
+    TARGET_RECEIPT,
+    TARGET_SECTION,
+    TARGET_TYPES,
+    PromptLabel,
+    PromptLabelAssignment,
+    PromptSectionOverride,
+)
 from pi_dash.prompting.renderer import PromptRenderError
 from pi_dash.prompting.serializers import (
+    PromptLabelSerializer,
     PromptSectionOverrideSerializer,
     ResolvedSectionSerializer,
 )
@@ -491,3 +499,238 @@ class PromptPreviewEndpoint(APIView):
             )
         context = build_scheduler_context(binding, _FakeRun(run_id=uuid.uuid4()))
         return context, binding.project, None
+
+
+# ----------------------------------------------------------------------
+# Prompt labels (PDASHOSS01-71)
+# ----------------------------------------------------------------------
+
+#: Max characters for a label name / color value.
+MAX_LABEL_NAME_LENGTH = 64
+MAX_LABEL_COLOR_LENGTH = 32
+
+
+def _validate_target(target_type, target_key):
+    """Return an error :class:`Response` if ``(target_type, target_key)`` does
+    not reference a real, code-defined section or receipt; otherwise ``None``.
+
+    Sections/receipts are not DB rows, so referential integrity is enforced here
+    against the registry (sections) and recipes (receipts).
+    """
+    if target_type not in TARGET_TYPES:
+        return Response(
+            {"error": f"unknown target_type {target_type!r}", "target_types": sorted(TARGET_TYPES)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if not target_key:
+        return Response({"error": "target_key is required"}, status=status.HTTP_400_BAD_REQUEST)
+    if target_type == TARGET_SECTION and target_key not in registry.REGISTRY:
+        return Response(
+            {"error": f"unknown section {target_key!r}"}, status=status.HTTP_404_NOT_FOUND
+        )
+    if target_type == TARGET_RECEIPT and target_key not in recipes.RECIPES:
+        return Response(
+            {"error": f"unknown receipt kind {target_key!r}", "kinds": list(recipes.all_kinds())},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    return None
+
+
+def _clean_label_name(raw):
+    """Return a trimmed label name, or ``None`` if empty/invalid."""
+    if raw is None:
+        return None
+    name = str(raw).strip()
+    if not name or len(name) > MAX_LABEL_NAME_LENGTH:
+        return None
+    return name
+
+
+class PromptLabelListEndpoint(APIView):
+    """``GET|POST /api/workspaces/<slug>/prompt-labels``.
+
+    ``GET`` returns every workspace label with its section/receipt targets
+    (member-readable). ``POST`` creates a label (admin-only).
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [UserRateThrottle]
+
+    def get(self, request, slug: str):
+        workspace = _get_workspace_or_404(slug)
+        if workspace is None:
+            return Response({"error": "workspace not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not _is_workspace_member(request.user, workspace):
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+
+        labels = (
+            PromptLabel.objects.filter(workspace=workspace)
+            .prefetch_related("assignments")
+            .order_by("name")
+        )
+        return Response({"labels": PromptLabelSerializer(labels, many=True).data})
+
+    def post(self, request, slug: str):
+        workspace = _get_workspace_or_404(slug)
+        if workspace is None:
+            return Response({"error": "workspace not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not _is_workspace_admin(request.user, workspace):
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+
+        name = _clean_label_name(request.data.get("name"))
+        if name is None:
+            return Response(
+                {"error": "a non-empty name of at most 64 characters is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        color = (request.data.get("color") or "").strip()[:MAX_LABEL_COLOR_LENGTH] or None
+
+        try:
+            label = PromptLabel.objects.create(
+                workspace=workspace,
+                name=name,
+                color=color or PromptLabel._meta.get_field("color").default,
+                created_by=request.user,
+                updated_by=request.user,
+            )
+        except IntegrityError:
+            return Response(
+                {"error": f"a label named {name!r} already exists in this workspace"},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response(PromptLabelSerializer(label).data, status=status.HTTP_201_CREATED)
+
+
+class PromptLabelDetailEndpoint(APIView):
+    """``PATCH|DELETE /api/workspaces/<slug>/prompt-labels/<label_id>`` (admin)."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [UserRateThrottle]
+
+    def _get(self, workspace, label_id):
+        try:
+            return PromptLabel.objects.prefetch_related("assignments").get(
+                id=label_id, workspace=workspace
+            )
+        except (PromptLabel.DoesNotExist, ValueError, DjangoValidationError):
+            return None
+
+    def patch(self, request, slug: str, label_id):
+        workspace = _get_workspace_or_404(slug)
+        if workspace is None:
+            return Response({"error": "workspace not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not _is_workspace_admin(request.user, workspace):
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        label = self._get(workspace, label_id)
+        if label is None:
+            return Response({"error": "label not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        update_fields = ["updated_by", "updated_at"]
+        if "name" in request.data:
+            name = _clean_label_name(request.data.get("name"))
+            if name is None:
+                return Response(
+                    {"error": "a non-empty name of at most 64 characters is required"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            label.name = name
+            update_fields.append("name")
+        if "color" in request.data:
+            label.color = (request.data.get("color") or "").strip()[:MAX_LABEL_COLOR_LENGTH] or (
+                PromptLabel._meta.get_field("color").default
+            )
+            update_fields.append("color")
+
+        label.updated_by = request.user
+        try:
+            label.save(update_fields=update_fields)
+        except IntegrityError:
+            return Response(
+                {"error": f"a label named {label.name!r} already exists in this workspace"},
+                status=status.HTTP_409_CONFLICT,
+            )
+        label.refresh_from_db()
+        return Response(PromptLabelSerializer(label).data, status=status.HTTP_200_OK)
+
+    def delete(self, request, slug: str, label_id):
+        workspace = _get_workspace_or_404(slug)
+        if workspace is None:
+            return Response({"error": "workspace not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not _is_workspace_admin(request.user, workspace):
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        label = self._get(workspace, label_id)
+        if label is None:
+            return Response({"error": "label not found"}, status=status.HTTP_404_NOT_FOUND)
+        label.delete()  # cascades to assignments
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PromptLabelAssignmentEndpoint(APIView):
+    """``POST|DELETE /api/workspaces/<slug>/prompt-labels/<label_id>/assignments``.
+
+    Attach (``POST``) or detach (``DELETE``) the label to/from one section or
+    receipt. Body: ``{"target_type": "section"|"receipt", "target_key": ...}``.
+    Admin-only, matching label management.
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [UserRateThrottle]
+
+    def _get_label(self, workspace, label_id):
+        try:
+            return PromptLabel.objects.get(id=label_id, workspace=workspace)
+        except (PromptLabel.DoesNotExist, ValueError, DjangoValidationError):
+            return None
+
+    def post(self, request, slug: str, label_id):
+        workspace = _get_workspace_or_404(slug)
+        if workspace is None:
+            return Response({"error": "workspace not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not _is_workspace_admin(request.user, workspace):
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        label = self._get_label(workspace, label_id)
+        if label is None:
+            return Response({"error": "label not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        target_type = request.data.get("target_type")
+        target_key = request.data.get("target_key")
+        err = _validate_target(target_type, target_key)
+        if err is not None:
+            return err
+
+        PromptLabelAssignment.objects.get_or_create(
+            label=label,
+            target_type=target_type,
+            target_key=target_key,
+            defaults={"created_by": request.user},
+        )
+        label = (
+            PromptLabel.objects.prefetch_related("assignments").get(id=label.id)
+        )
+        return Response(PromptLabelSerializer(label).data, status=status.HTTP_200_OK)
+
+    def delete(self, request, slug: str, label_id):
+        workspace = _get_workspace_or_404(slug)
+        if workspace is None:
+            return Response({"error": "workspace not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not _is_workspace_admin(request.user, workspace):
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        label = self._get_label(workspace, label_id)
+        if label is None:
+            return Response({"error": "label not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        target_type = request.data.get("target_type") or request.query_params.get("target_type")
+        target_key = request.data.get("target_key") or request.query_params.get("target_key")
+        if target_type not in TARGET_TYPES or not target_key:
+            return Response(
+                {"error": "target_type and target_key are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        deleted, _ = PromptLabelAssignment.objects.filter(
+            label=label, target_type=target_type, target_key=target_key
+        ).delete()
+        if not deleted:
+            return Response(
+                {"error": "no such assignment on this label"}, status=status.HTTP_404_NOT_FOUND
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
