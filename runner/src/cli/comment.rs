@@ -55,6 +55,9 @@ pub enum CommentCommand {
         comment_body: CommentBodyArgs,
         #[command(flatten)]
         speaker: CommentSpeakerArgs,
+        /// Fold this low-value status comment in the UI and omit it from future agent prompts.
+        #[arg(long)]
+        fold: bool,
     },
     /// Edit an existing comment owned by this user. Requires the issue
     /// identifier because the REST URL is project-scoped.
@@ -84,7 +87,8 @@ pub async fn run(args: CommentArgs, paths: &crate::util::paths::Paths) -> i32 {
             identifier,
             comment_body,
             speaker,
-        } => cmd_add(&client, &identifier, comment_body, speaker).await,
+            fold,
+        } => cmd_add(&client, &identifier, comment_body, speaker, fold).await,
         CommentCommand::Update {
             identifier,
             comment_id,
@@ -116,6 +120,7 @@ async fn cmd_add(
     identifier: &str,
     comment_body: CommentBodyArgs,
     speaker: CommentSpeakerArgs,
+    fold: bool,
 ) -> Result<(), CliError> {
     let body = load_comment_body(comment_body)?;
     let issue = resolve_issue(client, identifier).await?;
@@ -125,6 +130,7 @@ async fn cmd_add(
     );
     let mut payload: Map<String, Value> = Map::new();
     payload.insert("comment_html".into(), Value::String(body));
+    add_fold_label(&mut payload, fold);
     add_speaker_metadata(&mut payload, speaker)?;
     let resp = client.post(&path, &Value::Object(payload)).await?;
     println!(
@@ -132,6 +138,15 @@ async fn cmd_add(
         serde_json::to_string(&resp).expect("serialize JSON value")
     );
     Ok(())
+}
+
+fn add_fold_label(payload: &mut Map<String, Value>, fold: bool) {
+    if fold {
+        payload.insert(
+            "labels".into(),
+            Value::Array(vec![Value::String("fold".into())]),
+        );
+    }
 }
 
 fn add_speaker_metadata(
@@ -214,7 +229,18 @@ fn display_path(path: &Path) -> String {
 mod tests {
     use serde_json::{Map, Value};
 
-    use super::{CommentBodyArgs, CommentSpeakerArgs, add_speaker_metadata, load_comment_body};
+    use clap::Parser;
+
+    use super::{
+        CommentBodyArgs, CommentSpeakerArgs, add_fold_label, add_speaker_metadata,
+        load_comment_body,
+    };
+
+    #[derive(Debug, Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        comments: super::CommentArgs,
+    }
 
     #[test]
     fn load_comment_body_prefers_inline_body() {
@@ -283,5 +309,28 @@ mod tests {
         assert_eq!(err.exit_code, crate::api_client::EXIT_INVALID);
         assert!(err.message.contains("--agent-run-id requires --as-agent"));
         assert!(payload.is_empty());
+    }
+
+    #[test]
+    fn add_accepts_fold_flag() {
+        let parsed =
+            TestCli::try_parse_from(["pidash", "add", "ENG-42", "--body", "No change", "--fold"])
+                .expect("parse folded comment");
+
+        match parsed.comments.command {
+            super::CommentCommand::Add { fold, .. } => assert!(fold),
+            _ => panic!("expected comment add"),
+        }
+    }
+
+    #[test]
+    fn fold_flag_adds_reserved_label_to_payload() {
+        let mut payload = Map::new();
+        add_fold_label(&mut payload, true);
+
+        assert_eq!(
+            payload.get("labels"),
+            Some(&Value::Array(vec![Value::String("fold".into())]))
+        );
     }
 }

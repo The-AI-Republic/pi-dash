@@ -534,6 +534,9 @@ class IssueComment(ChangeTrackerMixin, ProjectBaseModel):
         "db.Description", on_delete=models.CASCADE, related_name="issue_comment_description", null=True
     )
     attachments = ArrayField(models.URLField(), size=10, blank=True, default=list)
+    # Lightweight behavior markers for comments. ``fold`` is intentionally
+    # opt-in: Pi Dash never infers it from the comment body or speaker.
+    labels = ArrayField(models.CharField(max_length=32), size=8, blank=True, default=list)
     issue = models.ForeignKey(Issue, on_delete=models.CASCADE, related_name="issue_comments")
     # System can also create comment
     actor = models.ForeignKey(

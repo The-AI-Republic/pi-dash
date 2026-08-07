@@ -9,6 +9,7 @@ from pi_dash.db.models import (
     GitRepository,
     GitRepositoryBinding,
     Issue,
+    IssueComment,
     Project,
     State,
 )
@@ -75,6 +76,29 @@ def test_context_shape(issue, run):
     assert ctx["repo"]["work_branch"] is None
     assert ctx["run"]["attempt"] == 1
     assert ctx["run"]["turn_number"] == 1
+
+
+@pytest.mark.unit
+def test_context_excludes_folded_comments(issue, run, workspace, project, create_user):
+    IssueComment.objects.create(
+        issue=issue,
+        workspace=workspace,
+        project=project,
+        actor=create_user,
+        comment_html="<p>Substantive update</p>",
+    )
+    IssueComment.objects.create(
+        issue=issue,
+        workspace=workspace,
+        project=project,
+        actor=create_user,
+        comment_html="<p>No change from the last tick</p>",
+        labels=["fold"],
+    )
+
+    comments_section = build_context(issue, run)["comments_section"]
+    assert "Substantive update" in comments_section
+    assert "No change from the last tick" not in comments_section
 
 
 @pytest.mark.unit
