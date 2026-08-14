@@ -24,6 +24,7 @@ from __future__ import annotations
 KIND_CODING_TASK = "coding-task"
 KIND_REVIEW = "review"
 KIND_SCHEDULER = "scheduler"
+KIND_DIRECT = "direct"
 
 RECIPES: dict[str, tuple[str, ...]] = {
     KIND_CODING_TASK: (
@@ -59,6 +60,43 @@ RECIPES: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# Locked executor-owned recipes. They deliberately share no local Runner
+# section, preventing CLI/filesystem instructions from entering Cloud prompts.
+CLOUD_RECIPES: dict[str, tuple[str, ...]] = {
+    KIND_CODING_TASK: (
+        "cloud-intro",
+        "cloud-capabilities",
+        "cloud-issue-context",
+        "cloud-execution-loop",
+        "cloud-write-policy",
+        "cloud-ending",
+    ),
+    KIND_REVIEW: (
+        "cloud-review-intro",
+        "cloud-capabilities",
+        "cloud-issue-context",
+        "cloud-review-loop",
+        "cloud-write-policy",
+        "cloud-ending",
+    ),
+    KIND_SCHEDULER: (
+        "cloud-scheduler-intro",
+        "cloud-capabilities",
+        "cloud-scheduler-task",
+        "cloud-scheduler-loop",
+        "cloud-write-policy",
+        "cloud-ending",
+    ),
+    KIND_DIRECT: (
+        "cloud-intro",
+        "cloud-capabilities",
+        "cloud-direct-task",
+        "cloud-execution-loop",
+        "cloud-write-policy",
+        "cloud-ending",
+    ),
+}
+
 #: Default work kind. The work-kind axis (project default + per-issue override)
 #: is designed-but-deferred (design §9.5); ``kind_for`` accepts ``work_kind``
 #: from day one and hardcodes ``"coding"`` so the axis lands without touching
@@ -88,6 +126,13 @@ def recipe_for(kind: str) -> tuple[str, ...]:
         return RECIPES[kind]
     except KeyError as exc:
         raise RecipeNotFound(f"no recipe for kind {kind!r}") from exc
+
+
+def cloud_recipe_for(kind: str) -> tuple[str, ...]:
+    try:
+        return CLOUD_RECIPES[kind]
+    except KeyError as exc:
+        raise RecipeNotFound(f"no Cloud Agent recipe for kind {kind!r}") from exc
 
 
 def all_kinds() -> tuple[str, ...]:

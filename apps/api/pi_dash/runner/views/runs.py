@@ -4,7 +4,8 @@
 
 import math
 
-from django.db import transaction
+from django.conf import settings
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import status
@@ -20,7 +21,6 @@ from pi_dash.runner.serializers import (
 )
 from pi_dash.runner.services import matcher
 from pi_dash.runner.services.permissions import (
-    can_view_runner,
     is_workspace_admin,
     is_workspace_member,
 )
@@ -68,8 +68,11 @@ def _can_view_run(user, run: AgentRun) -> bool:
         return True
     if run.runner_id is not None and run.runner.owner_id == user.id:
         return True
-    if run.runner_id is not None and not can_view_runner(user, run.runner):
-        return False
+    if run.work_item_id is not None:
+        if run.work_item.created_by_id == user.id:
+            return True
+        if run.work_item.assignees.filter(pk=user.id).exists():
+            return True
     return is_workspace_admin(user, run.workspace_id)
 
 
@@ -106,12 +109,15 @@ class AgentRunListEndpoint(APIView):
         from pi_dash.db.models import WorkspaceMember
 
         member_workspaces = WorkspaceMember.objects.filter(member=request.user).values("workspace_id")
+        admin_workspaces = WorkspaceMember.objects.filter(member=request.user, role=20).values("workspace_id")
         qs = (
             AgentRun.objects.filter(workspace_id__in=member_workspaces)
             .filter(
                 Q(created_by=request.user)
+                | Q(runner__owner=request.user)
                 | Q(work_item__created_by=request.user)
                 | Q(work_item__assignees=request.user)
+                | Q(workspace_id__in=admin_workspaces)
             )
             .distinct()
             .order_by("-created_at")
@@ -180,21 +186,71 @@ class AgentRunListEndpoint(APIView):
                 status=exc.status,
             )
 
-        with transaction.atomic():
-            run = AgentRun.objects.create(
-                workspace_id=ctx.workspace_id,
-                created_by=ctx.created_by,
-                pod=ctx.pod,
-                prompt=prompt,
-                run_config=request.data.get("run_config") or {},
-                required_capabilities=request.data.get("required_capabilities") or [],
-                work_item_id=ctx.work_item_id,
-                # Owner stays NULL until assignment (design §5.3).
+        from pi_dash.cloud_agent.creation import dispatch_after_commit, execution_fields
+
+        try:
+            with transaction.atomic():
+                execution = execution_fields(
+                    project=ctx.pod.project,
+                    run_kind="direct",
+                    has_issue=ctx.work_item_id is not None,
+                    required_capabilities=request.data.get("required_capabilities") or [],
+                    actor=ctx.created_by,
+                )
+                run = AgentRun.objects.create(
+                    workspace_id=ctx.workspace_id,
+                    created_by=ctx.created_by,
+                    pod=ctx.pod,
+                    prompt="",
+                    prompt_manifest=None,
+                    run_config=request.data.get("run_config") or {},
+                    required_capabilities=request.data.get("required_capabilities") or [],
+                    work_item_id=ctx.work_item_id,
+                    **execution,
+                    # Owner stays NULL until assignment (design §5.3).
+                )
+                from pi_dash.prompting.composer import build_direct_turn
+
+                run.prompt = build_direct_turn(
+                    prompt,
+                    run,
+                    run.work_item if run.work_item_id else None,
+                )
+                if len(run.prompt.encode()) > settings.CLOUD_AGENT_MAX_PROMPT_BYTES:
+                    raise OverflowError("prompt_too_large")
+                run.save(update_fields=["prompt", "prompt_manifest"])
+                dispatch_after_commit(run.id)
+        except (ValueError, RuntimeError) as exc:
+            code = getattr(exc, "code", str(exc))
+            if code == "run_quota_exceeded":
+                payload = {
+                    "error": str(exc),
+                    "code": code,
+                    "retry_after_seconds": max(1, getattr(exc, "retry_after_seconds", 1)),
+                }
+                return Response(payload, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            if code == "admission_unavailable":
+                return Response(
+                    {"error": str(exc), "code": code},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+            if code == "cloud_capability_unavailable":
+                return Response(
+                    {"error": str(exc), "code": code},
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+            return Response({"error": str(exc), "code": code}, status=status.HTTP_409_CONFLICT)
+        except OverflowError:
+            return Response(
+                {"error": "prompt exceeds Cloud Agent limit", "code": "prompt_too_large"},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        except IntegrityError:
+            return Response(
+                {"error": "work item already has an active run", "code": "active_run_exists"},
+                status=status.HTTP_409_CONFLICT,
             )
 
-        # Drain the pod's queue — assigns this run (or any predecessor) to
-        # an idle runner if one exists. Non-blocking on commit.
-        matcher.drain_pod(ctx.pod)
         run.refresh_from_db()
         return Response(
             AgentRunSerializer(run).data,
@@ -355,9 +411,7 @@ class AgentReTickEndpoint(APIView):
             payload["tick_count"] = ticker.tick_count
             payload["max_ticks"] = ticker.effective_max_ticks()
             payload["enabled"] = ticker.enabled
-            payload["next_run_at"] = (
-                ticker.next_run_at.isoformat() if ticker.next_run_at else None
-            )
+            payload["next_run_at"] = ticker.next_run_at.isoformat() if ticker.next_run_at else None
         return Response(payload, status=status.HTTP_200_OK)
 
 
@@ -366,7 +420,7 @@ class AgentRunDetailEndpoint(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, run_id):
-        run = AgentRun.objects.select_related("runner").filter(id=run_id).first()
+        run = AgentRun.objects.select_related("runner", "work_item").filter(id=run_id).first()
         if run is None:
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
         if not _can_view_run(request.user, run):
@@ -388,25 +442,53 @@ class AgentRunCancelEndpoint(APIView):
         # Authorization check happens on a non-locked read; re-check terminal
         # state after acquiring the row lock to avoid racing with
         # Runner.revoke() (which holds select_for_update on in-flight runs).
-        run = AgentRun.objects.select_related("runner").filter(id=run_id).first()
+        run = AgentRun.objects.select_related("runner", "work_item").filter(id=run_id).first()
         if run is None:
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
         if not _can_cancel_run(request.user, run):
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
 
         runner_id = run.runner_id
+        reason = (request.data.get("reason") or "cancelled by user")[:512]
+        if run.executor_kind == "cloud_agent" and run.status == AgentRunStatus.RUNNING:
+            updated = AgentRun.objects.filter(
+                pk=run.id, status=AgentRunStatus.RUNNING, cancel_requested_at__isnull=True
+            ).update(cancel_requested_at=timezone.now(), cancel_reason=reason)
+            if updated:
+                run.refresh_from_db()
+                return Response(AgentRunSerializer(run).data, status=status.HTTP_202_ACCEPTED)
         with transaction.atomic():
             locked = AgentRun.objects.select_for_update().filter(id=run_id).first()
             if locked is None:
                 return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
             if locked.is_terminal:
                 return Response(
-                    {"error": "run already terminal"},
+                    {"error": "run already terminal", "code": "run_already_terminal"},
                     status=status.HTTP_409_CONFLICT,
                 )
-            locked.status = AgentRunStatus.CANCELLED
-            locked.ended_at = timezone.now()
-            locked.save(update_fields=["status", "ended_at"])
+            if locked.executor_kind == "cloud_agent":
+                from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+                finalize_agent_run(
+                    locked.id,
+                    AgentRunStatus.CANCELLED,
+                    updates={
+                        "cancel_requested_at": timezone.now(),
+                        "cancel_reason": reason,
+                        "error_code": "cancelled",
+                        "error": reason,
+                    },
+                )
+                locked.refresh_from_db()
+            else:
+                from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+                finalize_agent_run(
+                    locked.id,
+                    AgentRunStatus.CANCELLED,
+                    updates={"cancel_reason": reason, "error_code": "cancelled", "error": reason},
+                )
+                locked.refresh_from_db()
             run = locked
 
         # Best-effort WS fan-out after commit; runner may already be offline or
@@ -446,6 +528,11 @@ class AgentRunReleasePinEndpoint(APIView):
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
         if not _can_cancel_run(request.user, run):
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+        if run.executor_kind == "cloud_agent":
+            return Response(
+                {"error": "Cloud Agent runs cannot be pinned", "code": "executor_not_local"},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         with transaction.atomic():
             locked = AgentRun.objects.select_for_update().filter(id=run_id).first()

@@ -495,6 +495,56 @@ RUNNER_AGENT_STALL_THRESHOLD_SECS = int(get_config("RUNNER_AGENT_STALL_THRESHOLD
 # roughly three missed 25s polls; stale rows from disabled / downgraded
 # runners age out instead of failing active runs.
 RUNNER_AGENT_OBSERVABILITY_STALE_SECS = int(get_config("RUNNER_AGENT_OBSERVABILITY_STALE_SECS", 90))
+
+# In-house Cloud Agent executor. It runs in the existing Celery deployment;
+# all identity and capacity state is durable in the database.
+DEFAULT_AGENT_EXECUTOR = get_config("DEFAULT_AGENT_EXECUTOR", "local_runner")
+CLOUD_AGENT_ENABLED = get_config("CLOUD_AGENT_ENABLED", "false").lower() in ("1", "true", "yes")
+CLOUD_AGENT_WRITES_ENABLED = get_config("CLOUD_AGENT_WRITES_ENABLED", "false").lower() in ("1", "true", "yes")
+CLOUD_AGENT_GITHUB_TOOLS_ENABLED = get_config("CLOUD_AGENT_GITHUB_TOOLS_ENABLED", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+CLOUD_AGENT_DISABLED_TOOLS = tuple(
+    filter(None, (item.strip() for item in get_config("CLOUD_AGENT_DISABLED_TOOLS", "").split(",")))
+)
+CLOUD_AGENT_MODEL_PROVIDER = get_config("CLOUD_AGENT_MODEL_PROVIDER", "")
+CLOUD_AGENT_MODEL = get_config("CLOUD_AGENT_MODEL", "")
+CLOUD_AGENT_MODEL_BASE_URL = get_config("CLOUD_AGENT_MODEL_BASE_URL", "")
+CLOUD_AGENT_MODEL_API_KEY = get_config("CLOUD_AGENT_MODEL_API_KEY", "")
+for _cloud_int_name, _cloud_default in {
+    "AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS": 30,
+    "CLOUD_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS": 60,
+    "CLOUD_AGENT_EXECUTION_TIMEOUT_SECONDS": 285,
+    "CLOUD_AGENT_RUN_SOFT_LIMIT_SECONDS": 300,
+    "CLOUD_AGENT_RUN_HARD_LIMIT_SECONDS": 330,
+    "CLOUD_AGENT_STALE_GRACE_SECONDS": 60,
+    "CLOUD_AGENT_DISPATCH_LEASE_SECONDS": 60,
+    "CLOUD_AGENT_DISPATCH_BACKOFF_SECONDS": 10,
+    "CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS": 10,
+    "CLOUD_AGENT_SWEEP_INTERVAL_SECONDS": 30,
+    "CLOUD_AGENT_DISPATCH_SCAN_BATCH": 100,
+    "CLOUD_AGENT_MAX_QUEUE_AGE_SECONDS": 900,
+    "CLOUD_AGENT_MODEL_REQUEST_LIMIT": 25,
+    "CLOUD_AGENT_TOOL_CALL_LIMIT": 20,
+    "CLOUD_AGENT_WRITE_CALL_LIMIT": 3,
+    "CLOUD_AGENT_INPUT_TOKEN_LIMIT": 144000,
+    "CLOUD_AGENT_OUTPUT_TOKEN_LIMIT": 16000,
+    "CLOUD_AGENT_TOTAL_TOKEN_LIMIT": 160000,
+    "CLOUD_AGENT_MAX_OUTPUT_TOKENS_PER_REQUEST": 4096,
+    "CLOUD_AGENT_MAX_QUEUED_PER_WORKSPACE": 20,
+    "CLOUD_AGENT_MAX_RUNNING_PER_WORKSPACE": 2,
+    "CLOUD_AGENT_USER_CREATION_RATE_PER_MINUTE": 6,
+    "CLOUD_AGENT_WORKSPACE_CREATION_RATE_PER_MINUTE": 30,
+    "CLOUD_AGENT_TOOL_TIMEOUT_SECONDS": 20,
+    "CLOUD_AGENT_MAX_TOOL_RESULT_BYTES": 65536,
+    "CLOUD_AGENT_MAX_PROMPT_BYTES": 262144,
+    "CLOUD_AGENT_MAX_FINAL_RESULT_BYTES": 65536,
+    "CLOUD_AGENT_MAX_EVENTS": 500,
+}.items():
+    globals()[_cloud_int_name] = int(get_config(_cloud_int_name, _cloud_default))
+CLOUD_AGENT_BLOCK_PRIVATE_URLS = get_config("CLOUD_AGENT_BLOCK_PRIVATE_URLS", "true").lower() in ("1", "true", "yes")
 # Access-token signing key ring. Each entry: {kid, secret, status} where
 # status ∈ {"active", "verify_only"}. Exactly one key is active.
 # Default to a deterministic per-instance key derived from SECRET_KEY so

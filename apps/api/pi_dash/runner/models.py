@@ -9,6 +9,8 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
+from pi_dash.core.agent_execution import AgentExecutorKind
+
 _logger = logging.getLogger(__name__)
 
 # Canonical set of ``Runner.revoke`` reasons. Kept here (not as a Django
@@ -569,11 +571,19 @@ class Runner(models.Model):
                 .values_list("pk", "pod_id")
             )
             if active_runs:
-                AgentRun.objects.filter(pk__in=[pk for pk, _ in active_runs]).update(
-                    status=AgentRunStatus.CANCELLED,
-                    ended_at=now,
-                    error="runner revoked",
-                )
+                from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+                for run_id, _ in active_runs:
+                    finalize_agent_run(
+                        run_id,
+                        AgentRunStatus.CANCELLED,
+                        updates={
+                            "error": "runner revoked",
+                            "error_code": "runner_revoked",
+                            "cancel_reason": stored_reason,
+                        },
+                        expected_runner_id=self.pk,
+                    )
                 affected_pod_ids = {pid for _, pid in active_runs if pid is not None}
 
             pinned_pod_ids = list(
@@ -821,6 +831,19 @@ class AgentRun(models.Model):
         default=AgentRunStatus.QUEUED,
         db_index=True,
     )
+    executor_kind = models.CharField(
+        max_length=24,
+        choices=AgentExecutorKind.choices,
+        default=AgentExecutorKind.LOCAL_RUNNER,
+        db_index=True,
+    )
+    dispatch_attempts = models.PositiveIntegerField(default=0)
+    cancel_requested_at = models.DateTimeField(null=True, blank=True)
+    cancel_reason = models.CharField(max_length=512, blank=True, default="")
+    error_code = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    tool_plan = models.JSONField(default=dict, blank=True)
+    terminal_hooks_applied_at = models.DateTimeField(null=True, blank=True)
+    terminal_capacity_released_at = models.DateTimeField(null=True, blank=True)
     prompt = models.TextField(blank=True, default="")
     # How this run was triggered. Drives per-user prompt-override resolution in
     # the composer (design §9.1) and is surfaced as run-detail audit metadata.
@@ -876,6 +899,55 @@ class AgentRun(models.Model):
             models.Index(fields=["work_item", "status"]),
             models.Index(fields=["pod", "status"], name="agent_run_pod_status_idx"),
             models.Index(fields=["created_by", "status"], name="agent_run_created_status_idx"),
+            models.Index(
+                fields=["executor_kind", "status", "lease_expires_at", "created_at"],
+                name="agent_run_cloud_dispatch_idx",
+            ),
+            models.Index(
+                fields=["executor_kind", "status", "started_at"],
+                name="agent_run_cloud_stale_idx",
+            ),
+            models.Index(
+                fields=["status", "terminal_hooks_applied_at", "ended_at"],
+                name="agent_run_term_hooks_idx",
+            ),
+            models.Index(
+                fields=["status", "terminal_capacity_released_at", "ended_at"],
+                name="agent_run_term_capacity_idx",
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    models.Q(executor_kind=AgentExecutorKind.LOCAL_RUNNER)
+                    | models.Q(
+                        executor_kind=AgentExecutorKind.CLOUD_AGENT,
+                        runner__isnull=True,
+                        pinned_runner__isnull=True,
+                        owner__isnull=True,
+                        assigned_at__isnull=True,
+                        queue_position__isnull=True,
+                    )
+                ),
+                name="agent_run_cloud_has_no_local_assignment",
+            ),
+            models.UniqueConstraint(
+                fields=["work_item"],
+                condition=(
+                    models.Q(work_item__isnull=False)
+                    & models.Q(
+                        status__in=[
+                            "queued",
+                            "assigned",
+                            "waiting_for_worktree",
+                            "running",
+                            "awaiting_approval",
+                            "awaiting_reauth",
+                        ]
+                    )
+                ),
+                name="agent_run_one_active_per_work_item",
+            ),
         ]
 
     def save(self, *args, **kwargs):
@@ -949,6 +1021,47 @@ class AgentRunEvent(models.Model):
         db_table = "agent_run_event"
         unique_together = [("agent_run", "seq")]
         ordering = ("agent_run", "seq")
+
+
+class ToolCallStatus(models.TextChoices):
+    PREPARED = "prepared", "Prepared"
+    SUBMITTED = "submitted", "Submitted"
+    SUCCEEDED = "succeeded", "Succeeded"
+    FAILED = "failed", "Failed"
+    UNKNOWN = "unknown", "Outcome unknown"
+    DENIED = "denied", "Denied"
+
+
+class AgentRunToolCall(models.Model):
+    """Durable, tenant-bound audit and idempotency ledger for Cloud tools."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    agent_run = models.ForeignKey(AgentRun, on_delete=models.CASCADE, related_name="tool_calls")
+    tool_call_id = models.CharField(max_length=255)
+    source = models.CharField(max_length=16)
+    server_key = models.CharField(max_length=64, blank=True, default="")
+    tool_name = models.CharField(max_length=255)
+    risk = models.CharField(max_length=16)
+    status = models.CharField(max_length=16, choices=ToolCallStatus.choices, default=ToolCallStatus.PREPARED)
+    request_fingerprint = models.CharField(max_length=64)
+    result_fingerprint = models.CharField(max_length=64, blank=True, default="")
+    idempotency_key_hash = models.CharField(max_length=64, blank=True, default="")
+    external_operation_id = models.CharField(max_length=255, blank=True, default="")
+    safe_replay_result = models.JSONField(null=True, blank=True)
+    error_code = models.CharField(max_length=64, blank=True, default="")
+    prepared_at = models.DateTimeField(auto_now_add=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "agent_run_tool_call"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["agent_run", "tool_call_id"],
+                name="agent_run_tool_call_unique",
+            )
+        ]
+        indexes = [models.Index(fields=["agent_run", "status"], name="agent_run_tool_status_idx")]
 
 
 class ApprovalRequest(models.Model):

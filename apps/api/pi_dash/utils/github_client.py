@@ -11,6 +11,7 @@ needs, paginated iteration via the Link header. See
 
 from __future__ import annotations
 
+import base64
 import re
 from datetime import datetime
 from typing import Iterable, Iterator, Optional
@@ -60,7 +61,8 @@ class GithubClient:
 
     def _request(self, method: str, url: str, **kwargs) -> requests.Response:
         kwargs.setdefault("timeout", self._timeout)
-        response = requests.request(method, url, headers=self._headers(), **kwargs)
+        kwargs.setdefault("headers", self._headers())
+        response = requests.request(method, url, **kwargs)
         if response.status_code == 401:
             raise GithubAuthError(response.text)
         if response.status_code == 403:
@@ -161,6 +163,58 @@ class GithubClient:
         """GET /repos/{owner}/{repo}/pulls/{number} — used to snapshot a PR's
         title/state/draft/merged when an issue link is attached."""
         return self._request("GET", f"{self._api_base}/repos/{owner}/{name}/pulls/{number}").json()
+
+    def get_file(self, owner: str, name: str, path: str, *, ref: str = "") -> dict:
+        """Read one repository file through the GitHub contents API."""
+        params = f"?{urlencode({'ref': ref})}" if ref else ""
+        payload = self._request("GET", f"{self._api_base}/repos/{owner}/{name}/contents/{path}{params}").json()
+        if payload.get("type") != "file":
+            raise ValueError("path is not a file")
+        raw = base64.b64decode(payload.get("content", ""), validate=False)
+        if len(raw) > 65536:
+            raise ValueError("file exceeds Cloud Agent result limit")
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return {
+                "path": payload.get("path"),
+                "sha": payload.get("sha"),
+                "content": "",
+                "unsupported_content": "binary",
+            }
+        return {
+            "path": payload.get("path"),
+            "sha": payload.get("sha"),
+            "content": content,
+        }
+
+    def get_pull_request_diff(self, owner: str, name: str, number: int) -> dict:
+        response = self._request(
+            "GET",
+            f"{self._api_base}/repos/{owner}/{name}/pulls/{number}",
+            headers={**self._headers(), "Accept": "application/vnd.github.diff"},
+        )
+        raw = response.text.encode()[:65536]
+        return {"diff": raw.decode("utf-8", errors="replace"), "truncated": len(response.content) > len(raw)}
+
+    def list_pull_request_files(self, owner: str, name: str, number: int) -> list[dict]:
+        return list(self._paginate(f"/repos/{owner}/{name}/pulls/{number}/files", {"per_page": 100}))[:300]
+
+    def list_pull_request_checks(self, owner: str, name: str, number: int) -> dict:
+        pull = self.get_pull_request(owner, name, number)
+        sha = pull["head"]["sha"]
+        return self._request("GET", f"{self._api_base}/repos/{owner}/{name}/commits/{sha}/check-runs").json()
+
+    def list_pull_request_reviews(self, owner: str, name: str, number: int) -> list[dict]:
+        return list(self._paginate(f"/repos/{owner}/{name}/pulls/{number}/reviews", {"per_page": 100}))[:200]
+
+    def list_pull_request_comments(self, owner: str, name: str, number: int) -> dict:
+        return {
+            "issue_comments": list(self.list_issue_comments(owner, name, number))[:200],
+            "review_comments": list(
+                self._paginate(f"/repos/{owner}/{name}/pulls/{number}/comments", {"per_page": 100})
+            )[:200],
+        }
 
 
 _ISSUE_URL_RE = re.compile(r"/repos/[^/]+/[^/]+/issues/(\d+)$")

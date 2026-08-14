@@ -22,6 +22,8 @@ from django.db import models, transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from pi_dash.core.agent_execution import AgentExecutorKind
+
 from pi_dash.runner.models import (
     AgentRun,
     AgentRunStatus,
@@ -138,6 +140,7 @@ def next_queued_run_for_pod(pod: Pod) -> Optional[AgentRun]:
         .filter(
             pod=pod,
             status=AgentRunStatus.QUEUED,
+            executor_kind=AgentExecutorKind.LOCAL_RUNNER,
             pinned_runner__isnull=True,
         )
         .order_by("created_at")
@@ -160,6 +163,7 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
         .filter(
             pod=runner.pod,
             status=AgentRunStatus.QUEUED,
+            executor_kind=AgentExecutorKind.LOCAL_RUNNER,
         )
         .filter(
             Q(pinned_runner=runner) | Q(pinned_runner__isnull=True),
@@ -395,9 +399,7 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
         eligible_owner_ids.add(run_creator_id)
     if issue.created_by_id is not None:
         eligible_owner_ids.add(issue.created_by_id)
-    eligible_owner_ids.update(
-        issue.assignees.values_list("id", flat=True)
-    )
+    eligible_owner_ids.update(issue.assignees.values_list("id", flat=True))
     eligible_owner_ids.discard(None)
     if not eligible_owner_ids:
         return False

@@ -82,9 +82,7 @@ def _is_workspace_admin(user, workspace: Workspace) -> bool:
 def _is_workspace_member(user, workspace: Workspace) -> bool:
     if user.is_superuser:
         return True
-    return WorkspaceMember.objects.filter(
-        workspace=workspace, member=user, is_active=True
-    ).exists()
+    return WorkspaceMember.objects.filter(workspace=workspace, member=user, is_active=True).exists()
 
 
 def _get_workspace_or_404(slug: str):
@@ -242,9 +240,7 @@ class PromptSectionDetailEndpoint(APIView):
             )
 
         row = self._upsert(workspace, target_user, section_key, body, request.user)
-        return Response(
-            PromptSectionOverrideSerializer(row).data, status=status.HTTP_200_OK
-        )
+        return Response(PromptSectionOverrideSerializer(row).data, status=status.HTTP_200_OK)
 
     def _upsert(self, workspace, target_user, section_key, body, editor):
         """Update the active override in place (bump version) or create one.
@@ -256,9 +252,7 @@ class PromptSectionDetailEndpoint(APIView):
         """
 
         def _base_qs():
-            qs = PromptSectionOverride.objects.filter(
-                workspace=workspace, section_key=section_key, is_active=True
-            )
+            qs = PromptSectionOverride.objects.filter(workspace=workspace, section_key=section_key, is_active=True)
             return qs.filter(user__isnull=True) if target_user is None else qs.filter(user=target_user)
 
         try:
@@ -291,9 +285,7 @@ class PromptSectionDetailEndpoint(APIView):
         row.version = F("version") + 1
         row.needs_attention = False
         row.updated_by = editor
-        row.save(
-            update_fields=["body", "version", "needs_attention", "updated_by", "updated_at"]
-        )
+        row.save(update_fields=["body", "version", "needs_attention", "updated_by", "updated_at"])
         row.refresh_from_db(fields=["version"])  # resolve F() for the response
         return row
 
@@ -313,9 +305,7 @@ class PromptSectionDetailEndpoint(APIView):
             )
 
         target_user = request.user if scope == SCOPE_USER else None
-        qs = PromptSectionOverride.objects.filter(
-            workspace=workspace, section_key=section_key, is_active=True
-        )
+        qs = PromptSectionOverride.objects.filter(workspace=workspace, section_key=section_key, is_active=True)
         qs = qs.filter(user__isnull=True) if target_user is None else qs.filter(user=target_user)
         row = qs.first()
         if row is None:
@@ -361,9 +351,7 @@ class PromptCompiledEndpoint(APIView):
         # Dual compilation (§9.1): when resolving for a user who has overrides,
         # also surface the workspace-only template that automatic runs (ticks,
         # scheduler beats) would use, so the seam is visible.
-        if user is not None and any(
-            r.source.startswith("user:") for r in compiled.resolved
-        ):
+        if user is not None and any(r.source.startswith("user:") for r in compiled.resolved):
             automatic = compile_template(kind, workspace=workspace, project=None, user=None)
             payload["automatic_template_body"] = automatic.template_body
         return Response(payload)
@@ -453,18 +441,18 @@ class PromptPreviewEndpoint(APIView):
     def _issue_context(self, request, workspace, kind):
         issue_id = request.data.get("issue_id")
         if not issue_id:
-            return None, None, Response(
-                {"error": "issue_id is required for this kind"},
-                status=status.HTTP_400_BAD_REQUEST,
+            return (
+                None,
+                None,
+                Response(
+                    {"error": "issue_id is required for this kind"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                ),
             )
         try:
-            issue = Issue.objects.select_related("project", "workspace", "state").get(
-                id=issue_id, workspace=workspace
-            )
+            issue = Issue.objects.select_related("project", "workspace", "state").get(id=issue_id, workspace=workspace)
         except (Issue.DoesNotExist, ValueError, DjangoValidationError):
-            return None, None, Response(
-                {"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND
-            )
+            return None, None, Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
         context = build_context(issue, _FakeRun(run_id=uuid.uuid4()))
         # Honor the requested kind even if it differs from the issue's state-
         # derived kind, so a preview of the review prompt against an In Progress
@@ -477,17 +465,19 @@ class PromptPreviewEndpoint(APIView):
 
         binding_id = request.data.get("binding_id")
         if not binding_id:
-            return None, None, Response(
-                {"error": "binding_id is required for the scheduler kind"},
-                status=status.HTTP_400_BAD_REQUEST,
+            return (
+                None,
+                None,
+                Response(
+                    {"error": "binding_id is required for the scheduler kind"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                ),
             )
         try:
-            binding = SchedulerBinding.objects.select_related(
-                "scheduler", "project", "workspace"
-            ).get(id=binding_id, workspace=workspace)
-        except (SchedulerBinding.DoesNotExist, ValueError, DjangoValidationError):
-            return None, None, Response(
-                {"error": "scheduler binding not found"}, status=status.HTTP_404_NOT_FOUND
+            binding = SchedulerBinding.objects.select_related("scheduler", "project", "workspace").get(
+                id=binding_id, workspace=workspace
             )
+        except (SchedulerBinding.DoesNotExist, ValueError, DjangoValidationError):
+            return None, None, Response({"error": "scheduler binding not found"}, status=status.HTTP_404_NOT_FOUND)
         context = build_scheduler_context(binding, _FakeRun(run_id=uuid.uuid4()))
         return context, binding.project, None

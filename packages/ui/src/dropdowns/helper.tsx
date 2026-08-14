@@ -100,6 +100,7 @@ export interface ICustomSelectItemProps {
   children: React.ReactNode;
   value: any;
   className?: string;
+  disabled?: boolean;
 }
 
 // Submenu interfaces

@@ -74,15 +74,9 @@ def _token_updates(tokens: Any) -> Dict[str, int]:
     if not isinstance(tokens, dict):
         return {}
     fields = {
-        "input_tokens": _coerce_token(
-            tokens.get("input", tokens.get("input_tokens"))
-        ),
-        "output_tokens": _coerce_token(
-            tokens.get("output", tokens.get("output_tokens"))
-        ),
-        "total_tokens": _coerce_token(
-            tokens.get("total", tokens.get("total_tokens"))
-        ),
+        "input_tokens": _coerce_token(tokens.get("input", tokens.get("input_tokens"))),
+        "output_tokens": _coerce_token(tokens.get("output", tokens.get("output_tokens"))),
+        "total_tokens": _coerce_token(tokens.get("total", tokens.get("total_tokens"))),
     }
     return {key: value for key, value in fields.items() if value is not None}
 
@@ -141,15 +135,11 @@ def _apply_post_run_orchestration(run: AgentRun) -> None:
     try:
         maybe_disarm_on_terminal_signal(run)
     except Exception:
-        logger.exception(
-            "orchestration.error: terminal-disarm failed for run %s", run.pk
-        )
+        logger.exception("orchestration.error: terminal-disarm failed for run %s", run.pk)
     try:
         maybe_apply_deferred_pause(run)
     except Exception:
-        logger.exception(
-            "orchestration.error: deferred-pause failed for run %s", run.pk
-        )
+        logger.exception("orchestration.error: deferred-pause failed for run %s", run.pk)
 
 
 def apply_run_paused(
@@ -206,9 +196,7 @@ def apply_run_paused(
                 )
             )
         if summary:
-            body_parts.append(
-                format_html("<p><em>Summary so far:</em> {}</p>", summary)
-            )
+            body_parts.append(format_html("<p><em>Summary so far:</em> {}</p>", summary))
         if body_parts:
             IssueComment.objects.create(
                 issue=run.work_item,
@@ -285,9 +273,7 @@ def apply_run_resume_unavailable(
     from pi_dash.runner.services.matcher import drain_pod_by_id
 
     if run.pod_id is not None:
-        transaction.on_commit(
-            lambda pid=run.pod_id: drain_pod_by_id(pid)
-        )
+        transaction.on_commit(lambda pid=run.pod_id: drain_pod_by_id(pid))
 
 
 def apply_assign_rejected_busy(
@@ -359,12 +345,14 @@ def _post_failure_comment(run_id: UUID | str, error_detail: str) -> None:
     if detail.startswith(_INFRA_FAILURE_DETAIL_PREFIXES):
         return
 
-    run = (
-        AgentRun.objects.select_related("work_item", "work_item__project")
-        .filter(pk=run_id)
-        .first()
-    )
+    run = AgentRun.objects.select_related("work_item", "work_item__project").filter(pk=run_id).first()
     if run is None or run.work_item_id is None:
+        return
+    if IssueComment.objects.filter(
+        issue_id=run.work_item_id,
+        speaker_agent_run_id=run.id,
+        speaker_type=IssueComment.SpeakerType.SYSTEM,
+    ).exists():
         return
 
     if detail:
@@ -386,6 +374,9 @@ def _post_failure_comment(run_id: UUID | str, error_detail: str) -> None:
         workspace=run.work_item.workspace,
         actor=get_agent_system_user(),
         comment_html=body,
+        speaker_type=IssueComment.SpeakerType.SYSTEM,
+        speaker_label="Pi Dash",
+        speaker_agent_run_id=run.id,
     )
 
 
@@ -439,61 +430,17 @@ def finalize_run_terminal(
     model_value = _normalize_model(model)
     if model_value:
         updates["llm_model"] = model_value
-    updated = AgentRun.objects.filter(id=run_id, runner=runner).exclude(
-        status__in=TERMINAL_RUN_STATUSES
-    ).update(**updates)
+    from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+    updated = finalize_agent_run(
+        run_id,
+        new_status,
+        updates=updates,
+        expected_runner_id=runner.id,
+    )
     if not updated:
         logger.info(
             "run_lifecycle: ignoring late terminal transition for closed run %s",
             run_id,
         )
-        return
-
-    if new_status == AgentRunStatus.FAILED:
-        try:
-            _post_failure_comment(run_id, error_detail)
-        except Exception:
-            # Comment posting must never block the lifecycle terminal
-            # transition. Log and move on so the run still gets reaped /
-            # the pod still gets drained.
-            logger.exception(
-                "run_lifecycle: failed to post failure comment for run %s",
-                run_id,
-            )
-
-    from pi_dash.runner.services.matcher import (
-        drain_for_runner_by_id,
-        drain_pod_by_id,
-    )
-    from pi_dash.runner.services.scheduler_hook import (
-        update_scheduler_binding_on_terminate,
-    )
-
-    runner_id = runner.id
-    pod_id = runner.pod_id
-
-    def _pause_and_drain(rid=run_id, rnr=runner_id, pid=pod_id):
-        run = (
-            AgentRun.objects.select_related(
-                "work_item",
-                "work_item__state",
-                "work_item__project",
-                "scheduler_binding",
-            )
-            .filter(pk=rid)
-            .first()
-        )
-        if run is not None:
-            _apply_post_run_orchestration(run)
-            if run.scheduler_binding_id is not None:
-                try:
-                    update_scheduler_binding_on_terminate(run)
-                except Exception:
-                    logger.exception(
-                        "scheduler.terminate_hook: failed for run %s", rid
-                    )
-        drain_for_runner_by_id(rnr)
-        if pid is not None:
-            drain_pod_by_id(pid)
-
-    transaction.on_commit(_pause_and_drain)
+    return

@@ -223,13 +223,9 @@ class IssueCreateSerializer(BaseSerializer):
                     proj = attrs["project"]
                     project_id = getattr(proj, "id", proj)
                 if project_id is not None and str(pod.project_id) != str(project_id):
-                    raise serializers.ValidationError(
-                        {"assigned_pod_id": "pod is in a different project"}
-                    )
+                    raise serializers.ValidationError({"assigned_pod_id": "pod is in a different project"})
                 if pod.deleted_at is not None:
-                    raise serializers.ValidationError(
-                        {"assigned_pod_id": "pod has been deleted"}
-                    )
+                    raise serializers.ValidationError({"assigned_pod_id": "pod has been deleted"})
             # Block mid-flight *reassignment* — changing OR clearing the pod once
             # a run is active. The run's pod FK is immutable, so a change would
             # silently take effect only on the *next* dispatch (and clearing to
@@ -1234,6 +1230,7 @@ class IssueDetailSerializer(IssueSerializer):
         return {
             "id": str(run.id),
             "status": run.status,
+            "executor_kind": run.executor_kind,
             "queue_position": run.queue_position,
             "runner": str(run.runner_id) if run.runner_id else None,
             "runner_name": run.runner.name if run.runner_id and run.runner else None,
@@ -1243,6 +1240,7 @@ class IssueDetailSerializer(IssueSerializer):
             "ended_at": self._serialize_datetime(run.ended_at),
             "done_payload": run.done_payload,
             "error": run.error,
+            "error_code": run.error_code,
             "error_diagnostic": classify_run_error(run.error),
             "llm_model": run.llm_model,
             "input_tokens": run.input_tokens,

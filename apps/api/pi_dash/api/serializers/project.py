@@ -97,6 +97,7 @@ class ProjectCreateSerializer(BaseSerializer):
             "is_default",
             "repo_url",
             "base_branch",
+            "default_agent_executor",
         ]
 
         read_only_fields = [
@@ -110,6 +111,13 @@ class ProjectCreateSerializer(BaseSerializer):
         ]
 
     def validate(self, data):
+        if data.get("default_agent_executor") == "cloud_agent":
+            from pi_dash.core.agent_execution import cloud_agent_is_configured
+
+            if not cloud_agent_is_configured():
+                from pi_dash.cloud_agent.api import CloudAgentUnavailableAPI
+
+                raise CloudAgentUnavailableAPI()
         project_name = data.get("name", None)
         project_identifier = data.get("identifier", None)
 
@@ -253,6 +261,13 @@ class ProjectSerializer(BaseSerializer):
         ]
 
     def validate(self, data):
+        if data.get("default_agent_executor") == "cloud_agent":
+            from pi_dash.core.agent_execution import cloud_agent_is_configured
+
+            if not cloud_agent_is_configured():
+                from pi_dash.cloud_agent.api import CloudAgentUnavailableAPI
+
+                raise CloudAgentUnavailableAPI()
         project_name = data.get("name", None)
         project_identifier = data.get("identifier", None)
 

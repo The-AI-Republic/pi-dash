@@ -133,10 +133,7 @@ class PromptSectionOverride(models.Model):
 
     def __str__(self) -> str:
         scope = f"user={self.user_id}" if self.user_id else "workspace"
-        return (
-            f"PromptSectionOverride<ws={self.workspace_id}:{scope}:"
-            f"{self.section_key}:v{self.version}>"
-        )
+        return f"PromptSectionOverride<ws={self.workspace_id}:{scope}:{self.section_key}:v{self.version}>"
 
     @property
     def is_workspace_level(self) -> bool:

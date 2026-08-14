@@ -44,6 +44,12 @@ export interface IPartialProject {
 }
 
 export interface IProject extends IPartialProject {
+  default_agent_executor?: "local_runner" | "cloud_agent";
+  agent_executor_options?: {
+    kind: "local_runner" | "cloud_agent";
+    available: boolean;
+    reason_code: string;
+  }[];
   archive_in?: number;
   close_in?: number;
   // only for uploading the cover image

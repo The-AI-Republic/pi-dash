@@ -72,6 +72,8 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
   // derived values
   const currentNetwork = NETWORK_CHOICES.find((n) => n.key === project?.network);
   const coverImage = watch("cover_image_url");
+  const cloudExecutorOption = project.agent_executor_options?.find((option) => option.kind === "cloud_agent");
+  const localExecutorOption = project.agent_executor_options?.find((option) => option.kind === "local_runner");
 
   useEffect(() => {
     if (project && projectId !== getValues("id")) {
@@ -215,6 +217,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
       logo_props: formData.logo_props,
       timezone: formData.timezone,
       base_branch: formData.base_branch ?? "",
+      default_agent_executor: formData.default_agent_executor ?? "local_runner",
     };
 
     // Handle cover image changes
@@ -454,6 +457,47 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
             />
             <span className="text-11 text-danger-primary">{errors?.base_branch?.message}</span>
           </div>
+        </div>
+        <div className="flex flex-col gap-1">
+          <h4 className="text-13">{t("Default AI executor")}</h4>
+          <Controller
+            name="default_agent_executor"
+            control={control}
+            render={({ field: { value, onChange } }) => (
+              <CustomSelect
+                value={value ?? "local_runner"}
+                onChange={onChange}
+                label={value === "cloud_agent" ? t("Pi Dash Cloud Agent") : t("Local Runner")}
+                buttonClassName="!border-subtle !shadow-none font-medium rounded-md"
+                input
+                disabled={!isAdmin}
+              >
+                <CustomSelect.Option value="cloud_agent" disabled={cloudExecutorOption?.available === false}>
+                  <div>
+                    <p>{t("Pi Dash Cloud Agent")}</p>
+                    <p className="text-11 text-placeholder">
+                      {cloudExecutorOption?.available === false
+                        ? t("Unavailable on this instance. Ask an administrator to configure the Cloud Agent.")
+                        : t("Works out of the box with project and connected GitHub tools; no filesystem or shell.")}
+                    </p>
+                  </div>
+                </CustomSelect.Option>
+                <CustomSelect.Option value="local_runner" disabled={localExecutorOption?.available === false}>
+                  <div>
+                    <p>{t("Local Runner")}</p>
+                    <p className="text-11 text-placeholder">
+                      {localExecutorOption?.available === false
+                        ? t("Unavailable until a Local Runner is connected to this project.")
+                        : t("Runs on your connected development machine with repository access.")}
+                    </p>
+                  </div>
+                </CustomSelect.Option>
+              </CustomSelect>
+            )}
+          />
+          <p className="text-11 text-tertiary">
+            {t("Changing this affects new runs only. Existing and queued runs keep their original executor.")}
+          </p>
         </div>
         <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
           <div className="flex flex-col gap-1">

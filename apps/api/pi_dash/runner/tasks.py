@@ -45,9 +45,7 @@ def expire_stale_approvals() -> int:
     now = timezone.now()
     expired = 0
     pending_ids = list(
-        ApprovalRequest.objects.filter(
-            status=ApprovalStatus.PENDING, expires_at__lt=now
-        ).values_list("pk", flat=True)
+        ApprovalRequest.objects.filter(status=ApprovalStatus.PENDING, expires_at__lt=now).values_list("pk", flat=True)
     )
     for approval_id in pending_ids:
         runner_id = None
@@ -70,9 +68,17 @@ def expire_stale_approvals() -> int:
                 AgentRunStatus.AWAITING_APPROVAL,
                 AgentRunStatus.RUNNING,
             }:
-                AgentRun.objects.filter(pk=run.pk).update(
-                    status=AgentRunStatus.CANCELLED,
-                    ended_at=now,
+                from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+                finalize_agent_run(
+                    run.id,
+                    AgentRunStatus.CANCELLED,
+                    updates={
+                        "error_code": "approval_timeout",
+                        "error": "approval request expired",
+                        "cancel_reason": "approval_timeout",
+                    },
+                    expected_runner_id=run.runner_id,
                 )
                 runner_id = run.runner_id
                 run_id = run.id
@@ -119,21 +125,15 @@ def sweep_idle_sessions() -> int:
     poll_secs = int(getattr(settings, "LONG_POLL_INTERVAL_SECS", 25))
     threshold = timezone.now() - timedelta(seconds=poll_secs * 2)
     sessions = list(
-        RunnerSession.objects.filter(
-            revoked_at__isnull=True, last_seen_at__lt=threshold
-        ).values_list("id", "runner_id")
+        RunnerSession.objects.filter(revoked_at__isnull=True, last_seen_at__lt=threshold).values_list("id", "runner_id")
     )
     if not sessions:
         return 0
     sids = [sid for sid, _ in sessions]
-    RunnerSession.objects.filter(id__in=sids).update(
-        revoked_at=timezone.now(), revoked_reason="idle_timeout"
-    )
+    RunnerSession.objects.filter(id__in=sids).update(revoked_at=timezone.now(), revoked_reason="idle_timeout")
     for sid, runner_id in sessions:
         outbox.clear_session_marker(sid)
-        outbox.publish_session_eviction(
-            runner_id, old_session_id=str(sid), new_session_id=""
-        )
+        outbox.publish_session_eviction(runner_id, old_session_id=str(sid), new_session_id="")
     logger.info("sweep_idle_sessions evicted %s session(s)", len(sessions))
     return len(sessions)
 
@@ -141,9 +141,7 @@ def sweep_idle_sessions() -> int:
 @shared_task(name="runner.sweep_stale_runners")
 def sweep_stale_runners() -> int:
     """Flip ONLINE runners to OFFLINE when last_heartbeat_at is too old."""
-    threshold = timezone.now() - timedelta(
-        seconds=int(getattr(settings, "RUNNER_OFFLINE_THRESHOLD_SECS", 50))
-    )
+    threshold = timezone.now() - timedelta(seconds=int(getattr(settings, "RUNNER_OFFLINE_THRESHOLD_SECS", 50)))
     affected = (
         Runner.objects.filter(status=RunnerStatus.ONLINE)
         .exclude(last_heartbeat_at__gte=threshold)
@@ -170,24 +168,16 @@ def sweep_old_streams() -> int:
     reaped_consumers = 0
 
     active_consumers_by_runner = defaultdict(set)
-    active_sessions = RunnerSession.objects.filter(
-        revoked_at__isnull=True
-    ).values_list("runner_id", "id")
+    active_sessions = RunnerSession.objects.filter(revoked_at__isnull=True).values_list("runner_id", "id")
     for runner_id, session_id in active_sessions:
-        active_consumers_by_runner[runner_id].add(
-            outbox.consumer_name(session_id)
-        )
+        active_consumers_by_runner[runner_id].add(outbox.consumer_name(session_id))
 
-    runner_ids_with_sessions = set(
-        RunnerSession.objects.values_list("runner_id", flat=True).distinct()
-    )
+    runner_ids_with_sessions = set(RunnerSession.objects.values_list("runner_id", flat=True).distinct())
     for rid in runner_ids_with_sessions:
         keep_consumers = active_consumers_by_runner.get(rid, set())
         if keep_consumers:
             try:
-                removed = outbox.safe_trim_runner_stream(
-                    rid, time_cutoff_id=time_cutoff_id
-                )
+                removed = outbox.safe_trim_runner_stream(rid, time_cutoff_id=time_cutoff_id)
                 if removed:
                     trimmed_count += removed
             except Exception:
@@ -252,6 +242,7 @@ def sweep_agent_chat_state() -> int:
 # heartbeat-staleness is handled by ``mark_offline_runners`` / etc.), and
 # the agent itself has been silent past the threshold.
 
+
 @shared_task(name="runner.reconcile_stalled_runs")
 def reconcile_stalled_runs() -> int:
     """Mark BUSY runs FAILED when the agent subprocess has gone silent.
@@ -275,9 +266,7 @@ def reconcile_stalled_runs() -> int:
     NULL and ``__lt`` excludes NULL.
     """
     threshold = int(getattr(settings, "RUNNER_AGENT_STALL_THRESHOLD_SECS", 360))
-    snapshot_freshness = int(
-        getattr(settings, "RUNNER_AGENT_OBSERVABILITY_STALE_SECS", 90)
-    )
+    snapshot_freshness = int(getattr(settings, "RUNNER_AGENT_OBSERVABILITY_STALE_SECS", 90))
     now = timezone.now()
     cutoff = now - timedelta(seconds=threshold)
     snapshot_cutoff = now - timedelta(seconds=snapshot_freshness)
@@ -307,10 +296,7 @@ def reconcile_stalled_runs() -> int:
             runner__live_state__updated_at__gte=snapshot_cutoff,
             runner__live_state__last_event_at__lt=cutoff,
         )
-        .filter(
-            Q(runner__live_state__approvals_pending=0)
-            | Q(runner__live_state__approvals_pending__isnull=True)
-        )
+        .filter(Q(runner__live_state__approvals_pending=0) | Q(runner__live_state__approvals_pending__isnull=True))
         .select_related("runner")
     )
 
@@ -342,3 +328,31 @@ def reconcile_stalled_runs() -> int:
             threshold,
         )
     return reaped
+
+
+@shared_task(name="runner.apply_agent_run_terminal_effects")
+def apply_agent_run_terminal_effects(run_id) -> bool:
+    from pi_dash.runner.services.agent_run_finalization import apply_terminal_effects
+
+    return apply_terminal_effects(run_id)
+
+
+@shared_task(name="runner.reconcile_agent_run_terminal_effects")
+def reconcile_agent_run_terminal_effects() -> int:
+    """Replay terminal hooks/capacity effects after broker or worker loss."""
+    from pi_dash.runner.services.agent_run_finalization import TERMINAL_STATUSES
+
+    ids = list(
+        AgentRun.objects.filter(status__in=TERMINAL_STATUSES)
+        .filter(Q(terminal_hooks_applied_at__isnull=True) | Q(terminal_capacity_released_at__isnull=True))
+        .order_by("ended_at")
+        .values_list("id", flat=True)[:100]
+    )
+    for run_id in ids:
+        apply_agent_run_terminal_effects.delay(str(run_id))
+    return len(ids)
+
+
+# Cloud Agent is not a separate Django app/service. Importing its tasks from an
+# installed app makes Celery autodiscovery register them on every normal worker.
+from pi_dash.cloud_agent import tasks as cloud_agent_tasks  # noqa: E402,F401

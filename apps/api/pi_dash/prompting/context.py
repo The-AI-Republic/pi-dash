@@ -128,11 +128,7 @@ def _comments_section(issue: Issue) -> str:
     """
     from pi_dash.db.models.issue import IssueComment
 
-    comments = (
-        IssueComment.objects.filter(issue=issue)
-        .select_related("actor")
-        .order_by("created_at")
-    )
+    comments = IssueComment.objects.filter(issue=issue).select_related("actor").order_by("created_at")
     parts: list[str] = []
     index = 0
     for comment in comments:
@@ -141,14 +137,10 @@ def _comments_section(issue: Issue) -> str:
             continue
         index += 1
         author = _comment_author_label(comment)
-        timestamp = (
-            comment.created_at.isoformat() if comment.created_at else "unknown time"
-        )
+        timestamp = comment.created_at.isoformat() if comment.created_at else "unknown time"
         run_id = getattr(comment, "speaker_agent_run_id", None)
         run_line = f"\nAgent run: {run_id}" if run_id else ""
-        parts.append(
-            f"### Comment {index} — {author} at {timestamp}{run_line}\n\n{body}"
-        )
+        parts.append(f"### Comment {index} — {author} at {timestamp}{run_line}\n\n{body}")
     if not parts:
         return "(no comments on this issue yet)"
     return "\n\n".join(parts)
@@ -251,11 +243,7 @@ def _repo_context(project, issue: Issue) -> Dict[str, Any]:
     from pi_dash.db.models import GitRepositoryBinding
     from pi_dash.integrations.git.registry import get_adapter
 
-    binding = (
-        GitRepositoryBinding.objects.filter(project=project)
-        .select_related("repository")
-        .first()
-    )
+    binding = GitRepositoryBinding.objects.filter(project=project).select_related("repository").first()
     if binding is None:
         return repo
     remote = binding.repository
@@ -294,9 +282,7 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
     # bubble up to the caller (which already wraps rendering in PromptRenderError
     # at the composer layer).
     labels = list(issue.labels.all().values_list("name", flat=True))
-    assignees = [
-        (u.display_name or u.email or "") for u in issue.assignees.all()
-    ]
+    assignees = [(u.display_name or u.email or "") for u in issue.assignees.all()]
     project_states = [
         {
             "name": s.name,
@@ -355,10 +341,7 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
         # content beyond the direct parent — the agent is told to fetch it via
         # the CLI on demand.
         "lineage": (
-            [
-                {"identifier": _issue_identifier(node), "title": node.name or ""}
-                for node in ancestors
-            ]
+            [{"identifier": _issue_identifier(node), "title": node.name or ""} for node in ancestors]
             if len(ancestors) > 2
             else None
         ),
@@ -373,7 +356,11 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
             # getattr, not attribute access: the template-preview endpoint
             # renders with a stub run that has no ``trigger``.
             "trigger": getattr(run, "trigger", None),
+            "executor_kind": getattr(run, "executor_kind", "local_runner"),
         },
+        "available_tools": (getattr(run, "tool_plan", {}) or {}).get("tools", []),
+        "unavailable_capabilities": (getattr(run, "tool_plan", {}) or {}).get("unavailable_capabilities", []),
+        "limits": (getattr(run, "tool_plan", {}) or {}).get("limits", {}),
         # Ticking schedule (None when the issue has no ticker row). Lets the
         # template explain the re-invocation cadence and remaining budget.
         "tick": _tick_context(issue),
@@ -416,6 +403,20 @@ def build_scheduler_context(binding, run: AgentRun) -> Dict[str, Any]:
     project = binding.project
     workspace = binding.workspace
     scheduler = binding.scheduler
+    scheduler_task_body = build_scheduler_task_body(binding)
+    if getattr(run, "executor_kind", "local_runner") == "cloud_agent":
+        scheduler_task_body = "\n\n".join(
+            part
+            for part in [
+                (getattr(scheduler, "prompt", "") or "").strip(),
+                (binding.extra_context or "").strip(),
+                (
+                    "Search for duplicates and create at most one Pi Dash backlog issue "
+                    "for the most important new finding."
+                ),
+            ]
+            if part
+        )
     return {
         "workspace": {
             "slug": getattr(workspace, "slug", ""),
@@ -437,8 +438,12 @@ def build_scheduler_context(binding, run: AgentRun) -> Dict[str, Any]:
             "kind": "scheduler",
             "attempt": 1,
             "turn_number": 1,
+            "executor_kind": getattr(run, "executor_kind", "local_runner"),
         },
-        "scheduler_task_body": build_scheduler_task_body(binding),
+        "available_tools": (getattr(run, "tool_plan", {}) or {}).get("tools", []),
+        "unavailable_capabilities": (getattr(run, "tool_plan", {}) or {}).get("unavailable_capabilities", []),
+        "limits": (getattr(run, "tool_plan", {}) or {}).get("limits", {}),
+        "scheduler_task_body": scheduler_task_body,
     }
 
 

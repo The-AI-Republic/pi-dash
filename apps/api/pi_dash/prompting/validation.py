@@ -96,7 +96,11 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
                 "attempt": 2,
                 "turn_number": 1,
                 "trigger": "tick",
+                "executor_kind": "local_runner",
             },
+            "available_tools": [],
+            "unavailable_capabilities": [],
+            "limits": {},
             "tick": {
                 "count": 5,
                 "cap": 24,
@@ -144,7 +148,11 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
             "attempt": 1,
             "turn_number": 1,
             "trigger": "state_transition",
+            "executor_kind": "local_runner",
         },
+        "available_tools": [],
+        "unavailable_capabilities": [],
+        "limits": {},
         "tick": None,
         "comments_section": "(no comments on this issue yet)",
         "parent_done_payload": "(no parent run done payload available)",
@@ -173,7 +181,11 @@ def _scheduler_sample(*, populated: bool) -> Dict[str, Any]:
                 "kind": recipes.KIND_SCHEDULER,
                 "attempt": 1,
                 "turn_number": 1,
+                "executor_kind": "local_runner",
             },
+            "available_tools": [],
+            "unavailable_capabilities": [],
+            "limits": {},
             "scheduler_task_body": "Audit the codebase for TODOs.",
         }
     return {
@@ -185,7 +197,11 @@ def _scheduler_sample(*, populated: bool) -> Dict[str, Any]:
             "kind": recipes.KIND_SCHEDULER,
             "attempt": 1,
             "turn_number": 1,
+            "executor_kind": "local_runner",
         },
+        "available_tools": [],
+        "unavailable_capabilities": [],
+        "limits": {},
         "scheduler_task_body": "",
     }
 
@@ -199,12 +215,14 @@ def sample_contexts(kind: str) -> List[Dict[str, Any]]:
 
 def kinds_for_section(section_key: str) -> List[str]:
     """All recipe kinds whose ordered section list contains ``section_key``."""
-    return [k for k, keys in recipes.RECIPES.items() if section_key in keys]
+    kinds = [k for k, keys in recipes.RECIPES.items() if section_key in keys]
+    for kind, keys in recipes.CLOUD_RECIPES.items():
+        if section_key in keys and kind not in kinds:
+            kinds.append(kind)
+    return kinds
 
 
-def _compose_with_candidate(
-    kind: str, section_key: str, candidate_body: str, *, workspace, project, user
-):
+def _compose_with_candidate(kind: str, section_key: str, candidate_body: str, *, workspace, project, user):
     """Assemble ``kind`` with ``section_key`` forced to ``candidate_body``.
 
     Other sections resolve normally (existing overrides + defaults) so the
@@ -225,16 +243,12 @@ def _compose_with_candidate(
                 )
             )
         else:
-            resolved.append(
-                resolve_section(key, workspace=workspace, project=project, user=user)
-            )
+            resolved.append(resolve_section(key, workspace=workspace, project=project, user=user))
     template_body, _manifest = _assemble(resolved)
     return template_body
 
 
-def validate_override(
-    section_key: str, candidate_body: str, *, workspace, project=None, user=None
-) -> None:
+def validate_override(section_key: str, candidate_body: str, *, workspace, project=None, user=None) -> None:
     """Validate a candidate override body. Raises on the first failure.
 
     Steps (design §6.3):
@@ -245,13 +259,10 @@ def validate_override(
     """
     section = registry.get_section(section_key)
     if section.is_locked:
-        raise OverrideValidationError(
-            f"section {section_key!r} is locked and cannot be overridden"
-        )
+        raise OverrideValidationError(f"section {section_key!r} is locked and cannot be overridden")
     if len(candidate_body) > MAX_BODY_LENGTH:
         raise OverrideValidationError(
-            f"override body exceeds {MAX_BODY_LENGTH}-character limit "
-            f"(got {len(candidate_body)} characters)"
+            f"override body exceeds {MAX_BODY_LENGTH}-character limit (got {len(candidate_body)} characters)"
         )
     try:
         validate_syntax(candidate_body)
@@ -276,6 +287,5 @@ def validate_override(
                 render(template_body, ctx)
             except PromptRenderError as exc:
                 raise OverrideValidationError(
-                    f"override for section {section_key!r} fails to render as part "
-                    f"of the {kind!r} prompt: {exc}"
+                    f"override for section {section_key!r} fails to render as part of the {kind!r} prompt: {exc}"
                 ) from exc

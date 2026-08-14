@@ -13,6 +13,7 @@ from celery import Celery
 from pythonjsonlogger.jsonlogger import JsonFormatter
 from celery.signals import after_setup_logger, after_setup_task_logger
 from celery.schedules import crontab
+from django.conf import settings
 
 # Set the default Django settings module for the 'celery' program.
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "pi_dash.settings.production")
@@ -103,6 +104,18 @@ app.conf.beat_schedule = {
     "runner-sweep-chat-message-dedupe": {
         "task": "runner.sweep_chat_message_dedupe",
         "schedule": crontab(hour=4, minute=0),
+    },
+    "cloud-agent-scan-queued-runs": {
+        "task": "cloud_agent.scan_queued_runs",
+        "schedule": timedelta(seconds=settings.CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS),
+    },
+    "cloud-agent-sweep-stale-runs": {
+        "task": "cloud_agent.sweep_stale_runs",
+        "schedule": timedelta(seconds=settings.CLOUD_AGENT_SWEEP_INTERVAL_SECONDS),
+    },
+    "agent-run-reconcile-terminal-effects": {
+        "task": "runner.reconcile_agent_run_terminal_effects",
+        "schedule": timedelta(seconds=settings.AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS),
     },
     # Issue ticking — see .ai_design/issue_ticking_system/design.md §6
     "scan-due-agent-tickers": {

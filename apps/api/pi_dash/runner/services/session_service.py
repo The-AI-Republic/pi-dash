@@ -63,9 +63,7 @@ def apply_hello(runner: Runner, body: Dict[str, Any]) -> None:
     runner.arch = body.get("arch", "") or runner.arch
     runner.runner_version = body.get("version", "") or runner.runner_version
     runner.last_heartbeat_at = timezone.now()
-    runner.save(
-        update_fields=["os", "arch", "runner_version", "last_heartbeat_at"]
-    )
+    runner.save(update_fields=["os", "arch", "runner_version", "last_heartbeat_at"])
     # Session open redelivers ASSIGNED / WAITING_FOR_WORKTREE runs the
     # restarted daemon no longer reports (design §6.3) — reaping them here
     # would fail the very runs ``build_session_open_redeliver`` is about to
@@ -74,9 +72,7 @@ def apply_hello(runner: Runner, body: Dict[str, Any]) -> None:
     reap_stale_busy_runs(runner, body, exclude_redeliverable=True)
 
 
-def reap_stale_busy_runs(
-    runner: Runner, body: Dict[str, Any], *, exclude_redeliverable: bool = False
-) -> None:
+def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeliverable: bool = False) -> None:
     """Cancel BUSY runs the daemon no longer claims.
 
     WAITING_FOR_WORKTREE runs are covered automatically via
@@ -101,11 +97,7 @@ def reap_stale_busy_runs(
     now = timezone.now()
     ts_raw = body.get("ts")
     try:
-        heartbeat_ts = (
-            datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
-            if isinstance(ts_raw, str)
-            else now
-        )
+        heartbeat_ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")) if isinstance(ts_raw, str) else now
     except (ValueError, AttributeError):
         heartbeat_ts = now
     heartbeat_ts = min(heartbeat_ts, now)
@@ -133,9 +125,7 @@ def reap_stale_busy_runs(
             AgentRunStatus.ASSIGNED,
             AgentRunStatus.WAITING_FOR_WORKTREE,
         )
-        reapable_statuses = tuple(
-            s for s in reapable_statuses if s not in redeliverable
-        )
+        reapable_statuses = tuple(s for s in reapable_statuses if s not in redeliverable)
 
     stale = AgentRun.objects.filter(
         runner=runner,
@@ -148,14 +138,19 @@ def reap_stale_busy_runs(
     if not reaped:
         return
 
-    AgentRun.objects.filter(id__in=[rid for rid, _ in reaped]).update(
-        status=AgentRunStatus.FAILED,
-        ended_at=now,
-        error=(
-            "reaped by heartbeat: runner reported in_flight_run="
-            f"{in_flight_id or '(none)'} but cloud had this run marked busy"
-        ),
+    from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+    detail = (
+        "reaped by heartbeat: runner reported in_flight_run="
+        f"{in_flight_id or '(none)'} but cloud had this run marked busy"
     )
+    for run_id, _ in reaped:
+        finalize_agent_run(
+            run_id,
+            AgentRunStatus.FAILED,
+            updates={"error": detail, "error_code": "heartbeat_reaped"},
+            expected_runner_id=runner.id,
+        )
     pod_ids = {pid for _, pid in reaped if pid is not None}
     runner_id = runner.id
 
@@ -212,9 +207,7 @@ def parse_optional_uuid(raw: Any) -> Optional[UUID]:
     return UUID(str(raw))
 
 
-def upsert_runner_live_state(
-    runner: Runner, status_entry: Dict[str, Any]
-) -> None:
+def upsert_runner_live_state(runner: Runner, status_entry: Dict[str, Any]) -> None:
     """Apply the volatile observability snapshot from a poll body.
 
     ``status_entry`` is the dict the poll handler reads as
@@ -251,10 +244,7 @@ def upsert_runner_live_state(
 
     update_fields: list[str] = []
 
-    if (
-        "observed_run_id" in status_entry
-        and state.observed_run_id != incoming_run_id
-    ):
+    if "observed_run_id" in status_entry and state.observed_run_id != incoming_run_id:
         # New run, or idle/null after a completed run. Persist the full
         # wipe, not just the fields present on this poll.
         for f in SNAPSHOT_FIELDS:
@@ -280,9 +270,7 @@ def upsert_runner_live_state(
         update_fields.append("llm_model")
 
     if update_fields:
-        state.save(
-            update_fields=sorted(set(update_fields)) + ["updated_at"]
-        )
+        state.save(update_fields=sorted(set(update_fields)) + ["updated_at"])
 
 
 # ``Runner.free_worktrees`` is an IntegerField; Postgres rejects anything
@@ -311,9 +299,7 @@ def parse_free_worktrees(raw: Any) -> Optional[int]:
     return min(value, FREE_WORKTREES_MAX)
 
 
-def build_session_open_redeliver(
-    runner: Runner, in_flight_run_id: Optional[str]
-) -> Optional[Dict[str, Any]]:
+def build_session_open_redeliver(runner: Runner, in_flight_run_id: Optional[str]) -> Optional[Dict[str, Any]]:
     """Return an ``Assign``-shaped payload to redeliver at session open.
 
     After a daemon restart the runner's local worktree queue is gone, so a
@@ -353,24 +339,16 @@ def build_session_open_redeliver(
 
 
 def mark_runner_online(runner_id: UUID | str) -> None:
-    Runner.objects.filter(pk=runner_id).update(
-        status=RunnerStatus.ONLINE, last_heartbeat_at=timezone.now()
-    )
+    Runner.objects.filter(pk=runner_id).update(status=RunnerStatus.ONLINE, last_heartbeat_at=timezone.now())
 
 
 def mark_runner_offline(runner_id: UUID | str) -> None:
-    Runner.objects.filter(pk=runner_id).exclude(
-        status=RunnerStatus.REVOKED
-    ).update(status=RunnerStatus.OFFLINE)
+    Runner.objects.filter(pk=runner_id).exclude(status=RunnerStatus.REVOKED).update(status=RunnerStatus.OFFLINE)
 
 
 def resolve_runner_project_slug(runner: Runner) -> Optional[str]:
     """Return ``runner.pod.project.identifier`` or ``None``."""
-    r = (
-        Runner.objects.select_related("pod__project")
-        .filter(pk=runner.pk)
-        .first()
-    )
+    r = Runner.objects.select_related("pod__project").filter(pk=runner.pk).first()
     if r is None or r.pod_id is None:
         return None
     project = r.pod.project
@@ -401,12 +379,7 @@ def build_resume_ack(runner: Runner, run_id: str) -> Optional[Dict[str, Any]]:
             "run_id": str(run_id),
             "reason": f"run_already_{run.status}",
         }
-    last_seq = (
-        AgentRunEvent.objects.filter(agent_run_id=run_id)
-        .order_by("-seq")
-        .values_list("seq", flat=True)
-        .first()
-    )
+    last_seq = AgentRunEvent.objects.filter(agent_run_id=run_id).order_by("-seq").values_list("seq", flat=True).first()
     return {
         "type": "resume_ack",
         "run_id": str(run_id),

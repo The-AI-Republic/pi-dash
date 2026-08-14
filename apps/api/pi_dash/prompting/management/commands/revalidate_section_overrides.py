@@ -56,10 +56,7 @@ class Command(BaseCommand):
                 row.save(update_fields=["needs_attention", "updated_at"])
                 flagged += 1
                 self.stdout.write(
-                    self.style.WARNING(
-                        f"flagged {row.workspace_id}/{row.section_key} "
-                        f"(user={row.user_id}): {detail}"
-                    )
+                    self.style.WARNING(f"flagged {row.workspace_id}/{row.section_key} (user={row.user_id}): {detail}")
                 )
             elif not broken and row.needs_attention and clear:
                 row.needs_attention = False
@@ -67,8 +64,5 @@ class Command(BaseCommand):
                 cleared += 1
 
         self.stdout.write(
-            self.style.SUCCESS(
-                f"checked {checked} active override(s): "
-                f"{flagged} newly flagged, {cleared} cleared."
-            )
+            self.style.SUCCESS(f"checked {checked} active override(s): {flagged} newly flagged, {cleared} cleared.")
         )

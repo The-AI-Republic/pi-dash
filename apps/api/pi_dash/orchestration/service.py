@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 from django.db import transaction
-from django.utils import timezone
 
 from pi_dash.db.models.issue import Issue, IssueComment
 from pi_dash.db.models.state import State, StateGroup
@@ -96,9 +95,7 @@ def _active_run_for(issue: Issue) -> Optional[AgentRun]:
 
 
 def _latest_prior_run(issue: Issue) -> Optional[AgentRun]:
-    return (
-        AgentRun.objects.filter(work_item=issue).order_by("-created_at").first()
-    )
+    return AgentRun.objects.filter(work_item=issue).order_by("-created_at").first()
 
 
 def _is_delegation_trigger(to_state: Optional[State]) -> bool:
@@ -146,11 +143,7 @@ def handle_issue_state_transition(
     # the captured run is genuinely the latest pre-review; we persist it
     # after arming so upgraded issues that do not yet have a ticker row
     # still get a resume target.
-    cross_phase = (
-        is_ticking_state(from_state)
-        and is_ticking_state(to_state)
-        and from_state.group != to_state.group
-    )
+    cross_phase = is_ticking_state(from_state) and is_ticking_state(to_state) and from_state.group != to_state.group
     resume_parent = None
     if cross_phase and from_state.group == StateGroup.STARTED.value:
         resume_parent = _latest_prior_run(issue)
@@ -159,9 +152,7 @@ def handle_issue_state_transition(
     # *same* ticking state. Inter-phase transitions (e.g., In Progress
     # → In Review) intentionally disarm-then-re-arm so the ticker row's
     # runtime fields land on the new phase's defaults.
-    if is_ticking_state(from_state) and (
-        not is_ticking_state(to_state) or from_state.group != to_state.group
-    ):
+    if is_ticking_state(from_state) and (not is_ticking_state(to_state) or from_state.group != to_state.group):
         scheduling.disarm_ticker(issue)
 
     if not _is_delegation_trigger(to_state):
@@ -172,9 +163,7 @@ def handle_issue_state_transition(
     # source either way.
     scheduling.arm_ticker(issue, dispatch_immediate=dispatch_immediate)
     if resume_parent is not None:
-        IssueAgentTicker.objects.filter(issue=issue).update(
-            resume_parent_run=resume_parent
-        )
+        IssueAgentTicker.objects.filter(issue=issue).update(resume_parent_run=resume_parent)
 
     if not dispatch_immediate:
         return TransitionOutcome(reason="dispatch-deferred-to-caller")
@@ -237,8 +226,7 @@ def handle_issue_state_transition(
     pod = _resolve_pod_for_issue(issue)
     if pod is None:
         logger.warning(
-            "orchestration: no pod available for workspace %s; "
-            "leaving issue %s unhandled",
+            "orchestration: no pod available for workspace %s; leaving issue %s unhandled",
             issue.workspace_id,
             issue.id,
         )
@@ -338,7 +326,8 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
     if state_group not in CONTINUATION_ELIGIBLE_GROUPS:
         logger.info(
             "orchestration.continuation: skip issue=%s reason=state-not-eligible group=%s",
-            issue.pk, state_group,
+            issue.pk,
+            state_group,
         )
         return ContinuationOutcome(reason="state-not-eligible")
 
@@ -372,16 +361,10 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
     # comment thread fresh on dispatch, so the queued run will pick up
     # the new comment without needing a separate queued run per comment.
     queued_follow_up = (
-        AgentRun.objects.filter(
-            work_item=issue, status=AgentRunStatus.QUEUED
-        )
-        .order_by("-created_at")
-        .first()
+        AgentRun.objects.filter(work_item=issue, status=AgentRunStatus.QUEUED).order_by("-created_at").first()
     )
     if queued_follow_up is not None:
-        return ContinuationOutcome(
-            coalesced_into=queued_follow_up, reason="coalesced"
-        )
+        return ContinuationOutcome(coalesced_into=queued_follow_up, reason="coalesced")
 
     # Don't wake while a run is already in flight; terminate sweep handles it.
     if prior.is_active:
@@ -390,8 +373,7 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
     pod = _resolve_pod_for_issue(issue)
     if pod is None:
         logger.warning(
-            "orchestration.continuation: no pod for workspace %s; "
-            "leaving issue %s unhandled",
+            "orchestration.continuation: no pod for workspace %s; leaving issue %s unhandled",
             issue.workspace_id,
             issue.id,
         )
@@ -406,9 +388,7 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
     )
 
 
-def _create_continuation_run(
-    *, issue: Issue, parent: AgentRun, creator, pod, trigger: str
-) -> ContinuationOutcome:
+def _create_continuation_run(*, issue: Issue, parent: AgentRun, creator, pod, trigger: str) -> ContinuationOutcome:
     """Create R_next as a follow-up to ``parent`` with optional pin.
 
     "Continuation" is a historical name. The new run renders a self-sufficient
@@ -416,11 +396,32 @@ def _create_continuation_run(
     parent's session. ``parent`` is retained for lineage / pin selection only.
     See ``.ai_design/ticking_optimization/design.md``.
     """
-    from pi_dash.runner.services import matcher
+    from pi_dash.cloud_agent.creation import dispatch_after_commit, execution_fields, lock_cloud_creation_capacity
 
     pinned_runner = _pinned_runner_for(parent)
+    try:
+        execution = execution_fields(
+            project=issue.project,
+            run_kind="issue",
+            has_issue=True,
+            actor=creator,
+            automatic=trigger == AgentRunTrigger.TICK,
+        )
+    except (ValueError, RuntimeError) as exc:
+        logger.warning("orchestration.continuation: executor unavailable: %s", exc)
+        return ContinuationOutcome(reason=str(exc))
+    admission_error = execution.pop("_cloud_admission_error", None)
+    pinned_runner = execution.pop("pinned_runner", pinned_runner)
 
     with transaction.atomic():
+        admission_error = (
+            lock_cloud_creation_capacity(
+                project=issue.project,
+                executor_kind=execution["executor_kind"],
+                automatic=trigger == AgentRunTrigger.TICK,
+            )
+            or admission_error
+        )
         run = AgentRun.objects.create(
             workspace=issue.workspace,
             created_by=creator,
@@ -436,21 +437,36 @@ def _create_continuation_run(
                 "repo_ref": (issue.project.base_branch or None),
                 "git_work_branch": (issue.git_work_branch or None),
             },
+            **execution,
         )
+        if admission_error:
+            from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+            finalize_agent_run(
+                run.id,
+                AgentRunStatus.FAILED,
+                updates={"error_code": admission_error["code"], "error": admission_error["detail"]},
+            )
+            run.refresh_from_db()
+            return ContinuationOutcome(created_run=run, reason=admission_error["code"])
         try:
             run.prompt = build_first_turn(issue, run)
         except _PROMPT_BUILD_ERRORS as exc:
-            run.status = AgentRunStatus.FAILED
-            run.error = f"prompt build failed: {exc}"
-            run.ended_at = timezone.now()
-            run.save(update_fields=["status", "error", "ended_at"])
+            from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+            finalize_agent_run(
+                run.id,
+                AgentRunStatus.FAILED,
+                updates={"error_code": "prompt_build_failed", "error": f"prompt build failed: {exc}"},
+            )
+            run.refresh_from_db()
             logger.exception(
                 "orchestration.continuation: prompt render failed for issue %s",
                 issue.id,
             )
             return ContinuationOutcome(created_run=run, reason="render-failed")
         run.save(update_fields=["prompt", "prompt_manifest"])
-        transaction.on_commit(lambda: matcher.drain_pod_by_id(pod.id))
+        dispatch_after_commit(run.id)
 
     return ContinuationOutcome(created_run=run, reason="created")
 
@@ -492,9 +508,30 @@ def _create_and_dispatch_run(
     resumed prior session). Used by cross-phase entry into a phase
     whose ``fresh_session_on_entry`` is True.
     """
-    from pi_dash.runner.services import matcher
+    from pi_dash.cloud_agent.creation import dispatch_after_commit, execution_fields, lock_cloud_creation_capacity
+
+    try:
+        execution = execution_fields(
+            project=issue.project,
+            run_kind="issue",
+            has_issue=True,
+            actor=creator,
+            automatic=trigger == AgentRunTrigger.TICK,
+        )
+    except (ValueError, RuntimeError) as exc:
+        logger.warning("orchestration: executor unavailable: %s", exc)
+        return TransitionOutcome(reason=str(exc))
+    admission_error = execution.pop("_cloud_admission_error", None)
 
     with transaction.atomic():
+        admission_error = (
+            lock_cloud_creation_capacity(
+                project=issue.project,
+                executor_kind=execution["executor_kind"],
+                automatic=trigger == AgentRunTrigger.TICK,
+            )
+            or admission_error
+        )
         effective_parent = None if fresh_session else parent
         # Pin the new run to the parent run's runner when eligible.
         # Skip pinning for fresh sessions — they intentionally drop
@@ -502,6 +539,7 @@ def _create_and_dispatch_run(
         pinned_runner = None
         if not fresh_session and effective_parent is not None:
             pinned_runner = _pinned_runner_for(effective_parent)
+        pinned_runner = execution.pop("pinned_runner", pinned_runner)
         run = AgentRun.objects.create(
             workspace=issue.workspace,
             created_by=creator,
@@ -517,15 +555,30 @@ def _create_and_dispatch_run(
                 "repo_ref": (issue.project.base_branch or None),
                 "git_work_branch": (issue.git_work_branch or None),
             },
+            **execution,
             # owner stays NULL until assignment captures runner.owner.
         )
+        if admission_error:
+            from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+            finalize_agent_run(
+                run.id,
+                AgentRunStatus.FAILED,
+                updates={"error_code": admission_error["code"], "error": admission_error["detail"]},
+            )
+            run.refresh_from_db()
+            return TransitionOutcome(created_run=run, reason=admission_error["code"])
         try:
             run.prompt = build_first_turn(issue, run)
         except _PROMPT_BUILD_ERRORS as exc:
-            run.status = AgentRunStatus.FAILED
-            run.error = f"prompt build failed: {exc}"
-            run.ended_at = timezone.now()
-            run.save(update_fields=["status", "error", "ended_at"])
+            from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+            finalize_agent_run(
+                run.id,
+                AgentRunStatus.FAILED,
+                updates={"error_code": "prompt_build_failed", "error": f"prompt build failed: {exc}"},
+            )
+            run.refresh_from_db()
             logger.exception("orchestration: prompt render failed for issue %s", issue.id)
             return TransitionOutcome(created_run=run, reason="render-failed")
 
@@ -533,7 +586,7 @@ def _create_and_dispatch_run(
         # Drain the pod's queue after the run row has landed. drain_pod is
         # idempotent and uses select_for_update(skip_locked=True), so it's
         # safe to run unconditionally.
-        transaction.on_commit(lambda: matcher.drain_pod_by_id(pod.id))
+        dispatch_after_commit(run.id)
 
     return TransitionOutcome(created_run=run, reason="created")
 
@@ -572,7 +625,7 @@ def dispatch_scheduler_run(
     See design §5.3.
     """
     from pi_dash.prompting.composer import build_scheduler_turn
-    from pi_dash.runner.services import matcher
+    from pi_dash.cloud_agent.creation import dispatch_after_commit, execution_fields, lock_cloud_creation_capacity
 
     # Pod resolution (late bound): prefer the binding's explicit pod override,
     # but only when it is still active and belongs to this project — a pod can
@@ -597,16 +650,57 @@ def dispatch_scheduler_run(
         return None, f"no default pod for project {binding.project_id}"
 
     creator = binding.actor
-    if creator is None:
-        from pi_dash.orchestration.workpad import get_agent_system_user
-        creator = get_agent_system_user()
-    if creator is None:
-        logger.warning(
-            "scheduler.dispatch: skip binding=%s reason=no-creator", binding.pk
+    if binding.project.default_agent_executor == "cloud_agent":
+        from pi_dash.core.permissions import ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER, check_project_role
+
+        creator = next(
+            (
+                candidate
+                for candidate in (binding.actor, binding.project.project_lead)
+                if candidate
+                and candidate.is_active
+                and not candidate.is_bot
+                and check_project_role(
+                    candidate,
+                    binding.workspace.slug,
+                    binding.project_id,
+                    [ROLE_ADMIN, ROLE_MEMBER, ROLE_GUEST],
+                )
+            ),
+            None,
         )
-        return None, "no creator (binding.actor and system bot both unavailable)"
+        creator_valid = creator is not None
+    else:
+        if creator is None:
+            from pi_dash.orchestration.workpad import get_agent_system_user
+
+            creator = get_agent_system_user()
+        creator_valid = creator is not None
+    if not creator_valid:
+        logger.warning("scheduler.dispatch: skip binding=%s reason=no-creator", binding.pk)
+        return None, "no current human execution principal"
+
+    try:
+        execution = execution_fields(
+            project=binding.project,
+            run_kind="scheduler",
+            has_issue=False,
+            actor=creator,
+            automatic=True,
+        )
+    except (ValueError, RuntimeError) as exc:
+        return None, str(exc)
+    admission_error = execution.pop("_cloud_admission_error", None)
 
     with transaction.atomic():
+        admission_error = (
+            lock_cloud_creation_capacity(
+                project=binding.project,
+                executor_kind=execution["executor_kind"],
+                automatic=True,
+            )
+            or admission_error
+        )
         run = AgentRun.objects.create(
             workspace_id=binding.workspace_id,
             created_by=creator,
@@ -618,23 +712,49 @@ def dispatch_scheduler_run(
             trigger=AgentRunTrigger.SCHEDULER,
             prompt="",
             run_config={},
+            **execution,
         )
+        if admission_error:
+            from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+            finalize_agent_run(
+                run.id,
+                AgentRunStatus.FAILED,
+                updates={"error_code": admission_error["code"], "error": admission_error["detail"]},
+            )
+            run.refresh_from_db()
+            return run, None
+        if run.executor_kind == "cloud_agent" and binding.outcome_mode != "create_issue":
+            from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+            finalize_agent_run(
+                run.id,
+                AgentRunStatus.FAILED,
+                updates={
+                    "error_code": "capability_unsupported",
+                    "error": "Cloud Agent scheduler runs support only create_issue outcome mode",
+                },
+            )
+            run.refresh_from_db()
+            return run, None
         try:
             run.prompt = build_scheduler_turn(binding, run)
         except _PROMPT_BUILD_ERRORS as exc:
-            run.status = AgentRunStatus.FAILED
-            run.error = f"prompt build failed: {exc}"
-            run.ended_at = timezone.now()
-            run.save(update_fields=["status", "error", "ended_at"])
-            logger.exception(
-                "scheduler.dispatch: prompt render failed for binding %s", binding.pk
+            from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+            finalize_agent_run(
+                run.id,
+                AgentRunStatus.FAILED,
+                updates={"error_code": "prompt_build_failed", "error": f"prompt build failed: {exc}"},
             )
+            run.refresh_from_db()
+            logger.exception("scheduler.dispatch: prompt render failed for binding %s", binding.pk)
             # A render failure DID produce a run — return it (not a
             # short-circuit None) so the Beat loop records it as last_run
             # and does not write binding.last_error. See design §5.3.
             return run, None
         run.save(update_fields=["prompt", "prompt_manifest"])
-        transaction.on_commit(lambda: matcher.drain_pod_by_id(pod.id))
+        dispatch_after_commit(run.id)
 
     logger.info(
         "scheduler.dispatch: created run=%s binding=%s pod=%s",

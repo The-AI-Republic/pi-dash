@@ -115,9 +115,7 @@ def seed_default_template(force: bool = False) -> str:
 
     body = read_default_body()
     existing = (
-        PromptTemplate.objects.filter(
-            workspace__isnull=True, name=PromptTemplate.DEFAULT_NAME
-        )
+        PromptTemplate.objects.filter(workspace__isnull=True, name=PromptTemplate.DEFAULT_NAME)
         .order_by("-updated_at")
         .first()
     )
@@ -149,11 +147,7 @@ def seed_review_template(force: bool = False) -> str:
 
     body = read_review_body()
     existing = (
-        PromptTemplate.objects.filter(
-            workspace__isnull=True, name=REVIEW_TEMPLATE_NAME
-        )
-        .order_by("-updated_at")
-        .first()
+        PromptTemplate.objects.filter(workspace__isnull=True, name=REVIEW_TEMPLATE_NAME).order_by("-updated_at").first()
     )
     if existing is None:
         PromptTemplate.objects.create(
@@ -174,9 +168,7 @@ def seed_review_template(force: bool = False) -> str:
     return "skipped"
 
 
-def seed_default_template_on_migrate(
-    sender=None, app_config=None, verbosity=1, using=None, **kwargs
-) -> None:
+def seed_default_template_on_migrate(sender=None, app_config=None, verbosity=1, using=None, **kwargs) -> None:
     """`post_migrate` receiver. Only runs from the prompting app config."""
     # Running under unrelated apps is fine — post_migrate fires once per app —
     # but we gate on our own app to avoid creating multiple rows.
