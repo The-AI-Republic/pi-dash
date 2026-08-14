@@ -398,10 +398,9 @@ def _report_runtime_tool_failures(ctx, toolsets: list) -> None:
 
 
 def _model_label(user) -> str:
-    from pi_dash.assistant.runtime.llm import get_config, model_label as _ml
+    from pi_dash.ee.assistant.model_provider import model_label_for_user
 
-    cfg = get_config(user)
-    return _ml(cfg) if cfg else ""
+    return model_label_for_user(user)
 
 
 def _extract_usage(result) -> dict:

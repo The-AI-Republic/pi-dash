@@ -14,7 +14,7 @@ instead of BYOK direct helpers, so the overlay is the single switch point.
 
 from __future__ import annotations
 
-from pi_dash.assistant.runtime.llm import get_config, resolve_byok_model
+from pi_dash.assistant.runtime.llm import get_config, model_label, resolve_byok_model
 from pi_dash.assistant.runtime.mcp import build_toolsets
 from pi_dash.assistant.runtime.title import generate_byok_title_for_user
 
@@ -43,6 +43,17 @@ def resolve_model_for_user(user):
 def generate_title_for_user(user, description: str) -> str:
     """Return a single-prompt generated title for ``user`` (CE: BYOK only)."""
     return generate_byok_title_for_user(user, description)
+
+
+def model_label_for_user(user) -> str:
+    """Human-readable label for the model a turn will use (CE: the BYOK one).
+
+    Recorded on the turn as ``model_used``. Builds that resolve models from
+    somewhere other than the BYOK config override this, so the audit trail
+    reflects what actually ran rather than silently reading empty.
+    """
+    cfg = get_config(user)
+    return model_label(cfg) if cfg else ""
 
 
 def resolve_toolsets_for_user(user):
