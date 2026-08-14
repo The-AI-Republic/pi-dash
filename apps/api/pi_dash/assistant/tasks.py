@@ -288,7 +288,10 @@ async def _run_turn(turn_id: str):
     from pydantic_ai import UsageLimits
     from pydantic_ai.usage import UsageLimitExceeded
 
-    from pi_dash.ee.assistant.model_provider import resolve_model_for_user
+    from pi_dash.ee.assistant.model_provider import (
+        resolve_model_for_user,
+        resolve_toolsets_for_user,
+    )
 
     ctx = await sync_to_async(_load_context)(turn_id)
     if ctx is None:
@@ -302,6 +305,13 @@ async def _run_turn(turn_id: str):
         await sync_to_async(_fail_turn)(ctx, exc.code, exc.detail)
         return
 
+    # Tool servers are additive: a failure to build them degrades the turn's
+    # capabilities but never fails it, so this is deliberately outside the
+    # model-resolution try/except above.
+    toolsets, skipped = await sync_to_async(_resolve_toolsets)(
+        ctx, resolve_toolsets_for_user
+    )
+
     hist = await sync_to_async(history.load_history)(ctx.thread)
     streamer = _Streamer(ctx)
     model_label = await sync_to_async(_model_label)(ctx.user)
@@ -312,6 +322,7 @@ async def _run_turn(turn_id: str):
             model=model,
             deps=ctx.deps,
             message_history=hist,
+            toolsets=toolsets,
             usage_limits=UsageLimits(request_limit=25, tool_calls_limit=20),
             event_stream_handler=streamer.handle,
         )
@@ -332,6 +343,33 @@ async def _run_turn(turn_id: str):
     model_messages = await sync_to_async(history.dump_new_messages)(result)
     usage = _extract_usage(result)
     await sync_to_async(_complete_turn)(ctx, model_messages, usage, model_label)
+
+
+def _resolve_toolsets(ctx, resolver) -> tuple[list, list]:
+    """Build the run's toolsets, tolerating any failure.
+
+    Emits a ``tool_servers_skipped`` event when some servers could not be
+    built, so the user learns their tool server is misconfigured instead of
+    silently wondering why the assistant "forgot" a capability. A resolver
+    that blows up entirely costs the turn its tools, not its life.
+    """
+    try:
+        toolsets, skipped = resolver(ctx.user)
+    except Exception:  # noqa: BLE001 — tools are additive; never fail the turn
+        logger.exception("resolving assistant toolsets failed")
+        return [], []
+
+    if skipped:
+        try:
+            events.append_event(
+                ctx.thread,
+                "tool_servers_skipped",
+                payload={"servers": [{"name": s.name, "reason": s.reason} for s in skipped]},
+                turn=ctx.turn,
+            )
+        except Exception:  # noqa: BLE001 — notification failure must not fail the turn
+            logger.exception("emitting tool_servers_skipped failed")
+    return toolsets, skipped
 
 
 def _model_label(user) -> str:

@@ -13,6 +13,7 @@ message list). ``AssistantMessage`` rows are a UI transcript projection;
 
 from __future__ import annotations
 
+import re
 import uuid
 
 from django.conf import settings
@@ -178,6 +179,58 @@ class AssistantEvent(models.Model):
 class ProviderKind(models.TextChoices):
     OPENAI_COMPATIBLE = "openai_compatible", "OpenAI-compatible"
     ANTHROPIC = "anthropic", "Anthropic"
+
+
+class AssistantMCPServer(models.Model):
+    """A user-configured MCP tool server the assistant may call during a turn.
+
+    Per-user and global across workspaces, mirroring ``UserLLMConfig``'s
+    scoping. Each enabled row becomes one pydantic-ai toolset for the duration
+    of an agent run (see ``pi_dash.ee.assistant.model_provider``), so its tools
+    sit alongside the built-in ``@assistant.tool`` functions. ``tool_prefix``
+    keeps names from colliding between servers and with the built-ins.
+
+    The optional ``auth_header_encrypted`` holds a full ``Authorization``
+    header value (e.g. ``Bearer …``), encrypted at rest with the same backend
+    as BYOK provider keys.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="assistant_mcp_servers",
+    )
+    name = models.CharField(max_length=80)
+    url = models.URLField(max_length=500)
+    auth_header_encrypted = models.BinaryField(null=True, blank=True)
+    is_enabled = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "assistant_mcp_server"
+        ordering = ("created_at",)
+        constraints = [
+            models.UniqueConstraint(fields=["user", "name"], name="assistant_mcp_server_user_name_uniq"),
+        ]
+
+    def __str__(self) -> str:
+        return f"AssistantMCPServer({self.user_id}, {self.name})"
+
+    @property
+    def has_auth_header(self) -> bool:
+        return bool(self.auth_header_encrypted)
+
+    @property
+    def tool_prefix(self) -> str:
+        """Slugified ``name`` used to namespace this server's tool names.
+
+        Falls back to the row id when the name has no alphanumeric content, so
+        a prefix is always non-empty and stable.
+        """
+        slug = re.sub(r"[^a-z0-9]+", "_", self.name.strip().lower()).strip("_")
+        return slug or f"mcp_{str(self.id).replace('-', '')[:8]}"
 
 
 class UserLLMConfig(models.Model):

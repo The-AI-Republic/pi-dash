@@ -15,6 +15,7 @@ instead of BYOK direct helpers, so the overlay is the single switch point.
 from __future__ import annotations
 
 from pi_dash.assistant.runtime.llm import get_config, resolve_byok_model
+from pi_dash.assistant.runtime.mcp import build_toolsets
 from pi_dash.assistant.runtime.title import generate_byok_title_for_user
 
 
@@ -42,3 +43,18 @@ def resolve_model_for_user(user):
 def generate_title_for_user(user, description: str) -> str:
     """Return a single-prompt generated title for ``user`` (CE: BYOK only)."""
     return generate_byok_title_for_user(user, description)
+
+
+def resolve_toolsets_for_user(user):
+    """Return ``(toolsets, skipped)`` for ``user``'s assistant run.
+
+    CE: the user's own enabled MCP tool servers. The cloud build overlays this
+    to additionally inject platform-provided toolsets, so the runtime asks this
+    one function rather than reading any particular table.
+
+    ``toolsets`` are pydantic-ai toolsets passed straight to ``Agent.run``;
+    ``skipped`` is a list of :class:`~pi_dash.assistant.runtime.mcp.SkippedServer`
+    the caller surfaces to the user. Building a toolset never performs I/O — an
+    unreachable server fails later, during the run, not here.
+    """
+    return build_toolsets(user)
