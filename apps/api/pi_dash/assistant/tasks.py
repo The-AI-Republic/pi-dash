@@ -395,6 +395,16 @@ def _extract_usage(result) -> dict:
 
 def _classify_error(exc: Exception) -> tuple[str, str]:
     text = str(exc).lower()
+    # Credit exhaustion is a distinct, user-actionable condition — routed
+    # providers (OpenRouter, and any metered gateway) answer 402 rather than
+    # 401 for it. Without this it lands in the generic "unexpected error"
+    # bucket, which tells the user nothing about what to do.
+    if any(
+        s in text
+        for s in ("402", "payment required", "insufficient_credits", "insufficient credits",
+                  "no_credit_account", "quota exceeded", "billing")
+    ):
+        return "provider_out_of_credit", "The provider rejected the request for lack of credit."
     if any(s in text for s in ("401", "unauthorized", "api key", "authentication", "invalid_api_key")):
         return "provider_auth_failed", "Your API key was rejected by the provider."
     if any(s in text for s in ("connection", "timeout", "timed out", "unreachable", "could not connect", "name resolution")):
