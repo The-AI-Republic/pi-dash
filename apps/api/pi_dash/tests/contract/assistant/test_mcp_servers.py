@@ -306,3 +306,83 @@ def test_servers_are_scoped_to_their_owner_when_building(world):
     make_server(world.admin, name="AdminTools")
     toolsets, _ = mcp_runtime.build_toolsets(world.member)
     assert toolsets == []
+
+
+# --------------------------------------------------------------------------- #
+# Resilience: a dead server must not cost the user their assistant
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_server_does_not_fail_the_run():
+    """The failure this guards is the whole point of the wrapper.
+
+    Building a toolset does no I/O — the connection opens when the agent
+    *enters* it. Unwrapped, a server that is down raises out of ``Agent.run``
+    and takes the turn with it, so one broken tool server costs the user their
+    assistant entirely.
+    """
+    from pydantic_ai import Agent
+
+    # Port 9 (discard) refuses fast and deterministically.
+    toolset = mcp_runtime.build_toolset(
+        url="http://127.0.0.1:9/mcp", timeout=1, read_timeout=1, server_name="dead"
+    )
+    result = await Agent().run("hi", model="test", toolsets=[toolset])
+
+    assert result is not None  # the turn completed
+    assert toolset.failure is not None  # ...and the failure was recorded
+    assert toolset.server_name == "dead"
+
+
+@pytest.mark.asyncio
+async def test_a_dead_server_reports_no_tools_rather_than_raising():
+    toolset = mcp_runtime.build_toolset(
+        url="http://127.0.0.1:9/mcp", timeout=1, read_timeout=1, server_name="dead"
+    )
+    async with toolset:
+        assert await toolset.get_tools(None) == {}
+
+
+def test_the_wrapper_is_transparent_over_the_real_toolset():
+    # It must add resilience without hiding what it wraps: the prefix and the
+    # underlying MCP toolset stay reachable.
+    from pydantic_ai.mcp import MCPToolset
+
+    toolset = mcp_runtime.build_toolset(
+        url="https://ok.example.com/mcp", tool_prefix="ok", server_name="Ok"
+    )
+    assert toolset.failure is None
+    assert toolset.server_name == "Ok"
+    assert toolset.wrapped.prefix == "ok"
+    assert isinstance(toolset.wrapped.wrapped, MCPToolset)
+
+
+# --------------------------------------------------------------------------- #
+# Tool-prefix collisions
+# --------------------------------------------------------------------------- #
+
+
+def test_names_that_slugify_alike_get_distinct_prefixes(world):
+    # Names are unique per user, but slugification is lossy: all three of these
+    # reduce to "my_tools". Colliding prefixes silently shadow one server's
+    # tools with another's, which the model has no way to detect.
+    for name in ("My Tools", "my-tools", "my_tools"):
+        make_server(world.member, name=name, url=f"https://{name.replace(' ', '')}.example.com/mcp")
+
+    toolsets, skipped = mcp_runtime.build_toolsets(world.member)
+    prefixes = [t.wrapped.prefix for t in toolsets]
+
+    assert skipped == []
+    assert len(prefixes) == 3
+    assert len(set(prefixes)) == 3, f"colliding prefixes: {prefixes}"
+    assert prefixes[0] == "my_tools"  # the first keeps the natural prefix
+
+
+def test_prefix_assignment_is_stable_for_unchanged_servers(world):
+    make_server(world.member, name="Alpha", url="https://a.example.com/mcp")
+    make_server(world.member, name="Beta", url="https://b.example.com/mcp")
+
+    first = [t.wrapped.prefix for t in mcp_runtime.build_toolsets(world.member)[0]]
+    second = [t.wrapped.prefix for t in mcp_runtime.build_toolsets(world.member)[0]]
+    assert first == second

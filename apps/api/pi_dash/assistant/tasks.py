@@ -340,6 +340,10 @@ async def _run_turn(turn_id: str):
         await sync_to_async(_fail_turn)(ctx, code, detail)
         return
 
+    # Servers that dropped out mid-run were absorbed to keep the turn alive;
+    # report them now so the user knows a capability was unavailable.
+    await sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
+
     model_messages = await sync_to_async(history.dump_new_messages)(result)
     usage = _extract_usage(result)
     await sync_to_async(_complete_turn)(ctx, model_messages, usage, model_label)
@@ -359,17 +363,38 @@ def _resolve_toolsets(ctx, resolver) -> tuple[list, list]:
         logger.exception("resolving assistant toolsets failed")
         return [], []
 
-    if skipped:
-        try:
-            events.append_event(
-                ctx.thread,
-                "tool_servers_skipped",
-                payload={"servers": [{"name": s.name, "reason": s.reason} for s in skipped]},
-                turn=ctx.turn,
-            )
-        except Exception:  # noqa: BLE001 — notification failure must not fail the turn
-            logger.exception("emitting tool_servers_skipped failed")
+    _emit_skipped(ctx, [{"name": s.name, "reason": s.reason} for s in skipped])
     return toolsets, skipped
+
+
+def _emit_skipped(ctx, servers: list[dict]) -> None:
+    if not servers:
+        return
+    try:
+        events.append_event(
+            ctx.thread,
+            "tool_servers_skipped",
+            payload={"servers": servers},
+            turn=ctx.turn,
+        )
+    except Exception:  # noqa: BLE001 — notification failure must not fail the turn
+        logger.exception("emitting tool_servers_skipped failed")
+
+
+def _report_runtime_tool_failures(ctx, toolsets: list) -> None:
+    """Tell the user about servers that died *during* the run.
+
+    Connection happens when the agent enters a toolset, so a server that was
+    reachable at build time can still drop out mid-turn. Those failures are
+    absorbed to keep the turn alive, which means this is the only place the
+    user learns a capability was missing.
+    """
+    failed = [
+        {"name": ts.server_name, "reason": ts.failure}
+        for ts in toolsets
+        if getattr(ts, "failure", None)
+    ]
+    _emit_skipped(ctx, failed)
 
 
 def _model_label(user) -> str:

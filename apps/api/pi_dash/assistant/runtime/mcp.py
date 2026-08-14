@@ -23,6 +23,8 @@ from dataclasses import dataclass
 
 from django.conf import settings
 
+from pydantic_ai.toolsets import WrapperToolset
+
 from pi_dash.assistant import crypto, ssrf
 from pi_dash.assistant.errors import AssistantError
 from pi_dash.assistant.models import AssistantMCPServer
@@ -46,6 +48,65 @@ class SkippedServer:
     reason: str
 
 
+class ResilientToolset(WrapperToolset):
+    """Wraps a toolset so an unreachable server degrades instead of failing.
+
+    Building an MCP toolset performs no I/O — the connection is opened when the
+    agent *enters* it, at the start of the run. Without this wrapper a server
+    that is down raises out of ``Agent.run`` and takes the whole turn with it,
+    so one broken tool server would cost the user their assistant entirely.
+
+    On a failed connect, the wrapper reports no tools and lets the run proceed.
+    ``failure`` records what happened so the caller can tell the user which
+    server was dropped rather than leaving them to wonder why a capability
+    silently vanished.
+    """
+
+    def __init__(self, wrapped, *, name: str) -> None:
+        super().__init__(wrapped)
+        self._server_name = name
+        self._entered = False
+        self.failure: str | None = None
+
+    @property
+    def server_name(self) -> str:
+        return self._server_name
+
+    async def __aenter__(self):
+        try:
+            await super().__aenter__()
+            self._entered = True
+        except Exception as exc:  # noqa: BLE001 — a dead server is not a turn failure
+            self.failure = type(exc).__name__
+            logger.warning(
+                "mcp server unreachable, continuing without it: %s (%s)",
+                self._server_name,
+                exc,
+            )
+        return self
+
+    async def __aexit__(self, *args) -> bool | None:
+        if not self._entered:
+            # Never entered, so there is nothing to unwind — and calling the
+            # wrapped __aexit__ would raise on a half-built connection.
+            return None
+        return await super().__aexit__(*args)
+
+    async def get_tools(self, ctx):
+        if self.failure is not None:
+            return {}
+        try:
+            return await super().get_tools(ctx)
+        except Exception as exc:  # noqa: BLE001 — same rule as connect
+            self.failure = type(exc).__name__
+            logger.warning(
+                "mcp server failed to list tools, continuing without it: %s (%s)",
+                self._server_name,
+                exc,
+            )
+            return {}
+
+
 def build_toolset(
     *,
     url: str,
@@ -54,6 +115,7 @@ def build_toolset(
     include_instructions: bool = False,
     timeout: float = DEFAULT_TIMEOUT_S,
     read_timeout: float = DEFAULT_READ_TIMEOUT_S,
+    server_name: str = "",
 ):
     """Build one streamable-HTTP MCP toolset.
 
@@ -76,7 +138,34 @@ def build_toolset(
         read_timeout=read_timeout,
     )
     # Prefixing is a wrapper in the current API rather than a constructor arg.
-    return toolset.prefixed(tool_prefix) if tool_prefix else toolset
+    if tool_prefix:
+        toolset = toolset.prefixed(tool_prefix)
+    # Outermost, so it also absorbs failures raised by the prefix wrapper.
+    return ResilientToolset(toolset, name=server_name or url)
+
+
+def _unique_prefixes(servers: list[AssistantMCPServer]) -> dict:
+    """Map each server to a tool prefix unique within this run.
+
+    Names are unique per user, but slugification is lossy — "My Tools",
+    "my-tools" and "my_tools" all reduce to ``my_tools``. Two servers sharing a
+    prefix would expose colliding tool names to the model, which silently
+    shadows one server's tools with another's. Disambiguate with a counter,
+    ordered by ``created_at`` so a given server's prefix is stable as long as
+    the ones before it are unchanged.
+    """
+    used: set[str] = set()
+    assigned: dict = {}
+    for server in servers:
+        base = server.tool_prefix
+        prefix = base
+        n = 2
+        while prefix in used:
+            prefix = f"{base}_{n}"
+            n += 1
+        used.add(prefix)
+        assigned[server.pk] = prefix
+    return assigned
 
 
 def _auth_header_for(server: AssistantMCPServer) -> str | None:
@@ -92,10 +181,13 @@ def build_toolsets(user) -> tuple[list, list[SkippedServer]]:
     auth header yields a :class:`SkippedServer` entry instead, so one bad row
     cannot break every turn the user takes.
     """
+    servers = list(AssistantMCPServer.objects.filter(user=user, is_enabled=True))
+    prefixes = _unique_prefixes(servers)
+
     toolsets: list = []
     skipped: list[SkippedServer] = []
 
-    for server in AssistantMCPServer.objects.filter(user=user, is_enabled=True):
+    for server in servers:
         if ssrf.is_blocked(server.url):
             skipped.append(SkippedServer(server.name, "url_blocked"))
             continue
@@ -115,9 +207,10 @@ def build_toolsets(user) -> tuple[list, list[SkippedServer]]:
                 build_toolset(
                     url=server.url,
                     auth_header=auth_header,
-                    tool_prefix=server.tool_prefix,
+                    tool_prefix=prefixes[server.pk],
                     timeout=_timeout_setting(),
                     read_timeout=_read_timeout_setting(),
+                    server_name=server.name,
                 )
             )
         except Exception:  # noqa: BLE001 — construction should not fail, but never fatal
