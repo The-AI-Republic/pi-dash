@@ -140,6 +140,13 @@ def test_github_app_keys_classified_by_secret():
 
 
 @pytest.mark.unit
+def test_cloud_agent_model_key_is_an_environment_secret():
+    entry = registry.CONFIG["CLOUD_AGENT_MODEL_API_KEY"]
+    assert entry["source"] == "env"
+    assert entry["secret"] is True
+
+
+@pytest.mark.unit
 def test_source_overrides_are_applied(monkeypatch):
     monkeypatch.setattr(registry, "_RESOLVER_CONFIG", {"K": {"source": "db", "default": None}})
     monkeypatch.setattr(registry, "CONFIG_SOURCE_OVERRIDES", {"K": "env"})

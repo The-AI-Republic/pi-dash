@@ -14,8 +14,8 @@ from pi_dash.prompting.renderer import validate_syntax
 
 @pytest.mark.unit
 def test_registry_loaded_with_expected_sections():
-    # 13 ported + 2 review + 3 scheduler = 18.
-    assert len(registry.REGISTRY) == 18
+    # 18 local sections plus 12 locked Cloud Agent sections.
+    assert len(registry.REGISTRY) == 30
     for key in ("intro", "pidash-cli", "review-cycle", "scheduler-task"):
         assert key in registry.REGISTRY
 
@@ -96,9 +96,7 @@ def test_parse_front_matter_rejects_missing_block(tmp_path):
 @pytest.mark.unit
 def test_parse_front_matter_rejects_unknown_customizable(tmp_path):
     bad = tmp_path / "x.md"
-    bad.write_text(
-        "---\nkey: x\ntitle: X\ncustomizable: sometimes\n---\nbody\n", encoding="utf-8"
-    )
+    bad.write_text("---\nkey: x\ntitle: X\ncustomizable: sometimes\n---\nbody\n", encoding="utf-8")
     with pytest.raises(registry.PromptRegistryError):
         registry._parse_front_matter(bad)
 

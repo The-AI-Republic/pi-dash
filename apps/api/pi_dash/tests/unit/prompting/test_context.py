@@ -50,9 +50,7 @@ def issue(workspace, project, state, create_user):
 
 @pytest.fixture
 def run(db, workspace, create_user, issue):
-    return AgentRun.objects.create(
-        owner=create_user, workspace=workspace, prompt="", work_item=issue
-    )
+    return AgentRun.objects.create(owner=create_user, workspace=workspace, prompt="", work_item=issue)
 
 
 @pytest.mark.unit
@@ -78,11 +76,13 @@ def test_context_shape(issue, run):
 
 
 @pytest.mark.unit
-def test_context_attempt_increments_on_follow_up(
-    issue, run, workspace, create_user
-):
+def test_context_attempt_increments_on_follow_up(issue, run, workspace, create_user):
     AgentRun.objects.create(
-        owner=create_user, workspace=workspace, prompt="prior", work_item=issue
+        owner=create_user,
+        workspace=workspace,
+        prompt="prior",
+        work_item=issue,
+        status="completed",
     )
     ctx = build_context(issue, run)
     assert ctx["run"]["attempt"] == 2
@@ -97,9 +97,7 @@ def test_context_includes_git_work_branch_when_set(issue, run):
 
 
 @pytest.mark.unit
-def test_context_includes_bound_git_provider_details(
-    workspace, project, issue, run, create_user
-):
+def test_context_includes_bound_git_provider_details(workspace, project, issue, run, create_user):
     account = GitProviderAccount.objects.create(
         workspace=workspace,
         provider="gitlab",
@@ -146,9 +144,7 @@ def test_context_parent_is_none_when_unset(issue, run):
 
 
 @pytest.mark.unit
-def test_context_parent_uses_parents_own_project_identifier(
-    workspace, project, state, create_user, run, issue
-):
+def test_context_parent_uses_parents_own_project_identifier(workspace, project, state, create_user, run, issue):
     # Parents may live in a different project than their child (the FK is just
     # a self-reference with no same-project constraint). The rendered parent
     # identifier must use the *parent's* project identifier, not the child's.
@@ -160,9 +156,7 @@ def test_context_parent_uses_parents_own_project_identifier(
         repo_url="git@github.com:acme/other.git",
         base_branch="trunk",
     )
-    other_state = State.objects.create(
-        name="Todo", project=other_project, group="unstarted"
-    )
+    other_state = State.objects.create(name="Todo", project=other_project, group="unstarted")
     parent = Issue.objects.create(
         name="Umbrella epic",
         workspace=workspace,
@@ -177,17 +171,14 @@ def test_context_parent_uses_parents_own_project_identifier(
     ctx = build_context(issue, run)
     assert ctx["parent"] is not None
     assert ctx["parent"]["identifier"].startswith("OP-"), (
-        f"parent identifier should use parent's project (OP), got "
-        f"{ctx['parent']['identifier']!r}"
+        f"parent identifier should use parent's project (OP), got {ctx['parent']['identifier']!r}"
     )
     assert ctx["parent"]["title"] == "Umbrella epic"
     assert ctx["parent"]["work_branch"] == "pi-dash/op-1"
 
 
 @pytest.mark.unit
-def test_context_parent_work_branch_empty_surfaces_as_none(
-    workspace, project, state, create_user, run, issue
-):
+def test_context_parent_work_branch_empty_surfaces_as_none(workspace, project, state, create_user, run, issue):
     parent = Issue.objects.create(
         name="Sibling parent",
         workspace=workspace,
@@ -205,9 +196,7 @@ def test_context_parent_work_branch_empty_surfaces_as_none(
 
 
 @pytest.mark.unit
-def test_context_parent_includes_description_and_comment_count(
-    workspace, project, state, create_user, run, issue
-):
+def test_context_parent_includes_description_and_comment_count(workspace, project, state, create_user, run, issue):
     from pi_dash.db.models import IssueComment
 
     parent = Issue.objects.create(
@@ -236,9 +225,7 @@ def test_context_parent_includes_description_and_comment_count(
 
 
 @pytest.mark.unit
-def test_context_lineage_is_none_for_single_parent(
-    workspace, project, state, create_user, run, issue
-):
+def test_context_lineage_is_none_for_single_parent(workspace, project, state, create_user, run, issue):
     # A direct parent with no ancestors → the `parent` block carries
     # everything, so no separate lineage tree is emitted.
     parent = Issue.objects.create(
@@ -257,9 +244,7 @@ def test_context_lineage_is_none_for_single_parent(
 
 
 @pytest.mark.unit
-def test_context_lineage_populated_for_grandparent(
-    workspace, project, state, create_user, run, issue
-):
+def test_context_lineage_populated_for_grandparent(workspace, project, state, create_user, run, issue):
     grandparent = Issue.objects.create(
         name="Root epic",
         workspace=workspace,
@@ -288,9 +273,7 @@ def test_context_lineage_populated_for_grandparent(
 
 
 @pytest.mark.unit
-def test_context_includes_project_description_when_set(
-    workspace, create_user
-):
+def test_context_includes_project_description_when_set(workspace, create_user):
     project = Project.objects.create(
         name="Documented Project",
         identifier="DP",
@@ -298,9 +281,7 @@ def test_context_includes_project_description_when_set(
         created_by=create_user,
         description="Core backend services. Prefer additive migrations.",
     )
-    project_state = State.objects.create(
-        name="Todo", project=project, group="unstarted"
-    )
+    project_state = State.objects.create(name="Todo", project=project, group="unstarted")
     issue = Issue.objects.create(
         name="Fix a thing",
         workspace=workspace,
@@ -308,14 +289,9 @@ def test_context_includes_project_description_when_set(
         state=project_state,
         created_by=create_user,
     )
-    run = AgentRun.objects.create(
-        owner=create_user, workspace=workspace, prompt="", work_item=issue
-    )
+    run = AgentRun.objects.create(owner=create_user, workspace=workspace, prompt="", work_item=issue)
     ctx = build_context(issue, run)
-    assert (
-        ctx["project"]["description"]
-        == "Core backend services. Prefer additive migrations."
-    )
+    assert ctx["project"]["description"] == "Core backend services. Prefer additive migrations."
 
 
 @pytest.mark.unit
@@ -348,9 +324,7 @@ def test_context_empty_base_branch_surfaces_as_none(workspace, create_user):
         state=project_state,
         created_by=create_user,
     )
-    run = AgentRun.objects.create(
-        owner=create_user, workspace=workspace, prompt="", work_item=issue
-    )
+    run = AgentRun.objects.create(owner=create_user, workspace=workspace, prompt="", work_item=issue)
     ctx = build_context(issue, run)
     assert ctx["repo"]["base_branch"] is None
     assert ctx["repo"]["work_branch"] is None
@@ -374,9 +348,7 @@ def test_context_tick_none_without_ticker(issue, run):
 def test_context_tick_populated_from_ticker(issue, run):
     from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
 
-    IssueAgentTicker.objects.create(
-        issue=issue, tick_count=5, interval_seconds=7200, max_ticks=24
-    )
+    IssueAgentTicker.objects.create(issue=issue, tick_count=5, interval_seconds=7200, max_ticks=24)
     ctx = build_context(issue, run)
     assert ctx["tick"] == {
         "count": 5,
