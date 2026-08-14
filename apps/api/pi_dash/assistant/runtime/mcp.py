@@ -58,20 +58,25 @@ def build_toolset(
     """Build one streamable-HTTP MCP toolset.
 
     ``include_instructions`` forwards the server's ``instructions`` to the
-    model. It defaults to False in pydantic-ai; servers that rely on
-    instructions to explain a discovery protocol need it on.
+    model. It defaults to False in pydantic-ai; a server that uses
+    instructions to describe a discovery protocol needs it on or the model
+    never learns the protocol exists.
+
+    Uses ``MCPToolset`` rather than the deprecated ``MCPServerStreamableHTTP``
+    (removed in pydantic-ai v2); streamable HTTP is its default for http URLs.
     """
-    from pydantic_ai.mcp import MCPServerStreamableHTTP
+    from pydantic_ai.mcp import MCPToolset
 
     headers = {"Authorization": auth_header} if auth_header else None
-    return MCPServerStreamableHTTP(
-        url=url,
+    toolset = MCPToolset(
+        url,
         headers=headers,
-        tool_prefix=tool_prefix,
         include_instructions=include_instructions,
-        timeout=timeout,
+        init_timeout=timeout,
         read_timeout=read_timeout,
     )
+    # Prefixing is a wrapper in the current API rather than a constructor arg.
+    return toolset.prefixed(tool_prefix) if tool_prefix else toolset
 
 
 def _auth_header_for(server: AssistantMCPServer) -> str | None:
