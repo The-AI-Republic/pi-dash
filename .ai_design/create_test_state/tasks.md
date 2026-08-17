@@ -92,13 +92,17 @@ Scope:
   `handle_issue_state_transition` (`:154-224`) cross-phase resume.
   There is **no** `resume_parent_run` _function_ — the logic is inline
   here (this citation was corrected in the create_review_state design
-  review). Make the capture explicit for the 3-phase
-  impl→review→test chain: entering a `fresh_session_on_entry` phase
-  (review **or** test) captures the pre-phase **implementation** run
-  once into `ticker.resume_parent_run` and must **not** clobber it
-  when passing _through_ review into test, so a later kick-back to In
-  Progress still resumes the implementation thread rather than a
-  review/test run. `CONTINUATION_ELIGIBLE_GROUPS` and
+  review). **No production-code change needed** (verified at `@main`,
+  third-round review): the capture gate at `:156`
+  (`from_state.group == StateGroup.STARTED.value`) fires only on
+  leaving In Progress and is the sole `resume_parent_run` write
+  (`:174`), so a review→test pass-through leaves the captured impl run
+  intact; `arm_ticker`/`disarm_ticker` don't write the field either.
+  A later kick-back to In Progress therefore still resumes the impl
+  thread via the `fresh_session_on_entry == False` branch (`:211-214`).
+  **Do not add "explicit capture" code — it risks introducing the very
+  clobber it aims to prevent.** The only deliverable is the regression
+  test below. `CONTINUATION_ELIGIBLE_GROUPS` and
   `_is_delegation_trigger` need **no** change — they grow from the
   registry.
 
@@ -137,12 +141,17 @@ Scope:
 body=TEST_TEMPLATE_BODY)` if absent. Idempotent, reversible.
 
 - **migration M2** — under `prompting/migrations/`: `RunPython`
-  extending the existing `coding-task` template body to report
-  **acceptance criteria** in `done_payload` (design §4.8) — the test
-  agent's spec, load-bearing for test quality. Idempotent (only if
-  the body lacks the field), reversible. **Verify first:** if the
-  review PR already added acceptance-criteria reporting to
-  `coding-task`, drop M2.
+  extending the existing `coding-task` template body so the impl run
+  **states the acceptance criteria it validated against in its final
+  summary** (→ `parent_done_payload.result`) and/or a durable comment
+  (design §4.8) — the test agent's spec, load-bearing for test
+  quality. **Correction (third-round review):** this is a prompt-body
+  edit, **not** a new structured `done_payload` field — `done_payload`
+  is the harness run-result envelope, and no structured `pr_url` /
+  `design_doc_paths` artifact field exists to extend. Idempotent (only
+  if the body lacks the instruction), reversible. **Verify first:** if
+  the impl summary already surfaces acceptance criteria clearly, drop
+  M2.
 
 - **`apps/api/pi_dash/prompting/management/commands/reseed_test_template.py`**
   — reseed command analogous to `reseed_review_template.py`.

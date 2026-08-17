@@ -275,36 +275,52 @@ review, only the _first_ In Test run renders the template; every
 subsequent tick is comment-delta only (`build_continuation`), and the
 `test` system prompt persists in the session's memory.
 
-**Three-phase resume (the review-design touchpoint that grows).**
-The review design captured an explicit `ticker.resume_parent_run` so
-that In Review → In Progress resumes the _implementation_ session
-rather than the latest (review) run. With a third phase, the resume
-logic — inline in `handle_issue_state_transition`
-(`service.py:154-224`), **not** a named `resume_parent_run` function
-(that citation in the original proposal was corrected in design
-review) — must be explicit about which prior run a test run reads
-from and which run a later kick-back resumes:
+**Three-phase resume (verified: no production-code change needed —
+add a regression test).** The review design captured an explicit
+`ticker.resume_parent_run` so that In Review → In Progress resumes
+the _implementation_ session rather than the latest (review) run.
+With a third phase, the concern is: does the captured implementation
+resume target survive the _pass-through_ review→test, so a later
+kick-back to In Progress still resumes the impl thread? **A
+third-round review at `@main` confirmed the existing code already
+does this correctly with no change** (the resume logic is inline in
+`handle_issue_state_transition`, `service.py:154-224`, **not** a
+named `resume_parent_run` function — that citation was corrected in
+the earlier design review). Two facts settle it:
 
-- On entering In Test, the test run's mode inference (§5, Step 1)
-  should read the artifact-of-record from the **implementation**
-  run's `done_payload` (the `pr_url` / `design_doc_paths` the impl
-  reported), not the review run's — the review run's payload is a
-  verdict, not an artifact manifest. In practice the test prompt
-  inspects the working tree + the issue's run history; v1 does not
-  need a new FK, but the transition handler must not overwrite the
-  captured implementation `resume_parent_run` when passing _through_
-  review into test.
-- If a human kicks a test issue back to In Progress or In Review, the
-  same `resume_parent_run` precedence the review design established
-  applies; the test phase must not clobber it. Concretely: entering
-  a `fresh_session_on_entry=True` phase (review **or** test) captures
-  the pre-phase implementation run once and leaves it intact across
-  review→test, so a later hand-back still resumes the implementation
-  thread.
+1. The only production write to `resume_parent_run` is
+   `service.py:174`, gated by `service.py:156`
+   (`cross_phase and from_state.group == StateGroup.STARTED.value`).
+   So the capture fires **only** on leaving In Progress. A review→test
+   transition has `from_state.group == "review"`, so line 174 does
+   **not** run and the stored impl run is left untouched.
+2. Neither `arm_ticker` nor `disarm_ticker` writes `resume_parent_run`
+   (their `update_fields` cover only the clock / `enabled` /
+   `disarm_reason`; the create-path defaults don't set it). The
+   disarm-then-re-arm the pass-through performs therefore preserves it.
 
-This is the one genuinely new bit of reasoning the third phase
-forces; §7.4 spells out the code shape. Everything else is a
-mechanical third arm.
+Traced end to end: In Progress → In Review captures `resume_parent_run
+= R_impl` (line 174). In Review → In Test leaves it intact (line 174
+skipped; arm/disarm don't touch it). In Test → In Progress hits the
+`fresh_session_on_entry == False` branch (`service.py:211-214`), reads
+`ticker.resume_parent_run` = R*impl, and resumes the implementation
+thread. **So §7.4 needs no new resume logic — only a regression test
+(§9) locking in that the capture survives review→test.** Actively
+"making the capture explicit" would risk \_introducing* the clobber
+this paragraph warns against; leave the gate as-is.
+
+For mode inference on entering In Test (§5, Step 1), the test run
+reads the artifact-of-record from the **implementation** run — but via
+the same channel review uses today: the run's free-text result
+(surfaced to the next phase as `parent_done_payload`) plus
+working-tree / run-history inspection, **not** a structured artifact
+manifest (see §4.8 — there is no structured `pr_url` /
+`design_doc_paths` field in `done_payload`; that is the harness
+run-result envelope). The review run's payload is a verdict, not an
+artifact manifest, so the test prompt should key its kind inference
+off the working tree (feature branch ahead of `main`, `.ai_design/`
+paths) exactly as `review-cycle.md` does. No new FK, no clobber, no
+new logic — just the regression test.
 
 ### 4.4 Done-signal handling (reuses the review hook)
 
@@ -424,13 +440,26 @@ The biggest determinant of test quality is **not** the plumbing — a
 test is only as good as its acceptance criteria. Two concrete
 recommendations:
 
-1. Have the **coding-task** run report acceptance criteria (and any
-   `pr_url` / `design_doc_paths`) in its `done_payload`. The review
-   design already added `done_payload` artifact reporting (`pr_url` /
-   `design_doc_paths`) for mode inference; extend it with the
-   acceptance criteria the impl run validated against. The `test`
-   prompt reads those as its spec. This is a one-field addition to
-   the `coding-task` template body, load-bearing for test quality.
+1. Have the **coding-task** run surface acceptance criteria for the
+   test phase to consume. **Correction (third-round review):** there
+   is **no** structured artifact-reporting field in `done_payload`
+   today. `done_payload` is the harness **run-result envelope** the
+   runner posts when a run ends (`runner/views/run_endpoints.py:337`
+   → `done_payload=request.data.get("done_payload")`) — it carries
+   `conclusion`, the agent's free-text `result`, `status`
+   (`completed`/`blocked`/`paused`/`noop`), and usage. Review's own
+   kind inference reads that free-text `result` + the working tree,
+   **not** a structured `pr_url` / `design_doc_paths` field (grep
+   confirms `review-cycle.md` says "look for a `pr_url` in
+   done_payload" as a hint, but nothing writes one there). So the
+   channel is: have the `coding-task` prompt **state the acceptance
+   criteria it validated against in its final summary** (which
+   becomes `parent_done_payload.result` for the next phase) and/or in
+   a durable issue comment. The `test` prompt then reads
+   `parent_done_payload` + the issue/comments as its spec. This is a
+   `coding-task` **prompt-body** change (surface the criteria in the
+   summary), **not** a new structured `done_payload` field or an M2
+   data migration (see §8) — no schema, no harness change.
 2. Where criteria are genuinely absent, the test agent derives a
    plan from the description, **states its assumptions in the
    comment**, and tests against them — or `paused`s to ask if the
@@ -625,14 +654,19 @@ existing review code.
 - `_is_delegation_trigger` (`:109`) is already
   `is_ticking_state(to_state)` — no change.
 - `handle_issue_state_transition` (`:154-224`) cross-phase resume:
-  make the `resume_parent_run` capture explicit for the 3-phase
-  impl→review→test chain (§4.3). The transition _into_ a
-  `fresh_session_on_entry` phase should capture the pre-phase
-  implementation run **once** and not clobber it when passing through
-  review into test, so a later kick-back to In Progress still resumes
-  the implementation thread rather than a review/test run. This is
-  the only genuinely new logic; keep it minimal and covered by tests
-  (§9).
+  **no production-code change needed** (verified at `@main` — §4.3).
+  The existing capture gate at `service.py:156`
+  (`from_state.group == StateGroup.STARTED.value`) fires only on
+  leaving In Progress, and the sole `resume_parent_run` write
+  (`service.py:174`) is gated by it, so a review→test pass-through
+  leaves the captured impl run intact; `arm_ticker` / `disarm_ticker`
+  don't touch the field either. A later kick-back to In Progress
+  therefore still resumes the implementation thread via the
+  `fresh_session_on_entry == False` branch (`:211-214`). **Do not**
+  add "explicit capture" code here — it would risk introducing the
+  clobber it aims to prevent. The only work is a regression test
+  (§9) proving the capture survives the impl→review→test→In-Progress
+  chain.
 
 ### 7.5 `bgtasks/agent_ticker.py`
 
@@ -656,10 +690,12 @@ Add `KIND_TEST = "test"` and its `RECIPES` entry (§5). Confirm
   (idempotent), modeled on `0002_review_template.py`.
 - `reseed_test_template.py` management command.
 - **Load-bearing:** extend the `coding-task` template body so impl
-  runs report **acceptance criteria** (alongside the `pr_url` /
-  `design_doc_paths` review already added) in `done_payload` — the
-  test agent's spec (§4.8). Idempotent body update, same pattern
-  review used.
+  runs **state the acceptance criteria they validated against in the
+  final run summary** (which the next phase reads as
+  `parent_done_payload.result`) and/or a durable comment — the test
+  agent's spec (§4.8). This is a prompt-body change only; there is
+  **no** structured `done_payload` artifact field to extend (§4.8
+  correction), so no schema and no harness change.
 
 ### 7.8 `prompting/sections/state-routing.md`
 
@@ -679,13 +715,15 @@ body=TEST_TEMPLATE_BODY)` if absent. Idempotent, reversible. Modeled
 on `0002_review_template.py`.
 
 **M2 — `coding-task` body update.** `RunPython` extending the
-existing `coding-task` template body to report acceptance criteria in
-`done_payload` (§4.8). Idempotent — only updates if the body lacks
-the field. Reversible.
+existing `coding-task` template body so the impl run **states the
+acceptance criteria it validated against in its final summary**
+(→ `parent_done_payload.result`) and/or a durable comment (§4.8).
+This is a prompt-body edit — **not** a new structured `done_payload`
+field (§4.8 correction). Idempotent — only updates if the body lacks
+the instruction. Reversible.
 
-(If the acceptance-criteria reporting was already folded into the
-review PR's `coding-task` update, M2 collapses into a no-op /
-is dropped — verify during impl.)
+(If the impl summary already surfaces acceptance criteria clearly,
+M2 collapses into a no-op / is dropped — verify during impl.)
 
 ## 9. Tests
 
@@ -710,9 +748,11 @@ is dropped — verify during impl.)
   - `_is_delegation_trigger` true for In Test.
   - In Review → In Test dispatches a **fresh session**
     (`parent_run=None`, `pinned_runner_id` cleared).
-  - The captured implementation `resume_parent_run` survives the
-    impl→review→test path, so a kick-back to In Progress resumes the
-    implementation thread (§4.3).
+  - **Regression guard (§4.3):** the captured implementation
+    `resume_parent_run` survives the impl→review→test path with the
+    _existing_ code unchanged, so a kick-back to In Progress resumes
+    the implementation thread. This test is the entire cost of the
+    3-phase resume concern — no production-code change.
   - Comment on In Test wakes the agent
     (`CONTINUATION_ELIGIBLE_GROUPS` includes `test`).
 - Extend `prompting/test_composer.py`: `build_first_turn` selects the
@@ -737,17 +777,17 @@ v1.
 
 ## 11. Open questions
 
-| #   | Question                                                         | Decision                                                                                                                                                                                                                                                                                                                     |
-| --- | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Q1  | Native session resume across phase change into test?             | **No — fresh session on cross-group entry.** §4.3. The `test` system prompt must be the system prompt, not a user turn on a resumed review session.                                                                                                                                                                          |
-| Q2  | Separate cadence for test vs review?                             | **No (v1) — reuse the review defaults (3 h × 4).** §3.2. Dedicated `agent_test_default_*` is a one-migration follow-up if rhythm needs to diverge.                                                                                                                                                                           |
-| Q3  | Auto hand-off In Review → In Test via a review done-signal?      | **No (v1)** — manual user transition only. Same call review made for impl→review.                                                                                                                                                                                                                                            |
-| Q4  | Custom workspace state names in the `test` group?                | **Don't tick (v1)** — same restriction as In Progress / In Review.                                                                                                                                                                                                                                                           |
-| Q5  | May the test agent write code / edit artifacts, or only comment? | **Allowed to push trivial fixes and file follow-up issues (v1).** §4.7. AUTOMATED kind may push trivial fixes to the PR branch; real defects → `blocked` / follow-up. DESIGN may edit the doc for trivial gaps. NON_TECHNICAL only summarizes. The validate-findings step (re-run before acting) is the hallucination guard. |
-| Q6  | UI / e2e testing in the runner pod?                              | **Follow-up capability, not a v1 blocker.** §4.7.1. v1 leans on the existing toolchain; a UI issue that needs a browser the pod lacks → honest `blocked`.                                                                                                                                                                    |
-| Q7  | Explicit `Issue.test_kind` override?                             | **No (v1) — runtime inference.** §4.7. An `Issue.test_kind` (default `auto`) is the v1.5 follow-up if inference proves unreliable, same escape hatch review reserved for `review_kind`.                                                                                                                                      |
-| Q8  | Where do the test acceptance criteria come from?                 | **From the impl run's `done_payload`.** §4.8. Extend the `coding-task` template to report the criteria it validated against; absent that, the test agent derives + states assumptions or `paused`s.                                                                                                                          |
-| Q9  | Cap-hit behavior for In Test?                                    | **Stay In Test, no auto-pause** — §4.5. Requires the TEST arm in `maybe_apply_deferred_pause`; without it a cap-exhausted issue is silently moved to Paused.                                                                                                                                                                 |
+| #   | Question                                                         | Decision                                                                                                                                                                                                                                                                                                                                              |
+| --- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Q1  | Native session resume across phase change into test?             | **No — fresh session on cross-group entry.** §4.3. The `test` system prompt must be the system prompt, not a user turn on a resumed review session.                                                                                                                                                                                                   |
+| Q2  | Separate cadence for test vs review?                             | **No (v1) — reuse the review defaults (3 h × 4).** §3.2. Dedicated `agent_test_default_*` is a one-migration follow-up if rhythm needs to diverge.                                                                                                                                                                                                    |
+| Q3  | Auto hand-off In Review → In Test via a review done-signal?      | **No (v1)** — manual user transition only. Same call review made for impl→review.                                                                                                                                                                                                                                                                     |
+| Q4  | Custom workspace state names in the `test` group?                | **Don't tick (v1)** — same restriction as In Progress / In Review.                                                                                                                                                                                                                                                                                    |
+| Q5  | May the test agent write code / edit artifacts, or only comment? | **Allowed to push trivial fixes and file follow-up issues (v1).** §4.7. AUTOMATED kind may push trivial fixes to the PR branch; real defects → `blocked` / follow-up. DESIGN may edit the doc for trivial gaps. NON_TECHNICAL only summarizes. The validate-findings step (re-run before acting) is the hallucination guard.                          |
+| Q6  | UI / e2e testing in the runner pod?                              | **Follow-up capability, not a v1 blocker.** §4.7.1. v1 leans on the existing toolchain; a UI issue that needs a browser the pod lacks → honest `blocked`.                                                                                                                                                                                             |
+| Q7  | Explicit `Issue.test_kind` override?                             | **No (v1) — runtime inference.** §4.7. An `Issue.test_kind` (default `auto`) is the v1.5 follow-up if inference proves unreliable, same escape hatch review reserved for `review_kind`.                                                                                                                                                               |
+| Q8  | Where do the test acceptance criteria come from?                 | **From the impl run's final summary (`parent_done_payload.result`) + issue comments** — there is no structured `done_payload` artifact field (§4.8 correction, third-round review). Extend the `coding-task` prompt to state the criteria it validated against in its summary; absent that, the test agent derives + states assumptions or `paused`s. |
+| Q9  | Cap-hit behavior for In Test?                                    | **Stay In Test, no auto-pause** — §4.5. Requires the TEST arm in `maybe_apply_deferred_pause`; without it a cap-exhausted issue is silently moved to Paused.                                                                                                                                                                                          |
 
 ## 12. PR sequence
 
@@ -767,8 +807,10 @@ against a test-named state, so they must land together.
   dedicated test cadence is a data change.
 - Add the TEST arm to `maybe_apply_deferred_pause`'s "stay put on
   cap" carve-out (§4.5) — the one silently-wrong-without-it site.
-- Make the `resume_parent_run` capture explicit across the 3-phase
-  impl→review→test chain (§4.3 / §7.4).
+- Add a **regression test** proving the existing `resume_parent_run`
+  capture survives the 3-phase impl→review→test chain (§4.3 / §7.4).
+  No production-code change — the existing capture gate already
+  handles it (verified at `@main`).
 - Add `KIND_TEST` + recipe, `test-intro` / `test-cycle` sections,
   `TEST_TEMPLATE_BODY` + `seed_test_template`, the insert migration,
   and the reseed command.
