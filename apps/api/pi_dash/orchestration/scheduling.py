@@ -73,7 +73,12 @@ def _project_default_interval(issue: Issue) -> int:
 
     project = issue.project
     state = getattr(issue, "state", None)
-    if state is not None and state.group == StateGroup.REVIEW.value:
+    # In Review and (v1) In Test both resolve the review cadence pair —
+    # see ``.ai_design/create_test_state/design.md`` §3.2.
+    if state is not None and state.group in (
+        StateGroup.REVIEW.value,
+        StateGroup.TEST.value,
+    ):
         return getattr(
             project,
             "agent_review_default_interval_seconds",
@@ -87,7 +92,11 @@ def _project_default_max_ticks(issue: Issue) -> int:
 
     project = issue.project
     state = getattr(issue, "state", None)
-    if state is not None and state.group == StateGroup.REVIEW.value:
+    # In Review and (v1) In Test both resolve the review cadence pair.
+    if state is not None and state.group in (
+        StateGroup.REVIEW.value,
+        StateGroup.TEST.value,
+    ):
         return getattr(
             project,
             "agent_review_default_max_ticks",
@@ -407,8 +416,8 @@ def re_tick_ticker(issue: Issue) -> dict:
         if sched is None:
             return {"granted": False, "reason": "no_ticker", "ticker": None}
         # Bind the freshly-locked issue so phase-aware methods
-        # (``_is_review_phase``/``effective_max_ticks``) resolve against the
-        # current state rather than lazy-loading a fresh copy.
+        # (``_uses_review_cadence_pair``/``effective_max_ticks``) resolve
+        # against the current state rather than lazy-loading a fresh copy.
         sched.issue = locked_issue
         if not is_ticking_state(locked_issue.state):
             return {"granted": False, "reason": "not_ticking_state", "ticker": sched}
@@ -416,9 +425,12 @@ def re_tick_ticker(issue: Issue) -> dict:
             return {"granted": False, "reason": "budget_not_exhausted", "ticker": sched}
 
         grant = _project_default_max_ticks(locked_issue)
-        review = sched._is_review_phase()
+        # In Review and (v1) In Test both persist their cap override on
+        # the review pair — the test phase aliases the review cadence
+        # fields until a dedicated pair lands (design §3.2 / §6).
+        uses_review_pair = sched._uses_review_cadence_pair()
         new_cap = sched.effective_max_ticks() + grant
-        if review:
+        if uses_review_pair:
             sched.review_max_ticks = new_cap
         else:
             sched.max_ticks = new_cap
@@ -431,7 +443,7 @@ def re_tick_ticker(issue: Issue) -> dict:
         sched.next_run_at = _compute_next_run_at(sched.effective_interval_seconds())
         sched.save(
             update_fields=[
-                "review_max_ticks" if review else "max_ticks",
+                "review_max_ticks" if uses_review_pair else "max_ticks",
                 "enabled",
                 "disarm_reason",
                 "next_run_at",
@@ -789,17 +801,23 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
     if not is_ticking_state(state):
         return False
 
-    # In Review is deliberately excluded from the cap-hit auto-pause. When
-    # the *review* budget is exhausted the issue must simply stay In Review
-    # for a human to close — the runner never promotes or reparks a review
-    # issue on its own (PDASHOSS01-68). The ticker is already disarmed
-    # above, so leaving the state untouched here does not resurrect ticking.
+    # In Review and In Test are deliberately excluded from the cap-hit
+    # auto-pause. When the *review* or *test* budget is exhausted the issue
+    # must simply stay put for a human to act — the runner never promotes
+    # or reparks a review/test issue on its own (PDASHOSS01-68 /
+    # PDASHOSS01-80). Without this carve-out, once TEST became a ticking
+    # phase a cap-exhausted In Test issue would fall through and be
+    # silently auto-moved to Paused, contradicting the design
+    # (``.ai_design/create_test_state/design.md`` §4.5). The ticker is
+    # already disarmed above, so leaving the state untouched here does not
+    # resurrect ticking.
     from pi_dash.db.models.state import StateGroup
 
-    if state.group == StateGroup.REVIEW.value:
+    if state.group in (StateGroup.REVIEW.value, StateGroup.TEST.value):
         logger.info(
-            "agent_ticker: review cap hit for issue=%s — leaving it In Review, "
+            "agent_ticker: %s cap hit for issue=%s — leaving it in place, "
             "no auto-pause",
+            state.group,
             issue.pk,
         )
         return False

@@ -219,12 +219,36 @@ def test_render_error_attributes_failing_section(db, workspace):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("kind", ["coding-task", "review", "scheduler"])
+@pytest.mark.parametrize("kind", ["coding-task", "review", "test", "scheduler"])
 def test_all_kinds_render_against_both_sample_contexts(kind):
     for ctx in sample_contexts(kind):
         out = compose(kind, workspace=None, project=None, user=None, context=ctx)
         assert out.text.strip()
         assert "{%" not in out.text and "{{" not in out.text
+
+
+@pytest.mark.unit
+def test_test_kind_renders_cycle_and_cli_docs():
+    out = compose("test", workspace=None, project=None, user=None, context=_ctx("test"))
+    # The polymorphic test cycle enumerates its five kinds and reports
+    # results as a structured comment.
+    assert "AUTOMATED" in out.text
+    assert "NON_TECHNICAL" in out.text
+    assert "structured results comment" in out.text
+    # And carries the CLI docs like the other issue kinds.
+    assert "Pi Dash CLI" in out.text
+
+
+@pytest.mark.unit
+def test_test_kind_completed_stays_in_test_not_done():
+    """A `completed` test pass leaves the issue In Test — the runner never
+    moves a test issue to `completed`/"Done". The ending-run section must
+    route the test kind to the Test-cycle Step 3, not the coding "move to
+    In Review" text or a `--state "Done"`."""
+    out = compose("test", workspace=None, project=None, user=None, context=_ctx("test"))
+    body = out.text
+    assert "leaves the issue In Test" in body or "leave the issue In Test" in body
+    assert '--state "Done"' not in body
 
 
 @pytest.mark.unit

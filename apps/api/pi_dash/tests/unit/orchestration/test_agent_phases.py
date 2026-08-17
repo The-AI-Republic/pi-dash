@@ -64,10 +64,36 @@ def test_is_ticking_state_true_for_started_in_progress():
 
 
 @pytest.mark.unit
-def test_test_group_is_manual_and_does_not_tick():
-    state = _StubState(StateGroup.TEST.value, "In Test")
+def test_phases_contains_test_in_test():
+    cfg = agent_phases.PHASES[StateGroup.TEST.value]
+    assert cfg.state_name == "In Test"
+    assert cfg.template_name == "test"
+    # Entering In Test from a different ticking phase must start a fresh
+    # session so the `test` body lands as the actual system prompt.
+    assert cfg.fresh_session_on_entry is True
+    assert cfg.disarm_on_completed is True
 
-    assert StateGroup.TEST.value not in agent_phases.PHASES
+
+@pytest.mark.unit
+def test_is_ticking_state_true_for_test_in_test():
+    # In Test is a first-class ticking phase (PDASHOSS01-80) — moving an
+    # issue there wakes the agent, exactly like In Progress / In Review.
+    state = _StubState(StateGroup.TEST.value, "In Test")
+    assert agent_phases.is_ticking_state(state) is True
+
+
+@pytest.mark.unit
+def test_template_name_for_test_in_test_is_test():
+    name = agent_phases.template_name_for(
+        _StubState(StateGroup.TEST.value, "In Test")
+    )
+    assert name == "test"
+
+
+@pytest.mark.unit
+def test_is_ticking_state_false_for_test_with_custom_name():
+    # A custom workspace state name in the test group still does not tick.
+    state = _StubState(StateGroup.TEST.value, "QA")
     assert agent_phases.is_ticking_state(state) is False
 
 

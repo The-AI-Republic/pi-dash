@@ -51,13 +51,17 @@ def scan_due_tickers() -> int:
     now = timezone.now()
     # Effective cap = override if set, else project default. Phase-
     # aware via Case/When over the issue's state group: pick the
-    # review-phase pair when the issue is in the review group, else
-    # the In Progress pair. ``-1`` means infinite — admit
-    # unconditionally. See
+    # review-phase pair when the issue is in the review group — or, in
+    # v1, the test group, which aliases the review cadence pair
+    # (``.ai_design/create_test_state/design.md`` §3.2) — else the In
+    # Progress pair. ``-1`` means infinite — admit unconditionally. See
     # ``.ai_design/create_review_state/design.md`` §7.5.
     effective_cap = Case(
         When(
-            issue__state__group=StateGroup.REVIEW.value,
+            issue__state__group__in=[
+                StateGroup.REVIEW.value,
+                StateGroup.TEST.value,
+            ],
             then=Coalesce(
                 F("review_max_ticks"),
                 F("issue__project__agent_review_default_max_ticks"),

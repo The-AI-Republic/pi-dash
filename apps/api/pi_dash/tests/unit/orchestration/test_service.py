@@ -45,6 +45,9 @@ def states(project, create_user):
             "in_review": State.objects.create(
                 name="In Review", project=project, group="review"
             ),
+            "in_test": State.objects.create(
+                name="In Test", project=project, group="test"
+            ),
             "done": State.objects.create(
                 name="Done", project=project, group="completed"
             ),
@@ -765,6 +768,110 @@ def test_state_transition_disarms_on_leaving_review(
         to_state=states["done"],
     )
     assert IssueAgentTicker.objects.get(issue=issue).enabled is False
+
+
+# ---------------------------------------------------------------------------
+# In Test phase (.ai_design/create_test_state/design.md §4.2 / §4.3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_is_delegation_trigger_true_for_in_test(states):
+    assert service._is_delegation_trigger(states["in_test"]) is True
+
+
+@pytest.mark.unit
+def test_continuation_eligible_groups_includes_test():
+    assert "test" in service.CONTINUATION_ELIGIBLE_GROUPS
+
+
+@pytest.mark.unit
+def test_in_review_to_in_test_dispatches_fresh_session(
+    seeded, issue, states, runner_for_workspace
+):
+    """Cross-phase entry into test must dispatch a fresh session
+    (``parent_run=None``, ``pinned_runner`` cleared) so the ``test``
+    template body lands as the system prompt (design §4.3)."""
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_review"])
+    issue.refresh_from_db()
+    _make_paused_run(issue, runner_for_workspace)
+
+    outcome = service.handle_issue_state_transition(
+        issue=issue,
+        from_state=states["in_review"],
+        to_state=states["in_test"],
+    )
+    assert outcome.reason == "created"
+    assert outcome.created_run is not None
+    assert outcome.created_run.parent_run_id is None
+    assert outcome.created_run.pinned_runner_id is None
+
+
+@pytest.mark.unit
+def test_comment_on_in_test_wakes_agent(
+    seeded, project, issue, states, runner_for_workspace, create_user
+):
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_test"])
+    issue.refresh_from_db()
+    _make_paused_run(issue, runner_for_workspace)
+
+    comment = _make_comment(issue, create_user, "please cover the empty-input case")
+    outcome = service.handle_issue_comment(comment)
+    assert outcome.reason == "created"
+
+
+@pytest.mark.unit
+def test_resume_parent_run_survives_impl_review_test_chain(
+    seeded, issue, states, runner_for_workspace
+):
+    """The 3-phase regression guard (design §4.3 / §7.4): the captured
+    implementation ``resume_parent_run`` survives the impl → review →
+    test pass-through with the existing code UNCHANGED, so a later
+    kick-back to In Progress resumes the *implementation* thread — not a
+    review or test run. This test is the entire cost of the 3-phase
+    resume concern; no production-code change is needed.
+    """
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    # Impl phase produces R_impl.
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    impl_run = _make_paused_run(issue, runner_for_workspace, thread_id="impl")
+
+    # In Progress → In Review captures R_impl on the ticker.
+    service.handle_issue_state_transition(
+        issue=issue,
+        from_state=states["in_progress"],
+        to_state=states["in_review"],
+    )
+    sched = IssueAgentTicker.objects.get(issue=issue)
+    assert sched.resume_parent_run_id == impl_run.pk
+
+    # In Review → In Test (pass-through) must LEAVE the captured impl run
+    # intact — the capture gate fires only on leaving In Progress.
+    service.handle_issue_state_transition(
+        issue=issue,
+        from_state=states["in_review"],
+        to_state=states["in_test"],
+    )
+    sched.refresh_from_db()
+    assert sched.resume_parent_run_id == impl_run.pk
+
+    # Terminate the intermediate review/test runs so the hand-back isn't
+    # blocked by the single-active-run guard — we only care that the
+    # captured impl run is what gets resumed.
+    AgentRun.objects.filter(work_item=issue).exclude(pk=impl_run.pk).update(
+        status=AgentRunStatus.COMPLETED, done_payload={"status": "blocked"}
+    )
+
+    # In Test → In Progress hand-back resumes R_impl, not the review/test run.
+    outcome = service.handle_issue_state_transition(
+        issue=issue,
+        from_state=states["in_test"],
+        to_state=states["in_progress"],
+    )
+    assert outcome.reason == "created"
+    assert outcome.created_run.parent_run_id == impl_run.id
 
 
 @pytest.mark.unit

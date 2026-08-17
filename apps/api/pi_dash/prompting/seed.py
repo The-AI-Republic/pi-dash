@@ -96,9 +96,84 @@ Step 3 — Emit a done-signal.
 """
 
 
+TEST_TEMPLATE_NAME = "test"
+
+#: Polymorphic test prompt. At runtime the agent picks the right test
+#: kind from ``parent_done_payload`` (and working-tree inspection) and
+#: runs the cycle for that kind, then reports results as a structured
+#: issue comment. See ``.ai_design/create_test_state/design.md`` §4.7 / §5.
+TEST_TEMPLATE_BODY = """\
+You are testing the work product of a previous implementation pass.
+"Testing" means different things depending on what was produced.
+
+Issue: {{ issue.title }}
+Issue Description: {{ issue.description }}
+Recent activity:
+{{ comments_section }}
+Latest implementation run output (read this carefully — it is your
+authoritative record of what was produced, including any acceptance
+criteria, pr_url, or design_doc_paths it reported):
+{{ parent_done_payload }}
+
+Step 1 — Decide what kind of testing this is.
+Inspect parent_done_payload, the issue description, and the working
+tree. Choose ONE:
+  (a) AUTOMATED — the issue produced code (a PR / feature branch).
+      Check out the branch and run the repo's own gates: pnpm check
+      (lint + types), the targeted unit/integration tests, pnpm
+      build. Add missing tests for the changed surface.
+  (b) UI / EXPLORATORY — a frontend change whose value is visual /
+      interactive. Launch the app, drive the changed flow, check the
+      acceptance criteria by observation. If you cannot boot the app
+      or drive a browser in this environment, say so and emit
+      `blocked` — do not report a false pass.
+  (c) OPS / INFRA — a config / deploy artifact. Dry-run, validate
+      config, health-check, confirm idempotency.
+  (d) DESIGN — a design / doc deliverable. Verify it against its
+      acceptance criteria: internal consistency, open questions
+      resolved, testability of what it proposes.
+  (e) NON_TECHNICAL / GENERIC — none of the above. Verify the
+      deliverable against the stated acceptance criteria, one by
+      one, and report a pass/fail assessment for a human to confirm.
+
+If the acceptance criteria are ambiguous or absent, derive a plan
+from the description, STATE YOUR ASSUMPTIONS in your comment, and
+test against them — or emit `paused` to ask if the deliverable is
+high-stakes.
+
+Step 2 — Run the test cycle (uniform across kinds):
+  i.   Derive a test plan from the acceptance criteria.
+  ii.  Set up the environment for the chosen kind.
+  iii. Execute.
+  iv.  Collect evidence (test output, coverage, logs, screenshots).
+  v.   Validate your findings — re-run / confirm; never report a
+       hallucinated failure.
+  vi.  Post a STRUCTURED results comment to the pidash issue:
+        - Kind detected and what was tested (scope).
+        - Method — commands run / flows exercised.
+        - Result — pass/fail per acceptance criterion, with evidence.
+        - Defects found — and whether you auto-fixed (pushed to the
+          PR branch) or it needs a human / a follow-up issue.
+  vii. Optionally push trivial fixes to the PR branch, or file a
+       follow-up issue for real defects.
+
+Step 3 — Emit a done-signal.
+- `completed` = all tests pass / acceptance criteria met.
+- `blocked`   = real defects found that need a human/dev, OR the
+                test couldn't be run (missing env / creds / tooling).
+- `paused`    = acceptance criteria ambiguous — ask the human.
+- `noop`      = nothing changed since the last test pass.
+"""
+
+
 def read_review_body() -> str:
     """Return the review template body."""
     return REVIEW_TEMPLATE_BODY
+
+
+def read_test_body() -> str:
+    """Return the test template body."""
+    return TEST_TEMPLATE_BODY
 
 
 def read_default_body() -> str:
@@ -174,6 +249,40 @@ def seed_review_template(force: bool = False) -> str:
     return "skipped"
 
 
+def seed_test_template(force: bool = False) -> str:
+    """Create or (if ``force``) refresh the global ``test``
+    PromptTemplate row. Returns ``"created"`` / ``"refreshed"`` /
+    ``"skipped"``.
+    """
+    from pi_dash.prompting.models import PromptTemplate
+
+    body = read_test_body()
+    existing = (
+        PromptTemplate.objects.filter(
+            workspace__isnull=True, name=TEST_TEMPLATE_NAME
+        )
+        .order_by("-updated_at")
+        .first()
+    )
+    if existing is None:
+        PromptTemplate.objects.create(
+            workspace=None,
+            name=TEST_TEMPLATE_NAME,
+            body=body,
+            is_active=True,
+            version=1,
+        )
+        return "created"
+
+    if force and existing.body != body:
+        existing.body = body
+        existing.version = (existing.version or 0) + 1
+        existing.is_active = True
+        existing.save(update_fields=["body", "version", "is_active", "updated_at"])
+        return "refreshed"
+    return "skipped"
+
+
 def seed_default_template_on_migrate(
     sender=None, app_config=None, verbosity=1, using=None, **kwargs
 ) -> None:
@@ -186,8 +295,9 @@ def seed_default_template_on_migrate(
         return
     try:
         seed_default_template(force=False)
-        # Also seed the review template — same lifecycle, same gate.
+        # Also seed the review + test templates — same lifecycle, same gate.
         seed_review_template(force=False)
+        seed_test_template(force=False)
     except Exception as exc:  # noqa: BLE001
         # Seeding is best-effort during migrate; failures should not abort the
         # migrate command. Operators can re-run via management command.

@@ -53,6 +53,11 @@ def states(project_with_overrides, create_user):
                 project=project_with_overrides,
                 group="review",
             ),
+            "in_test": State.objects.create(
+                name="In Test",
+                project=project_with_overrides,
+                group="test",
+            ),
             "done": State.objects.create(
                 name="Done",
                 project=project_with_overrides,
@@ -91,6 +96,21 @@ def in_review_issue(workspace, project_with_overrides, states, create_user):
     return i
 
 
+@pytest.fixture
+def in_test_issue(workspace, project_with_overrides, states, create_user):
+    with impersonate(create_user):
+        i = Issue.objects.create(
+            name="Task",
+            workspace=workspace,
+            project=project_with_overrides,
+            state=states["todo"],
+            created_by=create_user,
+        )
+    Issue.all_objects.filter(pk=i.pk).update(state=states["in_test"])
+    i.refresh_from_db()
+    return i
+
+
 @pytest.mark.unit
 def test_in_progress_uses_impl_project_defaults(in_progress_issue):
     sched = IssueAgentTicker.objects.create(issue=in_progress_issue)
@@ -105,6 +125,41 @@ def test_in_review_uses_review_project_defaults(in_review_issue):
     # This project fixture explicitly configures the review cap at 8, so the
     # In Review phase resolves to 8 — distinct from impl's 24. (The *schema*
     # default is 4; see test_review_max_ticks_schema_default_is_four.)
+    assert sched.effective_max_ticks() == 8
+
+
+@pytest.mark.unit
+def test_in_test_aliases_review_project_defaults(in_test_issue):
+    """In Test resolves the **review** cadence pair in v1 (design §3.2) —
+    3 h interval, the project's review cap (8 here), NOT the impl cap 24."""
+    sched = IssueAgentTicker.objects.create(issue=in_test_issue)
+    assert sched.effective_interval_seconds() == 10800
+    assert sched.effective_max_ticks() == 8
+
+
+@pytest.mark.unit
+def test_in_test_uses_review_override_pair(in_test_issue):
+    """A per-issue override for In Test lands on the review pair (aliased
+    in v1), so the review override fields win."""
+    sched = IssueAgentTicker.objects.create(
+        issue=in_test_issue,
+        review_interval_seconds=600,
+        review_max_ticks=3,
+    )
+    assert sched.effective_interval_seconds() == 600
+    assert sched.effective_max_ticks() == 3
+
+
+@pytest.mark.unit
+def test_in_test_ignores_impl_override(in_test_issue):
+    """Per-issue impl overrides do NOT apply when the issue is In Test —
+    it uses the review pair, same as In Review."""
+    sched = IssueAgentTicker.objects.create(
+        issue=in_test_issue,
+        interval_seconds=900,  # impl override — must NOT apply
+        max_ticks=100,         # impl override — must NOT apply
+    )
+    assert sched.effective_interval_seconds() == 10800
     assert sched.effective_max_ticks() == 8
 
 

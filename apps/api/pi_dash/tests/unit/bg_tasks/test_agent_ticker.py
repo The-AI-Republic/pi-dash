@@ -49,6 +49,9 @@ def states(project, create_user):
             "in_review": State.objects.create(
                 name="In Review", project=project, group="review"
             ),
+            "in_test": State.objects.create(
+                name="In Test", project=project, group="test"
+            ),
             "paused": State.objects.create(
                 name="Paused", project=project, group="backlog"
             ),
@@ -256,6 +259,85 @@ def test_scan_admits_in_review_row_under_review_phase_cap(
     assert fire.call_count == 1
 
 
+@pytest.mark.unit
+def test_scan_uses_test_phase_cap_for_in_test_rows(
+    seeded, project, states, workspace, create_user
+):
+    """The scanner's effective-cap ``Case/When`` must include the test
+    group (PDASHOSS01-80): In Test aliases the review cap pair in v1, so
+    an In Test ticker at ``tick_count=10`` (above the review cap 8, below
+    the impl cap 24) must be filtered out — proving the TEST arm resolves
+    the review pair, not the default impl pair.
+    """
+    project.agent_default_max_ticks = 24
+    project.agent_review_default_max_ticks = 8
+    project.save(
+        update_fields=[
+            "agent_default_max_ticks",
+            "agent_review_default_max_ticks",
+        ]
+    )
+
+    with impersonate(create_user):
+        test_issue = Issue.objects.create(
+            name="TestTask",
+            workspace=workspace,
+            project=project,
+            state=states["todo"],
+            created_by=create_user,
+        )
+    Issue.all_objects.filter(pk=test_issue.pk).update(state=states["in_test"])
+    test_issue.refresh_from_db()
+    sched = scheduling.arm_ticker(test_issue)
+    sched.next_run_at = timezone.now() - timedelta(seconds=1)
+    sched.tick_count = 10
+    sched.save(update_fields=["next_run_at", "tick_count", "updated_at"])
+
+    with mock.patch(
+        "pi_dash.bgtasks.agent_ticker.fire_tick.delay"
+    ) as fire:
+        count = scan_due_tickers()
+    assert count == 0
+    assert fire.call_count == 0
+
+
+@pytest.mark.unit
+def test_scan_admits_in_test_row_under_test_phase_cap(
+    seeded, project, states, workspace, create_user
+):
+    """Inverse: an In Test row below the review cap (8) is admitted."""
+    project.agent_default_max_ticks = 24
+    project.agent_review_default_max_ticks = 8
+    project.save(
+        update_fields=[
+            "agent_default_max_ticks",
+            "agent_review_default_max_ticks",
+        ]
+    )
+
+    with impersonate(create_user):
+        test_issue = Issue.objects.create(
+            name="TestTask2",
+            workspace=workspace,
+            project=project,
+            state=states["todo"],
+            created_by=create_user,
+        )
+    Issue.all_objects.filter(pk=test_issue.pk).update(state=states["in_test"])
+    test_issue.refresh_from_db()
+    sched = scheduling.arm_ticker(test_issue)
+    sched.next_run_at = timezone.now() - timedelta(seconds=1)
+    sched.tick_count = 5  # < 8
+    sched.save(update_fields=["next_run_at", "tick_count", "updated_at"])
+
+    with mock.patch(
+        "pi_dash.bgtasks.agent_ticker.fire_tick.delay"
+    ) as fire:
+        count = scan_due_tickers()
+    assert count == 1
+    assert fire.call_count == 1
+
+
 # ---------------------------------------------------------------------------
 # fire_tick
 # ---------------------------------------------------------------------------
@@ -285,6 +367,28 @@ def test_fire_tick_increments_tick_count_and_dispatches(
     assert run.trigger == "tick"
     assert "automatically by the issue's ticker" in run.prompt
     assert "Ticking schedule" in run.prompt
+
+
+@pytest.mark.unit
+def test_fire_tick_dispatches_for_in_test_issue(
+    seeded, issue, states, runner_for_workspace
+):
+    """``fire_tick`` ticks an In Test issue — In Test is a registered
+    ticking phase, so ``is_ticking_state`` passes and the continuation
+    run dispatches, exactly like In Progress / In Review."""
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_test"])
+    issue.refresh_from_db()
+    _make_prior_run(issue, runner_for_workspace)
+    sched = _make_due_schedule(issue)
+
+    fired = fire_tick(str(sched.id))
+    assert fired is True
+
+    sched.refresh_from_db()
+    assert sched.tick_count == 1
+    runs = AgentRun.objects.filter(work_item=issue, parent_run__isnull=False)
+    assert runs.count() == 1
+    assert runs.get().trigger == "tick"
 
 
 @pytest.mark.unit

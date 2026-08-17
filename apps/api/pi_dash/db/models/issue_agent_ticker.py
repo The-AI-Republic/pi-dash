@@ -128,9 +128,17 @@ class IssueAgentTicker(BaseModel):
     # Effective values (override-or-project-default)
     # ------------------------------------------------------------------
 
-    def _is_review_phase(self) -> bool:
-        """Return ``True`` if the issue's current state is the In
-        Review phase. Used to pick the right cadence-field pair.
+    def _uses_review_cadence_pair(self) -> bool:
+        """Return ``True`` when the issue's current phase resolves cadence
+        through the **In Review** field pair (``review_*`` override /
+        ``agent_review_default_*`` project default).
+
+        In Review uses this pair by definition. **In Test** aliases it in
+        v1 — the test phase reuses the review cadence (3 h × 4) rather
+        than introducing a third ``Project`` field pair; see
+        ``.ai_design/create_test_state/design.md`` §3.2. When a dedicated
+        ``agent_test_default_*`` pair lands, this splits cleanly the same
+        way review split from impl.
         """
         # Local imports keep the model file free of orchestration
         # imports at module load time (orchestration imports state).
@@ -138,23 +146,26 @@ class IssueAgentTicker(BaseModel):
         from pi_dash.orchestration.agent_phases import phase_config_for
 
         # Require both: a registered ticking state (so a custom
-        # workspace state in the review group does not pick up
-        # phase-aware cadence) AND the review group key. Comparing on
-        # the group enum keeps the cadence resolver decoupled from the
+        # workspace state in the review/test group does not pick up
+        # phase-aware cadence) AND a review-cadence group key. Comparing
+        # on the group enum keeps the cadence resolver decoupled from the
         # state's display name.
         cfg = phase_config_for(self.issue.state)
         if cfg is None:
             return False
-        return self.issue.state.group == StateGroup.REVIEW.value
+        return self.issue.state.group in (
+            StateGroup.REVIEW.value,
+            StateGroup.TEST.value,
+        )
 
     def effective_interval_seconds(self) -> int:
         """Return the interval to use, picking the In Review pair when
-        the issue is currently In Review and the In Progress pair
-        otherwise. Falls back through: per-issue override → project
-        default → constant.
+        the issue is currently in a review-cadence phase (In Review or,
+        in v1, In Test) and the In Progress pair otherwise. Falls back
+        through: per-issue override → project default → constant.
         """
         project = self.issue.project
-        if self._is_review_phase():
+        if self._uses_review_cadence_pair():
             override = self.review_interval_seconds
             project_default = getattr(
                 project,
@@ -178,7 +189,7 @@ class IssueAgentTicker(BaseModel):
         max-ticks pair.
         """
         project = self.issue.project
-        if self._is_review_phase():
+        if self._uses_review_cadence_pair():
             override = self.review_max_ticks
             project_default = getattr(
                 project,

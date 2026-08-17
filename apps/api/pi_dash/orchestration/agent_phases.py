@@ -69,6 +69,15 @@ PHASES: dict[str, PhaseConfig] = {
         template_name="review",
         fresh_session_on_entry=True,
     ),
+    StateGroup.TEST.value: PhaseConfig(
+        state_name="In Test",
+        template_name="test",
+        # The `test` system prompt must land as the actual system prompt
+        # of a fresh session, not a user-turn message on a resumed
+        # review/implementation conversation. See
+        # ``.ai_design/create_test_state/design.md`` §4.3.
+        fresh_session_on_entry=True,
+    ),
 }
 
 

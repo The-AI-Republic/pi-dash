@@ -14,9 +14,16 @@ from pi_dash.prompting.renderer import validate_syntax
 
 @pytest.mark.unit
 def test_registry_loaded_with_expected_sections():
-    # 13 ported + 2 review + 3 scheduler = 18.
-    assert len(registry.REGISTRY) == 18
-    for key in ("intro", "pidash-cli", "review-cycle", "scheduler-task"):
+    # 13 ported + 2 review + 2 test + 3 scheduler = 20.
+    assert len(registry.REGISTRY) == 20
+    for key in (
+        "intro",
+        "pidash-cli",
+        "review-cycle",
+        "test-intro",
+        "test-cycle",
+        "scheduler-task",
+    ):
         assert key in registry.REGISTRY
 
 
