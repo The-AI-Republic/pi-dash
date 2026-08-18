@@ -10,9 +10,9 @@
 //!    error, or the grant expires.
 //! 4. Write the returned `APIToken` to `[cli].token` in `config.toml`.
 //!
-//! After a successful login, if the host has no `[[runner]]` block and
-//! we're on an interactive TTY, offer to register one inline — this is
-//! the common dev-laptop case.
+//! After a successful login we simply confirm the account/workspace and
+//! point the user at the cloud URL. Registering a runner is a separate,
+//! explicit step (`pidash runner add`).
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
@@ -35,11 +35,6 @@ pub struct Args {
     /// Don't try to open the verification URL in a browser.
     #[arg(long)]
     pub no_browser: bool,
-
-    /// Don't prompt to register a runner after login succeeds, even on
-    /// a TTY. Useful when scripting an auth-only setup.
-    #[arg(long)]
-    pub no_runner_prompt: bool,
 
     /// Workspace slug to bind this CLI install to after login.
     #[arg(long, hide = true)]
@@ -79,22 +74,10 @@ struct TokenError {
 }
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
-    let no_runner_prompt = args.no_runner_prompt;
     let outcome = login_and_bind_workspace(&args, paths).await?;
 
-    if no_runner_prompt {
-        return Ok(());
-    }
-    if !std::io::stdout().is_terminal() {
-        return Ok(());
-    }
-    maybe_offer_runner_add(
-        paths,
-        &outcome.cloud_url,
-        &outcome.access_token,
-        &outcome.workspace_slug,
-    )
-    .await?;
+    println!();
+    println!("Start using Pi Dash at {}", outcome.cloud_url);
     Ok(())
 }
 
@@ -104,8 +87,6 @@ pub async fn run_auth_only(args: Args, paths: &Paths) -> Result<()> {
 
 struct LoginOutcome {
     cloud_url: String,
-    access_token: String,
-    workspace_slug: String,
 }
 
 async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOutcome> {
@@ -172,11 +153,7 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
     }
     println!("  Workspace: {}", machine_token.workspace_slug);
 
-    Ok(LoginOutcome {
-        cloud_url,
-        access_token: machine_token.machine_token,
-        workspace_slug: machine_token.workspace_slug,
-    })
+    Ok(LoginOutcome { cloud_url })
 }
 
 fn resolve_cloud_url(args: &Args, paths: &Paths) -> Result<String> {
@@ -454,144 +431,4 @@ fn pick_workspace(workspaces: &[WorkspaceRow]) -> Result<&WorkspaceRow> {
         anyhow::bail!("selection {idx} out of range");
     }
     Ok(&workspaces[idx - 1])
-}
-
-async fn maybe_offer_runner_add(
-    paths: &Paths,
-    cloud_url: &str,
-    api_token: &str,
-    workspace_slug: &str,
-) -> Result<()> {
-    // Skip the prompt entirely if a runner already exists — the user
-    // ran `auth login` to refresh a token, not to onboard.
-    let existing_runners = if paths.config_path().exists() {
-        file::load_config(paths)?.runners.len()
-    } else {
-        0
-    };
-    if existing_runners > 0 {
-        println!();
-        println!("This host already has {existing_runners} runner(s) registered.");
-        println!(
-            "Use `pidash runner add` to register another, or `pidash runner list` to see them."
-        );
-        return Ok(());
-    }
-
-    // Fetch the user's projects to decide what to suggest.
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()?;
-    let projects = match fetch_projects(&client, cloud_url, api_token).await {
-        Ok(p) => p,
-        Err(e) => {
-            // Non-fatal: we logged in fine, the picker just can't run.
-            println!();
-            println!(
-                "(Couldn't list projects: {e}. You can run `pidash runner add --project <SLUG>` later.)"
-            );
-            return Ok(());
-        }
-    };
-
-    if projects.is_empty() {
-        println!();
-        println!("You don't have any projects yet.");
-        println!("Create one in the cloud UI, then run `pidash runner add` to register this host.");
-        return Ok(());
-    }
-
-    println!();
-    println!("Register this host as a runner now?");
-    let pick = pick_project(&projects)?;
-    let Some(project) = pick else {
-        println!("Skipped. Run `pidash runner add` later to register this host.");
-        return Ok(());
-    };
-
-    println!();
-    println!("Registering runner under project {}...", project.identifier);
-    crate::cli::runner::add(
-        crate::cli::runner::AddArgs {
-            url: None,
-            name: None,
-            project: project.identifier.clone(),
-            workspace: Some(workspace_slug.to_string()),
-            pod: None,
-            working_dir: None,
-            workdir: None,
-            no_pool: false,
-            agent: crate::config::schema::AgentKind::default(),
-            model: None,
-            reasoning_effort: None,
-        },
-        paths,
-    )
-    .await?;
-    Ok(())
-}
-
-#[derive(Debug, Deserialize)]
-struct ProjectRow {
-    identifier: String,
-    name: String,
-}
-
-async fn fetch_projects(
-    client: &reqwest::Client,
-    cloud_url: &str,
-    api_token: &str,
-) -> Result<Vec<ProjectRow>> {
-    let url = format!("{cloud_url}/api/v1/runner/projects/");
-    let resp = client
-        .get(&url)
-        .header("X-Api-Key", api_token)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("HTTP {status}: {body}");
-    }
-    let rows: Vec<ProjectRow> = resp.json().await.context("parsing project list")?;
-    Ok(rows)
-}
-
-fn pick_project(projects: &[ProjectRow]) -> Result<Option<&ProjectRow>> {
-    use std::io::BufRead;
-    if projects.len() == 1 {
-        print!(
-            "Register this host for project '{}'? [Y/n] ",
-            projects[0].identifier
-        );
-        std::io::stdout().flush().ok();
-        let stdin = std::io::stdin();
-        let mut line = String::new();
-        stdin.lock().read_line(&mut line).ok();
-        let ans = line.trim().to_lowercase();
-        if ans.is_empty() || ans == "y" || ans == "yes" {
-            return Ok(Some(&projects[0]));
-        }
-        return Ok(None);
-    }
-    println!();
-    for (i, p) in projects.iter().enumerate() {
-        println!("  {}) {:<12} {}", i + 1, p.identifier, p.name);
-    }
-    println!("  q) skip");
-    print!("Pick a project [1-{}]: ", projects.len());
-    std::io::stdout().flush().ok();
-    let stdin = std::io::stdin();
-    let mut line = String::new();
-    stdin.lock().read_line(&mut line).ok();
-    let ans = line.trim().to_lowercase();
-    if ans.is_empty() || ans == "q" || ans == "skip" {
-        return Ok(None);
-    }
-    let idx: usize = ans.parse().context("expected a number or 'q'")?;
-    if idx == 0 || idx > projects.len() {
-        anyhow::bail!("selection {idx} out of range");
-    }
-    Ok(Some(&projects[idx - 1]))
 }
