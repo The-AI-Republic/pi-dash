@@ -252,6 +252,46 @@ def test_test_kind_completed_stays_in_test_not_done():
 
 
 @pytest.mark.unit
+def test_coding_task_posts_acceptance_criteria_handoff():
+    """The impl run must hand the test phase a spec. In Test starts from a
+    fresh session, so a comment with fixed headings — not the run summary —
+    is the channel the next phase reliably inherits."""
+    out = compose(
+        "coding-task", workspace=None, project=None, user=None,
+        context=_ctx("coding-task"),
+    )
+    body = out.text
+    assert "### Acceptance Criteria" in body
+    assert "### How to Test" in body
+    # Reinforced in the exit checklist, not only in the implementation step.
+    assert body.count("### Acceptance Criteria") >= 1
+    assert "hand-off" in body
+
+
+@pytest.mark.unit
+def test_test_kind_reads_the_handoff_comment_first():
+    out = compose(
+        "test", workspace=None, project=None, user=None, context=_ctx("test")
+    )
+    body = out.text
+    assert "hand-off comment" in body
+    assert "### Acceptance Criteria" in body
+
+
+@pytest.mark.unit
+def test_test_kind_does_not_prescribe_a_package_manager():
+    """Pi Dash runs against arbitrary customer repos — the AUTOMATED branch
+    must discover the repo's gates, not assume a JS toolchain."""
+    out = compose(
+        "test", workspace=None, project=None, user=None, context=_ctx("test")
+    )
+    body = out.text
+    for tool in ("pnpm", "yarn "):
+        assert tool not in body
+    assert "discover them" in body
+
+
+@pytest.mark.unit
 def test_review_default_includes_cli_docs():
     out = compose("review", workspace=None, project=None, user=None, context=_ctx("review"))
     assert "Pi Dash CLI" in out.text

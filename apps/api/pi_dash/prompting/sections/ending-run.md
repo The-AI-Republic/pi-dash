@@ -24,7 +24,8 @@ If any item fails this check, fix the workpad before exiting — `pidash workpad
 1. **If the work completed successfully:**
    - Pushed your branch (if any code changed).
    - Wrote the final workpad via `pidash workpad update` so its checkpoints and validation notes are accurate.
-   - Optionally posted a short completion comment (e.g. "Done — PR <url> ready for review") if the human will benefit from the ping; otherwise the issue state change is signal enough.
+   - Optionally posted a short completion comment (e.g. "Done — PR <url> ready for review") if the human will benefit from the ping; otherwise the issue state change is signal enough.{% if run.kind == "coding-task" %}
+   - Posted the **acceptance criteria + test instructions** hand-off comment (`### Acceptance Criteria` / `### How to Test`) — see "Implementation & validation" Step 7. The test phase runs in a fresh session and inherits nothing but the issue; without this comment it has no spec to test against.{% endif %}
    - Moved the issue to the correct next state.{% if run.kind != "review" and run.kind != "test" %} **The runner never proactively moves an issue to `completed`/"Done" — read this carefully, it is the single most common place runs get the ending wrong:**
      - **Move a successfully finished issue to the `review` group — usually "In Review" — whether or not you opened a PR.** A `code_change` that opened a PR is awaiting human review and merge; a finished `noncode` task (a question answered in a comment, a debug/investigation with the root cause posted, a status check) is awaiting a human's acknowledgement. In **both** cases the runner's job is done but the *issue* is not — a human (or a separate supporting process) closes it to Done. Marking it "Done" yourself drops it off the user's radar prematurely.
        `pidash issue patch {{ issue.identifier }} --state "In Review"`

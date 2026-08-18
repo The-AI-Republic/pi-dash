@@ -119,9 +119,12 @@ Step 1 — Decide what kind of testing this is.
 Inspect parent_done_payload, the issue description, and the working
 tree. Choose ONE:
   (a) AUTOMATED — the issue produced code (a PR / feature branch).
-      Check out the branch and run the repo's own gates: pnpm check
-      (lint + types), the targeted unit/integration tests, pnpm
-      build. Add missing tests for the changed surface.
+      Check out the branch and run THIS repo's own gates — discover
+      them from the README/CONTRIBUTING, the CI config, and the
+      package manifest (package.json / Makefile / pyproject.toml /
+      Cargo.toml / go.mod); never assume a toolchain. Run format/lint,
+      types, the targeted unit/integration tests for the changed
+      surface, and build. Add missing tests for the changed surface.
   (b) UI / EXPLORATORY — a frontend change whose value is visual /
       interactive. Launch the app, drive the changed flow, check the
       acceptance criteria by observation. If you cannot boot the app

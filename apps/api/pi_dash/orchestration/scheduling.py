@@ -61,6 +61,13 @@ DELEGATION_STATE_NAME = "In Progress"
 # ---------------------------------------------------------------------------
 
 
+def _cadence_fields(issue: Issue):
+    """Return the cadence column pair for the issue's *current* phase."""
+    from pi_dash.orchestration.agent_phases import cadence_fields_for
+
+    return cadence_fields_for(getattr(issue, "state", None))
+
+
 def _project_default_interval(issue: Issue) -> int:
     """Project-level default interval for the issue's *current* phase.
 
@@ -69,40 +76,14 @@ def _project_default_interval(issue: Issue) -> int:
     Subsequent arms read directly from the row's phase-aware
     ``effective_*`` methods.
     """
-    from pi_dash.db.models.state import StateGroup
-
-    project = issue.project
-    state = getattr(issue, "state", None)
-    # In Review and (v1) In Test both resolve the review cadence pair —
-    # see ``.ai_design/create_test_state/design.md`` §3.2.
-    if state is not None and state.group in (
-        StateGroup.REVIEW.value,
-        StateGroup.TEST.value,
-    ):
-        return getattr(
-            project,
-            "agent_review_default_interval_seconds",
-            DEFAULT_INTERVAL_SECONDS,
-        )
-    return getattr(project, "agent_default_interval_seconds", DEFAULT_INTERVAL_SECONDS)
+    fields = _cadence_fields(issue)
+    return getattr(issue.project, fields.project_interval, fields.default_interval)
 
 
 def _project_default_max_ticks(issue: Issue) -> int:
-    from pi_dash.db.models.state import StateGroup
-
-    project = issue.project
-    state = getattr(issue, "state", None)
-    # In Review and (v1) In Test both resolve the review cadence pair.
-    if state is not None and state.group in (
-        StateGroup.REVIEW.value,
-        StateGroup.TEST.value,
-    ):
-        return getattr(
-            project,
-            "agent_review_default_max_ticks",
-            DEFAULT_MAX_TICKS,
-        )
-    return getattr(project, "agent_default_max_ticks", DEFAULT_MAX_TICKS)
+    """Project-level default cap for the issue's *current* phase."""
+    fields = _cadence_fields(issue)
+    return getattr(issue.project, fields.project_max_ticks, fields.default_max_ticks)
 
 
 def _project_ticking_enabled(issue: Issue) -> bool:
@@ -145,12 +126,12 @@ def arm_ticker(
             # Brand-new row. We need a sensible ``next_run_at`` before
             # we can ask for ``effective_interval_seconds`` (which
             # consults the row), so use the project default for the
-            # issue's *current* phase. ``_project_default_interval``
-            # picks the review-phase default when the issue's current
-            # state group is REVIEW (e.g., a Todo → In Review path that
-            # skips the impl phase) and the In Progress default
-            # otherwise. Subsequent arms use the row's phase-aware
-            # ``effective_interval_seconds`` directly.
+            # issue's *current* phase — ``_project_default_interval``
+            # resolves that through the phase registry, so a Todo → In
+            # Review or Todo → In Test path that skips the impl phase
+            # still starts on its own phase's cadence. Subsequent arms
+            # use the row's phase-aware ``effective_interval_seconds``
+            # directly.
             interval = _project_default_interval(issue)
             sched = IssueAgentTicker.objects.create(
                 issue=issue,
@@ -158,6 +139,8 @@ def arm_ticker(
                 max_ticks=None,
                 review_interval_seconds=None,
                 review_max_ticks=None,
+                test_interval_seconds=None,
+                test_max_ticks=None,
                 user_disabled=False,
                 next_run_at=_compute_next_run_at(interval),
                 tick_count=0,
@@ -416,8 +399,8 @@ def re_tick_ticker(issue: Issue) -> dict:
         if sched is None:
             return {"granted": False, "reason": "no_ticker", "ticker": None}
         # Bind the freshly-locked issue so phase-aware methods
-        # (``_uses_review_cadence_pair``/``effective_max_ticks``) resolve
-        # against the current state rather than lazy-loading a fresh copy.
+        # (``_cadence_fields``/``effective_max_ticks``) resolve against
+        # the current state rather than lazy-loading a fresh copy.
         sched.issue = locked_issue
         if not is_ticking_state(locked_issue.state):
             return {"granted": False, "reason": "not_ticking_state", "ticker": sched}
@@ -425,15 +408,13 @@ def re_tick_ticker(issue: Issue) -> dict:
             return {"granted": False, "reason": "budget_not_exhausted", "ticker": sched}
 
         grant = _project_default_max_ticks(locked_issue)
-        # In Review and (v1) In Test both persist their cap override on
-        # the review pair — the test phase aliases the review cadence
-        # fields until a dedicated pair lands (design §3.2 / §6).
-        uses_review_pair = sched._uses_review_cadence_pair()
+        # The grant lands on the *current* phase's own override column.
+        # Phases are siblings with independent budgets: extending an In
+        # Test issue must never inflate what In Review gets later, and
+        # vice versa.
+        cap_field = _cadence_fields(locked_issue).ticker_max_ticks
         new_cap = sched.effective_max_ticks() + grant
-        if uses_review_pair:
-            sched.review_max_ticks = new_cap
-        else:
-            sched.max_ticks = new_cap
+        setattr(sched, cap_field, new_cap)
 
         # Re-arm: clear the disarm cause and restart the clock unless the
         # user disabled ticking on this issue or the project suppresses it.
@@ -443,7 +424,7 @@ def re_tick_ticker(issue: Issue) -> dict:
         sched.next_run_at = _compute_next_run_at(sched.effective_interval_seconds())
         sched.save(
             update_fields=[
-                "review_max_ticks" if uses_review_pair else "max_ticks",
+                cap_field,
                 "enabled",
                 "disarm_reason",
                 "next_run_at",
@@ -801,19 +782,18 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
     if not is_ticking_state(state):
         return False
 
-    # In Review and In Test are deliberately excluded from the cap-hit
-    # auto-pause. When the *review* or *test* budget is exhausted the issue
-    # must simply stay put for a human to act — the runner never promotes
-    # or reparks a review/test issue on its own (PDASHOSS01-68 /
-    # PDASHOSS01-80). Without this carve-out, once TEST became a ticking
-    # phase a cap-exhausted In Test issue would fall through and be
-    # silently auto-moved to Paused, contradicting the design
-    # (``.ai_design/create_test_state/design.md`` §4.5). The ticker is
-    # already disarmed above, so leaving the state untouched here does not
-    # resurrect ticking.
-    from pi_dash.db.models.state import StateGroup
+    # The human-hand-off phases (In Review, In Test) are deliberately
+    # excluded from the cap-hit auto-pause: when that budget is exhausted
+    # the issue must simply stay put for a human to act — the runner never
+    # promotes or reparks one on its own (PDASHOSS01-68 / PDASHOSS01-80).
+    # This is registry-driven rather than a group check, so a new phase
+    # declares its own answer instead of inheriting a silently-wrong
+    # default here (design ``create_test_state/design.md`` §4.5). The
+    # ticker is already disarmed above, so leaving the state untouched
+    # does not resurrect ticking.
+    from pi_dash.orchestration.agent_phases import auto_pauses_on_cap
 
-    if state.group in (StateGroup.REVIEW.value, StateGroup.TEST.value):
+    if not auto_pauses_on_cap(state):
         logger.info(
             "agent_ticker: %s cap hit for issue=%s — leaving it in place, "
             "no auto-pause",

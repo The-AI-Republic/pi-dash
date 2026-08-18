@@ -7,11 +7,19 @@ customizable: overridable
 ## Step 0 — Gather the acceptance criteria (the spec you test against)
 
 A test is only as good as the criteria it checks against. Before deciding
-anything, assemble the spec from every channel available to you:
+anything, assemble the spec from every channel available to you, in this
+order of authority:
 
+- the **hand-off comment** the implementation run posted — the most recent
+  issue comment carrying `### Acceptance Criteria` and `### How to Test`
+  headings. This is written for you and is the closest thing to a spec you
+  will get; start here. It is not authoritative about *outcomes*, only
+  about intent — an "Already validated here" line is a claim to re-check,
+  not evidence.
 - the issue description and any `Validation` / `Test Plan` / `Testing`
   section in it,
-- the recent comment activity (humans often refine the criteria there),
+- the rest of the comment activity (humans often refine the criteria
+  there, and a later human comment overrides an earlier hand-off),
 - the implementation run's summary in `parent_done_payload` (it should
   state what it built and validated against),
 - the issue **workpad** — read it with `pidash workpad get` for the
@@ -30,10 +38,16 @@ Choose ONE:
 
 - **(a) AUTOMATED** — the issue produced code (a PR / feature branch;
   look for a `pr_url` in the payload or a feature branch ahead of the base
-  branch). Check out the branch and run the repo's own gates: `pnpm check`
-  (lint + types), the targeted unit/integration tests for the changed
-  surface, `pnpm build`. Add missing tests for the changed surface where
-  it's cheap and clearly in scope.
+  branch). Check out the branch and run **this repo's own gates** —
+  discover them, never assume a toolchain. Read the README/CONTRIBUTING,
+  the CI config (`.github/workflows/`, `.gitlab-ci.yml`), and the package
+  manifest (`package.json` scripts, `Makefile`, `pyproject.toml`,
+  `Cargo.toml`, `go.mod`, `build.gradle`) and run what they declare for
+  format/lint, types, tests, and build. In a polyglot repo run the gates
+  for the stack you actually changed. Run the targeted unit/integration
+  tests for the changed surface, and add missing tests where it's cheap
+  and clearly in scope. If you cannot determine the gates, say so in your
+  results comment rather than inventing commands.
 - **(b) UI / EXPLORATORY** — a frontend change whose value is visual /
   interactive. Launch the app, drive the changed flow, and check the
   acceptance criteria by observation. **If you cannot boot the app or

@@ -263,18 +263,22 @@ def test_scan_admits_in_review_row_under_review_phase_cap(
 def test_scan_uses_test_phase_cap_for_in_test_rows(
     seeded, project, states, workspace, create_user
 ):
-    """The scanner's effective-cap ``Case/When`` must include the test
-    group (PDASHOSS01-80): In Test aliases the review cap pair in v1, so
-    an In Test ticker at ``tick_count=10`` (above the review cap 8, below
-    the impl cap 24) must be filtered out — proving the TEST arm resolves
-    the review pair, not the default impl pair.
+    """The scanner's effective-cap ``Case/When`` must resolve the **test**
+    pair for In Test rows (PDASHOSS01-80).
+
+    The three caps are set apart (impl 24, review 8, test 6) so the
+    assertion pins the test pair specifically: at ``tick_count=7`` the row
+    is over the test cap but under both of the others, so it is filtered
+    out only if the SQL annotation picked the right pair.
     """
     project.agent_default_max_ticks = 24
     project.agent_review_default_max_ticks = 8
+    project.agent_test_default_max_ticks = 6
     project.save(
         update_fields=[
             "agent_default_max_ticks",
             "agent_review_default_max_ticks",
+            "agent_test_default_max_ticks",
         ]
     )
 
@@ -290,7 +294,7 @@ def test_scan_uses_test_phase_cap_for_in_test_rows(
     test_issue.refresh_from_db()
     sched = scheduling.arm_ticker(test_issue)
     sched.next_run_at = timezone.now() - timedelta(seconds=1)
-    sched.tick_count = 10
+    sched.tick_count = 7
     sched.save(update_fields=["next_run_at", "tick_count", "updated_at"])
 
     with mock.patch(
@@ -305,13 +309,15 @@ def test_scan_uses_test_phase_cap_for_in_test_rows(
 def test_scan_admits_in_test_row_under_test_phase_cap(
     seeded, project, states, workspace, create_user
 ):
-    """Inverse: an In Test row below the review cap (8) is admitted."""
+    """Inverse: an In Test row below the test cap (6) is admitted."""
     project.agent_default_max_ticks = 24
     project.agent_review_default_max_ticks = 8
+    project.agent_test_default_max_ticks = 6
     project.save(
         update_fields=[
             "agent_default_max_ticks",
             "agent_review_default_max_ticks",
+            "agent_test_default_max_ticks",
         ]
     )
 
@@ -327,7 +333,7 @@ def test_scan_admits_in_test_row_under_test_phase_cap(
     test_issue.refresh_from_db()
     sched = scheduling.arm_ticker(test_issue)
     sched.next_run_at = timezone.now() - timedelta(seconds=1)
-    sched.tick_count = 5  # < 8
+    sched.tick_count = 5  # < 6
     sched.save(update_fields=["next_run_at", "tick_count", "updated_at"])
 
     with mock.patch(
@@ -336,6 +342,24 @@ def test_scan_admits_in_test_row_under_test_phase_cap(
         count = scan_due_tickers()
     assert count == 1
     assert fire.call_count == 1
+
+
+@pytest.mark.unit
+def test_scan_cap_annotation_covers_every_ticking_phase():
+    """The SQL cap annotation is generated from the phase registry, so a
+    phase added without its ``CADENCE_FIELDS`` entry fails here rather than
+    silently resolving against the implementation pair at runtime."""
+    from pi_dash.orchestration.agent_phases import (
+        PHASES,
+        cadence_fields_by_group,
+    )
+
+    by_group = cadence_fields_by_group()
+    assert set(by_group) == set(PHASES)
+    # Each phase must own a distinct column pair — sharing one lets a cap
+    # grant in one phase leak into another's budget.
+    pairs = [f.ticker_max_ticks for f in by_group.values()]
+    assert len(set(pairs)) == len(pairs)
 
 
 # ---------------------------------------------------------------------------

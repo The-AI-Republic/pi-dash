@@ -405,32 +405,34 @@ def test_deferred_pause_still_applies_for_in_progress(
 
 
 @pytest.mark.unit
-def test_project_defaults_resolve_review_pair_for_in_test(
+def test_project_defaults_resolve_test_pair_for_in_test(
     seeded, issue, project, create_user
 ):
     """``_project_default_interval`` / ``_project_default_max_ticks`` return
-    the **review** defaults for an In Test issue (v1 aliasing, design §3.2)."""
+    the **test** defaults for an In Test issue — not review's, not impl's."""
     with impersonate(create_user):
         in_test = State.objects.create(
             name="In Test", project=project, group="test"
         )
     Issue.all_objects.filter(pk=issue.pk).update(state=in_test)
     issue.refresh_from_db()
-    # Distinguish the pairs so the assertion is meaningful.
+    # Distinguish all three pairs so the assertion is meaningful.
     project.agent_default_interval_seconds = 43200
     project.agent_default_max_ticks = 24
     project.agent_review_default_interval_seconds = 10800
     project.agent_review_default_max_ticks = 4
+    project.agent_test_default_interval_seconds = 7200
+    project.agent_test_default_max_ticks = 6
     project.save()
-    assert scheduling._project_default_interval(issue) == 10800
-    assert scheduling._project_default_max_ticks(issue) == 4
+    assert scheduling._project_default_interval(issue) == 7200
+    assert scheduling._project_default_max_ticks(issue) == 6
 
 
 @pytest.mark.unit
-def test_arm_ticker_on_in_test_uses_review_cadence(
+def test_arm_ticker_on_in_test_uses_test_cadence(
     seeded, issue, project, create_user
 ):
-    """``arm_ticker`` on an In Test issue seeds the review-phase cadence and
+    """``arm_ticker`` on an In Test issue seeds the test-phase cadence and
     clears ``disarm_reason``."""
     with impersonate(create_user):
         in_test = State.objects.create(
@@ -439,10 +441,49 @@ def test_arm_ticker_on_in_test_uses_review_cadence(
     Issue.all_objects.filter(pk=issue.pk).update(state=in_test)
     issue.refresh_from_db()
     project.agent_review_default_max_ticks = 4
-    project.save(update_fields=["agent_review_default_max_ticks"])
+    project.agent_test_default_max_ticks = 6
+    project.save(
+        update_fields=[
+            "agent_review_default_max_ticks",
+            "agent_test_default_max_ticks",
+        ]
+    )
     sched = scheduling.arm_ticker(issue)
     assert sched.disarm_reason == TickerDisarmReason.NONE
-    assert sched.effective_max_ticks() == 4
+    assert sched.effective_max_ticks() == 6
+
+
+@pytest.mark.unit
+def test_re_tick_in_test_grants_on_test_column_only(
+    seeded, issue, project, create_user
+):
+    """A cap grant made while In Test lands on ``test_max_ticks`` and leaves
+    ``review_max_ticks`` untouched.
+
+    This is the cross-phase leak the shared-pair design allowed: with both
+    phases writing ``review_max_ticks``, extending an exhausted In Test issue
+    silently inflated the budget In Review would get next.
+    """
+    with impersonate(create_user):
+        in_test = State.objects.create(
+            name="In Test", project=project, group="test"
+        )
+    Issue.all_objects.filter(pk=issue.pk).update(state=in_test)
+    issue.refresh_from_db()
+    project.agent_test_default_max_ticks = 3
+    project.save(update_fields=["agent_test_default_max_ticks"])
+
+    sched = scheduling.arm_ticker(issue)
+    sched.tick_count = 3  # exhausted
+    sched.save(update_fields=["tick_count"])
+
+    result = scheduling.re_tick_ticker(issue)
+    assert result["granted"] is True
+
+    sched.refresh_from_db()
+    assert sched.test_max_ticks == 6  # 3 (current cap) + 3 (grant)
+    assert sched.review_max_ticks is None
+    assert sched.max_ticks is None
 
 
 @pytest.mark.unit

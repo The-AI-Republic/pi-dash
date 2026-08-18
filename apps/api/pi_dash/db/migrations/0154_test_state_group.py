@@ -10,11 +10,13 @@ Operations:
   - ``RunPython`` data migration: for every existing project lacking an
     In Test state, create one in the ``test`` group.
 
-Unlike ``0135_review_state_and_cadence_split``, the ``test`` group is
-**not** wired to any ticking cadence — it is a manual/agent-set marker
-that the AI agent can move an issue to when a task needs testing. No
-``PhaseConfig`` entry is added, so issues in ``In Test`` do not
-auto-tick.
+At the time this migration landed the ``test`` group was **not** wired to
+any ticking cadence — it was a manual marker only, with no ``PhaseConfig``
+entry. That changed in PDASHOSS01-80: In Test is now a first-class
+ticking phase with its own cadence pair (``0158_test_cadence_fields``).
+This migration still does only what it says — add the group and backfill
+the state row — but do not read its original claim about ticking as
+current.
 """
 
 from __future__ import annotations

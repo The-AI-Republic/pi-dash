@@ -81,6 +81,12 @@ class IssueAgentTicker(BaseModel):
     # ``.ai_design/create_review_state/design.md`` §6.3.
     review_interval_seconds = models.IntegerField(null=True, blank=True)
     review_max_ticks = models.IntegerField(null=True, blank=True)
+    # User-configured overrides for the **In Test** phase. In Test is a
+    # sibling of In Review, not a variant of it — it owns its own pair
+    # so a cap grant in one phase can never inflate the other's budget.
+    # See ``.ai_design/create_test_state/design.md`` §3.2.
+    test_interval_seconds = models.IntegerField(null=True, blank=True)
+    test_max_ticks = models.IntegerField(null=True, blank=True)
     user_disabled = models.BooleanField(default=False)
 
     # Runtime state.
@@ -128,84 +134,51 @@ class IssueAgentTicker(BaseModel):
     # Effective values (override-or-project-default)
     # ------------------------------------------------------------------
 
-    def _uses_review_cadence_pair(self) -> bool:
-        """Return ``True`` when the issue's current phase resolves cadence
-        through the **In Review** field pair (``review_*`` override /
-        ``agent_review_default_*`` project default).
+    def _cadence_fields(self):
+        """Return the :class:`CadenceFields` for the issue's current phase.
 
-        In Review uses this pair by definition. **In Test** aliases it in
-        v1 — the test phase reuses the review cadence (3 h × 4) rather
-        than introducing a third ``Project`` field pair; see
-        ``.ai_design/create_test_state/design.md`` §3.2. When a dedicated
-        ``agent_test_default_*`` pair lands, this splits cleanly the same
-        way review split from impl.
+        Every ticking phase owns an independent override/default column
+        pair, so this resolver never has to know which phase it is
+        looking at — it just asks the registry. A state that is not a
+        registered ticking state (including a custom workspace state
+        inside a ticking group) falls back to the implementation pair.
         """
-        # Local imports keep the model file free of orchestration
+        # Local import keeps the model file free of orchestration
         # imports at module load time (orchestration imports state).
-        from pi_dash.db.models.state import StateGroup
-        from pi_dash.orchestration.agent_phases import phase_config_for
+        from pi_dash.orchestration.agent_phases import cadence_fields_for
 
-        # Require both: a registered ticking state (so a custom
-        # workspace state in the review/test group does not pick up
-        # phase-aware cadence) AND a review-cadence group key. Comparing
-        # on the group enum keeps the cadence resolver decoupled from the
-        # state's display name.
-        cfg = phase_config_for(self.issue.state)
-        if cfg is None:
-            return False
-        return self.issue.state.group in (
-            StateGroup.REVIEW.value,
-            StateGroup.TEST.value,
-        )
+        return cadence_fields_for(self.issue.state)
 
     def effective_interval_seconds(self) -> int:
-        """Return the interval to use, picking the In Review pair when
-        the issue is currently in a review-cadence phase (In Review or,
-        in v1, In Test) and the In Progress pair otherwise. Falls back
-        through: per-issue override → project default → constant.
+        """Return the interval to use for the issue's current phase.
+
+        Falls back through: per-issue override for that phase → the
+        project default for that phase → the registry constant.
         """
-        project = self.issue.project
-        if self._uses_review_cadence_pair():
-            override = self.review_interval_seconds
-            project_default = getattr(
-                project,
-                "agent_review_default_interval_seconds",
-                DEFAULT_INTERVAL_SECONDS,
-            )
-        else:
-            override = self.interval_seconds
-            project_default = getattr(
-                project,
-                "agent_default_interval_seconds",
-                DEFAULT_INTERVAL_SECONDS,
-            )
+        fields = self._cadence_fields()
+        override = getattr(self, fields.ticker_interval, None)
         if override is not None and override > 0:
             return override
-        return project_default
+        return getattr(
+            self.issue.project,
+            fields.project_interval,
+            fields.default_interval,
+        )
 
     def effective_max_ticks(self) -> int:
-        """Return the cap to use. ``-1`` means infinite. Phase-aware:
-        same chain as ``effective_interval_seconds`` but against the
-        max-ticks pair.
+        """Return the cap to use for the issue's current phase. ``-1``
+        means infinite. Same resolution chain as
+        ``effective_interval_seconds`` against the max-ticks column.
         """
-        project = self.issue.project
-        if self._uses_review_cadence_pair():
-            override = self.review_max_ticks
-            project_default = getattr(
-                project,
-                "agent_review_default_max_ticks",
-                DEFAULT_MAX_TICKS,
-            )
-        else:
-            override = self.max_ticks
-            project_default = getattr(
-                project,
-                "agent_default_max_ticks",
-                DEFAULT_MAX_TICKS,
-            )
+        fields = self._cadence_fields()
+        override = getattr(self, fields.ticker_max_ticks, None)
         if override is not None:
             return override
-        return project_default
+        return getattr(
+            self.issue.project,
+            fields.project_max_ticks,
+            fields.default_max_ticks,
+        )
 
     def cap_reached(self) -> bool:
         """Has this ticker already exhausted its tick budget?"""

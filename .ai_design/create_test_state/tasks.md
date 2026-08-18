@@ -52,41 +52,45 @@ Scope:
   leaving-a-ticking-group disarm, and re-arm-on-comment — all for
   free. No edits needed at those sites.
 
-- **`apps/api/pi_dash/db/models/issue_agent_ticker.py`** — the cadence
-  resolvers are binary review-vs-impl and need a test arm:
-  - `_is_review_phase()` (`:131`) + `effective_interval_seconds()`
-    (`:150`) + `effective_max_ticks()` (`:175`).
-  - Preferred: extract a `_phase_cadence_fields(state) ->
-(override_attr, project_default_attr)` helper keyed on
-    `state.group`, so In Test resolves the test pair. **v1 aliases the
-    review pair** (`review_interval_seconds` /
-    `agent_review_default_interval_seconds` and the max-ticks pair) —
-    no new columns.
-  - Acceptable v1 alternative: an explicit `elif In Test` arm if it
-    reads more clearly against the existing review branch.
+- **`apps/api/pi_dash/db/models/issue_agent_ticker.py`** — replace the
+  binary review-vs-impl resolvers with a phase-keyed lookup:
+  - Drop `_is_review_phase()` (`:131`) for `_cadence_fields()`, which
+    returns `agent_phases.cadence_fields_for(self.issue.state)`.
+  - `effective_interval_seconds()` (`:150`) / `effective_max_ticks()`
+    (`:175`) `getattr` the named override column, falling back to the
+    named project column. No phase branching left in the model.
+  - Add the `test_interval_seconds` / `test_max_ticks` override
+    columns (In Test owns its pair — it does **not** alias review's).
 
 - **`apps/api/pi_dash/orchestration/scheduling.py`**:
   - `_project_default_interval` (`:64`) / `_project_default_max_ticks`
-    (`:85`): add a TEST arm returning the test-phase default (v1: the
-    `agent_review_default_*` value), or route through the phase-keyed
-    lookup.
+    (`:85`): route through the same `cadence_fields_for` lookup.
+  - `re_tick_ticker` (`:416`): `setattr(sched, fields.ticker_max_ticks,
+new_cap)` and pass that field name to `update_fields`. A cap grant
+    made In Test must never land on the column In Review reads.
+  - `arm_ticker` (`:125`): initialize the new override columns to
+    `None` on a brand-new row.
   - **`maybe_apply_deferred_pause` (`:760`, carve-out at `:799`)** —
     **the one silently-wrong-without-it site.** Today:
     `if state.group == StateGroup.REVIEW.value: return False`. Once
     `TEST` ticks, `is_ticking_state(In Test)` passes at `:789` and a
     cap-exhausted In Test issue would fall through and **auto-move to
     Paused**, contradicting the design's "stays In Test until a human
-    moves it." Add the TEST arm — generalize to
-    `state.group in (REVIEW, TEST)` or, cleaner, a registry-keyed
-    "stay put on cap" check so future phases inherit it. (This is the
-    create_review_state design-review's Refinement 1, re-confirmed at
-    `@main`.)
+    moves it." Replace the group check with
+    `agent_phases.auto_pauses_on_cap(state)`, backed by a new
+    `PhaseConfig.auto_pause_on_cap` flag, so a phase added later has to
+    state its own answer instead of inheriting a wrong default. (This
+    is the create_review_state design-review's Refinement 1,
+    re-confirmed at `@main`.)
 
 - **`apps/api/pi_dash/bgtasks/agent_ticker.py`** —
   `scan_due_tickers` `effective_cap` annotation (`:58`) is
-  `Case(When(group==REVIEW …))`. Add a `When(group==TEST …)` arm (v1:
-  same `agent_review_default_max_ticks` pair), or refactor the
-  annotation to be phase-keyed. `fire_tick` needs no change.
+  `Case(When(group==REVIEW …))`. Generate one `When` per registry entry
+  from `cadence_fields_by_group()` so this SQL mirror of
+  `effective_max_ticks` cannot drift from it. `fire_tick` needs no
+  change — already `is_ticking_state`-gated under the row lock, which
+  is also what makes the group-only SQL branch safe (it can only
+  over-admit).
 
 - **`apps/api/pi_dash/orchestration/service.py`** —
   `handle_issue_state_transition` (`:154-224`) cross-phase resume.
@@ -223,8 +227,10 @@ Why one PR:
       (b) the run logs show the `test` template body as the system
       prompt and the first turn decides a test kind
       (AUTOMATED / UI / OPS / DESIGN / NON_TECHNICAL) per §4.7,
-      (c) tick cadence equals the review default (3 h) and the ticker
-      stops after the review cap (4) unless overridden,
+      (c) tick cadence equals the **test** default (12 h) and the
+      ticker stops after the test cap (3) unless overridden — and a
+      `re_tick` grant while In Test lands on `test_max_ticks`, leaving
+      `review_max_ticks` untouched,
       (d) the agent posts a **structured results comment** (kind,
       method, per-criterion pass/fail + evidence, defects +
       disposition),

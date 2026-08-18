@@ -16,11 +16,11 @@
 > reuses the existing hook (§4.4), re-arm on human comment is
 > already registry-symmetric (§4.6), polymorphic `test` prompt with
 > runtime kind inference — AUTOMATED / UI / OPS / DESIGN /
-> NON*TECHNICAL (§4.7 / §5). **Cadence:** v1 reuses the **review**
-> defaults (3 h × 4) rather than introducing a third `Project`
-> field pair — a stale test window is as worthless as a stale
-> review window, and adding `agent_test_default*\*` is a trivial
-> follow-up if the rhythm needs to diverge (§3.2).
+> NON*TECHNICAL (§4.7 / §5). **Cadence:** In Test owns its own
+> `Project` field pair — `agent*test_default**`(12 h × 3), with`IssueAgentTicker.test\*\*` per-issue overrides. In Test and In
+> Review are sibling states whose runs are independent, so their
+> budgets must be too; sharing review's columns would let a cap
+> grant in one phase leak into the other (§3.2).
 >
 > **Scope:** wire the already-seeded **In Test** state (group
 > `test`) into the AgentRun ticking system so that moving an issue
@@ -93,8 +93,8 @@ inference rules.
   all already seeded.
 - Periodic ticking on In Test uses the same ticker primitives as In
   Review (same row, same scanner, same cap path, same Comment & Run
-  reset semantics), with cadence that **reuses the review defaults**
-  in v1 (3 h × 4 — a 12 h test window). See §3.2.
+  reset semantics) but its **own cadence pair** — 12 h × 3, a 36 h
+  test window. See §3.2.
 - The test run uses a new **`test`** prompt template that routes
   between AUTOMATED / UI / OPS / DESIGN / NON_TECHNICAL testing
   based on what the issue produced (§4.7 / §5).
@@ -172,58 +172,62 @@ phase for free (verified at `@main`):
 - The "leaving a ticking group disarms" rule and re-arm-on-comment
   (§4.6) are already phase-agnostic — In Test inherits both.
 
-### 3.1 The spots that are NOT free — a third arm at each binary site
+### 3.1 The spots that are NOT free — generalize each binary site
 
 Review generalized _impl → binary(impl, review)_, but several call
 sites still branch on `state.group == StateGroup.REVIEW.value`
-explicitly rather than looping over the registry. Each needs a
-`TEST` arm (or generalization to a phase-keyed lookup). These are
-the honest "it's not purely one line" touchpoints, all verified at
-`@main`:
+explicitly rather than looping over the registry. Rather than bolt a
+third `TEST` arm onto each `if`, every one of these is generalized to a
+**phase-keyed lookup** — the registry answers, the call site does not
+decide. These are the honest "it's not purely one line" touchpoints,
+all verified at `@main`:
 
-| Site                                                                                                                              | Current shape                                                | What TEST needs                                                                                                         |
-| --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| `db/models/issue_agent_ticker.py:131` `_is_review_phase()` + `effective_interval_seconds`/`effective_max_ticks` (`:150` / `:175`) | binary: review pair vs impl pair                             | resolve the **test** cadence pair (v1: reuse review's — §3.2 / §6)                                                      |
-| `orchestration/scheduling.py:64` `_project_default_interval` / `:85` `_project_default_max_ticks`                                 | `if state.group == REVIEW: review default else impl default` | a TEST arm returning the test-phase default (v1: the review default)                                                    |
-| `bgtasks/agent_ticker.py:58` `scan_due_tickers` `effective_cap` `Case(When(group==REVIEW …))`                                     | binary DB-level annotation                                   | a TEST `When` (v1: same `agent_review_default_max_ticks` pair)                                                          |
-| `orchestration/scheduling.py:799` `maybe_apply_deferred_pause` REVIEW carve-out                                                   | `if state.group == REVIEW: return False` (no auto-pause)     | **a TEST arm** — see §4.5. This is the one spot where "just add the registry entry" produces silently _wrong_ behavior. |
-| `orchestration/service.py:154-224` `handle_issue_state_transition` cross-phase resume                                             | assumes a two-phase impl↔review chain                        | be explicit about which prior run a test run resumes/reads from in a 3-phase impl→review→test flow (§4.3)               |
-| `prompting/sections/state-routing.md:14` `test` branch prose                                                                      | "Automatic ticking is not wired to this group"               | rewrite to describe the live test cycle                                                                                 |
+| Site                                                                                                                              | Current shape                                                | What it becomes                                                                                                          |
+| --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `db/models/issue_agent_ticker.py:131` `_is_review_phase()` + `effective_interval_seconds`/`effective_max_ticks` (`:150` / `:175`) | binary: review pair vs impl pair                             | `_cadence_fields()` → `CADENCE_FIELDS[cfg.cadence_key]`; both resolvers `getattr` the named columns                      |
+| `orchestration/scheduling.py:64` `_project_default_interval` / `:85` `_project_default_max_ticks`                                 | `if state.group == REVIEW: review default else impl default` | same lookup, reading the phase's `project_*` column name                                                                 |
+| `orchestration/scheduling.py:416` `re_tick_ticker` cap grant                                                                      | `if review: sched.review_max_ticks else sched.max_ticks`     | `setattr(sched, fields.ticker_max_ticks, …)` — the grant lands on the current phase's own column, never another's        |
+| `bgtasks/agent_ticker.py:58` `scan_due_tickers` `effective_cap` `Case(When(group==REVIEW …))`                                     | binary DB-level annotation                                   | one `When` generated per registry entry from `cadence_fields_by_group()`, so the SQL cannot drift from the Python        |
+| `orchestration/scheduling.py:799` `maybe_apply_deferred_pause` REVIEW carve-out                                                   | `if state.group == REVIEW: return False` (no auto-pause)     | `PhaseConfig.auto_pause_on_cap` — see §4.5. This is the one spot where "just add the registry entry" is silently _wrong_ |
+| `orchestration/service.py:154-224` `handle_issue_state_transition` cross-phase resume                                             | assumes a two-phase impl↔review chain                        | be explicit about which prior run a test run resumes/reads from in a 3-phase impl→review→test flow (§4.3)                |
+| `prompting/sections/state-routing.md:14` `test` branch prose                                                                      | "Automatic ticking is not wired to this group"               | rewrite to describe the live test cycle                                                                                  |
 
-None are large. The cleanest implementation generalizes the binary
-`_is_review_phase()` / `Case-When(REVIEW)` idioms into a small
-phase-keyed cadence lookup keyed on `state.group`, so a future
-`qa`/whatever phase is a registry edit rather than another
-three-site hunt. v1 may keep the explicit third arm if that reads
-more clearly against the existing review code; see §6.
+The payoff is that the next phase (`qa`, `staging`, whatever) is a
+registry edit plus a migration for its column pair — not another
+multi-site hunt for `== REVIEW`.
 
-### 3.2 Cadence: reuse the review defaults (v1)
+### 3.2 Cadence: In Test gets its own field pair
 
 Cadence stays centrally managed on `Project` (row + per-issue
-override) — the pattern review established. v1 does **not** add a
-third field pair. In Test resolves to the **review** cadence
-defaults:
+override) — the pattern review established. In Test gets its **own**
+pair rather than aliasing review's:
 
-- `agent_review_default_interval_seconds` = 10800 (3 h)
-- `agent_review_default_max_ticks` = 4 (a 12 h test window)
+- `Project.agent_test_default_interval_seconds` = 43200 (12 h)
+- `Project.agent_test_default_max_ticks` = 3 (a 36 h test window)
+- `IssueAgentTicker.test_interval_seconds` / `test_max_ticks` —
+  per-issue overrides, `null` = inherit the project default
 
 Rationale:
 
-- A test that sits open for days has gone stale, exactly like a
-  review — the short cap fits.
-- The 3 h interval is the human-involvement window: each tick is a
-  complete test cycle, then the agent stops to leave room for a
-  human to look at the results.
-- Adding `Project.agent_test_default_interval_seconds` /
-  `agent_test_default_max_ticks` (+ `IssueAgentTicker.test_*`
-  overrides) is a mechanical follow-up if field experience shows the
-  test rhythm should diverge from review. Keeping v1 to two field
-  pairs avoids a schema change for a value we'd only be guessing at.
+- **In Test and In Review are sibling states, not variants.** Their
+  agent runs are independent — different prompt, different session,
+  different outcome vocabulary — so their ticking must be independent
+  too. Sharing a column pair is not a harmless alias: `re_tick_ticker`
+  _writes_ the cap override, so a grant made while In Test would
+  silently inflate the next In Review budget, and vice versa. The
+  phases must never be able to read or write each other's budget.
+- **A test cycle is a slower, heavier loop than a review pass.** A
+  review tick re-reads a thread and a diff; a test tick boots an
+  environment, executes, and collects evidence. 12 h between passes,
+  3 passes total: enough for a real cycle plus a human look at the
+  results, without a stale test issue ticking for days.
 
-The per-issue override story: In Test reuses `review_interval_seconds`
-/ `review_max_ticks` in v1 (they resolve through the same review
-default). If/when a dedicated pair lands, it splits cleanly the same
-way review split from impl.
+Which columns a phase resolves through is declared once, in
+`PhaseConfig.cadence_key` → `agent_phases.CADENCE_FIELDS`. Every call
+site (`IssueAgentTicker.effective_*`, `scheduling._project_default_*`,
+`scheduling.re_tick_ticker`, the `scan_due_tickers` SQL annotation)
+resolves through that table rather than branching on the state group,
+so adding or retuning a phase is a change to one dict.
 
 ## 4. Lifecycle
 
@@ -242,15 +246,15 @@ ticker lifecycle. Every touchpoint the review design wired works
 unchanged once the registry has the TEST entry and the cadence
 resolvers grow their third arm:
 
-| Event                                            | Behavior                                                                                                                                                               |
-| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Issue enters In Test                             | `_is_delegation_trigger` returns True (registry hit) → `arm_ticker` (test-phase effective cadence = review default in v1) + immediate dispatch on a **fresh session**. |
-| Periodic tick on In Test                         | `fire_tick` registry-checks, claims, dispatches — same atomic-claim flow as In Review.                                                                                 |
-| Issue leaves the Test group                      | `disarm_ticker` — the phase-agnostic "leaving a ticking group disarms" rule.                                                                                           |
-| Cap hit during In Test                           | Disarm + **stay In Test** (no auto-pause). Requires the TEST arm in `maybe_apply_deferred_pause` (§4.5).                                                               |
-| Agent emits `completed` / `blocked`              | Existing `maybe_disarm_on_terminal_signal` hook disarms. Issue stays In Test until a human transitions it.                                                             |
-| Comment on In Test (incl. Comment & Run)         | Triggers continuation **and** re-arms the ticker (§4.6) — `CONTINUATION_ELIGIBLE_GROUPS` already includes `test` via `tuple(PHASES.keys())`.                           |
-| Comment & Run on a Paused issue formerly in Test | Re-opens to In Progress (v1 default — same as review).                                                                                                                 |
+| Event                                            | Behavior                                                                                                                                                                  |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Issue enters In Test                             | `_is_delegation_trigger` returns True (registry hit) → `arm_ticker` (test-phase effective cadence = the test pair, 12 h × 3) + immediate dispatch on a **fresh session**. |
+| Periodic tick on In Test                         | `fire_tick` registry-checks, claims, dispatches — same atomic-claim flow as In Review.                                                                                    |
+| Issue leaves the Test group                      | `disarm_ticker` — the phase-agnostic "leaving a ticking group disarms" rule.                                                                                              |
+| Cap hit during In Test                           | Disarm + **stay In Test** (no auto-pause). Requires the TEST arm in `maybe_apply_deferred_pause` (§4.5).                                                                  |
+| Agent emits `completed` / `blocked`              | Existing `maybe_disarm_on_terminal_signal` hook disarms. Issue stays In Test until a human transitions it.                                                                |
+| Comment on In Test (incl. Comment & Run)         | Triggers continuation **and** re-arms the ticker (§4.6) — `CONTINUATION_ELIGIBLE_GROUPS` already includes `test` via `tuple(PHASES.keys())`.                              |
+| Comment & Run on a Paused issue formerly in Test | Re-opens to In Progress (v1 default — same as review).                                                                                                                    |
 
 ### 4.3 Cross-group transition: fresh session + explicit resume
 
@@ -452,14 +456,30 @@ recommendations:
    **not** a structured `pr_url` / `design_doc_paths` field (grep
    confirms `review-cycle.md` says "look for a `pr_url` in
    done_payload" as a hint, but nothing writes one there). So the
-   channel is: have the `coding-task` prompt **state the acceptance
-   criteria it validated against in its final summary** (which
-   becomes `parent_done_payload.result` for the next phase) and/or in
-   a durable issue comment. The `test` prompt then reads
-   `parent_done_payload` + the issue/comments as its spec. This is a
-   `coding-task` **prompt-body** change (surface the criteria in the
-   summary), **not** a new structured `done_payload` field or an M2
-   data migration (see §8) — no schema, no harness change.
+   channel is a **durable issue comment**, not the run summary: In
+   Test enters on a fresh session, and `parent_done_payload` is
+   whatever run happens to be stashed in `ticker.resume_parent_run` —
+   reliable enough to read, too indirect to be the contract. The
+   `coding-task` prompt therefore posts a hand-off comment before it
+   exits (`implementation.md` Step 7), with fixed headings so the test
+   pass can find it:
+
+   ```
+   ### Acceptance Criteria
+   - <one checkable criterion per line>
+
+   ### How to Test
+   - Kind / Setup / Steps / Expected / Already validated here / Not covered
+   ```
+
+   `test-cycle.md` Step 0 reads that comment first, then falls back
+   through the description, the rest of the thread,
+   `parent_done_payload`, and the workpad. `ending-run.md` lists the
+   hand-off in the coding-task success checklist so it is verified at
+   exit. Prompt-body change only — **not** a new structured
+   `done_payload` field or an M2 data migration (see §8): no schema,
+   no harness change.
+
 2. Where criteria are genuinely absent, the test agent derives a
    plan from the description, **states its assumptions in the
    comment**, and tests against them — or `paused`s to ask if the
@@ -588,28 +608,25 @@ session, not a user turn on a resumed review conversation.
 
 ## 6. Schema
 
-Minimal — v1 adds **no** new columns.
+Two migrations, both small.
 
 - **No** `StateGroup` value (TEST exists).
 - **No** `State` seed / lifecycle migration (In Test seeded by
-  `0154_test_state_group.py`).
-- **No** new `Project` cadence fields — v1 reuses
-  `agent_review_default_*` (§3.2).
-- **No** new `IssueAgentTicker` override fields — v1 reuses
-  `review_interval_seconds` / `review_max_ticks`.
+  `0154_test_state_group.py`, which also backfilled the row onto every
+  existing project — In Test is already a default project state).
+- **New** `Project` cadence pair —
+  `agent_test_default_interval_seconds` = 43200,
+  `agent_test_default_max_ticks` = 3.
+- **New** `IssueAgentTicker` override pair — `test_interval_seconds` /
+  `test_max_ticks`, nullable, `null` = inherit the project default.
 
-The only "schema" change is the `test` PromptTemplate row inserted by
-the prompting data migration (§5). Everything else is code:
-the registry entry, the third arm in the cadence resolvers, and the
-TEST carve-out in `maybe_apply_deferred_pause`.
-
-If field experience shows test rhythm must diverge from review, the
-follow-up adds `Project.agent_test_default_interval_seconds` /
-`agent_test_default_max_ticks` + `IssueAgentTicker.test_interval_seconds`
-/ `test_max_ticks`, and the cadence resolvers gain a genuine third
-pair instead of aliasing review's. Structuring §3.1's resolvers as a
-phase-keyed lookup now makes that follow-up a data change rather than
-a control-flow change.
+`0158_test_cadence_fields` adds those four columns; no data migration
+is needed, since nothing was previously stored under a test-specific
+name to carry over. (`0157_merge_interval_defaults` precedes it, merging
+the two `0156` leaves that landed on `main` in parallel — a pure graph
+merge with no operations.) The `test` PromptTemplate row is inserted by
+the prompting data migration (§5). Everything else is code: the registry
+entry, the `cadence_key` routing, and the `auto_pause_on_cap` flag.
 
 ## 7. Code touchpoints
 
@@ -627,25 +644,29 @@ and re-arm-on-comment.
 
 ### 7.2 `db/models/issue_agent_ticker.py`
 
-`_is_review_phase()` + the two `effective_*()` resolvers
-(`:131` / `:150` / `:175`) branch binary review-vs-impl. Add a test
-arm: when the issue's current state is the In Test phase, resolve the
-test cadence pair (v1: the review pair). Cleanest form is a small
-`_phase_cadence_fields(state) → (override_attr, project_default_attr)`
-helper keyed on `state.group` that all three methods share; v1 may
-instead add an explicit `elif` if it reads more clearly against the
-existing review code.
+Replace `_is_review_phase()` with `_cadence_fields()`, which asks
+`agent_phases.cadence_fields_for(self.issue.state)` for the
+`CadenceFields` of the current phase. Both `effective_*()` resolvers
+then `getattr` the named override column, falling back to the named
+project column — no phase branching left in the model. Add the
+`test_interval_seconds` / `test_max_ticks` override columns.
 
 ### 7.3 `orchestration/scheduling.py`
 
 - `_project_default_interval` (`:64`) / `_project_default_max_ticks`
-  (`:85`): add a TEST arm returning the test-phase default (v1: the
-  `agent_review_default_*` value), or generalize to the phase-keyed
-  lookup.
-- `maybe_apply_deferred_pause` (`:760`, carve-out at `:799`): add the
-  TEST arm so a cap-exhausted In Test issue **stays In Test** and is
-  not auto-paused (§4.5). Prefer generalizing the condition to a
-  registry-keyed "stay put on cap" check.
+  (`:85`): resolve through the same `cadence_fields_for` lookup.
+- `re_tick_ticker` (`:416`): write the cap grant with
+  `setattr(sched, fields.ticker_max_ticks, new_cap)` and pass that
+  same field name to `update_fields`. This is the site the shared-pair
+  design got wrong — a grant made In Test must not land on the column
+  In Review reads.
+- `arm_ticker` (`:125`): initialize the new override columns to `None`
+  on a brand-new row.
+- `maybe_apply_deferred_pause` (`:760`, carve-out at `:799`): replace
+  the group check with `agent_phases.auto_pauses_on_cap(state)` so the
+  behavior is declared on `PhaseConfig` (§4.5). A phase added later has
+  to state its own answer instead of inheriting a silently-wrong
+  default.
 
 ### 7.4 `orchestration/service.py`
 
@@ -671,10 +692,13 @@ existing review code.
 ### 7.5 `bgtasks/agent_ticker.py`
 
 `scan_due_tickers` `effective_cap` annotation (`:58`) is a
-`Case(When(group==REVIEW …))`. Add a `When(group==TEST …)` arm (v1:
-same `agent_review_default_max_ticks` pair), or refactor to a
-phase-keyed annotation. `fire_tick` (`:132`) needs no change —
-already `is_ticking_state`-gated.
+`Case(When(group==REVIEW …))`. Generate one `When` per registry entry
+from `cadence_fields_by_group()` so this SQL mirror of
+`effective_max_ticks` cannot drift from it. Note it branches on the
+group alone — it cannot also check the state _name_ the way the Python
+resolver does — so it may over-admit a custom state inside a ticking
+group; `fire_tick` (`:132`) re-checks `is_ticking_state` under the row
+lock and drops it, so over-admitting is harmless.
 
 ### 7.6 `prompting/recipes.py`
 
@@ -689,13 +713,16 @@ Add `KIND_TEST = "test"` and its `RECIPES` entry (§5). Confirm
 - Data migration inserting the global `test` template row
   (idempotent), modeled on `0002_review_template.py`.
 - `reseed_test_template.py` management command.
-- **Load-bearing:** extend the `coding-task` template body so impl
-  runs **state the acceptance criteria they validated against in the
-  final run summary** (which the next phase reads as
-  `parent_done_payload.result`) and/or a durable comment — the test
-  agent's spec (§4.8). This is a prompt-body change only; there is
-  **no** structured `done_payload` artifact field to extend (§4.8
-  correction), so no schema and no harness change.
+- **Load-bearing:** extend the `coding-task` body (`implementation.md`
+  Step 7, reinforced in `ending-run.md`'s success checklist) so an impl
+  run **posts a hand-off comment** carrying `### Acceptance Criteria`
+  and `### How to Test` before it exits — the test agent's spec (§4.8).
+  A comment, not the run summary: In Test starts from a fresh session
+  and the comment thread is what it reliably inherits.
+  `test-cycle.md` Step 0 names that comment as the highest-authority
+  channel. Prompt-body change only; there is **no** structured
+  `done_payload` artifact field to extend (§4.8 correction), so no
+  schema and no harness change.
 
 ### 7.8 `prompting/sections/state-routing.md`
 
@@ -706,24 +733,38 @@ cycle and that In Test now ticks.
 
 ## 8. Migrations
 
-Two, both under `prompting/migrations/` — no `db/migrations/` change
-in v1 (no schema columns added):
+Three, and only the first two carry schema.
 
-**M1 — `test` prompt template.** `RunPython` inserting the global
-`PromptTemplate(name="test", workspace=NULL, is_active=True,
-body=TEST_TEMPLATE_BODY)` if absent. Idempotent, reversible. Modeled
-on `0002_review_template.py`.
+**`db/0157_merge_interval_defaults`** — graph merge only. Two `0156`
+migrations (`increase_in_progress_interval`, `review_interval_8h`)
+landed on `main` in parallel off `0155`, leaving the `db` app with two
+leaf nodes; `migrate` refuses to run against that graph. They touch
+disjoint fields, so the merge has no operations of its own.
 
-**M2 — `coding-task` body update.** `RunPython` extending the
-existing `coding-task` template body so the impl run **states the
-acceptance criteria it validated against in its final summary**
-(→ `parent_done_payload.result`) and/or a durable comment (§4.8).
-This is a prompt-body edit — **not** a new structured `done_payload`
-field (§4.8 correction). Idempotent — only updates if the body lacks
-the instruction. Reversible.
+**`db/0158_test_cadence_fields`** — the In Test cadence pair:
+`Project.agent_test_default_interval_seconds` (43200),
+`Project.agent_test_default_max_ticks` (3),
+`IssueAgentTicker.test_interval_seconds` / `test_max_ticks` (nullable).
+No data migration: the columns take their defaults and nothing was
+previously stored under a test-specific name. Issues sitting In Test at
+deploy time move from review's 8 h × 4 to 12 h × 3 on their next tick —
+the intended correction.
 
-(If the impl summary already surfaces acceptance criteria clearly,
-M2 collapses into a no-op / is dropped — verify during impl.)
+**`prompting/0005_test_template`** — inserts the global `test`
+`PromptTemplate` row if absent (idempotent, reversible), modeled on
+`0002_review_template.py`. **Parity only.** Since the section-registry
+rewrite, the runtime composes prompts from `prompting/sections/` +
+`recipes.py`, not from `PromptTemplate` bodies (`prompting/apps.py`
+spells this out: "Prompt defaults are code … the legacy `PromptTemplate`
+seed machinery is kept only for historical-migration replay"). The
+load-bearing content is `test-intro.md` / `test-cycle.md` and the `test`
+recipe.
+
+For the same reason there is **no** migration for the `coding-task`
+change (§4.8): `implementation.md` and `ending-run.md` are code, so the
+hand-off comment ships with the deploy. The earlier plan for an "M2
+`coding-task` body update" migration assumed the DB-template era and is
+dropped.
 
 ## 9. Tests
 
@@ -780,7 +821,7 @@ v1.
 | #   | Question                                                         | Decision                                                                                                                                                                                                                                                                                                                                              |
 | --- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Q1  | Native session resume across phase change into test?             | **No — fresh session on cross-group entry.** §4.3. The `test` system prompt must be the system prompt, not a user turn on a resumed review session.                                                                                                                                                                                                   |
-| Q2  | Separate cadence for test vs review?                             | **No (v1) — reuse the review defaults (3 h × 4).** §3.2. Dedicated `agent_test_default_*` is a one-migration follow-up if rhythm needs to diverge.                                                                                                                                                                                                    |
+| Q2  | Separate cadence for test vs review?                             | **Yes — In Test owns `agent_test_default_*` / `test_*` (12 h × 3).** §3.2. Sharing review's pair is not a harmless alias: `re_tick_ticker` writes the cap override, so a grant in one phase would leak into the other's budget. Siblings, not variants.                                                                                               |
 | Q3  | Auto hand-off In Review → In Test via a review done-signal?      | **No (v1)** — manual user transition only. Same call review made for impl→review.                                                                                                                                                                                                                                                                     |
 | Q4  | Custom workspace state names in the `test` group?                | **Don't tick (v1)** — same restriction as In Progress / In Review.                                                                                                                                                                                                                                                                                    |
 | Q5  | May the test agent write code / edit artifacts, or only comment? | **Allowed to push trivial fixes and file follow-up issues (v1).** §4.7. AUTOMATED kind may push trivial fixes to the PR branch; real defects → `blocked` / follow-up. DESIGN may edit the doc for trivial gaps. NON_TECHNICAL only summarizes. The validate-findings step (re-run before acting) is the hallucination guard.                          |
@@ -800,13 +841,16 @@ against a test-named state, so they must land together.
 
 - Add the `StateGroup.TEST` entry to `agent_phases.PHASES`
   (`fresh_session_on_entry=True`).
-- Add the TEST arm to the cadence resolvers
-  (`issue_agent_ticker.effective_*`, `scheduling._project_default_*`,
-  `agent_ticker.scan_due_tickers` annotation) — reusing the review
-  cadence pair in v1. Prefer a phase-keyed lookup so a future
-  dedicated test cadence is a data change.
-- Add the TEST arm to `maybe_apply_deferred_pause`'s "stay put on
-  cap" carve-out (§4.5) — the one silently-wrong-without-it site.
+- Add `Project.agent_test_default_*` + `IssueAgentTicker.test_*` and
+  route every cadence resolver (`issue_agent_ticker.effective_*`,
+  `scheduling._project_default_*`, `scheduling.re_tick_ticker`,
+  `agent_ticker.scan_due_tickers` annotation) through the phase-keyed
+  `CADENCE_FIELDS` table instead of branching on the state group.
+- Declare the "stay put on cap" behavior on `PhaseConfig`
+  (`auto_pause_on_cap=False` for In Review and In Test) so
+  `maybe_apply_deferred_pause` reads it from the registry (§4.5) —
+  a new phase then has to state its own answer rather than inherit a
+  silently-wrong default.
 - Add a **regression test** proving the existing `resume_parent_run`
   capture survives the 3-phase impl→review→test chain (§4.3 / §7.4).
   No production-code change — the existing capture gate already
@@ -822,8 +866,6 @@ against a test-named state, so they must land together.
 **Follow-ups** (each independently shippable):
 
 - Browser / e2e capability in the runner (§4.7.1).
-- Dedicated `Project.agent_test_default_*` + `IssueAgentTicker.test_*`
-  cadence pair, if test rhythm must diverge from review (§6).
 - Explicit `Issue.test_kind` override if runtime inference proves
   unreliable (§4.7 / Q7).
 - Auto In Review → In Test hand-off on a review done-signal (Q3).
@@ -839,7 +881,7 @@ T+5m     User moves I → In Test (group=review → group=test).
          • "leaving a ticking group disarms" fires (transient).
          • is_ticking_state(In Test) ✓ via the new PHASES entry →
            arm_ticker on the test-phase effective cadence
-           (review default in v1: 3 h × 4). disarm_reason cleared.
+           (test default: 12 h × 3). disarm_reason cleared.
          • fresh_session_on_entry=True → R_test1 dispatched with
            parent_run=None, pinned_runner_id cleared. The captured
            ticker.resume_parent_run still points at the pre-review

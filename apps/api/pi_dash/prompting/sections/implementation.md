@@ -36,5 +36,23 @@ customizable: overridable
 
      Mark `pr_opened` in the workpad.
 
-7. Update the workpad with final checklist status and validation notes. Add a `### Confusions` section at the bottom if anything about the task was genuinely unclear during execution; keep it concise.
-8. Follow the "Ending the run" section to finalize. Update the workpad one last time with final checkpoints, then move the issue to its next state via `pidash issue patch {{ issue.identifier }} --state "<state-name>"`. **A finished issue moves to the `review` group ("In Review") whether or not you opened a PR — the runner never proactively moves an issue to `completed`/"Done".** A PR is awaiting human review; a finished `noncode` task (a question answered, a debug/investigation posted) is awaiting a human's acknowledgement — leave it In Review so it stays on the user's radar, and let a human close it. See "Ending the run" for the exact rule and the no-`review`-state fallback.
+7. **Hand off to testing — post the acceptance criteria and test instructions as an issue comment.** Do this once the implementation is complete, on every task that produced something a human or a later agent could check (skip it only for a pure `noop`). A test pass is only as good as the spec it tests against, and the In Test phase starts from a **fresh session** with no memory of this run — this comment is the spec it inherits. Post it with `pidash comment add {{ issue.identifier }} --body-file <path>` using exactly these headings so it can be found and parsed later:
+
+   ```
+   ### Acceptance Criteria
+   - <one checkable criterion per line — the conditions that make this work correct>
+   - <criteria you derived rather than found in the ticket: mark "(assumed)">
+
+   ### How to Test
+   - Kind: AUTOMATED | UI | OPS | DESIGN | NON_TECHNICAL
+   - Setup: <branch to check out, services/env/creds needed, seed data>
+   - Steps: <the exact commands to run or flows to drive, in order>
+   - Expected: <what a pass looks like, per criterion>
+   - Already validated here: <what you actually ran this run, and its result>
+   - Not covered: <gaps you knowingly left — and why>
+   ```
+
+   Write the criteria as things that can be **checked**, not as a summary of what you built ("`pidash issue patch` rejects an unknown state name with exit code 2", not "improved error handling"). `Kind` is your best call on how this deliverable is verified; the test agent re-derives it and may disagree. If you genuinely could not establish acceptance criteria, say so under the heading rather than omitting it — an explicit "none stated; derived from the description" tells the test pass to state assumptions instead of inventing a spec.
+
+8. Update the workpad with final checklist status and validation notes. Add a `### Confusions` section at the bottom if anything about the task was genuinely unclear during execution; keep it concise.
+9. Follow the "Ending the run" section to finalize. Update the workpad one last time with final checkpoints, then move the issue to its next state via `pidash issue patch {{ issue.identifier }} --state "<state-name>"`. **A finished issue moves to the `review` group ("In Review") whether or not you opened a PR — the runner never proactively moves an issue to `completed`/"Done".** A PR is awaiting human review; a finished `noncode` task (a question answered, a debug/investigation posted) is awaiting a human's acknowledgement — leave it In Review so it stays on the user's radar, and let a human close it. See "Ending the run" for the exact rule and the no-`review`-state fallback.
