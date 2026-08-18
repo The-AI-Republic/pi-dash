@@ -346,7 +346,7 @@ def re_tick_ticker(issue: Issue) -> dict:
 
     Manual "re-ticking". When a ticker has burned through its budget
     (``cap_reached()``) while the issue is still in a ticking state
-    (In Progress / In Review), the user can re-grant budget so the
+    (In Progress / In Review / In Test), the user can re-grant budget so the
     continuation clock resumes. Unlike
     :func:`reset_ticker_after_comment_and_run` (which zeroes
     ``tick_count``), re-ticking **grows** the cap by one fresh phase

@@ -34,7 +34,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("db", "0157_merge_interval_defaults"),
+        ("db", "0157_merge_intervals_and_comment_labels"),
     ]
 
     operations = [

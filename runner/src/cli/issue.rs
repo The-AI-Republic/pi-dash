@@ -56,7 +56,7 @@ pub enum IssueCommand {
     /// Re-grant a fresh ticking budget to an issue whose agent-ticker budget
     /// is exhausted, so the periodic agent runs resume. No-op (reports
     /// `granted: false`) unless the issue is currently in a ticking state
-    /// (In Progress / In Review) AND its current budget is used up.
+    /// (In Progress / In Review / In Test) AND its current budget is used up.
     ReTick {
         /// Project-scoped identifier, e.g. `ENG-42`.
         identifier: String,

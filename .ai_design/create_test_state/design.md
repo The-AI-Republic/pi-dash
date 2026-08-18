@@ -672,9 +672,9 @@ Two migrations, both small.
 
 `0158_test_cadence_fields` adds those four columns; no data migration
 is needed, since nothing was previously stored under a test-specific
-name to carry over. (`0157_merge_interval_defaults` precedes it, merging
-the two `0156` leaves that landed on `main` in parallel — a pure graph
-merge with no operations.) The `test` PromptTemplate row is inserted by
+name to carry over. (It sits on top of `main`'s
+`0157_merge_intervals_and_comment_labels`, which merged the parallel
+`0156` leaves.) The `test` PromptTemplate row is inserted by
 the prompting data migration (§5). Everything else is code: the registry
 entry, the `cadence_key` routing, and the `auto_pause_on_cap` flag.
 
@@ -783,13 +783,8 @@ cycle and that In Test now ticks.
 
 ## 8. Migrations
 
-Three, and only the first two carry schema.
-
-**`db/0157_merge_interval_defaults`** — graph merge only. Two `0156`
-migrations (`increase_in_progress_interval`, `review_interval_8h`)
-landed on `main` in parallel off `0155`, leaving the `db` app with two
-leaf nodes; `migrate` refuses to run against that graph. They touch
-disjoint fields, so the merge has no operations of its own.
+Two; only the first carries schema. (The parallel `0156` leaves on
+`main` were merged by main's own `0157_merge_intervals_and_comment_labels`.)
 
 **`db/0158_test_cadence_fields`** — the In Test cadence pair:
 `Project.agent_test_default_interval_seconds` (43200),
