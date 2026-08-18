@@ -52,13 +52,13 @@ def _pr_payload(*, action="closed", state="closed", merged=True, updated_at="202
     }
 
 
-def _post(api_client, payload, event="pull_request"):
+def _post(api_client, payload, event="pull_request", delivery_id=None):
     with patch("pi_dash.app.views.integration.github.verify_webhook_signature", return_value=True):
         return api_client.post(
             reverse("github-app-webhook"),
             data=json.dumps(payload),
             content_type="application/json",
-            HTTP_X_GITHUB_DELIVERY=str(uuid4()),
+            HTTP_X_GITHUB_DELIVERY=str(delivery_id or uuid4()),
             HTTP_X_GITHUB_EVENT=event,
             HTTP_X_HUB_SIGNATURE_256="sha256=valid",
         )
@@ -114,3 +114,58 @@ def test_pull_request_draft_reflected(api_client, link):
     assert link.draft is True
     assert link.merged is False
     assert link.state == "open"
+
+
+@pytest.mark.parametrize(
+    "prior_status",
+    [GithubWebhookDelivery.Status.RECEIVED, GithubWebhookDelivery.Status.FAILED],
+)
+def test_redelivery_reprocesses_non_terminal_delivery(api_client, link, prior_status):
+    """A delivery that never terminally succeeded — left RECEIVED (the request was
+    interrupted mid-processing) or FAILED (an exception was caught) — must be
+    re-applied when GitHub redelivers the same X-GitHub-Delivery GUID. Otherwise a
+    single dropped merge event leaves the PR stuck showing "open"."""
+    delivery_id = uuid4()
+    GithubWebhookDelivery.objects.create(
+        delivery_id=delivery_id,
+        event="pull_request",
+        action="closed",
+        status=prior_status,
+        error="boom" if prior_status == GithubWebhookDelivery.Status.FAILED else "",
+    )
+
+    response = _post(api_client, _pr_payload(), delivery_id=delivery_id)
+
+    assert response.status_code == status.HTTP_202_ACCEPTED
+    assert response.data == {"status": GithubWebhookDelivery.Status.PROCESSED}
+    link.refresh_from_db()
+    assert link.state == "closed"
+    assert link.merged is True
+    # a successful reprocess clears any stale error from the prior failed attempt
+    delivery = GithubWebhookDelivery.objects.get(delivery_id=delivery_id)
+    assert delivery.status == GithubWebhookDelivery.Status.PROCESSED
+    assert delivery.error == ""
+
+
+@pytest.mark.parametrize(
+    "prior_status",
+    [GithubWebhookDelivery.Status.PROCESSED, GithubWebhookDelivery.Status.SKIPPED],
+)
+def test_redelivery_of_terminal_delivery_is_not_reprocessed(api_client, link, prior_status):
+    """A delivery that already reached a terminal-success outcome fast-returns and
+    does not touch the snapshot again — preserving idempotency for GitHub's normal
+    at-least-once duplicate deliveries."""
+    delivery_id = uuid4()
+    GithubWebhookDelivery.objects.create(
+        delivery_id=delivery_id,
+        event="pull_request",
+        action="closed",
+        status=prior_status,
+    )
+
+    response = _post(api_client, _pr_payload(), delivery_id=delivery_id)
+
+    assert response.status_code == status.HTTP_202_ACCEPTED
+    assert response.data == {"status": prior_status}
+    link.refresh_from_db()
+    assert link.state == "open"  # snapshot untouched — no reprocessing

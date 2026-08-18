@@ -29,16 +29,15 @@ First-run launcher. If no config exists, drops into `pidash auth login`. Otherwi
 Browser-based device-code login. Same UX as `gh auth login` / `stripe login`.
 
 ```
-pidash auth login [--url <URL>] [--no-browser] [--no-runner-prompt]
+pidash auth login [--url <URL>] [--no-browser]
 ```
 
-| Flag                 | Purpose                                                                                    |
-| -------------------- | ------------------------------------------------------------------------------------------ |
-| `--url <URL>`        | Cloud base URL (e.g. `https://pidash.airepublic.com`). Optional if config already has one. |
-| `--no-browser`       | Don't try to open the verification URL automatically.                                      |
-| `--no-runner-prompt` | Skip the post-login "add a runner now?" prompt.                                            |
+| Flag           | Purpose                                                                                    |
+| -------------- | ------------------------------------------------------------------------------------------ |
+| `--url <URL>`  | Cloud base URL (e.g. `https://pidash.airepublic.com`). Optional if config already has one. |
+| `--no-browser` | Don't try to open the verification URL automatically.                                      |
 
-Writes the CLI token to `config.toml`. On a TTY with no runners yet, offers to register one inline.
+Writes the CLI token to `config.toml`, then confirms the account and workspace and points you at the cloud URL. Registering a runner is a separate, explicit step — see `pidash runner add`.
 
 ### `pidash auth status`
 
