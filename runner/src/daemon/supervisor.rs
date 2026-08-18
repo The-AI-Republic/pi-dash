@@ -837,6 +837,12 @@ enum ChatCommand {
     Message(ChatTurn),
     Cancel { reason: Option<String> },
     Close { reason: Option<String> },
+    /// Tear down this runtime to make room for another session (or to free a
+    /// non-pooled runner's working dir for an assign) WITHOUT closing the
+    /// cloud session: it stays open and a later warm/message revives it via
+    /// `local_thread_id`. Contrast with `Shutdown`, which emits a terminal
+    /// `ChatClosed`.
+    Release,
     Shutdown,
 }
 
@@ -874,7 +880,10 @@ impl RunnerLoop {
         let Some(mut chat) = self.current_chat.take() else {
             return;
         };
-        let _ = chat.tx.send(ChatCommand::Shutdown).await;
+        // Release, not Shutdown: swapping the runtime to another session must
+        // not close the old session in the cloud — the user may switch back to
+        // it from the chat history panel, and a warm/message revives it.
+        let _ = chat.tx.send(ChatCommand::Release).await;
         let _ = tokio::time::timeout(Duration::from_secs(5), &mut chat.done_rx).await;
     }
 
@@ -1782,6 +1791,12 @@ impl ChatWorker {
                         .await;
                     break;
                 }
+                ChatCommand::Release => {
+                    // Runtime swap (see `stop_idle_chat_runtime`). No terminal
+                    // `ChatClosed` — the cloud session stays open for revival.
+                    // The post-loop persist below still commits + pushes.
+                    break;
+                }
                 ChatCommand::Shutdown => {
                     // RemoveRunner / teardown. Emit a terminal `ChatClosed` so
                     // the cloud session doesn't linger in "active turn" state.
@@ -2119,7 +2134,10 @@ impl ChatWorker {
                             close_after_turn = true;
                             break;
                         }
-                        Some(ChatCommand::Shutdown) | None => {
+                        // Release shouldn't arrive mid-turn (the supervisor
+                        // only swaps idle runtimes), but treat it like a
+                        // shutdown of this turn if it ever does.
+                        Some(ChatCommand::Release | ChatCommand::Shutdown) | None => {
                             bridge.interrupt().await.ok();
                             final_status = "cancelled".into();
                             break;

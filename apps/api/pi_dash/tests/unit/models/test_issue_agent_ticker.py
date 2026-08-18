@@ -102,8 +102,26 @@ def test_in_progress_uses_impl_project_defaults(in_progress_issue):
 def test_in_review_uses_review_project_defaults(in_review_issue):
     sched = IssueAgentTicker.objects.create(issue=in_review_issue)
     assert sched.effective_interval_seconds() == 10800
-    # Review-phase cap defaults to 8 (24h window) — distinct from impl's 24.
+    # This project fixture explicitly configures the review cap at 8, so the
+    # In Review phase resolves to 8 — distinct from impl's 24. (The *schema*
+    # default is 4; see test_review_max_ticks_schema_default_is_four.)
     assert sched.effective_max_ticks() == 8
+
+
+@pytest.mark.unit
+def test_review_max_ticks_schema_default_is_four(db, workspace, create_user):
+    """A project created without configuring the review cap inherits the
+    schema default of 4 (PDASHOSS01-68 reduced it from 8 → 4)."""
+    with impersonate(create_user):
+        project = Project.objects.create(
+            name="Defaults",
+            identifier="DFLT",
+            workspace=workspace,
+            created_by=create_user,
+        )
+    assert project.agent_review_default_max_ticks == 4
+    # The In Progress default is unchanged.
+    assert project.agent_default_max_ticks == 24
 
 
 @pytest.mark.unit

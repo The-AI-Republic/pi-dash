@@ -147,10 +147,10 @@ class Project(BaseModel):
     # (review iterations are bounded shorter — see design §3.2).
     # ``agent_ticking_enabled`` gates the project globally; both
     # phases respect it.
-    agent_default_interval_seconds = models.IntegerField(default=10800)  # 3 h
+    agent_default_interval_seconds = models.IntegerField(default=43200)  # 12 h
     agent_default_max_ticks = models.IntegerField(default=24)            # 3 days
     agent_review_default_interval_seconds = models.IntegerField(default=10800)  # 3 h
-    agent_review_default_max_ticks = models.IntegerField(default=8)             # 24 h window
+    agent_review_default_max_ticks = models.IntegerField(default=4)             # 12 h window
     agent_ticking_enabled = models.BooleanField(default=True)
 
     def __init__(self, *args, **kwargs):

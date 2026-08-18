@@ -76,21 +76,15 @@ pidash comment add {{ issue.identifier }} --body-file ./.pidash-blocked.md --as-
 pidash issue patch {{ issue.identifier }} --state "Blocked"
 ```
 
-{% if run.kind == "coding-task" %}End a successful run that opened a PR (workpad already written via `pidash workpad update`) — the change is awaiting human review and merge, so move to the `review` group, **not** `completed`:
+{% if run.kind == "coding-task" %}End a successful run (workpad already written via `pidash workpad update`) — whether you opened a PR or finished a `noncode` task (investigation, status check, comment-only response), move to the `review` group. The runner never moves an issue to `completed`/Done; a human closes it:
 
 ```sh
 pidash issue patch {{ issue.identifier }} --state "In Review"
 ```
-
-End a successful run with nothing to review — a finished `noncode` task (investigation, status check, comment-only response) that produced no PR — move to the `completed` group:
-
-```sh
-pidash issue patch {{ issue.identifier }} --state "Done"
-```
-{% else %}End a successful run (workpad already written via `pidash workpad update`) — move the issue to the state matching this pass's outcome (see "Review cycle" and "Available states"):
+{% else %}End a successful review pass (workpad already written via `pidash workpad update`) — an **approved** review posts its summary and leaves the issue In Review; the runner never moves it to `completed`/Done (see "Review cycle" and "Available states"). If the issue is not already In Review, move it there; otherwise leave it in place:
 
 ```sh
-pidash issue patch {{ issue.identifier }} --state "Done"
+pidash issue patch {{ issue.identifier }} --state "In Review"
 ```
 {% endif %}{% else %}File a finding as a new issue under this project:
 
@@ -108,7 +102,7 @@ pidash issue create --project {{ project.identifier }} --title "<short summary>"
 _(state list unavailable — call `pidash state list` to retrieve it before moving state)_
 {% endif %}
 
-Use the list above to pick the correct `--state` value. Match your intent to the state's `group` first, then to the name and description.{% if run.kind == "coding-task" %} The mapping that trips runs up most often: a `code_change` that opened a PR is awaiting review → `review` group ("In Review"), **not** `completed`. Use `completed` ("this work is done") only for a finished `noncode` task with no PR, and `cancelled` for "this will not be done".{% endif %}
+Use the list above to pick the correct `--state` value. Match your intent to the state's `group` first, then to the name and description.{% if run.kind == "coding-task" %} The mapping that trips runs up most often: a finished issue — a `code_change` that opened a PR **or** a finished `noncode` task — is awaiting a human → `review` group ("In Review"). The runner never moves an issue to `completed` ("Done"); that's a human's call. Use `cancelled` for "this will not be done".{% endif %}
 
 ### Conventions
 
