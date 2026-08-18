@@ -890,10 +890,23 @@ class GithubAppWebhookEndpoint(BaseAPIView):
                 "status": GithubWebhookDelivery.Status.RECEIVED,
             },
         )
-        if not created:
+        # GitHub reuses the same X-GitHub-Delivery GUID for automatic retries
+        # (on timeout / 5xx) and for a manual "Redeliver". Only fast-return when a
+        # prior attempt reached a terminal-success outcome; a delivery left in
+        # RECEIVED (the request was interrupted mid-processing — e.g. a deploy or
+        # pod restart) or FAILED (an exception was caught below) must be
+        # reprocessed so the snapshot can still converge. Reprocessing is safe:
+        # `_refresh_pr_links` is idempotent and guarded against out-of-order
+        # payloads by the PR's `updated_at`. Without this, a single dropped
+        # `pull_request` (merge) delivery leaves the PR stuck showing "open".
+        if not created and delivery.status in {
+            GithubWebhookDelivery.Status.PROCESSED,
+            GithubWebhookDelivery.Status.SKIPPED,
+        }:
             return Response({"status": delivery.status}, status=status.HTTP_202_ACCEPTED)
 
         try:
+            delivery.error = ""
             if event == "ping":
                 delivery.status = GithubWebhookDelivery.Status.PROCESSED
             elif event == "pull_request":
@@ -922,7 +935,7 @@ class GithubAppWebhookEndpoint(BaseAPIView):
             else:
                 delivery.status = GithubWebhookDelivery.Status.SKIPPED
             delivery.processed_at = timezone.now()
-            delivery.save(update_fields=["status", "processed_at", "updated_at"])
+            delivery.save(update_fields=["status", "error", "processed_at", "updated_at"])
         except Exception as e:
             log_exception(e)
             delivery.status = GithubWebhookDelivery.Status.FAILED
