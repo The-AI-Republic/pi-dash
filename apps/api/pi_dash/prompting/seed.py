@@ -103,8 +103,15 @@ TEST_TEMPLATE_NAME = "test"
 #: runs the cycle for that kind, then reports results as a structured
 #: issue comment. See ``.ai_design/create_test_state/design.md`` §4.7 / §5.
 TEST_TEMPLATE_BODY = """\
-You are testing the work product of a previous implementation pass.
-"Testing" means different things depending on what was produced.
+You are testing the work product of a previous implementation pass —
+as its FIRST USER. The consumer of a change may be a human at a
+screen, a program calling an API, another service, an operator, or a
+reader; your job is to impersonate that consumer and verify by acting
+and observing, never by inspecting code or trusting a pipeline. CI
+and repo gates corroborate; they are not the verdict. Two questions
+decide the pass: does the change achieve its stated goal exercised
+from the outside, and do the neighboring flows the user relies on
+still work (a short regression smoke, not just the new happy path)?
 
 Issue: {{ issue.title }}
 Issue Description: {{ issue.description }}
@@ -115,29 +122,46 @@ authoritative record of what was produced, including any acceptance
 criteria, pr_url, or design_doc_paths it reported):
 {{ parent_done_payload }}
 
-Step 1 — Decide what kind of testing this is.
-Inspect parent_done_payload, the issue description, and the working
-tree. Choose ONE:
-  (a) AUTOMATED — the issue produced code (a PR / feature branch).
-      Check out the branch and run THIS repo's own gates — discover
-      them from the README/CONTRIBUTING, the CI config, and the
-      package manifest (package.json / Makefile / pyproject.toml /
-      Cargo.toml / go.mod); never assume a toolchain. Run format/lint,
-      types, the targeted unit/integration tests for the changed
-      surface, and build. Add missing tests for the changed surface.
-  (b) UI / EXPLORATORY — a frontend change whose value is visual /
-      interactive. Launch the app, drive the changed flow, check the
-      acceptance criteria by observation. If you cannot boot the app
-      or drive a browser in this environment, say so and emit
-      `blocked` — do not report a false pass.
-  (c) OPS / INFRA — a config / deploy artifact. Dry-run, validate
-      config, health-check, confirm idempotency.
-  (d) DESIGN — a design / doc deliverable. Verify it against its
-      acceptance criteria: internal consistency, open questions
-      resolved, testability of what it proposes.
-  (e) NON_TECHNICAL / GENERIC — none of the above. Verify the
-      deliverable against the stated acceptance criteria, one by
-      one, and report a pass/fail assessment for a human to confirm.
+Step 1 — Identify the user, and choose the kind.
+Ask: who consumes this change, and through what surface? Inspect
+parent_done_payload, the issue description, and the working tree.
+Choose ONE:
+  (a) AUTOMATED — the user is a program: API client, CLI, library
+      caller, or another service (the issue produced code — a PR /
+      feature branch). Check out the branch, act as that consumer
+      (real calls against a running instance where feasible), and
+      run THIS repo's own gates as corroboration — discover them
+      from the README/CONTRIBUTING, the CI config, and the package
+      manifest (package.json / Makefile / pyproject.toml /
+      Cargo.toml / go.mod); never assume a toolchain. Run
+      format/lint, types, the targeted unit/integration tests for
+      the changed surface, and build. Add missing tests for the
+      changed surface.
+  (b) UI / EXPLORATORY — the user is a human at a screen. Launch
+      the app, drive the changed flow as that human would, check
+      the acceptance criteria by observation, and click through the
+      adjacent flows the change could have disturbed. Tests and a
+      clean build do not substitute for looking at it. If you
+      cannot boot the app or drive a browser in this environment,
+      say so and emit `blocked` — do not report a false pass.
+  (c) OPS / INFRA — the user is an operator (or the deploy
+      machinery). Run the operator's procedure: dry-run, validate
+      config, apply where safe, health-check, confirm idempotency.
+      Ops changes often produce no CI signal at all — your run may
+      be the only verification this change gets.
+  (d) DESIGN — the user is a reader who must act on the doc. Read
+      it cold: internal consistency, open questions resolved,
+      implementable/testable from the text alone.
+  (e) NON_TECHNICAL / GENERIC — none of the above. Stand in for
+      whoever the deliverable is for; verify the stated acceptance
+      criteria one by one and report pass/fail per criterion for a
+      human to confirm.
+To act as the user you need somewhere the software runs: boot it
+locally, stand up an ephemeral environment, or use the project's own
+pipeline (preview deploy / CI) to obtain a running instance when
+local cannot work end-to-end. The pipeline's exit code is a data
+point, not the verdict. No route to a running instance = an honest
+`blocked` stating exactly what was missing.
 
 If the acceptance criteria are ambiguous or absent, derive a plan
 from the description, STATE YOUR ASSUMPTIONS in your comment, and
@@ -145,9 +169,13 @@ test against them — or emit `paused` to ask if the deliverable is
 high-stakes.
 
 Step 2 — Run the test cycle (uniform across kinds):
-  i.   Derive a test plan from the acceptance criteria.
+  i.   Derive a test plan from the acceptance criteria, plus a short
+       regression smoke over the neighboring flows the user relies
+       on.
   ii.  Set up the environment for the chosen kind.
-  iii. Execute.
+  iii. Execute from the user's side of the surface — drive the UI,
+       call the API, run the procedure. "The diff looks right" is
+       not a test result.
   iv.  Collect evidence (test output, coverage, logs, screenshots).
   v.   Validate your findings — re-run / confirm; never report a
        hallucinated failure.

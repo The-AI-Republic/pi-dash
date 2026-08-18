@@ -17,7 +17,7 @@
 > already registry-symmetric (§4.6), polymorphic `test` prompt with
 > runtime kind inference — AUTOMATED / UI / OPS / DESIGN /
 > NON*TECHNICAL (§4.7 / §5). **Cadence:** In Test owns its own
-> `Project` field pair — `agent*test_default**`(12 h × 3), with`IssueAgentTicker.test\*\*` per-issue overrides. In Test and In
+> `Project` field pair — `agent*test_default\*\*`(12 h × 3), with`IssueAgentTicker.test\*\*` per-issue overrides. In Test and In
 > Review are sibling states whose runs are independent, so their
 > budgets must be too; sharing review's columns would let a cap
 > grant in one phase leak into the other (§3.2).
@@ -122,6 +122,56 @@ Non-goals (v1):
 - **Generalization to "any state in any group ticks."** v1 keeps the
   per-group designated-state-name model: literal `"In Test"` in the
   `test` group. Same constraint as In Progress / In Review.
+
+## 2.1 Testing philosophy: the agent is the first user
+
+The generalization that lets one prompt test millions of different
+projects is **not** a taxonomy of tech stacks — it is a single
+question: **who consumes this change, and through what surface?** The
+consumer may be a human at a screen, a program calling an API, another
+service on a queue, an operator running a procedure, or a reader
+acting on a document. The test agent impersonates that consumer and
+verifies by **acting and observing** from the user's side of the
+surface — never by inspecting the code or trusting a pipeline.
+
+Two questions decide every pass:
+
+1. Does the change **achieve its stated goal**, exercised from the
+   outside?
+2. Do the **neighboring flows the user already relies on still
+   work** — a short regression smoke around the change, not just the
+   new happy path?
+
+Corollaries the prompt encodes:
+
+- **CI and repo gates corroborate; they never conclude.** A pipeline
+  only re-checks what someone already wrote a check for. It cannot
+  vouch for the new behavior (its tests are part of the change being
+  doubted), and whole change classes — frontend rendering, ops/config —
+  may produce no CI signal at all. "CI is green" with no first-hand
+  observation is an incomplete test pass.
+- **The five kinds are user impersonations, not artifact labels.**
+  AUTOMATED = the user is a program; UI = a human at a screen; OPS =
+  an operator; DESIGN = a reader; NON_TECHNICAL = whoever the
+  deliverable is for. Same branches as an artifact taxonomy, but the
+  question "who is the user?" forces outside-in verification where
+  "what was produced?" invites author-perspective inspection.
+- **An environment is a means, not the goal.** To act as the user the
+  agent needs _somewhere the software runs_, obtained by the cheapest
+  workable route: local boot → ephemeral environment (containers,
+  seed data) → the project's own pipeline (preview deploy, CI
+  workflow) as a way to obtain a running instance when local cannot
+  work end-to-end. The pipeline's exit code is a data point along the
+  way, not the verdict.
+- **No route to a running instance is an honest `blocked`,** naming
+  exactly what was missing (browser, creds, environment) — never a
+  downgraded pass built from static inspection. These structured
+  blocked-reasons are also the platform's signal for which runner
+  capabilities (headless browser first — §4.7.1) are worth building.
+- **Acceptance criteria are written for this consumer.** The
+  `coding-task` hand-off (§4.8) phrases each criterion as observable
+  behavior from the user's side of the surface, so the criteria list
+  doubles as the test script in the vocabulary the test agent needs.
 
 ## 3. Design — reuse the phase registry, add the third arm
 

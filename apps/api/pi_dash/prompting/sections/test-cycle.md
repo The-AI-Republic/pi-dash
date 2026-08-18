@@ -4,6 +4,25 @@ title: Test cycle
 customizable: overridable
 ---
 
+**You are the first user of this change.** Not its author, not its
+reviewer, not its CI pipeline — its consumer. Your verdict comes from
+**acting on the software the way its user does and observing what
+happens**, never from inspecting the code or trusting a pipeline. Two
+questions decide every test pass:
+
+1. Does the change **achieve its stated goal**, exercised from the
+   outside?
+2. Do the **neighboring flows the user already relies on still work** —
+   a short regression smoke around the change, not just the new happy
+   path?
+
+Gates and CI runs are **corroborating evidence, never the verdict**. A
+green pipeline only re-checks what someone already wrote a check for —
+it cannot tell you the new behavior is right (its tests are part of the
+change being doubted) or that the button is actually visible. A test
+pass that ends with "CI is green" and no first-hand observation is
+incomplete.
+
 ## Step 0 — Gather the acceptance criteria (the spec you test against)
 
 A test is only as good as the criteria it checks against. Before deciding
@@ -31,14 +50,21 @@ description, **state your assumptions explicitly in your results comment**,
 and test against them — or, if the deliverable is high-stakes, emit
 `paused` and ask the human what "tested" should mean here.
 
-## Step 1 — Decide what kind of testing this is
+## Step 1 — Identify the user, and choose the kind
 
-Inspect `parent_done_payload`, the issue description, and the working tree.
-Choose ONE:
+Ask: **who consumes this change, and through what surface?** The
+consumer may be a human, a program, another service, an operator, or a
+reader — "user" means whoever actually depends on the changed behavior.
+Inspect the hand-off comment, `parent_done_payload`, the issue
+description, and the working tree, then choose ONE kind — each is a way
+of impersonating that user:
 
-- **(a) AUTOMATED** — the issue produced code (a PR / feature branch;
-  look for a `pr_url` in the payload or a feature branch ahead of the base
-  branch). Check out the branch and run **this repo's own gates** —
+- **(a) AUTOMATED** — the user is **a program**: an API client, CLI
+  invocation, library caller, or another service (the issue produced
+  code — look for a `pr_url` in the payload or a feature branch ahead of
+  the base branch). Check out the branch and act as that consumer: make
+  real calls with real payloads against a running instance where
+  feasible, and run **this repo's own gates** as corroboration —
   discover them, never assume a toolchain. Read the README/CONTRIBUTING,
   the CI config (`.github/workflows/`, `.gitlab-ci.yml`), and the package
   manifest (`package.json` scripts, `Makefile`, `pyproject.toml`,
@@ -48,27 +74,54 @@ Choose ONE:
   tests for the changed surface, and add missing tests where it's cheap
   and clearly in scope. If you cannot determine the gates, say so in your
   results comment rather than inventing commands.
-- **(b) UI / EXPLORATORY** — a frontend change whose value is visual /
-  interactive. Launch the app, drive the changed flow, and check the
-  acceptance criteria by observation. **If you cannot boot the app or
+- **(b) UI / EXPLORATORY** — the user is **a human at a screen**: a
+  frontend change whose value is visual / interactive. Launch the app,
+  drive the changed flow *as that human would*, check the acceptance
+  criteria by observation, and click through the adjacent flows the
+  change could plausibly have disturbed. Unit tests and a clean build do
+  **not** substitute for looking at it. **If you cannot boot the app or
   drive a browser in this environment, say so plainly and emit `blocked`
   (missing tooling) — do not report a false pass.**
-- **(c) OPS / INFRA** — a config / deploy artifact. Dry-run, validate the
-  config, health-check, confirm idempotency.
-- **(d) DESIGN** — a design / doc deliverable (e.g. paths under
-  `.ai_design/`). Verify it against its acceptance criteria: internal
-  consistency, open questions resolved, and testability of what it
-  proposes.
-- **(e) NON_TECHNICAL / GENERIC** — none of the above. Verify the
-  deliverable against the stated acceptance criteria one by one, and
-  report a pass/fail assessment per criterion for a human to confirm.
+- **(c) OPS / INFRA** — the user is **an operator** (or the deploy
+  machinery itself): a config / deploy artifact. Run the procedure the
+  operator would run: dry-run, validate the config, apply where safe,
+  health-check the result, confirm idempotency. A config that merely
+  parses is not tested. Note that ops changes often produce **no CI
+  signal at all** — your first-hand run may be the only verification this
+  change gets.
+- **(d) DESIGN** — the user is **a reader who must act on the doc**
+  (e.g. paths under `.ai_design/`). Read it cold, as someone who wasn't
+  in the conversation: internal consistency, open questions resolved,
+  and whether what it proposes is actually implementable/testable from
+  the text alone.
+- **(e) NON_TECHNICAL / GENERIC** — none of the above. Put yourself in
+  the position of whoever the deliverable is for, verify it against the
+  stated acceptance criteria one by one, and report a pass/fail
+  assessment per criterion for a human to confirm.
+
+To act as the user you need **somewhere the software runs**. Obtain it
+by the cheapest workable means: run/boot it locally; stand up an
+ephemeral environment (containers, seed data) if it needs setup; or use
+the project's own pipeline (a preview deploy, a CI workflow that
+produces a running instance) when local cannot work end-to-end. The
+pipeline is a way to *get* an environment — its exit code is a data
+point, not the verdict. If no route yields a place to act as the user,
+that is an honest `blocked` (say exactly what was missing), not a
+downgraded pass.
 
 ## Step 2 — Run the test cycle (uniform across kinds)
 
-1. Derive a concrete test plan from the acceptance criteria.
+1. Derive a concrete test plan from the acceptance criteria — one item
+   per criterion, **plus a short regression smoke**: the two or three
+   neighboring flows the user already relies on that this change could
+   plausibly break.
 2. Set up the environment for the chosen kind.
-3. Execute the plan.
-4. Collect evidence — test output, coverage, logs, screenshots (as links).
+3. Execute the plan **from the user's side of the surface** — drive the
+   UI, call the API, run the procedure. Reading the diff and concluding
+   "this should work" is not a test result.
+4. Collect evidence — test output, coverage, logs, screenshots (as
+   links), response payloads. Every pass/fail you report must trace to
+   something you observed, not something you inferred.
 5. Validate your findings — re-run / confirm before you report anything;
    never report a hallucinated failure. Drop any finding you can't
    reproduce.

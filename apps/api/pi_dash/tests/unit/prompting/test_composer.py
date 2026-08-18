@@ -240,6 +240,21 @@ def test_test_kind_renders_cycle_and_cli_docs():
 
 
 @pytest.mark.unit
+def test_test_kind_frames_agent_as_first_user():
+    """The test agent's identity is the change's first user: verdicts come
+    from acting and observing on the consumer's side of the surface, with a
+    regression smoke, and CI/gates demoted to corroborating evidence."""
+    out = compose("test", workspace=None, project=None, user=None, context=_ctx("test"))
+    body = out.text
+    assert "first user" in body
+    assert "regression smoke" in body
+    # Pipelines corroborate, they never conclude the verdict.
+    assert "corroborating evidence, never the verdict" in body
+    # An environment is a means to act as the user, not the goal.
+    assert "not the verdict" in body
+
+
+@pytest.mark.unit
 def test_test_kind_completed_stays_in_test_not_done():
     """A `completed` test pass leaves the issue In Test — the runner never
     moves a test issue to `completed`/"Done". The ending-run section must
