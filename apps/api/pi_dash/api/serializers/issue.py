@@ -817,6 +817,7 @@ class IssueCommentCreateSerializer(BaseSerializer):
             "access",
             "external_source",
             "external_id",
+            "labels",
             "speaker_type",
             "speaker_label",
             "speaker_agent_run_id",

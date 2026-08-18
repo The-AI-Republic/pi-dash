@@ -118,9 +118,10 @@ def _comment_author_label(comment) -> str:
 
 
 def _comments_section(issue: Issue) -> str:
-    """Render the issue's full comment thread as a numbered chronological log.
+    """Render the issue's unfolded comments as a numbered chronological log.
 
-    Includes both human-authored and agent-authored (bot) comments —
+    Includes both human-authored and agent-authored (bot) comments, except
+    comments explicitly labeled ``fold`` —
     a continuation run needs to see its own prior question alongside the
     human's reply so it can pick up the conversation. Each entry is
     formatted as ``### Comment N — <author> at <ISO timestamp>`` followed
@@ -130,6 +131,7 @@ def _comments_section(issue: Issue) -> str:
 
     comments = (
         IssueComment.objects.filter(issue=issue)
+        .exclude(labels__contains=["fold"])
         .select_related("actor")
         .order_by("created_at")
     )

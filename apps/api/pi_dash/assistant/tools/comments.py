@@ -19,8 +19,17 @@ from pi_dash.db.models import IssueComment
 
 
 @assistant.tool
-def create_comment(ctx: RunContext[AssistantDeps], issue_id: str, body_md: str) -> dict:
-    """Add a comment to an issue, attributed to you and marked 'via assistant'."""
+def create_comment(
+    ctx: RunContext[AssistantDeps],
+    issue_id: str,
+    body_md: str,
+    fold: bool = False,
+) -> dict:
+    """Add a comment to an issue.
+
+    Set ``fold`` for low-value status/noop updates that should stay available
+    to humans but remain collapsed and be omitted from future agent prompts.
+    """
     deps = ctx.deps
     issue = _scoping.get_issue(deps, issue_id)
 
@@ -50,6 +59,7 @@ def create_comment(ctx: RunContext[AssistantDeps], issue_id: str, body_md: str) 
             comment_html=html,
             comment_json={},
             comment_stripped=strip_tags(html),
+            labels=["fold"] if fold else [],
             speaker_type="agent",
             speaker_label="Pi Dash AI",
         )
@@ -63,4 +73,5 @@ def create_comment(ctx: RunContext[AssistantDeps], issue_id: str, body_md: str) 
         "created": True,
         "comment_id": str(comment.id),
         "issue_id": str(issue.id),
+        "folded": fold,
     }

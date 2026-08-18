@@ -59,6 +59,7 @@ export const CommentCardDisplay = observer(function CommentCardDisplay(props: TC
   const [highlightClassName, setHighlightClassName] = useState("");
   // state
   const [isPickerOpen, setIsPickerOpen] = useState(false);
+  const [isFoldExpanded, setIsFoldExpanded] = useState(false);
   // store hooks
   const { getUserDetails } = useMember();
   // derived values
@@ -68,6 +69,8 @@ export const CommentCardDisplay = observer(function CommentCardDisplay(props: TC
     : (userDetails?.display_name ?? comment?.actor_detail?.display_name);
   const avatarUrl = userDetails?.avatar_url ?? comment?.actor_detail?.avatar_url;
   const agentSpeakerLabel = comment.speaker_type === "agent" ? comment.speaker_label?.trim() || "AI Agent" : undefined;
+  const isFolded = comment.labels?.includes("fold") ?? false;
+  const showCommentContent = !isFolded || isFoldExpanded;
 
   const userReactions = activityOperations.userReactions(comment.id);
 
@@ -161,26 +164,41 @@ export const CommentCardDisplay = observer(function CommentCardDisplay(props: TC
         />
       ) : (
         <>
-          {agentSpeakerLabel ? (
-            <div className="px-3 pt-1 text-body-sm-regular text-primary">
-              <span className="font-medium">{agentSpeakerLabel}:</span>
-            </div>
+          {isFolded ? (
+            <button
+              type="button"
+              className="w-full rounded-md border border-subtle bg-layer-1 px-3 py-2 text-left text-caption-sm-regular text-secondary hover:bg-layer-2"
+              aria-expanded={isFoldExpanded}
+              onClick={() => setIsFoldExpanded((expanded) => !expanded)}
+            >
+              Folded comment · Click to {isFoldExpanded ? "collapse" : "expand"}
+            </button>
           ) : null}
-          <LiteTextEditor
-            editable={false}
-            ref={readOnlyEditorRef}
-            id={comment.id}
-            initialValue={comment.comment_html ?? ""}
-            workspaceId={workspaceId}
-            workspaceSlug={workspaceSlug}
-            containerClassName={cn("!py-1 transition-[border-color] duration-500", highlightClassName)}
-            projectId={projectId?.toString()}
-            displayConfig={{
-              fontSize: "small-font",
-            }}
-            parentClassName="border-none"
-          />
-          {shouldRenderReactions &&
+          {showCommentContent ? (
+            <>
+              {agentSpeakerLabel ? (
+                <div className="px-3 pt-1 text-body-sm-regular text-primary">
+                  <span className="font-medium">{agentSpeakerLabel}:</span>
+                </div>
+              ) : null}
+              <LiteTextEditor
+                editable={false}
+                ref={readOnlyEditorRef}
+                id={comment.id}
+                initialValue={comment.comment_html ?? ""}
+                workspaceId={workspaceId}
+                workspaceSlug={workspaceSlug}
+                containerClassName={cn("!py-1 transition-[border-color] duration-500", highlightClassName)}
+                projectId={projectId?.toString()}
+                displayConfig={{
+                  fontSize: "small-font",
+                }}
+                parentClassName="border-none"
+              />
+            </>
+          ) : null}
+          {showCommentContent &&
+            shouldRenderReactions &&
             (renderFooter ? (
               renderFooter(
                 <CommentReactions comment={comment} disabled={disabled} activityOperations={activityOperations} />

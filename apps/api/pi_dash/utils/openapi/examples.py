@@ -188,6 +188,7 @@ ISSUE_COMMENT_CREATE_EXAMPLE = OpenApiExample(
     "IssueCommentCreateSerializer",
     value={
         "comment_html": "<p>New comment content</p>",
+        "labels": [],
         "external_id": "1234567890",
         "external_source": "github",
     },
@@ -198,6 +199,7 @@ ISSUE_COMMENT_UPDATE_EXAMPLE = OpenApiExample(
     "IssueCommentCreateSerializer",
     value={
         "comment_html": "<p>Updated comment content</p>",
+        "labels": ["fold"],
         "external_id": "1234567890",
         "external_source": "github",
     },
@@ -504,6 +506,7 @@ ISSUE_COMMENT_EXAMPLE = OpenApiExample(
     value={
         "id": "550e8400-e29b-41d4-a716-446655440000",
         "comment_html": "<p>This issue has been resolved by implementing OAuth 2.0 flow.</p>",  # noqa: E501
+        "labels": [],
         "comment_json": {
             "type": "doc",
             "content": [
