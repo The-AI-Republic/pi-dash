@@ -99,6 +99,43 @@ def test_context_excludes_folded_comments(issue, run, workspace, project, create
     comments_section = build_context(issue, run)["comments_section"]
     assert "Substantive update" in comments_section
     assert "No change from the last tick" not in comments_section
+    # The omission must be visible: an agent that cannot tell something was
+    # hidden has no way to decide whether to go read it.
+    assert "1 comment on this issue folded and omitted here" in comments_section
+
+
+@pytest.mark.unit
+def test_context_all_folded_thread_does_not_read_as_empty(
+    issue, run, workspace, project, create_user
+):
+    for body in ("<p>tick noop</p>", "<p>still nothing</p>"):
+        IssueComment.objects.create(
+            issue=issue,
+            workspace=workspace,
+            project=project,
+            actor=create_user,
+            comment_html=body,
+            labels=["fold"],
+        )
+
+    comments_section = build_context(issue, run)["comments_section"]
+    assert "no comments on this issue yet" not in comments_section
+    assert "2 comments folded and omitted here" in comments_section
+
+
+@pytest.mark.unit
+def test_context_unfolded_thread_has_no_folded_note(
+    issue, run, workspace, project, create_user
+):
+    IssueComment.objects.create(
+        issue=issue,
+        workspace=workspace,
+        project=project,
+        actor=create_user,
+        comment_html="<p>Substantive update</p>",
+    )
+
+    assert "folded" not in build_context(issue, run)["comments_section"]
 
 
 @pytest.mark.unit
@@ -313,6 +350,7 @@ def test_context_parent_includes_description_and_comment_count(
     assert ctx["parent"]["description"] == "Parent framing and acceptance criteria."
     # Comment count surfaces the discussion volume without inlining bodies.
     assert ctx["parent"]["comments_count"] == 2
+    assert ctx["parent"]["folded_comments_count"] == 0
 
 
 @pytest.mark.unit

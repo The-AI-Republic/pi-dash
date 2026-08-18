@@ -52,6 +52,19 @@ def _issue_comment_count(issue: Issue) -> int:
     return IssueComment.objects.filter(issue=issue).count()
 
 
+def _folded_comment_count(issue: Issue) -> int:
+    """How many of ``issue``'s comments carry the ``fold`` label.
+
+    Folded comments are omitted from the rendered thread (see
+    ``_comments_section``), so the count is surfaced alongside it to keep the
+    omission visible — an agent that cannot see *that* something was hidden
+    has no way to decide whether it needs to go read it.
+    """
+    from pi_dash.db.models.issue import IssueComment
+
+    return IssueComment.objects.filter(issue=issue, labels__contains=["fold"]).count()
+
+
 def _ancestor_chain(issue: Issue) -> list[Issue]:
     """Return ``[issue, parent, grandparent, ... root]``.
 
@@ -126,6 +139,10 @@ def _comments_section(issue: Issue) -> str:
     human's reply so it can pick up the conversation. Each entry is
     formatted as ``### Comment N — <author> at <ISO timestamp>`` followed
     by the comment body, separated by blank lines.
+
+    When any comment is folded, a trailing note records how many were left
+    out and how to read them. The omission is never silent: an all-folded
+    thread must not read as an empty one.
     """
     from pi_dash.db.models.issue import IssueComment
 
@@ -151,9 +168,26 @@ def _comments_section(issue: Issue) -> str:
         parts.append(
             f"### Comment {index} — {author} at {timestamp}{run_line}\n\n{body}"
         )
+    folded = _folded_comment_count(issue)
     if not parts:
+        if folded:
+            return (
+                f"(no visible comments; {_plural_comments(folded)} folded and omitted "
+                f"here — run `pidash comment list {_issue_identifier(issue)}` to read them)"
+            )
         return "(no comments on this issue yet)"
+    if folded:
+        parts.append(
+            f"({_plural_comments(folded)} on this issue folded and omitted here "
+            f"— low-value status/noop updates. Run "
+            f"`pidash comment list {_issue_identifier(issue)}` to read them.)"
+        )
     return "\n\n".join(parts)
+
+
+def _plural_comments(count: int) -> str:
+    """``"1 comment"`` / ``"3 comments"`` — used in the folded-count notes."""
+    return f"{count} comment" if count == 1 else f"{count} comments"
 
 
 def _humanize_interval(seconds: int) -> str:
@@ -375,6 +409,10 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
                 "work_branch": (getattr(parent, "git_work_branch", "") or None),
                 "description": _issue_description_markdown(parent),
                 "comments_count": _issue_comment_count(parent),
+                # Subset of ``comments_count`` that is folded. The parent's
+                # bodies are never inlined here, so this is purely a hint
+                # about what ``pidash comment list`` will return.
+                "folded_comments_count": _folded_comment_count(parent),
             }
             if parent is not None
             else None

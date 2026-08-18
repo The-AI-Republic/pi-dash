@@ -33,7 +33,7 @@ Parent issue context (this issue is a sub-issue of {{ parent.identifier }}):
 {% else %}
 (no description on the parent issue)
 {% endif %}
-- The parent has {{ parent.comments_count }} comment(s); their contents are not included here. Run `pidash comment list {{ parent.identifier }}` to read them.
+- The parent has {{ parent.comments_count }} comment(s){% if parent.folded_comments_count %}, {{ parent.folded_comments_count }} of them folded{% endif %}; their contents are not included here. Run `pidash comment list {{ parent.identifier }}` to read them.
 {% if lineage %}
 - This issue has a multi-level parent lineage. Full chain, current issue first up to the root:
 {% for node in lineage %}{{ node.identifier }}: {{ node.title }}{% if loop.first %} (current){% endif %}{% if not loop.last %} → {% endif %}{% endfor %}

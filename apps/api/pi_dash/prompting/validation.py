@@ -95,6 +95,7 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
                 "work_branch": "pi-dash/sample-0",
                 "description": "Parent description.",
                 "comments_count": 3,
+                "folded_comments_count": 1,
             },
             "lineage": [
                 {"identifier": "SAMPLE-1", "title": "Sample issue title"},
