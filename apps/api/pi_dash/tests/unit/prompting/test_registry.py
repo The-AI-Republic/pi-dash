@@ -46,6 +46,14 @@ def test_locked_and_overridable_classification():
 
 
 @pytest.mark.unit
+def test_pidash_cli_documents_folded_comments():
+    body = registry.get_section("pidash-cli").default_body
+    assert "--fold" in body
+    assert "omitted from future agent-run task prompts" in body
+    assert "never folds comments automatically" in body
+
+
+@pytest.mark.unit
 def test_customizable_tier_capabilities():
     """The three tiers map to (workspace-override, personal-override) capability."""
     locked = registry.PromptSection("k", "T", registry.CUSTOMIZABLE_LOCKED, "b\n")

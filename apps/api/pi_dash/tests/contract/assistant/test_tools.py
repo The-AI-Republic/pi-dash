@@ -89,6 +89,21 @@ def test_create_comment_attribution(world, member_ctx):
     assert comment.speaker_type == "agent"
     assert comment.speaker_label == "Pi Dash AI"
     assert comment.actor_id == world.member.id
+    assert comment.labels == []
+
+
+def test_create_comment_can_be_folded(world, member_ctx):
+    ctx, *_ = member_ctx
+    res = comments.create_comment(
+        ctx,
+        issue_id=str(world.issue_a.id),
+        body_md="No change from the last tick.",
+        fold=True,
+    )
+
+    assert res["folded"] is True
+    comment = IssueComment.objects.get(id=res["comment_id"])
+    assert comment.labels == ["fold"]
 
 
 def test_guest_comment_only_on_own_issue(world, guest_ctx):

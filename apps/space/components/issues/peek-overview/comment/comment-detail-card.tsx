@@ -40,6 +40,7 @@ export const CommentCard = observer(function CommentCard(props: Props) {
 
   // states
   const [isEditing, setIsEditing] = useState(false);
+  const [isFoldExpanded, setIsFoldExpanded] = useState(false);
   // refs
   const editorRef = useRef<EditorRefApi>(null);
   const showEditorRef = useRef<EditorRefApi>(null);
@@ -65,6 +66,8 @@ export const CommentCard = observer(function CommentCard(props: Props) {
     showEditorRef.current?.setEditorValue(formData.comment_html);
   };
   const agentSpeakerLabel = comment.speaker_type === "agent" ? comment.speaker_label?.trim() || "AI Agent" : undefined;
+  const isFolded = comment.labels?.includes("fold") ?? false;
+  const showCommentContent = !isFolded || isFoldExpanded;
 
   return (
     <div className="relative flex items-start space-x-3">
@@ -153,23 +156,37 @@ export const CommentCard = observer(function CommentCard(props: Props) {
             </div>
           </form>
           <div className={`${isEditing ? "hidden" : ""}`}>
-            {agentSpeakerLabel ? (
-              <div className="px-3 pt-1 text-12 text-primary">
-                <span className="font-medium">{agentSpeakerLabel}:</span>
-              </div>
+            {isFolded ? (
+              <button
+                type="button"
+                className="w-full rounded-md border border-subtle bg-layer-1 px-3 py-2 text-left text-11 text-secondary hover:bg-layer-2"
+                aria-expanded={isFoldExpanded}
+                onClick={() => setIsFoldExpanded((expanded) => !expanded)}
+              >
+                Folded comment · Click to {isFoldExpanded ? "collapse" : "expand"}
+              </button>
             ) : null}
-            <LiteTextEditor
-              editable={false}
-              anchor={anchor}
-              workspaceId={workspaceID?.toString() ?? ""}
-              ref={showEditorRef}
-              id={comment.id}
-              initialValue={comment.comment_html}
-              displayConfig={{
-                fontSize: "small-font",
-              }}
-            />
-            <CommentReactions anchor={anchor} commentId={comment.id} />
+            {showCommentContent ? (
+              <>
+                {agentSpeakerLabel ? (
+                  <div className="px-3 pt-1 text-12 text-primary">
+                    <span className="font-medium">{agentSpeakerLabel}:</span>
+                  </div>
+                ) : null}
+                <LiteTextEditor
+                  editable={false}
+                  anchor={anchor}
+                  workspaceId={workspaceID?.toString() ?? ""}
+                  ref={showEditorRef}
+                  id={comment.id}
+                  initialValue={comment.comment_html}
+                  displayConfig={{
+                    fontSize: "small-font",
+                  }}
+                />
+                <CommentReactions anchor={anchor} commentId={comment.id} />
+              </>
+            ) : null}
           </div>
         </div>
       </div>

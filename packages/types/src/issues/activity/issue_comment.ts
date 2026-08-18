@@ -38,6 +38,7 @@ export type TIssueComment = {
   created_by: string | undefined;
   updated_by: string | undefined;
   attachments: any[];
+  labels?: string[];
   comment_reactions: any[];
   comment_stripped: string;
   comment_html: string;
@@ -133,6 +134,7 @@ export type TIssuePublicComment = {
   access: string;
   actor: string;
   attachments: any[];
+  labels?: string[];
   comment_html: string;
   comment_reactions: {
     actor_detail: ActorDetail;
