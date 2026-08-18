@@ -882,7 +882,7 @@ class IssueReTickAPIEndpoint(BaseAPIView):
 
     The CLI-facing sibling of the web ``AgentReTickEndpoint``. Grants an
     extra phase-sized budget and re-arms the ticker **only** when the
-    issue is still in a ticking state (In Progress / In Review) and the
+    issue is still in a ticking state (In Progress / In Review / In Test) and the
     current budget is exhausted; otherwise it is a no-op that reports
     ``granted = false`` with a machine-readable ``reason``. See
     ``pi_dash.orchestration.scheduling.re_tick_ticker`` for the rules.

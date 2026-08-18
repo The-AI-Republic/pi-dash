@@ -219,12 +219,91 @@ def test_render_error_attributes_failing_section(db, workspace):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("kind", ["coding-task", "review", "scheduler"])
+@pytest.mark.parametrize("kind", ["coding-task", "review", "test", "scheduler"])
 def test_all_kinds_render_against_both_sample_contexts(kind):
     for ctx in sample_contexts(kind):
         out = compose(kind, workspace=None, project=None, user=None, context=ctx)
         assert out.text.strip()
         assert "{%" not in out.text and "{{" not in out.text
+
+
+@pytest.mark.unit
+def test_test_kind_renders_cycle_and_cli_docs():
+    out = compose("test", workspace=None, project=None, user=None, context=_ctx("test"))
+    # The polymorphic test cycle enumerates its five kinds and reports
+    # results as a structured comment.
+    assert "AUTOMATED" in out.text
+    assert "NON_TECHNICAL" in out.text
+    assert "structured results comment" in out.text
+    # And carries the CLI docs like the other issue kinds.
+    assert "Pi Dash CLI" in out.text
+
+
+@pytest.mark.unit
+def test_test_kind_frames_agent_as_first_user():
+    """The test agent's identity is the change's first user: verdicts come
+    from acting and observing on the consumer's side of the surface, with a
+    regression smoke, and CI/gates demoted to corroborating evidence."""
+    out = compose("test", workspace=None, project=None, user=None, context=_ctx("test"))
+    body = out.text
+    assert "first user" in body
+    assert "regression smoke" in body
+    # Pipelines corroborate, they never conclude the verdict.
+    assert "corroborating evidence, never the verdict" in body
+    # An environment is a means to act as the user, not the goal.
+    assert "not the verdict" in body
+
+
+@pytest.mark.unit
+def test_test_kind_completed_stays_in_test_not_done():
+    """A `completed` test pass leaves the issue In Test — the runner never
+    moves a test issue to `completed`/"Done". The ending-run section must
+    route the test kind to the Test-cycle Step 3, not the coding "move to
+    In Review" text or a `--state "Done"`."""
+    out = compose("test", workspace=None, project=None, user=None, context=_ctx("test"))
+    body = out.text
+    assert "leaves the issue In Test" in body or "leave the issue In Test" in body
+    assert '--state "Done"' not in body
+
+
+@pytest.mark.unit
+def test_coding_task_posts_acceptance_criteria_handoff():
+    """The impl run must hand the test phase a spec. In Test starts from a
+    fresh session, so a comment with fixed headings — not the run summary —
+    is the channel the next phase reliably inherits."""
+    out = compose(
+        "coding-task", workspace=None, project=None, user=None,
+        context=_ctx("coding-task"),
+    )
+    body = out.text
+    assert "### Acceptance Criteria" in body
+    assert "### How to Test" in body
+    # Reinforced in the exit checklist, not only in the implementation step.
+    assert body.count("### Acceptance Criteria") >= 1
+    assert "hand-off" in body
+
+
+@pytest.mark.unit
+def test_test_kind_reads_the_handoff_comment_first():
+    out = compose(
+        "test", workspace=None, project=None, user=None, context=_ctx("test")
+    )
+    body = out.text
+    assert "hand-off comment" in body
+    assert "### Acceptance Criteria" in body
+
+
+@pytest.mark.unit
+def test_test_kind_does_not_prescribe_a_package_manager():
+    """Pi Dash runs against arbitrary customer repos — the AUTOMATED branch
+    must discover the repo's gates, not assume a JS toolchain."""
+    out = compose(
+        "test", workspace=None, project=None, user=None, context=_ctx("test")
+    )
+    body = out.text
+    for tool in ("pnpm", "yarn "):
+        assert tool not in body
+    assert "discover them" in body
 
 
 @pytest.mark.unit

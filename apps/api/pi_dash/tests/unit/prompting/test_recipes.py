@@ -12,8 +12,13 @@ from pi_dash.prompting import recipes
 
 
 @pytest.mark.unit
-def test_three_kinds_registered():
-    assert set(recipes.all_kinds()) == {"coding-task", "review", "scheduler"}
+def test_kinds_registered():
+    assert set(recipes.all_kinds()) == {
+        "coding-task",
+        "review",
+        "test",
+        "scheduler",
+    }
 
 
 @pytest.mark.unit
@@ -21,7 +26,18 @@ def test_kind_for_identity_on_template_name():
     # v1: work_kind hardcoded to "coding" → identity on the phase template name.
     assert recipes.kind_for("coding-task") == "coding-task"
     assert recipes.kind_for("review") == "review"
+    assert recipes.kind_for("test") == "test"
     assert recipes.kind_for("coding-task", "coding") == "coding-task"
+
+
+@pytest.mark.unit
+def test_test_recipe_has_intro_and_cycle():
+    recipe = recipes.recipe_for("test")
+    assert "test-intro" in recipe
+    assert "test-cycle" in recipe
+    # shares the CLI + guardrails + ending scaffold with the other kinds.
+    for shared in ("session-framing", "pidash-cli", "guardrails", "ending-run"):
+        assert shared in recipe
 
 
 @pytest.mark.unit
