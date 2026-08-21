@@ -36,6 +36,7 @@ from pi_dash.utils.content_validator import (
     validate_html_content,
     validate_binary_data,
 )
+from pi_dash.utils.host import issue_web_url
 
 from .base import BaseSerializer
 from .cycle import CycleLiteSerializer, CycleSerializer
@@ -85,6 +86,12 @@ class IssueSerializer(BaseSerializer):
     type_id = serializers.PrimaryKeyRelatedField(
         source="type", queryset=IssueType.objects.all(), required=False, allow_null=True
     )
+
+    # Absolute, human-clickable web URL for the issue. Built from deployment
+    # config (see ``issue_web_url``); omitted from the payload when no web base
+    # URL is configured (a missing url is easy for a client to handle, a broken
+    # one is not).
+    url = serializers.SerializerMethodField()
 
     class Meta:
         model = Issue
@@ -337,8 +344,19 @@ class IssueSerializer(BaseSerializer):
         instance.updated_at = timezone.now()
         return super().update(instance, validated_data)
 
+    def get_url(self, obj):
+        return issue_web_url(
+            obj.workspace.slug if obj.workspace_id else None,
+            obj.project.identifier if obj.project_id else None,
+            obj.sequence_id,
+        )
+
     def to_representation(self, instance):
         data = super().to_representation(instance)
+        # Omit ``url`` entirely when no web base URL is configured, rather than
+        # emitting ``null`` — keeps the contract "present and absolute, or absent".
+        if data.get("url") is None:
+            data.pop("url", None)
         if "assignees" in self.fields:
             if "assignees" in self.expand:
                 from .user import UserLiteSerializer
@@ -848,6 +866,11 @@ class IssueCommentSerializer(BaseSerializer):
 
     is_member = serializers.BooleanField(read_only=True)
 
+    # Absolute web URL of the issue this comment belongs to (there is no
+    # per-comment anchor route in the UI). Omitted when no web base URL is
+    # configured. See ``issue_web_url``.
+    url = serializers.SerializerMethodField()
+
     class Meta:
         model = IssueComment
         read_only_fields = [
@@ -861,6 +884,20 @@ class IssueCommentSerializer(BaseSerializer):
             "updated_at",
         ]
         exclude = ["comment_stripped", "comment_json"]
+
+    def get_url(self, obj):
+        return issue_web_url(
+            obj.workspace.slug if obj.workspace_id else None,
+            obj.project.identifier if obj.project_id else None,
+            obj.issue.sequence_id if obj.issue_id else None,
+        )
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # Omit ``url`` entirely when unconfigured (see IssueSerializer note).
+        if data.get("url") is None:
+            data.pop("url", None)
+        return data
 
     def validate(self, data):
         try:
@@ -1044,7 +1081,14 @@ class IssueAdvancedSearchResultSerializer(serializers.Serializer):
     updated_at = serializers.DateTimeField()
     completed_at = serializers.DateTimeField(allow_null=True)
     rank = serializers.FloatField(help_text="ts_rank score (higher = more relevant)")
-    url = serializers.CharField(help_text="Canonical API URL for the issue")
+    url = serializers.CharField(
+        required=False,
+        allow_null=True,
+        help_text=(
+            "Absolute, human-clickable web URL for the issue. Omitted when no "
+            "deployment web base URL (WEB_URL / APP_BASE_URL) is configured."
+        ),
+    )
 
 
 class IssueAdvancedSearchResponseSerializer(serializers.Serializer):
