@@ -144,6 +144,17 @@ class Issue(ProjectBaseModel):
         verbose_name="Issue Priority",
         default="none",
     )
+    # AI-reasoning complexity of the task, used to route the issue to an LLM of
+    # matching capability. 0 = "no score" (the default, i.e. unrated); a rated
+    # issue takes an integer 1..10. The 0..10 bound is enforced here by model
+    # validators (which DRF surfaces on the write serializer) and, for a clearer
+    # message, by ``validate_complexity_score`` on IssueCreateSerializer. How the
+    # score is *derived* is intentionally out of scope for this field.
+    complexity_score = models.IntegerField(
+        default=0,
+        validators=[MinValueValidator(0), MaxValueValidator(10)],
+        verbose_name="AI Reasoning Complexity Score",
+    )
     start_date = models.DateField(null=True, blank=True)
     target_date = models.DateField(null=True, blank=True)
     assignees = models.ManyToManyField(
