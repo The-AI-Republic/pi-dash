@@ -98,6 +98,7 @@ class IssueFlatSerializer(BaseSerializer):
             "description_json",
             "description_html",
             "priority",
+            "complexity_score",
             "start_date",
             "target_date",
             "sequence_id",
@@ -173,6 +174,19 @@ class IssueCreateSerializer(BaseSerializer):
         label_ids = self.initial_data.get("label_ids")
         data["label_ids"] = label_ids if label_ids else []
         return data
+
+    def validate_complexity_score(self, value):
+        # AI-reasoning complexity rule check: only 0..10 is allowed. 0 means
+        # "no score" (unrated); a rated issue is 1..10. The model already carries
+        # Min/Max validators, but re-checking here gives a precise, field-scoped
+        # error instead of DRF's generic min/max wording.
+        if value is None:
+            return value
+        if not 0 <= value <= 10:
+            raise serializers.ValidationError(
+                "complexity_score must be an integer from 0 to 10 (0 means unrated)."
+            )
+        return value
 
     def validate(self, attrs):
         allow_triage = self.context.get("allow_triage_state", False)
@@ -991,6 +1005,7 @@ class IssueSerializer(DynamicBaseSerializer):
             "completed_at",
             "estimate_point",
             "priority",
+            "complexity_score",
             "start_date",
             "target_date",
             "sequence_id",
