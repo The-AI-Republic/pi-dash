@@ -33,6 +33,7 @@ import { GIT_PROJECT_BINDING } from "@/constants/fetch-keys";
 // services
 import { ProjectService } from "@/services/project";
 // local imports
+import { ProjectIdentifierChangeAlert } from "./project-identifier-change-alert";
 import { ProjectNetworkIcon } from "./project-network-icon";
 
 export interface IProjectDetailsForm {
@@ -49,6 +50,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
   // states
   const [isOpen, setIsOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [pendingIdentifierChange, setPendingIdentifierChange] = useState<IProject | null>(null);
   // store hooks
   const { updateProject } = useProject();
   const { isMobile } = usePlatformOS();
@@ -198,7 +200,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
     }
   };
 
-  const onSubmit = async (formData: IProject) => {
+  const updateProjectDetails = async (formData: IProject) => {
     if (!workspaceSlug) return;
     setIsLoading(true);
     // `repo_url` is intentionally NOT included in the regular save payload.
@@ -254,8 +256,31 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
     }, 300);
   };
 
+  const onSubmit = async (formData: IProject) => {
+    if (project.identifier !== formData.identifier) {
+      setPendingIdentifierChange(formData);
+      return;
+    }
+
+    await updateProjectDetails(formData);
+  };
+
+  const confirmIdentifierChange = async () => {
+    if (!pendingIdentifierChange) return;
+    await updateProjectDetails(pendingIdentifierChange);
+    setPendingIdentifierChange(null);
+  };
+
   return (
     <form onSubmit={handleSubmit(onSubmit)}>
+      <ProjectIdentifierChangeAlert
+        isOpen={Boolean(pendingIdentifierChange)}
+        oldIdentifier={project.identifier}
+        newIdentifier={pendingIdentifierChange?.identifier ?? ""}
+        onClose={() => (isLoading ? null : setPendingIdentifierChange(null))}
+        onConfirm={confirmIdentifierChange}
+        isSubmitting={isLoading}
+      />
       <div className="relative h-44 w-full">
         <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent" />
         <CoverImage src={coverImage} alt="Project cover image" className="h-44 w-full rounded-md" />
