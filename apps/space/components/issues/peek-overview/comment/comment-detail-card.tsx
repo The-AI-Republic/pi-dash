@@ -101,8 +101,18 @@ export const CommentCard = observer(function CommentCard(props: Props) {
           <div className="text-11">
             {comment.actor_detail.is_bot ? comment.actor_detail.first_name + " Bot" : comment.actor_detail.display_name}
           </div>
-          <p className="mt-0.5 text-11 text-secondary">
+          <p className="mt-0.5 flex flex-wrap items-center gap-1 text-11 text-secondary">
             <>commented {timeAgo(comment.created_at)}</>
+            {isFolded && !isEditing ? (
+              <button
+                type="button"
+                className="whitespace-nowrap hover:text-primary"
+                aria-expanded={isFoldExpanded}
+                onClick={() => setIsFoldExpanded((expanded) => !expanded)}
+              >
+                Folded comment · Click to {isFoldExpanded ? "collapse" : "expand"}
+              </button>
+            ) : null}
           </p>
         </div>
         <div className="issue-comments-section p-0">
@@ -156,16 +166,6 @@ export const CommentCard = observer(function CommentCard(props: Props) {
             </div>
           </form>
           <div className={`${isEditing ? "hidden" : ""}`}>
-            {isFolded ? (
-              <button
-                type="button"
-                className="w-full rounded-md border border-subtle bg-layer-1 px-3 py-2 text-left text-11 text-secondary hover:bg-layer-2"
-                aria-expanded={isFoldExpanded}
-                onClick={() => setIsFoldExpanded((expanded) => !expanded)}
-              >
-                Folded comment · Click to {isFoldExpanded ? "collapse" : "expand"}
-              </button>
-            ) : null}
             {showCommentContent ? (
               <>
                 {agentSpeakerLabel ? (
