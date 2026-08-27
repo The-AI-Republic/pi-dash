@@ -80,15 +80,9 @@ class _RunEndpointBase(APIView):
     throttle_classes: list = []
 
     def _resolve(self, request, run_id) -> tuple[Optional[AgentRun], Optional[Response]]:
-        run = (
-            AgentRun.objects.select_related("work_item", "scheduler_binding")
-            .filter(id=run_id)
-            .first()
-        )
+        run = AgentRun.objects.select_related("work_item", "scheduler_binding").filter(id=run_id).first()
         if run is None:
-            return None, Response(
-                {"error": "run_not_found"}, status=status.HTTP_404_NOT_FOUND
-            )
+            return None, Response({"error": "run_not_found"}, status=status.HTTP_404_NOT_FOUND)
         if not resolve_runner_for_run(run, request):
             return None, Response(
                 {"error": "run_not_owned_by_runner"},
@@ -96,17 +90,19 @@ class _RunEndpointBase(APIView):
             )
         return run, None
 
-    def _lock_non_terminal(
-        self, run: AgentRun
-    ) -> tuple[Optional[AgentRun], Optional[Response]]:
+    def _lock_non_terminal(self, run: AgentRun) -> tuple[Optional[AgentRun], Optional[Response]]:
         locked = AgentRun.objects.select_for_update().filter(pk=run.pk).first()
         if locked is None:
-            return None, Response(
-                {"error": "run_not_found"}, status=status.HTTP_404_NOT_FOUND
-            )
+            return None, Response({"error": "run_not_found"}, status=status.HTTP_404_NOT_FOUND)
         if locked.status in run_lifecycle.TERMINAL_RUN_STATUSES:
             return locked, Response({"ok": True, "terminal": True})
         return locked, None
+
+    @staticmethod
+    def _cancellation_pending(locked: AgentRun) -> Optional[Response]:
+        if locked.status == AgentRunStatus.CANCEL_REQUESTED:
+            return Response({"ok": True, "cancel_requested": True, "ignored": True})
+        return None
 
 
 class RunAcceptEndpoint(_RunEndpointBase):
@@ -120,6 +116,8 @@ class RunAcceptEndpoint(_RunEndpointBase):
             locked, closed = self._lock_non_terminal(run)
             if closed:
                 return closed
+            if pending := self._cancellation_pending(locked):
+                return pending
             AgentRun.objects.filter(pk=locked.pk).update(
                 status=AgentRunStatus.RUNNING,
                 # The run left the daemon's local worktree queue — a stale
@@ -211,6 +209,8 @@ class RunStartedEndpoint(_RunEndpointBase):
             locked, closed = self._lock_non_terminal(run)
             if closed:
                 return closed
+            if pending := self._cancellation_pending(locked):
+                return pending
             thread_id = (request.data.get("thread_id") or "")[:128]
             updates = {
                 "status": AgentRunStatus.RUNNING,
@@ -279,6 +279,8 @@ class RunApprovalEndpoint(_RunEndpointBase):
             locked, closed = self._lock_non_terminal(run)
             if closed:
                 return closed
+            if pending := self._cancellation_pending(locked):
+                return pending
             approval_id = request.data.get("approval_id")
             kind_raw = (request.data.get("kind") or "").lower()
             kind = {
@@ -297,9 +299,7 @@ class RunApprovalEndpoint(_RunEndpointBase):
                     "expires_at": request.data.get("expires_at"),
                 },
             )
-            AgentRun.objects.filter(pk=locked.pk).update(
-                status=AgentRunStatus.AWAITING_APPROVAL
-            )
+            AgentRun.objects.filter(pk=locked.pk).update(status=AgentRunStatus.AWAITING_APPROVAL)
         return Response({"ok": True})
 
 
@@ -314,9 +314,9 @@ class RunAwaitingReauthEndpoint(_RunEndpointBase):
             locked, closed = self._lock_non_terminal(run)
             if closed:
                 return closed
-            AgentRun.objects.filter(pk=locked.pk).update(
-                status=AgentRunStatus.AWAITING_REAUTH
-            )
+            if pending := self._cancellation_pending(locked):
+                return pending
+            AgentRun.objects.filter(pk=locked.pk).update(status=AgentRunStatus.AWAITING_REAUTH)
         return Response({"ok": True})
 
 
@@ -349,9 +349,11 @@ class RunPausedEndpoint(_RunEndpointBase):
         with transaction.atomic():
             if not _record_dedupe(run, _idempotency_key(request)):
                 return Response({"ok": True, "duplicate": True})
-            _, closed = self._lock_non_terminal(run)
+            locked, closed = self._lock_non_terminal(run)
             if closed:
                 return closed
+            if pending := self._cancellation_pending(locked):
+                return pending
             runner = getattr(request, "auth_runner", None)
             if runner is None:
                 return Response({"ok": True})
@@ -388,6 +390,15 @@ class RunFailedEndpoint(_RunEndpointBase):
                 locked, closed = self._lock_non_terminal(run)
                 if closed:
                     return closed
+                if locked.status == AgentRunStatus.CANCEL_REQUESTED:
+                    # The daemon has proved it has no resumable process for
+                    # this run, which satisfies the cancellation barrier.
+                    run_lifecycle.finalize_run_terminal(
+                        runner,
+                        locked.id,
+                        AgentRunStatus.CANCELLED,
+                    )
+                    return Response({"ok": True, "cancelled": True})
                 run_lifecycle.apply_run_resume_unavailable(
                     runner,
                     locked.id,
@@ -403,6 +414,15 @@ class RunFailedEndpoint(_RunEndpointBase):
                 locked, closed = self._lock_non_terminal(run)
                 if closed:
                     return closed
+                if locked.status == AgentRunStatus.CANCEL_REQUESTED:
+                    # This assignment never started on the daemon, so there
+                    # is no source process left to wait for.
+                    run_lifecycle.finalize_run_terminal(
+                        runner,
+                        locked.id,
+                        AgentRunStatus.CANCELLED,
+                    )
+                    return Response({"ok": True, "cancelled": True})
                 run_lifecycle.apply_assign_rejected_busy(
                     runner,
                     locked.id,
@@ -466,9 +486,9 @@ class RunResumedEndpoint(_RunEndpointBase):
             locked, closed = self._lock_non_terminal(run)
             if closed:
                 return closed
-            AgentRun.objects.filter(pk=locked.pk).update(
-                status=AgentRunStatus.RUNNING
-            )
+            if pending := self._cancellation_pending(locked):
+                return pending
+            AgentRun.objects.filter(pk=locked.pk).update(status=AgentRunStatus.RUNNING)
         return Response({"ok": True})
 
 
@@ -509,9 +529,7 @@ class RunStreamUpgradeEndpoint(_RunEndpointBase):
                         "run_id": str(run.id),
                         "stream": stream,
                         "runner_id": str(runner.id) if runner else "",
-                        "expires_at": (
-                            timezone.now() + timedelta(seconds=60)
-                        ).isoformat(),
+                        "expires_at": (timezone.now() + timedelta(seconds=60)).isoformat(),
                     }
                 ),
                 ex=60,

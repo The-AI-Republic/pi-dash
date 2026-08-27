@@ -29,6 +29,7 @@ type Props = {
   user: IUser | undefined;
   onComplete: (skipInvites?: boolean) => void;
   handleCurrentViewChange: () => void;
+  handleJoinByEmailView: () => void;
   hasInvitations?: boolean;
 };
 
@@ -38,6 +39,7 @@ export const WorkspaceCreateStep = observer(function WorkspaceCreateStep({
   user,
   onComplete,
   handleCurrentViewChange,
+  handleJoinByEmailView,
   hasInvitations = false,
 }: Props) {
   // states
@@ -122,6 +124,9 @@ export const WorkspaceCreateStep = observer(function WorkspaceCreateStep({
           workspaces. Please ask a workspace owner or admin to invite you to a workspace first and come back to this
           screen to join.
         </span>
+        <Button variant="primary" size="xl" className="w-full" onClick={handleJoinByEmailView}>
+          {t("Join an existing workspace")}
+        </Button>
       </div>
     );
   }
@@ -234,13 +239,11 @@ export const WorkspaceCreateStep = observer(function WorkspaceCreateStep({
             )}
           />
           <p className="text-13 text-tertiary">{t("You can only edit the slug of the URL")}</p>
-          {slugError && (
-            <p className="-mt-3 text-13 text-danger-primary">
-              {t("Workspace URL is already taken!")}
-            </p>
-          )}
+          {slugError && <p className="-mt-3 text-13 text-danger-primary">{t("Workspace URL is already taken!")}</p>}
           {invalidSlug && (
-            <p className="text-13 text-danger-primary">{t("URLs can contain only ('-') and alphanumeric characters.")}</p>
+            <p className="text-13 text-danger-primary">
+              {t("URLs can contain only ('-') and alphanumeric characters.")}
+            </p>
           )}
           {errors.slug && <span className="text-13 text-danger-primary">{errors.slug.message}</span>}
         </div>
@@ -295,9 +298,12 @@ export const WorkspaceCreateStep = observer(function WorkspaceCreateStep({
         </Button>
         {hasInvitations && (
           <Button variant="ghost" size="xl" className="w-full" onClick={handleCurrentViewChange}>
-            Join existing workspace
+            {t("Join existing workspace")}
           </Button>
         )}
+        <Button variant="ghost" size="xl" className="w-full" onClick={handleJoinByEmailView}>
+          {t("Join an existing workspace by admin email")}
+        </Button>
       </div>
     </form>
   );

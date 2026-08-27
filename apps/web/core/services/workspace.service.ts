@@ -10,6 +10,8 @@ import type {
   IWorkspaceMemberMe,
   IWorkspaceMember,
   IWorkspaceMemberInvitation,
+  IWorkspaceJoinRequest,
+  IWorkspaceJoinRequestCreateResponse,
   ILastActiveWorkspaceDetails,
   IWorkspaceSearchResults,
   IProductUpdateResponse,
@@ -111,6 +113,22 @@ export class WorkspaceService extends APIService {
 
   async userWorkspaceInvitations(): Promise<IWorkspaceMemberInvitation[]> {
     return this.get("/api/users/me/workspaces/invitations/")
+      .then((response) => response?.data)
+      .catch((error) => {
+        throw error?.response?.data;
+      });
+  }
+
+  async createWorkspaceJoinRequest(data: { admin_email: string }): Promise<IWorkspaceJoinRequestCreateResponse> {
+    return this.post("/api/users/me/workspaces/join-requests/", data)
+      .then((response) => response?.data)
+      .catch((error) => {
+        throw error?.response?.data;
+      });
+  }
+
+  async userWorkspaceJoinRequests(): Promise<IWorkspaceJoinRequest[]> {
+    return this.get("/api/users/me/workspaces/join-requests/")
       .then((response) => response?.data)
       .catch((error) => {
         throw error?.response?.data;

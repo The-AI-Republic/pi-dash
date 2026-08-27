@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+from datetime import timedelta
+
 from django.db import transaction
-from django.db.models import Count, Max, Q
+from django.db.models import Count, Exists, Max, OuterRef, Q
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -14,6 +16,7 @@ from pi_dash.authentication.session import BaseSessionAuthentication
 from pi_dash.runner.models import (
     AgentRun,
     DevMachine,
+    MachineSession,
     MachineToken,
     Pod,
     Runner,
@@ -37,6 +40,22 @@ from pi_dash.runner.services.runner_delete import (
     delete_runner as delete_runner_svc,
     parse_purge_local,
 )
+
+# A machine counts as "control online" (able to execute cloud-pushed
+# commands) when its control session polled within this window. Polls
+# refresh last_seen_at every LONG_POLL_INTERVAL_SECS (25s); 90s gives
+# three missed cycles of slack before the UI stops offering the machine.
+_CONTROL_PRESENCE_WINDOW = timedelta(seconds=90)
+
+
+def _control_online_subquery():
+    return Exists(
+        MachineSession.objects.filter(
+            dev_machine_id=OuterRef("pk"),
+            revoked_at__isnull=True,
+            last_seen_at__gte=timezone.now() - _CONTROL_PRESENCE_WINDOW,
+        )
+    )
 
 
 class DevMachineListEndpoint(APIView):
@@ -98,6 +117,7 @@ class DevMachineListEndpoint(APIView):
                 runner_count=Count("runners", filter=workspace_runner_filter, distinct=True),
                 online_runner_count=Count("runners", filter=online_runner_filter, distinct=True),
                 last_heartbeat_at=Max("runners__last_heartbeat_at", filter=workspace_runner_filter),
+                control_online=_control_online_subquery(),
             )
             .order_by("-last_seen_at", "-created_at")
         )
@@ -142,6 +162,7 @@ def _serialize_dev_machine(machine: DevMachine, user, workspace_id):
             runner_count=Count("runners", filter=workspace_runner_filter, distinct=True),
             online_runner_count=Count("runners", filter=online_runner_filter, distinct=True),
             last_heartbeat_at=Max("runners__last_heartbeat_at", filter=workspace_runner_filter),
+            control_online=_control_online_subquery(),
         )
         .first()
     )
@@ -246,6 +267,9 @@ class RunnerListEndpoint(APIView):
         qs = (
             Runner.objects.filter(workspace_id=workspace_id)
             .filter(runner_visible_to_user_q(request.user))
+            # ``pod__project`` and ``dev_machine`` are read by the runner
+            # serializer's nested mini serializers; join them to avoid N+1.
+            .select_related("pod__project", "dev_machine")
             .order_by("-updated_at")
         )
         pod_id = request.query_params.get("pod")
@@ -261,7 +285,9 @@ class RunnerDetailEndpoint(APIView):
     permission_classes = [IsAuthenticated]
 
     def _get_runner(self, request, runner_id):
-        runner = Runner.objects.filter(pk=runner_id).first()
+        runner = (
+            Runner.objects.select_related("pod__project", "dev_machine").filter(pk=runner_id).first()
+        )
         if runner is None:
             return None
         if not is_workspace_member(request.user, runner.workspace_id):

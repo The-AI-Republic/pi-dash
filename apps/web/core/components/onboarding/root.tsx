@@ -8,7 +8,13 @@ import { useCallback, useEffect, useState } from "react";
 import { observer } from "mobx-react";
 // pi dash imports
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
-import type { IWorkspaceMemberInvitation, TOnboardingStep, TOnboardingSteps, TUserProfile } from "@pi-dash/types";
+import type {
+  IWorkspaceJoinRequest,
+  IWorkspaceMemberInvitation,
+  TOnboardingStep,
+  TOnboardingSteps,
+  TUserProfile,
+} from "@pi-dash/types";
 import { EOnboardingSteps } from "@pi-dash/types";
 // hooks
 import { useInstance } from "@/hooks/store/use-instance";
@@ -20,9 +26,10 @@ import { OnboardingStepRoot } from "./steps";
 
 type Props = {
   invitations?: IWorkspaceMemberInvitation[];
+  joinRequests?: IWorkspaceJoinRequest[];
 };
 
-export const OnboardingRoot = observer(function OnboardingRoot({ invitations = [] }: Props) {
+export const OnboardingRoot = observer(function OnboardingRoot({ invitations = [], joinRequests = [] }: Props) {
   const [currentStep, setCurrentStep] = useState<TOnboardingStep>(EOnboardingSteps.CLI_INSTALL);
   // store hooks
   const { data: user } = useUser();
@@ -141,7 +148,12 @@ export const OnboardingRoot = observer(function OnboardingRoot({ invitations = [
       />
 
       {/* Main content area */}
-      <OnboardingStepRoot currentStep={currentStep} invitations={invitations} handleStepChange={handleStepChange} />
+      <OnboardingStepRoot
+        currentStep={currentStep}
+        invitations={invitations}
+        joinRequests={joinRequests}
+        handleStepChange={handleStepChange}
+      />
     </div>
   );
 });

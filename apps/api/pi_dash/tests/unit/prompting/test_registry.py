@@ -14,9 +14,17 @@ from pi_dash.prompting.renderer import validate_syntax
 
 @pytest.mark.unit
 def test_registry_loaded_with_expected_sections():
-    # 18 local sections plus 12 locked Cloud Agent sections.
-    assert len(registry.REGISTRY) == 30
-    for key in ("intro", "pidash-cli", "review-cycle", "scheduler-task"):
+    # 20 local sections (13 ported + 2 review + 2 test + 3 scheduler)
+    # plus 12 locked Cloud Agent sections.
+    assert len(registry.REGISTRY) == 32
+    for key in (
+        "intro",
+        "pidash-cli",
+        "review-cycle",
+        "test-intro",
+        "test-cycle",
+        "scheduler-task",
+    ):
         assert key in registry.REGISTRY
 
 
@@ -36,6 +44,14 @@ def test_locked_and_overridable_classification():
     assert registry.get_section("ending-run").is_locked
     assert registry.get_section("implementation").is_overridable
     assert registry.get_section("review-cycle").is_overridable
+
+
+@pytest.mark.unit
+def test_pidash_cli_documents_folded_comments():
+    body = registry.get_section("pidash-cli").default_body
+    assert "--fold" in body
+    assert "omitted from future agent-run task prompts" in body
+    assert "never folds comments automatically" in body
 
 
 @pytest.mark.unit

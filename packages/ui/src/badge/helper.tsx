@@ -43,8 +43,8 @@ enum badgeSizeStyling {
 enum badgeIconStyling {
   sm = "h-3 w-3 flex justify-center items-center overflow-hidden flex-shrink-0",
   md = "h-3.5 w-3.5 flex justify-center items-center overflow-hidden flex-shrink-0",
+  // oxlint-disable-next-line typescript-eslint/no-duplicate-enum-values
   lg = "h-4 w-4 flex justify-center items-center overflow-hidden flex-shrink-0",
-  // eslint-disable-next-line @typescript-eslint/no-duplicate-enum-values
   xl = "h-4 w-4 flex justify-center items-center overflow-hidden flex-shrink-0",
 }
 
@@ -52,11 +52,11 @@ export const badgeStyling: IBadgeStyling = {
   primary: {
     default: `text-on-color bg-accent-primary`,
     hover: `hover:bg-accent-primary/80`,
-    disabled: `cursor-not-allowed !bg-custom-primary-60 hover:bg-custom-primary-60`,
+    disabled: `cursor-not-allowed !bg-accent-primary/60 hover:bg-accent-primary/60`,
   },
   "accent-primary": {
     default: `bg-accent-subtle text-accent-primary`,
-    hover: `hover:bg-custom-primary-20 hover:text-accent-secondary`,
+    hover: `hover:bg-accent-primary/20 hover:text-accent-secondary`,
     disabled: `cursor-not-allowed !text-accent-primary/60`,
   },
   "outline-primary": {
@@ -66,7 +66,7 @@ export const badgeStyling: IBadgeStyling = {
   },
 
   neutral: {
-    default: `text-custom-background-100 bg-layer-1 border border-subtle`,
+    default: `text-primary bg-layer-1 border border-subtle`,
     hover: `hover:bg-layer-1`,
     disabled: `cursor-not-allowed bg-subtle-1 !text-placeholder`,
   },

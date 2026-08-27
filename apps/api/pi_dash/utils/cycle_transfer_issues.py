@@ -29,6 +29,7 @@ from pi_dash.db.models import (
 )
 from pi_dash.utils.analytics_plot import burndown_plot
 from pi_dash.bgtasks.issue_activities_task import issue_activity
+from pi_dash.utils.constants import OPEN_STATE_GROUPS
 from pi_dash.utils.host import base_host
 
 
@@ -438,7 +439,7 @@ def transfer_cycle_issues(
         workspace__slug=slug,
         issue__archived_at__isnull=True,
         issue__is_draft=False,
-        issue__state__group__in=["backlog", "unstarted", "started", "review"],
+        issue__state__group__in=OPEN_STATE_GROUPS,
     )
 
     updated_cycles = []

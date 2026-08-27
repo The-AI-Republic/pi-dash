@@ -143,15 +143,27 @@ class Project(BaseModel):
     # ``.ai_design/create_review_state/design.md`` §6.4 for the
     # phase split.
     #
+    # One field pair per ticking phase. The phases are siblings — a
+    # pair is read and written only by its own phase, so a cap grant or
+    # cadence tweak in one never leaks into another. The mapping from
+    # phase to pair lives in ``orchestration.agent_phases.CADENCE_FIELDS``.
+    #
     # ``agent_default_*`` are the **In Progress phase** defaults.
     # ``agent_review_default_*`` are the **In Review phase** defaults
     # (review iterations are bounded shorter — see design §3.2).
-    # ``agent_ticking_enabled`` gates the project globally; both
-    # phases respect it.
-    agent_default_interval_seconds = models.IntegerField(default=10800)  # 3 h
-    agent_default_max_ticks = models.IntegerField(default=24)  # 3 days
-    agent_review_default_interval_seconds = models.IntegerField(default=10800)  # 3 h
-    agent_review_default_max_ticks = models.IntegerField(default=8)  # 24 h window
+    # ``agent_test_default_*`` are the **In Test phase** defaults: a
+    # test cycle is a slower, heavier loop than a review pass — boot an
+    # environment, execute, collect evidence — so it ticks every 12 h
+    # and is capped at 3 passes (a 36 h window). See
+    # ``.ai_design/create_test_state/design.md`` §3.2.
+    # ``agent_ticking_enabled`` gates the project globally; every
+    # phase respects it.
+    agent_default_interval_seconds = models.IntegerField(default=43200)  # 12 h
+    agent_default_max_ticks = models.IntegerField(default=24)            # 3 days
+    agent_review_default_interval_seconds = models.IntegerField(default=28800)  # 8 h
+    agent_review_default_max_ticks = models.IntegerField(default=4)             # 32 h window
+    agent_test_default_interval_seconds = models.IntegerField(default=43200)  # 12 h
+    agent_test_default_max_ticks = models.IntegerField(default=3)             # 36 h window
     agent_ticking_enabled = models.BooleanField(default=True)
     # Execution policy for future runs. Existing runs retain their snapshotted
     # executor even when this setting changes.

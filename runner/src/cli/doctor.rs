@@ -107,6 +107,7 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
             "claude",
             "cursor-agent",
             "acpx",
+            "grok",
         )
         .await;
     } else {
@@ -120,6 +121,7 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
                 &r.claude_code.binary,
                 &r.cursor_agent.binary,
                 &r.openclaw.binary,
+                &r.grok.binary,
             )
             .await;
         }
@@ -166,6 +168,10 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
 /// in multi-runner installs so the report distinguishes which runner failed
 /// — `codex@laptop` vs `codex@build-box` — and `None` in the single-runner
 /// case to keep output identical to the pre-multi-runner format.
+// One `&str` binary name per supported agent, so the arity grows with the
+// agent list; a struct wrapper would add ceremony without clarifying the call
+// sites, which pass the runner's per-agent binaries positionally.
+#[allow(clippy::too_many_arguments)]
 async fn run_agent_checks(
     checks: &mut Vec<Check>,
     prefix: Option<&str>,
@@ -174,6 +180,7 @@ async fn run_agent_checks(
     claude_binary: &str,
     cursor_binary: &str,
     openclaw_binary: &str,
+    grok_binary: &str,
 ) {
     let tag = |base: &str| match prefix {
         Some(p) => format!("{base}@{p}"),
@@ -304,6 +311,34 @@ async fn run_agent_checks(
                 blocker: false,
             });
         }
+        crate::config::schema::AgentKind::Grok => {
+            match check_version(grok_binary).await {
+                Ok(detail) => checks.push(Check {
+                    name: tag("grok"),
+                    ok: true,
+                    detail,
+                    blocker: true,
+                }),
+                Err(e) => checks.push(Check {
+                    name: tag("grok"),
+                    ok: false,
+                    detail: e.to_string(),
+                    blocker: true,
+                }),
+            }
+            // grok auth is via the `XAI_API_KEY` env var or an interactive
+            // `grok` login; there's no cheap non-interactive probe, so surface
+            // a hint rather than block.
+            checks.push(Check {
+                name: tag("grok-auth"),
+                ok: true,
+                detail: format!(
+                    "assumed ok (set XAI_API_KEY or run `{grok_binary}` login if runs \
+                     fail with auth errors)"
+                ),
+                blocker: false,
+            });
+        }
     }
 }
 
@@ -376,7 +411,7 @@ mod tests {
     use super::*;
     use crate::config::schema::{
         AgentKind, ClaudeCodeSection, CursorAgentSection, CodexSection, Config, DaemonConfig,
-        OpenClawSection, RunnerConfig, WorkspaceSection,
+        GrokSection, OpenClawSection, RunnerConfig, WorkspaceSection,
     };
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -411,6 +446,7 @@ mod tests {
             claude_code: ClaudeCodeSection::default(),
             cursor_agent: CursorAgentSection::default(),
             openclaw: OpenClawSection::default(),
+            grok: GrokSection::default(),
             approval_policy: Default::default(),
         }
     }
@@ -528,6 +564,7 @@ mod tests {
         let mut claude_checks: Vec<Check> = Vec::new();
         let mut cursor_checks: Vec<Check> = Vec::new();
         let mut openclaw_checks: Vec<Check> = Vec::new();
+        let mut grok_checks: Vec<Check> = Vec::new();
         run_agent_checks(
             &mut codex_checks,
             None,
@@ -536,6 +573,7 @@ mod tests {
             "claude-missing",
             "cursor-missing",
             "acpx-missing",
+            "grok-missing",
         )
         .await;
         run_agent_checks(
@@ -546,6 +584,7 @@ mod tests {
             "claude-missing",
             "cursor-missing",
             "acpx-missing",
+            "grok-missing",
         )
         .await;
         run_agent_checks(
@@ -556,6 +595,7 @@ mod tests {
             "claude-missing",
             "cursor-missing",
             "acpx-missing",
+            "grok-missing",
         )
         .await;
         run_agent_checks(
@@ -566,6 +606,18 @@ mod tests {
             "claude-missing",
             "cursor-missing",
             "acpx-missing",
+            "grok-missing",
+        )
+        .await;
+        run_agent_checks(
+            &mut grok_checks,
+            None,
+            AgentKind::Grok,
+            "codex-missing",
+            "claude-missing",
+            "cursor-missing",
+            "acpx-missing",
+            "grok-missing",
         )
         .await;
         assert!(codex_checks.iter().any(|c| c.name == "codex"));
@@ -576,5 +628,7 @@ mod tests {
         assert!(cursor_checks.iter().any(|c| c.name == "cursor-auth"));
         assert!(openclaw_checks.iter().any(|c| c.name == "acpx"));
         assert!(openclaw_checks.iter().any(|c| c.name == "openclaw"));
+        assert!(grok_checks.iter().any(|c| c.name == "grok"));
+        assert!(grok_checks.iter().any(|c| c.name == "grok-auth"));
     }
 }

@@ -316,6 +316,177 @@ def test_deferred_pause_applies_when_cap_hit_and_no_active_runs(
 
 
 @pytest.mark.unit
+def test_deferred_pause_skips_when_issue_is_in_review(
+    seeded, issue, states, runner_for_workspace, create_user
+):
+    """When the *review* budget is exhausted the issue must stay In Review
+    for a human to close — the review phase is excluded from the cap-hit
+    auto-pause (PDASHOSS01-68). Even with a Paused state available and the
+    CAP_HIT reason set, an In Review issue is left in place."""
+    with impersonate(create_user):
+        in_review = State.objects.create(
+            name="In Review", project=issue.project, group="review"
+        )
+    Issue.all_objects.filter(pk=issue.pk).update(state=in_review)
+    issue.refresh_from_db()
+    sched = scheduling.arm_ticker(issue)
+    sched.enabled = False
+    sched.disarm_reason = TickerDisarmReason.CAP_HIT
+    sched.save(update_fields=["enabled", "disarm_reason"])
+    run = AgentRun.objects.create(
+        workspace=issue.workspace,
+        created_by=create_user,
+        pod=runner_for_workspace.pod,
+        work_item=issue,
+        status=AgentRunStatus.COMPLETED,
+        prompt="x",
+    )
+    applied = scheduling.maybe_apply_deferred_pause(run)
+    assert applied is False
+    issue.refresh_from_db()
+    assert issue.state == in_review
+
+
+@pytest.mark.unit
+def test_deferred_pause_skips_when_issue_is_in_test(
+    seeded, issue, states, runner_for_workspace, create_user
+):
+    """The §4.5 carve-out (PDASHOSS01-80): a cap-exhausted In Test issue
+    must **stay In Test** for a human, NOT auto-move to Paused. Without the
+    TEST arm in ``maybe_apply_deferred_pause`` this issue would silently
+    fall through to the non-review path and be auto-paused."""
+    with impersonate(create_user):
+        in_test = State.objects.create(
+            name="In Test", project=issue.project, group="test"
+        )
+    Issue.all_objects.filter(pk=issue.pk).update(state=in_test)
+    issue.refresh_from_db()
+    sched = scheduling.arm_ticker(issue)
+    sched.enabled = False
+    sched.disarm_reason = TickerDisarmReason.CAP_HIT
+    sched.save(update_fields=["enabled", "disarm_reason"])
+    run = AgentRun.objects.create(
+        workspace=issue.workspace,
+        created_by=create_user,
+        pod=runner_for_workspace.pod,
+        work_item=issue,
+        status=AgentRunStatus.COMPLETED,
+        prompt="x",
+    )
+    applied = scheduling.maybe_apply_deferred_pause(run)
+    assert applied is False
+    issue.refresh_from_db()
+    assert issue.state == in_test
+
+
+@pytest.mark.unit
+def test_deferred_pause_still_applies_for_in_progress(
+    seeded, issue, states, runner_for_workspace, create_user
+):
+    """Regression guard for the carve-out: In Progress cap-hit STILL
+    auto-pauses (the TEST/REVIEW carve-out must not over-reach)."""
+    _to_in_progress(issue, states)
+    sched = scheduling.arm_ticker(issue)
+    sched.enabled = False
+    sched.disarm_reason = TickerDisarmReason.CAP_HIT
+    sched.save(update_fields=["enabled", "disarm_reason"])
+    run = AgentRun.objects.create(
+        workspace=issue.workspace,
+        created_by=create_user,
+        pod=runner_for_workspace.pod,
+        work_item=issue,
+        status=AgentRunStatus.COMPLETED,
+        prompt="x",
+    )
+    applied = scheduling.maybe_apply_deferred_pause(run)
+    assert applied is True
+    issue.refresh_from_db()
+    assert issue.state == states["paused"]
+
+
+@pytest.mark.unit
+def test_project_defaults_resolve_test_pair_for_in_test(
+    seeded, issue, project, create_user
+):
+    """``_project_default_interval`` / ``_project_default_max_ticks`` return
+    the **test** defaults for an In Test issue — not review's, not impl's."""
+    with impersonate(create_user):
+        in_test = State.objects.create(
+            name="In Test", project=project, group="test"
+        )
+    Issue.all_objects.filter(pk=issue.pk).update(state=in_test)
+    issue.refresh_from_db()
+    # Distinguish all three pairs so the assertion is meaningful.
+    project.agent_default_interval_seconds = 43200
+    project.agent_default_max_ticks = 24
+    project.agent_review_default_interval_seconds = 10800
+    project.agent_review_default_max_ticks = 4
+    project.agent_test_default_interval_seconds = 7200
+    project.agent_test_default_max_ticks = 6
+    project.save()
+    assert scheduling._project_default_interval(issue) == 7200
+    assert scheduling._project_default_max_ticks(issue) == 6
+
+
+@pytest.mark.unit
+def test_arm_ticker_on_in_test_uses_test_cadence(
+    seeded, issue, project, create_user
+):
+    """``arm_ticker`` on an In Test issue seeds the test-phase cadence and
+    clears ``disarm_reason``."""
+    with impersonate(create_user):
+        in_test = State.objects.create(
+            name="In Test", project=project, group="test"
+        )
+    Issue.all_objects.filter(pk=issue.pk).update(state=in_test)
+    issue.refresh_from_db()
+    project.agent_review_default_max_ticks = 4
+    project.agent_test_default_max_ticks = 6
+    project.save(
+        update_fields=[
+            "agent_review_default_max_ticks",
+            "agent_test_default_max_ticks",
+        ]
+    )
+    sched = scheduling.arm_ticker(issue)
+    assert sched.disarm_reason == TickerDisarmReason.NONE
+    assert sched.effective_max_ticks() == 6
+
+
+@pytest.mark.unit
+def test_re_tick_in_test_grants_on_test_column_only(
+    seeded, issue, project, create_user
+):
+    """A cap grant made while In Test lands on ``test_max_ticks`` and leaves
+    ``review_max_ticks`` untouched.
+
+    This is the cross-phase leak the shared-pair design allowed: with both
+    phases writing ``review_max_ticks``, extending an exhausted In Test issue
+    silently inflated the budget In Review would get next.
+    """
+    with impersonate(create_user):
+        in_test = State.objects.create(
+            name="In Test", project=project, group="test"
+        )
+    Issue.all_objects.filter(pk=issue.pk).update(state=in_test)
+    issue.refresh_from_db()
+    project.agent_test_default_max_ticks = 3
+    project.save(update_fields=["agent_test_default_max_ticks"])
+
+    sched = scheduling.arm_ticker(issue)
+    sched.tick_count = 3  # exhausted
+    sched.save(update_fields=["tick_count"])
+
+    result = scheduling.re_tick_ticker(issue)
+    assert result["granted"] is True
+
+    sched.refresh_from_db()
+    assert sched.test_max_ticks == 6  # 3 (current cap) + 3 (grant)
+    assert sched.review_max_ticks is None
+    assert sched.max_ticks is None
+
+
+@pytest.mark.unit
 def test_deferred_pause_skips_when_disarm_reason_is_terminal_signal(
     seeded, issue, states, runner_for_workspace, create_user
 ):

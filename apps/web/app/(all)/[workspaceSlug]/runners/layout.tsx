@@ -104,7 +104,9 @@ const RunnersLayout = observer(function RunnersLayout() {
               ))}
             </nav>
           </aside>
-          <main className="min-w-0 flex-1 overflow-auto p-6">
+          {/* Pages pad themselves (p-6) so full-bleed surfaces like the runner
+              chat can span edge-to-edge. */}
+          <main className="min-w-0 flex-1 overflow-auto">
             <Outlet />
           </main>
         </div>

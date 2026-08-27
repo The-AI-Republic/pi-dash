@@ -75,9 +75,14 @@ def _publish_effects(run_id):
 
 def apply_terminal_effects(run_id) -> bool:
     """Apply orchestration hooks once, then deliver capacity release at least once."""
-    from pi_dash.runner.services.run_lifecycle import _apply_post_run_orchestration, _post_failure_comment
+    from pi_dash.runner.services.run_lifecycle import (
+        _apply_post_run_orchestration,
+        _has_project_move_handoff,
+        _post_failure_comment,
+    )
     from pi_dash.runner.services.scheduler_hook import update_scheduler_binding_on_terminate
 
+    pending_handoff = False
     with transaction.atomic():
         run = (
             AgentRun.objects.select_for_update(of=("self",))
@@ -88,7 +93,8 @@ def apply_terminal_effects(run_id) -> bool:
         if run is None:
             return False
         if run.terminal_hooks_applied_at is None:
-            if run.status == AgentRunStatus.FAILED:
+            has_handoff = _has_project_move_handoff(run)
+            if run.status == AgentRunStatus.FAILED and not has_handoff:
                 try:
                     # Keep this best-effort side effect behind a savepoint: a
                     # comment database failure must not poison the enclosing
@@ -100,7 +106,15 @@ def apply_terminal_effects(run_id) -> bool:
                         "run_lifecycle: failed to post failure comment for run %s",
                         run.id,
                     )
-            _apply_post_run_orchestration(run)
+            if has_handoff:
+                # A source-project run stopped for a move must not
+                # disarm/pause the issue after it already belongs to the
+                # target project; the handoff completion (below, after
+                # this transaction to respect the issue → run lock order)
+                # creates the target-project replacement instead.
+                pending_handoff = True
+            else:
+                _apply_post_run_orchestration(run)
             if run.scheduler_binding_id:
                 try:
                     with transaction.atomic():
@@ -112,6 +126,20 @@ def apply_terminal_effects(run_id) -> bool:
                     )
             run.terminal_hooks_applied_at = timezone.now()
             run.save(update_fields=["terminal_hooks_applied_at"])
+
+    if pending_handoff:
+        from pi_dash.orchestration.service import complete_project_move_handoff
+
+        try:
+            complete_project_move_handoff(run_id)
+        except Exception:
+            # The terminal transition is already committed; a handoff
+            # recovery failure must not strand capacity release. The durable
+            # marker stays on the run for reconciliation.
+            logger.exception(
+                "failed to complete project-move handoff for run %s",
+                run_id,
+            )
 
     run = AgentRun.objects.select_related("runner", "pod").get(pk=run_id)
     if run.terminal_capacity_released_at is None:

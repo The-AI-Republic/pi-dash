@@ -10,7 +10,7 @@ import Script from "next/script";
 // eslint-disable-next-line import/no-unassigned-import
 import "@/styles/globals.css";
 
-import { SITE_DESCRIPTION, SITE_NAME } from "@pi-dash/constants";
+import { SITE_DESCRIPTION, SITE_KEYWORDS, SITE_NAME, SITE_TITLE } from "@pi-dash/constants";
 
 // helpers
 import { cn } from "@pi-dash/utils";
@@ -26,34 +26,33 @@ import icon512 from "@/app/assets/icons/icon-512x512.png?url";
 import { AppProvider } from "./provider";
 
 export const meta = () => [
-  { title: "Pi Dash | Simple, extensible, open-source project management tool." },
+  { title: SITE_TITLE },
   { name: "description", content: SITE_DESCRIPTION },
   {
     name: "keywords",
-    content:
-      "software development, plan, ship, software, accelerate, code management, release management, project management, work item tracking, agile, scrum, kanban, collaboration",
+    content: SITE_KEYWORDS,
   },
   {
     name: "viewport",
     content:
       "width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover",
   },
-  { property: "og:title", content: "Pi Dash | Simple, extensible, open-source project management tool." },
+  { property: "og:title", content: SITE_TITLE },
   {
     property: "og:description",
-    content: "Open-source project management tool to manage work items, cycles, and product roadmaps easily",
+    content: SITE_DESCRIPTION,
   },
   { property: "og:url", content: "https://airepublic.com/" },
   { property: "og:image", content: "https://airepublic.com/og-image.png" },
   { property: "og:image:width", content: "1200" },
   { property: "og:image:height", content: "630" },
-  { property: "og:image:alt", content: "Pi Dash - Modern project management" },
+  { property: "og:image:alt", content: "Pi Dash - AI agent orchestration platform" },
   { name: "twitter:site", content: "@ai_republic" },
   { name: "twitter:card", content: "summary_large_image" },
   { name: "twitter:image", content: "https://airepublic.com/og-image.png" },
   { name: "twitter:image:width", content: "1200" },
   { name: "twitter:image:height", content: "630" },
-  { name: "twitter:image:alt", content: "Pi Dash - Modern project management" },
+  { name: "twitter:image:alt", content: "Pi Dash - AI agent orchestration platform" },
 ];
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

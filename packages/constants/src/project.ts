@@ -52,6 +52,10 @@ export const GROUP_CHOICES = {
     key: "review",
     i18n_label: "Review",
   },
+  test: {
+    key: "test",
+    i18n_label: "Test",
+  },
   completed: {
     key: "completed",
     i18n_label: "Completed",

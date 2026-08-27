@@ -91,13 +91,13 @@ class TestProjectAPIPost(TestProjectBase):
         # Verify ProjectUserProperty was created
         assert ProjectUserProperty.objects.filter(project=project, user=user).exists()
 
-        # Verify default states were created. PR B added the "In Review"
-        # state to ``DEFAULT_STATES`` alongside the original five (see
+        # Verify default states were created. ``DEFAULT_STATES`` grew the
+        # "In Review" state (PR B) and later the "In Test" state (see
         # ``pi_dash/db/models/state.py``); the default manager filters
-        # triage out, so a freshly-created project ends up with six.
+        # triage out, so a freshly-created project ends up with seven.
         states = State.objects.filter(project=project)
-        assert states.count() == 6
-        expected_states = ["Backlog", "Todo", "In Progress", "In Review", "Done", "Cancelled"]
+        assert states.count() == 7
+        expected_states = ["Backlog", "Todo", "In Progress", "In Review", "In Test", "Done", "Cancelled"]
         state_names = list(states.values_list("name", flat=True))
         assert set(state_names) == set(expected_states)
 

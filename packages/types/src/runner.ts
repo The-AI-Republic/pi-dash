@@ -10,6 +10,19 @@ export interface IPodMini {
   id: string;
   name: string;
   is_default: boolean;
+  /** Project FK uuid that owns this pod. */
+  project: string;
+  /** Project's human-friendly identifier (slug), e.g. ``PDASHOSS01``. */
+  project_identifier: string;
+}
+
+/** Identity of the dev machine a runner is bound to, surfaced on the
+ * runner detail page. ``null`` on legacy ``pidash connect`` runners with
+ * no dev_machine FK. */
+export interface IDevMachineMini {
+  id: string;
+  host_label: string;
+  label: string;
 }
 
 export interface IPod {
@@ -59,11 +72,39 @@ export interface IDevMachine {
   visibility: number;
   runner_count: number;
   online_runner_count: number;
+  /** True when the machine's control session polled recently, i.e. the
+   * daemon can execute cloud-pushed commands (create runner) right now. */
+  control_online: boolean;
   last_seen_at: string | null;
   last_heartbeat_at: string | null;
   revoked_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** Body of ``POST /api/runners/dev-machines/<mid>/create-runner/``. */
+export interface ICreateRunnerOnMachineRequest {
+  project: string;
+  pod?: string;
+  name?: string;
+  working_dir?: string;
+  agent?: string;
+  model?: string;
+  reasoning_effort?: string;
+}
+
+/** Daemon-reported outcome of a cloud-driven runner creation. */
+export interface ICreateRunnerOnMachineStatus {
+  request_id: string;
+  status: "pending" | "ok" | "error";
+  runner_id?: string;
+  runner_name?: string;
+  error?: string;
+}
+
+export interface IRunnerDevMetadata {
+  /** Absolute path reported by the runner at session-open. */
+  working_dir?: string;
 }
 
 export interface IRunner {
@@ -73,12 +114,16 @@ export interface IRunner {
   os: string;
   arch: string;
   runner_version: string;
+  /** Extensible metadata reported by the runner's local development environment. */
+  dev_metadata: IRunnerDevMetadata;
   protocol_version: number;
   capabilities: string[];
   last_heartbeat_at: string | null;
   owner: string | null;
   pod: string;
   pod_detail: IPodMini | null;
+  /** Dev machine this runner runs on. ``null`` on legacy runners. */
+  dev_machine_detail: IDevMachineMini | null;
   /** Connection that owns this runner. Required post-refactor. */
   connection: string;
   /** Volatile per-active-run agent snapshot. Optional / null when the
@@ -101,6 +146,7 @@ export type TAgentRunStatus =
   | "assigned"
   | "waiting_for_worktree"
   | "running"
+  | "cancel_requested"
   | "awaiting_approval"
   | "awaiting_reauth"
   | "paused_awaiting_input"

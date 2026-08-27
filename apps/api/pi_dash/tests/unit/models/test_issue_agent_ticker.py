@@ -33,6 +33,8 @@ def project_with_overrides(db, workspace, create_user):
             agent_default_max_ticks=24,
             agent_review_default_interval_seconds=10800,
             agent_review_default_max_ticks=8,
+            agent_test_default_interval_seconds=7200,
+            agent_test_default_max_ticks=6,
         )
 
 
@@ -52,6 +54,11 @@ def states(project_with_overrides, create_user):
                 name="In Review",
                 project=project_with_overrides,
                 group="review",
+            ),
+            "in_test": State.objects.create(
+                name="In Test",
+                project=project_with_overrides,
+                group="test",
             ),
             "done": State.objects.create(
                 name="Done",
@@ -91,6 +98,21 @@ def in_review_issue(workspace, project_with_overrides, states, create_user):
     return i
 
 
+@pytest.fixture
+def in_test_issue(workspace, project_with_overrides, states, create_user):
+    with impersonate(create_user):
+        i = Issue.objects.create(
+            name="Task",
+            workspace=workspace,
+            project=project_with_overrides,
+            state=states["todo"],
+            created_by=create_user,
+        )
+    Issue.all_objects.filter(pk=i.pk).update(state=states["in_test"])
+    i.refresh_from_db()
+    return i
+
+
 @pytest.mark.unit
 def test_in_progress_uses_impl_project_defaults(in_progress_issue):
     sched = IssueAgentTicker.objects.create(issue=in_progress_issue)
@@ -102,8 +124,94 @@ def test_in_progress_uses_impl_project_defaults(in_progress_issue):
 def test_in_review_uses_review_project_defaults(in_review_issue):
     sched = IssueAgentTicker.objects.create(issue=in_review_issue)
     assert sched.effective_interval_seconds() == 10800
-    # Review-phase cap defaults to 8 (24h window) — distinct from impl's 24.
+    # This project fixture explicitly configures the review cap at 8, so the
+    # In Review phase resolves to 8 — distinct from impl's 24. (The *schema*
+    # default is 4; see test_review_max_ticks_schema_default_is_four.)
     assert sched.effective_max_ticks() == 8
+
+
+@pytest.mark.unit
+def test_in_test_uses_its_own_project_defaults(in_test_issue):
+    """In Test is a sibling of In Review, not a variant of it: it resolves
+    the ``agent_test_default_*`` pair, distinct from both review (10800/8)
+    and impl (10800/24) on this fixture."""
+    sched = IssueAgentTicker.objects.create(issue=in_test_issue)
+    assert sched.effective_interval_seconds() == 7200
+    assert sched.effective_max_ticks() == 6
+
+
+@pytest.mark.unit
+def test_in_test_uses_its_own_override_pair(in_test_issue):
+    """A per-issue override for In Test lands on the ``test_*`` fields."""
+    sched = IssueAgentTicker.objects.create(
+        issue=in_test_issue,
+        test_interval_seconds=600,
+        test_max_ticks=3,
+    )
+    assert sched.effective_interval_seconds() == 600
+    assert sched.effective_max_ticks() == 3
+
+
+@pytest.mark.unit
+def test_in_test_ignores_impl_and_review_overrides(in_test_issue):
+    """Neither the impl nor the review override pair leaks into In Test.
+
+    This is the leak the shared-pair design allowed: ``re_tick_ticker``
+    *writes* the cap override, so an In Test grant landing on
+    ``review_max_ticks`` would silently inflate the next In Review budget.
+    """
+    sched = IssueAgentTicker.objects.create(
+        issue=in_test_issue,
+        interval_seconds=900,  # impl override — must NOT apply
+        max_ticks=100,  # impl override — must NOT apply
+        review_interval_seconds=1200,  # review override — must NOT apply
+        review_max_ticks=99,  # review override — must NOT apply
+    )
+    assert sched.effective_interval_seconds() == 7200
+    assert sched.effective_max_ticks() == 6
+
+
+@pytest.mark.unit
+def test_in_review_ignores_test_override(in_review_issue):
+    """…and symmetrically: a test-phase override never reaches In Review."""
+    sched = IssueAgentTicker.objects.create(
+        issue=in_review_issue,
+        test_interval_seconds=60,
+        test_max_ticks=99,
+    )
+    assert sched.effective_interval_seconds() == 10800
+    assert sched.effective_max_ticks() == 8
+
+
+@pytest.mark.unit
+def test_test_cadence_schema_defaults(db, workspace, create_user):
+    """A project created without configuring the test cadence inherits the
+    schema defaults: 12 h between passes, 3 passes (a 36 h window)."""
+    with impersonate(create_user):
+        project = Project.objects.create(
+            name="TestDefaults",
+            identifier="TDFLT",
+            workspace=workspace,
+            created_by=create_user,
+        )
+    assert project.agent_test_default_interval_seconds == 43200
+    assert project.agent_test_default_max_ticks == 3
+
+
+@pytest.mark.unit
+def test_review_max_ticks_schema_default_is_four(db, workspace, create_user):
+    """A project created without configuring the review cap inherits the
+    schema default of 4 (PDASHOSS01-68 reduced it from 8 → 4)."""
+    with impersonate(create_user):
+        project = Project.objects.create(
+            name="Defaults",
+            identifier="DFLT",
+            workspace=workspace,
+            created_by=create_user,
+        )
+    assert project.agent_review_default_max_ticks == 4
+    # The In Progress default is unchanged.
+    assert project.agent_default_max_ticks == 24
 
 
 @pytest.mark.unit

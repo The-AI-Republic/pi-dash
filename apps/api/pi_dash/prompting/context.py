@@ -118,9 +118,10 @@ def _comment_author_label(comment) -> str:
 
 
 def _comments_section(issue: Issue) -> str:
-    """Render the issue's full comment thread as a numbered chronological log.
+    """Render the issue's unfolded comments as a numbered chronological log.
 
-    Includes both human-authored and agent-authored (bot) comments —
+    Includes both human-authored and agent-authored (bot) comments, except
+    comments explicitly labeled ``fold`` —
     a continuation run needs to see its own prior question alongside the
     human's reply so it can pick up the conversation. Each entry is
     formatted as ``### Comment N — <author> at <ISO timestamp>`` followed
@@ -128,7 +129,12 @@ def _comments_section(issue: Issue) -> str:
     """
     from pi_dash.db.models.issue import IssueComment
 
-    comments = IssueComment.objects.filter(issue=issue).select_related("actor").order_by("created_at")
+    comments = (
+        IssueComment.objects.filter(issue=issue)
+        .exclude(labels__contains=["fold"])
+        .select_related("actor")
+        .order_by("created_at")
+    )
     parts: list[str] = []
     index = 0
     for comment in comments:
@@ -266,6 +272,31 @@ def _repo_context(project, issue: Issue) -> Dict[str, Any]:
     return repo
 
 
+def _code_reviews_context(issue: Issue) -> list[Dict[str, Any]]:
+    """Return the git code reviews (PRs/MRs) attached to ``issue``.
+
+    Surfaces the ``GitCodeReviewLink`` rows created via ``pidash issue
+    attach-review`` or provider webhooks so the agent learns an issue already
+    has associated PRs before it opens a new one. Provider-neutral — the same
+    shape describes a GitHub pull request, a GitLab merge request, etc. The
+    reverse relation uses the model's default (soft-delete-filtering) manager,
+    so removed links never leak into the prompt. Ordered newest-first, matching
+    ``GitCodeReviewLink.Meta.ordering``.
+    """
+    return [
+        {
+            "url": cr.url,
+            "title": cr.title or "",
+            "state": cr.state,
+            "merged": bool(cr.merged),
+            "draft": bool(cr.draft),
+            "provider": cr.provider,
+            "external_iid": cr.external_iid,
+        }
+        for cr in issue.git_code_reviews.all()
+    ]
+
+
 def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
     """Build the dict passed into Jinja.
 
@@ -323,6 +354,10 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
             "description": project.description or "",
         },
         "repo": _repo_context(project, issue),
+        # Git PRs / code reviews already attached to this issue (empty list
+        # when none). Lets the template tell the agent about associated PRs so
+        # it can build on prior work and avoid opening a duplicate review.
+        "code_reviews": _code_reviews_context(issue),
         "parent": (
             {
                 "identifier": _issue_identifier(parent),

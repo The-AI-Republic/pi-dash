@@ -23,6 +23,7 @@ from __future__ import annotations
 #: ``SCHEDULER`` is the project-scoped kind unified onto the composer.
 KIND_CODING_TASK = "coding-task"
 KIND_REVIEW = "review"
+KIND_TEST = "test"
 KIND_SCHEDULER = "scheduler"
 KIND_DIRECT = "direct"
 
@@ -47,6 +48,14 @@ RECIPES: dict[str, tuple[str, ...]] = {
         "session-framing",
         "pidash-cli",
         "review-cycle",
+        "guardrails",
+        "ending-run",
+    ),
+    KIND_TEST: (
+        "test-intro",
+        "session-framing",
+        "pidash-cli",
+        "test-cycle",
         "guardrails",
         "ending-run",
     ),

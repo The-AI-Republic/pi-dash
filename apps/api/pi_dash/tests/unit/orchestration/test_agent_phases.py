@@ -64,6 +64,40 @@ def test_is_ticking_state_true_for_started_in_progress():
 
 
 @pytest.mark.unit
+def test_phases_contains_test_in_test():
+    cfg = agent_phases.PHASES[StateGroup.TEST.value]
+    assert cfg.state_name == "In Test"
+    assert cfg.template_name == "test"
+    # Entering In Test from a different ticking phase must start a fresh
+    # session so the `test` body lands as the actual system prompt.
+    assert cfg.fresh_session_on_entry is True
+    assert cfg.disarm_on_completed is True
+
+
+@pytest.mark.unit
+def test_is_ticking_state_true_for_test_in_test():
+    # In Test is a first-class ticking phase (PDASHOSS01-80) — moving an
+    # issue there wakes the agent, exactly like In Progress / In Review.
+    state = _StubState(StateGroup.TEST.value, "In Test")
+    assert agent_phases.is_ticking_state(state) is True
+
+
+@pytest.mark.unit
+def test_template_name_for_test_in_test_is_test():
+    name = agent_phases.template_name_for(
+        _StubState(StateGroup.TEST.value, "In Test")
+    )
+    assert name == "test"
+
+
+@pytest.mark.unit
+def test_is_ticking_state_false_for_test_with_custom_name():
+    # A custom workspace state name in the test group still does not tick.
+    state = _StubState(StateGroup.TEST.value, "QA")
+    assert agent_phases.is_ticking_state(state) is False
+
+
+@pytest.mark.unit
 def test_is_ticking_state_false_for_started_with_custom_name():
     # Workspaces with custom state names within a ticking group still
     # do not tick — the registry pins the literal state name per group.
@@ -127,3 +161,59 @@ def test_template_name_for_unregistered_state_falls_back_to_default():
         _StubState(StateGroup.COMPLETED.value, "Done")
     )
     assert name == PromptTemplate.DEFAULT_NAME
+
+
+@pytest.mark.unit
+def test_every_phase_owns_a_distinct_cadence_pair():
+    """Phases are siblings with independent budgets. Two phases sharing a
+    column pair is the leak this replaced: ``re_tick_ticker`` *writes* the
+    cap override, so a grant made in one phase would inflate the other's.
+    """
+    from pi_dash.orchestration.agent_phases import CADENCE_FIELDS, PHASES
+
+    keys = [cfg.cadence_key for cfg in PHASES.values()]
+    assert len(set(keys)) == len(keys)
+    for key in keys:
+        assert key in CADENCE_FIELDS
+    columns = [
+        (CADENCE_FIELDS[k].ticker_interval, CADENCE_FIELDS[k].ticker_max_ticks)
+        for k in keys
+    ]
+    assert len(set(columns)) == len(columns)
+
+
+@pytest.mark.unit
+def test_cadence_fields_for_unregistered_state_falls_back_to_impl():
+    from pi_dash.orchestration.agent_phases import (
+        CADENCE_FIELDS,
+        cadence_fields_for,
+    )
+
+    class _S:
+        group = "review"
+        name = "Peer Review"  # custom name — not the registered state
+
+    assert cadence_fields_for(_S()) is CADENCE_FIELDS["impl"]
+    assert cadence_fields_for(None) is CADENCE_FIELDS["impl"]
+
+
+@pytest.mark.unit
+def test_hand_off_phases_do_not_auto_pause_on_cap():
+    """In Review and In Test hand back to a human on cap exhaustion; only
+    the implementation phase auto-Pauses. Declared on ``PhaseConfig`` so a
+    phase added later must answer for itself instead of inheriting a
+    silently-wrong default."""
+    from pi_dash.orchestration.agent_phases import PHASES, auto_pauses_on_cap
+
+    assert PHASES["started"].auto_pause_on_cap is True
+    assert PHASES["review"].auto_pause_on_cap is False
+    assert PHASES["test"].auto_pause_on_cap is False
+
+    class _S:
+        def __init__(self, group, name):
+            self.group, self.name = group, name
+
+    assert auto_pauses_on_cap(_S("started", "In Progress")) is True
+    assert auto_pauses_on_cap(_S("test", "In Test")) is False
+    # A non-ticking state never reaches the cap path.
+    assert auto_pauses_on_cap(_S("completed", "Done")) is False

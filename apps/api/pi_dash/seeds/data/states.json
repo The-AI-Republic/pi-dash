@@ -45,6 +45,15 @@
     "project_id": 1
   },
   {
+    "id": 8,
+    "name": "In Test",
+    "color": "#14B8A6",
+    "sequence": 42500,
+    "group": "test",
+    "default": false,
+    "project_id": 1
+  },
+  {
     "id": 5,
     "name": "Done",
     "color": "#16A34A",

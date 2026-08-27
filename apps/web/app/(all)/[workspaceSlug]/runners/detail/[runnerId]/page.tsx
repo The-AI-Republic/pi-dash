@@ -46,7 +46,7 @@ const RunnerDetailPage = observer(function RunnerDetailPage() {
   });
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-6 p-6">
       <PageHead title={runner?.name ? t("Runner {name}", { name: runner.name }) : t("Runner detail")} />
 
       <div className="flex items-center justify-between gap-3">
@@ -86,8 +86,21 @@ const RunnerDetailPage = observer(function RunnerDetailPage() {
                 <span className="font-mono text-11">{runner.id}</span>
               </MetaRow>
               <MetaRow label={t("Pod")}>{runner.pod_detail ? runner.pod_detail.name : "—"}</MetaRow>
+              <MetaRow label={t("Project")}>{runner.pod_detail?.project_identifier || "—"}</MetaRow>
+              <MetaRow label={t("Dev machine")}>
+                {runner.dev_machine_detail
+                  ? runner.dev_machine_detail.label || runner.dev_machine_detail.host_label || "—"
+                  : "—"}
+              </MetaRow>
               <MetaRow label={t("OS / Arch")}>{runner.os ? `${runner.os} / ${runner.arch}` : "—"}</MetaRow>
               <MetaRow label={t("Version")}>{runner.runner_version || "—"}</MetaRow>
+              <MetaRow label={t("Working directory")}>
+                {runner.dev_metadata?.working_dir ? (
+                  <span className="font-mono text-11 break-all">{runner.dev_metadata.working_dir}</span>
+                ) : (
+                  "—"
+                )}
+              </MetaRow>
               <MetaRow label={t("Protocol version")}>{runner.protocol_version}</MetaRow>
               <MetaRow label={t("Capabilities")}>
                 {runner.capabilities.length > 0 ? (

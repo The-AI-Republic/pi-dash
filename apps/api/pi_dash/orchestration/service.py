@@ -48,6 +48,12 @@ logger = logging.getLogger(__name__)
 #: unlikely, but a mid-deploy skew must not strand dispatch).
 _PROMPT_BUILD_ERRORS = (PromptRenderError, RecipeNotFound, PromptRegistryError)
 
+# Stored on the source run while a cross-project move waits for the source
+# runner to acknowledge cancellation. Keeping the handoff intent on the
+# locked run makes the terminal callback idempotent without introducing a
+# second coordination table.
+PROJECT_MOVE_HANDOFF_CONFIG_KEY = "_project_move_handoff"
+
 #: DEPRECATED: retained only for backward compatibility with external
 #: importers (tests, integrations). Internal callers must use
 #: ``orchestration.agent_phases.is_ticking_state`` /
@@ -85,6 +91,7 @@ def _active_run_for(issue: Issue) -> Optional[AgentRun]:
                 # would create a second concurrent run for the same issue.
                 AgentRunStatus.WAITING_FOR_WORKTREE,
                 AgentRunStatus.RUNNING,
+                AgentRunStatus.CANCEL_REQUESTED,
                 AgentRunStatus.AWAITING_APPROVAL,
                 AgentRunStatus.AWAITING_REAUTH,
             ]
@@ -398,7 +405,7 @@ def _create_continuation_run(*, issue: Issue, parent: AgentRun, creator, pod, tr
     """
     from pi_dash.cloud_agent.creation import dispatch_after_commit, execution_fields, lock_cloud_creation_capacity
 
-    pinned_runner = _pinned_runner_for(parent)
+    pinned_runner = _pinned_runner_for(parent, pod)
     try:
         execution = execution_fields(
             project=issue.project,
@@ -471,7 +478,7 @@ def _create_continuation_run(*, issue: Issue, parent: AgentRun, creator, pod, tr
     return ContinuationOutcome(created_run=run, reason="created")
 
 
-def _pinned_runner_for(parent: AgentRun) -> Optional[Runner]:
+def _pinned_runner_for(parent: AgentRun, target_pod: Optional[Pod] = None) -> Optional[Runner]:
     """Return the runner to pin a follow-up to, or None.
 
     Prefer the parent's runner when it's still eligible. The motivation is
@@ -488,7 +495,161 @@ def _pinned_runner_for(parent: AgentRun) -> Optional[Runner]:
         return None
     if runner.status == RunnerStatus.REVOKED:
         return None
+    if target_pod is not None and runner.pod_id != target_pod.id:
+        return None
     return runner
+
+
+def _run_config_for_issue(issue: Issue, *, base: Optional[dict] = None) -> dict:
+    """Return a run snapshot refreshed for ``issue``'s current project.
+
+    Model/approval overrides survive a project handoff, while every
+    project-derived repository field is replaced and the private handoff
+    marker is stripped before the payload reaches a runner.
+    """
+    config = dict(base or {})
+    config.pop(PROJECT_MOVE_HANDOFF_CONFIG_KEY, None)
+    config.update(
+        {
+            "repo_url": (issue.project.repo_url or None),
+            "repo_ref": (issue.project.base_branch or None),
+            "git_work_branch": (issue.git_work_branch or None),
+        }
+    )
+    return config
+
+
+def _create_project_move_handoff_run(*, issue: Issue, parent: AgentRun, pod: Pod) -> AgentRun:
+    """Create a fresh target-project run after the source run has stopped.
+
+    The source run remains the lineage parent for audit/history only. Runner
+    affinity is deliberately cleared because a source-pod runner can never
+    consume a target-pod run.
+    """
+    from pi_dash.runner.services import matcher
+
+    with transaction.atomic():
+        existing = _active_run_for(issue)
+        if existing is not None:
+            return existing
+        run = AgentRun.objects.create(
+            workspace=issue.workspace,
+            created_by=parent.created_by,
+            pod=pod,
+            work_item=issue,
+            parent_run=parent,
+            pinned_runner=None,
+            status=AgentRunStatus.QUEUED,
+            trigger=parent.trigger,
+            prompt="",
+            run_config=_run_config_for_issue(issue, base=parent.run_config),
+        )
+        try:
+            run.prompt = build_first_turn(issue, run)
+        except _PROMPT_BUILD_ERRORS as exc:
+            run.status = AgentRunStatus.FAILED
+            run.error = f"prompt build failed: {exc}"
+            run.ended_at = timezone.now()
+            run.save(update_fields=["status", "error", "ended_at"])
+            logger.exception(
+                "orchestration.project_move_handoff: prompt render failed for issue %s",
+                issue.id,
+            )
+            return run
+        run.save(update_fields=["prompt", "prompt_manifest"])
+        transaction.on_commit(lambda pid=pod.id: matcher.drain_pod_by_id(pid))
+    return run
+
+
+def complete_project_move_handoff(run_id) -> Optional[AgentRun]:
+    """Create the target-project replacement for a stopped source run.
+
+    Called after a runner terminal acknowledgement (or after the heartbeat
+    reconciler proves the runner no longer owns the run). The source row and
+    issue row are locked so duplicate lifecycle deliveries cannot create two
+    replacements.
+    """
+    with transaction.atomic():
+        # Issue moves lock issue → run. Use the same order here so a second
+        # project move racing the cancellation acknowledgement cannot
+        # deadlock this callback.
+        work_item_id = (
+            AgentRun.objects.filter(pk=run_id)
+            .values_list("work_item_id", flat=True)
+            .first()
+        )
+        if work_item_id is None:
+            return None
+
+        issue = (
+            Issue.all_objects.select_for_update(of=("self",))
+            .select_related("project", "workspace", "state", "assigned_pod")
+            .filter(pk=work_item_id)
+            .first()
+        )
+        if issue is None:
+            return None
+
+        source = (
+            AgentRun.objects.select_for_update(of=("self",))
+            .select_related("created_by")
+            .filter(pk=run_id)
+            .first()
+        )
+        if source is None or not source.is_terminal:
+            return None
+
+        config = dict(source.run_config or {})
+        marker = dict(config.get(PROJECT_MOVE_HANDOFF_CONFIG_KEY) or {})
+        if not marker:
+            return None
+
+        replacement_id = marker.get("replacement_run_id")
+        if replacement_id:
+            return AgentRun.objects.filter(pk=replacement_id).first()
+
+        target_project_id = marker.get("target_project_id")
+        if target_project_id and str(issue.project_id) != str(target_project_id):
+            marker["suppressed"] = "issue_moved_again"
+            config[PROJECT_MOVE_HANDOFF_CONFIG_KEY] = marker
+            source.run_config = config
+            source.save(update_fields=["run_config"])
+            return None
+
+        active = _active_run_for(issue)
+        if active is not None:
+            # A concurrent explicit Run AI may have won the narrow window
+            # between terminal commit and this callback. Treat that row as the
+            # replacement rather than violating the one-active-run invariant.
+            marker["replacement_run_id"] = str(active.id)
+            config[PROJECT_MOVE_HANDOFF_CONFIG_KEY] = marker
+            source.run_config = config
+            source.save(update_fields=["run_config"])
+            return active
+
+        target_pod_id = marker.get("target_pod_id")
+        pod = None
+        if target_pod_id:
+            pod = Pod.objects.filter(pk=target_pod_id, project_id=issue.project_id).first()
+        if pod is None:
+            pod = Pod.default_for_project_id(issue.project_id)
+        if pod is None:
+            logger.error(
+                "orchestration.project_move_handoff: no target pod for issue %s",
+                issue.id,
+            )
+            return None
+
+        replacement = _create_project_move_handoff_run(
+            issue=issue,
+            parent=source,
+            pod=pod,
+        )
+        marker["replacement_run_id"] = str(replacement.id)
+        config[PROJECT_MOVE_HANDOFF_CONFIG_KEY] = marker
+        source.run_config = config
+        source.save(update_fields=["run_config"])
+        return replacement
 
 
 def _create_and_dispatch_run(
@@ -538,7 +699,7 @@ def _create_and_dispatch_run(
         # session continuity.
         pinned_runner = None
         if not fresh_session and effective_parent is not None:
-            pinned_runner = _pinned_runner_for(effective_parent)
+            pinned_runner = _pinned_runner_for(effective_parent, pod)
         pinned_runner = execution.pop("pinned_runner", pinned_runner)
         run = AgentRun.objects.create(
             workspace=issue.workspace,
@@ -550,11 +711,7 @@ def _create_and_dispatch_run(
             status=AgentRunStatus.QUEUED,
             trigger=trigger,
             prompt="",  # populated below before dispatch
-            run_config={
-                "repo_url": (issue.project.repo_url or None),
-                "repo_ref": (issue.project.base_branch or None),
-                "git_work_branch": (issue.git_work_branch or None),
-            },
+            run_config=_run_config_for_issue(issue),
             **execution,
             # owner stays NULL until assignment captures runner.owner.
         )

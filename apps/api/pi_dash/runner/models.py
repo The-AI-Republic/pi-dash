@@ -194,6 +194,12 @@ class AgentRunStatus(models.TextChoices):
     # ``.ai_design/worktree_pooling/design.md`` §6.1.
     WAITING_FOR_WORKTREE = "waiting_for_worktree", "Waiting for Worktree"
     RUNNING = "running", "Running"
+    # The cloud has asked the runner to stop, but the runner has not yet
+    # confirmed that the agent process has exited. This remains active/busy so
+    # the matcher cannot reuse the runner and orchestration cannot create a
+    # replacement concurrently. Project-move handoffs use the cancellation
+    # acknowledgement as the barrier before dispatching in the target pod.
+    CANCEL_REQUESTED = "cancel_requested", "Cancellation Requested"
     AWAITING_APPROVAL = "awaiting_approval", "Awaiting Approval"
     AWAITING_REAUTH = "awaiting_reauth", "Awaiting Reauth"
     PAUSED_AWAITING_INPUT = "paused_awaiting_input", "Paused — Awaiting Input"
@@ -409,6 +415,9 @@ class Runner(models.Model):
     os = models.CharField(max_length=32, blank=True, default="")
     arch = models.CharField(max_length=32, blank=True, default="")
     runner_version = models.CharField(max_length=32, blank=True, default="")
+    # Extensible metadata reported by the local development environment during
+    # session-open. Known keys are validated before being persisted.
+    dev_metadata = models.JSONField(default=dict, blank=True)
     protocol_version = models.PositiveIntegerField(default=1)
     last_heartbeat_at = models.DateTimeField(null=True, blank=True)
     # Free worktree count in this runner's work-dir pool, reported in the
@@ -540,6 +549,7 @@ class Runner(models.Model):
             return
 
         affected_pod_ids: set = set()
+        affected_run_ids: list = []
         with transaction.atomic():
             now = timezone.now()
             Runner.objects.filter(pk=self.pk).update(
@@ -584,6 +594,7 @@ class Runner(models.Model):
                         },
                         expected_runner_id=self.pk,
                     )
+                affected_run_ids = [pk for pk, _ in active_runs]
                 affected_pod_ids = {pid for _, pid in active_runs if pid is not None}
 
             pinned_pod_ids = list(
@@ -595,6 +606,28 @@ class Runner(models.Model):
                 AgentRun.objects.filter(pinned_runner=self, status=AgentRunStatus.QUEUED).update(pinned_runner=None)
                 affected_pod_ids.update(pid for pid in pinned_pod_ids if pid is not None)
 
+        def _complete_project_move_handoffs(run_ids=tuple(affected_run_ids)):
+            from pi_dash.orchestration.service import (
+                complete_project_move_handoff,
+            )
+
+            for run_id in run_ids:
+                try:
+                    complete_project_move_handoff(run_id)
+                except Exception:
+                    # Revocation is already committed. A handoff recovery
+                    # failure must not prevent source-pod draining or delayed
+                    # stream cleanup; leave the durable marker in place and
+                    # log enough context for reconciliation.
+                    _logger.exception(
+                        "failed to complete project-move handoff after "
+                        "revoking runner %s (run %s)",
+                        self.pk,
+                        run_id,
+                    )
+
+        if affected_run_ids:
+            transaction.on_commit(_complete_project_move_handoffs)
         for pod_id in affected_pod_ids:
             transaction.on_commit(lambda pid=pod_id: drain_pod_by_id(pid))
 
@@ -639,6 +672,48 @@ class RunnerSession(models.Model):
         ]
         indexes = [
             models.Index(fields=["runner", "revoked_at"]),
+            models.Index(fields=["last_seen_at"]),
+        ]
+
+
+class MachineSession(models.Model):
+    """Machine-level (per dev-machine) cloud control session.
+
+    The twin of :class:`RunnerSession`, but scoped to a whole
+    ``DevMachine`` rather than a single runner. The daemon opens exactly
+    one of these on startup — authenticated by the shared ``mt_``
+    MachineToken — and long-polls it for machine-scoped control
+    messages (e.g. ``create_runner``, ``config_push``). Because it is
+    keyed on the machine and not on any runner, it exists even when the
+    machine hosts zero runners, which is exactly the "add your first
+    runner" case cloud-driven runner creation needs a channel for.
+
+    Exactly one active session per machine is enforced via a partial
+    unique constraint, mirroring the per-runner session.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    dev_machine = models.ForeignKey(
+        "DevMachine", on_delete=models.CASCADE, related_name="sessions"
+    )
+    protocol_version = models.PositiveIntegerField(default=4)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_reason = models.CharField(max_length=32, blank=True, default="")
+
+    class Meta:
+        db_table = "machine_session"
+        ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["dev_machine"],
+                condition=models.Q(revoked_at__isnull=True),
+                name="machine_session_one_active_per_machine",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["dev_machine", "revoked_at"]),
             models.Index(fields=["last_seen_at"]),
         ]
 
@@ -1002,6 +1077,7 @@ class AgentRun(models.Model):
             # worktree — still occupies the issue's active slot like ASSIGNED.
             AgentRunStatus.WAITING_FOR_WORKTREE,
             AgentRunStatus.RUNNING,
+            AgentRunStatus.CANCEL_REQUESTED,
             AgentRunStatus.AWAITING_APPROVAL,
             AgentRunStatus.AWAITING_REAUTH,
         }

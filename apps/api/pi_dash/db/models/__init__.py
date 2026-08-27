@@ -82,6 +82,7 @@ from .workspace import (
     WorkspaceBaseModel,
     WorkspaceMember,
     WorkspaceMemberInvite,
+    WorkspaceJoinRequest,
     WorkspaceTheme,
     WorkspaceUserProperties,
     WorkspaceUserLink,

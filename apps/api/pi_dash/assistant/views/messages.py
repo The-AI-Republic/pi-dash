@@ -19,7 +19,7 @@ from pi_dash.assistant.models import (
     TurnStatus,
 )
 from pi_dash.assistant.runtime import events
-from pi_dash.assistant.runtime.llm import get_config
+from pi_dash.ee.assistant.model_provider import has_usable_llm_config
 from pi_dash.assistant.serializers import AssistantThreadSerializer
 from pi_dash.assistant.tasks import cancel_key, run_assistant_turn
 from pi_dash.assistant.views._base import AssistantBaseView
@@ -74,8 +74,7 @@ class AssistantMessageListCreateEndpoint(AssistantBaseView):
         if len(content) > MAX_MESSAGE_CHARS:
             return Response({"error": "message_too_long"}, status=status.HTTP_400_BAD_REQUEST)
 
-        cfg = get_config(request.user)
-        if cfg is None or not cfg.has_api_key:
+        if not has_usable_llm_config(request.user):
             return Response(
                 {"error": "llm_config_missing", "detail": "Configure your AI provider in Settings."},
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,

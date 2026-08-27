@@ -6,16 +6,18 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { LucideIcon } from "lucide-react";
-import { CircleAlert, CircleCheck, CirclePause, Clock3, LoaderCircle, RotateCw } from "lucide-react";
+import { CircleAlert, CircleCheck, CirclePause, CircleX, Clock3, LoaderCircle, RotateCw } from "lucide-react";
 import { useTranslation } from "@pi-dash/i18n";
 // pi dash imports
 import { Badge } from "@pi-dash/propel/badge";
 import type { TBadgeVariant } from "@pi-dash/propel/badge";
 import { Button } from "@pi-dash/propel/button";
 import type { TAgentRunStatus, TIssue, TIssueAgentRunSummary, TIssueAgentTicker } from "@pi-dash/types";
+import { AlertModalCore } from "@pi-dash/ui";
 import { cn } from "@pi-dash/utils";
 // local imports
 import type { TIssueOperations } from "./root";
+import { useAbortRun } from "./use-abort-run";
 import { useReTick } from "./use-re-tick";
 
 type TranslationFn = ReturnType<typeof useTranslation>["t"];
@@ -42,6 +44,7 @@ const ACTIVE_RUN_STATUSES = new Set<TAgentRunStatus>([
   "assigned",
   "waiting_for_worktree",
   "running",
+  "cancel_requested",
   "awaiting_approval",
   "awaiting_reauth",
   "paused_awaiting_input",
@@ -205,6 +208,15 @@ function getRunView(
         icon: LoaderCircle,
         iconClassName: "animate-spin text-accent-primary",
       };
+    case "cancel_requested":
+      return {
+        title: t("Stopping the AI agent"),
+        detail: runnerDetail ?? t("Waiting for the runner to confirm cancellation."),
+        badge: t("Stopping"),
+        badgeVariant: "warning",
+        icon: LoaderCircle,
+        iconClassName: "animate-spin text-warning-primary",
+      };
     case "awaiting_approval":
       return {
         title: t("AI agent is waiting for approval"),
@@ -350,9 +362,12 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
   const activeRun = status?.active_run;
   const activeRunStatus = activeRun?.status;
   const hasActiveAgentRun = Boolean(activeRunStatus && ACTIVE_RUN_STATUSES.has(activeRunStatus));
+  const canAbortActiveRun = hasActiveAgentRun && activeRunStatus !== "cancel_requested";
   const view = useMemo(() => getAgentStatusView(issue, now, t), [issue, now, t]);
   const canReTick = Boolean(ticker?.can_re_tick);
   const { reTick, isSubmitting: isReTicking } = useReTick();
+  const { abortRun, isSubmitting: isAborting } = useAbortRun();
+  const [showAbortConfirm, setShowAbortConfirm] = useState(false);
 
   const handleReTick = useCallback(async () => {
     const result = await reTick(issueId);
@@ -360,6 +375,16 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
     // when the grant was a no-op (state may have drifted since load).
     if (result) void issueOperations.fetch(workspaceSlug, projectId, issueId);
   }, [reTick, issueId, issueOperations, workspaceSlug, projectId]);
+
+  const handleAbort = useCallback(async () => {
+    if (!activeRun?.id) return;
+    const aborted = await abortRun(activeRun.id);
+    if (aborted) {
+      setShowAbortConfirm(false);
+      // Refresh so the card reflects the cancellation-in-progress state.
+      void issueOperations.fetch(workspaceSlug, projectId, issueId);
+    }
+  }, [abortRun, activeRun?.id, issueOperations, workspaceSlug, projectId, issueId]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 60_000);
@@ -457,6 +482,35 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
           </p>
         </div>
       )}
+
+      {canAbortActiveRun && activeRun?.id && (
+        <div className="mt-3 flex flex-col gap-1.5">
+          <Button
+            variant="error-outline"
+            size="base"
+            onClick={() => setShowAbortConfirm(true)}
+            disabled={isAborting}
+            loading={isAborting}
+            className="w-full"
+          >
+            <CircleX className="size-3.5 flex-shrink-0" />
+            <span className="text-body-xs-medium">{t("Abort run")}</span>
+          </Button>
+          <p className="text-caption-sm-regular text-tertiary">
+            {t("Signal the runner to stop the current AI agent run.")}
+          </p>
+        </div>
+      )}
+
+      <AlertModalCore
+        isOpen={showAbortConfirm}
+        handleClose={() => (isAborting ? null : setShowAbortConfirm(false))}
+        handleSubmit={handleAbort}
+        isSubmitting={isAborting}
+        title={t("Abort run?")}
+        content={t("The runner will stop this run as soon as it gets the signal.")}
+        primaryButtonText={{ default: t("Abort run"), loading: t("Aborting") }}
+      />
     </section>
   );
 }

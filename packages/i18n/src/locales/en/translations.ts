@@ -422,6 +422,7 @@ export default {
   "Create your first label": "Create your first label",
   "Create your first Page": "Create your first Page",
   "Create your first work item": "Create your first work item",
+  "Create your own workspace instead": "Create your own workspace instead",
   "Create your workspace": "Create your workspace",
   Created: "Created",
   "Created at": "Created at",
@@ -688,6 +689,27 @@ export default {
     "Generate a `pidash runner add` command for the machine that will host this runner.",
   "Generate a token to sign-in to the webhook payload": "Generate a token to sign-in to the webhook payload",
   "Generate command": "Generate command",
+  "Generate Runner": "Generate Runner",
+  "Create a runner on a connected dev machine, or generate a `pidash runner add` command to run manually.":
+    "Create a runner on a connected dev machine, or generate a `pidash runner add` command to run manually.",
+  "Dev machine": "Dev machine",
+  "Run `pidash runner add` manually": "Run `pidash runner add` manually",
+  "Connected dev machines can create the runner directly — no copy-paste needed.":
+    "Connected dev machines can create the runner directly — no copy-paste needed.",
+  "No connected dev machines. Install and start the pidash daemon on your machine, or generate the command to run manually.":
+    "No connected dev machines. Install and start the pidash daemon on your machine, or generate the command to run manually.",
+  "Runner created": "Runner created",
+  "Creating runner on": "Creating runner on",
+  "Waiting for the dev machine to report back. This usually takes a few seconds.":
+    "Waiting for the dev machine to report back. This usually takes a few seconds.",
+  "is now running on": "is now running on",
+  "Runner creation failed": "Runner creation failed",
+  "The dev machine did not report back in time. The runner may still appear shortly — check the runners list, or run the command manually.":
+    "The dev machine did not report back in time. The runner may still appear shortly — check the runners list, or run the command manually.",
+  "Show manual command": "Show manual command",
+  "The dev machine went offline before the command could be delivered.":
+    "The dev machine went offline before the command could be delivered.",
+  "Could not reach the cloud to start the runner creation.": "Could not reach the cloud to start the runner creation.",
   "Generate secure API tokens to connect your workspace with external systems and applications.":
     "Generate secure API tokens to connect your workspace with external systems and applications.",
   "Generate secure API tokens to integrate your data with external systems and applications.":
@@ -802,6 +824,9 @@ export default {
   Jira: "Jira",
   Join: "Join",
   "Join a workspace": "Join a workspace",
+  "Join an existing workspace": "Join an existing workspace",
+  "Join an existing workspace by admin email": "Join an existing workspace by admin email",
+  "Join existing workspace": "Join existing workspace",
   "Join our Forum": "Join our Forum",
   "Join project": "Join project",
   "Join the project to rearrange": "Join the project to rearrange",
@@ -1155,6 +1180,7 @@ export default {
   "Plan work in focused timeframes.": "Plan work in focused timeframes.",
   Planned: "Planned",
   "Please create a new state": "Please create a new state",
+  "Please enter a valid email address.": "Please enter a valid email address.",
   "Please select a timezone": "Please select a timezone",
   "Please select at least one invitation.": "Please select at least one invitation.",
   "Please select at least one work item": "Please select at least one work item",
@@ -1266,6 +1292,7 @@ export default {
   "Report a bug": "Report a bug",
   "Repository URL is too long": "Repository URL is too long",
   "Request instance admin": "Request instance admin",
+  "Request sent": "Request sent",
   "Requesting a new workspace": "Requesting a new workspace",
   "Requesting new code": "Requesting new code",
   Required: "Required",
@@ -1355,6 +1382,7 @@ export default {
   "Select projects": "Select projects",
   "Select your theme": "Select your theme",
   "Send invitations": "Send invitations",
+  "Send join request": "Send join request",
   "Send me everything": "Send me everything",
   "Send reset link": "Send reset link",
   Sending: "Sending",
@@ -1670,11 +1698,13 @@ export default {
     "We are unable to process your request, please try again.",
   "We copied the current Pi Dash default. Edit and save to customize it.":
     "We copied the current Pi Dash default. Edit and save to customize it.",
+  "We couldn't send your request. Please try again.": "We couldn't send your request. Please try again.",
   "We need an email address to invite them.": "We need an email address to invite them.",
   "We see that someone has invited you to join a workspace": "We see that someone has invited you to join a workspace",
   "We see that your god hasn't enabled SMTP, we will not be able to send a password reset link":
     "We see that your god hasn't enabled SMTP, we will not be able to send a password reset link",
   "We sent the reset link to your email address": "We sent the reset link to your email address",
+  "We've notified": "We've notified",
   "We were unable to create the new estimate, please try again.":
     "We were unable to create the new estimate, please try again.",
   "We were unable to modify the estimate, please try again": "We were unable to modify the estimate, please try again",
@@ -1753,6 +1783,7 @@ export default {
   "Working directory (optional)": "Working directory (optional)",
   Workload: "Workload",
   Workspace: "Workspace",
+  "Workspace admin email": "Workspace admin email",
   "Workspace could not be created. Please try again.": "Workspace could not be created. Please try again.",
   "Workspace created successfully": "Workspace created successfully",
   "Workspace deleted.": "Workspace deleted.",
@@ -1788,6 +1819,9 @@ export default {
   "You will be able to download the exported {entity} from the previous export.":
     "You will be able to download the exported {entity} from the previous export.",
   "You will soon go to your profile page.": "You will soon go to your profile page.",
+  "You'll join automatically once they approve.": "You'll join automatically once they approve.",
+  "You'll join automatically once your request is approved.":
+    "You'll join automatically once your request is approved.",
   "Your archives can be found in project archives.": "Your archives can be found in project archives.",
   "Your profile": "Your profile",
   "Your quickstart guide": "Your quickstart guide",

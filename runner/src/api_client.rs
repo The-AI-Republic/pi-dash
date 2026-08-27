@@ -330,6 +330,7 @@ mod resolve_tests {
                 claude_code: ClaudeCodeSection::default(),
                 cursor_agent: CursorAgentSection::default(),
                 openclaw: Default::default(),
+                grok: Default::default(),
                 approval_policy: ApprovalPolicySection::default(),
             }],
             workdirs: vec![],

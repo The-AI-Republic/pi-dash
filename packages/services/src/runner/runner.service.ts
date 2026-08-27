@@ -12,6 +12,8 @@ import type {
   IAgentChatMessage,
   IAgentChatSession,
   IApprovalRequest,
+  ICreateRunnerOnMachineRequest,
+  ICreateRunnerOnMachineStatus,
   IDevMachine,
   IRunner,
   TApprovalDecision,
@@ -54,6 +56,43 @@ export class RunnerService extends APIService {
 
   async rotateDevMachine(machineId: string, workspaceId: string): Promise<IDevMachine> {
     return this.post(`/api/runners/dev-machines/${machineId}/rotate/`, { workspace: workspaceId })
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  /**
+   * Cloud-driven runner creation: push a ``create_runner`` command down
+   * the machine control session of a connected dev machine. Returns the
+   * ``request_id`` to poll via ``getCreateRunnerOnMachineStatus``.
+   * Rejects with ``{ error: "machine_offline" }`` when the machine has
+   * no active control session.
+   */
+  async createRunnerOnMachine(
+    machineId: string,
+    workspaceId: string,
+    input: ICreateRunnerOnMachineRequest
+  ): Promise<{ request_id: string }> {
+    return this.post(`/api/runners/dev-machines/${machineId}/create-runner/`, {
+      workspace: workspaceId,
+      ...input,
+    })
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  /** Poll the daemon-reported outcome of ``createRunnerOnMachine``. */
+  async getCreateRunnerOnMachineStatus(
+    machineId: string,
+    requestId: string,
+    workspaceId: string
+  ): Promise<ICreateRunnerOnMachineStatus> {
+    return this.get(`/api/runners/dev-machines/${machineId}/create-runner/${requestId}/`, {
+      params: { workspace: workspaceId },
+    })
       .then((r) => r?.data)
       .catch((e) => {
         throw e?.response?.data;

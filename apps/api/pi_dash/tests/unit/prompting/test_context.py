@@ -9,6 +9,7 @@ from pi_dash.db.models import (
     GitRepository,
     GitRepositoryBinding,
     Issue,
+    IssueComment,
     Project,
     State,
 )
@@ -76,7 +77,32 @@ def test_context_shape(issue, run):
 
 
 @pytest.mark.unit
-def test_context_attempt_increments_on_follow_up(issue, run, workspace, create_user):
+def test_context_excludes_folded_comments(issue, run, workspace, project, create_user):
+    IssueComment.objects.create(
+        issue=issue,
+        workspace=workspace,
+        project=project,
+        actor=create_user,
+        comment_html="<p>Substantive update</p>",
+    )
+    IssueComment.objects.create(
+        issue=issue,
+        workspace=workspace,
+        project=project,
+        actor=create_user,
+        comment_html="<p>No change from the last tick</p>",
+        labels=["fold"],
+    )
+
+    comments_section = build_context(issue, run)["comments_section"]
+    assert "Substantive update" in comments_section
+    assert "No change from the last tick" not in comments_section
+
+
+@pytest.mark.unit
+def test_context_attempt_increments_on_follow_up(
+    issue, run, workspace, create_user
+):
     AgentRun.objects.create(
         owner=create_user,
         workspace=workspace,
@@ -86,6 +112,62 @@ def test_context_attempt_increments_on_follow_up(issue, run, workspace, create_u
     )
     ctx = build_context(issue, run)
     assert ctx["run"]["attempt"] == 2
+
+
+@pytest.mark.unit
+def test_context_code_reviews_empty_when_none_attached(issue, run):
+    ctx = build_context(issue, run)
+    assert ctx["code_reviews"] == []
+
+
+@pytest.mark.unit
+def test_context_includes_attached_code_reviews(issue, run):
+    from pi_dash.db.models import GitCodeReviewLink
+
+    GitCodeReviewLink.objects.create(
+        issue=issue,
+        project=issue.project,
+        workspace=issue.workspace,
+        provider="github",
+        host_url="https://github.com",
+        namespace="acme",
+        repo_name="web",
+        external_iid="42",
+        url="https://github.com/acme/web/pull/42",
+        title="Add feature",
+        state="open",
+        draft=True,
+    )
+    ctx = build_context(issue, run)
+    assert len(ctx["code_reviews"]) == 1
+    cr = ctx["code_reviews"][0]
+    assert cr["url"] == "https://github.com/acme/web/pull/42"
+    assert cr["title"] == "Add feature"
+    assert cr["state"] == "open"
+    assert cr["merged"] is False
+    assert cr["draft"] is True
+    assert cr["provider"] == "github"
+    assert cr["external_iid"] == "42"
+
+
+@pytest.mark.unit
+def test_context_code_reviews_excludes_soft_deleted(issue, run):
+    from pi_dash.db.models import GitCodeReviewLink
+
+    link = GitCodeReviewLink.objects.create(
+        issue=issue,
+        project=issue.project,
+        workspace=issue.workspace,
+        provider="github",
+        host_url="https://github.com",
+        namespace="acme",
+        repo_name="web",
+        external_iid="43",
+        url="https://github.com/acme/web/pull/43",
+    )
+    link.delete()  # soft delete
+    ctx = build_context(issue, run)
+    assert ctx["code_reviews"] == []
 
 
 @pytest.mark.unit

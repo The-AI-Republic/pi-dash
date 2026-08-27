@@ -47,6 +47,12 @@ BIGINT_MAX = 2**63 - 1
 _VALID_REFUSAL_CATEGORIES = frozenset(c.value for c in RefusalCategory)
 
 
+def _has_project_move_handoff(run: AgentRun) -> bool:
+    from pi_dash.orchestration.service import PROJECT_MOVE_HANDOFF_CONFIG_KEY
+
+    return bool((run.run_config or {}).get(PROJECT_MOVE_HANDOFF_CONFIG_KEY))
+
+
 def _normalize_model(raw: Any) -> str:
     return str(raw or "").strip()[:128]
 
@@ -166,6 +172,7 @@ def apply_run_paused(
     updated = (
         AgentRun.objects.filter(id=run_id, runner=runner)
         .exclude(status__in=TERMINAL_RUN_STATUSES)
+        .exclude(status=AgentRunStatus.CANCEL_REQUESTED)
         .update(
             status=AgentRunStatus.PAUSED_AWAITING_INPUT,
             done_payload=payload,

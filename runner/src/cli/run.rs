@@ -35,7 +35,13 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         .validate()
         .context("config.toml failed validation; refusing to start the daemon")?;
 
-    if config.runners.is_empty() {
+    // Zero runners is only a hard error when the daemon would have
+    // nothing at all to do. With a shared machine token AND a
+    // dev_machine_id, the daemon opens the machine control session and
+    // the cloud can create the first runner remotely (web "Add runner"
+    // → connected dev machine) — that path requires an idle daemon to
+    // be running.
+    if config.runners.is_empty() && !supports_machine_control(&config) {
         anyhow::bail!(
             "no runners configured in config.toml — \
              register one with `pidash runner add --project <SLUG>`."
@@ -102,6 +108,12 @@ fn has_shared_machine_token(config: &crate::config::schema::Config) -> bool {
         .unwrap_or(false)
 }
 
+/// True when the daemon can open the machine control session (and thus
+/// has work to do even with zero configured runners).
+fn supports_machine_control(config: &crate::config::schema::Config) -> bool {
+    has_shared_machine_token(config) && config.daemon.dev_machine_id.is_some()
+}
+
 fn requires_runner_credentials(args: &Args, config: &crate::config::schema::Config) -> bool {
     !args.offline && !has_shared_machine_token(config)
 }
@@ -148,5 +160,15 @@ mod tests {
             &args,
             &config_with_cli_token(None)
         ));
+    }
+
+    #[test]
+    fn zero_runners_allowed_when_machine_control_available() {
+        let mut cfg = config_with_cli_token(Some("mt_shared"));
+        assert!(!supports_machine_control(&cfg)); // no dev_machine_id yet
+        cfg.daemon.dev_machine_id = Some(uuid::Uuid::nil());
+        assert!(supports_machine_control(&cfg));
+        let legacy = config_with_cli_token(None);
+        assert!(!supports_machine_control(&legacy));
     }
 }

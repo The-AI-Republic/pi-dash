@@ -91,9 +91,7 @@ def _post_queued(api_client, run, token, position, key=None):
 
 
 @pytest.mark.unit
-def test_queued_assigned_to_waiting_with_position(
-    db, api_client, runner_token, assigned_run
-):
+def test_queued_assigned_to_waiting_with_position(db, api_client, runner_token, assigned_run):
     resp = _post_queued(api_client, assigned_run, runner_token, 3)
     assert resp.status_code == 200, resp.data
     assert resp.data.get("ok") is True
@@ -103,9 +101,7 @@ def test_queued_assigned_to_waiting_with_position(
 
 
 @pytest.mark.unit
-def test_queued_waiting_to_waiting_refreshes_position(
-    db, api_client, runner_token, assigned_run
-):
+def test_queued_waiting_to_waiting_refreshes_position(db, api_client, runner_token, assigned_run):
     assigned_run.status = AgentRunStatus.WAITING_FOR_WORKTREE
     assigned_run.queue_position = 5
     assigned_run.save(update_fields=["status", "queue_position"])
@@ -118,9 +114,7 @@ def test_queued_waiting_to_waiting_refreshes_position(
 
 
 @pytest.mark.unit
-def test_queued_does_not_regress_running_run(
-    db, api_client, runner_token, assigned_run
-):
+def test_queued_does_not_regress_running_run(db, api_client, runner_token, assigned_run):
     """A late/duplicate queued post against a RUNNING run is acknowledged and
     dropped — it must never pull a live run back to WAITING_FOR_WORKTREE."""
     assigned_run.status = AgentRunStatus.RUNNING
@@ -136,9 +130,7 @@ def test_queued_does_not_regress_running_run(
 
 
 @pytest.mark.unit
-def test_queued_terminal_is_acknowledged_and_dropped(
-    db, api_client, runner_token, assigned_run
-):
+def test_queued_terminal_is_acknowledged_and_dropped(db, api_client, runner_token, assigned_run):
     assigned_run.status = AgentRunStatus.COMPLETED
     assigned_run.ended_at = timezone.now()
     assigned_run.save(update_fields=["status", "ended_at"])
@@ -185,9 +177,7 @@ def test_accept_clears_queue_position(db, api_client, runner_token, assigned_run
 
 
 @pytest.mark.unit
-def test_queued_rejects_other_runner(
-    db, api_client, runner_token, assigned_run, create_user, workspace, pod
-):
+def test_queued_rejects_other_runner(db, api_client, runner_token, assigned_run, create_user, workspace, pod):
     other_runner = Runner.objects.create(
         owner=create_user,
         workspace=workspace,
@@ -247,9 +237,7 @@ def test_waiting_run_makes_runner_busy(db, create_user, workspace, pod, enrolled
 
 
 @pytest.mark.unit
-def test_reaper_spares_reported_waiting_run(
-    db, create_user, workspace, pod, enrolled_runner
-):
+def test_reaper_spares_reported_waiting_run(db, create_user, workspace, pod, enrolled_runner):
     """A waiting run the runner DOES report as in_flight is spared."""
     run = AgentRun.objects.create(
         owner=create_user,
@@ -271,9 +259,7 @@ def test_reaper_spares_reported_waiting_run(
 
 
 @pytest.mark.unit
-def test_reaper_fails_unreported_waiting_run(
-    db, create_user, workspace, pod, enrolled_runner
-):
+def test_reaper_fails_unreported_waiting_run(db, create_user, workspace, pod, enrolled_runner):
     """A waiting run older than the grace that the runner does NOT report is
     reaped — the daemon truly lost it (crash without restart)."""
     run = AgentRun.objects.create(
@@ -319,13 +305,80 @@ def test_cancel_from_waiting_for_worktree(db, api_client, create_user, assigned_
         )
     assert resp.status_code == 200, getattr(resp, "data", resp)
     assigned_run.refresh_from_db()
-    assert assigned_run.status == AgentRunStatus.CANCELLED
-    assert assigned_run.ended_at is not None
+    assert assigned_run.status == AgentRunStatus.CANCEL_REQUESTED
+    assert assigned_run.ended_at is None
+    assert assigned_run.queue_position is None
     # The cancel frame is delivered to the runner so it can dequeue.
     assert send.called
     sent = send.call_args[0][1]
     assert sent["type"] == "cancel"
     assert sent["run_id"] == str(assigned_run.id)
+
+
+@pytest.mark.unit
+def test_cancel_requested_is_redelivered_when_runner_reconnects(db, assigned_run, enrolled_runner):
+    from pi_dash.runner.services import session_service
+
+    assigned_run.status = AgentRunStatus.CANCEL_REQUESTED
+    assigned_run.save(update_fields=["status"])
+
+    resume = session_service.build_resume_ack(enrolled_runner, str(assigned_run.id))
+    assert resume["type"] == "cancel"
+    assert resume["run_id"] == str(assigned_run.id)
+
+    redeliver = session_service.build_session_open_redeliver(enrolled_runner, None)
+    assert redeliver["type"] == "cancel"
+    assert redeliver["run_id"] == str(assigned_run.id)
+
+
+@pytest.mark.unit
+def test_reaper_closes_unreported_cancel_requested_run(
+    db,
+    assigned_run,
+    enrolled_runner,
+):
+    assigned_run.status = AgentRunStatus.CANCEL_REQUESTED
+    assigned_run.assigned_at = timezone.now() - timezone.timedelta(minutes=10)
+    assigned_run.save(update_fields=["status", "assigned_at"])
+
+    with patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()):
+        session_service.reap_stale_busy_runs(
+            enrolled_runner,
+            {"in_flight_run": None, "ts": timezone.now().isoformat()},
+        )
+
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.CANCELLED
+    assert assigned_run.ended_at is not None
+
+
+@pytest.mark.unit
+def test_poll_redelivers_reported_cancel_requested_run(
+    db,
+    assigned_run,
+    enrolled_runner,
+):
+    assigned_run.status = AgentRunStatus.CANCEL_REQUESTED
+    assigned_run.assigned_at = timezone.now() - timezone.timedelta(minutes=10)
+    assigned_run.save(update_fields=["status", "assigned_at"])
+
+    with (
+        patch("pi_dash.runner.services.pubsub.send_to_runner") as send,
+        patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()),
+    ):
+        session_service.reap_stale_busy_runs(
+            enrolled_runner,
+            {
+                "in_flight_run": str(assigned_run.id),
+                "ts": timezone.now().isoformat(),
+            },
+        )
+
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.CANCEL_REQUESTED
+    send.assert_called_once()
+    assert send.call_args.args[1]["type"] == "cancel"
+    assert send.call_args.args[1]["run_id"] == str(assigned_run.id)
 
 
 # ---------------------------------------------------------------------------
@@ -349,9 +402,7 @@ def _open_session(api_client, runner, token, *, in_flight=None):
 
 
 @pytest.mark.unit
-def test_session_open_redelivers_unreported_waiting_run(
-    db, api_client, runner_token, enrolled_runner, assigned_run
-):
+def test_session_open_redelivers_unreported_waiting_run(db, api_client, runner_token, enrolled_runner, assigned_run):
     """Regression: the run is well outside ASSIGN_DELIVERY_GRACE_SECS, so the
     session-open reaper used to fail it before ``build_session_open_redeliver``
     could push it back. Session open must redeliver, never reap."""
@@ -398,15 +449,11 @@ def test_session_open_redelivers_unreported_assigned_run_past_grace(
 
 
 @pytest.mark.unit
-def test_session_open_no_redeliver_when_reported_in_flight(
-    db, api_client, runner_token, enrolled_runner, assigned_run
-):
+def test_session_open_no_redeliver_when_reported_in_flight(db, api_client, runner_token, enrolled_runner, assigned_run):
     assigned_run.status = AgentRunStatus.WAITING_FOR_WORKTREE
     assigned_run.save(update_fields=["status"])
 
-    resp = _open_session(
-        api_client, enrolled_runner, runner_token, in_flight=str(assigned_run.id)
-    )
+    resp = _open_session(api_client, enrolled_runner, runner_token, in_flight=str(assigned_run.id))
     assert resp.status_code == 201, resp.data
     assert resp.data.get("redeliver") is None
     # The reported run still gets a resume ack.
@@ -414,9 +461,7 @@ def test_session_open_no_redeliver_when_reported_in_flight(
 
 
 @pytest.mark.unit
-def test_session_open_no_redeliver_for_running_run(
-    db, api_client, runner_token, enrolled_runner, assigned_run
-):
+def test_session_open_no_redeliver_for_running_run(db, api_client, runner_token, enrolled_runner, assigned_run):
     """RUNNING runs the daemon lost are the reaper's job, never redelivered."""
     assigned_run.status = AgentRunStatus.RUNNING
     assigned_run.started_at = timezone.now()
@@ -428,9 +473,7 @@ def test_session_open_no_redeliver_for_running_run(
 
 
 @pytest.mark.unit
-def test_poll_still_reaps_old_unreported_waiting_run(
-    db, api_client, runner_token, enrolled_runner, assigned_run
-):
+def test_poll_still_reaps_old_unreported_waiting_run(db, api_client, runner_token, enrolled_runner, assigned_run):
     """Only session OPEN redelivers. A daemon that is alive and polling but no
     longer reports an old ASSIGNED/WAITING run truly lost it — the poll path
     keeps the default reap."""
@@ -438,9 +481,7 @@ def test_poll_still_reaps_old_unreported_waiting_run(
     assigned_run.assigned_at = timezone.now() - timezone.timedelta(minutes=10)
     assigned_run.save(update_fields=["status", "assigned_at"])
 
-    open_resp = _open_session(
-        api_client, enrolled_runner, runner_token, in_flight=str(assigned_run.id)
-    )
+    open_resp = _open_session(api_client, enrolled_runner, runner_token, in_flight=str(assigned_run.id))
     assert open_resp.status_code == 201, open_resp.data
     sid = open_resp.data["session_id"]
 

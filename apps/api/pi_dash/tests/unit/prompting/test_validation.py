@@ -93,13 +93,16 @@ def test_validate_override_fails_closed_for_orphan_section(db, workspace, monkey
 
 @pytest.mark.unit
 def test_kinds_for_section_shared_vs_unique():
-    # implementation is coding-task only; session-framing is in all three.
+    # implementation is coding-task only; session-framing is in every kind.
     assert kinds_for_section("implementation") == ["coding-task"]
     assert set(kinds_for_section("session-framing")) == {
         "coding-task",
         "review",
+        "test",
         "scheduler",
     }
+    # test-cycle is unique to the test kind.
+    assert kinds_for_section("test-cycle") == ["test"]
 
 
 # ----------------------------------------------------------------------

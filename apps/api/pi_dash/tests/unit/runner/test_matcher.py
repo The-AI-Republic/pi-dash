@@ -221,6 +221,19 @@ def test_paused_not_in_busy_statuses():
 
 
 @pytest.mark.unit
+def test_cancel_requested_remains_active_and_busy(db, create_user, workspace):
+    run = AgentRun.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        prompt="stopping",
+        status=AgentRunStatus.CANCEL_REQUESTED,
+    )
+    assert run.is_active is True
+    assert AgentRunStatus.CANCEL_REQUESTED in matcher.NON_TERMINAL_STATUSES
+    assert AgentRunStatus.CANCEL_REQUESTED in matcher.BUSY_STATUSES
+
+
+@pytest.mark.unit
 def test_paused_not_terminal_on_agent_run(db, create_user, workspace):
     run = AgentRun.objects.create(
         owner=create_user,
@@ -253,9 +266,7 @@ def test_paused_not_in_metrics_active_statuses():
 
 
 @pytest.mark.unit
-def test_paused_runner_not_busy_for_matcher(
-    db, online_runner, create_user, workspace
-):
+def test_paused_runner_not_busy_for_matcher(db, online_runner, create_user, workspace):
     # A paused run on the runner must not exclude it from matching.
     AgentRun.objects.create(
         owner=create_user,

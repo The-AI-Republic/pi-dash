@@ -11,6 +11,8 @@ from pi_dash.app.views import (
     WorkspaceJoinEndpoint,
     WorkSpaceMemberViewSet,
     WorkspaceInvitationsViewset,
+    WorkspaceJoinRequestViewSet,
+    UserWorkspaceJoinRequestViewSet,
     WorkspaceMemberUserEndpoint,
     WorkspaceMemberUserViewsEndpoint,
     WorkSpaceAvailabilityCheckEndpoint,
@@ -82,6 +84,30 @@ urlpatterns = [
         "workspaces/<str:slug>/invitations/<uuid:pk>/join/",
         WorkspaceJoinEndpoint.as_view(),
         name="workspace-join",
+    ),
+    # workspace join requests (request-to-join by admin email)
+    # Requester-facing: create a request and list the current user's requests.
+    # Lives under users/me/ so a workspace-less user (no slug) can reach it.
+    path(
+        "users/me/workspaces/join-requests/",
+        UserWorkspaceJoinRequestViewSet.as_view({"get": "list", "post": "create"}),
+        name="user-workspace-join-requests",
+    ),
+    # Admin-facing: list pending requests for a workspace and approve / deny.
+    path(
+        "workspaces/<str:slug>/join-requests/",
+        WorkspaceJoinRequestViewSet.as_view({"get": "list"}),
+        name="workspace-join-requests",
+    ),
+    path(
+        "workspaces/<str:slug>/join-requests/<uuid:pk>/approve/",
+        WorkspaceJoinRequestViewSet.as_view({"post": "approve"}),
+        name="workspace-join-request-approve",
+    ),
+    path(
+        "workspaces/<str:slug>/join-requests/<uuid:pk>/deny/",
+        WorkspaceJoinRequestViewSet.as_view({"post": "deny"}),
+        name="workspace-join-request-deny",
     ),
     # user join workspace
     path(

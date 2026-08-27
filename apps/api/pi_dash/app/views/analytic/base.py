@@ -30,6 +30,7 @@ from pi_dash.db.models import (
 )
 
 from pi_dash.utils.analytics_plot import build_graph_plot, VALID_ANALYTICS_FIELDS, VALID_YAXIS
+from pi_dash.utils.constants import CLOSED_STATE_GROUPS, OPEN_STATE_GROUPS
 from pi_dash.utils.issue_filters import issue_filters
 from pi_dash.app.permissions import allow_permission, ROLE
 
@@ -262,8 +263,7 @@ class DefaultAnalyticsEndpoint(BaseAPIView):
             state_groups.values("state_group").annotate(state_count=Count("state_group")).order_by("state_group")
         )
 
-        open_issues_groups = ["backlog", "unstarted", "started", "review"]
-        open_issues_queryset = state_groups.filter(state__group__in=open_issues_groups)
+        open_issues_queryset = state_groups.filter(state__group__in=OPEN_STATE_GROUPS)
 
         open_issues = open_issues_queryset.count()
         open_issues_classified = (
@@ -421,7 +421,7 @@ class ProjectStatsEndpoint(BaseAPIView):
 
         if "completed_issues" in requested_fields:
             annotations["completed_issues"] = (
-                Issue.issue_objects.filter(project_id=OuterRef("pk"), state__group__in=["completed", "cancelled"])
+                Issue.issue_objects.filter(project_id=OuterRef("pk"), state__group__in=CLOSED_STATE_GROUPS)
                 .order_by()
                 .annotate(count=Func(F("id"), function="Count"))
                 .values("count")

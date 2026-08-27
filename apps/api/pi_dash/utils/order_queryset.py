@@ -4,9 +4,11 @@
 
 from django.db.models import Case, CharField, Min, Value, When
 
+from pi_dash.utils.constants import STATE_GROUP_ORDER
+
 # Custom ordering for priority and state
 PRIORITY_ORDER = ["urgent", "high", "medium", "low", "none"]
-STATE_ORDER = ["backlog", "unstarted", "started", "review", "completed", "cancelled"]
+STATE_ORDER = list(STATE_GROUP_ORDER)
 
 
 def order_issue_queryset(issue_queryset, order_by_param="-created_at"):

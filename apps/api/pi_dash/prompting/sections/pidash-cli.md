@@ -36,9 +36,11 @@ On success every command prints a single JSON document to stdout and exits `0`. 
 
 Comments are the human ↔ agent conversation channel. Use them to ask clarifying questions, post blocker notices, share PR links, and announce completion. **Comments are not for tracking your own progress — that's what the workpad is for.**
 
-- `pidash comment list <identifier>` — list comments on the issue. Each entry has `id` (UUID), `comment_html`, `comment_stripped`, `actor_detail`, `speaker_type`, `speaker_label`, `speaker_agent_run_id`, and timestamps. Read these in chronological order to pick up any human replies since your last run.
-- `pidash comment add <identifier> --body-file <path> --as-agent "<agent name>" --agent-run-id "{{ run.id }}"` — post a new comment from a file and mark it as spoken by this AI agent run. `--body <markdown>` works for one-liners. Prefer `--body-file` for anything multi-line — shell quoting of markdown is error-prone. When you post any issue comment during this run, always include `--as-agent` and `--agent-run-id`; use your actual runtime name if you know it (`Codex`, `Claude Code`, etc.), otherwise use `AI Agent`.
+- `pidash comment list <identifier>` — list comments on the issue. Each entry has `id` (UUID), `comment_html`, `comment_stripped`, `labels`, `actor_detail`, `speaker_type`, `speaker_label`, `speaker_agent_run_id`, and timestamps. Read these in chronological order to pick up any human replies since your last run.
+- `pidash comment add <identifier> --body-file <path> --as-agent "<agent name>" --agent-run-id "{{ run.id }}" [--fold]` — post a new comment from a file and mark it as spoken by this AI agent run. `--body <markdown>` works for one-liners. Prefer `--body-file` for anything multi-line — shell quoting of markdown is error-prone. When you post any issue comment during this run, always include `--as-agent` and `--agent-run-id`; use your actual runtime name if you know it (`Codex`, `Claude Code`, etc.), otherwise use `AI Agent`.
 - `pidash comment update <identifier> <comment-id> --body-file <path>` — edit a comment you own. Both the issue identifier and the comment UUID are required. Rarely needed — prefer posting a fresh comment for new information.
+
+Use `--fold` only for low-value status/noop updates that should remain available to humans without cluttering the thread. Folded comments are collapsed by default in the UI and omitted from future agent-run task prompts, though `pidash comment list` still returns them. Pi Dash never folds comments automatically. Do not fold questions, blockers, decisions, results, or other context a future run needs.
 
 {% if run.kind != "scheduler" %}#### Workpad
 
@@ -49,7 +51,7 @@ The workpad is your durable per-issue scratchpad — a single markdown document 
 
 {% endif %}#### States
 
-- `pidash state list{% if run.kind == "scheduler" %} --project {{ project.identifier }}{% endif %}` — list the states available in {% if run.kind == "scheduler" %}this project{% else %}this issue's project{% endif %} with `name`, `group` (`backlog | unstarted | started | review | completed | cancelled`), and `description`.{% if run.kind != "scheduler" %} Uses `PIDASH_ISSUE_IDENTIFIER` by default; pass `pidash state list <issue-identifier>` or `pidash state list <project-uuid>` to override. Already rendered below under "Available states"; only call again if something looks stale.{% endif %}
+- `pidash state list{% if run.kind == "scheduler" %} --project {{ project.identifier }}{% endif %}` — list the states available in {% if run.kind == "scheduler" %}this project{% else %}this issue's project{% endif %} with `name`, `group` (`backlog | unstarted | started | review | test | completed | cancelled`), and `description`.{% if run.kind != "scheduler" %} Uses `PIDASH_ISSUE_IDENTIFIER` by default; pass `pidash state list <issue-identifier>` or `pidash state list <project-uuid>` to override. Already rendered below under "Available states"; only call again if something looks stale.{% endif %}
 
 #### Debugging
 
@@ -76,21 +78,15 @@ pidash comment add {{ issue.identifier }} --body-file ./.pidash-blocked.md --as-
 pidash issue patch {{ issue.identifier }} --state "Blocked"
 ```
 
-{% if run.kind == "coding-task" %}End a successful run that opened a PR (workpad already written via `pidash workpad update`) — the change is awaiting human review and merge, so move to the `review` group, **not** `completed`:
+{% if run.kind == "coding-task" %}End a successful run (workpad already written via `pidash workpad update`) — whether you opened a PR or finished a `noncode` task (investigation, status check, comment-only response), move to the `review` group. The runner never moves an issue to `completed`/Done; a human closes it:
 
 ```sh
 pidash issue patch {{ issue.identifier }} --state "In Review"
 ```
-
-End a successful run with nothing to review — a finished `noncode` task (investigation, status check, comment-only response) that produced no PR — move to the `completed` group:
-
-```sh
-pidash issue patch {{ issue.identifier }} --state "Done"
-```
-{% else %}End a successful run (workpad already written via `pidash workpad update`) — move the issue to the state matching this pass's outcome (see "Review cycle" and "Available states"):
+{% else %}End a successful review pass (workpad already written via `pidash workpad update`) — an **approved** review posts its summary and leaves the issue In Review; the runner never moves it to `completed`/Done (see "Review cycle" and "Available states"). If the issue is not already In Review, move it there; otherwise leave it in place:
 
 ```sh
-pidash issue patch {{ issue.identifier }} --state "Done"
+pidash issue patch {{ issue.identifier }} --state "In Review"
 ```
 {% endif %}{% else %}File a finding as a new issue under this project:
 
@@ -108,7 +104,7 @@ pidash issue create --project {{ project.identifier }} --title "<short summary>"
 _(state list unavailable — call `pidash state list` to retrieve it before moving state)_
 {% endif %}
 
-Use the list above to pick the correct `--state` value. Match your intent to the state's `group` first, then to the name and description.{% if run.kind == "coding-task" %} The mapping that trips runs up most often: a `code_change` that opened a PR is awaiting review → `review` group ("In Review"), **not** `completed`. Use `completed` ("this work is done") only for a finished `noncode` task with no PR, and `cancelled` for "this will not be done".{% endif %}
+Use the list above to pick the correct `--state` value. Match your intent to the state's `group` first, then to the name and description.{% if run.kind == "coding-task" %} The mapping that trips runs up most often: a finished issue — a `code_change` that opened a PR **or** a finished `noncode` task — is awaiting a human → `review` group ("In Review"). The runner never moves an issue to `completed` ("Done"); that's a human's call. Use `cancelled` for "this will not be done".{% endif %}
 
 ### Conventions
 
