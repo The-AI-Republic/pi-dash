@@ -88,6 +88,14 @@ CLOUD_RECIPES: dict[str, tuple[str, ...]] = {
         "cloud-write-policy",
         "cloud-ending",
     ),
+    KIND_TEST: (
+        "cloud-test-intro",
+        "cloud-capabilities",
+        "cloud-issue-context",
+        "cloud-test-loop",
+        "cloud-write-policy",
+        "cloud-ending",
+    ),
     KIND_SCHEDULER: (
         "cloud-scheduler-intro",
         "cloud-capabilities",

@@ -1016,6 +1016,12 @@ class AgentRun(models.Model):
                             "assigned",
                             "waiting_for_worktree",
                             "running",
+                            # A run whose cancellation awaits the daemon's
+                            # acknowledgement still occupies the active slot
+                            # (mirrors ``is_active`` / ``_active_run_for``) —
+                            # without it a POST during wind-down could create
+                            # a second concurrent run for the work item.
+                            "cancel_requested",
                             "awaiting_approval",
                             "awaiting_reauth",
                         ]

@@ -297,13 +297,16 @@ def test_unknown_required_cloud_capability_is_rejected(project):
     CLOUD_AGENT_WORKSPACE_CREATION_RATE_PER_MINUTE=1,
     CLOUD_AGENT_USER_CREATION_RATE_PER_MINUTE=1,
 )
-def test_creation_rate_limit_is_workspace_scoped(project, create_user):
+def test_creation_rate_limit_is_workspace_scoped(project, create_user, django_capture_on_commit_callbacks):
     from pi_dash.cloud_agent.admission import CloudAgentAdmissionError
 
     cache.clear()
     project.default_agent_executor = AgentExecutorKind.CLOUD_AGENT
     _configure_llm(create_user)
-    execution_fields(project=project, run_kind="issue", has_issue=True, actor=create_user)
+    # Token consumption is deferred to commit so rolled-back creations don't
+    # burn quota — execute the on-commit callbacks to model a committed run.
+    with django_capture_on_commit_callbacks(execute=True):
+        execution_fields(project=project, run_kind="issue", has_issue=True, actor=create_user)
     with pytest.raises(CloudAgentAdmissionError) as caught:
         execution_fields(project=project, run_kind="issue", has_issue=True, actor=create_user)
     assert caught.value.code == "run_quota_exceeded"

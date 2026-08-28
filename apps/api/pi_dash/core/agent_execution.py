@@ -30,13 +30,17 @@ def cloud_agent_is_configured() -> bool:
 
 
 def user_has_llm_config(user) -> bool:
-    """Whether ``user`` has a usable BYOK LLM config (provider key + model)."""
+    """Whether ``user`` has a usable LLM config (CE: BYOK; cloud: overlay).
+
+    Delegates to the EE-overlayable ``has_usable_llm_config`` seam — the same
+    single switch point Pi Dash AI uses — so the hosted build's
+    platform-credential overlay applies to Cloud Agent runs too.
+    """
     if user is None or not getattr(user, "is_active", False) or getattr(user, "is_bot", False):
         return False
-    from pi_dash.assistant.runtime.llm import get_config
+    from pi_dash.ee.assistant.model_provider import has_usable_llm_config
 
-    cfg = get_config(user)
-    return bool(cfg is not None and cfg.has_api_key and cfg.model_name)
+    return has_usable_llm_config(user)
 
 
 def agent_executor_options(project, user=None) -> list[dict[str, object]]:

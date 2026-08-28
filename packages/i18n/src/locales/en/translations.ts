@@ -1833,4 +1833,28 @@ export default {
   "Zoom into cycles that need attention. ": "Zoom into cycles that need attention. ",
   "Zoom out to see running cycles across all your projects at once instead of going from Cycle to Cycle in each project.":
     "Zoom out to see running cycles across all your projects at once instead of going from Cycle to Cycle in each project.",
+  "AI agent declined this request": "AI agent declined this request",
+  "Changing this affects new runs only. Existing and queued runs keep their original executor.":
+    "Changing this affects new runs only. Existing and queued runs keep their original executor.",
+  "Cloud execution": "Cloud execution",
+  "Configure your AI provider in Pi Dash AI settings to use the Cloud Agent.":
+    "Configure your AI provider in Pi Dash AI settings to use the Cloud Agent.",
+  "Default AI executor": "Default AI executor",
+  Executor: "Executor",
+  "Local Runner": "Local Runner",
+  "Pi Dash Cloud Agent": "Pi Dash Cloud Agent",
+  "Pi Dash Cloud Agent is using the project's bounded tools.":
+    "Pi Dash Cloud Agent is using the project's bounded tools.",
+  Refused: "Refused",
+  Result: "Result",
+  "Runs on your connected development machine with repository access.":
+    "Runs on your connected development machine with repository access.",
+  "The model provider refused the request.": "The model provider refused the request.",
+  "Unavailable on this instance. Ask an administrator to enable the Cloud Agent.":
+    "Unavailable on this instance. Ask an administrator to enable the Cloud Agent.",
+  "Unavailable until a Local Runner is connected to this project.":
+    "Unavailable until a Local Runner is connected to this project.",
+  "Waiting for Pi Dash Cloud Agent capacity.": "Waiting for Pi Dash Cloud Agent capacity.",
+  "Works out of the box with project and connected GitHub tools; no filesystem or shell.":
+    "Works out of the box with project and connected GitHub tools; no filesystem or shell.",
 } as const;

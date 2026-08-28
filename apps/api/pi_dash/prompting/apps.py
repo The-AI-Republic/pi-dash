@@ -32,10 +32,15 @@ class PromptingConfig(AppConfig):
                     raise registry.PromptRegistryError(f"Cloud recipe {kind!r} references unknown section {key!r}")
                 if section.customizable != registry.CUSTOMIZABLE_LOCKED:
                     raise registry.PromptRegistryError(f"Cloud recipe section {key!r} must be locked")
-        # Every ticking phase must map to a real recipe, else a run would only
-        # fail at creation time with a confusing RecipeNotFound.
+        # Every ticking phase must map to a real recipe — in BOTH executors'
+        # maps, since any phase can fire on a cloud-executor project — else a
+        # run would only fail at creation time with a confusing RecipeNotFound.
         for cfg in PHASES.values():
             if cfg.template_name not in recipes.RECIPES:
                 raise registry.PromptRegistryError(
                     f"phase {cfg.state_name!r} maps to unknown recipe {cfg.template_name!r}"
+                )
+            if cfg.template_name not in recipes.CLOUD_RECIPES:
+                raise registry.PromptRegistryError(
+                    f"phase {cfg.state_name!r} has no Cloud Agent recipe for {cfg.template_name!r}"
                 )

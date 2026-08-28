@@ -84,6 +84,16 @@ def apply_terminal_effects(run_id) -> bool:
 
     pending_handoff = False
     with transaction.atomic():
+        # Lock order: issue → run, matching issue moves and
+        # complete_project_move_handoff. The post-run hooks below lock the
+        # ticker/issue while we hold the run row; taking the issue lock first
+        # prevents a Postgres deadlock against a concurrent issue move that
+        # locks issue-then-run.
+        work_item_id = AgentRun.objects.filter(pk=run_id).values_list("work_item_id", flat=True).first()
+        if work_item_id is not None:
+            from pi_dash.db.models.issue import Issue
+
+            Issue.all_objects.select_for_update(of=("self",)).filter(pk=work_item_id).first()
         run = (
             AgentRun.objects.select_for_update(of=("self",))
             .select_related("work_item", "work_item__state", "work_item__project", "scheduler_binding")

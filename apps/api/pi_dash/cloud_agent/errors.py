@@ -20,11 +20,25 @@ def sanitize_error(exc: BaseException) -> str:
     return text[:16_000]
 
 
+def _is_usage_limit(exc: BaseException) -> bool:
+    """Classify by exception type — pydantic-ai's UsageLimitExceeded messages
+    ("The next request would exceed the request_limit of N") share no stable
+    substring worth matching on."""
+    try:
+        from pydantic_ai.exceptions import UsageLimitExceeded
+    except ImportError:
+        return False
+    return isinstance(exc, UsageLimitExceeded)
+
+
 def classify_error(exc: BaseException) -> tuple[str, str]:
     text = sanitize_error(exc)
     lowered = text.lower()
-    if "usage limit" in lowered or "tool call limit" in lowered:
+    if _is_usage_limit(exc) or "usage limit" in lowered or "would exceed the" in lowered:
         return "iteration_limit", text
-    if any(marker in lowered for marker in ("content filter", "content_filter", "safety refusal", "refused")):
+    # Deliberately no bare "refused" marker: it matches transport errors like
+    # "Connection refused", which must classify as provider_error (FAILED),
+    # never as a safety REFUSED terminal state.
+    if any(marker in lowered for marker in ("content filter", "content_filter", "safety refusal", "model refused")):
         return "provider_refusal", text
     return "provider_error", text

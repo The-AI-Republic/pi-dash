@@ -9,12 +9,14 @@ resolution path, two runtime instances.
 
 
 def resolve_model_for_creator(run):
-    """Return a pydantic-ai model built from ``run.created_by``'s BYOK config.
+    """Return a pydantic-ai model for ``run.created_by``'s LLM config.
 
-    Raises :class:`pi_dash.assistant.errors.LLMConfigMissing` when the
-    creator has no usable config; callers surface that as a run failure
-    with the ``llm_config_missing`` code.
+    Delegates to the assistant's EE-overlayable ``resolve_model_for_user``
+    seam (CE: BYOK; the hosted build overlays platform credentials), so the
+    Cloud Agent and Pi Dash AI always resolve models the same way. Raises
+    :class:`pi_dash.assistant.errors.LLMConfigMissing` when the creator has
+    no usable config; callers surface that as ``llm_config_missing``.
     """
-    from pi_dash.assistant.runtime.llm import resolve_byok_model
+    from pi_dash.ee.assistant.model_provider import resolve_model_for_user
 
-    return resolve_byok_model(run.created_by)
+    return resolve_model_for_user(run.created_by)

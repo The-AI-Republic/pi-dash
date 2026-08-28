@@ -524,9 +524,29 @@ def _create_project_move_handoff_run(*, issue: Issue, parent: AgentRun, pod: Pod
 
     The source run remains the lineage parent for audit/history only. Runner
     affinity is deliberately cleared because a source-pod runner can never
-    consume a target-pod run.
+    consume a target-pod run. The replacement goes through the executor seam
+    so a cloud-executor target project gets a dispatchable cloud run rather
+    than a local row no runner will ever consume.
     """
-    from pi_dash.runner.services import matcher
+    from pi_dash.cloud_agent.creation import dispatch_after_commit, execution_fields
+    from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+    try:
+        execution = execution_fields(
+            project=issue.project,
+            run_kind="issue",
+            has_issue=True,
+            actor=parent.created_by,
+            automatic=True,
+        )
+    except (ValueError, RuntimeError) as exc:
+        # The target project's executor cannot accept this creator (e.g. a
+        # cloud project whose principal has no LLM config). Fall back to a
+        # local-runner row so the handoff still lands somewhere visible.
+        logger.warning("orchestration.project_move_handoff: executor unavailable: %s", exc)
+        execution = {"executor_kind": "local_runner", "tool_plan": {}}
+    admission_error = execution.pop("_cloud_admission_error", None)
+    execution.pop("pinned_runner", None)
 
     with transaction.atomic():
         existing = _active_run_for(issue)
@@ -543,21 +563,32 @@ def _create_project_move_handoff_run(*, issue: Issue, parent: AgentRun, pod: Pod
             trigger=parent.trigger,
             prompt="",
             run_config=_run_config_for_issue(issue, base=parent.run_config),
+            **execution,
         )
+        if admission_error:
+            finalize_agent_run(
+                run.id,
+                AgentRunStatus.FAILED,
+                updates={"error_code": admission_error["code"], "error": admission_error["detail"]},
+            )
+            run.refresh_from_db()
+            return run
         try:
             run.prompt = build_first_turn(issue, run)
         except _PROMPT_BUILD_ERRORS as exc:
-            run.status = AgentRunStatus.FAILED
-            run.error = f"prompt build failed: {exc}"
-            run.ended_at = timezone.now()
-            run.save(update_fields=["status", "error", "ended_at"])
+            finalize_agent_run(
+                run.id,
+                AgentRunStatus.FAILED,
+                updates={"error_code": "prompt_build_failed", "error": f"prompt build failed: {exc}"},
+            )
+            run.refresh_from_db()
             logger.exception(
                 "orchestration.project_move_handoff: prompt render failed for issue %s",
                 issue.id,
             )
             return run
         run.save(update_fields=["prompt", "prompt_manifest"])
-        transaction.on_commit(lambda pid=pod.id: matcher.drain_pod_by_id(pid))
+        dispatch_after_commit(run.id)
     return run
 
 
@@ -853,6 +884,12 @@ def dispatch_scheduler_run(
         return None, str(exc)
     admission_error = execution.pop("_cloud_admission_error", None)
 
+    if execution["executor_kind"] == "cloud_agent" and binding.outcome_mode != "create_issue":
+        # Permanent misconfiguration — refuse BEFORE creating a run so a
+        # broken binding writes last_error once instead of minting a FAILED
+        # AgentRun on every scheduler firing.
+        return None, "Cloud Agent scheduler runs support only the create_issue outcome mode"
+
     with transaction.atomic():
         admission_error = (
             lock_cloud_creation_capacity(
@@ -882,19 +919,6 @@ def dispatch_scheduler_run(
                 run.id,
                 AgentRunStatus.FAILED,
                 updates={"error_code": admission_error["code"], "error": admission_error["detail"]},
-            )
-            run.refresh_from_db()
-            return run, None
-        if run.executor_kind == "cloud_agent" and binding.outcome_mode != "create_issue":
-            from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
-
-            finalize_agent_run(
-                run.id,
-                AgentRunStatus.FAILED,
-                updates={
-                    "error_code": "capability_unsupported",
-                    "error": "Cloud Agent scheduler runs support only create_issue outcome mode",
-                },
             )
             run.refresh_from_db()
             return run, None

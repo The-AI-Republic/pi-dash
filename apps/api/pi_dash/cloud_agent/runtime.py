@@ -37,7 +37,10 @@ async def execute(run):
         tool_timeout=settings.CLOUD_AGENT_TOOL_TIMEOUT_SECONDS,
     )
     model_name = str(getattr(model, "model_name", "") or "")[:128]
-    events.append(run.id, "model_started", {"model": model_name})
+    # events.append is synchronous ORM work; calling it bare in this coroutine
+    # raises SynchronousOnlyOperation (pydantic-ai runs sync *tools* in a
+    # threadpool, but this call executes on the event loop itself).
+    await sync_to_async(events.append)(run.id, "model_started", {"model": model_name})
     limits = run.tool_plan.get("limits", {})
     usage_limits = UsageLimits(
         request_limit=limits.get("model_requests", settings.CLOUD_AGENT_MODEL_REQUEST_LIMIT),

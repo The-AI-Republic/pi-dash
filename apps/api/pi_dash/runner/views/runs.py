@@ -22,6 +22,7 @@ from pi_dash.runner.serializers import (
 )
 from pi_dash.runner.services import matcher
 from pi_dash.runner.services.permissions import (
+    can_view_runner,
     is_workspace_admin,
     is_workspace_member,
 )
@@ -96,6 +97,13 @@ def _can_view_run(user, run: AgentRun) -> bool:
         return True
     if run.runner_id is not None and run.runner.owner_id == user.id:
         return True
+    # Private-runner gate: a run executing on someone else's private machine
+    # is visible only to the run creator and the runner owner (both handled
+    # above) — not to issue participants or workspace admins. Runs without a
+    # runner (queued local work, Cloud Agent runs) fall through to the
+    # involvement grants below.
+    if run.runner_id is not None and not can_view_runner(user, run.runner):
+        return False
     if run.work_item_id is not None:
         if run.work_item.created_by_id == user.id:
             return True
@@ -147,10 +155,18 @@ class AgentRunListEndpoint(APIView):
                 | Q(work_item__assignees=request.user)
                 | Q(workspace_id__in=admin_workspaces)
             )
+            # Private-runner gate, mirroring ``_can_view_run``: involvement or
+            # admin standing never reveals a run executing on someone else's
+            # private machine — only the run creator and the runner owner see
+            # those rows. Runner-less runs (queued, Cloud Agent) are unaffected.
+            .filter(Q(runner__isnull=True) | Q(runner__owner=request.user) | Q(created_by=request.user))
             # ``pod__project`` is read by AgentRunSerializer.pod_detail
             # (PodMiniSerializer.project_identifier); join it to avoid an
             # N+1 across the up-to-200 rows serialized below.
             .select_related("pod__project")
+            # AgentRunSerializer renders ``tool_calls`` inline; prefetch so a
+            # page of runs costs one extra query instead of one per row.
+            .prefetch_related("tool_calls")
             .distinct()
             .order_by("-created_at")
         )
@@ -248,7 +264,13 @@ class AgentRunListEndpoint(APIView):
                     run,
                     run.work_item if run.work_item_id else None,
                 )
-                if len(run.prompt.encode()) > settings.CLOUD_AGENT_MAX_PROMPT_BYTES:
+                # The prompt-size cap is a Cloud Agent execution limit; local
+                # runs stream the prompt to the runner verbatim and never had
+                # a limit — do not break that workflow.
+                if (
+                    run.executor_kind == "cloud_agent"
+                    and len(run.prompt.encode()) > settings.CLOUD_AGENT_MAX_PROMPT_BYTES
+                ):
                     raise OverflowError("prompt_too_large")
                 run.save(update_fields=["prompt", "prompt_manifest"])
                 dispatch_after_commit(run.id)
@@ -499,6 +521,20 @@ class AgentRunCancelEndpoint(APIView):
                     status=status.HTTP_409_CONFLICT,
                 )
             if locked.status == AgentRunStatus.CANCEL_REQUESTED:
+                run = locked
+            elif locked.executor_kind == "cloud_agent" and locked.status == AgentRunStatus.RUNNING:
+                # A running cloud run must never be finalized from here — the
+                # Celery worker is still executing, and finalizing would
+                # release workspace capacity mid-flight. A duplicate cancel
+                # lands in this branch because the fast path above already
+                # consumed cancel_requested_at; a first cancel can also land
+                # here when the run went RUNNING between the unlocked read
+                # and this lock. Record the request and let the worker's
+                # cancellation poll finalize.
+                if locked.cancel_requested_at is None:
+                    locked.cancel_requested_at = timezone.now()
+                    locked.cancel_reason = reason
+                    locked.save(update_fields=["cancel_requested_at", "cancel_reason"])
                 run = locked
             elif (
                 locked.executor_kind != "cloud_agent"

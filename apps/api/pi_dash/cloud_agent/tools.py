@@ -307,7 +307,23 @@ def build_tools(run_id, allowed_names, *, source="internal", server_key=""):
 
         def op(run):
             state = State.objects.get(pk=state_id, project_id=run.work_item.project_id)
-            Issue.objects.filter(pk=run.work_item_id).update(state=state, updated_at=timezone.now())
+            # Mirror the assistant's update_issue tool: lock, save through the
+            # model (audit columns + activity), then route through the
+            # orchestration transition handler. A bare queryset .update()
+            # would skip the signal-driven phase machinery entirely — no
+            # ticker arm/disarm, no follow-up phase run.
+            locked = Issue.objects.select_for_update().select_related("state").get(pk=run.work_item_id)
+            from_state = locked.state
+            if from_state is not None and from_state.pk == state.pk:
+                return {"updated": False, "state": state.name, "state_id": str(state.id)}
+            locked.state = state
+            with impersonate(run.created_by):
+                locked.save(update_fields=["state", "updated_at", "updated_by"])
+            from pi_dash.orchestration import service as orchestration
+
+            orchestration.handle_issue_state_transition(
+                locked, from_state, state, actor=run.created_by, dispatch_immediate=True
+            )
             return {"updated": True, "state": state.name, "state_id": str(state.id)}
 
         return audit("pidash_transition_current_issue", "write", {"state_id": state_id}, op)
