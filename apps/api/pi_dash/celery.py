@@ -105,18 +105,6 @@ app.conf.beat_schedule = {
         "task": "runner.sweep_chat_message_dedupe",
         "schedule": crontab(hour=4, minute=0),
     },
-    "cloud-agent-scan-queued-runs": {
-        "task": "cloud_agent.scan_queued_runs",
-        "schedule": timedelta(seconds=settings.CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS),
-    },
-    "cloud-agent-sweep-stale-runs": {
-        "task": "cloud_agent.sweep_stale_runs",
-        "schedule": timedelta(seconds=settings.CLOUD_AGENT_SWEEP_INTERVAL_SECONDS),
-    },
-    "agent-run-reconcile-terminal-effects": {
-        "task": "runner.reconcile_agent_run_terminal_effects",
-        "schedule": timedelta(seconds=settings.AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS),
-    },
     # Issue ticking — see .ai_design/issue_ticking_system/design.md §6
     "scan-due-agent-tickers": {
         "task": "pi_dash.bgtasks.agent_ticker.scan_due_tickers",
@@ -162,5 +150,34 @@ def setup_task_loggers(logger, *args, **kwargs):
 
 # Load task modules from all registered Django app configs.
 app.autodiscover_tasks()
+
+
+@app.on_after_finalize.connect
+def _register_settings_backed_beat_entries(sender, **_kwargs):
+    """Beat entries whose cadence comes from Django settings.
+
+    Registered after finalize — NOT in the literal dict above — because this
+    module is imported while Django's Settings object may still be under
+    construction (settings-overlay packages import ``pi_dash`` from inside
+    their settings module), and a module-level ``settings.X`` read would see
+    a partially-built object. Every entry in the literal dict must stay a
+    literal.
+    """
+    sender.conf.beat_schedule.update(
+        {
+            "cloud-agent-scan-queued-runs": {
+                "task": "cloud_agent.scan_queued_runs",
+                "schedule": timedelta(seconds=settings.CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS),
+            },
+            "cloud-agent-sweep-stale-runs": {
+                "task": "cloud_agent.sweep_stale_runs",
+                "schedule": timedelta(seconds=settings.CLOUD_AGENT_SWEEP_INTERVAL_SECONDS),
+            },
+            "agent-run-reconcile-terminal-effects": {
+                "task": "runner.reconcile_agent_run_terminal_effects",
+                "schedule": timedelta(seconds=settings.AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS),
+            },
+        }
+    )
 
 app.conf.beat_scheduler = "django_celery_beat.schedulers.DatabaseScheduler"
