@@ -1462,6 +1462,7 @@ export default {
   "Stay ahead of blockers.": "Stay ahead of blockers.",
   "Stay in the loop on Work items you are subscribed to. Enable this to get notified.":
     "Stay in the loop on Work items you are subscribed to. Enable this to get notified.",
+  "Page {page} of {total}": "Page {page} of {total}",
   "Step {step} of {total}": "Step {step} of {total}",
   Stickies: "Stickies",
   "Stickies are quick notes and to-dos you take down on the fly.":
