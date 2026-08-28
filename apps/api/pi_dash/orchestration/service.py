@@ -808,8 +808,11 @@ def dispatch_scheduler_run(
 
     creator = binding.actor
     if binding.project.default_agent_executor == "cloud_agent":
+        from pi_dash.core.agent_execution import user_has_llm_config
         from pi_dash.core.permissions import ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER, check_project_role
 
+        # Cloud runs execute against the creator's BYOK LLM config, so the
+        # execution principal must also have a usable provider key.
         creator = next(
             (
                 candidate
@@ -823,6 +826,7 @@ def dispatch_scheduler_run(
                     binding.project_id,
                     [ROLE_ADMIN, ROLE_MEMBER, ROLE_GUEST],
                 )
+                and user_has_llm_config(candidate)
             ),
             None,
         )

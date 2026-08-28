@@ -36,7 +36,8 @@ async def execute(run):
         retries=2,
         tool_timeout=settings.CLOUD_AGENT_TOOL_TIMEOUT_SECONDS,
     )
-    events.append(run.id, "model_started", {"model": settings.CLOUD_AGENT_MODEL})
+    model_name = str(getattr(model, "model_name", "") or "")[:128]
+    events.append(run.id, "model_started", {"model": model_name})
     limits = run.tool_plan.get("limits", {})
     usage_limits = UsageLimits(
         request_limit=limits.get("model_requests", settings.CLOUD_AGENT_MODEL_REQUEST_LIMIT),
@@ -56,6 +57,7 @@ async def execute(run):
         )
     usage = result.usage()
     return result.output, {
+        "llm_model": model_name,
         "input_tokens": getattr(usage, "input_tokens", None),
         "output_tokens": getattr(usage, "output_tokens", None),
         "total_tokens": getattr(usage, "total_tokens", None),

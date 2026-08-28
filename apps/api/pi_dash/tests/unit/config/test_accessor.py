@@ -140,10 +140,10 @@ def test_github_app_keys_classified_by_secret():
 
 
 @pytest.mark.unit
-def test_cloud_agent_model_key_is_an_environment_secret():
-    entry = registry.CONFIG["CLOUD_AGENT_MODEL_API_KEY"]
-    assert entry["source"] == "env"
-    assert entry["secret"] is True
+def test_cloud_agent_has_no_platform_model_key():
+    # Cloud Agent runs bill the creator's BYOK LLM config (the same per-user
+    # config Pi Dash AI uses); there is no instance-level model credential.
+    assert "CLOUD_AGENT_MODEL_API_KEY" not in registry.CONFIG
 
 
 @pytest.mark.unit

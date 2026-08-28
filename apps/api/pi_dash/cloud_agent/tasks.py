@@ -10,6 +10,8 @@ from datetime import timedelta
 
 from celery import shared_task
 from celery.exceptions import SoftTimeLimitExceeded
+
+from pi_dash.assistant.errors import LLMConfigMissing
 from django.conf import settings
 from django.db import transaction
 from django.db import close_old_connections
@@ -17,7 +19,7 @@ from django.db.models import Min, Q
 from django.utils import timezone
 
 from pi_dash.cloud_agent import events
-from pi_dash.core.agent_execution import AgentExecutorKind, cloud_agent_is_configured
+from pi_dash.core.agent_execution import AgentExecutorKind, cloud_agent_is_configured, user_has_llm_config
 from pi_dash.core.permissions import ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER, check_project_role, is_workspace_member
 from pi_dash.db.models import Workspace
 from pi_dash.runner.models import AgentRun, AgentRunStatus
@@ -111,6 +113,14 @@ def run_cloud_agent(run_id):
         _fail(run.id, "actor_no_longer_authorized", "The initiating user no longer belongs to this project")
         close_old_connections()
         return "unauthorized"
+    if not user_has_llm_config(run.created_by):
+        _fail(
+            run.id,
+            "llm_config_missing",
+            "The run creator has no AI provider configured. Configure one in Pi Dash AI settings.",
+        )
+        close_old_connections()
+        return "llm_config_missing"
     if len(run.prompt.encode()) > settings.CLOUD_AGENT_MAX_PROMPT_BYTES:
         _fail(run.id, "prompt_too_large", "The composed Cloud Agent prompt exceeds the configured limit")
         close_old_connections()
@@ -164,7 +174,6 @@ def run_cloud_agent(run_id):
                 "done_payload": payload,
                 "error": "",
                 "error_code": "",
-                "llm_model": settings.CLOUD_AGENT_MODEL,
                 **usage,
             },
         )
@@ -174,6 +183,10 @@ def run_cloud_agent(run_id):
         _fail(run.id, "run_timeout", "Cloud Agent execution exceeded its time limit")
     except TimeoutError:
         _fail(run.id, "run_timeout", "Cloud Agent execution exceeded its time limit")
+    except LLMConfigMissing as exc:
+        # The creator's BYOK config disappeared or became unusable between the
+        # pre-check above and model resolution.
+        _fail(run.id, "llm_config_missing", str(exc))
     except Exception as exc:
         from pi_dash.cloud_agent.errors import classify_error
 

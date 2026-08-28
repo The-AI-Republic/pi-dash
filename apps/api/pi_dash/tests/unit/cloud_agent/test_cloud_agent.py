@@ -31,10 +31,30 @@ from pi_dash.runner.services.agent_run_finalization import apply_terminal_effect
 
 CLOUD_SETTINGS = {
     "CLOUD_AGENT_ENABLED": True,
-    "CLOUD_AGENT_MODEL_PROVIDER": "openai",
-    "CLOUD_AGENT_MODEL": "test-model",
-    "CLOUD_AGENT_MODEL_API_KEY": "secret",
 }
+
+
+def _configure_llm(user):
+    """Give ``user`` a usable BYOK LLM config (what every cloud run bills against).
+
+    The stored token is opaque bytes: these tests mock model execution, so the
+    ciphertext is never decrypted and no crypto backend is required.
+    """
+    from django.utils import timezone
+
+    from pi_dash.assistant.models import UserLLMConfig
+
+    cfg, _ = UserLLMConfig.objects.get_or_create(
+        user=user,
+        defaults={
+            "provider_kind": "openai_compatible",
+            "base_url": "https://api.example.com/v1",
+            "model_name": "test-model",
+            "api_key_encrypted": b"opaque-test-token",
+            "last_verified_at": timezone.now(),
+        },
+    )
+    return cfg
 
 
 @pytest.fixture
@@ -46,6 +66,7 @@ def issue(project, workspace, create_user):
         member=create_user,
         defaults={"role": 20},
     )
+    _configure_llm(create_user)
     return Issue.objects.create(
         workspace=workspace,
         project=project,
@@ -78,9 +99,10 @@ def test_setting_backed_project_default_callable():
 
 @pytest.mark.unit
 @override_settings(**CLOUD_SETTINGS)
-def test_executor_resolution_and_immutable_plan(project):
+def test_executor_resolution_and_immutable_plan(project, create_user):
     project.default_agent_executor = AgentExecutorKind.CLOUD_AGENT
-    fields = execution_fields(project=project, run_kind="issue", has_issue=True)
+    _configure_llm(create_user)
+    fields = execution_fields(project=project, run_kind="issue", has_issue=True, actor=create_user)
     assert resolve_executor_kind(project=project) == AgentExecutorKind.CLOUD_AGENT
     assert fields["executor_kind"] == AgentExecutorKind.CLOUD_AGENT
     assert fields["pinned_runner"] is None
@@ -280,6 +302,7 @@ def test_creation_rate_limit_is_workspace_scoped(project, create_user):
 
     cache.clear()
     project.default_agent_executor = AgentExecutorKind.CLOUD_AGENT
+    _configure_llm(create_user)
     execution_fields(project=project, run_kind="issue", has_issue=True, actor=create_user)
     with pytest.raises(CloudAgentAdmissionError) as caught:
         execution_fields(project=project, run_kind="issue", has_issue=True, actor=create_user)
@@ -342,12 +365,12 @@ def test_provider_refusal_has_distinct_terminal_state(issue, create_user):
 
 @pytest.mark.unit
 @override_settings(**CLOUD_SETTINGS)
-def test_error_sanitizer_redacts_platform_and_bearer_secrets():
+def test_error_sanitizer_redacts_byok_and_bearer_secrets():
     from pi_dash.cloud_agent.errors import sanitize_error
 
-    text = sanitize_error(RuntimeError("Authorization: Bearer token-value secret"))
+    text = sanitize_error(RuntimeError("Authorization: Bearer token-value key sk-abc123def456ghi789"))
     assert "token-value" not in text
-    assert "secret" not in text
+    assert "sk-abc123def456ghi789" not in text
     assert "[REDACTED]" in text
 
 
@@ -490,7 +513,6 @@ def test_executor_options_require_an_online_local_runner(project, create_user):
 @pytest.mark.unit
 @override_settings(
     **CLOUD_SETTINGS,
-    CLOUD_AGENT_MODEL_BASE_URL="http://model.internal",
     CLOUD_AGENT_DISABLED_TOOLS=("not_a_public_tool",),
     CLOUD_AGENT_EXECUTION_TIMEOUT_SECONDS=301,
     CLOUD_AGENT_RUN_SOFT_LIMIT_SECONDS=300,
@@ -500,7 +522,7 @@ def test_system_check_rejects_unsafe_or_inconsistent_cloud_configuration():
     from pi_dash.cloud_agent.checks import cloud_agent_configuration_check
 
     ids = {error.id for error in cloud_agent_configuration_check(None)}
-    assert {"cloud_agent.E004", "cloud_agent.E005", "cloud_agent.E007"} <= ids
+    assert {"cloud_agent.E005", "cloud_agent.E007"} <= ids
 
 
 @pytest.mark.unit

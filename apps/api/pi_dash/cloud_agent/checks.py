@@ -1,6 +1,5 @@
 from django.conf import settings
 from django.core.checks import Error, register
-from urllib.parse import urlparse
 
 from pi_dash.core.agent_execution import AgentExecutorKind
 
@@ -13,25 +12,11 @@ def cloud_agent_configuration_check(app_configs, **kwargs):
     default = settings.DEFAULT_AGENT_EXECUTOR
     if default not in AgentExecutorKind.values:
         errors.append(Error("DEFAULT_AGENT_EXECUTOR is invalid", id="cloud_agent.E001"))
-    configured = bool(
-        settings.CLOUD_AGENT_MODEL_PROVIDER in {"openai", "anthropic"}
-        and settings.CLOUD_AGENT_MODEL
-        and settings.CLOUD_AGENT_MODEL_API_KEY
-    )
-    if default == AgentExecutorKind.CLOUD_AGENT and not configured:
-        errors.append(Error("Cloud default requires a configured platform model provider", id="cloud_agent.E002"))
-    if settings.CLOUD_AGENT_ENABLED and not configured:
-        errors.append(Error("CLOUD_AGENT_ENABLED requires provider, model, and API key", id="cloud_agent.E003"))
-    base_url = settings.CLOUD_AGENT_MODEL_BASE_URL
-    if base_url:
-        parsed = urlparse(base_url)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-            errors.append(
-                Error(
-                    "CLOUD_AGENT_MODEL_BASE_URL must be an HTTPS URL without embedded credentials",
-                    id="cloud_agent.E004",
-                )
-            )
+    # The Cloud Agent executes against each run creator's BYOK LLM config
+    # (the same per-user config Pi Dash AI uses) — no platform model settings
+    # exist to validate. E002/E003/E004/E006 covered those and are retired.
+    if default == AgentExecutorKind.CLOUD_AGENT and not settings.CLOUD_AGENT_ENABLED:
+        errors.append(Error("Cloud default requires CLOUD_AGENT_ENABLED", id="cloud_agent.E002"))
     unknown_tools = sorted(set(settings.CLOUD_AGENT_DISABLED_TOOLS) - set(READ_TOOLS) - set(WRITE_TOOLS))
     if unknown_tools:
         errors.append(
@@ -40,8 +25,6 @@ def cloud_agent_configuration_check(app_configs, **kwargs):
                 id="cloud_agent.E005",
             )
         )
-    if len(settings.CLOUD_AGENT_MODEL) > 128:
-        errors.append(Error("CLOUD_AGENT_MODEL must not exceed 128 characters", id="cloud_agent.E006"))
     if not (
         0
         < settings.CLOUD_AGENT_EXECUTION_TIMEOUT_SECONDS

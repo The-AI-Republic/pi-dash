@@ -1,23 +1,20 @@
-"""Instance-owned model provider seam for the Cloud Agent."""
+"""Model resolution seam for the Cloud Agent.
 
-from django.conf import settings
+The Cloud Agent has no platform model config of its own: every run
+executes against its creator's BYOK LLM config — the same per-user
+``UserLLMConfig`` (and the same pydantic-ai model construction, key
+decryption cache, and SSRF guard) that Pi Dash AI uses. One config, one
+resolution path, two runtime instances.
+"""
 
 
-def resolve_cloud_model():
-    provider = settings.CLOUD_AGENT_MODEL_PROVIDER.lower()
-    model_name = settings.CLOUD_AGENT_MODEL
-    api_key = settings.CLOUD_AGENT_MODEL_API_KEY
-    if provider == "anthropic":
-        from pydantic_ai.models.anthropic import AnthropicModel
-        from pydantic_ai.providers.anthropic import AnthropicProvider
+def resolve_model_for_creator(run):
+    """Return a pydantic-ai model built from ``run.created_by``'s BYOK config.
 
-        return AnthropicModel(model_name, provider=AnthropicProvider(api_key=api_key))
-    if provider == "openai":
-        from pydantic_ai.models.openai import OpenAIChatModel
-        from pydantic_ai.providers.openai import OpenAIProvider
+    Raises :class:`pi_dash.assistant.errors.LLMConfigMissing` when the
+    creator has no usable config; callers surface that as a run failure
+    with the ``llm_config_missing`` code.
+    """
+    from pi_dash.assistant.runtime.llm import resolve_byok_model
 
-        kwargs = {"api_key": api_key}
-        if settings.CLOUD_AGENT_MODEL_BASE_URL:
-            kwargs["base_url"] = settings.CLOUD_AGENT_MODEL_BASE_URL
-        return OpenAIChatModel(model_name, provider=OpenAIProvider(**kwargs))
-    raise ValueError("CLOUD_AGENT_MODEL_PROVIDER must be openai or anthropic")
+    return resolve_byok_model(run.created_by)

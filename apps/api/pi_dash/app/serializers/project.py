@@ -35,7 +35,9 @@ class ProjectSerializer(BaseSerializer):
     def get_agent_executor_options(self, project):
         from pi_dash.core.agent_execution import agent_executor_options
 
-        return agent_executor_options(project)
+        request = self.context.get("request")
+        user = getattr(request, "user", None) if request else None
+        return agent_executor_options(project, user=user if user and user.is_authenticated else None)
 
     class Meta:
         model = Project
@@ -145,7 +147,9 @@ class ProjectListSerializer(DynamicBaseSerializer):
     def get_agent_executor_options(self, project):
         from pi_dash.core.agent_execution import agent_executor_options
 
-        return agent_executor_options(project)
+        request = self.context.get("request")
+        user = getattr(request, "user", None) if request else None
+        return agent_executor_options(project, user=user if user and user.is_authenticated else None)
 
     def get_members(self, obj):
         project_members = getattr(obj, "members_list", None)
@@ -177,7 +181,9 @@ class ProjectDetailSerializer(BaseSerializer):
     def get_agent_executor_options(self, project):
         from pi_dash.core.agent_execution import agent_executor_options
 
-        return agent_executor_options(project)
+        request = self.context.get("request")
+        user = getattr(request, "user", None) if request else None
+        return agent_executor_options(project, user=user if user and user.is_authenticated else None)
 
     class Meta:
         model = Project

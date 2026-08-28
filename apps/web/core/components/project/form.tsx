@@ -477,7 +477,9 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                     <p>{t("Pi Dash Cloud Agent")}</p>
                     <p className="text-11 text-placeholder">
                       {cloudExecutorOption?.available === false
-                        ? t("Unavailable on this instance. Ask an administrator to configure the Cloud Agent.")
+                        ? cloudExecutorOption.reason_code === "llm_config_missing"
+                          ? t("Configure your AI provider in Pi Dash AI settings to use the Cloud Agent.")
+                          : t("Unavailable on this instance. Ask an administrator to enable the Cloud Agent.")
                         : t("Works out of the box with project and connected GitHub tools; no filesystem or shell.")}
                     </p>
                   </div>

@@ -20,7 +20,17 @@ def execution_fields(
     executor = resolve_executor_kind(project=project)
     if executor == AgentExecutorKind.CLOUD_AGENT:
         from pi_dash.cloud_agent.admission import CloudAgentAdmissionError, enforce_creation_rate
+        from pi_dash.cloud_agent.policy import CloudAgentUnavailable
+        from pi_dash.core.agent_execution import user_has_llm_config
         from pi_dash.db.models import Workspace
+
+        # Cloud runs execute against the creator's BYOK LLM config (the same
+        # per-user config Pi Dash AI uses); a run without a funded principal
+        # can never start, so refuse it here with an actionable reason.
+        if not user_has_llm_config(actor):
+            raise CloudAgentUnavailable(
+                "The run creator has no AI provider configured. Configure one in Pi Dash AI settings."
+            )
 
         admission_error = None
         try:

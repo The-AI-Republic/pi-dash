@@ -91,9 +91,6 @@ _RESOLVER_CONFIG = {
     "LLM_PROVIDER": {"source": "db", "default": "openai"},
     "LLM_MODEL": {"source": "db", "default": "gpt-4o-mini"},
     "GPT_ENGINE": {"source": "db", "default": "gpt-3.5-turbo"},  # deprecated, use LLM_MODEL
-    # Platform-owned Cloud Agent credentials are deployment secrets, never
-    # tenant/admin-editable database settings.
-    "CLOUD_AGENT_MODEL_API_KEY": {"source": "env", "default": None, "secret": True},
     # --- Misc -------------------------------------------------------------
     "UNSPLASH_ACCESS_KEY": {"source": "db", "default": "", "secret": True},
     # Read by the instances endpoint from the env only (never seeded to DB).
@@ -203,9 +200,6 @@ _ENV_INFRA = {
     "CLOUD_AGENT_WRITES_ENABLED": "false",
     "CLOUD_AGENT_GITHUB_TOOLS_ENABLED": "true",
     "CLOUD_AGENT_DISABLED_TOOLS": "",
-    "CLOUD_AGENT_MODEL_PROVIDER": "",
-    "CLOUD_AGENT_MODEL": "",
-    "CLOUD_AGENT_MODEL_BASE_URL": "",
     "CLOUD_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS": 60,
     "CLOUD_AGENT_EXECUTION_TIMEOUT_SECONDS": 285,
     "CLOUD_AGENT_RUN_SOFT_LIMIT_SECONDS": 300,

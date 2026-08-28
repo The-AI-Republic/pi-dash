@@ -1012,15 +1012,16 @@ imports only the EE seam, exactly as the assistant imports
 - Provider credentials never enter `AgentRun`, `AgentRunEvent`, Redis, model
   prompts, or MCP headers.
 
-User BYOK may be added later as an explicit billing choice, but it is not the
-definition of the default Cloud Agent.
-
-Supported CE provider values are exactly `openai` and `anthropic`, matching the
-already installed PydanticAI extras. `CLOUD_AGENT_MODEL_API_KEY` is required
-when enabled; `CLOUD_AGENT_MODEL_BASE_URL` is optional and operator-only. An
-unknown provider or missing provider/model/key fails the Django system check
-when `DEFAULT_AGENT_EXECUTOR=cloud_agent` and reports Cloud as unavailable when
-the feature is merely enabled for opt-in testing.
+DECISION UPDATE: the Cloud Agent has no platform model config. Every run
+executes against its creator's BYOK LLM config — the same per-user
+`UserLLMConfig` (provider, model, encrypted key, SSRF-guarded base URL) that
+Pi Dash AI uses, resolved through the assistant's `resolve_byok_model`. One
+LLM config powers both; there is no second, instance-level credential.
+`CLOUD_AGENT_ENABLED` remains the operator kill switch. A run whose creator
+has no usable config is refused at creation (`llm_config_missing` /
+CloudAgentUnavailable), and the same check re-runs in the worker before model
+resolution. The scheduler's cloud execution-principal selection also requires
+a candidate with a usable config.
 
 ## 10. Tool architecture
 
@@ -1787,9 +1788,6 @@ the launch profile, not examples:
 | `CLOUD_AGENT_WRITES_ENABLED`                     |        `false` | Enables only the four first-party writes in §10.1              |
 | `CLOUD_AGENT_GITHUB_TOOLS_ENABLED`               |         `true` | GitHub MCP catalog switch; relevant only when Cloud is enabled |
 | `CLOUD_AGENT_DISABLED_TOOLS`                     |           `[]` | Validated list of exact version-1 public tool names            |
-| `CLOUD_AGENT_MODEL_PROVIDER`                     |          empty | `openai` or `anthropic`                                        |
-| `CLOUD_AGENT_MODEL`                              |          empty | One operator-selected model name, maximum 128 chars            |
-| `CLOUD_AGENT_MODEL_BASE_URL`                     |          empty | Optional operator-owned HTTPS endpoint; never user input       |
 | `CLOUD_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS`      |           `60` | Per provider request                                           |
 | `CLOUD_AGENT_EXECUTION_TIMEOUT_SECONDS`          |          `285` | Whole model/tool loop; below Celery soft limit                 |
 | `CLOUD_AGENT_RUN_SOFT_LIMIT_SECONDS`             |          `300` | Celery soft limit                                              |
@@ -1819,8 +1817,8 @@ the launch profile, not examples:
 | `CLOUD_AGENT_MAX_EVENTS`                         |          `500` | Includes truncation and terminal events                        |
 | `CLOUD_AGENT_BLOCK_PRIVATE_URLS`                 |         `true` | Applies when remote MCP is introduced                          |
 
-`CLOUD_AGENT_MODEL_API_KEY` is a secret environment/deployment-secret value and
-is intentionally absent from the ordinary database settings registry. Cloud/EE
+There is no platform model credential: runs use each creator's BYOK key,
+stored encrypted on `UserLLMConfig` exactly as for Pi Dash AI. Cloud/EE
 overlays may reduce limits or deny admission by plan, but may not raise past
 operator hard caps without explicit operator configuration. OSS/CE has no
 billing-plan dependency: configured instances use the table limits directly.
