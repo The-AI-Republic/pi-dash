@@ -58,11 +58,18 @@ and "Ending the run"):
   they've seen the review, or a separate supporting process does. (Review
   ticking is bounded; once it's exhausted the issue simply stays In Review.
   If a later tick finds nothing has changed, emit a **noop** and exit
-  without moving state.)
+  without moving state — see the noop rule below: update the workpad if
+  needed, but do **not** post a thread comment.)
 - **changes needed** — real issues found that you could not auto-fix and
   that need human attention. Follow "Blocking the run" (post the summary
   comment, move to "Blocked" if the project has that state).
 - **clarification** — a clarifying question for the human. Follow
   "Blocking the run".
-- **noop** — nothing has changed since your last review pass. Post a short
-  noop comment and exit without moving state.
+- **noop** — nothing has changed since your last review pass. Update the
+  workpad if there is anything new to record, then exit without moving
+  state. **Do not post a thread comment.** A tick that found nothing to do
+  is not worth a comment — "Review tick (N/M) — noop, nothing changed"
+  clutters the human's thread with noise and buries the comments that
+  matter. Comment only when you have something a human actually needs to
+  see (a finding, a question, a result); silence is the correct signal for
+  "nothing changed."

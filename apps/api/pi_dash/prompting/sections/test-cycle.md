@@ -150,7 +150,9 @@ and "Ending the run"):
   to Done — a human closes it once they've seen the results, or a separate
   supporting process does. (Test ticking is bounded; once it's exhausted
   the issue simply stays In Test. If a later tick finds nothing has
-  changed, emit a **noop** and exit without moving state.)
+  changed, emit a **noop** and exit without moving state — see the noop
+  rule below: update the workpad if needed, but do **not** post a thread
+  comment.)
 - **blocked** — real defects that need a human/dev, **or** the test could
   not be run (missing env / creds / tooling — e.g. no browser for a UI
   kind). Follow "Blocking the run" (post the results comment, move to
@@ -158,5 +160,11 @@ and "Ending the run"):
 - **paused** — the acceptance criteria are ambiguous or absent and the
   deliverable is high-stakes: a clarifying question for the human. Follow
   "Blocking the run".
-- **noop** — nothing has changed since your last test pass. Post a short
-  noop comment and exit without moving state.
+- **noop** — nothing has changed since your last test pass. Update the
+  workpad if there is anything new to record, then exit without moving
+  state. **Do not post a thread comment.** A tick that found nothing to do
+  is not worth a comment — "Test tick (N/M) — noop, nothing changed"
+  clutters the human's thread with noise and buries the comments that
+  matter. Comment only when you have something a human actually needs to
+  see (a defect, a question, a result); silence is the correct signal for
+  "nothing changed."
