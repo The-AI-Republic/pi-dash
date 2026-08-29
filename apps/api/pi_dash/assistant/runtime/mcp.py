@@ -62,11 +62,15 @@ class ResilientToolset(WrapperToolset):
     silently vanished.
     """
 
-    def __init__(self, wrapped, *, name: str) -> None:
+    def __init__(self, wrapped, *, name: str, prefix: str = "") -> None:
         super().__init__(wrapped)
         self._server_name = name
         self._entered = False
         self.failure: str | None = None
+        # The tool prefix assigned to this server for the run. Carried on the
+        # outermost wrapper because that is the object callers hold — the
+        # prefixing wrapper underneath doesn't surface it.
+        self.prefix = prefix
 
     @property
     def server_name(self) -> str:
@@ -141,7 +145,7 @@ def build_toolset(
     if tool_prefix:
         toolset = toolset.prefixed(tool_prefix)
     # Outermost, so it also absorbs failures raised by the prefix wrapper.
-    return ResilientToolset(toolset, name=server_name or url)
+    return ResilientToolset(toolset, name=server_name or url, prefix=tool_prefix or "")
 
 
 def _unique_prefixes(servers: list[AssistantMCPServer]) -> dict:

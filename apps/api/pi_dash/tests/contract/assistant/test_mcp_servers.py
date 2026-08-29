@@ -257,12 +257,26 @@ def test_a_server_without_an_auth_header_sends_none(world, monkeypatch):
     assert seen["auth_header"] is None
 
 
-def test_a_blocked_url_is_skipped_without_taking_down_the_others(world, settings):
+def test_a_blocked_url_is_skipped_without_taking_down_the_others(world, settings, monkeypatch):
     # The failure mode this guards: one bad row silently costing the user every
     # tool, or worse, failing the whole turn.
     settings.ASSISTANT_BLOCK_PRIVATE_URLS = True
     make_server(world.member, name="Good", url="https://good.example.com/mcp")
     make_server(world.member, name="Internal", url="http://127.0.0.1:9000/mcp")
+
+    # Pin DNS: the guard resolves hostnames, and this test must not depend on
+    # what the CI network resolves (good.example.com has no real A record, and
+    # an unresolvable host is treated as blocked).
+    from pi_dash.assistant import ssrf
+
+    def fake_getaddrinfo(host, _port):
+        # NB: the RFC 5737 documentation ranges (203.0.113.0/24 etc.) count as
+        # *private* to ipaddress.is_private, so a genuinely public unicast
+        # address is required here.
+        ip = "127.0.0.1" if host == "127.0.0.1" else "8.8.8.8"
+        return [(None, None, None, None, (ip, 0))]
+
+    monkeypatch.setattr(ssrf.socket, "getaddrinfo", fake_getaddrinfo)
 
     toolsets, skipped = mcp_runtime.build_toolsets(world.member)
     assert len(toolsets) == 1
@@ -386,3 +400,64 @@ def test_prefix_assignment_is_stable_for_unchanged_servers(world):
     first = [t.wrapped.prefix for t in mcp_runtime.build_toolsets(world.member)[0]]
     second = [t.wrapped.prefix for t in mcp_runtime.build_toolsets(world.member)[0]]
     assert first == second
+
+
+# --------------------------------------------------------------------------- #
+# Review fixes: race-safe create, error classification, resolver blow-up
+# --------------------------------------------------------------------------- #
+
+
+def test_a_create_race_on_the_name_returns_400_not_500(world, monkeypatch):
+    # The pre-check can pass for two concurrent creates; the unique constraint
+    # then rejects the loser. That must surface as the same 400 the pre-check
+    # would have produced, not a 500.
+    from django.db import IntegrityError
+
+    def boom(self, *args, **kwargs):
+        raise IntegrityError("duplicate key value violates unique constraint")
+
+    monkeypatch.setattr(AssistantMCPServer, "save", boom)
+    res = client_for(world.member).post(
+        URL, {"name": "Raced", "url": "https://raced.example.com/mcp"}, format="json"
+    )
+    assert res.status_code == 400
+    assert res.data["error"] == "duplicate_name"
+
+
+def test_out_of_credit_is_classified_by_status_code_not_substring():
+    from pi_dash.assistant.tasks import _classify_error
+
+    class Provider402(Exception):
+        status_code = 402
+
+    code, _ = _classify_error(Provider402("Payment Required"))
+    assert code == "provider_out_of_credit"
+
+    # "402" appearing inside a request id must not trip the credit branch.
+    code, _ = _classify_error(Exception("connection reset, request id req_a402bfe9"))
+    assert code != "provider_out_of_credit"
+
+    code, _ = _classify_error(Exception("Error code: insufficient_credits"))
+    assert code == "provider_out_of_credit"
+
+
+def test_a_resolver_blow_up_still_tells_the_user(monkeypatch):
+    # Per-server failures emit tool_servers_skipped; the total-failure branch
+    # must not be the one silent case.
+    from types import SimpleNamespace
+
+    from pi_dash.assistant import tasks as assistant_tasks
+
+    emitted = []
+    monkeypatch.setattr(
+        assistant_tasks, "_emit_skipped", lambda ctx, servers: emitted.append(servers)
+    )
+
+    def exploding_resolver(user):
+        raise RuntimeError("resolver dead")
+
+    ctx = SimpleNamespace(user=None, thread=None, turn=None)
+    toolsets, skipped = assistant_tasks._resolve_toolsets(ctx, exploding_resolver)
+    assert toolsets == []
+    assert skipped == []
+    assert emitted == [[{"name": "all tool servers", "reason": "toolsets_unavailable"}]]

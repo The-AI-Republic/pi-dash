@@ -361,6 +361,10 @@ def _resolve_toolsets(ctx, resolver) -> tuple[list, list]:
         toolsets, skipped = resolver(ctx.user)
     except Exception:  # noqa: BLE001 — tools are additive; never fail the turn
         logger.exception("resolving assistant toolsets failed")
+        # The one case where *every* tool server vanishes must not also be
+        # the one case that says nothing — that would invert the per-server
+        # skipped reporting below.
+        _emit_skipped(ctx, [{"name": "all tool servers", "reason": "toolsets_unavailable"}])
         return [], []
 
     _emit_skipped(ctx, [{"name": s.name, "reason": s.reason} for s in skipped])
@@ -423,10 +427,15 @@ def _classify_error(exc: Exception) -> tuple[str, str]:
     # providers (OpenRouter, and any metered gateway) answer 402 rather than
     # 401 for it. Without this it lands in the generic "unexpected error"
     # bucket, which tells the user nothing about what to do.
-    if any(
+    #
+    # The status code is read from the exception, never substring-matched:
+    # "402" appears in request ids and token counts, so matching it in the
+    # message text misclassifies unrelated errors. The remaining markers are
+    # provider error *codes* and phrases specific enough to trust.
+    if getattr(exc, "status_code", None) == 402 or any(
         s in text
-        for s in ("402", "payment required", "insufficient_credits", "insufficient credits",
-                  "no_credit_account", "quota exceeded", "billing")
+        for s in ("payment required", "insufficient_credits", "insufficient credits",
+                  "no_credit_account", "quota exceeded")
     ):
         return "provider_out_of_credit", "The provider rejected the request for lack of credit."
     if any(s in text for s in ("401", "unauthorized", "api key", "authentication", "invalid_api_key")):

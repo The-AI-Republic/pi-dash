@@ -11,6 +11,7 @@ echoed back, only its presence (``has_auth_header``).
 
 from __future__ import annotations
 
+from django.db import IntegrityError
 from rest_framework import status
 from rest_framework.response import Response
 
@@ -83,7 +84,13 @@ class AssistantMCPServerListCreateEndpoint(BaseAPIView):
         error = _apply_auth_header(server, data.get("auth_header"))
         if error is not None:
             return error
-        server.save()
+        try:
+            server.save()
+        except IntegrityError:
+            # Concurrent create with the same name: the pre-check above raced.
+            # The unique constraint is the authority; answer as the pre-check
+            # would have.
+            return _duplicate_name_response()
         return Response(_serialize(server), status=status.HTTP_201_CREATED)
 
 
@@ -118,7 +125,10 @@ class AssistantMCPServerDetailEndpoint(BaseAPIView):
         error = _apply_auth_header(server, data.get("auth_header"))
         if error is not None:
             return error
-        server.save()
+        try:
+            server.save()
+        except IntegrityError:
+            return _duplicate_name_response()
         return Response(_serialize(server))
 
     def delete(self, request, server_id):
