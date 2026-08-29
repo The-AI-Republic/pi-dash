@@ -213,14 +213,19 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
     if not reaped and not stopped_cancel_ids:
         return
 
-    AgentRun.objects.filter(id__in=[rid for rid, _ in reaped]).update(
-        status=AgentRunStatus.FAILED,
-        ended_at=now,
-        error=(
-            "reaped by heartbeat: runner reported in_flight_run="
-            f"{in_flight_id or '(none)'} but cloud had this run marked busy"
-        ),
+    from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+    detail = (
+        "reaped by heartbeat: runner reported in_flight_run="
+        f"{in_flight_id or '(none)'} but cloud had this run marked busy"
     )
+    for run_id, _ in reaped:
+        finalize_agent_run(
+            run_id,
+            AgentRunStatus.FAILED,
+            updates={"error": detail, "error_code": "heartbeat_reaped"},
+            expected_runner_id=runner.id,
+        )
     pod_ids = {pid for _, pid in reaped if pid is not None}
     pod_ids.update(pid for pid in stopped_cancel_pod_ids if pid is not None)
     runner_id = runner.id

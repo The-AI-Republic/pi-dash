@@ -5,7 +5,7 @@
  */
 
 import type { TIssuePriorities } from "../issues";
-import type { IAgentRunErrorDiagnostic, IRunnerLiveState, TAgentRunStatus } from "../runner";
+import type { IAgentRunErrorDiagnostic, IRunnerLiveState, TAgentExecutorKind, TAgentRunStatus } from "../runner";
 import type { TStateGroups } from "../state";
 import type { TIssuePublicComment } from "./activity/issue_comment";
 import type { TIssueAttachment } from "./issue_attachment";
@@ -69,6 +69,11 @@ export type TBaseIssue = {
   // the project's default pod, resolved server-side. Reassignment is rejected
   // by the backend once the issue has an active run.
   assigned_pod_id?: string | null;
+  // Per-issue execution-target override. Null inherits the project's
+  // `default_agent_executor`. "local_runner" routes to `assigned_pod_id`;
+  // "cloud_agent" has no pod. Changing it is rejected by the backend once the
+  // issue has an active run, same as the pod.
+  agent_executor?: "local_runner" | "cloud_agent" | null;
 
   created_at: string;
   updated_at: string;
@@ -123,6 +128,7 @@ export type TIssueAgentTicker = {
 export type TIssueAgentRunSummary = {
   id: string;
   status: TAgentRunStatus;
+  executor_kind: TAgentExecutorKind;
   runner: string | null;
   runner_name: string | null;
   created_at: string;
@@ -131,6 +137,7 @@ export type TIssueAgentRunSummary = {
   ended_at: string | null;
   done_payload: Record<string, unknown> | null;
   error: string;
+  error_code: string;
   error_diagnostic: IAgentRunErrorDiagnostic | null;
   llm_model: string;
   input_tokens: number | null;

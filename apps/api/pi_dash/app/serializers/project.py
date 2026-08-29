@@ -30,6 +30,14 @@ from pi_dash.utils.content_validator import (
 class ProjectSerializer(BaseSerializer):
     workspace_detail = WorkspaceLiteSerializer(source="workspace", read_only=True)
     inbox_view = serializers.BooleanField(read_only=True, source="intake_view")
+    agent_executor_options = serializers.SerializerMethodField()
+
+    def get_agent_executor_options(self, project):
+        from pi_dash.core.agent_execution import agent_executor_options
+
+        request = self.context.get("request")
+        user = getattr(request, "user", None) if request else None
+        return agent_executor_options(project, user=user if user and user.is_authenticated else None)
 
     class Meta:
         model = Project
@@ -75,6 +83,13 @@ class ProjectSerializer(BaseSerializer):
         return identifier
 
     def validate(self, data):
+        if data.get("default_agent_executor") == "cloud_agent":
+            from pi_dash.core.agent_execution import cloud_agent_is_configured
+
+            if not cloud_agent_is_configured():
+                from pi_dash.cloud_agent.api import CloudAgentUnavailableAPI
+
+                raise CloudAgentUnavailableAPI()
         if self.instance and self.instance.is_default and data.get("is_default") is False:
             raise serializers.ValidationError(
                 "Default project cannot be unset without assigning another default project."
@@ -127,6 +142,14 @@ class ProjectListSerializer(DynamicBaseSerializer):
     cover_image_url = serializers.CharField(read_only=True)
     inbox_view = serializers.BooleanField(read_only=True, source="intake_view")
     next_work_item_sequence = serializers.SerializerMethodField()
+    agent_executor_options = serializers.SerializerMethodField()
+
+    def get_agent_executor_options(self, project):
+        from pi_dash.core.agent_execution import agent_executor_options
+
+        request = self.context.get("request")
+        user = getattr(request, "user", None) if request else None
+        return agent_executor_options(project, user=user if user and user.is_authenticated else None)
 
     def get_members(self, obj):
         project_members = getattr(obj, "members_list", None)
@@ -153,6 +176,14 @@ class ProjectDetailSerializer(BaseSerializer):
     sort_order = serializers.FloatField(read_only=True)
     member_role = serializers.IntegerField(read_only=True)
     anchor = serializers.CharField(read_only=True)
+    agent_executor_options = serializers.SerializerMethodField()
+
+    def get_agent_executor_options(self, project):
+        from pi_dash.core.agent_execution import agent_executor_options
+
+        request = self.context.get("request")
+        user = getattr(request, "user", None) if request else None
+        return agent_executor_options(project, user=user if user and user.is_authenticated else None)
 
     class Meta:
         model = Project

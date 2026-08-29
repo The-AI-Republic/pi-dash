@@ -23,7 +23,9 @@ from __future__ import annotations
 #: ``SCHEDULER`` is the project-scoped kind unified onto the composer.
 KIND_CODING_TASK = "coding-task"
 KIND_REVIEW = "review"
+KIND_TEST = "test"
 KIND_SCHEDULER = "scheduler"
+KIND_DIRECT = "direct"
 
 RECIPES: dict[str, tuple[str, ...]] = {
     KIND_CODING_TASK: (
@@ -49,6 +51,14 @@ RECIPES: dict[str, tuple[str, ...]] = {
         "guardrails",
         "ending-run",
     ),
+    KIND_TEST: (
+        "test-intro",
+        "session-framing",
+        "pidash-cli",
+        "test-cycle",
+        "guardrails",
+        "ending-run",
+    ),
     KIND_SCHEDULER: (
         "scheduler-intro",
         "session-framing",
@@ -56,6 +66,51 @@ RECIPES: dict[str, tuple[str, ...]] = {
         "scheduler-task",
         "guardrails",
         "scheduler-ending",
+    ),
+}
+
+# Locked executor-owned recipes. They deliberately share no local Runner
+# section, preventing CLI/filesystem instructions from entering Cloud prompts.
+CLOUD_RECIPES: dict[str, tuple[str, ...]] = {
+    KIND_CODING_TASK: (
+        "cloud-intro",
+        "cloud-capabilities",
+        "cloud-issue-context",
+        "cloud-execution-loop",
+        "cloud-write-policy",
+        "cloud-ending",
+    ),
+    KIND_REVIEW: (
+        "cloud-review-intro",
+        "cloud-capabilities",
+        "cloud-issue-context",
+        "cloud-review-loop",
+        "cloud-write-policy",
+        "cloud-ending",
+    ),
+    KIND_TEST: (
+        "cloud-test-intro",
+        "cloud-capabilities",
+        "cloud-issue-context",
+        "cloud-test-loop",
+        "cloud-write-policy",
+        "cloud-ending",
+    ),
+    KIND_SCHEDULER: (
+        "cloud-scheduler-intro",
+        "cloud-capabilities",
+        "cloud-scheduler-task",
+        "cloud-scheduler-loop",
+        "cloud-write-policy",
+        "cloud-ending",
+    ),
+    KIND_DIRECT: (
+        "cloud-intro",
+        "cloud-capabilities",
+        "cloud-direct-task",
+        "cloud-execution-loop",
+        "cloud-write-policy",
+        "cloud-ending",
     ),
 }
 
@@ -88,6 +143,13 @@ def recipe_for(kind: str) -> tuple[str, ...]:
         return RECIPES[kind]
     except KeyError as exc:
         raise RecipeNotFound(f"no recipe for kind {kind!r}") from exc
+
+
+def cloud_recipe_for(kind: str) -> tuple[str, ...]:
+    try:
+        return CLOUD_RECIPES[kind]
+    except KeyError as exc:
+        raise RecipeNotFound(f"no Cloud Agent recipe for kind {kind!r}") from exc
 
 
 def all_kinds() -> tuple[str, ...]:

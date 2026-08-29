@@ -22,11 +22,18 @@ import {
   ParentPropertyIcon,
 } from "@pi-dash/propel/icons";
 import { cn, getDate, renderFormattedPayloadDate, shouldHighlightIssueDueDate } from "@pi-dash/utils";
+import { Container } from "lucide-react";
 // components
 import { DateDropdown } from "@/components/dropdowns/date";
 import { EstimateDropdown } from "@/components/dropdowns/estimate";
 import { ButtonAvatars } from "@/components/dropdowns/member/avatar";
 import { MemberDropdown } from "@/components/dropdowns/member/dropdown";
+import { PodDropdown } from "@/components/dropdowns/pod/dropdown";
+import {
+  cloudAgentOption,
+  executionTargetPatch,
+  executionTargetValue,
+} from "@/components/dropdowns/pod/execution-target";
 import { PriorityDropdown } from "@/components/dropdowns/priority";
 import { StateDropdown } from "@/components/dropdowns/state/dropdown";
 import { SidebarPropertyListItem } from "@/components/common/layout/sidebar/property-list-item";
@@ -116,6 +123,22 @@ export const PeekOverviewProperties = observer(function PeekOverviewProperties(p
             />
           </SidebarPropertyListItem>
 
+          <SidebarPropertyListItem icon={Container} label={t("Runs on")}>
+            <PodDropdown
+              value={executionTargetValue(issue, projectDetails)}
+              onChange={(val) => issueOperations.update(workspaceSlug, projectId, issueId, executionTargetPatch(val))}
+              cloudAgent={cloudAgentOption(projectDetails)}
+              disabled={disabled}
+              projectId={projectId}
+              buttonVariant="transparent-with-text"
+              className="group w-full grow"
+              buttonContainerClassName="w-full text-left h-7.5"
+              buttonClassName={`text-body-xs-medium ${executionTargetValue(issue, projectDetails) ? "" : "text-placeholder"}`}
+              dropdownArrow
+              dropdownArrowClassName="h-3.5 w-3.5 hidden group-hover:inline"
+            />
+          </SidebarPropertyListItem>
+
           <SidebarPropertyListItem icon={PriorityPropertyIcon} label={t("Priority")}>
             <PriorityDropdown
               value={issue?.priority}
@@ -129,11 +152,7 @@ export const PeekOverviewProperties = observer(function PeekOverviewProperties(p
           </SidebarPropertyListItem>
 
           {createdByDetails && (
-            <SidebarPropertyListItem
-              icon={UserCirclePropertyIcon}
-              label={t("Created by")}
-              childrenClassName="px-2"
-            >
+            <SidebarPropertyListItem icon={UserCirclePropertyIcon} label={t("Created by")} childrenClassName="px-2">
               <ButtonAvatars
                 showTooltip
                 userIds={createdByDetails?.display_name.includes("-intake") ? null : createdByDetails?.id}

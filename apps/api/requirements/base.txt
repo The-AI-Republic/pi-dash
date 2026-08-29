@@ -39,7 +39,9 @@ django-crum==0.7.9
 # `/ws/runner/` 404s through the HTTP URL router), plus httptools, uvloop,
 # and watchfiles (so `--reload` uses the efficient watcher instead of the
 # legacy stat-polling fallback).
-uvicorn[standard]==0.29.0
+# Floor set by fastmcp 3.4.4 (requires uvicorn>=0.35); 0.52 still ships the
+# `uvicorn.workers.UvicornWorker` shim the gunicorn entrypoint uses.
+uvicorn[standard]==0.52.4
 # sockets
 channels==4.1.0
 channels-redis==4.2.0
@@ -50,7 +52,8 @@ channels-redis==4.2.0
 openai==2.29.0
 # AI assistant agent runtime. Must be >= the release containing pydantic-ai
 # PR #4421 (per-instance httpx client) for asyncio.run-per-Celery-task safety.
-pydantic-ai-slim[openai,anthropic]==1.107.0
+pydantic-ai-slim[openai,anthropic,mcp]==1.107.0
+fastmcp==3.4.4
 # slack
 slack-sdk==3.27.1
 # apm

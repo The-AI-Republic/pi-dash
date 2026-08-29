@@ -11,6 +11,7 @@ from pi_dash.runner.models import (
     AgentChatMessage,
     AgentChatSession,
     AgentRun,
+    AgentRunToolCall,
     AgentRunEvent,
     ApprovalRequest,
     DevMachine,
@@ -229,9 +230,29 @@ class RunnerEnrollRequestSerializer(serializers.Serializer):
     version = serializers.CharField(max_length=32, allow_blank=True, default="")
 
 
+class AgentRunToolCallSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AgentRunToolCall
+        fields = [
+            "id",
+            "tool_call_id",
+            "source",
+            "server_key",
+            "tool_name",
+            "risk",
+            "status",
+            "error_code",
+            "prepared_at",
+            "submitted_at",
+            "completed_at",
+        ]
+        read_only_fields = fields
+
+
 class AgentRunSerializer(serializers.ModelSerializer):
     pod_detail = PodMiniSerializer(source="pod", read_only=True)
     error_diagnostic = serializers.SerializerMethodField()
+    tool_calls = AgentRunToolCallSerializer(many=True, read_only=True)
 
     def get_error_diagnostic(self, run: AgentRun):
         # Only the per-run detail drawer renders this block. Skip the
@@ -247,6 +268,10 @@ class AgentRunSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "status",
+            "executor_kind",
+            "dispatch_attempts",
+            "cancel_requested_at",
+            "cancel_reason",
             "prompt",
             "thread_id",
             "runner",
@@ -262,12 +287,15 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "ended_at",
             "done_payload",
             "error",
+            "error_code",
             "error_diagnostic",
             "refusal_category",
             "llm_model",
             "input_tokens",
             "output_tokens",
             "total_tokens",
+            "tool_plan",
+            "tool_calls",
         ]
         read_only_fields = fields
 

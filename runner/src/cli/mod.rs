@@ -190,7 +190,6 @@ async fn run_default(paths: &crate::util::paths::Paths) -> Result<()> {
             command: auth::AuthCommand::Login(auth::login::Args {
                 url: None,
                 no_browser: false,
-                no_runner_prompt: false,
                 workspace: None,
             }),
         };

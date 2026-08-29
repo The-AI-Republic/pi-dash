@@ -415,7 +415,6 @@ async fn ensure_cli_token(
         crate::cli::auth::login::Args {
             url: cloud_url.map(|u| u.trim_end_matches('/').to_string()),
             no_browser: !std::io::stderr().is_terminal() && !std::io::stdin().is_terminal(),
-            no_runner_prompt: true,
             workspace: workspace.map(str::to_string),
         },
         paths,

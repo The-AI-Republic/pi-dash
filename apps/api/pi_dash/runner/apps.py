@@ -15,3 +15,4 @@ class RunnerConfig(AppConfig):
         # Import for side effects: registers post_save(Project) handler that
         # auto-creates a default pod per new project. See runner/signals.py.
         from pi_dash.runner import signals  # noqa: F401
+        from pi_dash.cloud_agent import checks  # noqa: F401

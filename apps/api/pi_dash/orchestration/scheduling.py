@@ -61,6 +61,13 @@ DELEGATION_STATE_NAME = "In Progress"
 # ---------------------------------------------------------------------------
 
 
+def _cadence_fields(issue: Issue):
+    """Return the cadence column pair for the issue's *current* phase."""
+    from pi_dash.orchestration.agent_phases import cadence_fields_for
+
+    return cadence_fields_for(getattr(issue, "state", None))
+
+
 def _project_default_interval(issue: Issue) -> int:
     """Project-level default interval for the issue's *current* phase.
 
@@ -69,31 +76,14 @@ def _project_default_interval(issue: Issue) -> int:
     Subsequent arms read directly from the row's phase-aware
     ``effective_*`` methods.
     """
-    from pi_dash.db.models.state import StateGroup
-
-    project = issue.project
-    state = getattr(issue, "state", None)
-    if state is not None and state.group == StateGroup.REVIEW.value:
-        return getattr(
-            project,
-            "agent_review_default_interval_seconds",
-            DEFAULT_INTERVAL_SECONDS,
-        )
-    return getattr(project, "agent_default_interval_seconds", DEFAULT_INTERVAL_SECONDS)
+    fields = _cadence_fields(issue)
+    return getattr(issue.project, fields.project_interval, fields.default_interval)
 
 
 def _project_default_max_ticks(issue: Issue) -> int:
-    from pi_dash.db.models.state import StateGroup
-
-    project = issue.project
-    state = getattr(issue, "state", None)
-    if state is not None and state.group == StateGroup.REVIEW.value:
-        return getattr(
-            project,
-            "agent_review_default_max_ticks",
-            DEFAULT_MAX_TICKS,
-        )
-    return getattr(project, "agent_default_max_ticks", DEFAULT_MAX_TICKS)
+    """Project-level default cap for the issue's *current* phase."""
+    fields = _cadence_fields(issue)
+    return getattr(issue.project, fields.project_max_ticks, fields.default_max_ticks)
 
 
 def _project_ticking_enabled(issue: Issue) -> bool:
@@ -127,21 +117,17 @@ def arm_ticker(
     suppress_for_project = not _project_ticking_enabled(issue)
 
     with transaction.atomic():
-        sched = (
-            IssueAgentTicker.objects.select_for_update()
-            .filter(issue=issue)
-            .first()
-        )
+        sched = IssueAgentTicker.objects.select_for_update().filter(issue=issue).first()
         if sched is None:
             # Brand-new row. We need a sensible ``next_run_at`` before
             # we can ask for ``effective_interval_seconds`` (which
             # consults the row), so use the project default for the
-            # issue's *current* phase. ``_project_default_interval``
-            # picks the review-phase default when the issue's current
-            # state group is REVIEW (e.g., a Todo → In Review path that
-            # skips the impl phase) and the In Progress default
-            # otherwise. Subsequent arms use the row's phase-aware
-            # ``effective_interval_seconds`` directly.
+            # issue's *current* phase — ``_project_default_interval``
+            # resolves that through the phase registry, so a Todo → In
+            # Review or Todo → In Test path that skips the impl phase
+            # still starts on its own phase's cadence. Subsequent arms
+            # use the row's phase-aware ``effective_interval_seconds``
+            # directly.
             interval = _project_default_interval(issue)
             sched = IssueAgentTicker.objects.create(
                 issue=issue,
@@ -149,6 +135,8 @@ def arm_ticker(
                 max_ticks=None,
                 review_interval_seconds=None,
                 review_max_ticks=None,
+                test_interval_seconds=None,
+                test_max_ticks=None,
                 user_disabled=False,
                 next_run_at=_compute_next_run_at(interval),
                 tick_count=0,
@@ -158,9 +146,7 @@ def arm_ticker(
         else:
             # Existing row — reset clock and re-evaluate enabled.
             sched.tick_count = 0
-            sched.next_run_at = _compute_next_run_at(
-                sched.effective_interval_seconds()
-            )
+            sched.next_run_at = _compute_next_run_at(sched.effective_interval_seconds())
             suppress = sched.user_disabled or suppress_for_project
             sched.enabled = not suppress
             # Re-arming clears any prior disarm cause; if we end up
@@ -223,11 +209,7 @@ def disarm_ticker(
             "to preserve a prior CAP_HIT and the auto-pause it gates."
         )
     with transaction.atomic():
-        sched = (
-            IssueAgentTicker.objects.select_for_update()
-            .filter(issue=issue)
-            .first()
-        )
+        sched = IssueAgentTicker.objects.select_for_update().filter(issue=issue).first()
         if sched is None:
             return None
         # Always update the reason — even when already disabled — so a
@@ -244,12 +226,8 @@ def disarm_ticker(
             sched.disarm_reason = reason
             changed = True
         if changed:
-            sched.save(
-                update_fields=["enabled", "disarm_reason", "updated_at"]
-            )
-    logger.info(
-        "agent_ticker: disarmed issue=%s reason=%s", issue.pk, reason
-    )
+            sched.save(update_fields=["enabled", "disarm_reason", "updated_at"])
+    logger.info("agent_ticker: disarmed issue=%s reason=%s", issue.pk, reason)
     return sched
 
 
@@ -287,11 +265,7 @@ def maybe_disarm_on_terminal_signal(run: AgentRun) -> bool:
         return False
     issue = run.work_item
     with transaction.atomic():
-        sched = (
-            IssueAgentTicker.objects.select_for_update()
-            .filter(issue=issue)
-            .first()
-        )
+        sched = IssueAgentTicker.objects.select_for_update().filter(issue=issue).first()
         if sched is None:
             return False
         # Already disabled — preserve the prior reason. See docstring.
@@ -299,9 +273,7 @@ def maybe_disarm_on_terminal_signal(run: AgentRun) -> bool:
             return False
         sched.enabled = False
         sched.disarm_reason = TickerDisarmReason.TERMINAL_SIGNAL
-        sched.save(
-            update_fields=["enabled", "disarm_reason", "updated_at"]
-        )
+        sched.save(update_fields=["enabled", "disarm_reason", "updated_at"])
     logger.info(
         "agent_ticker: disarmed-on-terminal issue=%s payload_status=%s",
         issue.pk,
@@ -318,11 +290,7 @@ def reset_ticker_after_comment_and_run(issue: Issue) -> Optional[IssueAgentTicke
     ``fire_tick`` (§6.1).
     """
     with transaction.atomic():
-        sched = (
-            IssueAgentTicker.objects.select_for_update()
-            .filter(issue=issue)
-            .first()
-        )
+        sched = IssueAgentTicker.objects.select_for_update().filter(issue=issue).first()
         if sched is None:
             return None
         sched.tick_count = 0
@@ -354,7 +322,7 @@ def re_tick_ticker(issue: Issue) -> dict:
 
     Manual "re-ticking". When a ticker has burned through its budget
     (``cap_reached()``) while the issue is still in a ticking state
-    (In Progress / In Review), the user can re-grant budget so the
+    (In Progress / In Review / In Test), the user can re-grant budget so the
     continuation clock resumes. Unlike
     :func:`reset_ticker_after_comment_and_run` (which zeroes
     ``tick_count``), re-ticking **grows** the cap by one fresh phase
@@ -399,16 +367,12 @@ def re_tick_ticker(issue: Issue) -> dict:
         if locked_issue is None:
             return {"granted": False, "reason": "no_issue", "ticker": None}
 
-        sched = (
-            IssueAgentTicker.objects.select_for_update()
-            .filter(issue=locked_issue)
-            .first()
-        )
+        sched = IssueAgentTicker.objects.select_for_update().filter(issue=locked_issue).first()
         if sched is None:
             return {"granted": False, "reason": "no_ticker", "ticker": None}
         # Bind the freshly-locked issue so phase-aware methods
-        # (``_is_review_phase``/``effective_max_ticks``) resolve against the
-        # current state rather than lazy-loading a fresh copy.
+        # (``_cadence_fields``/``effective_max_ticks``) resolve against
+        # the current state rather than lazy-loading a fresh copy.
         sched.issue = locked_issue
         if not is_ticking_state(locked_issue.state):
             return {"granted": False, "reason": "not_ticking_state", "ticker": sched}
@@ -416,12 +380,13 @@ def re_tick_ticker(issue: Issue) -> dict:
             return {"granted": False, "reason": "budget_not_exhausted", "ticker": sched}
 
         grant = _project_default_max_ticks(locked_issue)
-        review = sched._is_review_phase()
+        # The grant lands on the *current* phase's own override column.
+        # Phases are siblings with independent budgets: extending an In
+        # Test issue must never inflate what In Review gets later, and
+        # vice versa.
+        cap_field = _cadence_fields(locked_issue).ticker_max_ticks
         new_cap = sched.effective_max_ticks() + grant
-        if review:
-            sched.review_max_ticks = new_cap
-        else:
-            sched.max_ticks = new_cap
+        setattr(sched, cap_field, new_cap)
 
         # Re-arm: clear the disarm cause and restart the clock unless the
         # user disabled ticking on this issue or the project suppresses it.
@@ -431,7 +396,7 @@ def re_tick_ticker(issue: Issue) -> dict:
         sched.next_run_at = _compute_next_run_at(sched.effective_interval_seconds())
         sched.save(
             update_fields=[
-                "review_max_ticks" if review else "max_ticks",
+                cap_field,
                 "enabled",
                 "disarm_reason",
                 "next_run_at",
@@ -478,24 +443,51 @@ def _resolve_pod_for_issue(issue: Issue):
 
 
 def _resolve_creator_for_trigger(issue: Issue, *, triggered_by: str, actor=None):
-    """Pick the user who will appear as ``AgentRun.created_by``."""
-    if actor is not None:
-        return actor
-    if triggered_by == TRIGGER_TICK:
-        # System-driven; attribute to the agent system bot.
-        from pi_dash.orchestration.workpad import get_agent_system_user
-        return get_agent_system_user()
-    # Fall back to the issue creator / project lead — same logic the
-    # state-transition path uses.
-    if issue.created_by_id:
-        return issue.created_by
-    project = issue.project
-    return project.project_lead or project.default_assignee
+    """Resolve a current human execution principal; bots never own tool authority."""
+    from pi_dash.core.agent_execution import AgentExecutorKind, effective_executor_for_issue
+
+    if effective_executor_for_issue(issue) == AgentExecutorKind.LOCAL_RUNNER:
+        if actor is not None:
+            return actor
+        if triggered_by == TRIGGER_TICK:
+            from pi_dash.orchestration.workpad import get_agent_system_user
+
+            return get_agent_system_user()
+        return issue.created_by or issue.project.project_lead or issue.project.default_assignee
+
+    from pi_dash.core.permissions import ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER, check_project_role
+
+    if actor is not None and triggered_by != TRIGGER_TICK:
+        candidates = [actor]
+    else:
+        candidates = [issue.created_by, issue.project.project_lead, issue.project.default_assignee]
+        candidates.extend(issue.assignees.all().order_by("id"))
+    from pi_dash.core.agent_execution import user_has_llm_config
+
+    seen = set()
+    for candidate in candidates:
+        candidate_id = getattr(candidate, "id", None)
+        if candidate_id is None or candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+        if not getattr(candidate, "is_active", False) or getattr(candidate, "is_bot", False):
+            continue
+        # Cloud runs execute against the creator's LLM config, so the
+        # execution principal must also hold a usable one (mirrors
+        # dispatch_scheduler_run's candidate filter).
+        if not user_has_llm_config(candidate):
+            continue
+        if check_project_role(
+            candidate,
+            issue.workspace.slug,
+            issue.project_id,
+            [ROLE_ADMIN, ROLE_MEMBER, ROLE_GUEST],
+        ):
+            return candidate
+    return None
 
 
-def preflight_eligibility_or_bounce(
-    issue: Issue, *, run_creator, pod, triggered_by: str
-) -> bool:
+def preflight_eligibility_or_bounce(issue: Issue, *, run_creator, pod, triggered_by: str) -> bool:
     """Return True if dispatch can proceed; False if the issue was bounced.
 
     Companion preflight to the four issue-run dispatch paths. When no
@@ -507,6 +499,25 @@ def preflight_eligibility_or_bounce(
 
     See ``.ai_design/issue_runner/design.md`` §6.6.
     """
+    from pi_dash.core.agent_execution import (
+        AgentExecutorKind,
+        effective_executor_for_issue,
+        user_has_llm_config,
+    )
+
+    # Cloud capacity is independent of registered local machines, but the
+    # execution principal must hold a usable LLM config — otherwise run
+    # creation would raise CloudAgentUnavailable and the tick would be
+    # swallowed with no user-visible signal. Bounce loudly instead.
+    #
+    # Branch on the issue's *effective* executor: an issue pinned to the Cloud
+    # Agent on a local-default project has no pod requirement at all.
+    if effective_executor_for_issue(issue) == AgentExecutorKind.CLOUD_AGENT:
+        if run_creator is not None and user_has_llm_config(run_creator):
+            return True
+        _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by, reason="no-llm-config")
+        return False
+
     from pi_dash.runner.services.matcher import (
         pod_has_runner_for_issue_principal,
     )
@@ -518,7 +529,7 @@ def preflight_eligibility_or_bounce(
     return False
 
 
-def _bounce_issue_no_eligible_runner(issue: Issue, *, triggered_by: str) -> None:
+def _bounce_issue_no_eligible_runner(issue: Issue, *, triggered_by: str, reason: str = "no-eligible-runner") -> None:
     """Move ``issue`` back to Backlog and post the no-eligible-runner notice.
 
     State move fires ``fire_state_transition`` which disarms the ticker as
@@ -547,17 +558,26 @@ def _bounce_issue_no_eligible_runner(issue: Issue, *, triggered_by: str) -> None
     from pi_dash.orchestration.workpad import get_agent_system_user
 
     logger.info(
-        "agent_dispatch: bounce issue=%s reason=no-eligible-runner triggered_by=%s",
+        "agent_dispatch: bounce issue=%s reason=%s triggered_by=%s",
         issue.pk,
+        reason,
         triggered_by,
     )
 
-    body = format_html(
-        "<p><strong>Agent run skipped — no eligible runner.</strong></p>"
-        "<p>No runner is registered in this pod that can serve this issue. "
-        "Add a runner under your account, or assign this issue to a "
-        "workspace member whose runner is registered here.</p>"
-    )
+    if reason == "no-llm-config":
+        body = format_html(
+            "<p><strong>Agent run skipped — no AI provider configured.</strong></p>"
+            "<p>This project uses the Pi Dash Cloud Agent, which runs against "
+            "the triggering user's AI provider. Configure one in Pi Dash AI "
+            "settings, or assign this issue to a member who has one configured.</p>"
+        )
+    else:
+        body = format_html(
+            "<p><strong>Agent run skipped — no eligible runner.</strong></p>"
+            "<p>No runner is registered in this pod that can serve this issue. "
+            "Add a runner under your account, or assign this issue to a "
+            "workspace member whose runner is registered here.</p>"
+        )
 
     with transaction.atomic():
         current_state_group = issue.state.group if issue.state_id else None
@@ -642,15 +662,20 @@ def dispatch_continuation_run(
         )
         return None
 
-    creator = _resolve_creator_for_trigger(
-        issue, triggered_by=triggered_by, actor=actor
-    )
+    creator = _resolve_creator_for_trigger(issue, triggered_by=triggered_by, actor=actor)
     if creator is None:
         logger.warning(
             "agent_ticker: skip dispatch issue=%s reason=no-creator triggered_by=%s",
             issue.pk,
             triggered_by,
         )
+        from pi_dash.core.agent_execution import AgentExecutorKind, effective_executor_for_issue
+
+        if effective_executor_for_issue(issue) == AgentExecutorKind.CLOUD_AGENT:
+            # On a cloud project "no creator" means no candidate holds a
+            # usable LLM config — bounce loudly instead of letting the
+            # ticker fire forever with zero user-visible signal.
+            _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by, reason="no-llm-config")
         return None
 
     pod = _resolve_pod_for_issue(issue)
@@ -662,9 +687,7 @@ def dispatch_continuation_run(
         )
         return None
 
-    if not preflight_eligibility_or_bounce(
-        issue, run_creator=creator, pod=pod, triggered_by=triggered_by
-    ):
+    if not preflight_eligibility_or_bounce(issue, run_creator=creator, pod=pod, triggered_by=triggered_by):
         return None
 
     outcome = orchestration_service._create_continuation_run(
@@ -707,15 +730,17 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
         )
         return None
 
-    creator = _resolve_creator_for_trigger(
-        issue, triggered_by=TRIGGER_RUN_AI, actor=actor
-    )
+    creator = _resolve_creator_for_trigger(issue, triggered_by=TRIGGER_RUN_AI, actor=actor)
     if creator is None:
         logger.warning(
             "agent_ticker: skip dispatch issue=%s reason=no-creator triggered_by=%s",
             issue.pk,
             TRIGGER_RUN_AI,
         )
+        from pi_dash.core.agent_execution import AgentExecutorKind, effective_executor_for_issue
+
+        if effective_executor_for_issue(issue) == AgentExecutorKind.CLOUD_AGENT:
+            _bounce_issue_no_eligible_runner(issue, triggered_by=TRIGGER_RUN_AI, reason="no-llm-config")
         return None
 
     pod = _resolve_pod_for_issue(issue)
@@ -727,9 +752,7 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
         )
         return None
 
-    if not preflight_eligibility_or_bounce(
-        issue, run_creator=creator, pod=pod, triggered_by=TRIGGER_RUN_AI
-    ):
+    if not preflight_eligibility_or_bounce(issue, run_creator=creator, pod=pod, triggered_by=TRIGGER_RUN_AI):
         return None
 
     parent = orchestration_service._latest_prior_run(issue)
@@ -789,17 +812,22 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
     if not is_ticking_state(state):
         return False
 
-    # In Review is deliberately excluded from the cap-hit auto-pause. When
-    # the *review* budget is exhausted the issue must simply stay In Review
-    # for a human to close — the runner never promotes or reparks a review
-    # issue on its own (PDASHOSS01-68). The ticker is already disarmed
-    # above, so leaving the state untouched here does not resurrect ticking.
-    from pi_dash.db.models.state import StateGroup
+    # The human-hand-off phases (In Review, In Test) are deliberately
+    # excluded from the cap-hit auto-pause: when that budget is exhausted
+    # the issue must simply stay put for a human to act — the runner never
+    # promotes or reparks one on its own (PDASHOSS01-68 / PDASHOSS01-80).
+    # This is registry-driven rather than a group check, so a new phase
+    # declares its own answer instead of inheriting a silently-wrong
+    # default here (design ``create_test_state/design.md`` §4.5). The
+    # ticker is already disarmed above, so leaving the state untouched
+    # does not resurrect ticking.
+    from pi_dash.orchestration.agent_phases import auto_pauses_on_cap
 
-    if state.group == StateGroup.REVIEW.value:
+    if not auto_pauses_on_cap(state):
         logger.info(
-            "agent_ticker: review cap hit for issue=%s — leaving it In Review, "
+            "agent_ticker: %s cap hit for issue=%s — leaving it in place, "
             "no auto-pause",
+            state.group,
             issue.pk,
         )
         return False
@@ -813,7 +841,8 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
         return False
 
     paused_state = (
-        type(state).all_state_objects.filter(
+        type(state)
+        .all_state_objects.filter(
             project=issue.project,
             name=PAUSED_STATE_NAME,
             deleted_at__isnull=True,
@@ -836,11 +865,7 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
         # this, a concurrent ``arm_ticker`` (e.g. user manually re-starts
         # the issue between the unlocked read on line ~314 and here) can
         # re-enable the schedule while we auto-pause its issue.
-        locked_sched = (
-            IssueAgentTicker.objects.select_for_update()
-            .filter(pk=sched.pk)
-            .first()
-        )
+        locked_sched = IssueAgentTicker.objects.select_for_update().filter(pk=sched.pk).first()
         if locked_sched is None or locked_sched.enabled:
             return False
         # Re-check disarm_reason under the lock so a concurrent
@@ -853,9 +878,7 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
         # Re-fetch the issue under the same transaction to guard against a
         # racing state transition.
         IssueModel = type(issue)
-        locked = (
-            IssueModel.all_objects.select_for_update().filter(pk=issue.pk).first()
-        )
+        locked = IssueModel.all_objects.select_for_update().filter(pk=issue.pk).first()
         if locked is None:
             return False
         if locked.state_id != state.id:

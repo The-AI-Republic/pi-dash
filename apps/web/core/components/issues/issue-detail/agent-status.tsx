@@ -165,7 +165,10 @@ function getRunView(
     case "queued":
       return {
         title: t("AI agent is queued"),
-        detail: runnerDetail ?? t("Waiting for an available runner."),
+        detail:
+          run.executor_kind === "cloud_agent"
+            ? t("Waiting for Pi Dash Cloud Agent capacity.")
+            : (runnerDetail ?? t("Waiting for an available runner.")),
         badge: t("Queued"),
         badgeVariant: "neutral",
         icon: Clock3,
@@ -196,7 +199,10 @@ function getRunView(
     case "running":
       return {
         title: t("AI agent is working on this issue"),
-        detail: liveDetail ?? runnerDetail,
+        detail:
+          run.executor_kind === "cloud_agent"
+            ? t("Pi Dash Cloud Agent is using the project's bounded tools.")
+            : (liveDetail ?? runnerDetail),
         badge: t("Working"),
         badgeVariant: "brand",
         icon: LoaderCircle,
@@ -270,6 +276,15 @@ function getRunView(
         badgeVariant: "neutral",
         icon: CirclePause,
         iconClassName: "text-tertiary",
+      };
+    case "refused":
+      return {
+        title: t("AI agent declined this request"),
+        detail: run.error ? truncate(run.error) : t("The model provider refused the request."),
+        badge: t("Refused"),
+        badgeVariant: "danger",
+        icon: CircleAlert,
+        iconClassName: "text-danger-primary",
       };
     case "completed":
     default:
@@ -424,6 +439,14 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
             <div className="rounded-sm bg-layer-2 px-2 py-1">
               <span className="block text-placeholder">{t("Runs")}</span>
               <span className="text-primary">{status.run_count}</span>
+            </div>
+          ) : null}
+          {status?.latest_run ? (
+            <div className="rounded-sm bg-layer-2 px-2 py-1">
+              <span className="block text-placeholder">{t("Executor")}</span>
+              <span className="text-primary">
+                {status.latest_run.executor_kind === "cloud_agent" ? t("Pi Dash Cloud Agent") : t("Local Runner")}
+              </span>
             </div>
           ) : null}
           {nextTick ? (

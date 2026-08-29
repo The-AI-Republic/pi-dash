@@ -18,7 +18,7 @@ import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { Tooltip } from "@pi-dash/propel/tooltip";
 import { EFileAssetType } from "@pi-dash/types";
 import type { IProject, IWorkspace } from "@pi-dash/types";
-import { CustomSelect, Input, TextArea } from "@pi-dash/ui";
+import { CustomSelect, Input, TextArea, ToggleSwitch } from "@pi-dash/ui";
 import { renderFormattedDate } from "@pi-dash/utils";
 import { CoverImage } from "@/components/common/cover-image";
 import { ImagePickerPopover } from "@/components/core/image-picker-popover";
@@ -72,6 +72,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
   // derived values
   const currentNetwork = NETWORK_CHOICES.find((n) => n.key === project?.network);
   const coverImage = watch("cover_image_url");
+  const cloudExecutorOption = project.agent_executor_options?.find((option) => option.kind === "cloud_agent");
 
   useEffect(() => {
     if (project && projectId !== getValues("id")) {
@@ -215,6 +216,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
       logo_props: formData.logo_props,
       timezone: formData.timezone,
       base_branch: formData.base_branch ?? "",
+      default_agent_executor: formData.default_agent_executor ?? "local_runner",
     };
 
     // Handle cover image changes
@@ -454,6 +456,35 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
             />
             <span className="text-11 text-danger-primary">{errors?.base_branch?.message}</span>
           </div>
+        </div>
+        <div className="flex flex-col gap-1">
+          <h4 className="text-13">{t("Use Pi Dash Cloud Agent by default")}</h4>
+          <div className="flex items-start justify-between gap-4">
+            <p className="text-11 text-tertiary">
+              {cloudExecutorOption?.available === false
+                ? cloudExecutorOption.reason_code === "llm_config_missing"
+                  ? t("Configure your AI provider in Pi Dash AI settings to use the Cloud Agent.")
+                  : t("Unavailable on this instance. Ask an administrator to enable the Cloud Agent.")
+                : t(
+                    "New work items run on the Cloud Agent — no machine required. Turn this off to default to this project's pod instead. Either way both remain selectable per work item."
+                  )}
+            </p>
+            <Controller
+              name="default_agent_executor"
+              control={control}
+              render={({ field: { value, onChange } }) => (
+                <ToggleSwitch
+                  value={value === "cloud_agent"}
+                  onChange={(enabled) => onChange(enabled ? "cloud_agent" : "local_runner")}
+                  disabled={!isAdmin || cloudExecutorOption?.available === false}
+                  size="sm"
+                />
+              )}
+            />
+          </div>
+          <p className="text-11 text-tertiary">
+            {t("Changing this affects new runs only. Existing and queued runs keep their original executor.")}
+          </p>
         </div>
         <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
           <div className="flex flex-col gap-1">

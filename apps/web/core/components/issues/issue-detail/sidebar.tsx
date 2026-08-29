@@ -22,11 +22,18 @@ import {
   ParentPropertyIcon,
 } from "@pi-dash/propel/icons";
 import { cn, getDate, renderFormattedPayloadDate, shouldHighlightIssueDueDate } from "@pi-dash/utils";
+import { Container } from "lucide-react";
 // components
 import { DateDropdown } from "@/components/dropdowns/date";
 import { EstimateDropdown } from "@/components/dropdowns/estimate";
 import { ButtonAvatars } from "@/components/dropdowns/member/avatar";
 import { MemberDropdown } from "@/components/dropdowns/member/dropdown";
+import { PodDropdown } from "@/components/dropdowns/pod/dropdown";
+import {
+  cloudAgentOption,
+  executionTargetPatch,
+  executionTargetValue,
+} from "@/components/dropdowns/pod/execution-target";
 import { PriorityDropdown } from "@/components/dropdowns/priority";
 import { StateDropdown } from "@/components/dropdowns/state/dropdown";
 // hooks
@@ -129,6 +136,22 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
                 buttonContainerClassName="w-full text-left h-7.5"
                 buttonClassName={`text-body-xs-regular justify-between ${issue?.assignee_ids?.length > 0 ? "" : "text-placeholder"}`}
                 hideIcon={issue.assignee_ids?.length === 0}
+                dropdownArrow
+                dropdownArrowClassName="h-3.5 w-3.5 hidden group-hover:inline"
+              />
+            </SidebarPropertyListItem>
+
+            <SidebarPropertyListItem icon={Container} label={t("Runs on")}>
+              <PodDropdown
+                value={executionTargetValue(issue, projectDetails)}
+                onChange={(val) => issueOperations.update(workspaceSlug, projectId, issueId, executionTargetPatch(val))}
+                cloudAgent={cloudAgentOption(projectDetails)}
+                disabled={!isEditable}
+                projectId={projectId?.toString() ?? ""}
+                buttonVariant="transparent-with-text"
+                className="group w-full grow"
+                buttonContainerClassName="w-full text-left h-7.5"
+                buttonClassName={`text-body-xs-regular ${executionTargetValue(issue, projectDetails) ? "" : "text-placeholder"}`}
                 dropdownArrow
                 dropdownArrowClassName="h-3.5 w-3.5 hidden group-hover:inline"
               />

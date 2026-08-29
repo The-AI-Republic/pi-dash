@@ -69,6 +69,7 @@ function CustomSelect(props: ICustomSelectProps) {
     <DropdownContext.Provider value={closeDropdown}>
       <Combobox
         as="div"
+        role="presentation"
         ref={dropdownRef}
         tabIndex={tabIndex}
         value={value}
@@ -149,7 +150,7 @@ function CustomSelect(props: ICustomSelectProps) {
 }
 
 function Option(props: ICustomSelectItemProps) {
-  const { children, value, className } = props;
+  const { children, value, className, disabled = false } = props;
   const closeDropdown = useContext(DropdownContext);
 
   const handleClick = useCallback(() => {
@@ -164,11 +165,14 @@ function Option(props: ICustomSelectItemProps) {
   return (
     <Combobox.Option
       value={value}
+      disabled={disabled}
       className={({ active }) =>
         cn(
-          "flex cursor-pointer items-center justify-between gap-2 truncate rounded-sm px-1 py-1.5 text-secondary select-none",
+          "flex items-center justify-between gap-2 truncate rounded-sm px-1 py-1.5 text-secondary select-none",
           {
             "bg-layer-transparent-hover": active,
+            "cursor-pointer": !disabled,
+            "cursor-not-allowed opacity-60": disabled,
           },
           className
         )

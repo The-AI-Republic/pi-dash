@@ -22,9 +22,7 @@ from pi_dash.runner.models import (
 
 @pytest.fixture
 def second_workspace(db, create_user):
-    ws = Workspace.objects.create(
-        name="OtherWS", owner=create_user, slug="other-ws-runs"
-    )
+    ws = Workspace.objects.create(name="OtherWS", owner=create_user, slug="other-ws-runs")
     WorkspaceMember.objects.create(workspace=ws, member=create_user, role=20)
     return ws
 
@@ -37,16 +35,12 @@ def _stub_send_to_runner():
 
 @pytest.fixture(autouse=True)
 def _on_commit_immediate():
-    with patch(
-        "django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()
-    ):
+    with patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()):
         yield
 
 
 @pytest.mark.unit
-def test_post_run_validates_workspace_membership(
-    db, api_client, second_workspace
-):
+def test_post_run_validates_workspace_membership(db, api_client, second_workspace):
     outsider = User.objects.create(
         email=f"out-{uuid4().hex[:8]}@example.com",
         username=f"out_{uuid4().hex[:8]}",
@@ -126,10 +120,8 @@ def test_post_run_ignores_request_body_created_by(db, session_client, workspace,
 
 
 @pytest.mark.unit
-def test_get_runs_lists_by_created_by(db, session_client, workspace, project):
-    """Free-form runs (no work_item) are scoped by creator. A run created
-    by another user with no link back to the caller stays invisible.
-    """
+def test_get_runs_workspace_admin_sees_free_form_workspace_runs(db, session_client, workspace, project):
+    """Workspace administrators are involved with every workspace run."""
     AgentRun.objects.create(
         workspace=workspace,
         created_by=workspace.owner,
@@ -152,7 +144,7 @@ def test_get_runs_lists_by_created_by(db, session_client, workspace, project):
     assert resp.status_code == status.HTTP_200_OK
     prompts = [r["prompt"] for r in resp.data["results"]]
     assert "mine" in prompts
-    assert "not mine" not in prompts
+    assert "not mine" in prompts
 
 
 @pytest.mark.unit
@@ -297,10 +289,8 @@ def test_get_runs_includes_tick_runs_on_issue_user_assigned(db, session_client, 
 
 
 @pytest.mark.unit
-def test_get_runs_excludes_runs_on_unrelated_issues(db, session_client, workspace, project):
-    """Negative case: an issue I neither created nor am assigned to, with
-    a run also not created by me. Stays invisible.
-    """
+def test_get_runs_workspace_admin_sees_runs_on_unrelated_issues(db, session_client, workspace, project):
+    """Workspace administrators can audit runs on otherwise unrelated issues."""
     other = _make_other_user()
     issue = _make_issue(workspace, created_by=other)
     AgentRun.objects.create(
@@ -312,7 +302,7 @@ def test_get_runs_excludes_runs_on_unrelated_issues(db, session_client, workspac
     )
     resp = session_client.get("/api/runners/runs/")
     assert resp.status_code == status.HTTP_200_OK
-    assert "run on unrelated issue" not in [r["prompt"] for r in resp.data["results"]]
+    assert "run on unrelated issue" in [r["prompt"] for r in resp.data["results"]]
 
 
 @pytest.mark.unit
@@ -464,9 +454,7 @@ def _make_pinned_run(workspace, *, parent_thread_id=None):
 
 @pytest.mark.unit
 def test_release_pin_clears_pin_and_parent_thread_id(db, session_client, workspace, project):
-    run, parent, runner = _make_pinned_run(
-        workspace, parent_thread_id="sess_alive"
-    )
+    run, parent, runner = _make_pinned_run(workspace, parent_thread_id="sess_alive")
     resp = session_client.post(
         f"/api/runners/runs/{run.id}/release-pin/",
         {},
@@ -489,9 +477,7 @@ def test_release_pin_clears_pin_and_parent_thread_id(db, session_client, workspa
 def test_release_pin_returns_409_when_not_queued(db, session_client, workspace, project):
     run, _, _ = _make_pinned_run(workspace)
     AgentRun.objects.filter(pk=run.pk).update(status=AgentRunStatus.RUNNING)
-    resp = session_client.post(
-        f"/api/runners/runs/{run.id}/release-pin/", {}, format="json"
-    )
+    resp = session_client.post(f"/api/runners/runs/{run.id}/release-pin/", {}, format="json")
     assert resp.status_code == status.HTTP_409_CONFLICT
     assert resp.data["error"] == "run not queued"
 
@@ -500,9 +486,7 @@ def test_release_pin_returns_409_when_not_queued(db, session_client, workspace, 
 def test_release_pin_returns_409_when_not_pinned(db, session_client, workspace, project):
     run, _, _ = _make_pinned_run(workspace)
     AgentRun.objects.filter(pk=run.pk).update(pinned_runner=None)
-    resp = session_client.post(
-        f"/api/runners/runs/{run.id}/release-pin/", {}, format="json"
-    )
+    resp = session_client.post(f"/api/runners/runs/{run.id}/release-pin/", {}, format="json")
     assert resp.status_code == status.HTTP_409_CONFLICT
     assert resp.data["error"] == "run not pinned"
 
@@ -518,9 +502,7 @@ def test_release_pin_404_for_run_in_other_workspace(db, api_client, workspace, s
     outsider.set_password("pw")
     outsider.save()
     api_client.force_authenticate(user=outsider)
-    resp = api_client.post(
-        f"/api/runners/runs/{run.id}/release-pin/", {}, format="json"
-    )
+    resp = api_client.post(f"/api/runners/runs/{run.id}/release-pin/", {}, format="json")
     assert resp.status_code == status.HTTP_404_NOT_FOUND
 
 
@@ -552,9 +534,7 @@ def _make_in_progress_issue_with_paused_run(workspace):
             workspace=workspace,
             created_by=workspace.owner,
         )
-        in_progress = State.objects.create(
-            name="In Progress", project=project, group="started"
-        )
+        in_progress = State.objects.create(name="In Progress", project=project, group="started")
         State.objects.create(name="Todo", project=project, group="unstarted")
         issue = Issue.objects.create(
             name="Task",
@@ -672,15 +652,18 @@ def test_comment_and_run_returns_409_when_no_prior_run(db, session_client, works
 
     with impersonate(workspace.owner):
         project = Project.objects.create(
-            name="P2", identifier="P2", workspace=workspace,
+            name="P2",
+            identifier="P2",
+            workspace=workspace,
             created_by=workspace.owner,
         )
-        in_progress = State.objects.create(
-            name="In Progress", project=project, group="started"
-        )
+        in_progress = State.objects.create(name="In Progress", project=project, group="started")
         issue = Issue.objects.create(
-            name="Task", workspace=workspace, project=project,
-            state=in_progress, created_by=workspace.owner,
+            name="Task",
+            workspace=workspace,
+            project=project,
+            state=in_progress,
+            created_by=workspace.owner,
         )
     # Discard the single AgentRun the state-transition signal auto-created
     # so the endpoint sees no prior.
@@ -804,15 +787,18 @@ def test_run_ai_succeeds_when_no_prior_run(db, session_client, workspace):
     seed_default_template()
     with impersonate(workspace.owner):
         fresh_project = Project.objects.create(
-            name="RA1", identifier="RA1", workspace=workspace,
+            name="RA1",
+            identifier="RA1",
+            workspace=workspace,
             created_by=workspace.owner,
         )
-        in_progress = State.objects.create(
-            name="In Progress", project=fresh_project, group="started"
-        )
+        in_progress = State.objects.create(name="In Progress", project=fresh_project, group="started")
         issue = Issue.objects.create(
-            name="Fresh task", workspace=workspace, project=fresh_project,
-            state=in_progress, created_by=workspace.owner,
+            name="Fresh task",
+            workspace=workspace,
+            project=fresh_project,
+            state=in_progress,
+            created_by=workspace.owner,
         )
     _add_online_runner(workspace, fresh_project)
     # Discard the run the state-transition signal auto-created so the
@@ -882,15 +868,18 @@ def test_run_ai_returns_409_when_no_pod_available(db, session_client, workspace)
     seed_default_template()
     with impersonate(workspace.owner):
         podless_project = Project.objects.create(
-            name="NoPod", identifier="NOPOD", workspace=workspace,
+            name="NoPod",
+            identifier="NOPOD",
+            workspace=workspace,
             created_by=workspace.owner,
         )
-        in_progress = State.objects.create(
-            name="In Progress", project=podless_project, group="started"
-        )
+        in_progress = State.objects.create(name="In Progress", project=podless_project, group="started")
         issue = Issue.objects.create(
-            name="Stranded", workspace=workspace, project=podless_project,
-            state=in_progress, created_by=workspace.owner,
+            name="Stranded",
+            workspace=workspace,
+            project=podless_project,
+            state=in_progress,
+            created_by=workspace.owner,
         )
     # Discard the AgentRun the post_save(Issue) state-transition signal
     # auto-created (otherwise the active-run guardrail trips first and
@@ -958,18 +947,19 @@ def test_skip_immediate_dispatch_header_suppresses_run_creation_on_state_change(
     seed_default_template()
     with impersonate(workspace.owner):
         project = Project.objects.create(
-            name="SkipDisp", identifier="SD", workspace=workspace,
+            name="SkipDisp",
+            identifier="SD",
+            workspace=workspace,
             created_by=workspace.owner,
         )
-        todo = State.objects.create(
-            name="Todo", project=project, group="unstarted"
-        )
-        in_progress = State.objects.create(
-            name="In Progress", project=project, group="started"
-        )
+        todo = State.objects.create(name="Todo", project=project, group="unstarted")
+        in_progress = State.objects.create(name="In Progress", project=project, group="started")
         issue = Issue.objects.create(
-            name="Task", workspace=workspace, project=project,
-            state=todo, created_by=workspace.owner,
+            name="Task",
+            workspace=workspace,
+            project=project,
+            state=todo,
+            created_by=workspace.owner,
         )
     _add_online_runner(workspace, project)
 
@@ -1001,18 +991,19 @@ def test_no_skip_header_creates_run_on_state_change(db, session_client, workspac
     seed_default_template()
     with impersonate(workspace.owner):
         project = Project.objects.create(
-            name="DispDef", identifier="DD", workspace=workspace,
+            name="DispDef",
+            identifier="DD",
+            workspace=workspace,
             created_by=workspace.owner,
         )
-        todo = State.objects.create(
-            name="Todo", project=project, group="unstarted"
-        )
-        in_progress = State.objects.create(
-            name="In Progress", project=project, group="started"
-        )
+        todo = State.objects.create(name="Todo", project=project, group="unstarted")
+        in_progress = State.objects.create(name="In Progress", project=project, group="started")
         issue = Issue.objects.create(
-            name="Task", workspace=workspace, project=project,
-            state=todo, created_by=workspace.owner,
+            name="Task",
+            workspace=workspace,
+            project=project,
+            state=todo,
+            created_by=workspace.owner,
         )
     _add_online_runner(workspace, project)
 
@@ -1026,9 +1017,7 @@ def test_no_skip_header_creates_run_on_state_change(db, session_client, workspac
 
 
 @pytest.mark.unit
-def test_comment_and_run_prompt_renders_post_reset_budget(
-    db, session_client, workspace, project
-):
+def test_comment_and_run_prompt_renders_post_reset_budget(db, session_client, workspace, project):
     """The ticker reset must land BEFORE the prompt renders — otherwise the
     prompt bakes in the stale pre-reset count ("used 7 of 24 ticks") that
     this very request refunds."""
@@ -1057,9 +1046,7 @@ def test_comment_and_run_prompt_renders_post_reset_budget(
 
 
 @pytest.mark.unit
-def test_comment_and_run_409_leaves_ticker_untouched(
-    db, session_client, workspace, project
-):
+def test_comment_and_run_409_leaves_ticker_untouched(db, session_client, workspace, project):
     """When the dispatch bails (no prior run → 409) the pre-dispatch ticker
     reset must roll back: the user didn't trigger a new invocation, so the
     cap budget must not be refunded nor the next-tick clock pushed out."""
@@ -1073,15 +1060,18 @@ def test_comment_and_run_409_leaves_ticker_untouched(
 
     with impersonate(workspace.owner):
         project2 = Project.objects.create(
-            name="P3", identifier="P3", workspace=workspace,
+            name="P3",
+            identifier="P3",
+            workspace=workspace,
             created_by=workspace.owner,
         )
-        in_progress = State.objects.create(
-            name="In Progress", project=project2, group="started"
-        )
+        in_progress = State.objects.create(name="In Progress", project=project2, group="started")
         issue = Issue.objects.create(
-            name="Task", workspace=workspace, project=project2,
-            state=in_progress, created_by=workspace.owner,
+            name="Task",
+            workspace=workspace,
+            project=project2,
+            state=in_progress,
+            created_by=workspace.owner,
         )
     AgentRun.objects.filter(work_item=issue).delete()
     sched = IssueAgentTicker.objects.get(issue=issue)

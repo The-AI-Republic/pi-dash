@@ -35,8 +35,12 @@ from pi_dash.db.models.issue_agent_ticker import (
     IssueAgentTicker,
     TickerDisarmReason,
 )
-from pi_dash.db.models.state import StateGroup
-from pi_dash.orchestration.agent_phases import is_ticking_state
+from pi_dash.orchestration.agent_phases import (
+    CADENCE_FIELDS,
+    DEFAULT_CADENCE_KEY,
+    cadence_fields_by_group,
+    is_ticking_state,
+)
 
 logger = logging.getLogger("pi_dash.worker")
 
@@ -49,23 +53,35 @@ def scan_due_tickers() -> int:
     Returns the number of fan-outs (mostly for logging / tests).
     """
     now = timezone.now()
-    # Effective cap = override if set, else project default. Phase-
-    # aware via Case/When over the issue's state group: pick the
-    # review-phase pair when the issue is in the review group, else
-    # the In Progress pair. ``-1`` means infinite — admit
-    # unconditionally. See
-    # ``.ai_design/create_review_state/design.md`` §7.5.
+    # Effective cap = the phase's own override if set, else the phase's
+    # own project default. This is the SQL mirror of
+    # ``IssueAgentTicker.effective_max_ticks``, so both are generated
+    # from the same phase registry rather than hand-written per phase.
+    # One ``When`` per ticking group; states outside the registry fall
+    # through to the implementation pair. This branches on the group
+    # alone — unlike the Python resolver it cannot also check the state
+    # *name*, so a custom state inside a ticking group may be admitted
+    # here against the wrong pair; ``fire_tick`` re-checks
+    # ``is_ticking_state`` under the row lock and drops it, so the scan
+    # only ever over-admits. ``-1`` means infinite — admit
+    # unconditionally. See ``.ai_design/create_review_state/design.md``
+    # §7.5.
+    by_group = cadence_fields_by_group()
+    default_fields = CADENCE_FIELDS[DEFAULT_CADENCE_KEY]
     effective_cap = Case(
-        When(
-            issue__state__group=StateGroup.REVIEW.value,
-            then=Coalesce(
-                F("review_max_ticks"),
-                F("issue__project__agent_review_default_max_ticks"),
-            ),
-        ),
+        *[
+            When(
+                issue__state__group=group,
+                then=Coalesce(
+                    F(fields.ticker_max_ticks),
+                    F(f"issue__project__{fields.project_max_ticks}"),
+                ),
+            )
+            for group, fields in by_group.items()
+        ],
         default=Coalesce(
-            F("max_ticks"),
-            F("issue__project__agent_default_max_ticks"),
+            F(default_fields.ticker_max_ticks),
+            F(f"issue__project__{default_fields.project_max_ticks}"),
         ),
     )
     due_ids = list(

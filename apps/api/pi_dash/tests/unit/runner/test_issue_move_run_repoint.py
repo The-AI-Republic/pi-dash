@@ -30,7 +30,7 @@ from pi_dash.orchestration.service import (
     complete_project_move_handoff,
 )
 from pi_dash.runner.services import run_lifecycle
-from pi_dash.utils.issue_move import IssueMoveError, move_work_item_to_project
+from pi_dash.utils.issue_move import move_work_item_to_project
 
 
 @pytest.fixture
@@ -379,13 +379,23 @@ def test_move_without_active_run_does_not_require_target_pod(
 
 
 @pytest.mark.unit
-def test_move_refuses_to_hide_multiple_executing_runs(
+def test_multiple_executing_runs_are_database_impossible(
     db,
     create_user,
     workspace,
     source_project,
     target_project,
 ):
+    """The state the move-refusal guard defends against cannot be created.
+
+    ``agent_run_one_active_per_work_item`` now covers every status the
+    application treats as active — including ``cancel_requested`` — so a
+    second executing run per work item is rejected at the database. The
+    ``issue_move`` guard remains as defense-in-depth for rows predating the
+    constraint, but the invariant itself is DB-enforced.
+    """
+    from django.db import IntegrityError, transaction as db_transaction
+
     source_pod = Pod.default_for_project(source_project)
     first_runner = _make_runner(
         create_user,
@@ -400,32 +410,34 @@ def test_move_refuses_to_hide_multiple_executing_runs(
         "src-runner-2",
     )
     issue = _make_issue(source_project, create_user)
-    for runner in (first_runner, second_runner):
-        AgentRun.objects.create(
-            workspace=workspace,
-            created_by=create_user,
-            pod=source_pod,
-            runner=runner,
-            work_item=issue,
-            status=AgentRunStatus.RUNNING,
-            prompt="in-flight",
-        )
+    AgentRun.objects.create(
+        workspace=workspace,
+        created_by=create_user,
+        pod=source_pod,
+        runner=first_runner,
+        work_item=issue,
+        status=AgentRunStatus.RUNNING,
+        prompt="in-flight",
+    )
+    for second_status in (AgentRunStatus.RUNNING, AgentRunStatus.CANCEL_REQUESTED):
+        with pytest.raises(IntegrityError), db_transaction.atomic():
+            AgentRun.objects.create(
+                workspace=workspace,
+                created_by=create_user,
+                pod=source_pod,
+                runner=second_runner,
+                work_item=issue,
+                status=second_status,
+                prompt="in-flight",
+            )
 
-    with pytest.raises(IssueMoveError) as exc_info:
-        _move(
-            workspace,
-            source_project,
-            target_project,
-            issue,
-            create_user,
-        )
-
-    assert exc_info.value.status_code == 409
-    issue.refresh_from_db()
-    assert issue.project_id == source_project.id
-    assert set(
-        AgentRun.objects.filter(work_item=issue).values_list(
-            "status",
-            flat=True,
-        )
-    ) == {AgentRunStatus.RUNNING}
+    # With exactly one executing run, the move proceeds through the normal
+    # cancellation handoff instead of refusing.
+    moved = _move(
+        workspace,
+        source_project,
+        target_project,
+        issue,
+        create_user,
+    )
+    assert moved.project_id == target_project.id

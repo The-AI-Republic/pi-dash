@@ -223,13 +223,9 @@ class IssueCreateSerializer(BaseSerializer):
                     proj = attrs["project"]
                     project_id = getattr(proj, "id", proj)
                 if project_id is not None and str(pod.project_id) != str(project_id):
-                    raise serializers.ValidationError(
-                        {"assigned_pod_id": "pod is in a different project"}
-                    )
+                    raise serializers.ValidationError({"assigned_pod_id": "pod is in a different project"})
                 if pod.deleted_at is not None:
-                    raise serializers.ValidationError(
-                        {"assigned_pod_id": "pod has been deleted"}
-                    )
+                    raise serializers.ValidationError({"assigned_pod_id": "pod has been deleted"})
             # Block mid-flight *reassignment* — changing OR clearing the pod once
             # a run is active. The run's pod FK is immutable, so a change would
             # silently take effect only on the *next* dispatch (and clearing to
@@ -242,6 +238,35 @@ class IssueCreateSerializer(BaseSerializer):
                     raise serializers.ValidationError(
                         {"assigned_pod_id": "cannot reassign pod while the issue has an active run"}
                     )
+
+        # ``agent_executor`` is the per-issue execution-target override; NULL
+        # inherits the project default. Cloud Agent and pods are mutually
+        # exclusive targets, so the UI presents them as one "Runs on" choice
+        # and this is the matching server-side guard.
+        if "agent_executor" in attrs:
+            executor = attrs["agent_executor"]  # None clears the override
+            if executor is not None:
+                from pi_dash.core.agent_execution import AgentExecutorKind, cloud_agent_is_configured
+
+                if executor not in AgentExecutorKind.values:
+                    raise serializers.ValidationError({"agent_executor": "unknown agent executor"})
+                # Refuse a target that could never dispatch, rather than
+                # accepting it and failing invisibly at run creation.
+                if executor == AgentExecutorKind.CLOUD_AGENT and not cloud_agent_is_configured():
+                    raise serializers.ValidationError(
+                        {"agent_executor": "Pi Dash Cloud Agent is not available on this instance"}
+                    )
+            # Same mid-flight rule as the pod: ``AgentRun.executor_kind`` is
+            # snapshotted at creation, so switching targets under a live run
+            # would silently apply only to the next dispatch.
+            if (
+                self.instance is not None
+                and str(executor) != str(self.instance.agent_executor)
+                and self.instance.has_active_run
+            ):
+                raise serializers.ValidationError(
+                    {"agent_executor": "cannot change the execution target while the issue has an active run"}
+                )
 
         # Validate description content for security
         if "description_html" in attrs and attrs["description_html"]:
@@ -1234,6 +1259,7 @@ class IssueDetailSerializer(IssueSerializer):
         return {
             "id": str(run.id),
             "status": run.status,
+            "executor_kind": run.executor_kind,
             "queue_position": run.queue_position,
             "runner": str(run.runner_id) if run.runner_id else None,
             "runner_name": run.runner.name if run.runner_id and run.runner else None,
@@ -1243,6 +1269,7 @@ class IssueDetailSerializer(IssueSerializer):
             "ended_at": self._serialize_datetime(run.ended_at),
             "done_payload": run.done_payload,
             "error": run.error,
+            "error_code": run.error_code,
             "error_diagnostic": classify_run_error(run.error),
             "llm_model": run.llm_model,
             "input_tokens": run.input_tokens,

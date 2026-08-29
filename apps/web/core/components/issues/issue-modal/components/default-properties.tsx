@@ -7,7 +7,7 @@
 import { useState } from "react";
 import { observer } from "mobx-react";
 import type { Control } from "react-hook-form";
-import { Controller } from "react-hook-form";
+import { Controller, useController } from "react-hook-form";
 import { ETabIndices, EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 import { ParentPropertyIcon } from "@pi-dash/propel/icons";
@@ -23,6 +23,11 @@ import { EstimateDropdown } from "@/components/dropdowns/estimate";
 import { MemberDropdown } from "@/components/dropdowns/member/dropdown";
 import { ModuleDropdown } from "@/components/dropdowns/module/dropdown";
 import { PodDropdown } from "@/components/dropdowns/pod/dropdown";
+import {
+  cloudAgentOption,
+  executionTargetPatch,
+  executionTargetValue,
+} from "@/components/dropdowns/pod/execution-target";
 import { PriorityDropdown } from "@/components/dropdowns/priority";
 import { StateDropdown } from "@/components/dropdowns/state/dropdown";
 import { ParentIssuesListModal } from "@/components/issues/parent-issues-list-modal";
@@ -74,6 +79,9 @@ export const IssueDefaultProperties = observer(function IssueDefaultProperties(p
   const { allowPermissions } = useUserPermissions();
   // derived values
   const projectDetails = getProjectById(projectId);
+  // The execution target spans two form fields — the pod and the executor
+  // override — so the dropdown writes both from one selection.
+  const { field: executorField } = useController({ control, name: "agent_executor" });
 
   const { getIndex } = getTabIndex(ETabIndices.ISSUE_FORM, isMobile);
 
@@ -113,11 +121,17 @@ export const IssueDefaultProperties = observer(function IssueDefaultProperties(p
         render={({ field: { value, onChange } }) => (
           <div className="h-7">
             <PodDropdown
-              value={value}
-              onChange={(podId) => {
-                onChange(podId);
+              value={executionTargetValue(
+                { agent_executor: executorField.value, assigned_pod_id: value },
+                projectDetails
+              )}
+              onChange={(target) => {
+                const patch = executionTargetPatch(target);
+                executorField.onChange(patch.agent_executor ?? null);
+                if (patch.assigned_pod_id !== undefined) onChange(patch.assigned_pod_id);
                 handleFormChange();
               }}
+              cloudAgent={cloudAgentOption(projectDetails)}
               projectId={projectId ?? undefined}
               buttonVariant="border-with-text"
               isForWorkItemCreation={!id}
