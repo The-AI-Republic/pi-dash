@@ -7,7 +7,7 @@
 import { useState } from "react";
 import { observer } from "mobx-react";
 import { HelpCircle, Plus } from "lucide-react";
-import { useNavigate } from "react-router";
+import { useNavigate, useParams } from "react-router";
 import useSWR from "swr";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
@@ -33,15 +33,21 @@ const RunnersListPage = observer(function RunnersListPage() {
   const { currentWorkspace } = useWorkspace();
   const { t } = useTranslation();
   const navigate = useNavigate();
+  // ``projectId`` is present only on the project-scoped route
+  // (/<workspace>/projects/<projectId>/runners); the workspace aggregate route
+  // leaves it undefined so this same page keeps today's behaviour.
+  const { projectId } = useParams<{ projectId?: string }>();
   const workspaceId = currentWorkspace?.id;
   const workspaceSlug = currentWorkspace?.slug;
+  // Link base for row actions — project-scoped when a projectId is in the route.
+  const base = projectId ? `/${workspaceSlug}/projects/${projectId}/runners` : `/${workspaceSlug}/runners`;
   const pageTitle = currentWorkspace?.name
     ? t("{workspace} - AI Agents", { workspace: currentWorkspace.name })
     : t("AI Agents");
 
   const { data: runners, mutate: mutateRunners } = useSWR<IRunner[]>(
-    workspaceId ? ["runners", workspaceId] : null,
-    () => service.list(workspaceId),
+    workspaceId ? ["runners", workspaceId, projectId ?? null] : null,
+    () => service.list(workspaceId, projectId),
     { refreshInterval: 5_000 }
   );
 
@@ -49,9 +55,13 @@ const RunnersListPage = observer(function RunnersListPage() {
     data: pods,
     error: podsError,
     mutate: mutatePods,
-  } = useSWR<IPod[]>(workspaceId ? ["pods", workspaceId] : null, () => podService.list(workspaceId!), {
-    refreshInterval: 30_000,
-  });
+  } = useSWR<IPod[]>(
+    workspaceId ? ["pods", workspaceId, projectId ?? null] : null,
+    () => podService.list(workspaceId!, projectId),
+    {
+      refreshInterval: 30_000,
+    }
+  );
 
   const [addOpen, setAddOpen] = useState(false);
   const [createPodOpen, setCreatePodOpen] = useState(false);
@@ -245,11 +255,7 @@ const RunnersListPage = observer(function RunnersListPage() {
                   <td className="px-3 py-2 text-right">
                     <div className="flex justify-end gap-2">
                       {workspaceSlug && (
-                        <Button
-                          variant="neutral-primary"
-                          size="sm"
-                          onClick={() => navigate(`/${workspaceSlug}/runners/detail/${r.id}`)}
-                        >
+                        <Button variant="neutral-primary" size="sm" onClick={() => navigate(`${base}/detail/${r.id}`)}>
                           {t("Details")}
                         </Button>
                       )}

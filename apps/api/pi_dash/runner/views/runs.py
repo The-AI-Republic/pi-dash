@@ -174,6 +174,17 @@ class AgentRunListEndpoint(APIView):
         if workspace_id:
             qs = qs.filter(workspace_id=workspace_id)
 
+        # Project scope for the per-project AI Workers panel. A run reaches its
+        # project through its pod (``pod__project``), and a project owns several
+        # pods, so this narrows to every run whose pod belongs to the project.
+        # Kept as its own chained ``.filter()`` so it AND-combines without
+        # touching the private-runner ``Q`` gate above — the visibility rule
+        # holds regardless of scope. Pod-less runs (never assigned to a project)
+        # are correctly excluded from a project view.
+        project_id = request.query_params.get("project")
+        if project_id:
+            qs = qs.filter(pod__project_id=project_id)
+
         # Page-number pagination. The list grew unbounded (previously capped at
         # a flat 200), so the client now requests one page at a time and only
         # the first page loads by default. ``page`` is 1-based and reflected in

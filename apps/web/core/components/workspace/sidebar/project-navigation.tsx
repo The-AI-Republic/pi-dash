@@ -10,7 +10,7 @@ import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { EUserPermissionsLevel, EUserPermissions } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
-import { CalendarClock } from "lucide-react";
+import { Bot, CalendarClock } from "lucide-react";
 import { CycleIcon, IntakeIcon, ModuleIcon, PageIcon, ViewsIcon, WorkItemsIcon } from "@pi-dash/propel/icons";
 import type { EUserProjectRoles } from "@pi-dash/types";
 // pi dash ui
@@ -143,6 +143,18 @@ export const ProjectNavigation = observer(function ProjectNavigation(props: TPro
         access: [EUserPermissions.ADMIN, EUserPermissions.MEMBER, EUserPermissions.GUEST],
         shouldRender: true,
         sortOrder: 7,
+      },
+      {
+        i18n_key: "AI Workers",
+        key: "runners",
+        name: "AI Workers",
+        // Project-scoped AI Workers panel — sibling of Work Items / Schedulers.
+        // The workspace-wide aggregate lives under the sidebar "More" section.
+        href: `/${workspaceSlug}/projects/${projectId}/runners`,
+        icon: Bot,
+        access: [EUserPermissions.ADMIN, EUserPermissions.MEMBER],
+        shouldRender: true,
+        sortOrder: 8,
       },
     ],
     [project, workspaceSlug, projectId]
