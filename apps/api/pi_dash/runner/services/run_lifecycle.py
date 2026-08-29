@@ -355,6 +355,12 @@ def _post_failure_comment(run_id: UUID | str, error_detail: str) -> None:
     run = AgentRun.objects.select_related("work_item", "work_item__project").filter(pk=run_id).first()
     if run is None or run.work_item_id is None:
         return
+    if IssueComment.objects.filter(
+        issue_id=run.work_item_id,
+        speaker_agent_run_id=run.id,
+        speaker_type=IssueComment.SpeakerType.SYSTEM,
+    ).exists():
+        return
 
     if detail:
         body = format_html(
@@ -375,6 +381,9 @@ def _post_failure_comment(run_id: UUID | str, error_detail: str) -> None:
         workspace=run.work_item.workspace,
         actor=get_agent_system_user(),
         comment_html=body,
+        speaker_type=IssueComment.SpeakerType.SYSTEM,
+        speaker_label="Pi Dash",
+        speaker_agent_run_id=run.id,
     )
 
 
@@ -428,72 +437,17 @@ def finalize_run_terminal(
     model_value = _normalize_model(model)
     if model_value:
         updates["llm_model"] = model_value
-    updated = (
-        AgentRun.objects.filter(id=run_id, runner=runner).exclude(status__in=TERMINAL_RUN_STATUSES).update(**updates)
+    from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+    updated = finalize_agent_run(
+        run_id,
+        new_status,
+        updates=updates,
+        expected_runner_id=runner.id,
     )
     if not updated:
         logger.info(
             "run_lifecycle: ignoring late terminal transition for closed run %s",
             run_id,
         )
-        return
-
-    closed_run = AgentRun.objects.only("run_config").filter(pk=run_id).first()
-    has_project_move_handoff = bool(closed_run and _has_project_move_handoff(closed_run))
-
-    if new_status == AgentRunStatus.FAILED and not has_project_move_handoff:
-        try:
-            _post_failure_comment(run_id, error_detail)
-        except Exception:
-            # Comment posting must never block the lifecycle terminal
-            # transition. Log and move on so the run still gets reaped /
-            # the pod still gets drained.
-            logger.exception(
-                "run_lifecycle: failed to post failure comment for run %s",
-                run_id,
-            )
-
-    from pi_dash.runner.services.matcher import (
-        drain_for_runner_by_id,
-        drain_pod_by_id,
-    )
-    from pi_dash.runner.services.scheduler_hook import (
-        update_scheduler_binding_on_terminate,
-    )
-
-    runner_id = runner.id
-    pod_id = runner.pod_id
-
-    def _pause_and_drain(rid=run_id, rnr=runner_id, pid=pod_id):
-        run = (
-            AgentRun.objects.select_related(
-                "work_item",
-                "work_item__state",
-                "work_item__project",
-                "scheduler_binding",
-            )
-            .filter(pk=rid)
-            .first()
-        )
-        if run is not None:
-            if _has_project_move_handoff(run):
-                from pi_dash.orchestration.service import (
-                    complete_project_move_handoff,
-                )
-
-                complete_project_move_handoff(run.id)
-            else:
-                # A source-project run being cancelled for a move must not
-                # disarm/pause the issue after it already belongs to the
-                # target project.
-                _apply_post_run_orchestration(run)
-            if run.scheduler_binding_id is not None:
-                try:
-                    update_scheduler_binding_on_terminate(run)
-                except Exception:
-                    logger.exception("scheduler.terminate_hook: failed for run %s", rid)
-        drain_for_runner_by_id(rnr)
-        if pid is not None:
-            drain_pod_by_id(pid)
-
-    transaction.on_commit(_pause_and_drain)
+    return

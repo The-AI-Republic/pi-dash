@@ -124,12 +124,12 @@ export const AllIcons: Story = {
       </div>
 
       <div className="space-y-4">
-        <h3 className="text-lg text-primary font-semibold">Misc Icons</h3>
+        <h3 className="text-lg font-semibold text-primary">Misc Icons</h3>
         <div className="grid w-full grid-cols-12 gap-6">
           {MiscIconsMap.map((item) => (
             <div key={item.title} className="col-span-2 flex flex-col items-center justify-center gap-3 p-4">
               <div className="text-secondary">{item.icon}</div>
-              <p className="text-xs text-tertiary text-center">{item.title}</p>
+              <p className="text-xs text-center text-tertiary">{item.title}</p>
             </div>
           ))}
         </div>

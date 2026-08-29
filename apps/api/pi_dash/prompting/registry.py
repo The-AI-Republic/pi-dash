@@ -38,9 +38,7 @@ SECTIONS_DIR = Path(__file__).resolve().parent / "sections"
 CUSTOMIZABLE_LOCKED = "locked"
 CUSTOMIZABLE_WORKSPACE = "workspace"
 CUSTOMIZABLE_OVERRIDABLE = "overridable"
-_VALID_CUSTOMIZABLE = frozenset(
-    {CUSTOMIZABLE_LOCKED, CUSTOMIZABLE_WORKSPACE, CUSTOMIZABLE_OVERRIDABLE}
-)
+_VALID_CUSTOMIZABLE = frozenset({CUSTOMIZABLE_LOCKED, CUSTOMIZABLE_WORKSPACE, CUSTOMIZABLE_OVERRIDABLE})
 
 
 def tier_allows_workspace_override(tier: str) -> bool:
@@ -56,6 +54,7 @@ def tier_allows_workspace_override(tier: str) -> bool:
 def tier_allows_personal_override(tier: str) -> bool:
     """Whether a member may keep a personal (user-scope) override at ``tier``."""
     return tier == CUSTOMIZABLE_OVERRIDABLE
+
 
 #: Only files following the ``<key>.md`` convention are loaded. A stray
 #: README.md / NOTES.md without valid front-matter raises at import time
@@ -107,15 +106,12 @@ def _parse_front_matter(path: Path) -> PromptSection:
     """
     text = path.read_text(encoding="utf-8")
     if not text.startswith("---"):
-        raise PromptRegistryError(
-            f"section {path.name!r} is missing the leading '---' front-matter block"
-        )
+        raise PromptRegistryError(f"section {path.name!r} is missing the leading '---' front-matter block")
     # Split off the front-matter between the first two '---' fences.
     parts = text.split("---", 2)
     if len(parts) < 3:
         raise PromptRegistryError(
-            f"section {path.name!r} has a malformed front-matter block "
-            "(expected '---\\n<meta>\\n---\\n<body>')"
+            f"section {path.name!r} has a malformed front-matter block (expected '---\\n<meta>\\n---\\n<body>')"
         )
     _, raw_meta, body = parts
     meta: dict[str, str] = {}
@@ -124,17 +120,14 @@ def _parse_front_matter(path: Path) -> PromptSection:
         if not line or line.startswith("#"):
             continue
         if ":" not in line:
-            raise PromptRegistryError(
-                f"section {path.name!r} has an invalid front-matter line: {line!r}"
-            )
+            raise PromptRegistryError(f"section {path.name!r} has an invalid front-matter line: {line!r}")
         field, _, value = line.partition(":")
         meta[field.strip()] = value.strip()
 
     missing = {"key", "title", "customizable"} - meta.keys()
     if missing:
         raise PromptRegistryError(
-            f"section {path.name!r} is missing front-matter field(s): "
-            f"{', '.join(sorted(missing))}"
+            f"section {path.name!r} is missing front-matter field(s): {', '.join(sorted(missing))}"
         )
     customizable = meta["customizable"]
     if customizable not in _VALID_CUSTOMIZABLE:
@@ -145,16 +138,13 @@ def _parse_front_matter(path: Path) -> PromptSection:
     key = meta["key"]
     if path.stem != key:
         raise PromptRegistryError(
-            f"section file {path.name!r} does not match its front-matter "
-            f"key={key!r} (filename stem must equal the key)"
+            f"section file {path.name!r} does not match its front-matter key={key!r} (filename stem must equal the key)"
         )
     # Body: drop a single leading newline left by the closing '---\n', keep the
     # rest verbatim. Trailing whitespace is normalized to a single newline so
     # the composer's join is deterministic regardless of editor settings.
     body = body.lstrip("\n").rstrip("\n") + "\n"
-    return PromptSection(
-        key=key, title=meta["title"], customizable=customizable, default_body=body
-    )
+    return PromptSection(key=key, title=meta["title"], customizable=customizable, default_body=body)
 
 
 def _load_registry() -> dict[str, PromptSection]:

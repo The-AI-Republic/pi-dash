@@ -96,6 +96,8 @@ const EMPTY_PAGE: IAgentRunPage = {
   count: 0,
   total_count: 0,
   total_pages: 1,
+  page: 1,
+  per_page: 20,
 } as IAgentRunPage;
 
 /** Route the two useSWR call sites (runs list, run detail) by their key. */

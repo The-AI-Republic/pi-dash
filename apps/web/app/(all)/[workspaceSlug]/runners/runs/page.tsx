@@ -34,6 +34,7 @@ const STATUS_BADGE_VARIANT: Record<TAgentRunStatus, TBadgeVariant> = {
   completed: "accent-success",
   failed: "accent-destructive",
   cancelled: "accent-neutral",
+  refused: "accent-destructive",
 };
 
 const RUN_STATUS_I18N_LABELS: Record<TAgentRunStatus, string> = {
@@ -49,6 +50,7 @@ const RUN_STATUS_I18N_LABELS: Record<TAgentRunStatus, string> = {
   completed: "completed",
   failed: "failed",
   cancelled: "cancelled",
+  refused: "refused",
 };
 
 const ERROR_SOURCE_BADGE_VARIANT: Record<TAgentRunErrorSource, TBadgeVariant> = {
@@ -251,6 +253,12 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
                     <Badge variant={STATUS_BADGE_VARIANT[detail.status]} size="sm">
                       {t(RUN_STATUS_I18N_LABELS[detail.status])}
                     </Badge>
+                    <Badge
+                      variant={detail.executor_kind === "cloud_agent" ? "accent-primary" : "accent-neutral"}
+                      size="sm"
+                    >
+                      {detail.executor_kind === "cloud_agent" ? t("Pi Dash Cloud Agent") : t("Local Runner")}
+                    </Badge>
                     {detail.status === "waiting_for_worktree" &&
                       typeof detail.queue_position === "number" &&
                       detail.queue_position > 0 && (
@@ -295,10 +303,45 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
               )}
               {detail.done_payload && (
                 <div className="text-13">
-                  <div className="text-secondary">{t("Done payload")}</div>
+                  <div className="text-secondary">{t("Result")}</div>
+                  {detail.executor_kind === "cloud_agent" && typeof detail.done_payload.summary === "string" && (
+                    <div className="mt-1 rounded bg-layer-1 p-3 whitespace-pre-wrap">{detail.done_payload.summary}</div>
+                  )}
                   <pre className="mt-1 rounded bg-layer-1 p-2 text-11 whitespace-pre-wrap">
                     {JSON.stringify(detail.done_payload, null, 2)}
                   </pre>
+                </div>
+              )}
+              {detail.executor_kind === "cloud_agent" && (
+                <div className="rounded border border-subtle p-3 text-13">
+                  <div className="font-medium">{t("Cloud execution")}</div>
+                  <p className="mt-1 text-11 text-secondary">
+                    {t(
+                      "This stateless runner uses only the tools listed below. It has no development-machine filesystem or shell access."
+                    )}
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {(detail.tool_plan.tools ?? []).map((tool) => (
+                      <Badge key={tool} variant="accent-neutral" size="sm">
+                        {tool}
+                      </Badge>
+                    ))}
+                  </div>
+                  {detail.tool_calls.length > 0 && (
+                    <div className="mt-3 space-y-1">
+                      {detail.tool_calls.map((call) => (
+                        <div
+                          key={call.id}
+                          className="flex items-center justify-between rounded bg-layer-1 px-2 py-1 text-11"
+                        >
+                          <span className="font-mono">{call.tool_name}</span>
+                          <span>
+                            {call.risk} · {call.status}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
               <div className="text-13">
@@ -352,7 +395,11 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
         handleSubmit={confirmCancel}
         isSubmitting={cancelling}
         title={t("Cancel run?")}
-        content={t("The runner will stop this run as soon as it gets the signal.")}
+        content={t(
+          cancelTarget?.executor_kind === "cloud_agent"
+            ? "The Cloud Agent will stop at the next safe boundary."
+            : "The runner will stop this run as soon as it gets the signal."
+        )}
         primaryButtonText={{ default: t("Cancel run"), loading: t("Cancel run") }}
       />
     </div>

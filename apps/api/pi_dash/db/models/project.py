@@ -18,6 +18,7 @@ from django.http import Http404
 
 # Module imports
 from pi_dash.db.mixins import AuditModel
+from pi_dash.core.agent_execution import AgentExecutorKind, get_default_agent_executor
 
 from .base import BaseModel
 
@@ -164,6 +165,13 @@ class Project(BaseModel):
     agent_test_default_interval_seconds = models.IntegerField(default=43200)  # 12 h
     agent_test_default_max_ticks = models.IntegerField(default=3)             # 36 h window
     agent_ticking_enabled = models.BooleanField(default=True)
+    # Execution policy for future runs. Existing runs retain their snapshotted
+    # executor even when this setting changes.
+    default_agent_executor = models.CharField(
+        max_length=24,
+        choices=AgentExecutorKind.choices,
+        default=get_default_agent_executor,
+    )
 
     def __init__(self, *args, **kwargs):
         # Track if timezone is provided, if so, don't override it with the workspace timezone when saving
@@ -275,11 +283,15 @@ class Project(BaseModel):
                 is_default=True,
                 deleted_at__isnull=True,
             ).exists()
-            has_replacement = Project.objects.filter(
-                workspace_id=self.workspace_id,
-                is_default=True,
-                deleted_at__isnull=True,
-            ).exclude(pk=self.pk).exists()
+            has_replacement = (
+                Project.objects.filter(
+                    workspace_id=self.workspace_id,
+                    is_default=True,
+                    deleted_at__isnull=True,
+                )
+                .exclude(pk=self.pk)
+                .exists()
+            )
             if was_default and not has_replacement:
                 raise ValidationError("Default project cannot be unset without assigning another default project.")
 

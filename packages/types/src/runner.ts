@@ -153,14 +153,32 @@ export type TAgentRunStatus =
   | "blocked"
   | "completed"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "refused";
 
 export const AGENT_RUN_TERMINAL_STATUSES: readonly TAgentRunStatus[] = [
   "blocked",
   "completed",
   "failed",
   "cancelled",
+  "refused",
 ] as const;
+
+export type TAgentExecutorKind = "local_runner" | "cloud_agent";
+
+export interface IAgentRunToolCall {
+  id: string;
+  tool_call_id: string;
+  source: "internal" | "mcp";
+  server_key: string;
+  tool_name: string;
+  risk: "read" | "write";
+  status: "prepared" | "submitted" | "succeeded" | "failed" | "unknown" | "denied";
+  error_code: string;
+  prepared_at: string;
+  submitted_at: string | null;
+  completed_at: string | null;
+}
 
 export interface IAgentRunEvent {
   id: number;
@@ -183,6 +201,10 @@ export interface IAgentRunErrorDiagnostic {
 export interface IAgentRun {
   id: string;
   status: TAgentRunStatus;
+  executor_kind: TAgentExecutorKind;
+  dispatch_attempts: number;
+  cancel_requested_at: string | null;
+  cancel_reason: string;
   prompt: string;
   thread_id: string;
   runner: string | null;
@@ -199,11 +221,18 @@ export interface IAgentRun {
   ended_at: string | null;
   done_payload: Record<string, unknown> | null;
   error: string;
+  error_code: string;
   error_diagnostic: IAgentRunErrorDiagnostic | null;
   llm_model: string;
   input_tokens: number | null;
   output_tokens: number | null;
   total_tokens: number | null;
+  tool_plan: {
+    tools?: string[];
+    unavailable_capabilities?: string[];
+    limits?: Record<string, number>;
+  };
+  tool_calls: IAgentRunToolCall[];
   /** Place in the runner's local worktree queue while
    * ``waiting_for_worktree``; ``null`` otherwise (display only). */
   queue_position?: number | null;

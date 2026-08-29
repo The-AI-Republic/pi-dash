@@ -5,7 +5,8 @@
 import logging
 import math
 
-from django.db import transaction
+from django.conf import settings
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import status
@@ -96,8 +97,18 @@ def _can_view_run(user, run: AgentRun) -> bool:
         return True
     if run.runner_id is not None and run.runner.owner_id == user.id:
         return True
+    # Private-runner gate: a run executing on someone else's private machine
+    # is visible only to the run creator and the runner owner (both handled
+    # above) — not to issue participants or workspace admins. Runs without a
+    # runner (queued local work, Cloud Agent runs) fall through to the
+    # involvement grants below.
     if run.runner_id is not None and not can_view_runner(user, run.runner):
         return False
+    if run.work_item_id is not None:
+        if run.work_item.created_by_id == user.id:
+            return True
+        if run.work_item.assignees.filter(pk=user.id).exists():
+            return True
     return is_workspace_admin(user, run.workspace_id)
 
 
@@ -134,17 +145,28 @@ class AgentRunListEndpoint(APIView):
         from pi_dash.db.models import WorkspaceMember
 
         member_workspaces = WorkspaceMember.objects.filter(member=request.user).values("workspace_id")
+        admin_workspaces = WorkspaceMember.objects.filter(member=request.user, role=20).values("workspace_id")
         qs = (
             AgentRun.objects.filter(workspace_id__in=member_workspaces)
             .filter(
                 Q(created_by=request.user)
+                | Q(runner__owner=request.user)
                 | Q(work_item__created_by=request.user)
                 | Q(work_item__assignees=request.user)
+                | Q(workspace_id__in=admin_workspaces)
             )
+            # Private-runner gate, mirroring ``_can_view_run``: involvement or
+            # admin standing never reveals a run executing on someone else's
+            # private machine — only the run creator and the runner owner see
+            # those rows. Runner-less runs (queued, Cloud Agent) are unaffected.
+            .filter(Q(runner__isnull=True) | Q(runner__owner=request.user) | Q(created_by=request.user))
             # ``pod__project`` is read by AgentRunSerializer.pod_detail
             # (PodMiniSerializer.project_identifier); join it to avoid an
             # N+1 across the up-to-200 rows serialized below.
             .select_related("pod__project")
+            # AgentRunSerializer renders ``tool_calls`` inline; prefetch so a
+            # page of runs costs one extra query instead of one per row.
+            .prefetch_related("tool_calls")
             .distinct()
             .order_by("-created_at")
         )
@@ -212,21 +234,88 @@ class AgentRunListEndpoint(APIView):
                 status=exc.status,
             )
 
-        with transaction.atomic():
-            run = AgentRun.objects.create(
-                workspace_id=ctx.workspace_id,
-                created_by=ctx.created_by,
-                pod=ctx.pod,
-                prompt=prompt,
-                run_config=request.data.get("run_config") or {},
-                required_capabilities=request.data.get("required_capabilities") or [],
-                work_item_id=ctx.work_item_id,
-                # Owner stays NULL until assignment (design §5.3).
+        from pi_dash.cloud_agent.creation import dispatch_after_commit, execution_fields
+        from pi_dash.db.models.issue import Issue
+
+        try:
+            with transaction.atomic():
+                execution = execution_fields(
+                    project=ctx.pod.project,
+                    run_kind="direct",
+                    has_issue=ctx.work_item_id is not None,
+                    required_capabilities=request.data.get("required_capabilities") or [],
+                    actor=ctx.created_by,
+                    # Honor the work item's execution-target override when this
+                    # direct run is bound to one; free-form runs inherit the
+                    # project default.
+                    requested=(
+                        Issue.objects.filter(pk=ctx.work_item_id)
+                        .values_list("agent_executor", flat=True)
+                        .first()
+                        if ctx.work_item_id is not None
+                        else None
+                    ),
+                )
+                run = AgentRun.objects.create(
+                    workspace_id=ctx.workspace_id,
+                    created_by=ctx.created_by,
+                    pod=ctx.pod,
+                    prompt="",
+                    prompt_manifest=None,
+                    run_config=request.data.get("run_config") or {},
+                    required_capabilities=request.data.get("required_capabilities") or [],
+                    work_item_id=ctx.work_item_id,
+                    **execution,
+                    # Owner stays NULL until assignment (design §5.3).
+                )
+                from pi_dash.prompting.composer import build_direct_turn
+
+                run.prompt = build_direct_turn(
+                    prompt,
+                    run,
+                    run.work_item if run.work_item_id else None,
+                )
+                # The prompt-size cap is a Cloud Agent execution limit; local
+                # runs stream the prompt to the runner verbatim and never had
+                # a limit — do not break that workflow.
+                if (
+                    run.executor_kind == "cloud_agent"
+                    and len(run.prompt.encode()) > settings.CLOUD_AGENT_MAX_PROMPT_BYTES
+                ):
+                    raise OverflowError("prompt_too_large")
+                run.save(update_fields=["prompt", "prompt_manifest"])
+                dispatch_after_commit(run.id)
+        except (ValueError, RuntimeError) as exc:
+            code = getattr(exc, "code", str(exc))
+            if code == "run_quota_exceeded":
+                payload = {
+                    "error": str(exc),
+                    "code": code,
+                    "retry_after_seconds": max(1, getattr(exc, "retry_after_seconds", 1)),
+                }
+                return Response(payload, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            if code == "admission_unavailable":
+                return Response(
+                    {"error": str(exc), "code": code},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+            if code == "cloud_capability_unavailable":
+                return Response(
+                    {"error": str(exc), "code": code},
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+            return Response({"error": str(exc), "code": code}, status=status.HTTP_409_CONFLICT)
+        except OverflowError:
+            return Response(
+                {"error": "prompt exceeds Cloud Agent limit", "code": "prompt_too_large"},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        except IntegrityError:
+            return Response(
+                {"error": "work item already has an active run", "code": "active_run_exists"},
+                status=status.HTTP_409_CONFLICT,
             )
 
-        # Drain the pod's queue — assigns this run (or any predecessor) to
-        # an idle runner if one exists. Non-blocking on commit.
-        matcher.drain_pod(ctx.pod)
         run.refresh_from_db()
         return Response(
             AgentRunSerializer(run).data,
@@ -396,7 +485,7 @@ class AgentRunDetailEndpoint(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, run_id):
-        run = AgentRun.objects.select_related("runner").filter(id=run_id).first()
+        run = AgentRun.objects.select_related("runner", "work_item").filter(id=run_id).first()
         if run is None:
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
         if not _can_view_run(request.user, run):
@@ -418,41 +507,79 @@ class AgentRunCancelEndpoint(APIView):
         # Authorization check happens on a non-locked read; re-check terminal
         # state after acquiring the row lock to avoid racing with
         # Runner.revoke() (which holds select_for_update on in-flight runs).
-        run = AgentRun.objects.select_related("runner").filter(id=run_id).first()
+        run = AgentRun.objects.select_related("runner", "work_item").filter(id=run_id).first()
         if run is None:
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
         if not _can_cancel_run(request.user, run):
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
 
         runner_id = None
+        reason = (request.data.get("reason") or "cancelled by user")[:512]
+        if run.executor_kind == "cloud_agent" and run.status == AgentRunStatus.RUNNING:
+            updated = AgentRun.objects.filter(
+                pk=run.id, status=AgentRunStatus.RUNNING, cancel_requested_at__isnull=True
+            ).update(cancel_requested_at=timezone.now(), cancel_reason=reason)
+            if updated:
+                run.refresh_from_db()
+                return Response(AgentRunSerializer(run).data, status=status.HTTP_202_ACCEPTED)
         with transaction.atomic():
             locked = AgentRun.objects.select_for_update().filter(id=run_id).first()
             if locked is None:
                 return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
             if locked.is_terminal:
                 return Response(
-                    {"error": "run already terminal"},
+                    {"error": "run already terminal", "code": "run_already_terminal"},
                     status=status.HTTP_409_CONFLICT,
                 )
             if locked.status == AgentRunStatus.CANCEL_REQUESTED:
                 run = locked
-            elif locked.runner_id is not None and locked.status not in {
-                AgentRunStatus.QUEUED,
-                AgentRunStatus.PAUSED_AWAITING_INPUT,
-            }:
+            elif locked.executor_kind == "cloud_agent" and locked.status == AgentRunStatus.RUNNING:
+                # A running cloud run must never be finalized from here — the
+                # Celery worker is still executing, and finalizing would
+                # release workspace capacity mid-flight. A duplicate cancel
+                # lands in this branch because the fast path above already
+                # consumed cancel_requested_at; a first cancel can also land
+                # here when the run went RUNNING between the unlocked read
+                # and this lock. Record the request and let the worker's
+                # cancellation poll finalize.
+                if locked.cancel_requested_at is None:
+                    locked.cancel_requested_at = timezone.now()
+                    locked.cancel_reason = reason
+                    locked.save(update_fields=["cancel_requested_at", "cancel_reason"])
+                run = locked
+            elif (
+                locked.executor_kind != "cloud_agent"
+                and locked.runner_id is not None
+                and locked.status
+                not in {
+                    AgentRunStatus.QUEUED,
+                    AgentRunStatus.PAUSED_AWAITING_INPUT,
+                }
+            ):
                 # Do not free the runner in DB terms until its daemon confirms
                 # the agent process has stopped. This closes the race where a
                 # new Assign arrives while the cancelled process is still
                 # winding down.
                 locked.status = AgentRunStatus.CANCEL_REQUESTED
                 locked.queue_position = None
-                locked.save(update_fields=["status", "queue_position"])
+                locked.cancel_requested_at = timezone.now()
+                locked.cancel_reason = reason
+                locked.save(update_fields=["status", "queue_position", "cancel_requested_at", "cancel_reason"])
                 run = locked
             else:
-                locked.status = AgentRunStatus.CANCELLED
-                locked.ended_at = timezone.now()
-                locked.queue_position = None
-                locked.save(update_fields=["status", "ended_at", "queue_position"])
+                from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+                finalize_agent_run(
+                    locked.id,
+                    AgentRunStatus.CANCELLED,
+                    updates={
+                        "cancel_requested_at": timezone.now(),
+                        "cancel_reason": reason,
+                        "error_code": "cancelled",
+                        "error": reason,
+                    },
+                )
+                locked.refresh_from_db()
                 run = locked
             runner_id = locked.runner_id
 
@@ -489,6 +616,11 @@ class AgentRunReleasePinEndpoint(APIView):
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
         if not _can_cancel_run(request.user, run):
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+        if run.executor_kind == "cloud_agent":
+            return Response(
+                {"error": "Cloud Agent runs cannot be pinned", "code": "executor_not_local"},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         with transaction.atomic():
             locked = AgentRun.objects.select_for_update().filter(id=run_id).first()
