@@ -29,6 +29,11 @@ import { EstimateDropdown } from "@/components/dropdowns/estimate";
 import { ButtonAvatars } from "@/components/dropdowns/member/avatar";
 import { MemberDropdown } from "@/components/dropdowns/member/dropdown";
 import { PodDropdown } from "@/components/dropdowns/pod/dropdown";
+import {
+  cloudAgentOption,
+  executionTargetPatch,
+  executionTargetValue,
+} from "@/components/dropdowns/pod/execution-target";
 import { PriorityDropdown } from "@/components/dropdowns/priority";
 import { StateDropdown } from "@/components/dropdowns/state/dropdown";
 // hooks
@@ -136,16 +141,17 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
               />
             </SidebarPropertyListItem>
 
-            <SidebarPropertyListItem icon={Container} label={t("Pod")}>
+            <SidebarPropertyListItem icon={Container} label={t("Runs on")}>
               <PodDropdown
-                value={issue?.assigned_pod_id}
-                onChange={(val) => issueOperations.update(workspaceSlug, projectId, issueId, { assigned_pod_id: val })}
+                value={executionTargetValue(issue, projectDetails)}
+                onChange={(val) => issueOperations.update(workspaceSlug, projectId, issueId, executionTargetPatch(val))}
+                cloudAgent={cloudAgentOption(projectDetails)}
                 disabled={!isEditable}
                 projectId={projectId?.toString() ?? ""}
                 buttonVariant="transparent-with-text"
                 className="group w-full grow"
                 buttonContainerClassName="w-full text-left h-7.5"
-                buttonClassName={`text-body-xs-regular ${issue?.assigned_pod_id ? "" : "text-placeholder"}`}
+                buttonClassName={`text-body-xs-regular ${executionTargetValue(issue, projectDetails) ? "" : "text-placeholder"}`}
                 dropdownArrow
                 dropdownArrowClassName="h-3.5 w-3.5 hidden group-hover:inline"
               />

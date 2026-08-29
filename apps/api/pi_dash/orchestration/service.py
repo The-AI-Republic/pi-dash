@@ -411,6 +411,7 @@ def _create_continuation_run(*, issue: Issue, parent: AgentRun, creator, pod, tr
             project=issue.project,
             run_kind="issue",
             has_issue=True,
+            requested=issue.agent_executor,
             actor=creator,
             automatic=trigger == AgentRunTrigger.TICK,
         )
@@ -536,6 +537,7 @@ def _create_project_move_handoff_run(*, issue: Issue, parent: AgentRun, pod: Pod
             project=issue.project,
             run_kind="issue",
             has_issue=True,
+            requested=issue.agent_executor,
             actor=parent.created_by,
             automatic=True,
         )
@@ -707,6 +709,7 @@ def _create_and_dispatch_run(
             project=issue.project,
             run_kind="issue",
             has_issue=True,
+            requested=issue.agent_executor,
             actor=creator,
             automatic=trigger == AgentRunTrigger.TICK,
         )

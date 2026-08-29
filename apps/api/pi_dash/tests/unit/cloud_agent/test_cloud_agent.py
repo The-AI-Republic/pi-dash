@@ -113,6 +113,67 @@ def test_executor_resolution_and_immutable_plan(project, create_user):
 
 @pytest.mark.unit
 @override_settings(**CLOUD_SETTINGS)
+def test_issue_override_wins_over_project_default(project, create_user):
+    """Per-issue execution target overrides the project default in both directions."""
+    _configure_llm(create_user)
+
+    # Project defaults to local; the issue pins Cloud Agent.
+    project.default_agent_executor = AgentExecutorKind.LOCAL_RUNNER
+    fields = execution_fields(
+        project=project,
+        run_kind="issue",
+        has_issue=True,
+        actor=create_user,
+        requested=AgentExecutorKind.CLOUD_AGENT,
+    )
+    assert fields["executor_kind"] == AgentExecutorKind.CLOUD_AGENT
+
+    # Project defaults to cloud; the issue pins a pod (local runner).
+    project.default_agent_executor = AgentExecutorKind.CLOUD_AGENT
+    fields = execution_fields(
+        project=project,
+        run_kind="issue",
+        has_issue=True,
+        actor=create_user,
+        requested=AgentExecutorKind.LOCAL_RUNNER,
+    )
+    assert fields["executor_kind"] == AgentExecutorKind.LOCAL_RUNNER
+
+    # No override inherits the project default.
+    fields = execution_fields(
+        project=project, run_kind="issue", has_issue=True, actor=create_user, requested=None
+    )
+    assert fields["executor_kind"] == AgentExecutorKind.CLOUD_AGENT
+
+
+@pytest.mark.unit
+@override_settings(**CLOUD_SETTINGS)
+def test_issue_agent_executor_defaults_to_inherit(issue):
+    """Existing and new issues start as 'inherit', so the project default rules."""
+    assert issue.agent_executor is None
+
+
+@pytest.mark.unit
+@override_settings(**CLOUD_SETTINGS)
+def test_dispatch_uses_the_issues_execution_target(issue, create_user):
+    """A cloud-pinned issue dispatches a cloud run even on a local-default project."""
+    from pi_dash.orchestration import service as orchestration
+
+    _configure_llm(create_user)
+    issue.project.default_agent_executor = AgentExecutorKind.LOCAL_RUNNER
+    issue.project.save(update_fields=["default_agent_executor"])
+    issue.agent_executor = AgentExecutorKind.CLOUD_AGENT
+    issue.save(update_fields=["agent_executor"])
+
+    to_state = State.objects.create(name="In Progress", group="started", project=issue.project)
+    with patch("pi_dash.cloud_agent.creation.dispatch_after_commit"):
+        outcome = orchestration.handle_issue_state_transition(issue, issue.state, to_state, actor=create_user)
+    assert outcome.created_run is not None
+    assert outcome.created_run.executor_kind == AgentExecutorKind.CLOUD_AGENT
+
+
+@pytest.mark.unit
+@override_settings(**CLOUD_SETTINGS)
 def test_cloud_prompt_is_locked_and_has_no_local_commands(issue, create_user):
     run = _cloud_run(issue, create_user)
     prompt = build_first_turn(issue, run)

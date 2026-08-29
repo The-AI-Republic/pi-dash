@@ -16,8 +16,14 @@ def execution_fields(
     required_capabilities=(),
     actor=None,
     automatic: bool = False,
+    requested=None,
 ):
-    executor = resolve_executor_kind(project=project)
+    """Resolve the executor-specific AgentRun fields for one run creation.
+
+    ``requested`` is the per-issue execution-target override
+    (``Issue.agent_executor``); ``None`` inherits the project default.
+    """
+    executor = resolve_executor_kind(project=project, requested=requested)
     if executor == AgentExecutorKind.CLOUD_AGENT:
         from pi_dash.cloud_agent.admission import CloudAgentAdmissionError, enforce_creation_rate
         from pi_dash.cloud_agent.policy import CloudAgentUnavailable

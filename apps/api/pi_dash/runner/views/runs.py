@@ -235,6 +235,7 @@ class AgentRunListEndpoint(APIView):
             )
 
         from pi_dash.cloud_agent.creation import dispatch_after_commit, execution_fields
+        from pi_dash.db.models.issue import Issue
 
         try:
             with transaction.atomic():
@@ -244,6 +245,16 @@ class AgentRunListEndpoint(APIView):
                     has_issue=ctx.work_item_id is not None,
                     required_capabilities=request.data.get("required_capabilities") or [],
                     actor=ctx.created_by,
+                    # Honor the work item's execution-target override when this
+                    # direct run is bound to one; free-form runs inherit the
+                    # project default.
+                    requested=(
+                        Issue.objects.filter(pk=ctx.work_item_id)
+                        .values_list("agent_executor", flat=True)
+                        .first()
+                        if ctx.work_item_id is not None
+                        else None
+                    ),
                 )
                 run = AgentRun.objects.create(
                     workspace_id=ctx.workspace_id,

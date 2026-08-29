@@ -69,6 +69,11 @@ export type TBaseIssue = {
   // the project's default pod, resolved server-side. Reassignment is rejected
   // by the backend once the issue has an active run.
   assigned_pod_id?: string | null;
+  // Per-issue execution-target override. Null inherits the project's
+  // `default_agent_executor`. "local_runner" routes to `assigned_pod_id`;
+  // "cloud_agent" has no pod. Changing it is rejected by the backend once the
+  // issue has an active run, same as the pod.
+  agent_executor?: "local_runner" | "cloud_agent" | null;
 
   created_at: string;
   updated_at: string;

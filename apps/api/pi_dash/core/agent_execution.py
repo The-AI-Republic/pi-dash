@@ -29,6 +29,18 @@ def cloud_agent_is_configured() -> bool:
     return bool(getattr(settings, "CLOUD_AGENT_ENABLED", False))
 
 
+def effective_executor_for_issue(issue) -> str:
+    """The executor actually in force for ``issue``.
+
+    The per-issue ``agent_executor`` override wins; ``None`` inherits the
+    project's ``default_agent_executor``. Every caller that branches on "is
+    this cloud or local work" must use this rather than reading the project
+    default directly, or a cloud-pinned issue on a local-default project gets
+    routed down the pod/runner path (and bounced for having no runner).
+    """
+    return getattr(issue, "agent_executor", None) or issue.project.default_agent_executor
+
+
 def user_has_llm_config(user) -> bool:
     """Whether ``user`` has a usable LLM config (CE: BYOK; cloud: overlay).
 

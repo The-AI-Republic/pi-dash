@@ -38,6 +38,8 @@ export function PodDropdown(props: TPodDropdownProps) {
   // or stranding the previous project's pod. The dropdown has no clear action,
   // so `value` only goes null via those resets, never by user intent → no loop.
   useEffect(() => {
+    // `value` holds the cloud sentinel when the target is the Cloud Agent —
+    // never overwrite that with a pod.
     if (!isForWorkItemCreation || value || !pods?.length) return;
     const defaultPod = pods.find((pod) => pod.is_default) ?? pods[0];
     if (defaultPod) onChange(defaultPod.id);

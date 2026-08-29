@@ -19,6 +19,7 @@ from django import apps
 
 # Module imports
 from pi_dash.utils.html_processor import strip_tags
+from pi_dash.core.agent_execution import AgentExecutorKind
 from pi_dash.db.mixins import SoftDeletionManager
 from pi_dash.utils.exception_logger import log_exception
 from .project import ProjectBaseModel
@@ -197,6 +198,21 @@ class Issue(ProjectBaseModel):
         blank=True,
         on_delete=models.PROTECT,
         related_name="assigned_issues",
+    )
+    # Per-issue execution target override. NULL means "inherit the project's
+    # ``default_agent_executor``" — the state every issue starts in, so the
+    # project-level default keeps working untouched and this field is purely
+    # additive for existing rows.
+    #
+    # ``local_runner`` routes the run to ``assigned_pod``; ``cloud_agent``
+    # runs have no runner and no pod queue of their own (see AgentRun's
+    # ``agent_run_cloud_has_no_local_assignment`` constraint), so the two are
+    # mutually exclusive execution targets presented as one choice in the UI.
+    agent_executor = models.CharField(
+        max_length=24,
+        choices=AgentExecutorKind.choices,
+        null=True,
+        blank=True,
     )
 
     issue_objects = IssueManager()

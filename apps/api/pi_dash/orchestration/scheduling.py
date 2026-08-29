@@ -444,9 +444,9 @@ def _resolve_pod_for_issue(issue: Issue):
 
 def _resolve_creator_for_trigger(issue: Issue, *, triggered_by: str, actor=None):
     """Resolve a current human execution principal; bots never own tool authority."""
-    from pi_dash.core.agent_execution import AgentExecutorKind
+    from pi_dash.core.agent_execution import AgentExecutorKind, effective_executor_for_issue
 
-    if issue.project.default_agent_executor == AgentExecutorKind.LOCAL_RUNNER:
+    if effective_executor_for_issue(issue) == AgentExecutorKind.LOCAL_RUNNER:
         if actor is not None:
             return actor
         if triggered_by == TRIGGER_TICK:
@@ -499,13 +499,20 @@ def preflight_eligibility_or_bounce(issue: Issue, *, run_creator, pod, triggered
 
     See ``.ai_design/issue_runner/design.md`` §6.6.
     """
-    from pi_dash.core.agent_execution import AgentExecutorKind, user_has_llm_config
+    from pi_dash.core.agent_execution import (
+        AgentExecutorKind,
+        effective_executor_for_issue,
+        user_has_llm_config,
+    )
 
     # Cloud capacity is independent of registered local machines, but the
     # execution principal must hold a usable LLM config — otherwise run
     # creation would raise CloudAgentUnavailable and the tick would be
     # swallowed with no user-visible signal. Bounce loudly instead.
-    if issue.project.default_agent_executor == AgentExecutorKind.CLOUD_AGENT:
+    #
+    # Branch on the issue's *effective* executor: an issue pinned to the Cloud
+    # Agent on a local-default project has no pod requirement at all.
+    if effective_executor_for_issue(issue) == AgentExecutorKind.CLOUD_AGENT:
         if run_creator is not None and user_has_llm_config(run_creator):
             return True
         _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by, reason="no-llm-config")
@@ -662,9 +669,9 @@ def dispatch_continuation_run(
             issue.pk,
             triggered_by,
         )
-        from pi_dash.core.agent_execution import AgentExecutorKind
+        from pi_dash.core.agent_execution import AgentExecutorKind, effective_executor_for_issue
 
-        if issue.project.default_agent_executor == AgentExecutorKind.CLOUD_AGENT:
+        if effective_executor_for_issue(issue) == AgentExecutorKind.CLOUD_AGENT:
             # On a cloud project "no creator" means no candidate holds a
             # usable LLM config — bounce loudly instead of letting the
             # ticker fire forever with zero user-visible signal.
@@ -730,9 +737,9 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
             issue.pk,
             TRIGGER_RUN_AI,
         )
-        from pi_dash.core.agent_execution import AgentExecutorKind
+        from pi_dash.core.agent_execution import AgentExecutorKind, effective_executor_for_issue
 
-        if issue.project.default_agent_executor == AgentExecutorKind.CLOUD_AGENT:
+        if effective_executor_for_issue(issue) == AgentExecutorKind.CLOUD_AGENT:
             _bounce_issue_no_eligible_runner(issue, triggered_by=TRIGGER_RUN_AI, reason="no-llm-config")
         return None
 

@@ -239,6 +239,35 @@ class IssueCreateSerializer(BaseSerializer):
                         {"assigned_pod_id": "cannot reassign pod while the issue has an active run"}
                     )
 
+        # ``agent_executor`` is the per-issue execution-target override; NULL
+        # inherits the project default. Cloud Agent and pods are mutually
+        # exclusive targets, so the UI presents them as one "Runs on" choice
+        # and this is the matching server-side guard.
+        if "agent_executor" in attrs:
+            executor = attrs["agent_executor"]  # None clears the override
+            if executor is not None:
+                from pi_dash.core.agent_execution import AgentExecutorKind, cloud_agent_is_configured
+
+                if executor not in AgentExecutorKind.values:
+                    raise serializers.ValidationError({"agent_executor": "unknown agent executor"})
+                # Refuse a target that could never dispatch, rather than
+                # accepting it and failing invisibly at run creation.
+                if executor == AgentExecutorKind.CLOUD_AGENT and not cloud_agent_is_configured():
+                    raise serializers.ValidationError(
+                        {"agent_executor": "Pi Dash Cloud Agent is not available on this instance"}
+                    )
+            # Same mid-flight rule as the pod: ``AgentRun.executor_kind`` is
+            # snapshotted at creation, so switching targets under a live run
+            # would silently apply only to the next dispatch.
+            if (
+                self.instance is not None
+                and str(executor) != str(self.instance.agent_executor)
+                and self.instance.has_active_run
+            ):
+                raise serializers.ValidationError(
+                    {"agent_executor": "cannot change the execution target while the issue has an active run"}
+                )
+
         # Validate description content for security
         if "description_html" in attrs and attrs["description_html"]:
             is_valid, error_msg, sanitized_html = validate_html_content(attrs["description_html"])

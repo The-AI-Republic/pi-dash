@@ -1858,4 +1858,8 @@ export default {
   "Waiting for Pi Dash Cloud Agent capacity.": "Waiting for Pi Dash Cloud Agent capacity.",
   "Works out of the box with project and connected GitHub tools; no filesystem or shell.":
     "Works out of the box with project and connected GitHub tools; no filesystem or shell.",
+  "Runs on": "Runs on",
+  "Use Pi Dash Cloud Agent by default": "Use Pi Dash Cloud Agent by default",
+  "New work items run on the Cloud Agent — no machine required. Turn this off to default to this project's pod instead. Either way both remain selectable per work item.":
+    "New work items run on the Cloud Agent — no machine required. Turn this off to default to this project's pod instead. Either way both remain selectable per work item.",
 } as const;

@@ -7,7 +7,7 @@
 import { useRef, useState } from "react";
 import { usePopper } from "react-popper";
 import { Combobox } from "@headlessui/react";
-import { Check, Container } from "lucide-react";
+import { Check, Cloud, Container } from "lucide-react";
 // pi dash imports
 import { useTranslation } from "@pi-dash/i18n";
 import { SearchIcon, ChevronDownIcon } from "@pi-dash/propel/icons";
@@ -20,8 +20,17 @@ import { BUTTON_VARIANTS_WITH_TEXT } from "@/components/dropdowns/constants";
 import type { TDropdownProps } from "@/components/dropdowns/types";
 // hooks
 import { useDropdown } from "@/hooks/use-dropdown";
+// local imports
+import { CLOUD_AGENT_VALUE } from "./execution-target";
+
+const matchesQuery = (label: string, query: string) =>
+  query === "" || label.toLowerCase().includes(query.toLowerCase());
 
 export type TPodDropdownBaseProps = TDropdownProps & {
+  /** When given, the Cloud Agent is offered as a peer of the pods — the issue's
+   * execution target rather than just its pod. Disabled (with a reason) when
+   * the instance or the viewer cannot run it. */
+  cloudAgent?: { available: boolean; reasonCode: string };
   dropdownArrow?: boolean;
   dropdownArrowClassName?: string;
   isInitializing?: boolean;
@@ -38,6 +47,7 @@ export function PodDropdownBase(props: TPodDropdownBaseProps) {
     buttonClassName,
     buttonContainerClassName,
     buttonVariant,
+    cloudAgent,
     className = "",
     disabled = false,
     dropdownArrow = false,
@@ -83,7 +93,16 @@ export function PodDropdownBase(props: TPodDropdownBaseProps) {
   });
 
   // derived values
-  const selectedPod = value ? pods.find((pod) => pod.id === value) : undefined;
+  const isCloudSelected = value === CLOUD_AGENT_VALUE;
+  const selectedPod = value && !isCloudSelected ? pods.find((pod) => pod.id === value) : undefined;
+  // The field names an execution target once the Cloud Agent can appear in it;
+  // "Pod" would be a category error (the Cloud Agent has no pod).
+  const fieldLabel = cloudAgent ? t("Runs on") : t("Pod");
+  const selectedLabel = isCloudSelected ? t("Pi Dash Cloud Agent") : selectedPod?.name;
+  const cloudUnavailableReason =
+    cloudAgent?.reasonCode === "llm_config_missing"
+      ? t("Configure your AI provider in Pi Dash AI settings to use the Cloud Agent.")
+      : t("Unavailable on this instance. Ask an administrator to enable the Cloud Agent.");
   const filteredPods = query === "" ? pods : pods.filter((pod) => pod.name.toLowerCase().includes(query.toLowerCase()));
 
   const dropdownOnChange = (val: string) => {
@@ -110,8 +129,8 @@ export function PodDropdownBase(props: TPodDropdownBaseProps) {
       <DropdownButton
         className={buttonClassName}
         isActive={isOpen}
-        tooltipHeading={t("Pod")}
-        tooltipContent={selectedPod?.name ?? t("Pod")}
+        tooltipHeading={fieldLabel}
+        tooltipContent={selectedLabel ?? fieldLabel}
         showTooltip={showTooltip}
         variant={buttonVariant}
         renderToolTipByDefault={renderByDefault}
@@ -120,9 +139,14 @@ export function PodDropdownBase(props: TPodDropdownBaseProps) {
           <Spinner className="h-3.5 w-3.5" />
         ) : (
           <>
-            {!hideIcon && <Container className="size-3.5 flex-shrink-0" />}
+            {!hideIcon &&
+              (isCloudSelected ? (
+                <Cloud className="size-3.5 flex-shrink-0" />
+              ) : (
+                <Container className="size-3.5 flex-shrink-0" />
+              ))}
             {BUTTON_VARIANTS_WITH_TEXT.includes(buttonVariant) && (
-              <span className="flex-grow truncate text-left">{selectedPod?.name ?? t("Pod")}</span>
+              <span className="flex-grow truncate text-left">{selectedLabel ?? fieldLabel}</span>
             )}
             {dropdownArrow && (
               <ChevronDownIcon className={cn("h-2.5 w-2.5 flex-shrink-0", dropdownArrowClassName)} aria-hidden="true" />
@@ -167,37 +191,63 @@ export function PodDropdownBase(props: TPodDropdownBaseProps) {
               />
             </div>
             <div className="mt-2 max-h-48 space-y-1 overflow-y-scroll">
-              {filteredPods.length > 0 ? (
-                filteredPods.map((pod) => (
-                  <Combobox.Option
-                    key={pod.id}
-                    value={pod.id}
-                    className={({ active, selected }) =>
-                      cn(
-                        "flex w-full cursor-pointer items-center justify-between gap-2 truncate rounded-sm px-1 py-1.5 select-none",
-                        { "bg-surface-2": active, "text-primary": selected, "text-secondary": !selected }
-                      )
-                    }
-                  >
-                    {({ selected }) => (
-                      <>
-                        <div className="flex items-center gap-2 truncate">
-                          <Container className="size-3.5 flex-shrink-0" />
-                          <span className="flex-grow truncate">{pod.name}</span>
-                          {pod.is_default && (
-                            <span className="flex-shrink-0 rounded-sm bg-surface-2 px-1 py-0.5 text-9 text-tertiary uppercase">
-                              {t("Default")}
-                            </span>
+              {cloudAgent && matchesQuery(t("Pi Dash Cloud Agent"), query) && (
+                <Combobox.Option
+                  value={CLOUD_AGENT_VALUE}
+                  disabled={!cloudAgent.available}
+                  className={({ active, selected }) =>
+                    cn(
+                      "flex w-full items-center justify-between gap-2 truncate rounded-sm px-1 py-1.5 select-none",
+                      { "bg-surface-2": active, "text-primary": selected, "text-secondary": !selected },
+                      cloudAgent.available ? "cursor-pointer" : "cursor-not-allowed text-placeholder"
+                    )
+                  }
+                >
+                  {({ selected }) => (
+                    <>
+                      <div className="flex min-w-0 items-center gap-2">
+                        <Cloud className="size-3.5 flex-shrink-0" />
+                        <div className="min-w-0">
+                          <p className="truncate">{t("Pi Dash Cloud Agent")}</p>
+                          {!cloudAgent.available && (
+                            <p className="truncate text-9 text-placeholder">{cloudUnavailableReason}</p>
                           )}
                         </div>
-                        {selected && <Check className="size-3.5 flex-shrink-0" />}
-                      </>
-                    )}
-                  </Combobox.Option>
-                ))
-              ) : (
-                <p className="px-1.5 py-1 text-placeholder italic">{t("No matching results")}</p>
+                      </div>
+                      {selected && <Check className="size-3.5 flex-shrink-0" />}
+                    </>
+                  )}
+                </Combobox.Option>
               )}
+              {filteredPods.length > 0
+                ? filteredPods.map((pod) => (
+                    <Combobox.Option
+                      key={pod.id}
+                      value={pod.id}
+                      className={({ active, selected }) =>
+                        cn(
+                          "flex w-full cursor-pointer items-center justify-between gap-2 truncate rounded-sm px-1 py-1.5 select-none",
+                          { "bg-surface-2": active, "text-primary": selected, "text-secondary": !selected }
+                        )
+                      }
+                    >
+                      {({ selected }) => (
+                        <>
+                          <div className="flex items-center gap-2 truncate">
+                            <Container className="size-3.5 flex-shrink-0" />
+                            <span className="flex-grow truncate">{pod.name}</span>
+                            {pod.is_default && (
+                              <span className="flex-shrink-0 rounded-sm bg-surface-2 px-1 py-0.5 text-9 text-tertiary uppercase">
+                                {t("Default")}
+                              </span>
+                            )}
+                          </div>
+                          {selected && <Check className="size-3.5 flex-shrink-0" />}
+                        </>
+                      )}
+                    </Combobox.Option>
+                  ))
+                : !cloudAgent && <p className="px-1.5 py-1 text-placeholder italic">{t("No matching results")}</p>}
             </div>
           </div>
         </Combobox.Options>
