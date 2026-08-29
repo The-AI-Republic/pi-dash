@@ -365,6 +365,11 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
                 "work_branch": (getattr(parent, "git_work_branch", "") or None),
                 "description": _issue_description_markdown(parent),
                 "comments_count": _issue_comment_count(parent),
+                # Same shape as the issue's own ``code_reviews`` (empty list when
+                # none, soft-deleted excluded). Lets the template surface the
+                # parent's PRs so the agent can inspect prior work it builds on
+                # and resolve the stacked-PR base against the parent PR's state.
+                "code_reviews": _code_reviews_context(parent),
             }
             if parent is not None
             else None
