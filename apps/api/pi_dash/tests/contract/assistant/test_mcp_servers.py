@@ -23,6 +23,21 @@ pytestmark = pytest.mark.django_db
 URL = "/api/users/me/ai-assistant/mcp-servers/"
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_crypto(settings, monkeypatch):
+    """Give every test in this file a working crypto backend of its own.
+
+    Without this, the auth-header tests depend on whatever key material the
+    ambient environment happens to provide — green where a KMS/Fernet key is
+    configured, 503s in a bare CI runner.
+    """
+    from cryptography.fernet import Fernet
+
+    settings.ASSISTANT_CRYPTO_BACKEND = "fernet"
+    settings.ASSISTANT_ENCRYPTION_KEY = Fernet.generate_key().decode()
+    monkeypatch.setattr(crypto, "_backend", None)
+
+
 def client_for(user):
     c = APIClient()
     c.force_authenticate(user=user)
@@ -327,35 +342,44 @@ def test_servers_are_scoped_to_their_owner_when_building(world):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.asyncio
-async def test_an_unreachable_server_does_not_fail_the_run():
+def test_an_unreachable_server_does_not_fail_the_run():
     """The failure this guards is the whole point of the wrapper.
 
     Building a toolset does no I/O — the connection opens when the agent
     *enters* it. Unwrapped, a server that is down raises out of ``Agent.run``
     and takes the turn with it, so one broken tool server costs the user their
     assistant entirely.
+
+    Driven via ``asyncio.run`` so the test needs no async plugin — the CI
+    runner installs only ``requirements/test.txt``.
     """
+    import asyncio
+
     from pydantic_ai import Agent
 
     # Port 9 (discard) refuses fast and deterministically.
     toolset = mcp_runtime.build_toolset(
         url="http://127.0.0.1:9/mcp", timeout=1, read_timeout=1, server_name="dead"
     )
-    result = await Agent().run("hi", model="test", toolsets=[toolset])
+    result = asyncio.run(Agent().run("hi", model="test", toolsets=[toolset]))
 
     assert result is not None  # the turn completed
     assert toolset.failure is not None  # ...and the failure was recorded
     assert toolset.server_name == "dead"
 
 
-@pytest.mark.asyncio
-async def test_a_dead_server_reports_no_tools_rather_than_raising():
+def test_a_dead_server_reports_no_tools_rather_than_raising():
+    import asyncio
+
     toolset = mcp_runtime.build_toolset(
         url="http://127.0.0.1:9/mcp", timeout=1, read_timeout=1, server_name="dead"
     )
-    async with toolset:
-        assert await toolset.get_tools(None) == {}
+
+    async def scenario():
+        async with toolset:
+            return await toolset.get_tools(None)
+
+    assert asyncio.run(scenario()) == {}
 
 
 def test_the_wrapper_is_transparent_over_the_real_toolset():
