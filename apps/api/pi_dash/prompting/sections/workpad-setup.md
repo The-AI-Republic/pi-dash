@@ -39,8 +39,14 @@ This is the first run on this issue — the workpad is empty. You will create it
    - `git pull --rebase origin {{ repo.work_branch }}`.
 {% else %}
    - Resolve the **base branch** (what your work branches off of):
-{% if parent and parent.work_branch %}
-     - This issue has a parent ({{ parent.identifier }}) with an active implementation branch. Use the parent's branch as base: `BASE={{ parent.work_branch }}`.
+{% set parent_open_reviews = (parent.code_reviews | rejectattr("merged") | selectattr("state", "equalto", "open") | list) if parent else [] %}
+{% set parent_merged_reviews = (parent.code_reviews | selectattr("merged") | list) if parent else [] %}
+{% if parent and parent.work_branch and parent_open_reviews %}
+     - This issue has a parent ({{ parent.identifier }}) with an active implementation branch and an open {{ repo.code_review_term }} from it. Stack on it — use the parent's branch as base: `BASE={{ parent.work_branch }}`.
+{% elif parent and parent.work_branch and parent_merged_reviews %}
+     - This issue has a parent ({{ parent.identifier }}) whose {{ repo.code_review_term }} for its implementation branch has already merged. Do **not** stack on the (now-merged, possibly deleted) parent branch — the parent's work is already in the project base branch, or will be once you pull. Fall back to the project base branch: `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}`. Note the decision in the workpad `Notes`.
+{% elif parent and parent.work_branch %}
+     - This issue has a parent ({{ parent.identifier }}) with an active implementation branch and no attached {{ repo.code_review_term }} yet. The branch is the only signal available, so stack on it: `BASE={{ parent.work_branch }}`.
 {% elif parent %}
      - This issue has a parent ({{ parent.identifier }}) but the parent has no implementation branch yet. Fall back to the project base branch: `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}`. Note the fallback in the workpad `Notes`.
 {% else %}

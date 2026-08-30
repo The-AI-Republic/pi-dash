@@ -307,6 +307,214 @@ def test_context_parent_includes_description_and_comment_count(workspace, projec
 
 
 @pytest.mark.unit
+def test_context_parent_code_reviews_empty_when_none(workspace, project, state, create_user, run, issue):
+    # A parent with no attached PRs still exposes the key as an empty list so
+    # the template can branch with `{% if parent.code_reviews %}`.
+    parent = Issue.objects.create(
+        name="Umbrella epic",
+        workspace=workspace,
+        project=project,
+        state=state,
+        created_by=create_user,
+    )
+    issue.parent = parent
+    issue.save(update_fields=["parent"])
+
+    ctx = build_context(issue, run)
+    assert ctx["parent"]["code_reviews"] == []
+
+
+@pytest.mark.unit
+def test_context_parent_includes_attached_code_reviews(workspace, project, state, create_user, run, issue):
+    from pi_dash.db.models import GitCodeReviewLink
+
+    parent = Issue.objects.create(
+        name="Umbrella epic",
+        workspace=workspace,
+        project=project,
+        state=state,
+        created_by=create_user,
+        git_work_branch="pi-dash/parent-impl",
+    )
+    GitCodeReviewLink.objects.create(
+        issue=parent,
+        project=parent.project,
+        workspace=parent.workspace,
+        provider="github",
+        host_url="https://github.com",
+        namespace="acme",
+        repo_name="web",
+        external_iid="7",
+        url="https://github.com/acme/web/pull/7",
+        title="Parent groundwork",
+        state="open",
+    )
+    issue.parent = parent
+    issue.save(update_fields=["parent"])
+
+    ctx = build_context(issue, run)
+    reviews = ctx["parent"]["code_reviews"]
+    assert len(reviews) == 1
+    # Same shape as the issue's own code_reviews list.
+    assert reviews[0]["url"] == "https://github.com/acme/web/pull/7"
+    assert reviews[0]["title"] == "Parent groundwork"
+    assert reviews[0]["state"] == "open"
+    assert reviews[0]["merged"] is False
+    assert reviews[0]["provider"] == "github"
+    assert reviews[0]["external_iid"] == "7"
+
+
+@pytest.mark.unit
+def test_context_parent_code_reviews_excludes_soft_deleted(workspace, project, state, create_user, run, issue):
+    from pi_dash.db.models import GitCodeReviewLink
+
+    parent = Issue.objects.create(
+        name="Umbrella epic",
+        workspace=workspace,
+        project=project,
+        state=state,
+        created_by=create_user,
+    )
+    link = GitCodeReviewLink.objects.create(
+        issue=parent,
+        project=parent.project,
+        workspace=parent.workspace,
+        provider="github",
+        host_url="https://github.com",
+        namespace="acme",
+        repo_name="web",
+        external_iid="8",
+        url="https://github.com/acme/web/pull/8",
+    )
+    link.delete()  # soft delete
+    issue.parent = parent
+    issue.save(update_fields=["parent"])
+
+    ctx = build_context(issue, run)
+    assert ctx["parent"]["code_reviews"] == []
+
+
+def _make_parent_with_review(workspace, project, state, create_user, issue, *, work_branch, review=None):
+    """Attach a parent (optionally with one PR) to ``issue`` and return it."""
+    from pi_dash.db.models import GitCodeReviewLink
+
+    parent = Issue.objects.create(
+        name="Umbrella epic",
+        workspace=workspace,
+        project=project,
+        state=state,
+        created_by=create_user,
+        git_work_branch=work_branch,
+    )
+    if review is not None:
+        GitCodeReviewLink.objects.create(
+            issue=parent,
+            project=parent.project,
+            workspace=parent.workspace,
+            provider="github",
+            host_url="https://github.com",
+            namespace="acme",
+            repo_name="web",
+            external_iid=review.get("external_iid", "9"),
+            url=review.get("url", "https://github.com/acme/web/pull/9"),
+            title=review.get("title", "Parent PR"),
+            state=review.get("state", "open"),
+            merged=review.get("merged", False),
+        )
+    issue.parent = parent
+    issue.save(update_fields=["parent"])
+    return parent
+
+
+def _render_section(key, ctx):
+    from pi_dash.prompting import registry
+    from pi_dash.prompting.renderer import render
+
+    return render(registry.get_section(key).default_body, ctx)
+
+
+@pytest.mark.unit
+def test_intro_renders_parent_pr_block_only_when_non_empty(workspace, project, state, create_user, run, issue):
+    # Parent without PRs → the parent-PR block is omitted.
+    _make_parent_with_review(workspace, project, state, create_user, issue, work_branch="pi-dash/parent-impl")
+    out = _render_section("intro", build_context(issue, run))
+    assert "may have already implemented part of this work" not in out
+
+    # Parent with a PR → the block (and the PR line) render.
+    from pi_dash.db.models import GitCodeReviewLink
+
+    GitCodeReviewLink.objects.create(
+        issue=issue.parent,
+        project=issue.parent.project,
+        workspace=issue.parent.workspace,
+        provider="github",
+        host_url="https://github.com",
+        namespace="acme",
+        repo_name="web",
+        external_iid="11",
+        url="https://github.com/acme/web/pull/11",
+        title="Parent groundwork",
+        state="open",
+    )
+    out = _render_section("intro", build_context(issue, run))
+    assert "may have already implemented part of this work" in out
+    assert "https://github.com/acme/web/pull/11" in out
+    assert "Parent groundwork" in out
+
+
+@pytest.mark.unit
+def test_workpad_setup_base_stacks_on_parent_with_open_pr(workspace, project, state, create_user, run, issue):
+    _make_parent_with_review(
+        workspace, project, state, create_user, issue,
+        work_branch="pi-dash/parent-impl",
+        review={"state": "open", "merged": False},
+    )
+    out = _render_section("workpad-setup", build_context(issue, run))
+    assert "BASE=pi-dash/parent-impl" in out
+    assert "BASE=trunk" not in out
+
+
+@pytest.mark.unit
+def test_workpad_setup_base_falls_back_when_parent_pr_merged(workspace, project, state, create_user, run, issue):
+    _make_parent_with_review(
+        workspace, project, state, create_user, issue,
+        work_branch="pi-dash/parent-impl",
+        review={"state": "closed", "merged": True},
+    )
+    out = _render_section("workpad-setup", build_context(issue, run))
+    # Parent PR merged → do not stack on the (now-merged) parent branch.
+    assert "BASE=trunk" in out
+    assert "BASE=pi-dash/parent-impl" not in out
+
+
+@pytest.mark.unit
+def test_workpad_setup_base_stacks_on_parent_branch_without_pr(workspace, project, state, create_user, run, issue):
+    _make_parent_with_review(workspace, project, state, create_user, issue, work_branch="pi-dash/parent-impl")
+    out = _render_section("workpad-setup", build_context(issue, run))
+    # Branch present, no attached PR → branch is the only signal, so stack.
+    assert "BASE=pi-dash/parent-impl" in out
+    assert "BASE=trunk" not in out
+
+
+@pytest.mark.unit
+def test_implementation_base_reflects_parent_pr_state(workspace, project, state, create_user, run, issue):
+    # Open parent PR → child PR base is the parent branch.
+    _make_parent_with_review(
+        workspace, project, state, create_user, issue,
+        work_branch="pi-dash/parent-impl",
+        review={"state": "open", "merged": False},
+    )
+    out = _render_section("implementation", build_context(issue, run))
+    assert "pi-dash/parent-impl" in out
+
+    # Merged parent PR → child PR base falls back to the project base branch.
+    issue.parent.git_code_reviews.update(state="closed", merged=True)
+    out = _render_section("implementation", build_context(issue, run))
+    assert "`trunk`" in out
+    assert "pi-dash/parent-impl" not in out
+
+
+@pytest.mark.unit
 def test_context_lineage_is_none_for_single_parent(workspace, project, state, create_user, run, issue):
     # A direct parent with no ancestors → the `parent` block carries
     # everything, so no separate lineage tree is emitted.

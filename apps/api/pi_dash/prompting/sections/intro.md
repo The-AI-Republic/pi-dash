@@ -39,6 +39,12 @@ Parent issue context (this issue is a sub-issue of {{ parent.identifier }}):
 (no description on the parent issue)
 {% endif %}
 - The parent has {{ parent.comments_count }} comment(s); their contents are not included here. Run `pidash comment list {{ parent.identifier }}` to read them.
+{% if parent.code_reviews %}
+- Parent {{ parent.identifier }}'s {{ repo.code_review_term }}s (the parent may have already implemented part of this work — inspect the relevant ones before starting):
+{% for cr in parent.code_reviews %}
+  - {{ cr.title or cr.url }} — {{ cr.url }} (state: {{ cr.state }}{% if cr.merged %}, merged{% endif %}{% if cr.draft %}, draft{% endif %})
+{% endfor %}
+{% endif %}
 {% if lineage %}
 - This issue has a multi-level parent lineage. Full chain, current issue first up to the root:
 {% for node in lineage %}{{ node.identifier }}: {{ node.title }}{% if loop.first %} (current){% endif %}{% if not loop.last %} → {% endif %}{% endfor %}
