@@ -112,6 +112,7 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
             },
             "available_tools": [],
             "unavailable_capabilities": [],
+            "extra_toolsets": False,
             "limits": {},
             "tick": {
                 "count": 5,
@@ -165,6 +166,7 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
         },
         "available_tools": [],
         "unavailable_capabilities": [],
+        "extra_toolsets": False,
         "limits": {},
         "tick": None,
         "comments_section": "(no comments on this issue yet)",
@@ -198,6 +200,7 @@ def _scheduler_sample(*, populated: bool) -> Dict[str, Any]:
             },
             "available_tools": [],
             "unavailable_capabilities": [],
+            "extra_toolsets": False,
             "limits": {},
             "scheduler_task_body": "Audit the codebase for TODOs.",
         }
@@ -214,6 +217,7 @@ def _scheduler_sample(*, populated: bool) -> Dict[str, Any]:
         },
         "available_tools": [],
         "unavailable_capabilities": [],
+        "extra_toolsets": False,
         "limits": {},
         "scheduler_task_body": "",
     }
