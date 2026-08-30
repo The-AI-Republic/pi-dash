@@ -67,5 +67,35 @@ def base_host(
     return base_origin
 
 
+def web_base_url() -> str | None:
+    """Return the configured public web (frontend) origin, or ``None``.
+
+    The value comes from deployment configuration (``WEB_URL``, falling back to
+    ``APP_BASE_URL``) — never from the inbound request host, which may be a
+    proxy or a non-public hostname and would produce links that do not work for
+    the user. Returns ``None`` when neither is configured so callers can *omit*
+    a url field rather than emit a wrong or relative one. The trailing slash is
+    stripped so callers can join paths with a leading ``/``.
+    """
+    base_origin = settings.WEB_URL or settings.APP_BASE_URL
+    if not base_origin:
+        return None
+    return base_origin.rstrip("/")
+
+
+def issue_web_url(workspace_slug, project_identifier, sequence_id) -> str | None:
+    """Build the absolute, human-clickable web URL for an issue, or ``None``.
+
+    Uses the canonical browse route (``/<slug>/browse/<PROJ>-<seq>``), which the
+    web UI resolves directly (the UUID route redirects to it). Returns ``None``
+    when the web base URL is unconfigured or any identifier part is missing, so
+    the caller can omit the field entirely.
+    """
+    base = web_base_url()
+    if not base or not workspace_slug or not project_identifier or sequence_id is None:
+        return None
+    return f"{base}/{workspace_slug}/browse/{project_identifier}-{sequence_id}"
+
+
 def user_ip(request: Request | HttpRequest) -> str:
     return get_client_ip(request=request)

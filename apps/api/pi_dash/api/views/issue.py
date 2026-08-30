@@ -9,7 +9,6 @@ import uuid
 # Django imports
 from django.core.serializers.json import DjangoJSONEncoder
 from django.http import HttpResponseRedirect
-from django.urls import reverse
 from django.utils.dateparse import parse_datetime
 from django.db import IntegrityError, transaction
 from django.db.models import (
@@ -87,7 +86,7 @@ from pi_dash.db.models import (
 from pi_dash.settings.storage import S3Storage
 from pi_dash.bgtasks.storage_metadata_task import get_asset_object_metadata
 from .base import BaseAPIView
-from pi_dash.utils.host import base_host
+from pi_dash.utils.host import base_host, issue_web_url
 from pi_dash.utils.constants import CLOSED_STATE_GROUPS, OPEN_STATE_GROUPS, STATE_GROUP_ORDER
 from pi_dash.utils.issue_relation_mapper import get_actual_relation
 from pi_dash.search.issue import extract_snippet, issue_search_queryset
@@ -2482,8 +2481,9 @@ class IssueAdvancedSearchEndpoint(BaseAPIView):
             )[:limit]
         )
 
-        results = [
-            {
+        results = []
+        for row in rows:
+            result = {
                 "id": str(row["id"]),
                 "sequence_id": row["sequence_id"],
                 "identifier": f"{row['project__identifier']}-{row['sequence_id']}",
@@ -2503,17 +2503,17 @@ class IssueAdvancedSearchEndpoint(BaseAPIView):
                 "updated_at": row["updated_at"],
                 "completed_at": row["completed_at"],
                 "rank": float(row["_rank"] or 0.0),
-                "url": reverse(
-                    "work-item-by-identifier",
-                    kwargs={
-                        "slug": row["workspace__slug"],
-                        "project_identifier": row["project__identifier"],
-                        "issue_identifier": str(row["sequence_id"]),
-                    },
-                ),
             }
-            for row in rows
-        ]
+            # Absolute, human-clickable web URL. Omitted (rather than emitted as
+            # a relative/broken link) when no web base URL is configured.
+            web_url = issue_web_url(
+                row["workspace__slug"],
+                row["project__identifier"],
+                row["sequence_id"],
+            )
+            if web_url is not None:
+                result["url"] = web_url
+            results.append(result)
 
         return Response(
             {"query": query, "count": len(results), "results": results},
