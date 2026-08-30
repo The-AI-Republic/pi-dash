@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import { AssistantService } from "@pi-dash/services";
-import type { IAssistantEvent, IAssistantMessage } from "@pi-dash/types";
+import type { IAssistantEvent, IAssistantMessage, IAssistantSkippedServer } from "@pi-dash/types";
 
 const service = new AssistantService();
 
@@ -151,6 +151,32 @@ export function useAssistantChat(slug: string | undefined, threadId: string | un
         case "tool_result": {
           const m = payload.message as IAssistantMessage | undefined;
           if (m) setById((prev) => ({ ...prev, [m.id]: { ...prev[m.id], ...m } }));
+          break;
+        }
+        case "tool_servers_skipped": {
+          // A run dropped one or more MCP tool servers (blocked URL, unreadable
+          // credential, unreachable, died mid-run, or the whole resolver
+          // failing). Surface it as an inline, non-fatal notice keyed by seq so
+          // it interleaves in the thread and an SSE replay from 0 is idempotent.
+          // It is client-only (never persisted); reload re-derives it from the
+          // replayed event.
+          const servers = (payload.servers as IAssistantSkippedServer[] | undefined) ?? [];
+          if (servers.length === 0) break;
+          const id = `notice:${event.seq}`;
+          setById((prev) => ({
+            ...prev,
+            [id]: {
+              id,
+              role: "notice",
+              content: "",
+              status: "completed",
+              seq: event.seq,
+              turn_id: null,
+              payload: { servers },
+              created_at: event.created_at,
+              completed_at: event.created_at,
+            },
+          }));
           break;
         }
         case "turn_failed":
