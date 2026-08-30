@@ -12,6 +12,8 @@ import {
   WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS_LINKS,
   WORKSPACE_SIDEBAR_STATIC_PINNED_NAVIGATION_ITEMS_LINKS,
 } from "@pi-dash/constants";
+// constants
+import { extendedNavigationItems } from "@/constants/extended-navigation";
 // store hooks
 import { usePersonalNavigationPreferences } from "@/hooks/use-navigation-preferences";
 // pi-dash-web imports
@@ -60,6 +62,10 @@ export const SidebarMenuItems = observer(function SidebarMenuItems() {
       ))}
       {pinnedNavigationItems.map((item) => (
         <SidebarItem key={`pinned_${item.key}`} item={item} />
+      ))}
+      {/* Contributed by the running build; empty in open source. */}
+      {extendedNavigationItems.map((item) => (
+        <SidebarItem key={`extended_${item.key}`} item={item} />
       ))}
     </div>
   );

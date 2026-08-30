@@ -417,9 +417,28 @@ class ProfileEndpoint(BaseAPIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def patch(self, request):
+        from pi_dash.ee.settings import user_settings
+
         profile = Profile.objects.get(user=request.user)
+
+        # ``settings`` is a namespaced bag whose recognised contents only the
+        # running build declares (CE declares none), so it is read-only on the
+        # serializer and written here instead: validated against that
+        # declaration, then merged per namespace so a client patching one
+        # namespace cannot drop another's values.
+        settings_patch = None
+        if "settings" in request.data:
+            try:
+                settings_patch = user_settings.validate_settings_patch(request.data["settings"])
+            except ValueError as exc:
+                return Response({"settings": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
+
         serializer = ProfileSerializer(profile, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
+            if settings_patch is not None:
+                profile.settings = user_settings.merge_settings(profile.settings, settings_patch)
+                profile.save(update_fields=["settings"])
+                serializer = ProfileSerializer(profile)
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
