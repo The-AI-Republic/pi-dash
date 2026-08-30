@@ -9,6 +9,7 @@ import logging
 import secrets
 
 # Django imports
+from django.db import transaction
 from django.db.models import Case, Count, IntegerField, Q, When
 from django.contrib.auth import logout
 from django.utils import timezone
@@ -437,8 +438,16 @@ class ProfileEndpoint(BaseAPIView):
         if serializer.is_valid():
             serializer.save()
             if settings_patch is not None:
-                profile.settings = user_settings.merge_settings(profile.settings, settings_patch)
-                profile.save(update_fields=["settings"])
+                # Re-read under a row lock before merging. Without it this is a
+                # read-modify-write: two requests patching different namespaces
+                # both merge onto the same stale bag and the second write drops
+                # the first's namespace — the exact loss the per-namespace merge
+                # exists to prevent.
+                with transaction.atomic():
+                    locked = Profile.objects.select_for_update().get(pk=profile.pk)
+                    locked.settings = user_settings.merge_settings(locked.settings, settings_patch)
+                    locked.save(update_fields=["settings"])
+                profile = locked
                 serializer = ProfileSerializer(profile)
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

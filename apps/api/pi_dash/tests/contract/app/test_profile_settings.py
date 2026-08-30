@@ -108,3 +108,53 @@ def test_another_users_settings_are_not_reachable(session_client, profile, creat
     session_client.patch(URL, {"settings": {"openhub": {"apps_enabled": False}}}, format="json")
     other.refresh_from_db()
     assert other.settings == {"openhub": {"apps_enabled": True}}
+
+
+def test_the_merge_reads_under_a_row_lock(session_client, profile, monkeypatch):
+    """Concurrency guard.
+
+    The merge is a read-modify-write, so it must re-read the row under a lock
+    rather than merging onto whatever was fetched at the top of the request —
+    otherwise two requests patching different namespaces both merge onto the
+    same stale bag and the second drops the first's namespace, which is the
+    exact loss per-namespace merging exists to prevent.
+
+    Asserted by observing the locked re-read, because the race itself cannot be
+    reproduced deterministically in a single-threaded test.
+    """
+    _declare(monkeypatch, {"a": {"x": 1}, "b": {"y": 2}})
+
+    locked_reads = []
+    original = Profile.objects.select_for_update
+
+    def spy(*args, **kwargs):
+        locked_reads.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(Profile.objects, "select_for_update", spy)
+
+    res = session_client.patch(URL, {"settings": {"a": {"x": 10}}}, format="json")
+    assert res.status_code == 200, res.data
+    assert locked_reads, "settings merge must re-read the profile under select_for_update"
+
+
+def test_a_concurrent_namespace_write_is_not_lost(session_client, profile, monkeypatch):
+    """The property the lock protects, simulated at the seam it guards.
+
+    Another writer commits between this request's initial fetch and its merge.
+    Because the merge re-reads under the lock, that writer's namespace survives.
+    """
+    _declare(monkeypatch, {"a": {"x": 1}, "b": {"y": 2}})
+
+    original_get = Profile.objects.select_for_update
+
+    def racing_get(*args, **kwargs):
+        # Simulate the other request landing first.
+        Profile.objects.filter(pk=profile.pk).update(settings={"b": {"y": 99}})
+        return original_get(*args, **kwargs)
+
+    monkeypatch.setattr(Profile.objects, "select_for_update", racing_get)
+
+    res = session_client.patch(URL, {"settings": {"a": {"x": 10}}}, format="json")
+    assert res.status_code == 200, res.data
+    assert res.data["settings"] == {"b": {"y": 99}, "a": {"x": 10}}
