@@ -75,6 +75,9 @@ def execution_fields(
                 has_issue=has_issue,
                 required_capabilities=required_capabilities,
                 project=project,
+                # The run executes as its creator, so their preference is what
+                # the snapshot records.
+                creator=actor,
             ),
             "pinned_runner": None,
         }
