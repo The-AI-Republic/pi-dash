@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -109,11 +109,17 @@ impl Supervisor {
             instances.push(inst);
         }
 
-        // Worktree pools — one per `[[workdir]]`. Built once at startup; each
+        // Worktree pools — one per `[[workdir]]`. Seeded at startup; each
         // runner that references a work dir leases desks from the matching
         // pool instead of running the agent directly in its `working_dir`.
         // Runners with no `workdir` reference (legacy) get no pool and keep
         // the single-dir behavior. See `.ai_design/worktree_pooling/`.
+        //
+        // The map is wrapped in an `RwLock` so the cloud-driven hot-add path
+        // (`RunnerSpawnCtx::add_runner`) can build and register a new pool at
+        // runtime — auto-pooled runners created from the UI would otherwise
+        // fail every run ("work dir has no worktree pool") until the next
+        // daemon restart.
         let worktrees_base = paths.data_dir.join("worktrees");
         let mut pools: HashMap<String, PoolHandle> = HashMap::new();
         for wd in &config.workdirs {
@@ -129,7 +135,7 @@ impl Supervisor {
                 }
             }
         }
-        let pools = Arc::new(pools);
+        let pools = Arc::new(RwLock::new(pools));
 
         let mailboxes = Arc::new(RwLock::new(
             instances
@@ -320,7 +326,7 @@ pub(crate) struct RunnerSpawnCtx {
     shared_machine_token: Option<String>,
     pub(crate) paths: Paths,
     daemon: DaemonConfig,
-    pools: Arc<HashMap<String, PoolHandle>>,
+    pools: Arc<RwLock<HashMap<String, PoolHandle>>>,
     mailboxes: Arc<RwLock<HashMap<uuid::Uuid, mpsc::Sender<InboundEnvelope>>>>,
     hello_runners: Arc<RwLock<HelloRunnerMap>>,
     daemon_state: StateHandle,
@@ -341,6 +347,19 @@ impl RunnerSpawnCtx {
     /// snapshot is built at startup, so the TUI won't list this runner
     /// until the next daemon restart.
     pub(crate) async fn add_runner(&self, runner_cfg: RunnerConfig) -> Result<()> {
+        // Auto-pooled runners created from the cloud/UI reference a
+        // `[[workdir]]` pool, but pools are otherwise seeded once at startup.
+        // Build and register this runner's pool now if it isn't live yet —
+        // otherwise every run would fail with "work dir has no worktree
+        // pool" until the next daemon restart.
+        if let Some(name) = runner_cfg.workdir.clone() {
+            let already_live = self.pools.read().await.contains_key(&name);
+            if !already_live {
+                self.ensure_pool(&name).await.with_context(|| {
+                    format!("building worktree pool for hot-added work dir {name:?}")
+                })?;
+            }
+        }
         let inst = build_runner_instance(
             runner_cfg,
             self.transport.as_ref(),
@@ -366,6 +385,30 @@ impl RunnerSpawnCtx {
         }
         let _tasks = spawn_instance_tasks(&inst, self).await;
         tracing::info!(runner_id = %inst.runner_id, name = %inst.name, "hot-added runner from machine control session");
+        Ok(())
+    }
+
+    /// Build a worktree pool for the `[[workdir]]` named `name` and register
+    /// it in the shared pool map. Used by the hot-add path when a runner
+    /// created after daemon startup references a pool that isn't live yet.
+    /// The `WorkdirConfig` is read back from `config.toml` (the enroll path
+    /// just wrote it) so the pool is built from the authoritative on-disk
+    /// definition. `pool::spawn` runs outside the write lock so a slow pool
+    /// init never blocks concurrent readers.
+    async fn ensure_pool(&self, name: &str) -> Result<()> {
+        let cfg = crate::config::file::load_config(&self.paths)
+            .context("loading config to build hot-added runner's worktree pool")?;
+        let wd = cfg
+            .workdirs
+            .iter()
+            .find(|w| w.name == name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("work dir {name:?} not found in config after enroll"))?;
+        let worktrees_base = self.paths.data_dir.join("worktrees");
+        let handle = crate::workspace::pool::spawn(wd, &worktrees_base).await?;
+        // Re-check under the write lock: a concurrent hot-add may have raced
+        // us. Last writer wins; a redundant pool's owner task idles harmlessly.
+        self.pools.write().await.insert(name.to_string(), handle);
         Ok(())
     }
 }
@@ -408,12 +451,19 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
     let live_mailboxes = ctx.mailboxes.clone();
     let live_hello_runners = ctx.hello_runners.clone();
     let daemon_paths = ctx.paths.clone();
-    // Resolve this runner's pool (if it references a work dir). Cloned
-    // handle is cheap (wraps an mpsc sender).
-    let inst_pool = runner_config
-        .workdir
-        .as_deref()
-        .and_then(|name| ctx.pools.get(name).cloned());
+    // Resolve this runner's pool and reported working dir up front, under a
+    // single read of the shared pool map, so the lock isn't held across the
+    // spawns/awaits below. Cloned handles are cheap (each wraps an mpsc
+    // sender).
+    let (inst_pool, attach_working_dir) = {
+        let pools = ctx.pools.read().await;
+        let pool = runner_config
+            .workdir
+            .as_deref()
+            .and_then(|name| pools.get(name).cloned());
+        (pool, resolve_working_dir(inst, &pools))
+    };
+    let http_pool = inst_pool.clone();
     let h = tokio::spawn(async move {
         let run = RunnerLoop {
             runner_paths,
@@ -455,15 +505,10 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
             inst.state.rx_status.clone(),
             inst.state.rx_in_flight.clone(),
             inst.state.shutdown_notified(),
-            attach_body_for_instance(inst, resolve_working_dir(inst, &ctx.pools)),
+            attach_body_for_instance(inst, attach_working_dir),
         )
         .with_state(inst.state.clone())
-        .with_pool(
-            inst.config
-                .workdir
-                .as_deref()
-                .and_then(|name| ctx.pools.get(name).cloned()),
-        )
+        .with_pool(http_pool)
         .with_teardown_rx(inst.remove_tx.subscribe());
         let close_client = client.clone();
         let local_state = inst.state.clone();
