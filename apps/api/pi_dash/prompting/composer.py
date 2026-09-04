@@ -445,6 +445,10 @@ def build_scheduler_turn(binding, run) -> str:
 
 def build_direct_turn(raw_prompt: str, run, issue=None) -> str:
     """Wrap Cloud direct input as inert task data; preserve local raw prompts."""
+    # Local import: ``context`` pulls in Django models, and importing it at
+    # module scope would drag them into every importer of this module.
+    from pi_dash.prompting.context import extra_toolsets_vars
+
     if getattr(run, "executor_kind", "local_runner") != "cloud_agent":
         run.prompt_manifest = None
         return raw_prompt
@@ -476,10 +480,7 @@ def build_direct_turn(raw_prompt: str, run, issue=None) -> str:
             },
             "available_tools": run.tool_plan.get("tools", []),
             "unavailable_capabilities": run.tool_plan.get("unavailable_capabilities", []),
-            # True when the run may also carry toolsets whose tool names are not in
-            # ``tools`` (see ``pi_dash.ee.cloud_agent.toolsets``); the prompt has to
-            # say they exist because the capability list cannot name them.
-            "extra_toolsets": bool((getattr(run, "tool_plan", {}) or {}).get("extra_toolsets")),
+            **extra_toolsets_vars(run),
             "limits": run.tool_plan.get("limits", {}),
         }
     composed = compose_cloud(recipes.KIND_DIRECT, workspace=workspace, project=project, context=context)

@@ -25,9 +25,14 @@ async def execute(run):
     if set(allowed_names) & GITHUB_TOOL_NAMES:
         toolsets.append(build_github_toolset(run.id, allowed_names))
     # Deployment-provided toolsets whose tool names cannot be known at plan
-    # time. The seam is responsible for honouring the run's plan; building them
-    # can touch the DB, hence sync_to_async.
-    toolsets.extend(await sync_to_async(resolve_extra_toolsets_for_run)(run))
+    # time. Gated here, on the run's own snapshot, rather than left to the
+    # seam: the snapshot is what makes a run execute under the policy it was
+    # admitted with, and the same flag decides whether the prompt tells the
+    # agent these tools exist — so a run that resolves them without it would
+    # carry tools its prompt never mentions. Building them can touch the DB,
+    # hence sync_to_async.
+    if run.tool_plan.get("extra_toolsets"):
+        toolsets.extend(await sync_to_async(resolve_extra_toolsets_for_run)(run))
     agent = Agent(
         model=model,
         output_type=CloudAgentOutput,

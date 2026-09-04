@@ -12,7 +12,15 @@ means an overlay declares a schema and inherits all of this unchanged.
 
 from __future__ import annotations
 
+import json
 from typing import Any
+
+#: Ceiling on one PATCH's accepted payload, encoded as JSON.
+#:
+#: Namespaces and keys are a closed allow-list, so the stored bag is bounded by
+#: (declared keys x this) — capping the patch caps the bag. Generous for a
+#: settings field, far too small to be worth using as storage.
+MAX_SETTINGS_PATCH_BYTES = 4096
 
 
 def _schema() -> dict[str, dict[str, Any]]:
@@ -40,6 +48,34 @@ def get_setting(profile, namespace: str, key: str) -> Any:
     return default_for(namespace, key)
 
 
+def _check_value(namespace: str, key: str, value: Any, default: Any) -> None:
+    """Reject a value whose type does not match the key's declared default.
+
+    The schema declares ``{namespace: {key: default}}``, so the default doubles
+    as the type declaration. Without this the allow-list would cover key
+    *names* only, leaving a declared boolean free to hold a megabyte of text
+    and ``get_setting`` free to return a type its caller never expects.
+
+    ``bool`` is checked before ``int`` because it is a subclass of it — without
+    the ordering, ``True`` would satisfy an int-typed key and vice versa.
+    """
+    if default is None:
+        # Nothing to infer a type from; allow scalars, refuse containers.
+        if isinstance(value, (dict, list)):
+            raise ValueError(f"settings.{namespace}.{key} must be a scalar")
+        return
+    if isinstance(default, bool):
+        ok = isinstance(value, bool)
+    elif isinstance(default, int):
+        ok = isinstance(value, int) and not isinstance(value, bool)
+    elif isinstance(default, float):
+        ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+    else:
+        ok = isinstance(value, type(default))
+    if not ok:
+        raise ValueError(f"settings.{namespace}.{key} must be of type {type(default).__name__}")
+
+
 def validate_settings_patch(patch: Any) -> dict[str, dict[str, Any]]:
     """Validate a client-supplied ``settings`` payload against the schema.
 
@@ -50,7 +86,8 @@ def validate_settings_patch(patch: Any) -> dict[str, dict[str, Any]]:
     This is a closed allow-list on purpose. ``Profile.settings`` is writable
     through the profile API by every authenticated user, so accepting arbitrary
     content would make it an unbounded per-user JSON store rather than a
-    settings field.
+    settings field. Names, types and total size are all part of that: an
+    allow-list of key names alone still admits arbitrary values under them.
     """
     if not isinstance(patch, dict):
         raise ValueError("settings must be an object")
@@ -66,7 +103,18 @@ def validate_settings_patch(patch: Any) -> dict[str, dict[str, Any]]:
         unknown = sorted(set(values) - set(schema[namespace]))
         if unknown:
             raise ValueError(f"unknown settings key(s) in {namespace}: {', '.join(unknown)}")
+        for key, value in values.items():
+            _check_value(namespace, key, value, schema[namespace][key])
         accepted[namespace] = dict(values)
+
+    try:
+        encoded = len(json.dumps(accepted).encode())
+    except (TypeError, ValueError) as exc:
+        # A value the field itself could not store; reject rather than fail on
+        # the way to the database.
+        raise ValueError("settings must be JSON-serialisable") from exc
+    if encoded > MAX_SETTINGS_PATCH_BYTES:
+        raise ValueError(f"settings payload is too large ({encoded} > {MAX_SETTINGS_PATCH_BYTES} bytes)")
 
     return accepted
 

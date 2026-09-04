@@ -28,6 +28,7 @@ from typing import Any
 # Re-exported so callers import one module regardless of which build declared
 # the schema.
 from pi_dash.core.user_settings import (  # noqa: F401
+    MAX_SETTINGS_PATCH_BYTES,
     default_for,
     get_setting,
     merge_settings,

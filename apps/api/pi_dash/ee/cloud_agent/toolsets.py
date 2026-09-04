@@ -34,3 +34,17 @@ def extra_toolsets_enabled_for(user) -> bool:
 def resolve_extra_toolsets_for_run(run):
     """Return additional pydantic-ai toolsets for ``run`` (CE: none)."""
     return []
+
+
+def extra_toolsets_schema_tool() -> str:
+    """Name of the tool that fetches a deferred tool schema (CE: none).
+
+    A deployment may list its extra tools by name with a placeholder schema and
+    make the agent fetch the real one before calling — cheaper than loading
+    every schema into a prompt that mostly will not use them. The tool that
+    does the fetching is that deployment's own, so it cannot be named in the
+    shared prompt: this returns it, and the section renders that instruction
+    only when there is a name to give. A deployment whose tools arrive with
+    full schemas keeps the default and the instruction disappears.
+    """
+    return ""

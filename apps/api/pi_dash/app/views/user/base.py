@@ -420,8 +420,6 @@ class ProfileEndpoint(BaseAPIView):
     def patch(self, request):
         from pi_dash.ee.settings import user_settings
 
-        profile = Profile.objects.get(user=request.user)
-
         # ``settings`` is a namespaced bag whose recognised contents only the
         # running build declares (CE declares none), so it is read-only on the
         # serializer and written here instead: validated against that
@@ -434,20 +432,20 @@ class ProfileEndpoint(BaseAPIView):
             except ValueError as exc:
                 return Response({"settings": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
 
-        serializer = ProfileSerializer(profile, data=request.data, partial=True)
-        if serializer.is_valid():
-            serializer.save()
+        # The whole read-modify-write runs under one row lock, and the merge
+        # happens *before* the save rather than after it. ``serializer.save()``
+        # issues a full-row UPDATE — ``settings`` included, since the instance
+        # carries it whether or not the serializer may write it — so a profile
+        # read outside the lock writes back the bag as it looked at read time
+        # and silently drops any namespace another request committed in
+        # between. Merging after that save cannot repair it: the clobbering
+        # write has already landed.
+        with transaction.atomic():
+            profile = Profile.objects.select_for_update().get(user=request.user)
+            serializer = ProfileSerializer(profile, data=request.data, partial=True)
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
             if settings_patch is not None:
-                # Re-read under a row lock before merging. Without it this is a
-                # read-modify-write: two requests patching different namespaces
-                # both merge onto the same stale bag and the second write drops
-                # the first's namespace — the exact loss the per-namespace merge
-                # exists to prevent.
-                with transaction.atomic():
-                    locked = Profile.objects.select_for_update().get(pk=profile.pk)
-                    locked.settings = user_settings.merge_settings(locked.settings, settings_patch)
-                    locked.save(update_fields=["settings"])
-                profile = locked
-                serializer = ProfileSerializer(profile)
-            return Response(serializer.data, status=status.HTTP_200_OK)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                profile.settings = user_settings.merge_settings(profile.settings, settings_patch)
+            serializer.save()
+        return Response(serializer.data, status=status.HTTP_200_OK)

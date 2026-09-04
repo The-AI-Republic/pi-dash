@@ -112,7 +112,13 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
             },
             "available_tools": [],
             "unavailable_capabilities": [],
-            "extra_toolsets": False,
+            # Populated means every optional branch renders: this run carries
+            # deployment-provided toolsets, so the section's extra-tools block and
+            # its schema-fetch instruction are both exercised. With both samples
+            # False the block never rendered here and a broken override inside it
+            # saved cleanly, then failed at run time under StrictUndefined.
+            "extra_toolsets": True,
+            "extra_toolsets_schema_tool": "sample_get_tool_schema",
             "limits": {},
             "tick": {
                 "count": 5,
@@ -167,6 +173,7 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
         "available_tools": [],
         "unavailable_capabilities": [],
         "extra_toolsets": False,
+        "extra_toolsets_schema_tool": "",
         "limits": {},
         "tick": None,
         "comments_section": "(no comments on this issue yet)",
@@ -200,7 +207,13 @@ def _scheduler_sample(*, populated: bool) -> Dict[str, Any]:
             },
             "available_tools": [],
             "unavailable_capabilities": [],
-            "extra_toolsets": False,
+            # Populated means every optional branch renders: this run carries
+            # deployment-provided toolsets, so the section's extra-tools block and
+            # its schema-fetch instruction are both exercised. With both samples
+            # False the block never rendered here and a broken override inside it
+            # saved cleanly, then failed at run time under StrictUndefined.
+            "extra_toolsets": True,
+            "extra_toolsets_schema_tool": "sample_get_tool_schema",
             "limits": {},
             "scheduler_task_body": "Audit the codebase for TODOs.",
         }
@@ -218,6 +231,7 @@ def _scheduler_sample(*, populated: bool) -> Dict[str, Any]:
         "available_tools": [],
         "unavailable_capabilities": [],
         "extra_toolsets": False,
+        "extra_toolsets_schema_tool": "",
         "limits": {},
         "scheduler_task_body": "",
     }

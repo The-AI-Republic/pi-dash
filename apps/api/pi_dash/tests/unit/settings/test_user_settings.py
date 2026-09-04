@@ -85,6 +85,54 @@ def test_a_non_object_namespace_value_is_refused(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# ...of names *and* values
+# --------------------------------------------------------------------------- #
+
+
+def test_a_value_of_the_wrong_type_is_refused(monkeypatch):
+    # Allow-listing key names alone still leaves the bag an unbounded per-user
+    # JSON store: the name is declared, so anything may sit under it.
+    _declare(monkeypatch, {"openhub": {"apps_enabled": False}})
+    with pytest.raises(ValueError, match="must be of type bool"):
+        user_settings.validate_settings_patch({"openhub": {"apps_enabled": "x" * 10_000}})
+
+
+def test_a_bool_is_not_accepted_for_an_int_key(monkeypatch):
+    # bool subclasses int, so a naive isinstance check lets True through as 1.
+    _declare(monkeypatch, {"ns": {"count": 0}})
+    with pytest.raises(ValueError, match="must be of type int"):
+        user_settings.validate_settings_patch({"ns": {"count": True}})
+
+
+def test_an_int_is_not_accepted_for_a_bool_key(monkeypatch):
+    _declare(monkeypatch, {"ns": {"on": False}})
+    with pytest.raises(ValueError, match="must be of type bool"):
+        user_settings.validate_settings_patch({"ns": {"on": 1}})
+
+
+def test_an_int_is_accepted_for_a_float_key(monkeypatch):
+    _declare(monkeypatch, {"ns": {"ratio": 1.0}})
+    assert user_settings.validate_settings_patch({"ns": {"ratio": 2}}) == {"ns": {"ratio": 2}}
+
+
+def test_a_container_is_refused_for_an_untyped_key(monkeypatch):
+    # A None default declares no type, so scalars pass and containers — the
+    # shapes that grow without bound — do not.
+    _declare(monkeypatch, {"ns": {"anything": None}})
+    assert user_settings.validate_settings_patch({"ns": {"anything": "ok"}}) == {"ns": {"anything": "ok"}}
+    with pytest.raises(ValueError, match="must be a scalar"):
+        user_settings.validate_settings_patch({"ns": {"anything": {"nested": "object"}}})
+
+
+def test_an_oversized_payload_is_refused(monkeypatch):
+    # Types alone do not bound size: a str-typed key accepts a megabyte of str.
+    _declare(monkeypatch, {"ns": {"note": ""}})
+    oversized = "x" * (user_settings.MAX_SETTINGS_PATCH_BYTES + 1)
+    with pytest.raises(ValueError, match="too large"):
+        user_settings.validate_settings_patch({"ns": {"note": oversized}})
+
+
+# --------------------------------------------------------------------------- #
 # Merge semantics
 # --------------------------------------------------------------------------- #
 

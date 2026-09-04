@@ -297,6 +297,30 @@ def _code_reviews_context(issue: Issue) -> list[Dict[str, Any]]:
     ]
 
 
+def extra_toolsets_vars(run) -> Dict[str, Any]:
+    """Prompt variables for deployment-provided toolsets.
+
+    ``extra_toolsets`` is read from the run's own plan snapshot, the same flag
+    ``cloud_agent.runtime`` gates on, so the prompt can never claim tools the
+    run will not be given. The prompt has to say they exist at all because
+    their names are not knowable at plan time and so never reach
+    ``available_tools``.
+
+    The schema-fetch tool is named by the seam rather than here: it belongs to
+    whichever deployment supplies the tools, and naming one in shared code
+    would make every other deployment's agent call a tool that does not exist.
+    """
+    # Local import: the seam is overlayable, and a module-scope import would
+    # bind CE's version before an overlay could replace it.
+    from pi_dash.ee.cloud_agent.toolsets import extra_toolsets_schema_tool
+
+    enabled = bool((getattr(run, "tool_plan", {}) or {}).get("extra_toolsets"))
+    return {
+        "extra_toolsets": enabled,
+        "extra_toolsets_schema_tool": extra_toolsets_schema_tool() if enabled else "",
+    }
+
+
 def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
     """Build the dict passed into Jinja.
 
@@ -395,10 +419,7 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
         },
         "available_tools": (getattr(run, "tool_plan", {}) or {}).get("tools", []),
         "unavailable_capabilities": (getattr(run, "tool_plan", {}) or {}).get("unavailable_capabilities", []),
-        # True when the run may also carry toolsets whose tool names are not in
-        # ``tools`` (see ``pi_dash.ee.cloud_agent.toolsets``); the prompt has to
-        # say they exist because the capability list cannot name them.
-        "extra_toolsets": bool((getattr(run, "tool_plan", {}) or {}).get("extra_toolsets")),
+        **extra_toolsets_vars(run),
         "limits": (getattr(run, "tool_plan", {}) or {}).get("limits", {}),
         # Ticking schedule (None when the issue has no ticker row). Lets the
         # template explain the re-invocation cadence and remaining budget.
@@ -481,10 +502,7 @@ def build_scheduler_context(binding, run: AgentRun) -> Dict[str, Any]:
         },
         "available_tools": (getattr(run, "tool_plan", {}) or {}).get("tools", []),
         "unavailable_capabilities": (getattr(run, "tool_plan", {}) or {}).get("unavailable_capabilities", []),
-        # True when the run may also carry toolsets whose tool names are not in
-        # ``tools`` (see ``pi_dash.ee.cloud_agent.toolsets``); the prompt has to
-        # say they exist because the capability list cannot name them.
-        "extra_toolsets": bool((getattr(run, "tool_plan", {}) or {}).get("extra_toolsets")),
+        **extra_toolsets_vars(run),
         "limits": (getattr(run, "tool_plan", {}) or {}).get("limits", {}),
         "scheduler_task_body": scheduler_task_body,
     }
