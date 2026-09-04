@@ -226,11 +226,13 @@ class AssistantMCPServer(models.Model):
     def tool_prefix(self) -> str:
         """Slugified ``name`` used to namespace this server's tool names.
 
+        The reserved ``mcp_`` namespace keeps user-provided tool names disjoint
+        from the assistant's built-in tools and deployment-provided toolsets.
         Falls back to the row id when the name has no alphanumeric content, so
         a prefix is always non-empty and stable.
         """
         slug = re.sub(r"[^a-z0-9]+", "_", self.name.strip().lower()).strip("_")
-        return slug or f"mcp_{str(self.id).replace('-', '')[:8]}"
+        return f"mcp_{slug}" if slug else f"mcp_{str(self.id).replace('-', '')[:8]}"
 
 
 class UserLLMConfig(models.Model):

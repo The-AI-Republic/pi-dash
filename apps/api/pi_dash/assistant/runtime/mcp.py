@@ -130,7 +130,16 @@ class ResilientToolset(WrapperToolset):
             # Never entered, so there is nothing to unwind — and calling the
             # wrapped __aexit__ would raise on a half-built connection.
             return None
-        return await super().__aexit__(*args)
+        try:
+            return await super().__aexit__(*args)
+        except Exception as exc:  # noqa: BLE001 — teardown is still server I/O
+            # A transport can disappear after the final tool call but before
+            # the session's close handshake completes. That is the same
+            # additive-server outage as a connect/list/call failure: record it
+            # for the user, but do not replace the assistant turn's outcome
+            # with an MCP cleanup exception.
+            self._record(exc, "failed to close")
+            return None
 
     async def get_tools(self, ctx):
         if self.failure is not None:

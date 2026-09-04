@@ -57,7 +57,7 @@ def make_server(user, **kwargs) -> AssistantMCPServer:
 
 def test_tool_prefix_is_slugified_from_the_name(world):
     server = make_server(world.member, name="My Jira Tools!")
-    assert server.tool_prefix == "my_jira_tools"
+    assert server.tool_prefix == "mcp_my_jira_tools"
 
 
 def test_tool_prefix_falls_back_when_the_name_has_no_alphanumerics(world):
@@ -423,6 +423,27 @@ def test_a_server_that_dies_mid_call_does_not_take_the_turn_with_it():
     assert toolset.failure == "ConnectionResetError"  # ...and the user can be too
 
 
+def test_a_server_that_dies_during_teardown_does_not_take_the_turn_with_it():
+    """Closing the MCP session is remote I/O and follows the same fail-open policy."""
+    import asyncio
+
+    class _Boom:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            raise ConnectionResetError("server disappeared during close")
+
+    toolset = mcp_runtime.ResilientToolset(_Boom(), server_name="flaky")
+
+    async def scenario():
+        async with toolset:
+            return "turn completed"
+
+    assert asyncio.run(scenario()) == "turn completed"
+    assert toolset.failure == "ConnectionResetError"
+
+
 def test_a_tools_own_retry_is_not_mistaken_for_an_outage():
     # ModelRetry is the tool's considered answer, not a dead server; swallowing
     # it would turn a recoverable retry into a silent capability loss.
@@ -474,7 +495,7 @@ def test_the_read_timeout_is_not_tighter_than_pydantic_ais_own():
 
 def test_names_that_slugify_alike_get_distinct_prefixes(world):
     # Names are unique per user, but slugification is lossy: all three of these
-    # reduce to "my_tools". Colliding prefixes silently shadow one server's
+    # reduce to "mcp_my_tools". Colliding prefixes silently shadow one server's
     # tools with another's, which the model has no way to detect.
     for name in ("My Tools", "my-tools", "my_tools"):
         make_server(world.member, name=name, url=f"https://{name.replace(' ', '')}.example.com/mcp")
@@ -485,7 +506,19 @@ def test_names_that_slugify_alike_get_distinct_prefixes(world):
     assert skipped == []
     assert len(prefixes) == 3
     assert len(set(prefixes)) == 3, f"colliding prefixes: {prefixes}"
-    assert prefixes[0] == "my_tools"  # the first keeps the natural prefix
+    assert prefixes[0] == "mcp_my_tools"  # the first keeps the natural prefix
+
+
+def test_user_servers_stay_in_the_reserved_mcp_namespace(world):
+    """A server name cannot claim a built-in or deployment tool namespace."""
+    servers = [
+        make_server(world.member, name=name, url=f"https://{name.replace(' ', '')}.example.com/mcp")
+        for name in ("Search", "OpenHub", "Run AI")
+    ]
+
+    prefixes = [server.tool_prefix for server in servers]
+
+    assert prefixes == ["mcp_search", "mcp_openhub", "mcp_run_ai"]
 
 
 def test_prefix_assignment_is_stable_for_unchanged_servers(world):
@@ -506,9 +539,9 @@ def test_the_list_view_reports_the_prefix_a_run_actually_assigns(world):
     body = client_for(world.member).get(URL).json()
     effective = {row["name"]: row["effective_tool_prefix"] for row in body}
 
-    assert {row["tool_prefix"] for row in body} == {"my_tools"}  # both slugify alike...
+    assert {row["tool_prefix"] for row in body} == {"mcp_my_tools"}  # both slugify alike...
     assert len(set(effective.values())) == 2, effective  # ...but get distinct prefixes
-    assert effective["My Tools"] == "my_tools"
+    assert effective["My Tools"] == "mcp_my_tools"
 
 
 def test_a_disabled_server_claims_no_prefix(world):
