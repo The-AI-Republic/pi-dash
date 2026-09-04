@@ -328,7 +328,15 @@ class UserEndpoint(BaseViewSet):
             "workspace_create": False,
             "workspace_invite": False,
         }
-        profile.save()
+        profile.save(
+            update_fields=[
+                "last_workspace_id",
+                "is_tour_completed",
+                "is_onboarded",
+                "onboarding_step",
+                "updated_at",
+            ]
+        )
 
         # Reset password
         user.is_password_autoset = True
@@ -366,7 +374,10 @@ class UpdateUserOnBoardedEndpoint(BaseAPIView):
     def patch(self, request):
         profile = Profile.objects.get(user_id=request.user.id)
         profile.is_onboarded = request.data.get("is_onboarded", False)
-        profile.save()
+        # Restrict the UPDATE to fields this endpoint owns. A full-row save of
+        # a stale instance can overwrite a concurrently committed namespaced
+        # settings bag even though the settings endpoint itself uses a lock.
+        profile.save(update_fields=["is_onboarded", "updated_at"])
         return Response({"message": "Updated successfully"}, status=status.HTTP_200_OK)
 
 
@@ -374,7 +385,7 @@ class UpdateUserTourCompletedEndpoint(BaseAPIView):
     def patch(self, request):
         profile = Profile.objects.get(user_id=request.user.id)
         profile.is_tour_completed = request.data.get("is_tour_completed", False)
-        profile.save()
+        profile.save(update_fields=["is_tour_completed", "updated_at"])
         return Response({"message": "Updated successfully"}, status=status.HTTP_200_OK)
 
 

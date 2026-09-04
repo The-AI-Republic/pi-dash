@@ -158,3 +158,34 @@ def test_a_concurrent_namespace_write_is_not_lost(session_client, profile, monke
     res = session_client.patch(URL, {"settings": {"a": {"x": 10}}}, format="json")
     assert res.status_code == 200, res.data
     assert res.data["settings"] == {"b": {"y": 99}, "a": {"x": 10}}
+
+
+@pytest.mark.parametrize(
+    ("url", "payload"),
+    [
+        ("/api/users/me/onboard/", {"is_onboarded": True}),
+        ("/api/users/me/tour-completed/", {"is_tour_completed": True}),
+    ],
+)
+def test_non_settings_profile_writers_cannot_clobber_a_concurrent_settings_write(
+    session_client, profile, monkeypatch, url, payload
+):
+    """A writer holding a stale Profile instance must update only its own field."""
+    stale = Profile.objects.get(pk=profile.pk)
+    original_get = Profile.objects.get
+
+    def racing_get(*args, **kwargs):
+        # The endpoint has already read ``stale``. Simulate the settings
+        # endpoint committing before that stale instance is saved.
+        Profile.objects.filter(pk=profile.pk).update(settings={"openhub": {"apps_enabled": True}})
+        return stale
+
+    monkeypatch.setattr(Profile.objects, "get", racing_get)
+    try:
+        res = session_client.patch(url, payload, format="json")
+    finally:
+        monkeypatch.setattr(Profile.objects, "get", original_get)
+
+    assert res.status_code == 200, res.data
+    profile.refresh_from_db()
+    assert profile.settings == {"openhub": {"apps_enabled": True}}
