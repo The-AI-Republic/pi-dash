@@ -17,7 +17,7 @@ const REASON_TEXT: Record<string, string> = {
   url_blocked: "its URL is not allowed",
   auth_header_unreadable: "its credential could not be read",
   toolset_unavailable: "it could not be reached",
-  toolsets_unavailable: "tools were unavailable",
+  toolsets_unavailable: "they could not be loaded",
   assistant_not_configured: "its credential could not be decrypted",
   openhub_unavailable: "OpenHub apps were unavailable",
 };
@@ -28,9 +28,13 @@ function reasonText(reason: string): string {
 
 function noticeLine(server: IAssistantSkippedServer): string {
   const detail = reasonText(server.reason);
-  // The resolver's total-failure sentinel isn't a real server name; phrase it
-  // as a whole-capability outage rather than "Tool server all tool servers…".
-  if (server.name === "all tool servers") {
+  // The resolver's total-failure sentinel carries a placeholder name, not a
+  // real server; phrase it as a whole-capability outage rather than "Tool
+  // server all tool servers…". Discriminate on the reason code, which is
+  // unique to that branch — the name is user-supplied for every other reason,
+  // so matching on it would let a server *named* "all tool servers" falsely
+  // report an outage of every server.
+  if (server.reason === "toolsets_unavailable") {
     return `Tool servers were unavailable for this reply (${detail}).`;
   }
   return `Tool server ${server.name} was unavailable for this reply (${detail}).`;

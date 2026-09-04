@@ -28,7 +28,16 @@ describe("ToolServersSkippedNotice", () => {
 
   it("phrases the resolver total-failure sentinel as a whole-capability outage", () => {
     render(<ToolServersSkippedNotice servers={[{ name: "all tool servers", reason: "toolsets_unavailable" }]} />);
-    expect(screen.getByText("Tool servers were unavailable for this reply (tools were unavailable).")).toBeTruthy();
+    expect(screen.getByText("Tool servers were unavailable for this reply (they could not be loaded).")).toBeTruthy();
+  });
+
+  it("keys the whole-capability phrasing off the reason, not the server name", () => {
+    // A user may legitimately name a server "all tool servers"; that must not
+    // be reported as every server being down.
+    render(<ToolServersSkippedNotice servers={[{ name: "all tool servers", reason: "url_blocked" }]} />);
+    expect(
+      screen.getByText("Tool server all tool servers was unavailable for this reply (its URL is not allowed).")
+    ).toBeTruthy();
   });
 
   it("renders the cloud openhub reason", () => {
