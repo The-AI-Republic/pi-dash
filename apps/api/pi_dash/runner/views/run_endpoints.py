@@ -212,10 +212,25 @@ class RunStartedEndpoint(_RunEndpointBase):
             if pending := self._cancellation_pending(locked):
                 return pending
             thread_id = (request.data.get("thread_id") or "")[:128]
+            # ``local_thread_id`` defaults to ``thread_id`` for older runners
+            # that report only the resume handle; ``local_session_id`` and
+            # ``agent_kind`` are new keys the run bridge reports at start.
+            # agent_metadata is write-once here and never cleared on retry (so
+            # a failed attempt's session id survives), in contrast to the
+            # ``thread_id`` write, which run_lifecycle nulls on the parent when
+            # a resume is unavailable.
+            local_thread_id = (request.data.get("local_thread_id") or thread_id or "")[:128]
+            local_session_id = (request.data.get("local_session_id") or "")[:128]
+            agent_kind = (request.data.get("agent_kind") or "")[:24]
             updates = {
                 "status": AgentRunStatus.RUNNING,
                 "thread_id": thread_id,
                 "started_at": timezone.now(),
+                "agent_metadata": {
+                    "local_session_id": local_session_id,
+                    "local_thread_id": local_thread_id,
+                    "agent_kind": agent_kind,
+                },
             }
             model = str(request.data.get("model") or "").strip()
             if model:

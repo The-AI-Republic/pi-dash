@@ -938,6 +938,16 @@ class AgentRun(models.Model):
     run_config = models.JSONField(default=dict, blank=True)
     required_capabilities = models.JSONField(default=list, blank=True)
     thread_id = models.CharField(max_length=128, blank=True, default="")
+    # General-purpose per-attempt run metadata. Unlike the four owned JSON
+    # contracts above (``run_config`` / ``done_payload`` / ``prompt_manifest``
+    # / ``required_capabilities``), this column has no single downstream
+    # consumer and is not fed back into any prompt or capability match. It is
+    # written once at run start with the runner-reported
+    # ``{local_session_id, local_thread_id, agent_kind}`` and — unlike
+    # ``thread_id``, which is a resume handle cleared on retry
+    # (run_lifecycle.apply_run_resume_unavailable) — is never cleared, so a
+    # failed attempt's session id survives for audit / local session lookup.
+    agent_metadata = models.JSONField(default=dict, blank=True)
     lease_expires_at = models.DateTimeField(null=True, blank=True)
     done_payload = models.JSONField(null=True, blank=True)
     error = models.TextField(blank=True, default="")

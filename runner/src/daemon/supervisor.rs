@@ -3038,6 +3038,13 @@ impl AssignWorker {
         self.send(ClientMsg::RunStarted {
             run_id,
             thread_id: cursor.thread_id().to_string(),
+            // Alias the session id to the thread id, mirroring the chat
+            // bridge's warm path (`local_session_id: Some(thread_id)`): the
+            // run path's only session handle today is the thread id. `agent_kind`
+            // lets the cloud interpret it per-CLI. Both are recorded durably in
+            // `agent_metadata`, which — unlike `thread_id` — survives a retry.
+            local_session_id: cursor.thread_id().to_string(),
+            agent_kind: cursor.agent_kind().to_string(),
             started_at: Utc::now(),
             model: run_model,
         })

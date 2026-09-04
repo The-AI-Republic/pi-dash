@@ -129,6 +129,16 @@ pub enum ClientMsg {
     RunStarted {
         run_id: Uuid,
         thread_id: String,
+        // Durably recorded into ``AgentRun.agent_metadata`` at run start
+        // (unlike ``thread_id``, which is a resume handle cleared on retry).
+        // ``local_session_id`` mirrors the chat bridge's warm-path alias of
+        // the thread id; ``agent_kind`` labels which CLI produced the run so a
+        // consumer can interpret the session/thread ids. Older cloud builds
+        // simply ignore the extra keys.
+        #[serde(default)]
+        local_session_id: String,
+        #[serde(default)]
+        agent_kind: String,
         started_at: DateTime<Utc>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
