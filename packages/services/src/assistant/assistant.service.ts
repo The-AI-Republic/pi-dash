@@ -5,6 +5,8 @@
 import { API_BASE_URL } from "@pi-dash/constants";
 import type { AxiosRequestConfig } from "axios";
 import type {
+  IAssistantMCPServer,
+  IAssistantMCPServerInput,
   IAssistantMessage,
   IAssistantSendResponse,
   IAssistantThread,
@@ -115,6 +117,40 @@ export class AssistantService extends APIService {
 
   async testLLMConfig(): Promise<{ ok: boolean; error_code?: string; detail?: string }> {
     return this.post(`/api/users/me/ai-assistant/config/test/`)
+      .then((res) => res?.data)
+      .catch((err) => {
+        throw err?.response?.data;
+      });
+  }
+
+  // --- MCP tool servers (user-level) ---
+
+  async listMCPServers(): Promise<IAssistantMCPServer[]> {
+    return this.get(`/api/users/me/ai-assistant/mcp-servers/`)
+      .then((res) => res?.data)
+      .catch((err) => {
+        throw err?.response?.data;
+      });
+  }
+
+  async createMCPServer(data: IAssistantMCPServerInput): Promise<IAssistantMCPServer> {
+    return this.post(`/api/users/me/ai-assistant/mcp-servers/`, data)
+      .then((res) => res?.data)
+      .catch((err) => {
+        throw err?.response?.data;
+      });
+  }
+
+  async updateMCPServer(serverId: string, data: Partial<IAssistantMCPServerInput>): Promise<IAssistantMCPServer> {
+    return this.patch(`/api/users/me/ai-assistant/mcp-servers/${serverId}/`, data)
+      .then((res) => res?.data)
+      .catch((err) => {
+        throw err?.response?.data;
+      });
+  }
+
+  async deleteMCPServer(serverId: string): Promise<void> {
+    return this.delete(`/api/users/me/ai-assistant/mcp-servers/${serverId}/`)
       .then((res) => res?.data)
       .catch((err) => {
         throw err?.response?.data;

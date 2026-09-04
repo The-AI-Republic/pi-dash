@@ -4,14 +4,17 @@
  * See the LICENSE file for details.
  */
 
+import type { ReactNode } from "react";
 import type { IWorkspaceSidebarNavigationItem } from "@pi-dash/constants";
 import { SidebarItemBase } from "@/components/workspace/sidebar/sidebar-item";
 
 type Props = {
   item: IWorkspaceSidebarNavigationItem;
   additionalStaticItems?: string[];
+  /** Overrides the key-based icon lookup; see `SidebarItemBase`. */
+  icon?: ReactNode;
 };
 
-export function SidebarItem({ item, additionalStaticItems }: Props) {
-  return <SidebarItemBase item={item} additionalStaticItems={additionalStaticItems} />;
+export function SidebarItem({ item, additionalStaticItems, icon }: Props) {
+  return <SidebarItemBase item={item} additionalStaticItems={additionalStaticItems} icon={icon} />;
 }

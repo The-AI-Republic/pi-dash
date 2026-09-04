@@ -12,6 +12,8 @@ import {
   WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS_LINKS,
   WORKSPACE_SIDEBAR_STATIC_PINNED_NAVIGATION_ITEMS_LINKS,
 } from "@pi-dash/constants";
+// constants
+import { extendedNavigationItems } from "@/constants/extended-navigation";
 // store hooks
 import { usePersonalNavigationPreferences } from "@/hooks/use-navigation-preferences";
 // pi-dash-web imports
@@ -35,6 +37,11 @@ const RELOCATED_KEYS = new Set([
   "archives",
   "runners",
 ]);
+
+// Keys contributed by the running build, treated as always-visible for the
+// same reason the built-in rows are: they are navigation, not user-pinnable
+// favourites.
+const extendedNavigationKeys = extendedNavigationItems.map((item) => item.key);
 
 export const SidebarMenuItems = observer(function SidebarMenuItems() {
   // hooks
@@ -71,6 +78,19 @@ export const SidebarMenuItems = observer(function SidebarMenuItems() {
       ))}
       {pinnedNavigationItems.map((item) => (
         <SidebarItem key={`pinned_${item.key}`} item={item} />
+      ))}
+      {/* Contributed by the running build; empty in open source.
+          `additionalStaticItems` is required, not decorative: SidebarItem
+          hides anything that is neither pinned by the user nor in its own
+          hardcoded static list, and that list cannot know about keys a
+          downstream build introduces. */}
+      {extendedNavigationItems.map((item) => (
+        <SidebarItem
+          key={`extended_${item.key}`}
+          item={item}
+          icon={item.icon}
+          additionalStaticItems={extendedNavigationKeys}
+        />
       ))}
     </div>
   );
