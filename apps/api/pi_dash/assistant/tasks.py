@@ -316,6 +316,11 @@ async def _run_turn(turn_id: str):
     streamer = _Streamer(ctx)
     model_label = await sync_to_async(_model_label)(ctx.user)
 
+    # Servers that dropped out mid-run were absorbed to keep the turn alive;
+    # report them however the turn ends. On the failure paths this matters
+    # most: a turn that died *because* a tool server misbehaved is exactly when
+    # the user needs to know which one, and reporting only on success left that
+    # case silent.
     try:
         result = await assistant.run(
             ctx.user_text,
@@ -327,21 +332,22 @@ async def _run_turn(turn_id: str):
             event_stream_handler=streamer.handle,
         )
     except _Cancelled:
+        await sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
         await streamer.fail_open_row(MessageStatus.CANCELLED)
         await sync_to_async(_cancel_turn)(ctx)
         return
     except UsageLimitExceeded as exc:
+        await sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
         await streamer.fail_open_row(MessageStatus.FAILED)
         await sync_to_async(_fail_turn)(ctx, "iteration_limit", str(exc))
         return
     except Exception as exc:  # noqa: BLE001 — classify provider failures
+        await sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
         await streamer.fail_open_row(MessageStatus.FAILED)
         code, detail = _classify_error(exc)
         await sync_to_async(_fail_turn)(ctx, code, detail)
         return
 
-    # Servers that dropped out mid-run were absorbed to keep the turn alive;
-    # report them now so the user knows a capability was unavailable.
     await sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
 
     model_messages = await sync_to_async(history.dump_new_messages)(result)

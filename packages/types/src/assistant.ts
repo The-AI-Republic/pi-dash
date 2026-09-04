@@ -72,6 +72,12 @@ export interface IAssistantMCPServer {
   has_auth_header: boolean;
   /** Slugified name; namespaces this server's tool names inside a run. */
   tool_prefix: string;
+  /**
+   * The prefix this server's tools actually get. Differs from `tool_prefix`
+   * when two servers slugify alike and a run disambiguates them with a
+   * counter. Null for a disabled server, which claims no prefix.
+   */
+  effective_tool_prefix: string | null;
   is_enabled: boolean;
   created_at: string;
   updated_at: string;

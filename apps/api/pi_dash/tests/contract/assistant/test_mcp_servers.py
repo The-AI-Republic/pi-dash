@@ -396,6 +396,77 @@ def test_the_wrapper_is_transparent_over_the_real_toolset():
     assert isinstance(toolset.wrapped.wrapped, MCPToolset)
 
 
+def test_a_server_that_dies_mid_call_does_not_take_the_turn_with_it():
+    """The fail-open has to cover ``call_tool``, not just connect and list.
+
+    Connecting and listing succeed at turn start; the server can still time out
+    or drop on the second tool call. pydantic-ai's tool manager converts only
+    its own control-flow exceptions, so anything else raises straight out of
+    ``Agent.run`` — the exact hard failure this wrapper exists to prevent.
+    """
+    import asyncio
+
+    class _Boom:
+        async def call_tool(self, name, tool_args, ctx, tool):
+            raise ConnectionResetError("server went away")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    toolset = mcp_runtime.ResilientToolset(_Boom(), server_name="flaky")
+    result = asyncio.run(toolset.call_tool("search", {}, None, None))
+
+    assert "unavailable" in result  # the model is told, as a tool result
+    assert toolset.failure == "ConnectionResetError"  # ...and the user can be too
+
+
+def test_a_tools_own_retry_is_not_mistaken_for_an_outage():
+    # ModelRetry is the tool's considered answer, not a dead server; swallowing
+    # it would turn a recoverable retry into a silent capability loss.
+    import asyncio
+
+    from pydantic_ai.exceptions import ModelRetry
+
+    class _Retry:
+        async def call_tool(self, name, tool_args, ctx, tool):
+            raise ModelRetry("try narrower arguments")
+
+    toolset = mcp_runtime.ResilientToolset(_Retry(), server_name="picky")
+
+    with pytest.raises(ModelRetry):
+        asyncio.run(toolset.call_tool("search", {}, None, None))
+    assert toolset.failure is None
+
+
+def test_the_wrapper_survives_being_rebuilt_by_pydantic_ai():
+    """``dataclasses.replace`` must not blow up on this wrapper.
+
+    pydantic-ai rebuilds wrappers that way in ``for_run``, ``for_run_step`` and
+    ``visit_and_replace``. A required constructor argument made every rebuild a
+    TypeError — dormant only because ``MCPToolset.for_run`` returns ``self``,
+    and it would fire exactly where the wrapper is meant to prevent a hard
+    failure.
+    """
+    import dataclasses
+
+    toolset = mcp_runtime.build_toolset(url="https://ok.example.com/mcp", tool_prefix="ok", server_name="Ok")
+    rebuilt = dataclasses.replace(toolset, wrapped=toolset.wrapped)
+
+    assert isinstance(rebuilt, mcp_runtime.ResilientToolset)
+    assert rebuilt.server_name == "Ok"  # configuration carries across
+    assert rebuilt.prefix == "ok"
+
+
+def test_the_read_timeout_is_not_tighter_than_pydantic_ais_own():
+    # It is documented as generous; a value below the library default is the
+    # opposite, and silently fails every long-running tool call.
+    assert mcp_runtime.DEFAULT_READ_TIMEOUT_S >= 300.0
+    assert mcp_runtime.DEFAULT_READ_TIMEOUT_S > mcp_runtime.DEFAULT_TIMEOUT_S
+
+
 # --------------------------------------------------------------------------- #
 # Tool-prefix collisions
 # --------------------------------------------------------------------------- #
@@ -424,6 +495,64 @@ def test_prefix_assignment_is_stable_for_unchanged_servers(world):
     first = [t.wrapped.prefix for t in mcp_runtime.build_toolsets(world.member)[0]]
     second = [t.wrapped.prefix for t in mcp_runtime.build_toolsets(world.member)[0]]
     assert first == second
+
+
+def test_the_list_view_reports_the_prefix_a_run_actually_assigns(world):
+    # The row's own slug is not what the tools get once two servers collide.
+    # Showing it would tell both servers they share a prefix when they do not.
+    for name in ("My Tools", "my-tools"):
+        make_server(world.member, name=name, url=f"https://{name.replace(' ', '')}.example.com/mcp")
+
+    body = client_for(world.member).get(URL).json()
+    effective = {row["name"]: row["effective_tool_prefix"] for row in body}
+
+    assert {row["tool_prefix"] for row in body} == {"my_tools"}  # both slugify alike...
+    assert len(set(effective.values())) == 2, effective  # ...but get distinct prefixes
+    assert effective["My Tools"] == "my_tools"
+
+
+def test_a_disabled_server_claims_no_prefix(world):
+    # It contributes no toolset, so promising it one would be a lie — and would
+    # push an enabled server onto a counter suffix it never actually gets.
+    make_server(world.member, name="Off", url="https://off.example.com/mcp", is_enabled=False)
+
+    row = client_for(world.member).get(URL).json()[0]
+    assert row["effective_tool_prefix"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Server count is bounded
+# --------------------------------------------------------------------------- #
+
+
+def test_creating_past_the_cap_is_refused(world, settings):
+    # Toolsets are entered sequentially at the start of every turn, so an
+    # unbounded list is dead time the user pays on every single message.
+    settings.ASSISTANT_MCP_MAX_SERVERS = 2
+    for i in range(2):
+        make_server(world.member, name=f"S{i}", url=f"https://s{i}.example.com/mcp")
+
+    res = client_for(world.member).post(
+        URL, {"name": "One too many", "url": "https://extra.example.com/mcp"}, format="json"
+    )
+
+    assert res.status_code == 400
+    assert res.json()["error"] == "too_many_servers"
+    assert AssistantMCPServer.objects.filter(user=world.member).count() == 2
+
+
+def test_rows_over_the_cap_are_skipped_rather_than_silently_run(world, settings):
+    # Rows can predate the cap or outlive a lowered one. Dropping them silently
+    # would leave the user wondering why their newest server never runs.
+    for i in range(3):
+        make_server(world.member, name=f"S{i}", url=f"https://s{i}.example.com/mcp")
+    settings.ASSISTANT_MCP_MAX_SERVERS = 2
+
+    toolsets, skipped = mcp_runtime.build_toolsets(world.member)
+
+    assert len(toolsets) == 2
+    assert [s.name for s in skipped] == ["S2"]
+    assert skipped[0].reason == "too_many_servers"
 
 
 # --------------------------------------------------------------------------- #

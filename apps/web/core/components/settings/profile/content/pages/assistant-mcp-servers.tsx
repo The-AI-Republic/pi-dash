@@ -107,9 +107,11 @@ export const AssistantMCPServersSettings = observer(function AssistantMCPServers
                   {server.has_auth_header && <span className="text-11 text-secondary">🔒</span>}
                 </div>
                 <div className="truncate text-12 text-secondary">{server.url}</div>
-                <div className="text-11 text-secondary">
-                  Tools appear as <code>{server.tool_prefix}_*</code>
-                </div>
+                {server.is_enabled && (
+                  <div className="text-11 text-secondary">
+                    Tools appear as <code>{server.effective_tool_prefix ?? server.tool_prefix}_*</code>
+                  </div>
+                )}
               </div>
               <div className="flex shrink-0 items-center gap-2">
                 <Button variant="neutral-primary" onClick={() => toggle(server)}>

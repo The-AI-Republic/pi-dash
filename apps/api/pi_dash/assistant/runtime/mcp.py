@@ -19,10 +19,11 @@ whatever toolsets did build. Callers surface the skipped servers to the user
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from django.conf import settings
 
+from pydantic_ai import exceptions as pydantic_ai_exceptions
 from pydantic_ai.toolsets import WrapperToolset
 
 from pi_dash.assistant import crypto, ssrf
@@ -34,10 +35,31 @@ logger = logging.getLogger(__name__)
 # Connect timeout. pydantic-ai defaults to 5s, which is tight for a cold
 # server but fine as a connect bound.
 DEFAULT_TIMEOUT_S = 10.0
-# Read timeout for a single MCP call. Tool calls commonly traverse a third
-# upstream (the tool's own backend), so this is deliberately generous relative
-# to the connect bound.
-DEFAULT_READ_TIMEOUT_S = 60.0
+# Read timeout for a single MCP call, matching pydantic-ai's own default.
+# Tool calls commonly traverse a third upstream (the tool's own backend) and
+# long-running tools — search, build, anything LLM-backed — routinely need
+# minutes, so this must stay generous: anything tighter turns a slow tool into
+# a failed one.
+DEFAULT_READ_TIMEOUT_S = 300.0
+# Ceiling on enabled servers per user. Toolsets are entered sequentially at the
+# start of every turn, each bounded only by the connect timeout, so the count is
+# what bounds the dead time a user can inflict on their own turns: N dead
+# servers cost N x DEFAULT_TIMEOUT_S before the model is even called.
+DEFAULT_MAX_SERVERS = 10
+
+
+#: pydantic-ai exceptions that mean "handle this", not "the server broke".
+#: Mirrors what ``pydantic_ai.tool_manager`` re-raises rather than converting,
+#: and is resolved by name so a version that renames or drops one degrades to
+#: treating it as a server failure instead of failing at import.
+_CONTROL_FLOW_EXCEPTIONS: tuple[type[BaseException], ...] = tuple(
+    t
+    for t in (
+        getattr(pydantic_ai_exceptions, name, None)
+        for name in ("ModelRetry", "ToolRetryError", "SkipToolExecution", "CallDeferred", "ApprovalRequired")
+    )
+    if isinstance(t, type) and issubclass(t, BaseException)
+)
 
 
 @dataclass(frozen=True)
@@ -48,45 +70,59 @@ class SkippedServer:
     reason: str
 
 
+@dataclass
 class ResilientToolset(WrapperToolset):
-    """Wraps a toolset so an unreachable server degrades instead of failing.
+    """Wraps a toolset so a failing server degrades instead of failing the turn.
 
     Building an MCP toolset performs no I/O — the connection is opened when the
     agent *enters* it, at the start of the run. Without this wrapper a server
     that is down raises out of ``Agent.run`` and takes the whole turn with it,
     so one broken tool server would cost the user their assistant entirely.
 
-    On a failed connect, the wrapper reports no tools and lets the run proceed.
+    All three points where a server can reach out are covered: connecting,
+    listing tools, and *calling* one. The last matters most in practice — a
+    server that connects fine at turn start can still time out or drop mid-run,
+    and pydantic-ai's tool manager only converts ``ModelRetry``/``ToolError``,
+    so anything else propagates out of ``Agent.run``.
+
     ``failure`` records what happened so the caller can tell the user which
     server was dropped rather than leaving them to wonder why a capability
     silently vanished.
     """
 
-    def __init__(self, wrapped, *, name: str, prefix: str = "") -> None:
-        super().__init__(wrapped)
-        self._server_name = name
-        self._entered = False
-        self.failure: str | None = None
-        # The tool prefix assigned to this server for the run. Carried on the
-        # outermost wrapper because that is the object callers hold — the
-        # prefixing wrapper underneath doesn't surface it.
-        self.prefix = prefix
+    #: Every field carries a default on purpose. pydantic-ai rebuilds wrappers
+    #: with ``dataclasses.replace(self, wrapped=...)`` in ``for_run``,
+    #: ``for_run_step`` and ``visit_and_replace``, which reconstructs through
+    #: ``__init__`` passing only the dataclass fields. A required argument here
+    #: — or a hand-written ``__init__`` that adds one — turns every such rebuild
+    #: into a TypeError, and it would fire exactly where this wrapper exists to
+    #: prevent a hard failure. Dormant today because ``MCPToolset.for_run``
+    #: returns ``self``; a pydantic-ai upgrade is all it takes to wake it.
+    server_name: str = ""
+    #: The tool prefix assigned to this server for the run. Carried on the
+    #: outermost wrapper because that is the object callers hold — the
+    #: prefixing wrapper underneath doesn't surface it.
+    prefix: str = ""
+    #: Run state, not configuration: a rebuilt wrapper starts clean rather than
+    #: inheriting a failure recorded against a connection it no longer holds.
+    failure: str | None = field(default=None, init=False, compare=False)
+    _entered: bool = field(default=False, init=False, compare=False, repr=False)
 
-    @property
-    def server_name(self) -> str:
-        return self._server_name
+    def _record(self, exc: Exception, what: str) -> None:
+        self.failure = type(exc).__name__
+        logger.warning(
+            "mcp server %s, continuing without it: %s (%s)",
+            what,
+            self.server_name,
+            exc,
+        )
 
     async def __aenter__(self):
         try:
             await super().__aenter__()
             self._entered = True
         except Exception as exc:  # noqa: BLE001 — a dead server is not a turn failure
-            self.failure = type(exc).__name__
-            logger.warning(
-                "mcp server unreachable, continuing without it: %s (%s)",
-                self._server_name,
-                exc,
-            )
+            self._record(exc, "unreachable")
         return self
 
     async def __aexit__(self, *args) -> bool | None:
@@ -102,13 +138,29 @@ class ResilientToolset(WrapperToolset):
         try:
             return await super().get_tools(ctx)
         except Exception as exc:  # noqa: BLE001 — same rule as connect
-            self.failure = type(exc).__name__
-            logger.warning(
-                "mcp server failed to list tools, continuing without it: %s (%s)",
-                self._server_name,
-                exc,
-            )
+            self._record(exc, "failed to list tools")
             return {}
+
+    async def call_tool(self, name, tool_args, ctx, tool):
+        """Absorb a mid-run tool failure into the tool's own result.
+
+        The server was reachable when the run started or this tool would not be
+        on offer, so a failure here is the server dying, timing out, or erroring
+        mid-turn. Returning the failure as the tool's result keeps the turn
+        alive and lets the model react to it; raising would end the turn, and
+        ``ModelRetry`` would burn the run's retries on a server that is not
+        coming back.
+
+        pydantic-ai's own control-flow exceptions pass through untouched: they
+        are decisions, not outages, and the tool manager is what acts on them.
+        """
+        try:
+            return await super().call_tool(name, tool_args, ctx, tool)
+        except _CONTROL_FLOW_EXCEPTIONS:
+            raise
+        except Exception as exc:  # noqa: BLE001 — a dying server is not a turn failure
+            self._record(exc, f"failed calling {name}")
+            return f"Tool server {self.server_name!r} was unavailable for this call ({type(exc).__name__})."
 
 
 def build_toolset(
@@ -145,10 +197,10 @@ def build_toolset(
     if tool_prefix:
         toolset = toolset.prefixed(tool_prefix)
     # Outermost, so it also absorbs failures raised by the prefix wrapper.
-    return ResilientToolset(toolset, name=server_name or url, prefix=tool_prefix or "")
+    return ResilientToolset(toolset, server_name=server_name or url, prefix=tool_prefix or "")
 
 
-def _unique_prefixes(servers: list[AssistantMCPServer]) -> dict:
+def unique_prefixes(servers: list[AssistantMCPServer]) -> dict:
     """Map each server to a tool prefix unique within this run.
 
     Names are unique per user, but slugification is lossy — "My Tools",
@@ -185,11 +237,22 @@ def build_toolsets(user) -> tuple[list, list[SkippedServer]]:
     auth header yields a :class:`SkippedServer` entry instead, so one bad row
     cannot break every turn the user takes.
     """
+    limit = max_servers()
     servers = list(AssistantMCPServer.objects.filter(user=user, is_enabled=True))
-    prefixes = _unique_prefixes(servers)
+    prefixes = unique_prefixes(servers)
 
     toolsets: list = []
     skipped: list[SkippedServer] = []
+
+    # Defence in depth behind the create-time limit: rows can predate the cap
+    # or outlive a lowered one, and every enabled row costs connect time on
+    # every turn. Report the overflow rather than dropping it silently — the
+    # user is owed the reason their newest server never runs. Ordering is the
+    # model's ``created_at``, so which servers survive is stable.
+    if len(servers) > limit:
+        for server in servers[limit:]:
+            skipped.append(SkippedServer(server.name, "too_many_servers"))
+        servers = servers[:limit]
 
     for server in servers:
         if ssrf.is_blocked(server.url):
@@ -230,3 +293,8 @@ def _timeout_setting() -> float:
 
 def _read_timeout_setting() -> float:
     return float(getattr(settings, "ASSISTANT_MCP_READ_TIMEOUT_S", DEFAULT_READ_TIMEOUT_S))
+
+
+def max_servers() -> int:
+    """Ceiling on enabled servers per user, enforced on create and at build."""
+    return int(getattr(settings, "ASSISTANT_MCP_MAX_SERVERS", DEFAULT_MAX_SERVERS))

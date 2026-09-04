@@ -19,11 +19,19 @@ from pi_dash.app.views.base import BaseAPIView
 from pi_dash.assistant import crypto, ssrf
 from pi_dash.assistant.errors import AssistantError
 from pi_dash.assistant.models import AssistantMCPServer
+from pi_dash.assistant.runtime import mcp
 from pi_dash.assistant.serializers import AssistantMCPServerSerializer
 
 
-def _serialize(server: AssistantMCPServer) -> dict:
-    return AssistantMCPServerSerializer(server).data
+def _serialize(server: AssistantMCPServer, effective_prefix: str | None = None) -> dict:
+    """Serialize a row, optionally with the prefix its tools actually get.
+
+    ``tool_prefix`` is the row's own slug; the prefix a run assigns can differ,
+    because slugification is lossy and colliding servers are disambiguated with
+    a counter. Showing the raw slug tells two colliding servers they share a
+    prefix when they do not, so the list view resolves it (see ``get``).
+    """
+    return {**AssistantMCPServerSerializer(server).data, "effective_tool_prefix": effective_prefix}
 
 
 def _blocked_response() -> Response:
@@ -61,8 +69,12 @@ def _apply_auth_header(server: AssistantMCPServer, auth_header: str | None) -> R
 
 class AssistantMCPServerListCreateEndpoint(BaseAPIView):
     def get(self, request):
-        servers = AssistantMCPServer.objects.filter(user=request.user)
-        return Response([_serialize(s) for s in servers])
+        servers = list(AssistantMCPServer.objects.filter(user=request.user))
+        # Resolved over the *enabled* set, exactly as a run does — a disabled
+        # server claims no prefix, so it cannot push an enabled one onto a
+        # counter suffix it would never actually get.
+        effective = mcp.unique_prefixes([s for s in servers if s.is_enabled])
+        return Response([_serialize(s, effective.get(s.pk)) for s in servers])
 
     def post(self, request):
         serializer = AssistantMCPServerSerializer(data=request.data)
@@ -74,6 +86,20 @@ class AssistantMCPServerListCreateEndpoint(BaseAPIView):
 
         if AssistantMCPServer.objects.filter(user=request.user, name=data["name"]).exists():
             return _duplicate_name_response()
+
+        # Toolsets are entered sequentially at the start of every turn, each
+        # bounded only by the connect timeout, so an unbounded server list is
+        # dead time the user pays on every message they send. Refuse here
+        # rather than let the run-time cap silently drop the newest server.
+        limit = mcp.max_servers()
+        if AssistantMCPServer.objects.filter(user=request.user).count() >= limit:
+            return Response(
+                {
+                    "error": "too_many_servers",
+                    "detail": f"You can have at most {limit} tool servers. Remove one before adding another.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         server = AssistantMCPServer(
             user=request.user,
