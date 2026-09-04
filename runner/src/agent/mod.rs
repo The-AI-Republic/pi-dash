@@ -304,6 +304,23 @@ impl AgentCursor {
         }
     }
 
+    /// Which agent CLI produced this run, as the stable wire string the cloud
+    /// stores in ``AgentRun.agent_metadata["agent_kind"]`` (mirrors
+    /// ``AgentChatSession.agent_kind``). Reported on the run-started call so a
+    /// consumer can interpret ``local_session_id`` / ``thread_id``, whose
+    /// meaning is agent-kind dependent (for Claude Code the runner aliases the
+    /// session id as the thread id; for Codex the thread id is a distinct
+    /// concept).
+    pub fn agent_kind(&self) -> &'static str {
+        match self {
+            AgentCursor::Codex(_) => "codex",
+            AgentCursor::ClaudeCode(_) => "claude_code",
+            AgentCursor::CursorAgent(_) => "cursor_agent",
+            AgentCursor::OpenClaw(_) => "openclaw",
+            AgentCursor::Grok(_) => "grok",
+        }
+    }
+
     pub fn model(&self) -> Option<&str> {
         match self {
             AgentCursor::Codex(c) => c.model.as_deref(),
