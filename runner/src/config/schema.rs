@@ -179,6 +179,12 @@ pub struct RunnerConfig {
     /// parse. Only consulted when `agent.kind == grok`.
     #[serde(default)]
     pub grok: GrokSection,
+    /// Muse Code settings. Missing section falls back to
+    /// `MuseCodeSection::default()` so existing `config.toml` files (written
+    /// before Muse Code support) still parse. Only consulted when
+    /// `agent.kind == muse_code`.
+    #[serde(default)]
+    pub muse_code: MuseCodeSection,
     /// Missing section falls back to `ApprovalPolicySection::default()` so
     /// a minimal `config.toml` doesn't have to spell out every knob.
     #[serde(default)]
@@ -321,6 +327,10 @@ pub enum AgentKind {
     /// xAI Grok via its native ACP server (`grok agent stdio`), which the
     /// runner drives directly over the Agent Client Protocol.
     Grok,
+    /// Meta Muse Code via its headless one-shot mode
+    /// (`muse exec --json --prompt-file <PATH>`), whose JSONL event stream the
+    /// runner drives one turn per subprocess.
+    MuseCode,
 }
 
 impl AgentKind {
@@ -350,10 +360,14 @@ impl AgentKind {
             // for the full duration of a single tool call with no intra-tool
             // progress on the ACP stream. Use the same 15-minute envelope.
             // Grok, also driven over ACP, has the same quiet-tool-call profile.
+            // Muse Code (`muse exec`), like Cursor, is one-shot per turn and can
+            // be silent for the full duration of a single tool call; use the
+            // same 15-minute envelope.
             AgentKind::ClaudeCode
             | AgentKind::CursorAgent
             | AgentKind::OpenClaw
-            | AgentKind::Grok => Duration::from_secs(15 * 60),
+            | AgentKind::Grok
+            | AgentKind::MuseCode => Duration::from_secs(15 * 60),
         }
     }
 
@@ -366,6 +380,7 @@ impl AgentKind {
             AgentKind::CursorAgent => "Cursor",
             AgentKind::OpenClaw => "OpenClaw",
             AgentKind::Grok => "Grok",
+            AgentKind::MuseCode => "Muse Code",
         }
     }
 
@@ -384,6 +399,8 @@ impl AgentKind {
             // Grok is its own ACP server (`grok agent stdio`), so the runner
             // invokes `grok` directly.
             AgentKind::Grok => "grok",
+            // Muse Code ships as the `muse` CLI; the runner drives `muse exec`.
+            AgentKind::MuseCode => "muse",
         }
     }
 
@@ -397,6 +414,7 @@ impl AgentKind {
             AgentKind::CursorAgent => "https://cursor.com/download",
             AgentKind::OpenClaw => "https://github.com/openclaw/acpx",
             AgentKind::Grok => "https://x.ai/cli",
+            AgentKind::MuseCode => "https://developer.meta.com/ai/products/muse-code/",
         }
     }
 }
@@ -492,6 +510,30 @@ impl Default for GrokSection {
     fn default() -> Self {
         Self {
             binary: default_grok_binary(),
+            model_default: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MuseCodeSection {
+    /// The `muse` CLI binary the runner drives as `muse exec --json`. Per-field
+    /// default so a partial `[muse_code]` block (e.g. only `model_default`)
+    /// still parses without spelling out `binary = "muse"`.
+    #[serde(default = "default_muse_binary")]
+    pub binary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_default: Option<String>,
+}
+
+fn default_muse_binary() -> String {
+    "muse".to_string()
+}
+
+impl Default for MuseCodeSection {
+    fn default() -> Self {
+        Self {
+            binary: default_muse_binary(),
             model_default: None,
         }
     }
@@ -966,6 +1008,7 @@ mod tests {
             cursor_agent: Default::default(),
             openclaw: Default::default(),
             grok: Default::default(),
+            muse_code: Default::default(),
             approval_policy: Default::default(),
         }
     }
@@ -1169,6 +1212,10 @@ mod tests {
             OpenClawSection::default().binary
         );
         assert_eq!(AgentKind::Grok.default_binary(), GrokSection::default().binary);
+        assert_eq!(
+            AgentKind::MuseCode.default_binary(),
+            MuseCodeSection::default().binary
+        );
     }
 
     #[test]
@@ -1181,6 +1228,7 @@ mod tests {
             AgentKind::CursorAgent,
             AgentKind::OpenClaw,
             AgentKind::Grok,
+            AgentKind::MuseCode,
         ] {
             let url = kind.install_page_url();
             assert!(url.starts_with("https://"), "{kind:?} url not https: {url}");

@@ -14,6 +14,7 @@ pub mod daemon;
 pub mod grok;
 pub mod history;
 pub mod ipc;
+pub mod muse_code;
 pub mod openclaw;
 pub mod service;
 pub mod tui;
