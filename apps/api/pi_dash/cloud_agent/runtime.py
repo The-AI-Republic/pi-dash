@@ -16,6 +16,7 @@ from pi_dash.cloud_agent.github_mcp import GITHUB_TOOL_NAMES, build_github_tools
 async def execute(run):
     from pydantic_ai import Agent, UsageLimits
     from pi_dash.ee.cloud_agent.model_provider import resolve_model_for_run
+    from pi_dash.ee.cloud_agent.toolsets import resolve_extra_toolsets_for_run
 
     model = await sync_to_async(resolve_model_for_run)(run)
     allowed_names = run.tool_plan.get("tools", [])
@@ -23,6 +24,15 @@ async def execute(run):
     toolsets = []
     if set(allowed_names) & GITHUB_TOOL_NAMES:
         toolsets.append(build_github_toolset(run.id, allowed_names))
+    # Deployment-provided toolsets whose tool names cannot be known at plan
+    # time. Gated here, on the run's own snapshot, rather than left to the
+    # seam: the snapshot is what makes a run execute under the policy it was
+    # admitted with, and the same flag decides whether the prompt tells the
+    # agent these tools exist — so a run that resolves them without it would
+    # carry tools its prompt never mentions. Building them can touch the DB,
+    # hence sync_to_async.
+    if run.tool_plan.get("extra_toolsets"):
+        toolsets.extend(await sync_to_async(resolve_extra_toolsets_for_run)(run))
     agent = Agent(
         model=model,
         output_type=CloudAgentOutput,
