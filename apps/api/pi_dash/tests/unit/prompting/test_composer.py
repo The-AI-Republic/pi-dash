@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 from pi_dash.prompting import recipes
@@ -419,3 +421,103 @@ def test_session_framing_omits_trigger_block_for_scheduler():
     ).text
     assert "Why this run started" not in out
     assert "Ticking schedule" not in out
+
+
+# ----------------------------------------------------------------------
+# Ancestor-chain required reading + parent-readiness (PDASHOSS01-97)
+# ----------------------------------------------------------------------
+
+REQUIRED_READING_DIRECTIVE = "The ancestor chain is required reading before you implement."
+
+
+def _coding_ctx_chain(depth: int) -> dict:
+    """A populated coding-task context whose ancestor chain has ``depth``
+    issues (current + ancestors).
+
+    ``depth == 1`` is parentless (``parent``/``lineage`` both None). ``depth
+    == 2`` has a direct parent only — ``build_context`` leaves ``lineage``
+    None for a 2-chain. ``depth >= 3`` additionally carries a multi-level
+    ``lineage`` (grandparent+), current-first up to the root.
+    """
+    if depth < 1:
+        raise ValueError("depth must be >= 1")
+    if depth == 1:
+        ctx = copy.deepcopy(sample_contexts("coding-task")[1])  # minimal: parentless
+        assert ctx["parent"] is None and ctx["lineage"] is None
+        return ctx
+    ctx = copy.deepcopy(sample_contexts("coding-task")[0])  # populated: has a parent
+    if depth == 2:
+        ctx["lineage"] = None
+        return ctx
+    lineage = [
+        {"identifier": "SAMPLE-1", "title": "Sample issue title"},
+        {"identifier": "SAMPLE-0", "title": "Parent issue"},
+    ]
+    for i in range(depth - 3):
+        lineage.append({"identifier": f"SAMPLE-mid{i}", "title": f"Ancestor {i}"})
+    lineage.append({"identifier": "SAMPLE-root", "title": "Root issue"})
+    ctx["lineage"] = lineage
+    return ctx
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("depth", [2, 3, 4, 6])
+def test_coding_task_requires_ancestor_reading_when_parent(depth):
+    """When the issue has a parent (chain length >= 2), the assembled coding
+    prompt must direct the agent to read the ancestor chain before it
+    implements — required, not optional (PDASHOSS01-97). Holds whether the
+    chain is just the parent (len 2, lineage None) or a multi-level lineage
+    (len 3, 4, ...)."""
+    ctx = _coding_ctx_chain(depth)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert REQUIRED_READING_DIRECTIVE in body
+    # analyze-and-scope step 2 walks the chain and assesses readiness.
+    assert "Walk the ancestor chain to the root" in body
+    assert "ready to implement against" in body
+    # The old optional wording is gone.
+    assert "To learn about any ancestor" not in body
+
+
+@pytest.mark.unit
+def test_coding_task_no_ancestor_directive_when_parentless():
+    """A parentless issue gets no ancestor-chain directive — there is no chain
+    to walk (PDASHOSS01-97)."""
+    ctx = _coding_ctx_chain(1)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert REQUIRED_READING_DIRECTIVE not in body
+    assert "Walk the ancestor chain to the root" not in body
+
+
+@pytest.mark.unit
+def test_coding_task_ancestor_directive_adapts_to_chain_depth():
+    """For a 2-chain the directive says the chain is just the parent; for a
+    3+-chain it names walking up to the root and surfaces the root id."""
+    body2 = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_coding_ctx_chain(2)
+    ).text
+    body3 = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_coding_ctx_chain(3)
+    ).text
+
+    assert "the chain here is just the parent" in body2
+    assert "up to the root issue" not in body2  # no multi-level lineage for a 2-chain
+    assert "up to the root issue" in body3
+    assert "SAMPLE-root" in body3  # root id surfaced so the agent can walk to it
+
+
+@pytest.mark.unit
+def test_coding_task_parent_no_branch_routes_through_readiness_not_autofallback():
+    """workpad-setup must route the 'parent has no implementation branch' case
+    through the readiness judgment (research/design parent -> project base;
+    in-progress implementation dependency -> block) rather than an automatic
+    fall-back to the project base (PDASHOSS01-97)."""
+    ctx = _coding_ctx_chain(2)
+    ctx["repo"]["work_branch"] = None  # this issue has no branch yet -> resolve a base
+    ctx["parent"]["work_branch"] = None  # parent has no implementation branch yet
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert "Do not treat this as an automatic fall-back to the project base" in body
+    # The dependency case routes into the existing blocking flow by reference.
+    assert 'Treat it as a blocker — follow "Blocking the run" instead of creating a branch' in body
