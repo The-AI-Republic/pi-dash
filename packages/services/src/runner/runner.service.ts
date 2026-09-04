@@ -63,6 +63,24 @@ export class RunnerService extends APIService {
   }
 
   /**
+   * Hard-delete a dev-machine connection. The destructive counterpart to
+   * ``revokeDevMachine``: revoke leaves the machine in the list marked
+   * revoked, delete removes it entirely (tokens invalidated, runners torn
+   * down, row dropped). Pass ``purgeLocal: false`` to leave the local
+   * install untouched; the default (``true``) cascades the teardown to the
+   * daemon, matching ``deleteRunner``.
+   */
+  async deleteDevMachine(machineId: string, workspaceId: string, options?: { purgeLocal?: boolean }): Promise<void> {
+    const purge = options?.purgeLocal ?? true;
+    const url = `/api/runners/dev-machines/${machineId}/?workspace=${workspaceId}&purge_local=${purge ? "true" : "false"}`;
+    return this.delete(url)
+      .then(() => undefined)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  /**
    * Cloud-driven runner creation: push a ``create_runner`` command down
    * the machine control session of a connected dev machine. Returns the
    * ``request_id`` to poll via ``getCreateRunnerOnMachineStatus``.

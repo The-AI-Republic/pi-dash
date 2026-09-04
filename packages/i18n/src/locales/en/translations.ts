@@ -370,6 +370,7 @@ export default {
   "Could not load pods.": "Could not load pods.",
   "Could not load projects.": "Could not load projects.",
   "Could not revert the prompt.": "Could not revert the prompt.",
+  "Could not delete the dev machine.": "Could not delete the dev machine.",
   "Could not revoke the dev machine.": "Could not revoke the dev machine.",
   "Could not rotate the dev machine token.": "Could not rotate the dev machine token.",
   "Could not save the prompt.": "Could not save the prompt.",
@@ -485,6 +486,7 @@ export default {
   Delete: "Delete",
   "Delete {entity}": "Delete {entity}",
   "Delete attachment": "Delete attachment",
+  "Delete dev machine?": "Delete dev machine?",
   "Delete draft": "Delete draft",
   "Delete personal access token": "Delete personal access token",
   "Delete runner?": "Delete runner?",
@@ -1575,6 +1577,8 @@ export default {
   "This module isn't active yet.": "This module isn't active yet.",
   "This permanently revokes the dev machine, invalidates its auth token, and revokes runners hosted on it. Use this when the machine should no longer be trusted.":
     "This permanently revokes the dev machine, invalidates its auth token, and revokes runners hosted on it. Use this when the machine should no longer be trusted.",
+  "This removes the dev machine connection entirely: its auth token is invalidated, the runners hosted on it are torn down, and the machine disappears from this list. Deleting a dev machine does not uninstall the AI agent (such as Codex or Claude) on the machine itself.":
+    "This removes the dev machine connection entirely: its auth token is invalidated, the runners hosted on it are torn down, and the machine disappears from this list. Deleting a dev machine does not uninstall the AI agent (such as Codex or Claude) on the machine itself.",
   "This run is not available. It may have been deleted or belong to a different workspace.":
     "This run is not available. It may have been deleted or belong to a different workspace.",
   "This soft-deletes the scheduler. Any active project bindings will stop firing. The slug becomes available for re-creation.":
