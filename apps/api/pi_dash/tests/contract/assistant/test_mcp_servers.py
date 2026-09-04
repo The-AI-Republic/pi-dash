@@ -94,7 +94,7 @@ def test_create_list_and_delete_a_server(world):
     res = c.post(URL, {"name": "Tools", "url": "https://tools.example.com/mcp"}, format="json")
     assert res.status_code == 201, res.data
     server_id = res.data["id"]
-    assert res.data["tool_prefix"] == "tools"
+    assert res.data["tool_prefix"] == "mcp_tools"
     assert res.data["has_auth_header"] is False
 
     res = c.get(URL)
@@ -239,7 +239,7 @@ def test_each_server_gets_its_own_tool_prefix(world):
 
     toolsets, _ = mcp_runtime.build_toolsets(world.member)
     prefixes = sorted(t.prefix for t in toolsets)
-    assert prefixes == ["alpha", "beta"]
+    assert prefixes == ["mcp_alpha", "mcp_beta"]
 
 
 def test_auth_header_is_decrypted_when_building_the_toolset(world, monkeypatch):
