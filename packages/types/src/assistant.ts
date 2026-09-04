@@ -64,3 +64,32 @@ export interface IUserLLMConfigInput {
   model_name: string;
   api_key?: string;
 }
+
+export interface IAssistantMCPServer {
+  id: string;
+  name: string;
+  url: string;
+  has_auth_header: boolean;
+  /** Slugified name; namespaces this server's tool names inside a run. */
+  tool_prefix: string;
+  /**
+   * The prefix this server's tools actually get. Differs from `tool_prefix`
+   * when two servers slugify alike and a run disambiguates them with a
+   * counter. Null for a disabled server, which claims no prefix.
+   */
+  effective_tool_prefix: string | null;
+  is_enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IAssistantMCPServerInput {
+  name: string;
+  url: string;
+  /**
+   * Full Authorization header value (e.g. "Bearer …"). Write-only: the API
+   * never echoes it back, only `has_auth_header`. Send "" to clear it.
+   */
+  auth_header?: string;
+  is_enabled?: boolean;
+}
