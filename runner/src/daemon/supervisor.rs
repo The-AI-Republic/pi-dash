@@ -2707,7 +2707,8 @@ impl AssignWorker {
             AgentKind::ClaudeCode
             | AgentKind::CursorAgent
             | AgentKind::OpenClaw
-            | AgentKind::Grok => FailureReason::AgentCrash,
+            | AgentKind::Grok
+            | AgentKind::MuseCode => FailureReason::AgentCrash,
         }
     }
 
@@ -3588,7 +3589,7 @@ mod tests {
     use crate::cloud::protocol::Envelope;
     use crate::config::schema::{
         AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, CursorAgentSection,
-        GrokSection, OpenClawSection, RunnerConfig, WorkspaceSection,
+        GrokSection, MuseCodeSection, OpenClawSection, RunnerConfig, WorkspaceSection,
     };
     use crate::daemon::state::ExecCommandSnapshot;
     use chrono::TimeZone;
@@ -3618,6 +3619,7 @@ mod tests {
             cursor_agent: CursorAgentSection::default(),
             openclaw: OpenClawSection::default(),
             grok: GrokSection::default(),
+            muse_code: MuseCodeSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         }
     }

@@ -1121,6 +1121,7 @@ export default {
   "Open work item in full screen": "Open work item in full screen",
   "Open workspace switcher": "Open workspace switcher",
   OpenClaw: "OpenClaw",
+  "Muse Code": "Muse Code",
   Optional: "Optional",
   Options: "Options",
   "Order by": "Order by",
