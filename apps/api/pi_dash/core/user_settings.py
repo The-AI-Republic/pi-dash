@@ -5,9 +5,10 @@
 """Validation, merge and read semantics for ``Profile.settings``.
 
 Deliberately separate from the ``ee.settings.user_settings`` seam: a build
-overlays that module to declare its own namespaces, and a whole-file
-replacement cannot import from the file it replaces. Keeping the logic here
-means an overlay declares a schema and inherits all of this unchanged.
+overlays that module to declare its own namespaces. Keeping the OSS-owned
+schema and the composition logic here means an overlay can extend the public
+declaration instead of replacing it, while inheriting all validation, merge,
+and read behavior unchanged.
 """
 
 from __future__ import annotations
@@ -21,6 +22,41 @@ from typing import Any
 #: (declared keys x this) — capping the patch caps the bag. Generous for a
 #: settings field, far too small to be worth using as storage.
 MAX_SETTINGS_PATCH_BYTES = 4096
+
+
+def base_settings_schema() -> dict[str, dict[str, Any]]:
+    """Settings namespaces owned by OSS Pi Dash.
+
+    The public build currently declares none. This function nevertheless lives
+    outside the overlayable ``ee`` seam so downstream builds can always import
+    the OSS declaration, merge their own namespaces into it, and automatically
+    inherit public settings added later.
+    """
+    return {}
+
+
+def extend_settings_schema(
+    base: dict[str, dict[str, Any]], extension: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Return ``base`` plus an independently owned schema ``extension``.
+
+    Namespaces may be shared, but a key may have only one owner. Silently
+    overriding a public key from a private build would make its validation and
+    default depend on packaging order, so collisions fail when the schema is
+    assembled rather than changing user-facing behavior implicitly.
+
+    Neither input is mutated.
+    """
+    merged = {namespace: dict(values) for namespace, values in base.items()}
+    for namespace, values in extension.items():
+        existing = merged.setdefault(namespace, {})
+        collisions = sorted(set(existing) & set(values))
+        if collisions:
+            raise ValueError(
+                f"settings schema collision(s) in {namespace}: {', '.join(collisions)}"
+            )
+        existing.update(values)
+    return merged
 
 
 def _schema() -> dict[str, dict[str, Any]]:
