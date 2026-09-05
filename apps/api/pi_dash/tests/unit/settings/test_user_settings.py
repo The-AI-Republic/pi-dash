@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pytest
 
+from pi_dash.core import user_settings as core_user_settings
 from pi_dash.ee.settings import user_settings
 
 pytestmark = pytest.mark.unit
@@ -36,6 +37,14 @@ class _Profile:
 def test_ce_declares_no_namespaces():
     # The bag exists but nothing may go in it until a build says otherwise.
     assert user_settings.known_settings_schema() == {}
+
+
+def test_ce_schema_comes_from_the_non_overlayed_oss_declaration(monkeypatch):
+    """Downstream builds need a stable public declaration they can extend."""
+    public = {"notifications": {"daily_digest": False}}
+    monkeypatch.setattr(core_user_settings, "base_settings_schema", lambda: public)
+
+    assert user_settings.known_settings_schema() == public
 
 
 def test_every_write_is_refused_when_nothing_is_declared():
@@ -135,6 +144,41 @@ def test_an_oversized_payload_is_refused(monkeypatch):
 # --------------------------------------------------------------------------- #
 # Merge semantics
 # --------------------------------------------------------------------------- #
+
+
+def test_extending_a_schema_preserves_public_namespaces_and_merges_shared_ones():
+    public = {
+        "notifications": {"daily_digest": False},
+        "assistant": {"public_tools": True},
+    }
+    private = {
+        "openhub": {"apps_enabled": False},
+        "assistant": {"private_models": True},
+    }
+
+    assert core_user_settings.extend_settings_schema(public, private) == {
+        "notifications": {"daily_digest": False},
+        "assistant": {"public_tools": True, "private_models": True},
+        "openhub": {"apps_enabled": False},
+    }
+
+
+def test_extending_a_schema_does_not_mutate_either_input():
+    public = {"assistant": {"public_tools": True}}
+    private = {"assistant": {"private_models": True}}
+
+    core_user_settings.extend_settings_schema(public, private)
+
+    assert public == {"assistant": {"public_tools": True}}
+    assert private == {"assistant": {"private_models": True}}
+
+
+def test_extending_a_schema_rejects_a_key_owned_by_both_builds():
+    with pytest.raises(ValueError, match="settings schema collision.*apps_enabled"):
+        core_user_settings.extend_settings_schema(
+            {"openhub": {"apps_enabled": True}},
+            {"openhub": {"apps_enabled": False}},
+        )
 
 
 def test_patching_one_namespace_leaves_the_others_intact():

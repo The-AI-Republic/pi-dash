@@ -10,11 +10,11 @@ per such preference would put deployment-specific concepts into the shared
 schema, so ``Profile.settings`` is a generic ``{namespace: {key: value}}`` bag
 and *this module* is the only thing that says what may live in it.
 
-Open source declares no namespaces, so the bag stays empty and the API rejects
-every write to it. A downstream build replaces this file to declare its own,
-and inherits validation, defaults and the API surface without changing any
-model. The semantics live in ``pi_dash.core.user_settings`` precisely so a
-replacement of this file does not have to reimplement them.
+Open source currently declares no namespaces, so the bag stays empty and the
+API rejects every write to it. A downstream build replaces this file to add
+its own declaration, but composes it with
+``pi_dash.core.user_settings.base_settings_schema`` so public settings are
+retained. Validation, defaults and the API surface remain shared.
 
 The declaration is values-with-defaults rather than a schema language: it
 answers "which keys exist and what do they mean when unset", which is all the
@@ -24,6 +24,8 @@ endpoint and the readers need.
 from __future__ import annotations
 
 from typing import Any
+
+from pi_dash.core import user_settings as core_user_settings
 
 # Re-exported so callers import one module regardless of which build declared
 # the schema.
@@ -43,4 +45,4 @@ def known_settings_schema() -> dict[str, dict[str, Any]]:
     read, so an overlay that stops declaring a namespace does not start serving
     values it no longer understands.
     """
-    return {}
+    return core_user_settings.base_settings_schema()
