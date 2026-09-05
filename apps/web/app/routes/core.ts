@@ -264,6 +264,42 @@ export const coreRoutes: RouteConfigEntry[] = [
               "./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/schedulers/calendar/page.tsx"
             ),
           ]),
+
+          // AI Workers (project-scoped runners panel). Renders the SAME
+          // middle-panel page modules as the workspace-wide aggregate
+          // (./(all)/[workspaceSlug]/runners/*) but inside the project chrome
+          // and filtered to this project. Explicit ids are required because the
+          // page files are reused across two scopes; without them the two route
+          // trees would collide on the file-derived id.
+          layout("./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/runners/layout.tsx", [
+            route(":workspaceSlug/projects/:projectId/runners", "./(all)/[workspaceSlug]/runners/page.tsx", {
+              id: "project-runners-overview",
+            }),
+            route(
+              ":workspaceSlug/projects/:projectId/runners/runs/:runId?",
+              "./(all)/[workspaceSlug]/runners/runs/page.tsx",
+              {
+                id: "project-runners-runs",
+              }
+            ),
+            route(
+              ":workspaceSlug/projects/:projectId/runners/approvals",
+              "./(all)/[workspaceSlug]/runners/approvals/page.tsx",
+              {
+                id: "project-runners-approvals",
+              }
+            ),
+            route(
+              ":workspaceSlug/projects/:projectId/runners/chat/:runnerId",
+              "./(all)/[workspaceSlug]/runners/chat/[runnerId]/page.tsx",
+              { id: "project-runners-chat" }
+            ),
+            route(
+              ":workspaceSlug/projects/:projectId/runners/detail/:runnerId",
+              "./(all)/[workspaceSlug]/runners/detail/[runnerId]/page.tsx",
+              { id: "project-runners-detail" }
+            ),
+          ]),
         ]),
 
         // Project Archives - Issues, Cycles, Modules

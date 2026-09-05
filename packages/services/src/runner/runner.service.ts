@@ -29,8 +29,17 @@ export class RunnerService extends APIService {
     super(BASE_URL || API_BASE_URL);
   }
 
-  async list(workspaceId?: string): Promise<IRunner[]> {
-    const params = workspaceId ? { params: { workspace: workspaceId } } : {};
+  /**
+   * List runners. Pass ``projectId`` to scope the list to a single project
+   * (the project-scoped AI Workers panel); the server filters to every runner
+   * whose pod belongs to that project. The ``workspaceId``-only form keeps the
+   * workspace-wide aggregate behaviour.
+   */
+  async list(workspaceId?: string, projectId?: string): Promise<IRunner[]> {
+    const query: Record<string, string> = {};
+    if (workspaceId) query.workspace = workspaceId;
+    if (projectId) query.project = projectId;
+    const params = Object.keys(query).length ? { params: query } : {};
     return this.get("/api/runners/", params)
       .then((r) => r?.data)
       .catch((e) => {
@@ -153,9 +162,10 @@ export class RunnerService extends APIService {
    * defaults to 30 items per page. Returns the paginated envelope so callers
    * can render page controls and only the requested page is loaded.
    */
-  async listRuns(workspaceId?: string, page = 1, perPage?: number): Promise<IAgentRunPage> {
+  async listRuns(workspaceId?: string, page = 1, perPage?: number, projectId?: string): Promise<IAgentRunPage> {
     const params: Record<string, string | number> = { page };
     if (workspaceId) params.workspace = workspaceId;
+    if (projectId) params.project = projectId;
     if (perPage !== undefined) params.per_page = perPage;
     return this.get("/api/runners/runs/", { params })
       .then((r) => r?.data)
@@ -197,8 +207,9 @@ export class RunnerService extends APIService {
       });
   }
 
-  async listApprovals(): Promise<IApprovalRequest[]> {
-    return this.get("/api/runners/approvals/")
+  async listApprovals(projectId?: string): Promise<IApprovalRequest[]> {
+    const params = projectId ? { params: { project: projectId } } : {};
+    return this.get("/api/runners/approvals/", params)
       .then((r) => r?.data)
       .catch((e) => {
         throw e?.response?.data;

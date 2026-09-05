@@ -32,10 +32,15 @@ function MetaRow({ label, children }: { label: string; children: React.ReactNode
 }
 
 const RunnerDetailPage = observer(function RunnerDetailPage() {
-  const { workspaceSlug, runnerId } = useParams<{ workspaceSlug: string; runnerId: string }>();
+  const { workspaceSlug, projectId, runnerId } = useParams<{
+    workspaceSlug: string;
+    projectId?: string;
+    runnerId: string;
+  }>();
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const base = `/${workspaceSlug}/runners`;
+  // Project-scoped when a projectId is in the route; workspace aggregate otherwise.
+  const base = projectId ? `/${workspaceSlug}/projects/${projectId}/runners` : `/${workspaceSlug}/runners`;
 
   const {
     data: runner,
