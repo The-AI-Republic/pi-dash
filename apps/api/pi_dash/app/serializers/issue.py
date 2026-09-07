@@ -293,6 +293,12 @@ class IssueCreateSerializer(BaseSerializer):
                     from pi_dash.managed_runner.policy import managed_runner_availability
 
                     project = self.instance.project if self.instance is not None else attrs.get("project")
+                    if project is None:
+                        from pi_dash.db.models import Project
+
+                        project = Project.objects.filter(pk=self.context.get("project_id")).first()
+                    if project is None:
+                        raise serializers.ValidationError({"agent_executor": "A project is required for desktop runs"})
                     viewer = getattr(self.context.get("request"), "user", None)
                     available, reason = managed_runner_availability(project, viewer)
                     # A desktop that has not enrolled this project yet fixes
@@ -1070,6 +1076,7 @@ class IssueSerializer(DynamicBaseSerializer):
             "parent_id",
             "cycle_id",
             "assigned_pod_id",
+            "agent_executor",
             "module_ids",
             "label_ids",
             "assignee_ids",

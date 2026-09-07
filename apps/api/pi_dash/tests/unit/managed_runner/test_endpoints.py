@@ -79,6 +79,35 @@ def test_project_responses_compute_managed_availability_for_the_viewer(
         assert option == {"kind": "managed_runner", "available": True, "reason_code": ""}
 
 
+@pytest.mark.parametrize("operation", ["create", "update"])
+@override_settings(**MANAGED_SETTINGS)
+def test_issue_endpoints_persist_the_viewers_desktop_selection(
+    web_client, workspace, project, issue_for_project, bundled_runner, openhub_lane, monkeypatch, operation
+):
+    from pi_dash.app.views.issue import base
+    from pi_dash.db.models import Issue
+
+    for task in [base.issue_activity, base.model_activity, base.issue_description_version_task, base.recent_visited_task]:
+        monkeypatch.setattr(task, "delay", lambda **kwargs: None)
+    path = f"/api/workspaces/{workspace.slug}/projects/{project.id}/issues/"
+    if operation == "create":
+        response = web_client.post(
+            path, {"name": "Desktop issue", "agent_executor": "managed_runner"}, content_type="application/json"
+        )
+    else:
+        response = web_client.patch(
+            f"{path}{issue_for_project.id}/", {"agent_executor": "managed_runner"}, content_type="application/json"
+        )
+    assert response.status_code in (200, 201, 204), response.content
+    issue_id = response.json()["id"] if operation == "create" else issue_for_project.id
+    assert Issue.objects.get(pk=issue_id).agent_executor == "managed_runner"
+    detail = web_client.get(f"{path}{issue_id}/")
+    assert detail.status_code == 200
+    assert detail.json()["agent_executor"] == "managed_runner"
+    project.refresh_from_db()
+    assert project.default_agent_executor == "local_runner"
+
+
 @pytest.mark.parametrize(
     "url_name,method",
     [
