@@ -390,6 +390,8 @@ CELERY_IMPORTS = (
     "pi_dash.bgtasks.file_asset_task",
     "pi_dash.bgtasks.email_notification_task",
     "pi_dash.bgtasks.cleanup_task",
+    "pi_dash.bgtasks.git_sync_task",
+    "pi_dash.bgtasks.loop",
     "pi_dash.license.bgtasks.tracer",
     # management tasks
     "pi_dash.bgtasks.dummy_data_task",
