@@ -16,16 +16,41 @@ set -eu
 
 INSTALLER_URL="https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-installer.sh"
 
+# Running under WSL installs the *Linux* build, which is usually not what a
+# Windows user wants: it cannot see the Windows filesystem the way they expect
+# and cannot drive coding agents installed on the Windows side. The install
+# still succeeds, so warn loudly rather than failing — a runner that genuinely
+# lives inside the WSL distro is a legitimate setup.
+if grep -qi microsoft /proc/version 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]; then
+  echo ""
+  echo "Warning: this looks like WSL, so the Linux build of pidash will be installed."
+  echo "It will drive coding agents inside this WSL distro only — not ones installed"
+  echo "on Windows. If your agents live on the Windows side, stop now and run this"
+  echo "from PowerShell instead:"
+  echo ""
+  echo "  irm https://github.com/The-AI-Republic/pi-dash/releases/latest/download/install.ps1 | iex"
+  echo ""
+fi
+
 echo "==> Downloading pidash..."
 curl --proto '=https' --tlsv1.2 -LsSf "$INSTALLER_URL" | sh
 
 # cargo-dist drops the binary into $HOME/.local/bin (install-path in
 # dist-workspace.toml). If a future release moves it, surface a clear
 # error instead of silently continuing.
+#
+# Under Git Bash / MSYS2 / Cygwin the installed file is `pidash.exe`: the
+# cargo-dist installer maps MINGW*/MSYS*/CYGWIN* to a Windows target and
+# unpacks the Windows archive. Those runtimes usually resolve a bare
+# `pidash` to `pidash.exe` transparently, but that is a property of the
+# emulation layer rather than something to rely on — check both names.
 PIDASH_BIN="$HOME/.local/bin/pidash"
+if [ ! -x "$PIDASH_BIN" ] && [ -x "$PIDASH_BIN.exe" ]; then
+  PIDASH_BIN="$PIDASH_BIN.exe"
+fi
 if [ ! -x "$PIDASH_BIN" ]; then
   echo ""
-  echo "pidash binary not found at $PIDASH_BIN after install."
+  echo "pidash binary not found at $HOME/.local/bin/pidash after install."
   echo "Run \`$INSTALLER_URL\` manually, then \`pidash auth login\`."
   exit 1
 fi
