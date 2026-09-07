@@ -149,7 +149,7 @@
                                 Id='setupCmdFile'
                                 Name='pidash-setup.cmd'
                                 DiskId='1'
-                                Source='wix\pidash-setup.cmd'
+                                Source='$(sys.SOURCEFILEDIR)pidash-setup.cmd'
                                 KeyPath='yes'/>
                         </Component>
                     </Directory>
