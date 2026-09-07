@@ -288,7 +288,10 @@ async def _run_turn(turn_id: str):
     from pydantic_ai import UsageLimits
     from pydantic_ai.usage import UsageLimitExceeded
 
-    from pi_dash.ee.assistant.model_provider import resolve_model_for_user
+    from pi_dash.ee.assistant.model_provider import (
+        resolve_model_for_user,
+        resolve_toolsets_for_user,
+    )
 
     ctx = await sync_to_async(_load_context)(turn_id)
     if ctx is None:
@@ -302,43 +305,112 @@ async def _run_turn(turn_id: str):
         await sync_to_async(_fail_turn)(ctx, exc.code, exc.detail)
         return
 
+    # Tool servers are additive: a failure to build them degrades the turn's
+    # capabilities but never fails it, so this is deliberately outside the
+    # model-resolution try/except above.
+    toolsets, skipped = await sync_to_async(_resolve_toolsets)(
+        ctx, resolve_toolsets_for_user
+    )
+
     hist = await sync_to_async(history.load_history)(ctx.thread)
     streamer = _Streamer(ctx)
     model_label = await sync_to_async(_model_label)(ctx.user)
 
+    # Servers that dropped out mid-run were absorbed to keep the turn alive;
+    # report them however the turn ends. On the failure paths this matters
+    # most: a turn that died *because* a tool server misbehaved is exactly when
+    # the user needs to know which one, and reporting only on success left that
+    # case silent.
     try:
         result = await assistant.run(
             ctx.user_text,
             model=model,
             deps=ctx.deps,
             message_history=hist,
+            toolsets=toolsets,
             usage_limits=UsageLimits(request_limit=25, tool_calls_limit=20),
             event_stream_handler=streamer.handle,
         )
     except _Cancelled:
+        await sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
         await streamer.fail_open_row(MessageStatus.CANCELLED)
         await sync_to_async(_cancel_turn)(ctx)
         return
     except UsageLimitExceeded as exc:
+        await sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
         await streamer.fail_open_row(MessageStatus.FAILED)
         await sync_to_async(_fail_turn)(ctx, "iteration_limit", str(exc))
         return
     except Exception as exc:  # noqa: BLE001 — classify provider failures
+        await sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
         await streamer.fail_open_row(MessageStatus.FAILED)
         code, detail = _classify_error(exc)
         await sync_to_async(_fail_turn)(ctx, code, detail)
         return
+
+    await sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
 
     model_messages = await sync_to_async(history.dump_new_messages)(result)
     usage = _extract_usage(result)
     await sync_to_async(_complete_turn)(ctx, model_messages, usage, model_label)
 
 
-def _model_label(user) -> str:
-    from pi_dash.assistant.runtime.llm import get_config, model_label as _ml
+def _resolve_toolsets(ctx, resolver) -> tuple[list, list]:
+    """Build the run's toolsets, tolerating any failure.
 
-    cfg = get_config(user)
-    return _ml(cfg) if cfg else ""
+    Emits a ``tool_servers_skipped`` event when some servers could not be
+    built, so the user learns their tool server is misconfigured instead of
+    silently wondering why the assistant "forgot" a capability. A resolver
+    that blows up entirely costs the turn its tools, not its life.
+    """
+    try:
+        toolsets, skipped = resolver(ctx.user)
+    except Exception:  # noqa: BLE001 — tools are additive; never fail the turn
+        logger.exception("resolving assistant toolsets failed")
+        # The one case where *every* tool server vanishes must not also be
+        # the one case that says nothing — that would invert the per-server
+        # skipped reporting below.
+        _emit_skipped(ctx, [{"name": "all tool servers", "reason": "toolsets_unavailable"}])
+        return [], []
+
+    _emit_skipped(ctx, [{"name": s.name, "reason": s.reason} for s in skipped])
+    return toolsets, skipped
+
+
+def _emit_skipped(ctx, servers: list[dict]) -> None:
+    if not servers:
+        return
+    try:
+        events.append_event(
+            ctx.thread,
+            "tool_servers_skipped",
+            payload={"servers": servers},
+            turn=ctx.turn,
+        )
+    except Exception:  # noqa: BLE001 — notification failure must not fail the turn
+        logger.exception("emitting tool_servers_skipped failed")
+
+
+def _report_runtime_tool_failures(ctx, toolsets: list) -> None:
+    """Tell the user about servers that died *during* the run.
+
+    Connection happens when the agent enters a toolset, so a server that was
+    reachable at build time can still drop out mid-turn. Those failures are
+    absorbed to keep the turn alive, which means this is the only place the
+    user learns a capability was missing.
+    """
+    failed = [
+        {"name": ts.server_name, "reason": ts.failure}
+        for ts in toolsets
+        if getattr(ts, "failure", None)
+    ]
+    _emit_skipped(ctx, failed)
+
+
+def _model_label(user) -> str:
+    from pi_dash.ee.assistant.model_provider import model_label_for_user
+
+    return model_label_for_user(user)
 
 
 def _extract_usage(result) -> dict:
@@ -357,6 +429,21 @@ def _extract_usage(result) -> dict:
 
 def _classify_error(exc: Exception) -> tuple[str, str]:
     text = str(exc).lower()
+    # Credit exhaustion is a distinct, user-actionable condition — routed
+    # providers (OpenRouter, and any metered gateway) answer 402 rather than
+    # 401 for it. Without this it lands in the generic "unexpected error"
+    # bucket, which tells the user nothing about what to do.
+    #
+    # The status code is read from the exception, never substring-matched:
+    # "402" appears in request ids and token counts, so matching it in the
+    # message text misclassifies unrelated errors. The remaining markers are
+    # provider error *codes* and phrases specific enough to trust.
+    if getattr(exc, "status_code", None) == 402 or any(
+        s in text
+        for s in ("payment required", "insufficient_credits", "insufficient credits",
+                  "no_credit_account", "quota exceeded")
+    ):
+        return "provider_out_of_credit", "The provider rejected the request for lack of credit."
     if any(s in text for s in ("401", "unauthorized", "api key", "authentication", "invalid_api_key")):
         return "provider_auth_failed", "Your API key was rejected by the provider."
     if any(s in text for s in ("connection", "timeout", "timed out", "unreachable", "could not connect", "name resolution")):

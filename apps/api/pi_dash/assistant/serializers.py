@@ -8,7 +8,12 @@ from urllib.parse import urlparse
 
 from rest_framework import serializers
 
-from pi_dash.assistant.models import AssistantThread, ProviderKind, UserLLMConfig
+from pi_dash.assistant.models import (
+    AssistantMCPServer,
+    AssistantThread,
+    ProviderKind,
+    UserLLMConfig,
+)
 
 
 class AssistantThreadSerializer(serializers.ModelSerializer):
@@ -67,3 +72,45 @@ class UserLLMConfigSerializer(serializers.ModelSerializer):
                 {"base_url": "base_url is required for OpenAI-compatible providers."}
             )
         return attrs
+
+
+class AssistantMCPServerSerializer(serializers.ModelSerializer):
+    auth_header = serializers.CharField(
+        write_only=True, required=False, allow_blank=True, max_length=2048
+    )
+    has_auth_header = serializers.BooleanField(read_only=True)
+    tool_prefix = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = AssistantMCPServer
+        fields = [
+            "id",
+            "name",
+            "url",
+            "auth_header",
+            "has_auth_header",
+            "tool_prefix",
+            "is_enabled",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "has_auth_header", "tool_prefix", "created_at", "updated_at"]
+
+    def validate_name(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("A name is required.")
+        return value
+
+    def validate_url(self, value):
+        value = (value or "").strip().rstrip("/")
+        if not value:
+            raise serializers.ValidationError("A server URL is required.")
+        parsed = urlparse(value)
+        if parsed.scheme not in ("http", "https"):
+            raise serializers.ValidationError("url must be an http(s) URL.")
+        if parsed.username or parsed.password:
+            # Credentials in the URL would be logged and stored in the clear;
+            # the auth_header field is the supported way to authenticate.
+            raise serializers.ValidationError("url must not contain credentials.")
+        return value

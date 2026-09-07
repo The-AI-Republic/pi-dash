@@ -11,6 +11,7 @@ import { setToast, TOAST_TYPE } from "@pi-dash/propel/toast";
 import { AssistantService } from "@pi-dash/services";
 import type { IUserLLMConfig, TAssistantProviderKind } from "@pi-dash/types";
 import { Button } from "@pi-dash/ui";
+import { AssistantMCPServersSettings } from "./assistant-mcp-servers";
 
 const service = new AssistantService();
 
@@ -166,6 +167,10 @@ export const AIAssistantProfileSettings = observer(function AIAssistantProfileSe
           Last verified: {new Date(config.last_verified_at).toLocaleString()}
         </div>
       )}
+
+      <div className="mt-2 border-t border-subtle pt-5">
+        <AssistantMCPServersSettings />
+      </div>
     </div>
   );
 });

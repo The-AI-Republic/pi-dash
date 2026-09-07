@@ -14,6 +14,10 @@ from pi_dash.assistant.views.llm_config import (
     UserLLMConfigEndpoint,
     UserLLMConfigTestEndpoint,
 )
+from pi_dash.assistant.views.mcp_servers import (
+    AssistantMCPServerDetailEndpoint,
+    AssistantMCPServerListCreateEndpoint,
+)
 from pi_dash.assistant.views.messages import (
     AssistantCancelEndpoint,
     AssistantMessageListCreateEndpoint,
@@ -69,5 +73,15 @@ urlpatterns = [
         "users/me/ai-assistant/agent-token/",
         AgentModelTokenEndpoint.as_view(),
         name="ai-assistant-agent-token",
+    ),
+    path(
+        "users/me/ai-assistant/mcp-servers/",
+        AssistantMCPServerListCreateEndpoint.as_view(),
+        name="ai-assistant-mcp-servers",
+    ),
+    path(
+        "users/me/ai-assistant/mcp-servers/<uuid:server_id>/",
+        AssistantMCPServerDetailEndpoint.as_view(),
+        name="ai-assistant-mcp-server-detail",
     ),
 ]
