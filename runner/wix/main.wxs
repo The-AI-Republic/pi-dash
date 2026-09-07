@@ -170,6 +170,14 @@
                     </Component>
                 </Directory>
             </Directory>
+
+            <!--
+              Standard system directory, declared so [System64Folder] resolves
+              to a real path when referenced from the LaunchPidashSetup command
+              line below. Without this declaration the formatted [System64Folder]
+              can expand to empty and cmd.exe would only be found via PATH.
+            -->
+            <Directory Id='System64Folder'/>
         </Directory>
 
         <Feature
@@ -226,15 +234,25 @@
 
         <!--
           Launches the setup shim when the ExitDialog checkbox is ticked.
-          Type-18 custom action (FileKey + ExeCommand) so no WixUtilExtension /
-          extra light.exe -ext flag is needed through the cargo-dist build.
-          Impersonate='yes' runs it unelevated as the installing user so the
-          device-code token lands under that user's profile (see login.rs);
-          asyncNoWait lets the paused console outlive msiexec.
+
+          This is a type-34 custom action (Directory + ExeCommand), NOT type-18
+          (FileKey + ExeCommand). Type-18 runs the target file via CreateProcess,
+          which cannot execute a .cmd/.bat directly (it is not a PE image), so it
+          would fail with error 193 and the checkbox would silently no-op. We
+          instead invoke cmd.exe explicitly as the batch host. Still no
+          WixUtilExtension / extra light.exe -ext flag, so nothing extra has to
+          be threaded through the cargo-dist build.
+
+          `start` opens the shim in its own console window that is not tied to
+          msiexec's lifetime, and asyncNoWait means msiexec does not wait, so the
+          paused console outlives the installer. Impersonate='yes' runs it
+          unelevated as the installing user so the device-code token lands under
+          that user's profile (see login.rs), not SYSTEM's.
         -->
         <CustomAction Id='LaunchPidashSetup'
-                      FileKey='setupCmd'
-                      ExeCommand=''
+                      Directory='Bin'
+                      ExeCommand='[System64Folder]cmd.exe /c start "Pi Dash setup" "[#setupCmd]"'
+                      Execute='immediate'
                       Return='asyncNoWait'
                       Impersonate='yes'/>
 
