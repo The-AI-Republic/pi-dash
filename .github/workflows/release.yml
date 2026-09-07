@@ -107,10 +107,26 @@ jobs:
             exit 1
           fi
 
-          # bsdtar handles .tar.xz and .zip alike, and ships on all these runners.
-          tar -xf "${tmp}/${archive}" -C "${tmp}"
+          # `shell: bash` on a Windows runner is Git Bash, whose tar is GNU tar
+          # and cannot read a zip -- it shadows the bsdtar Windows ships. Hand
+          # the zip to PowerShell instead, converting the MSYS paths first.
+          if [ "${ext}" = "zip" ]; then
+            powershell -NoProfile -Command \
+              "Expand-Archive -Path '$(cygpath -w "${tmp}/${archive}")' -DestinationPath '$(cygpath -w "${tmp}")' -Force"
+          else
+            tar -xf "${tmp}/${archive}" -C "${tmp}"
+          fi
+
+          # Layouts differ: the tarballs unpack into cargo-dist-<target>/, the
+          # zip puts cargo-dist.exe at the archive root. Search for either.
           mkdir -p "${HOME}/.cargo/bin"
-          find "${tmp}/cargo-dist-${target}" -maxdepth 1 -name 'cargo-dist*' -type f -exec install -m 0755 {} "${HOME}/.cargo/bin/" \;
+          binary="$(find "${tmp}" -maxdepth 2 -type f \( -name 'cargo-dist' -o -name 'cargo-dist.exe' \) | head -n1)"
+          if [ -z "${binary}" ]; then
+            echo "::error::cargo-dist binary not found in ${archive}"
+            find "${tmp}" -maxdepth 2
+            exit 1
+          fi
+          install -m 0755 "${binary}" "${HOME}/.cargo/bin/"
           cargo-dist --version
       - name: Cache cargo-dist
         uses: actions/upload-artifact@v4
@@ -208,10 +224,26 @@ jobs:
             exit 1
           fi
 
-          # bsdtar handles .tar.xz and .zip alike, and ships on all these runners.
-          tar -xf "${tmp}/${archive}" -C "${tmp}"
+          # `shell: bash` on a Windows runner is Git Bash, whose tar is GNU tar
+          # and cannot read a zip -- it shadows the bsdtar Windows ships. Hand
+          # the zip to PowerShell instead, converting the MSYS paths first.
+          if [ "${ext}" = "zip" ]; then
+            powershell -NoProfile -Command \
+              "Expand-Archive -Path '$(cygpath -w "${tmp}/${archive}")' -DestinationPath '$(cygpath -w "${tmp}")' -Force"
+          else
+            tar -xf "${tmp}/${archive}" -C "${tmp}"
+          fi
+
+          # Layouts differ: the tarballs unpack into cargo-dist-<target>/, the
+          # zip puts cargo-dist.exe at the archive root. Search for either.
           mkdir -p "${HOME}/.cargo/bin"
-          find "${tmp}/cargo-dist-${target}" -maxdepth 1 -name 'cargo-dist*' -type f -exec install -m 0755 {} "${HOME}/.cargo/bin/" \;
+          binary="$(find "${tmp}" -maxdepth 2 -type f \( -name 'cargo-dist' -o -name 'cargo-dist.exe' \) | head -n1)"
+          if [ -z "${binary}" ]; then
+            echo "::error::cargo-dist binary not found in ${archive}"
+            find "${tmp}" -maxdepth 2
+            exit 1
+          fi
+          install -m 0755 "${binary}" "${HOME}/.cargo/bin/"
           cargo-dist --version
       # Get the dist-manifest
       - name: Fetch local artifacts
