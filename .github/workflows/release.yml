@@ -65,10 +65,53 @@ jobs:
         with:
           submodules: recursive
       - name: Install cargo-dist
-        # we specify bash to get pipefail; it guards against the `curl` command
-        # failing. otherwise `sh` won't catch that `curl` returned non-0
+        # Hand-patched (cargo-dist generates this file; "ci" is in allow-dirty).
+        #
+        # cargo-dist's own installer scripts fetch the binary from
+        # axodotdev.artifacts.axodotdev.host, which returns HTTP 429 to
+        # everyone -- it rate-limited a release run to death on 2026-09-07 and
+        # kept doing so on retry. That host is a single vendor CDN sitting in
+        # the critical path of every release. The identical binaries are
+        # published as GitHub release assets, so fetch those directly and skip
+        # the installer scripts entirely.
+        #
+        # Checksums are still verified, as the installer scripts do.
         shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.22.1/cargo-dist-installer.sh | sh"
+        run: |
+          set -euo pipefail
+          case "${RUNNER_OS}-${RUNNER_ARCH}" in
+            Linux-X64)    target=x86_64-unknown-linux-gnu;  ext=tar.xz ;;
+            Linux-ARM64)  target=aarch64-unknown-linux-gnu; ext=tar.xz ;;
+            macOS-X64)    target=x86_64-apple-darwin;       ext=tar.xz ;;
+            macOS-ARM64)  target=aarch64-apple-darwin;      ext=tar.xz ;;
+            Windows-X64)  target=x86_64-pc-windows-msvc;    ext=zip    ;;
+            *) echo "::error::no cargo-dist build for ${RUNNER_OS}-${RUNNER_ARCH}"; exit 1 ;;
+          esac
+
+          base="https://github.com/axodotdev/cargo-dist/releases/download/v0.22.1"
+          archive="cargo-dist-${target}.${ext}"
+          tmp="$(mktemp -d)"
+
+          curl --proto '=https' --tlsv1.2 -fsSL -o "${tmp}/${archive}" "${base}/${archive}"
+          curl --proto '=https' --tlsv1.2 -fsSL -o "${tmp}/${archive}.sha256" "${base}/${archive}.sha256"
+
+          # The .sha256 asset is `<digest> *<filename>`, so take field one.
+          expected="$(awk '{print $1}' < "${tmp}/${archive}.sha256")"
+          if command -v sha256sum >/dev/null; then
+            actual="$(sha256sum "${tmp}/${archive}" | cut -d' ' -f1)"
+          else
+            actual="$(shasum -a 256 "${tmp}/${archive}" | cut -d' ' -f1)"
+          fi
+          if [ "${expected}" != "${actual}" ]; then
+            echo "::error::checksum mismatch for ${archive}: expected ${expected}, got ${actual}"
+            exit 1
+          fi
+
+          # bsdtar handles .tar.xz and .zip alike, and ships on all these runners.
+          tar -xf "${tmp}/${archive}" -C "${tmp}"
+          mkdir -p "${HOME}/.cargo/bin"
+          find "${tmp}/cargo-dist-${target}" -maxdepth 1 -name 'cargo-dist*' -type f -exec install -m 0755 {} "${HOME}/.cargo/bin/" \;
+          cargo-dist --version
       - name: Cache cargo-dist
         uses: actions/upload-artifact@v4
         with:
@@ -123,7 +166,53 @@ jobs:
         with:
           submodules: recursive
       - name: Install cargo-dist
-        run: ${{ matrix.install_dist }}
+        # Hand-patched (cargo-dist generates this file; "ci" is in allow-dirty).
+        #
+        # cargo-dist's own installer scripts fetch the binary from
+        # axodotdev.artifacts.axodotdev.host, which returns HTTP 429 to
+        # everyone -- it rate-limited a release run to death on 2026-09-07 and
+        # kept doing so on retry. That host is a single vendor CDN sitting in
+        # the critical path of every release. The identical binaries are
+        # published as GitHub release assets, so fetch those directly and skip
+        # the installer scripts entirely.
+        #
+        # Checksums are still verified, as the installer scripts do.
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${RUNNER_OS}-${RUNNER_ARCH}" in
+            Linux-X64)    target=x86_64-unknown-linux-gnu;  ext=tar.xz ;;
+            Linux-ARM64)  target=aarch64-unknown-linux-gnu; ext=tar.xz ;;
+            macOS-X64)    target=x86_64-apple-darwin;       ext=tar.xz ;;
+            macOS-ARM64)  target=aarch64-apple-darwin;      ext=tar.xz ;;
+            Windows-X64)  target=x86_64-pc-windows-msvc;    ext=zip    ;;
+            *) echo "::error::no cargo-dist build for ${RUNNER_OS}-${RUNNER_ARCH}"; exit 1 ;;
+          esac
+
+          base="https://github.com/axodotdev/cargo-dist/releases/download/v0.22.1"
+          archive="cargo-dist-${target}.${ext}"
+          tmp="$(mktemp -d)"
+
+          curl --proto '=https' --tlsv1.2 -fsSL -o "${tmp}/${archive}" "${base}/${archive}"
+          curl --proto '=https' --tlsv1.2 -fsSL -o "${tmp}/${archive}.sha256" "${base}/${archive}.sha256"
+
+          # The .sha256 asset is `<digest> *<filename>`, so take field one.
+          expected="$(awk '{print $1}' < "${tmp}/${archive}.sha256")"
+          if command -v sha256sum >/dev/null; then
+            actual="$(sha256sum "${tmp}/${archive}" | cut -d' ' -f1)"
+          else
+            actual="$(shasum -a 256 "${tmp}/${archive}" | cut -d' ' -f1)"
+          fi
+          if [ "${expected}" != "${actual}" ]; then
+            echo "::error::checksum mismatch for ${archive}: expected ${expected}, got ${actual}"
+            exit 1
+          fi
+
+          # bsdtar handles .tar.xz and .zip alike, and ships on all these runners.
+          tar -xf "${tmp}/${archive}" -C "${tmp}"
+          mkdir -p "${HOME}/.cargo/bin"
+          find "${tmp}/cargo-dist-${target}" -maxdepth 1 -name 'cargo-dist*' -type f -exec install -m 0755 {} "${HOME}/.cargo/bin/" \;
+          cargo-dist --version
       # Get the dist-manifest
       - name: Fetch local artifacts
         uses: actions/download-artifact@v4
