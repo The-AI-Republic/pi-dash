@@ -12,7 +12,7 @@ use crate::agent::{
     AgentProcessHandle, ExitSnapshot, STDERR_RING_LINES, StderrBuffer, StderrRing, StderrSnapshot,
 };
 use crate::codex::jsonrpc::Incoming;
-use crate::util::shell::{is_benign_login_shell_warning, login_shell_command};
+use crate::util::shell::{is_benign_login_shell_warning, login_shell_command_with_env, AgentEnv};
 
 /// Handles the `codex app-server` subprocess lifecycle + JSON-RPC wire.
 ///
@@ -43,9 +43,19 @@ enum KillRequest {
 
 impl AppServer {
     pub async fn spawn(binary: &str, cwd: &Path) -> Result<Self> {
+        Self::spawn_with_env(binary, cwd, &AgentEnv::default()).await
+    }
+
+    /// Spawn `codex app-server` with a Pi Dash-controlled environment.
+    ///
+    /// The managed runner uses this to point the engine at its own
+    /// `CODEX_HOME`, put the bundled `pidash` CLI on the agent's `PATH`, and
+    /// supply the model credential from a file read fresh on every spawn. An
+    /// empty [`AgentEnv`] is exactly the historical behaviour.
+    pub async fn spawn_with_env(binary: &str, cwd: &Path, env: &AgentEnv) -> Result<Self> {
         // Route through the platform spawn helper so the probe and real
         // launch behavior stay aligned. See `util::shell::login_shell_command`.
-        let cmd = login_shell_command(binary, &["app-server"], Some(cwd));
+        let cmd = login_shell_command_with_env(binary, &["app-server"], Some(cwd), env);
         Self::spawn_command(cmd).await
     }
 

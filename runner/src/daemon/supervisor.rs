@@ -379,10 +379,35 @@ struct SpawnedInstanceTasks {
     refresh: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// The binary this runner's configured agent kind will actually launch.
+fn agent_binary_for(config: &crate::config::schema::RunnerConfig) -> &str {
+    match config.agent.kind {
+        crate::config::schema::AgentKind::Codex => &config.codex.binary,
+        crate::config::schema::AgentKind::ClaudeCode => &config.claude_code.binary,
+        crate::config::schema::AgentKind::CursorAgent => &config.cursor_agent.binary,
+        crate::config::schema::AgentKind::OpenClaw => &config.openclaw.binary,
+        crate::config::schema::AgentKind::Grok => &config.grok.binary,
+    }
+}
+
 /// Spawn the RunnerLoop + HttpLoop + refresh loop for one instance.
 /// Extracted from `Supervisor::run`'s startup loop so the machine
 /// control session's hot-add path spawns byte-identical machinery.
 async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> SpawnedInstanceTasks {
+    // Probe the agent binary once per daemon start, in the background: the
+    // answer is only used for reporting, so it must never delay bringing the
+    // runner online (or fail startup if the binary is briefly unavailable
+    // during a desktop upgrade).
+    {
+        let slot = inst.engine_version.clone();
+        let binary = agent_binary_for(&inst.config).to_string();
+        let env = crate::agent::agent_env_for_config(&inst.config);
+        tokio::spawn(async move {
+            if let Some(version) = crate::util::shell::binary_version(&binary, &env).await {
+                *slot.write().await = Some(version);
+            }
+        });
+    }
     let mut tasks = SpawnedInstanceTasks {
         runner_loop: None,
         http_loop: None,
@@ -649,9 +674,20 @@ fn attach_body_for_instance(
     working_dir: Option<std::path::PathBuf>,
 ) -> AttachBody {
     let mut agent_versions = HashMap::new();
+    let kind_key = format!("{:?}", inst.config.agent.kind).to_ascii_lowercase();
+    // The agent binary's own version when we managed to probe it, falling back
+    // to the runner's version so the key is never absent (older cloud builds
+    // read it positionally). `try_read` keeps this function sync and lock-free:
+    // a probe in flight just means this attach reports the fallback and the
+    // next reconnect carries the real value.
+    let probed = inst
+        .engine_version
+        .try_read()
+        .ok()
+        .and_then(|guard| guard.clone());
     agent_versions.insert(
-        format!("{:?}", inst.config.agent.kind).to_ascii_lowercase(),
-        crate::RUNNER_VERSION.to_string(),
+        kind_key,
+        probed.unwrap_or_else(|| crate::RUNNER_VERSION.to_string()),
     );
     AttachBody {
         version: crate::RUNNER_VERSION.to_string(),

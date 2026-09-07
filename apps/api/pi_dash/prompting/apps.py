@@ -25,6 +25,12 @@ class PromptingConfig(AppConfig):
             for key in section_keys:
                 if key not in registry.REGISTRY:
                     raise registry.PromptRegistryError(f"recipe {kind!r} references unknown section {key!r}")
+        for kind, section_keys in recipes.MANAGED_RECIPES.items():
+            for key in section_keys:
+                if key not in registry.REGISTRY:
+                    raise registry.PromptRegistryError(
+                        f"managed recipe {kind!r} references unknown section {key!r}"
+                    )
         for kind, section_keys in recipes.CLOUD_RECIPES.items():
             for key in section_keys:
                 section = registry.REGISTRY.get(key)
@@ -43,4 +49,8 @@ class PromptingConfig(AppConfig):
             if cfg.template_name not in recipes.CLOUD_RECIPES:
                 raise registry.PromptRegistryError(
                     f"phase {cfg.state_name!r} has no Cloud Agent recipe for {cfg.template_name!r}"
+                )
+            if cfg.template_name not in recipes.MANAGED_RECIPES:
+                raise registry.PromptRegistryError(
+                    f"phase {cfg.state_name!r} has no managed-runner recipe for {cfg.template_name!r}"
                 )

@@ -7,6 +7,20 @@ from django.db import models
 class AgentExecutorKind(models.TextChoices):
     LOCAL_RUNNER = "local_runner", "Local Runner"
     CLOUD_AGENT = "cloud_agent", "Pi Dash Cloud Agent"
+    # A Pi Dash-provisioned local runner: the daemon and its agent engine ship
+    # inside the desktop app rather than being installed by the user. It IS a
+    # ``Runner`` and executes through the same daemon/worktree/approval path as
+    # ``LOCAL_RUNNER``; the separate kind exists to carry policy (availability
+    # is viewer-and-device scoped, dispatch is always pinned, scheduled work
+    # waits visibly). See ``.ai_design/managed_runner/design.md``.
+    MANAGED_RUNNER = "managed_runner", "Pi Dash Agent"
+
+
+#: Executors whose runs execute on a machine through the ``pidash`` daemon.
+#: Every call site that asks "is this local work" must use this rather than
+#: comparing against ``LOCAL_RUNNER`` alone, or managed runs silently take the
+#: Cloud Agent path.
+MACHINE_EXECUTORS = (AgentExecutorKind.LOCAL_RUNNER, AgentExecutorKind.MANAGED_RUNNER)
 
 
 def get_default_agent_executor() -> str:
@@ -27,6 +41,17 @@ def cloud_agent_is_configured() -> bool:
     answered by :func:`user_has_llm_config` at creation and execution time.
     """
     return bool(getattr(settings, "CLOUD_AGENT_ENABLED", False))
+
+
+def managed_runner_is_enabled() -> bool:
+    """Operator kill switch for the desktop-bundled managed runner.
+
+    Mirrors :func:`cloud_agent_is_configured`: this answers only "may this
+    instance accept managed work at all". Whether a *specific* viewer can run
+    on their desktop right now is answered by
+    :func:`pi_dash.managed_runner.policy.managed_runner_availability`.
+    """
+    return bool(getattr(settings, "MANAGED_RUNNER_ENABLED", False))
 
 
 def effective_executor_for_issue(issue) -> str:
@@ -63,18 +88,27 @@ def agent_executor_options(project, user=None) -> list[dict[str, object]]:
     your AI provider" signal. Without a user, only the instance switch is
     reported (a project-level policy question, not a per-viewer one).
     """
-    from pi_dash.runner.models import Runner, RunnerStatus
+    from pi_dash.runner.models import Runner, RunnerProvisioning, RunnerStatus
+    from pi_dash.managed_runner.policy import managed_runner_availability
 
     cloud_available = cloud_agent_is_configured()
     cloud_reason = "" if cloud_available else "cloud_agent_unavailable"
     if cloud_available and user is not None and not user_has_llm_config(user):
         cloud_available = False
         cloud_reason = "llm_config_missing"
-    local_available = Runner.objects.filter(
-        pod__project_id=project.id,
-        workspace_id=project.workspace_id,
-        status=RunnerStatus.ONLINE,
-    ).exists()
+    # Desktop-bundled runners are deliberately excluded: they serve only runs
+    # pinned to them, so counting one here would advertise "a local runner is
+    # available" for work it will never accept.
+    local_available = (
+        Runner.objects.filter(
+            pod__project_id=project.id,
+            workspace_id=project.workspace_id,
+            status=RunnerStatus.ONLINE,
+        )
+        .exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
+        .exists()
+    )
+    managed_available, managed_reason = managed_runner_availability(project, user)
     return [
         {
             "kind": AgentExecutorKind.CLOUD_AGENT,
@@ -85,5 +119,10 @@ def agent_executor_options(project, user=None) -> list[dict[str, object]]:
             "kind": AgentExecutorKind.LOCAL_RUNNER,
             "available": local_available,
             "reason_code": "" if local_available else "no_local_runner",
+        },
+        {
+            "kind": AgentExecutorKind.MANAGED_RUNNER,
+            "available": managed_available,
+            "reason_code": managed_reason,
         },
     ]

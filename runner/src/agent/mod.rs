@@ -263,6 +263,38 @@ pub struct RunPayload {
     pub model: Option<String>,
 }
 
+
+/// Build the Pi Dash-controlled environment for this runner's agent.
+///
+/// Empty for a user-enrolled runner, so its agent inherits the operator's
+/// environment exactly as it always has. A managed runner instead gets its own
+/// `CODEX_HOME`, the bundled CLI on `PATH`, `PIDASH_CONFIG_DIR` /
+/// `PIDASH_DATA_DIR` pointing at the app's own tree (so the agent's `pidash
+/// issue|comment|workpad` calls authenticate with the managed `[cli].token`
+/// rather than a raw token in the environment), and a credential file read
+/// once per spawn.
+pub fn agent_env_for_config(runner: &RunnerConfig) -> crate::util::shell::AgentEnv {
+    let managed = runner.codex.codex_home.is_some();
+    crate::util::shell::AgentEnv {
+        codex_home: runner.codex.codex_home.clone(),
+        path_prepend: runner.codex.path_prepend.clone(),
+        // The daemon's own config/data dirs, forwarded so the agent's `pidash`
+        // calls land on the same tree the daemon is using. Read from this
+        // process's environment rather than the runner config because they are
+        // a property of the daemon (the desktop sets them when it spawns
+        // `pidash __run`), not of any one runner. Only forwarded for a managed
+        // runner: a user-enrolled agent should keep resolving config the way
+        // it always has, including from the default XDG location.
+        config_dir: managed
+            .then(|| std::env::var_os("PIDASH_CONFIG_DIR").map(std::path::PathBuf::from))
+            .flatten(),
+        data_dir: managed
+            .then(|| std::env::var_os("PIDASH_DATA_DIR").map(std::path::PathBuf::from))
+            .flatten(),
+        model_token_file: runner.codex.model_token_file.clone(),
+    }
+}
+
 /// Enum dispatch over the concrete bridges. Each variant owns the agent's
 /// subprocess; the supervisor treats them uniformly.
 pub enum AgentBridge {
@@ -335,11 +367,12 @@ impl AgentBridge {
     ) -> Result<Self> {
         match runner.agent.kind {
             AgentKind::Codex => {
-                let b = crate::codex::bridge::Bridge::spawn(
+                let b = crate::codex::bridge::Bridge::spawn_with_env(
                     &runner.codex.binary,
                     cwd,
                     selected_model(model_override, runner.codex.model_default.clone()),
                     runner.codex.effort_default.clone(),
+                    &agent_env_for_config(runner),
                 )
                 .await?;
                 Ok(AgentBridge::Codex(b))

@@ -103,6 +103,9 @@ REST_FRAMEWORK = {
         "assistant_message": "30/hour",
         "assistant_llm_test": "6/minute",
         "assistant_llm_generate_title": "20/minute",
+        # Desktop agent credential. Refreshed once per token lifetime in normal
+        # use, so a low ceiling still leaves generous headroom for retries.
+        "assistant_agent_token": "12/minute",
     },
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_RENDERER_CLASSES": ("rest_framework.renderers.JSONRenderer",),
@@ -495,6 +498,22 @@ RUNNER_AGENT_STALL_THRESHOLD_SECS = int(get_config("RUNNER_AGENT_STALL_THRESHOLD
 # roughly three missed 25s polls; stale rows from disabled / downgraded
 # runners age out instead of failing active runs.
 RUNNER_AGENT_OBSERVABILITY_STALE_SECS = int(get_config("RUNNER_AGENT_OBSERVABILITY_STALE_SECS", 90))
+
+# Desktop-bundled managed runner. The kill switch gates creation, availability
+# and dispatch; turning it off must never mutate project settings, so issues
+# pinned to ``managed_runner`` simply become unavailable until it is back on.
+# See ``.ai_design/managed_runner/design.md`` §16.
+MANAGED_RUNNER_ENABLED = get_config("MANAGED_RUNNER_ENABLED", "false").lower() in ("1", "true", "yes")
+MANAGED_RUNNER_MAX_PER_USER_PROJECT = int(get_config("MANAGED_RUNNER_MAX_PER_USER_PROJECT", 1))
+# How long an automatic run may wait for a closed desktop before it is failed
+# with ``desktop_not_connected`` instead of queueing forever (§8.5).
+MANAGED_RUNNER_QUEUED_MAX_AGE_SECS = int(get_config("MANAGED_RUNNER_QUEUED_MAX_AGE_SECS", 43200))
+# Advisory, read by the desktop app: how long it waits for an in-flight run to
+# finish before stopping the bundled daemon (§9.5).
+MANAGED_RUNNER_GRACEFUL_STOP_SECS = int(get_config("MANAGED_RUNNER_GRACEFUL_STOP_SECS", 30))
+MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS = int(get_config("MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS", 300))
+# Minimum desktop app version allowed to enroll; empty disables the check.
+DESKTOP_MIN_VERSION_FOR_MANAGED_RUNNER = get_config("DESKTOP_MIN_VERSION_FOR_MANAGED_RUNNER", "") or ""
 
 # In-house Cloud Agent executor. It runs in the existing Celery deployment;
 # all identity and capacity state is durable in the database.

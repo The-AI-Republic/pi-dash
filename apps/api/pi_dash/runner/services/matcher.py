@@ -22,7 +22,11 @@ from django.db import models, transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from pi_dash.core.agent_execution import AgentExecutorKind
+from pi_dash.core.agent_execution import (
+    MACHINE_EXECUTORS,
+    AgentExecutorKind,
+    effective_executor_for_issue,
+)
 
 from pi_dash.runner.models import (
     AgentRun,
@@ -89,6 +93,8 @@ def select_runner_in_pod(pod: Pod) -> Optional[Runner]:
     row-level lock (``SELECT … FOR UPDATE SKIP LOCKED``) so concurrent drains
     can't both pick the same runner.
     """
+    from pi_dash.runner.models import RunnerProvisioning
+
     alive_threshold = timezone.now() - HEARTBEAT_GRACE
     return (
         Runner.objects.select_for_update(skip_locked=True)
@@ -97,6 +103,10 @@ def select_runner_in_pod(pod: Pod) -> Optional[Runner]:
             status=RunnerStatus.ONLINE,
             last_heartbeat_at__gte=alive_threshold,
         )
+        # Desktop-bundled runners serve only work pinned to them. Handing them
+        # unpinned pod work would make one person's laptop the team's build
+        # server, and it would vanish when they close the lid.
+        .exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
         .exclude(agent_runs__status__in=BUSY_STATUSES)
         # An active chat no longer excludes a runner from issue assignment:
         # chat and issue runs are concurrent (design §3.4). BUSY_STATUSES still
@@ -142,7 +152,9 @@ def next_queued_run_for_pod(pod: Pod) -> Optional[AgentRun]:
         .filter(
             pod=pod,
             status=AgentRunStatus.QUEUED,
-            executor_kind=AgentExecutorKind.LOCAL_RUNNER,
+            # Both machine executors run through this daemon path; a
+            # managed run is a local run whose install Pi Dash owns.
+            executor_kind__in=MACHINE_EXECUTORS,
             pinned_runner__isnull=True,
         )
         .order_by("created_at")
@@ -165,7 +177,9 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
         .filter(
             pod=runner.pod,
             status=AgentRunStatus.QUEUED,
-            executor_kind=AgentExecutorKind.LOCAL_RUNNER,
+            # Both machine executors run through this daemon path; a
+            # managed run is a local run whose install Pi Dash owns.
+            executor_kind__in=MACHINE_EXECUTORS,
         )
         .filter(
             Q(pinned_runner=runner) | Q(pinned_runner__isnull=True),
@@ -359,12 +373,15 @@ def select_runner_for_run(run: AgentRun) -> Optional[Runner]:
 
 
 def can_register_another(user_id, workspace_id) -> bool:
-    """Enforce the per-user runner cap."""
-    active = Runner.objects.filter(
-        owner_id=user_id,
-        workspace_id=workspace_id,
-    ).exclude(status=RunnerStatus.REVOKED)
-    return active.count() < Runner.MAX_PER_USER
+    """Enforce the per-user runner cap.
+
+    Desktop-bundled runners are provisioned by Pi Dash, one per project the
+    user opens, and are capped separately by
+    ``MANAGED_RUNNER_MAX_PER_USER_PROJECT``. Counting them here would let the
+    desktop silently consume a user's allowance for machines they installed
+    themselves.
+    """
+    return count_active(user_id, workspace_id) < Runner.MAX_PER_USER
 
 
 def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
@@ -395,7 +412,28 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
     The intent is to detect the structural "nobody on this pod could ever
     serve this" case, not transient unavailability. See
     ``.ai_design/issue_runner/design.md`` §6.6.
+
+    For ``managed_runner`` issues the eligibility set is narrower: a managed
+    run is pinned to its creator's own desktop, so only a desktop-bundled
+    runner owned by the run creator could ever serve it. Transient status is
+    ignored here for the same reason as above — a closed laptop is not a
+    structural failure, and the creation path (§8.5) decides whether to wait.
     """
+    from pi_dash.runner.models import RunnerProvisioning
+
+    if effective_executor_for_issue(issue) == AgentExecutorKind.MANAGED_RUNNER:
+        if run_creator_id is None:
+            return False
+        return (
+            Runner.objects.filter(
+                pod=pod,
+                owner_id=run_creator_id,
+                provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
+            )
+            .exclude(status=RunnerStatus.REVOKED)
+            .exists()
+        )
+
     eligible_owner_ids: set = set()
     if run_creator_id is not None:
         eligible_owner_ids.add(run_creator_id)
@@ -411,13 +449,20 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
             owner_id__in=eligible_owner_ids,
         )
         .exclude(status=RunnerStatus.REVOKED)
+        .exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
         .exists()
     )
 
 
 def count_active(user_id, workspace_id) -> int:
+    """Manually-enrolled, non-revoked runners this user holds in a workspace."""
+    from pi_dash.runner.models import RunnerProvisioning
+
     return (
-        Runner.objects.filter(owner_id=user_id, workspace_id=workspace_id).exclude(status=RunnerStatus.REVOKED).count()
+        Runner.objects.filter(owner_id=user_id, workspace_id=workspace_id)
+        .exclude(status=RunnerStatus.REVOKED)
+        .exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
+        .count()
     )
 
 

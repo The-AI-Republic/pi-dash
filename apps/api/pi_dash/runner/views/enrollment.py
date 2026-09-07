@@ -39,6 +39,8 @@ from pi_dash.runner.models import (
     Pod,
     Runner,
     RunnerForceRefresh,
+    RunnerProvisioning,
+    RunnerStatus,
 )
 from pi_dash.runner.serializers import RunnerEnrollRequestSerializer
 from pi_dash.runner.services import tokens
@@ -220,6 +222,38 @@ class RunnerInviteEndpoint(APIView):
             },
             status=status.HTTP_410_GONE,
         )
+
+
+def _managed_cap_error(*, user, pod, workspace_id):
+    """Refuse a second bundled runner for the same user on the same project.
+
+    The desktop enrolls one runner per project it opens; more than that would
+    be a bug in the client (or a stale row it failed to reuse), and silently
+    accepting them would leave the pod with several machines all claiming the
+    same pinned work. Returns a ``Response`` to return, or ``None`` to proceed.
+    """
+    from django.conf import settings
+
+    existing = (
+        Runner.objects.filter(
+            owner=user,
+            pod=pod,
+            workspace_id=workspace_id,
+            provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
+        )
+        .exclude(status=RunnerStatus.REVOKED)
+        .count()
+    )
+    if existing >= settings.MANAGED_RUNNER_MAX_PER_USER_PROJECT:
+        return Response(
+            {
+                "error": "managed_runner_limit",
+                "error_description": "This project already has a Pi Dash Agent registered for you on a machine.",
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+    return None
+
 
 
 class RunnerEnrollEndpoint(APIView):
@@ -665,6 +699,14 @@ class RunnerCreateEndpoint(APIView):
                         dev_machine_id=dev_machine_id,
                         host_label=host_label,
                     )
+                    # Provisioning is inherited from the machine, never read
+                    # from the body: a client must not be able to claim it is
+                    # Pi Dash-managed and thereby take pinned desktop work.
+                    provisioning = getattr(dev_machine, "provisioning", RunnerProvisioning.MANUAL)
+                    if provisioning == RunnerProvisioning.DESKTOP_BUNDLED:
+                        cap_error = _managed_cap_error(user=request.user, pod=pod, workspace_id=workspace.id)
+                        if cap_error is not None:
+                            return cap_error
                     runner = Runner.objects.create(
                         owner=request.user,
                         workspace_id=workspace.id,
@@ -672,6 +714,7 @@ class RunnerCreateEndpoint(APIView):
                         pod=pod,
                         name=name,
                         host_label=host_label,
+                        provisioning=provisioning,
                         enrolled_at=timezone.now(),
                     )
                     if auth_machine_token is None and host_label:
