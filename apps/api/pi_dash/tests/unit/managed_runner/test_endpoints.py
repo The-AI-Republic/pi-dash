@@ -87,6 +87,7 @@ def test_permission_accepts_only_marked_sessions(create_user):
 
     assert IsDesktopSession().has_permission(_Req({}), None) is False
     assert IsDesktopSession().has_permission(_Req({DESKTOP_SESSION_KEY: DESKTOP_CLIENT}), None) is True
+
     # A broken session store must fail closed, not raise into the view.
     class _Boom:
         def get(self, *_args, **_kw):
@@ -148,11 +149,52 @@ def test_enroll_refuses_a_workspace_you_are_not_in(desktop_client):
 
 
 @override_settings(**MANAGED_SETTINGS)
+def test_same_desktop_has_distinct_machine_identity_per_workspace(desktop_client, workspace, create_user):
+    from pi_dash.db.models import Workspace, WorkspaceMember
+
+    second = Workspace.objects.create(name="Other workspace", slug="other-workspace", owner=create_user)
+    WorkspaceMember.objects.create(workspace=second, member=create_user, role=20)
+    url = reverse("runner:desktop-enroll")
+    first_body = desktop_client.post(
+        url, {"workspace_slug": workspace.slug, "host_label": "desktop-test"}, content_type="application/json"
+    ).json()
+    second_body = desktop_client.post(
+        url, {"workspace_slug": second.slug, "host_label": "desktop-test"}, content_type="application/json"
+    ).json()
+    assert first_body["dev_machine_id"] != second_body["dev_machine_id"]
+    assert MachineToken.objects.filter(revoked_at__isnull=True, dev_machine__host_label="desktop-test").count() == 2
+
+
+@override_settings(**MANAGED_SETTINGS)
+def test_reenroll_after_local_config_loss_reuses_server_runner(desktop_client, workspace, project):
+    from rest_framework.test import APIClient
+
+    enrollment = desktop_client.post(
+        reverse("runner:desktop-enroll"),
+        {"workspace_slug": workspace.slug, "host_label": "desktop-test"},
+        content_type="application/json",
+    ).json()
+    machine_client = APIClient()
+    machine_client.credentials(HTTP_X_API_KEY=enrollment["machine_token"])
+    payload = {
+        "workspace_slug": workspace.slug,
+        "project": project.identifier,
+        "host_label": "desktop-test",
+        "dev_machine_id": enrollment["dev_machine_id"],
+    }
+    url = reverse("runner:runner-create")
+    first = machine_client.post(url, payload, format="json")
+    assert first.status_code == 201, first.data
+    second = machine_client.post(url, payload, format="json")
+    assert second.status_code == 201, second.data
+    assert first.data["runner_id"] == second.data["runner_id"]
+    assert Runner.objects.filter(dev_machine_id=enrollment["dev_machine_id"]).count() == 1
+
+
+@override_settings(**MANAGED_SETTINGS)
 def test_enroll_requires_host_label(desktop_client, workspace):
     url = reverse("runner:desktop-enroll")
-    resp = desktop_client.post(
-        url, {"workspace_slug": workspace.slug}, content_type="application/json"
-    )
+    resp = desktop_client.post(url, {"workspace_slug": workspace.slug}, content_type="application/json")
     assert resp.status_code == 400
 
 

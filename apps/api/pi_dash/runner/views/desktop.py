@@ -112,6 +112,7 @@ class DesktopEnrollEndpoint(APIView):
                     host_label=host_label,
                     provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
                     revoked_at__isnull=True,
+                    machine_tokens__workspace=workspace,
                 )
                 .order_by("-created_at")
                 .first()

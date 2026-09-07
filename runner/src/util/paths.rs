@@ -32,11 +32,18 @@ impl Paths {
         let dirs = ProjectDirs::from(QUALIFIER, ORG, APP)
             .context("unable to resolve XDG project directories")?;
         let config_dir = config_override.unwrap_or_else(|| dirs.config_dir().to_path_buf());
+        // An isolated daemon must also get an isolated PID and IPC socket.
+        // Otherwise the desktop and a personal installation claim the same
+        // XDG runtime path even though their configuration and data differ.
+        let isolated = data_override.is_some();
         let data_dir = data_override.unwrap_or_else(|| dirs.data_dir().to_path_buf());
-        let runtime_dir = dirs
-            .runtime_dir()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| data_dir.join("runtime"));
+        let runtime_dir = if isolated {
+            data_dir.join("runtime")
+        } else {
+            dirs.runtime_dir()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| data_dir.join("runtime"))
+        };
         Ok(Self {
             config_dir,
             data_dir,
@@ -148,6 +155,16 @@ impl RunnerPaths {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_override_isolates_daemon_socket_and_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = Paths::resolve(None, Some(tmp.path().join("first"))).unwrap();
+        let second = Paths::resolve(None, Some(tmp.path().join("second"))).unwrap();
+        assert_eq!(first.runtime_dir, tmp.path().join("first/runtime"));
+        assert_ne!(first.ipc_socket_path(), second.ipc_socket_path());
+        assert_ne!(first.pid_path(), second.pid_path());
+    }
 
     fn fixed_id() -> Uuid {
         Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap()

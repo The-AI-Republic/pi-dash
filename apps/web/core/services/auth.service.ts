@@ -11,6 +11,7 @@ import type { ICsrfTokenData, IEmailCheckData, IEmailCheckResponse } from "@pi-d
 // services
 import { APIService } from "@/services/api.service";
 import { performSignOut } from "@/services/auth-signout";
+import { disposeAgentRuntime } from "@/services/agent-runtime";
 
 export class AuthService extends APIService {
   constructor() {
@@ -64,6 +65,7 @@ export class AuthService extends APIService {
   // editions can swap the strategy — e.g. an OIDC edition whose logout is a
   // JSON request — without forking this whole service. See auth-signout.ts.
   async signOut(baseUrl: string): Promise<void> {
+    await disposeAgentRuntime();
     await performSignOut(this, baseUrl);
   }
 }

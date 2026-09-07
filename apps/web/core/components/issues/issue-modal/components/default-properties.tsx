@@ -25,6 +25,7 @@ import { ModuleDropdown } from "@/components/dropdowns/module/dropdown";
 import { PodDropdown } from "@/components/dropdowns/pod/dropdown";
 import {
   cloudAgentOption,
+  managedAgentOption,
   executionTargetPatch,
   executionTargetValue,
 } from "@/components/dropdowns/pod/execution-target";
@@ -132,6 +133,7 @@ export const IssueDefaultProperties = observer(function IssueDefaultProperties(p
                 handleFormChange();
               }}
               cloudAgent={cloudAgentOption(projectDetails)}
+              managedAgent={managedAgentOption(projectDetails)}
               projectId={projectId ?? undefined}
               buttonVariant="border-with-text"
               isForWorkItemCreation={!id}

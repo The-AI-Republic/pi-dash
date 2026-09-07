@@ -53,6 +53,9 @@ pub struct BootstrapArgs {
     pub cloud_url: String,
     #[arg(long)]
     pub workspace: String,
+    /// Identity returned by desktop-enroll, already bound to the machine token.
+    #[arg(long)]
+    pub dev_machine_id: uuid::Uuid,
     /// Read the machine token from stdin rather than argv, so it never appears
     /// in the process table or a shell history.
     #[arg(long, default_value_t = true)]
@@ -117,12 +120,16 @@ async fn bootstrap(args: BootstrapArgs, paths: &Paths) -> Result<()> {
         .context("writing machine token to config.toml")?;
     runner_ops::write_cli_workspace(paths, &args.workspace)
         .context("writing workspace binding to config.toml")?;
+    let mut cfg = file::load_config(paths)?;
+    cfg.daemon.dev_machine_id = Some(args.dev_machine_id);
+    file::write_config(paths, &cfg).context("writing enrolled dev-machine identity")?;
     println!("{{\"ok\":true,\"config\":{:?}}}", paths.config_path());
     Ok(())
 }
 
 async fn enroll(args: EnrollArgs, paths: &Paths) -> Result<()> {
-    let cfg = file::load_config(paths).context("loading config.toml — run `__managed bootstrap` first")?;
+    let cfg = file::load_config(paths)
+        .context("loading config.toml — run `__managed bootstrap` first")?;
     let cloud_url = cfg.daemon.cloud_url.clone();
     let api_token = cfg
         .cli
@@ -145,14 +152,11 @@ async fn enroll(args: EnrollArgs, paths: &Paths) -> Result<()> {
         return Ok(());
     }
 
-    let host_label = args
-        .host_label
-        .clone()
-        .unwrap_or_else(hostname_or_desktop);
+    let host_label = args.host_label.clone().unwrap_or_else(hostname_or_desktop);
     let name = args
         .name
         .clone()
-        .unwrap_or_else(|| format!("desktop-{}", sanitize_name(&host_label)));
+        .unwrap_or_else(|| format!("desktop-{}-{}", sanitize_name(&host_label), args.project));
 
     let dev_machine_id =
         runner_ops::ensure_dev_machine_id(paths).context("ensuring local dev-machine identity")?;

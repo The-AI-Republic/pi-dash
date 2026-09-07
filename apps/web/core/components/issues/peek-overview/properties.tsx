@@ -31,6 +31,7 @@ import { MemberDropdown } from "@/components/dropdowns/member/dropdown";
 import { PodDropdown } from "@/components/dropdowns/pod/dropdown";
 import {
   cloudAgentOption,
+  managedAgentOption,
   executionTargetPatch,
   executionTargetValue,
 } from "@/components/dropdowns/pod/execution-target";
@@ -128,6 +129,7 @@ export const PeekOverviewProperties = observer(function PeekOverviewProperties(p
               value={executionTargetValue(issue, projectDetails)}
               onChange={(val) => issueOperations.update(workspaceSlug, projectId, issueId, executionTargetPatch(val))}
               cloudAgent={cloudAgentOption(projectDetails)}
+              managedAgent={managedAgentOption(projectDetails)}
               disabled={disabled}
               projectId={projectId}
               buttonVariant="transparent-with-text"

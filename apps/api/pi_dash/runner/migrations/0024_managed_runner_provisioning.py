@@ -58,7 +58,7 @@ class Migration(migrations.Migration):
         migrations.AddConstraint(
             model_name="agentrun",
             constraint=models.CheckConstraint(
-                condition=models.Q(("executor_kind__in", ["local_runner", "managed_runner"]))
+                check=models.Q(("executor_kind__in", ["local_runner", "managed_runner"]))
                 | models.Q(
                     ("executor_kind", "cloud_agent"),
                     ("runner__isnull", True),

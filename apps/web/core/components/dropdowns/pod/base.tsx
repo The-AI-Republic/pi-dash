@@ -7,7 +7,7 @@
 import { useRef, useState } from "react";
 import { usePopper } from "react-popper";
 import { Combobox } from "@headlessui/react";
-import { Check, Cloud, Container } from "lucide-react";
+import { Check, Cloud, Container, Monitor } from "lucide-react";
 // pi dash imports
 import { useTranslation } from "@pi-dash/i18n";
 import { SearchIcon, ChevronDownIcon } from "@pi-dash/propel/icons";
@@ -21,7 +21,7 @@ import type { TDropdownProps } from "@/components/dropdowns/types";
 // hooks
 import { useDropdown } from "@/hooks/use-dropdown";
 // local imports
-import { CLOUD_AGENT_VALUE } from "./execution-target";
+import { CLOUD_AGENT_VALUE, MANAGED_AGENT_VALUE } from "./execution-target";
 
 const matchesQuery = (label: string, query: string) =>
   query === "" || label.toLowerCase().includes(query.toLowerCase());
@@ -31,6 +31,7 @@ export type TPodDropdownBaseProps = TDropdownProps & {
    * execution target rather than just its pod. Disabled (with a reason) when
    * the instance or the viewer cannot run it. */
   cloudAgent?: { available: boolean; reasonCode: string };
+  managedAgent?: { available: boolean; reasonCode: string };
   dropdownArrow?: boolean;
   dropdownArrowClassName?: string;
   isInitializing?: boolean;
@@ -48,6 +49,7 @@ export function PodDropdownBase(props: TPodDropdownBaseProps) {
     buttonContainerClassName,
     buttonVariant,
     cloudAgent,
+    managedAgent,
     className = "",
     disabled = false,
     dropdownArrow = false,
@@ -94,11 +96,22 @@ export function PodDropdownBase(props: TPodDropdownBaseProps) {
 
   // derived values
   const isCloudSelected = value === CLOUD_AGENT_VALUE;
+  const isManagedSelected = value === MANAGED_AGENT_VALUE;
   const selectedPod = value && !isCloudSelected ? pods.find((pod) => pod.id === value) : undefined;
   // The field names an execution target once the Cloud Agent can appear in it;
   // "Pod" would be a category error (the Cloud Agent has no pod).
   const fieldLabel = cloudAgent ? t("Runs on") : t("Pod");
-  const selectedLabel = isCloudSelected ? t("Pi Dash Cloud Agent") : selectedPod?.name;
+  const selectedLabel = isManagedSelected
+    ? t("Pi Dash Agent (desktop)")
+    : isCloudSelected
+      ? t("Pi Dash Cloud Agent")
+      : selectedPod?.name;
+  const managedUnavailableReason =
+    managedAgent?.reasonCode === "byok_not_supported_on_desktop"
+      ? t("Select OpenHub in AI Assistant settings to run on your desktop.")
+      : managedAgent?.reasonCode === "managed_runner_disabled"
+        ? t("Pi Dash Agent is not enabled on this server.")
+        : t("Open this project in Pi Dash Desktop to connect its agent.");
   const cloudUnavailableReason =
     cloudAgent?.reasonCode === "llm_config_missing"
       ? t("Configure your AI provider in Pi Dash AI settings to use the Cloud Agent.")
@@ -140,7 +153,9 @@ export function PodDropdownBase(props: TPodDropdownBaseProps) {
         ) : (
           <>
             {!hideIcon &&
-              (isCloudSelected ? (
+              (isManagedSelected ? (
+                <Monitor className="size-3.5 flex-shrink-0" />
+              ) : isCloudSelected ? (
                 <Cloud className="size-3.5 flex-shrink-0" />
               ) : (
                 <Container className="size-3.5 flex-shrink-0" />
@@ -217,6 +232,28 @@ export function PodDropdownBase(props: TPodDropdownBaseProps) {
                       {selected && <Check className="size-3.5 flex-shrink-0" />}
                     </>
                   )}
+                </Combobox.Option>
+              )}
+              {managedAgent && matchesQuery(t("Pi Dash Agent (desktop)"), query) && (
+                <Combobox.Option
+                  value={MANAGED_AGENT_VALUE}
+                  disabled={!managedAgent.available}
+                  className={({ active }) =>
+                    cn(
+                      "flex w-full items-center justify-between gap-2 rounded-sm px-1 py-1.5",
+                      active && "bg-surface-2",
+                      !managedAgent.available && "text-placeholder"
+                    )
+                  }
+                >
+                  <div className="flex items-center gap-2">
+                    <Monitor className="size-3.5 flex-shrink-0" />
+                    <div>
+                      <p>{t("Pi Dash Agent (desktop)")}</p>
+                      {!managedAgent.available && <p className="text-9">{managedUnavailableReason}</p>}
+                    </div>
+                  </div>
+                  {isManagedSelected && <Check className="size-3.5 flex-shrink-0" />}
                 </Combobox.Option>
               )}
               {filteredPods.length > 0

@@ -255,7 +255,6 @@ def _managed_cap_error(*, user, pod, workspace_id):
     return None
 
 
-
 class RunnerEnrollEndpoint(APIView):
     """``POST /api/v1/runner/runners/enroll/`` — public.
 
@@ -704,6 +703,23 @@ class RunnerCreateEndpoint(APIView):
                     # Pi Dash-managed and thereby take pinned desktop work.
                     provisioning = getattr(dev_machine, "provisioning", RunnerProvisioning.MANUAL)
                     if provisioning == RunnerProvisioning.DESKTOP_BUNDLED:
+                        # Sign-out removes the local config, but the server row
+                        # deliberately survives. Re-enrollment must recover it
+                        # before applying the per-user/project creation cap.
+                        runner = (
+                            Runner.objects.select_for_update()
+                            .filter(
+                                owner=request.user,
+                                workspace_id=workspace.id,
+                                dev_machine=dev_machine,
+                                pod=pod,
+                                provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
+                                revoked_at__isnull=True,
+                            )
+                            .first()
+                        )
+                        if runner is not None:
+                            break
                         cap_error = _managed_cap_error(user=request.user, pod=pod, workspace_id=workspace.id)
                         if cap_error is not None:
                             return cap_error

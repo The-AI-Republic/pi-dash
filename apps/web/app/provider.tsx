@@ -15,6 +15,7 @@ import { Toast } from "@pi-dash/propel/toast";
 import { resolveGeneralTheme } from "@pi-dash/utils";
 // mobx store provider
 import { StoreProvider } from "@/lib/store-context";
+import { AgentRuntime } from "@/components/agent-runtime";
 
 // lazy imports
 const AppProgressBar = lazy(function AppProgressBar() {
@@ -48,6 +49,7 @@ export function AppProvider(props: IAppProvider) {
             <InstanceWrapper>
               <Suspense>
                 <SWRConfig value={WEB_SWR_CONFIG}>{children}</SWRConfig>
+                <AgentRuntime />
               </Suspense>
             </InstanceWrapper>
           </StoreWrapper>

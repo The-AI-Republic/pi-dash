@@ -1,6 +1,6 @@
 # Pi Dash Managed Runner (Desktop built-in agent engine) — Design
 
-- **Status:** Draft for review — architecture settled, §24 lists the verification items that must close before implementation starts
+- **Status:** Implementation under end-to-end validation — local Linux native enrollment and lifecycle are verified; live model execution and the remaining §23/§24 acceptance/release gates are still open. See `private-pi-dash/desktop/tests/README.md` for current evidence.
 - **Date:** 2026-09-06
 - **Scope:** A zero-setup agent execution path for the Pi Dash desktop app: a Pi Dash-provisioned local runner that ships inside the desktop bundle with a pinned upstream Codex binary, a Pi Dash-managed Codex configuration, Pi Dash tooling, and model access through the user's existing Pi Dash login. Introduces a third `AgentExecutorKind`, `managed_runner`.
 
