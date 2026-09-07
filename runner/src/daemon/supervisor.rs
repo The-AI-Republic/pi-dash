@@ -2892,12 +2892,12 @@ impl AssignWorker {
             let wd = self.runner_config.workspace.working_dir.clone();
             match crate::workspace::resolve(&wd, repo_url.as_deref()).await {
                 Ok(crate::workspace::Resolution::ExistingRepo(p))
-                | Ok(crate::workspace::Resolution::Cloned(p)) => p,
+                | Ok(crate::workspace::Resolution::Cloned(p))
+                | Ok(crate::workspace::Resolution::Directory(p)) => p,
                 Err(e) => {
                     let reason = match &e {
                         crate::workspace::ResolveError::Clone(_) => FailureReason::GitAuth,
-                        crate::workspace::ResolveError::MissingRepoUrl
-                        | crate::workspace::ResolveError::NonEmptyNonRepo(_)
+                        crate::workspace::ResolveError::NonEmptyNonRepo(_)
                         | crate::workspace::ResolveError::UnsupportedScheme(_) => {
                             FailureReason::WorkspaceSetup
                         }
@@ -2941,6 +2941,7 @@ impl AssignWorker {
         // Pooled runs SKIP this — the pool already checked the branch out in
         // the leased worktree (and holds the branch lock for it).
         if self.pool.is_none()
+            && crate::workspace::git::is_git_repo(&workspace_path)
             && let Some(branch) = git_work_branch.as_deref().filter(|s| !s.is_empty())
             && let Err(e) =
                 crate::workspace::git::checkout_work_branch(&workspace_path, branch).await
@@ -3668,6 +3669,72 @@ mod tests {
         let inst = RunnerInstance::new(runner_config("legacy", "WEB", relative), &paths, out_tx);
 
         assert_eq!(resolve_working_dir(&inst, &HashMap::new()), Some(expected));
+    }
+
+    #[tokio::test]
+    async fn repo_free_assignment_reaches_agent_spawn_and_skips_branch_checkout() {
+        for kind in [AgentKind::Codex, AgentKind::ClaudeCode] {
+            let tmp = tempfile::tempdir().unwrap();
+            let paths = paths_for(tmp.path());
+            paths.ensure().unwrap();
+            let wd = tmp.path().join("task-folder");
+            std::fs::create_dir_all(&wd).unwrap();
+            std::fs::write(wd.join("notes.txt"), "preserve user content").unwrap();
+            let mut config = runner_config("general-tasks", "TEST", wd.clone());
+            config.project_slug = None; // no cloud context lookup in this test
+            config.agent.kind = kind;
+            let missing_binary = tmp.path().join("missing-agent").to_string_lossy().into_owned();
+            config.codex.binary = missing_binary.clone();
+            config.claude_code.binary = missing_binary;
+            let runner_paths = paths.for_runner(config.runner_id);
+            runner_paths.ensure().unwrap();
+            let (tx, mut rx) = mpsc::channel(16);
+            let mut worker = AssignWorker {
+                runner_paths,
+                daemon_paths: paths,
+                runner_config: config.clone(),
+                pool: None,
+                state: StateHandle::new(Config {
+                    version: 2,
+                    daemon: Default::default(),
+                    runners: vec![config.clone()],
+                    workdirs: vec![],
+                    cli: None,
+                }),
+                approvals: ApprovalRouter::new(),
+                out: RunnerOut::new(config.runner_id, tx),
+                cancel: tokio_util::sync::CancellationToken::new(),
+            };
+            worker
+                .run(
+                    uuid::Uuid::new_v4(),
+                    "Summarize these notes".into(),
+                    None,
+                    Some("irrelevant-without-git".into()),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                rx.recv().await.unwrap().body,
+                ClientMsg::Accept { .. }
+            ));
+            // Deliberately absent engine proves the assignment got past
+            // workspace setup and reached the agent-specific spawn path.
+            let failure = rx.recv().await.unwrap().body;
+            assert!(matches!(
+                failure,
+                ClientMsg::RunFailed {
+                    reason: FailureReason::CodexCrash | FailureReason::AgentCrash,
+                    ..
+                }
+            ));
+            assert_eq!(
+                std::fs::read_to_string(wd.join("notes.txt")).unwrap(),
+                "preserve user content"
+            );
+            assert!(!wd.join(".git").exists());
+        }
     }
 
     #[test]

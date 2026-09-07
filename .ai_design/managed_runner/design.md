@@ -87,6 +87,10 @@ design is therefore _zero-config setup_, not a new engine.
 
 ## 3. Goals
 
+- Execute general-purpose tasks, including coding and non-coding work, in a
+  managed working folder. Git and a project repository URL are optional. This
+  applies equally to built-in and user-connected direct-mode local runners.
+
 - A new desktop user goes from "installed" to "an agent is editing my repo"
   with exactly one login and no terminal.
 - Every desktop user runs a Codex version Pi Dash chose and can reproduce
@@ -115,7 +119,7 @@ Agent today; this design only makes more users reach them by removing the
 setup steps in front of them. It surfaces the existing error (§9.4, §17)
 and nothing more:
 
-- _Git and git credentials on the machine._ Clone and push use the
+- _Git and git credentials for repository-backed work only._ Clone and push use the
   machine's own git, per `clone_auth_mode = runner_managed`
   (`git_support_generalization/design.md`).
 - _OpenHub wallet balance._ Every OpenHub-lane run bills the wallet; an
@@ -191,7 +195,7 @@ A run flows exactly as it does for any local runner:
 2. the cloud creates the `AgentRun`, resolves its executor, and assigns it
    to a runner over the existing runner protocol;
 3. the bundled daemon picks the assignment up as a **native runner**,
-   clones or reuses the project repository (§9.4), spawns the built-in
+   prepares a task folder or clones/reuses a configured repository (§9.4), spawns the built-in
    engine with the composed prompt, relays approvals and events, and
    reports completion.
 
@@ -560,7 +564,19 @@ creation the web "Add runner" modal drives — remains available but is not
 used here: the desktop already holds a session, and the REST + `__managed
 enroll` path keeps the cloud out of the loop for a purely local decision.
 
-### 9.4 Work directory — provisioned by the runner, not the user
+### 9.4 Work directory — Git optional, provisioned by the runner
+
+**General-purpose task contract (2026-09-07 clarification).** Neither built-in
+nor user-connected direct-mode runners require a Git repository. Without a
+repository URL, the runner creates or reuses the configured task directory,
+preserves existing files, and starts the selected agent. It does not run
+`git init`, invent a remote, or require commits/PRs. Branch checkout is skipped
+for ordinary folders. Task prompts must support non-coding results and files.
+With a repository URL, existing clone/auth safeguards remain: clone into an
+empty folder, reuse an existing repository, and refuse to overwrite a
+non-empty non-repository folder. Explicit worktree pools remain Git-specific;
+they are not used for repo-free tasks. These rules supersede the former
+clone-first assumption in this section.
 
 The managed runner is a runner. It obtains its working copy the way a
 cloud-generated runner already does, with no user step:
@@ -570,7 +586,7 @@ cloud-generated runner already does, with no user step:
    — instead of the `$TMPDIR/.pidash` sandbox `Paths::default_working_dir`
    gives a `MachineMsg::CreateRunner` with an empty `working_dir`
    (`daemon/machine_control.rs:229`). Same mechanism, a durable location.
-2. The first assignment carries `repo_url`, `repo_ref`, and
+2. When a repository is configured, the first assignment carries `repo_url`, `repo_ref`, and
    `git_work_branch` (`cloud/protocol.rs:279`) from the project's
    repository binding. The supervisor calls
    `workspace::resolve(&wd, repo_url)` (`daemon/supervisor.rs:2857`),
@@ -582,8 +598,8 @@ cloud-generated runner already does, with no user step:
    The desktop's users are developers on their own machines; nothing is
    minted or sent. A clone failure surfaces git's message verbatim
    ("Permission denied (publickey)") with a "set up git access" link.
-4. `pidash doctor`'s existing `git --version` check runs at enrollment; a
-   missing git blocks with the doctor message. Git is not bundled.
+4. Git is needed only for repository operations, not for task-folder runs.
+   Git is not bundled.
 
 **Worktrees.** v1 uses the direct-in-`working_dir` mode the cloud-generated
 runner uses today. Promoting the clone to a `[[workdir]]` pool

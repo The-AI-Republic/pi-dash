@@ -41,6 +41,20 @@ def test_compose_coding_task_renders_no_leftover_jinja():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("executor", ["local_runner", "managed_runner"])
+def test_repo_free_task_prompt_does_not_require_git(executor):
+    ctx = _ctx()
+    ctx["repo"]["url"] = ""
+    out = compose(
+        "coding-task", workspace=None, project=None, user=None,
+        context=ctx, executor_kind=executor,
+    ).text
+    assert "A Git repository is optional" in out
+    assert "ordinary folder, not a Git repository" in out
+    assert "Do not initialize a repository" in out
+
+
+@pytest.mark.unit
 def test_manifest_one_entry_per_recipe_section_all_default():
     out = compose(
         "coding-task", workspace=None, project=None, user=None, context=_ctx()

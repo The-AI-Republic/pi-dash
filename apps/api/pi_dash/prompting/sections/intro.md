@@ -57,6 +57,7 @@ Repository:
 {% endif %}
 {% else %}
 - Work in the runner's configured working directory. Do not clone or touch any other path.
+- This may be an ordinary folder, not a Git repository. Execute the task normally; do not require Git setup, commits, or a PR for non-coding work.
 {% endif %}
 {% if code_reviews %}
 

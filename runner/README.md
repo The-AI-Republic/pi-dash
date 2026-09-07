@@ -111,6 +111,19 @@ pidash runner add --project X    # add another runner
 pidash runner list / remove      # manage runners
 ```
 
+## Task folders and Git
+
+Direct-mode runners can execute coding and non-coding tasks in an ordinary
+working directory. No Git repository or project repository URL is required;
+existing files are preserved, and the runner does not initialize Git for you.
+This applies to user-connected agents and the built-in desktop agent alike.
+
+When a repository URL is supplied, the runner still clones into an empty
+directory or reuses an existing repository. It refuses to clone over files in
+a non-repository directory. Branch checkout only applies to repositories.
+Explicit worktree pools remain Git-based; use a direct working directory for
+repo-free tasks.
+
 ## Auto-update
 
 `pidash` keeps itself current. When the cloud announces a newer `latest_runner_version` in the welcome frame, the running daemon swaps the on-disk `pidash` binary in place. The currently-running process is **never disturbed** — it keeps its loaded copy until the next natural restart (`pidash restart`, host reboot, or a service-manager respawn after a crash). This gives you the Claude-Code-style "always current" experience without ever killing in-flight work.
