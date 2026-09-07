@@ -128,7 +128,46 @@
                                 Source='$(var.CargoTargetBinDir)\pidash.exe'
                                 KeyPath='yes'/>
                         </Component>
+
+                        <!--
+                          Post-install setup shim. Launched (a) from the ExitDialog
+                          checkbox on interactive installs and (b) from the Start Menu
+                          shortcut. Runs `pidash auth login` and pauses so the console
+                          survives the login flow. See wix\setup.cmd for the rationale.
+                        -->
+                        <Component Id='SetupCmd' Guid='*'>
+                            <File
+                                Id='setupCmd'
+                                Name='setup.cmd'
+                                DiskId='1'
+                                Source='wix\setup.cmd'
+                                KeyPath='yes'/>
+                        </Component>
                     </Directory>
+                </Directory>
+            </Directory>
+
+            <!--
+              Start Menu shortcut ("Sign in to Pi Dash"). This is the fallback for
+              silent/Group-Policy installs where the ExitDialog never runs: the admin
+              deploys the MSI, the user finds the shortcut and completes sign-in.
+            -->
+            <Directory Id='ProgramMenuFolder'>
+                <Directory Id='ApplicationProgramsFolder' Name='Pi Dash'>
+                    <Component Id='StartMenuShortcut' Guid='*'>
+                        <Shortcut Id='SetupShortcut'
+                                  Name='Sign in to Pi Dash'
+                                  Description='Complete Pi Dash setup: sign in via the device-code flow.'
+                                  Target='[#setupCmd]'
+                                  WorkingDirectory='Bin'/>
+                        <RemoveFolder Id='CleanupProgramsFolder' Directory='ApplicationProgramsFolder' On='uninstall'/>
+                        <!--
+                          perMachine package: the execute sequence is elevated, so an
+                          HKLM keypath is writable and avoids the ICE57 per-user/
+                          per-machine mixing warning that an HKCU keypath would trigger.
+                        -->
+                        <RegistryValue Root='HKLM' Key='Software\AI Republic\pidash' Name='StartMenuShortcut' Type='integer' Value='1' KeyPath='yes'/>
+                    </Component>
                 </Directory>
             </Directory>
         </Directory>
@@ -150,6 +189,8 @@
             <!--<ComponentRef Id='License'/>-->
 
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='SetupCmd'/>
+            <ComponentRef Id='StartMenuShortcut'/>
 
             <Feature
                 Id='Environment'
@@ -174,7 +215,29 @@
         <!--<Property Id='ARPPRODUCTICON' Value='ProductICO' />-->
 
         <Property Id='ARPHELPLINK' Value='https://github.com/The-AI-Republic/pi-dash'/>
-        
+
+        <!--
+          ExitDialog "Sign in to Pi Dash now" checkbox. WixUI_FeatureTree's
+          ExitDialog renders this optional checkbox automatically when the text
+          property is set; it defaults to ticked (value 1).
+        -->
+        <Property Id='WIXUI_EXITDIALOGOPTIONALCHECKBOX' Value='1'/>
+        <Property Id='WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT' Value='Sign in to Pi Dash now'/>
+
+        <!--
+          Launches the setup shim when the ExitDialog checkbox is ticked.
+          Type-18 custom action (FileKey + ExeCommand) so no WixUtilExtension /
+          extra light.exe -ext flag is needed through the cargo-dist build.
+          Impersonate='yes' runs it unelevated as the installing user so the
+          device-code token lands under that user's profile (see login.rs);
+          asyncNoWait lets the paused console outlive msiexec.
+        -->
+        <CustomAction Id='LaunchPidashSetup'
+                      FileKey='setupCmd'
+                      ExeCommand=''
+                      Return='asyncNoWait'
+                      Impersonate='yes'/>
+
         <UI>
             <UIRef Id='WixUI_FeatureTree'/>
             
@@ -190,6 +253,17 @@
             -->
             <Publish Dialog='WelcomeDlg' Control='Next' Event='NewDialog' Value='CustomizeDlg' Order='99'>1</Publish>
             <Publish Dialog='CustomizeDlg' Control='Back' Event='NewDialog' Value='WelcomeDlg' Order='99'>1</Publish>
+
+            <!--
+              On the ExitDialog "Finish" click, run the setup shim when the
+              checkbox is ticked and this is a fresh install (not a repair or
+              major upgrade). Silent installs (msiexec /qn, /qb) skip the UI
+              sequence entirely, so nothing spawns there. Order='999' runs the
+              DoAction before WixUI's own EndDialog on Finish.
+            -->
+            <Publish Dialog='ExitDialog' Control='Finish' Event='DoAction'
+                     Value='LaunchPidashSetup'
+                     Order='999'>WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed</Publish>
 
         </UI>
 

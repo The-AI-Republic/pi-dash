@@ -71,14 +71,18 @@ Or on Windows, download and run the MSI installer:
 
 <https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-x86_64-pc-windows-msvc.msi>
 
-The MSI is a standard double-click Windows Installer — it drops `pidash.exe` and exits. It does **not** automatically launch the auth flow (MSI typically runs elevated as the Windows Installer service, and many MSI invocations are silent for IT/Group Policy deploys, so spawning a terminal from it would be wrong). To finish setup after the MSI closes:
+The MSI is a standard double-click Windows Installer — it drops `pidash.exe`, adds a **Sign in to Pi Dash** Start Menu shortcut, and (on an interactive install) offers to finish setup for you. The final installer screen shows a **Sign in to Pi Dash now** checkbox, ticked by default; leaving it ticked and clicking **Finish** opens a console and runs `pidash auth login`, walking you through the same device-code flow as the `install.ps1` one-liner.
+
+The auto-launch is deliberately scoped to interactive installs. Silent invocations (`msiexec /qn`, and the basic-UI `/qb`) — the IT/Group Policy/Intune/SCCM deploy paths — skip the installer UI entirely, so no terminal is ever spawned under the Windows Installer service. For those deploys, the admin ships the MSI and the user completes sign-in later from the **Sign in to Pi Dash** Start Menu shortcut (or by opening PowerShell and running `pidash`). Repairs and upgrades don't re-launch it either.
+
+If you skipped the checkbox, you can finish setup any time from the Start Menu shortcut, or:
 
 ```powershell
 # Open PowerShell and run:
 pidash
 ```
 
-With no config yet, bare `pidash` drops into `auth login` and walks you through the same device-code flow as the `install.ps1` one-liner. (A discoverable Start Menu shortcut for this step is tracked as a follow-up.)
+With no config yet, bare `pidash` drops into `auth login` and walks you through the device-code flow.
 
 Windows release assets also include a `pidash-x86_64-pc-windows-msvc.zip` archive with `pidash.exe` for advanced/manual installs.
 
