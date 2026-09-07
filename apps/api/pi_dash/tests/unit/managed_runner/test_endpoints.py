@@ -46,6 +46,39 @@ def web_client(client, create_user):
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("operation", ["retrieve", "list_detail", "update", "create"])
+@override_settings(**MANAGED_SETTINGS)
+def test_project_responses_compute_managed_availability_for_the_viewer(
+    web_client, workspace, project, create_user, bundled_runner, openhub_lane, monkeypatch, operation
+):
+    from pi_dash.app.views.project import base
+    from pi_dash.db.models import ProjectMember
+
+    ProjectMember.objects.get_or_create(
+        project=project, workspace=workspace, member=create_user, defaults={"role": 20}
+    )
+    monkeypatch.setattr(base.recent_visited_task, "delay", lambda **kwargs: None)
+    monkeypatch.setattr(base.model_activity, "delay", lambda **kwargs: None)
+    path = f"/api/workspaces/{workspace.slug}/projects/"
+    if operation == "retrieve":
+        response = web_client.get(f"{path}{project.id}/")
+    elif operation == "list_detail":
+        response = web_client.get(f"{path}details/")
+    elif operation == "update":
+        response = web_client.patch(f"{path}{project.id}/", {"name": "Renamed"}, content_type="application/json")
+    else:
+        response = web_client.post(path, {"name": "New project", "identifier": "NEW"}, content_type="application/json")
+    assert response.status_code in (200, 201), response.content
+    data = response.json()
+    if operation == "list_detail":
+        data = next(item for item in data if item["id"] == str(project.id))
+    option = next(item for item in data["agent_executor_options"] if item["kind"] == "managed_runner")
+    if operation == "create":
+        assert option["reason_code"] == "no_managed_runner_for_project"
+    else:
+        assert option == {"kind": "managed_runner", "available": True, "reason_code": ""}
+
+
 @pytest.mark.parametrize(
     "url_name,method",
     [
