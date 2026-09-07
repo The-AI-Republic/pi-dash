@@ -34,7 +34,7 @@ powershell -c "irm https://github.com/The-AI-Republic/pi-dash/releases/latest/do
 | Alpine / musl             | Served by the same musl builds.                                                                                                                                                                                |
 | Windows x86_64            | Native build.                                                                                                                                                                                                  |
 | Windows arm64             | No native build; the installer serves the x86_64 build, which runs under Windows-on-ARM emulation.                                                                                                             |
-| Git Bash / MSYS2 / Cygwin | Supported — `install.sh` detects these and installs the Windows build.                                                                                                                                         |
+| Git Bash / MSYS2 / Cygwin | Supported — the cargo-dist installer maps `MINGW*`/`MSYS*`/`CYGWIN*` to the Windows target and unpacks the Windows build; `install.sh` accepts the resulting `pidash.exe`.                                     |
 | WSL                       | Installs the **Linux** build, which can only drive agents inside the WSL distro. `install.sh` warns about this. If your coding agents are installed on the Windows side, use the PowerShell one-liner instead. |
 
 The installer will prompt for your Pi Dash cloud URL, walk you through device-code approval in the browser, and offer to register this host as a runner — for the typical dev-laptop case, that's the entire setup.

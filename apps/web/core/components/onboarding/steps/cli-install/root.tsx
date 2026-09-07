@@ -72,11 +72,20 @@ const PLATFORMS: Record<TPlatformKey, { label: string; commands: TInstallCommand
  * `navigator.clipboard` is only exposed on secure origins, so a self-hosted
  * instance served over plain HTTP would otherwise fail silently here. Fall
  * back to a detached textarea + `execCommand` before giving up.
+ *
+ * The fallback is keyed on `writeText` *failing*, not merely being absent: it
+ * can be present and still reject — the document not being focused when the
+ * promise settles, or a `clipboard-write` Permissions-Policy denial in an
+ * embedded context — and the textarea path handles those too.
  */
 async function copyToClipboard(value: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(value);
-    return;
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {
+      // fall through to the textarea path
+    }
   }
 
   const textarea = document.createElement("textarea");

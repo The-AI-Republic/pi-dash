@@ -270,7 +270,17 @@
         <UI>
             <UIRef Id='WixUI_FeatureTree'/>
 
-            <Publish Dialog='ExitDialog' Control='Finish' Event='DoAction' Value='LaunchPidashSetup' Order='999'>WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed</Publish>
+            <!--
+              `NOT Installed` alone is not enough. A major upgrade installs a
+              package with a fresh ProductCode, so `Installed` is unset and the
+              pre-ticked checkbox would reappear — running a full device-code
+              login against a machine that is already authenticated, and
+              re-prompting for the workspace binding. `MajorUpgrade` sets
+              WIX_UPGRADE_DETECTED, which distinguishes the two cases.
+              Compare run_default in runner/src/cli/mod.rs, which guards on an
+              existing config for the same reason.
+            -->
+            <Publish Dialog='ExitDialog' Control='Finish' Event='DoAction' Value='LaunchPidashSetup' Order='999'>WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed and NOT WIX_UPGRADE_DETECTED</Publish>
 
             <!--
               Enabling the EULA dialog in the installer is a three step process:

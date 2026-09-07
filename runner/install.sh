@@ -25,11 +25,35 @@ if grep -qi microsoft /proc/version 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]
   echo ""
   echo "Warning: this looks like WSL, so the Linux build of pidash will be installed."
   echo "It will drive coding agents inside this WSL distro only — not ones installed"
-  echo "on Windows. If your agents live on the Windows side, stop now and run this"
+  echo "on Windows. If your agents live on the Windows side, cancel and run this"
   echo "from PowerShell instead:"
   echo ""
   echo "  irm https://github.com/The-AI-Republic/pi-dash/releases/latest/download/install.ps1 | iex"
   echo ""
+
+  # Actually stop and ask, rather than printing advice the user cannot act on:
+  # install and `auth login` follow immediately, so a bare warning would need
+  # to be read and Ctrl-C'd faster than the download completes. stdin is the
+  # `curl | sh` pipe, so read from /dev/tty — probed for openability because
+  # the device node exists even where it cannot be opened (Docker without -t,
+  # cron, systemd, SSH without -t).
+  if (: </dev/tty) 2>/dev/null; then
+    printf "Continue installing the Linux build? [y/N] "
+    read -r _wsl_reply </dev/tty || _wsl_reply=""
+    case "$_wsl_reply" in
+      [yY] | [yY][eE][sS]) ;;
+      *)
+        echo "Cancelled."
+        exit 0
+        ;;
+    esac
+    echo ""
+  else
+    # Headless: nobody to ask, and erroring out would break legitimate
+    # automated installs into a WSL distro. Warn and continue.
+    echo "No terminal detected — continuing with the Linux build."
+    echo ""
+  fi
 fi
 
 echo "==> Downloading pidash..."
