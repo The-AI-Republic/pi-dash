@@ -139,10 +139,10 @@
                         </Component>
 
                         <!--
-                          Sign-in helper invoked by the ExitDialog checkbox and
-                          the Start Menu shortcut. See wix\pidash-setup.cmd for
-                          why the flow goes through a .cmd rather than calling
-                          pidash.exe directly.
+                          Sign-in helper invoked by the ExitDialog checkbox.
+                          See wix\pidash-setup.cmd for why the flow goes
+                          through a .cmd rather than calling pidash.exe
+                          directly.
                         -->
                         <Component Id='setupCmd' Guid='68DEF1C1-2FDA-46E9-AB0C-3ADDE5E6DB50'>
                             <File
@@ -155,36 +155,8 @@
                     </Directory>
                 </Directory>
             </Directory>
-
-            <!--
-              Start Menu entry. This is the fallback for silent/unattended
-              installs (Group Policy, Intune, SCCM), which never show the
-              ExitDialog and so never get the checkbox: the admin pushes the
-              MSI, the user finds "Sign in to Pi Dash" here.
-            -->
-            <Directory Id='ProgramMenuFolder'>
-                <Directory Id='PiDashMenuFolder' Name='Pi Dash'/>
-            </Directory>
         </Directory>
 
-        <DirectoryRef Id='PiDashMenuFolder'>
-            <Component Id='StartMenuShortcut' Guid='1340C7C5-25C3-4C69-AEE7-16ADF29C22F8'>
-                <Shortcut
-                    Id='SignInShortcut'
-                    Name='Sign in to Pi Dash'
-                    Description='Authenticate this machine with your Pi Dash workspace.'
-                    Target='[#setupCmdFile]'
-                    WorkingDirectory='Bin'/>
-                <RemoveFolder Id='RemovePiDashMenuFolder' Directory='PiDashMenuFolder' On='uninstall'/>
-                <RegistryValue
-                    Root='HKLM'
-                    Key='Software\AI Republic\pidash'
-                    Name='StartMenuShortcut'
-                    Type='integer'
-                    Value='1'
-                    KeyPath='yes'/>
-            </Component>
-        </DirectoryRef>
 
         <Feature
             Id='Binaries'
@@ -204,7 +176,6 @@
 
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='setupCmd'/>
-            <ComponentRef Id='StartMenuShortcut'/>
 
             <Feature
                 Id='Environment'

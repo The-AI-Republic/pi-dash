@@ -96,7 +96,7 @@ Two properties of that flow are deliberate:
 - **Silent installs spawn nothing.** `msiexec /qn` (Group Policy, Intune, SCCM) skips the installer UI entirely, so the checkbox never runs. Unattended IT deploys are unaffected.
 - **Sign-in runs as the installing user, not SYSTEM.** The package is per-machine and its execute sequence runs elevated, but the ExitDialog runs unelevated — which matters, because `auth login` writes the CLI token and workspace binding into the current user's profile.
 
-For silent installs, or if you clear the checkbox, a **Start Menu → Pi Dash → "Sign in to Pi Dash"** shortcut runs the same flow. From a terminal, bare `pidash` with no config also drops into `auth login`.
+For silent installs, or if you clear the checkbox, sign in from a terminal: bare `pidash` with no config drops straight into `auth login`, as does `pidash auth login`. (A discoverable Start Menu shortcut for this step is tracked as a follow-up.)
 
 Windows release assets also include a `pidash-x86_64-pc-windows-msvc.zip` archive with `pidash.exe` for advanced/manual installs.
 
