@@ -8,9 +8,12 @@ import { NavLink, useParams } from "react-router";
 import { useTranslation } from "@pi-dash/i18n";
 
 export function RunnersTabs() {
-  const { workspaceSlug } = useParams<{ workspaceSlug: string }>();
+  const { workspaceSlug, projectId } = useParams<{ workspaceSlug: string; projectId?: string }>();
   const { t } = useTranslation();
-  const base = `/${workspaceSlug}/runners`;
+  // Project-scoped panel and the workspace-wide aggregate share these tabs; the
+  // only difference is the link base, derived from whether a projectId is in
+  // the route.
+  const base = projectId ? `/${workspaceSlug}/projects/${projectId}/runners` : `/${workspaceSlug}/runners`;
 
   const tabs: { to: string; label: string; end: boolean }[] = [
     { to: base, label: t("Overview"), end: true },

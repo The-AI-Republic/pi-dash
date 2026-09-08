@@ -249,7 +249,10 @@ class RunnerListEndpoint(APIView):
     """List runners in a workspace.
 
     Private runners are visible only to their owner, even within a shared
-    workspace. Optional ``?pod=<uuid>`` filter narrows to a single pod.
+    workspace. Optional ``?pod=<uuid>`` filter narrows to a single pod;
+    optional ``?project=<uuid>`` narrows to every pod owned by that project
+    (a project may own several pods), which is how the project-scoped AI
+    Workers panel filters this list.
     """
 
     authentication_classes = [BaseSessionAuthentication]
@@ -283,6 +286,9 @@ class RunnerListEndpoint(APIView):
             from pi_dash.runner.models import RunnerProvisioning
 
             qs = qs.exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
+        project_id = request.query_params.get("project")
+        if project_id:
+            qs = qs.filter(pod__project_id=project_id)
         return Response(RunnerSerializer(qs, many=True).data)
 
 

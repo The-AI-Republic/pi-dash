@@ -100,10 +100,17 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
   const { currentWorkspace } = useWorkspace();
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { workspaceSlug, runId } = useParams<{ workspaceSlug: string; runId?: string }>();
+  const { workspaceSlug, projectId, runId } = useParams<{
+    workspaceSlug: string;
+    projectId?: string;
+    runId?: string;
+  }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const workspaceId = currentWorkspace?.id;
   const selected = runId ?? null;
+  // Project-scoped when a projectId is in the route; the workspace aggregate
+  // leaves it undefined.
+  const base = projectId ? `/${workspaceSlug}/projects/${projectId}/runners` : `/${workspaceSlug}/runners`;
 
   // Current page comes from the URL (`?page=N`, 1-based) so a specific page is
   // directly linkable; missing/invalid values fall back to page 1.
@@ -111,8 +118,9 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
   const page = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
 
   const { data: runsPage, mutate } = useSWR<IAgentRunPage>(
-    workspaceId ? ["runner-runs", workspaceId, page] : null,
-    () => service.listRuns(workspaceId, page),
+    // projectId is part of the key so paging never leaks rows across scopes.
+    workspaceId ? ["runner-runs", workspaceId, page, projectId ?? null] : null,
+    () => service.listRuns(workspaceId, page, undefined, projectId),
     { refreshInterval: 5_000 }
   );
 
@@ -143,7 +151,7 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
     if (!workspaceSlug) return;
     // Preserve the `?page=` query so selecting a run doesn't reset pagination.
     const search = searchParams.toString();
-    navigate(`/${workspaceSlug}/runners/runs/${id}${search ? `?${search}` : ""}`, { replace: true });
+    navigate(`${base}/runs/${id}${search ? `?${search}` : ""}`, { replace: true });
   }
 
   async function confirmCancel() {

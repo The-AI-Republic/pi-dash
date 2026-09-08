@@ -86,6 +86,15 @@
         <Property Id='DiskPrompt' Value='pidash Installation'/>
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
+            <!--
+              Declared so `[System64Folder]` in the LaunchPidashSetup command
+              line resolves. Referencing a standard directory in a formatted
+              string does not by itself put it in the Directory table; without
+              this the property expands to empty and the action would be
+              relying on cmd.exe being found via PATH.
+            -->
+            <Directory Id='System64Folder'/>
+
             <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
                 <Directory Id='APPLICATIONFOLDER' Name='pidash'>
                     
@@ -128,10 +137,26 @@
                                 Source='$(var.CargoTargetBinDir)\pidash.exe'
                                 KeyPath='yes'/>
                         </Component>
+
+                        <!--
+                          Sign-in helper invoked by the ExitDialog checkbox.
+                          See wix\pidash-setup.cmd for why the flow goes
+                          through a .cmd rather than calling pidash.exe
+                          directly.
+                        -->
+                        <Component Id='setupCmd' Guid='68DEF1C1-2FDA-46E9-AB0C-3ADDE5E6DB50'>
+                            <File
+                                Id='setupCmdFile'
+                                Name='pidash-setup.cmd'
+                                DiskId='1'
+                                Source='$(sys.SOURCEFILEDIR)pidash-setup.cmd'
+                                KeyPath='yes'/>
+                        </Component>
                     </Directory>
                 </Directory>
             </Directory>
         </Directory>
+
 
         <Feature
             Id='Binaries'
@@ -150,6 +175,7 @@
             <!--<ComponentRef Id='License'/>-->
 
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='setupCmd'/>
 
             <Feature
                 Id='Environment'
@@ -175,9 +201,58 @@
 
         <Property Id='ARPHELPLINK' Value='https://github.com/The-AI-Republic/pi-dash'/>
         
+        <!--
+          Offer to finish setup while the user is still here. Every other
+          install path (install.sh, install.ps1, and bare `pidash` with no
+          config) starts the device-code flow automatically; without this the
+          MSI is the one route that leaves the user holding an unauthenticated
+          binary with no prompt to do anything about it.
+
+          Deliberately driven from the ExitDialog rather than a deferred
+          custom action, for two reasons:
+
+            * Silent installs skip the UI sequence entirely, so `msiexec /qn`
+              (Group Policy, Intune, SCCM) spawns nothing. No hand-maintained
+              condition to get wrong.
+            * This package is perMachine, so the execute sequence runs as
+              SYSTEM. A deferred action there would be invisible in session 0
+              *and* would write the CLI token and workspace binding into
+              SYSTEM's profile. The UI sequence runs unelevated as the
+              installing user, which is the only account the credentials
+              should land in.
+        -->
+        <Property Id='WIXUI_EXITDIALOGOPTIONALCHECKBOX' Value='1'/>
+        <Property Id='WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT' Value='Sign in to Pi Dash now'/>
+
+        <!--
+          Type 34 (Directory + ExeCommand) rather than a FileKey action: the
+          target is a .cmd, which CreateProcess cannot launch on its own.
+          `start` hands it to a fresh console window and returns immediately,
+          so the window outlives msiexec.
+        -->
+        <CustomAction
+            Id='LaunchPidashSetup'
+            Directory='Bin'
+            ExeCommand='[System64Folder]cmd.exe /c start "Pi Dash setup" "[#setupCmdFile]"'
+            Execute='immediate'
+            Impersonate='yes'
+            Return='asyncNoWait'/>
+
         <UI>
             <UIRef Id='WixUI_FeatureTree'/>
-            
+
+            <!--
+              `NOT Installed` alone is not enough. A major upgrade installs a
+              package with a fresh ProductCode, so `Installed` is unset and the
+              pre-ticked checkbox would reappear - running a full device-code
+              login against a machine that is already authenticated, and
+              re-prompting for the workspace binding. `MajorUpgrade` sets
+              WIX_UPGRADE_DETECTED, which distinguishes the two cases.
+              Compare run_default in runner/src/cli/mod.rs, which guards on an
+              existing config for the same reason.
+            -->
+            <Publish Dialog='ExitDialog' Control='Finish' Event='DoAction' Value='LaunchPidashSetup' Order='999'>WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed and NOT WIX_UPGRADE_DETECTED</Publish>
+
             <!--
               Enabling the EULA dialog in the installer is a three step process:
 
