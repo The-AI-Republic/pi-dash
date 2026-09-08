@@ -6,7 +6,7 @@
 
 import { useMemo } from "react";
 import { observer } from "mobx-react";
-import { MoreHorizontal } from "lucide-react";
+import { MoreHorizontal, FoldVertical, UnfoldVertical } from "lucide-react";
 // pi dash imports
 import { EIssueCommentAccessSpecifier } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
@@ -35,6 +35,10 @@ export const CommentQuickActions = observer(function CommentQuickActions(props: 
   const isAuthor = currentUser?.id === comment.actor;
   const canEdit = isAuthor;
   const canDelete = isAuthor;
+  // Fold state is stored as a "fold" marker in the comment's labels array. It is
+  // not gated on authorship: unfolding another actor's (e.g. an agent's) folded
+  // comment is the primary use case.
+  const isFolded = comment.labels?.includes("fold") ?? false;
   // translation
   const { t } = useTranslation();
 
@@ -72,6 +76,18 @@ export const CommentQuickActions = observer(function CommentQuickActions(props: 
           shouldRender: showAccessSpecifier,
         },
         {
+          key: "fold",
+          action: () =>
+            activityOperations.updateComment(comment.id, {
+              labels: isFolded
+                ? (comment.labels ?? []).filter((label) => label !== "fold")
+                : [...(comment.labels ?? []), "fold"],
+            }),
+          title: isFolded ? t("Unfold comment") : t("Fold comment"),
+          icon: isFolded ? UnfoldVertical : FoldVertical,
+          shouldRender: true,
+        },
+        {
           key: "delete",
           action: () => activityOperations.removeComment(comment.id),
           title: t("Delete"),
@@ -80,7 +96,7 @@ export const CommentQuickActions = observer(function CommentQuickActions(props: 
         },
       ];
     },
-    [t, setEditMode, canEdit, showCopyLinkOption, activityOperations, comment, showAccessSpecifier, canDelete]
+    [t, setEditMode, canEdit, showCopyLinkOption, activityOperations, comment, showAccessSpecifier, isFolded, canDelete]
   );
 
   return (
