@@ -12,22 +12,57 @@ installers = ["shell", "powershell", "msi"]
 # cargo-dist 0.22.1 defaults to the retired ubuntu-20.04 runner image.
 # The workflow is hand-patched to ubuntu-22.04; tell cargo-dist to stop
 # policing it so `cargo dist plan` does not abort on the diff.
-allow-dirty = ["ci"]
+#
+# "msi" is here for the same reason: wix/main.wxs is hand-customized (the
+# ExitDialog sign-in checkbox, the setup shim, the Start Menu shortcut), so it
+# no longer matches the template cargo-dist would generate. Without this,
+# `cargo dist plan` aborts — which would fail the release workflow's plan job
+# before anything is built.
+allow-dirty = ["ci", "msi"]
+# The two `-musl` targets are not just for Alpine. cargo-dist stamps the build
+# machine's glibc version into the generated installer as a hard floor, and the
+# gnu builds run on ubuntu-22.04 (glibc 2.35) — so Ubuntu 20.04, Debian 11,
+# RHEL 8 and Amazon Linux 2 all fail the check and get "no compatible downloads
+# were found". With a musl archive published, the installer falls back to it
+# instead of erroring.
 targets = [
     "aarch64-apple-darwin",
     "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
     "x86_64-apple-darwin",
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
 ]
 pr-run-mode = "plan"
 install-path = "$HOME/.local/bin"
+
+# Build deps for the musl targets. Harmless on the gnu runners.
+#
+# The runner links no OpenSSL, but it is not pure Rust either: rustls 0.23
+# defaults to the aws-lc-rs provider, and `axoupdater -> axoasset -> reqwest
+# (default-tls)` turns that feature on for the whole graph regardless of the
+# runner's own `rustls-tls` choice. So `aws-lc-sys` has to compile, which needs
+# cmake, and — because it ships no pre-generated bindings for
+# `*-unknown-linux-musl` — bindgen, hence libclang.
+#
+# musl-tools is not listed: cargo-dist adds it to the musl targets on its own.
+#
+# Untested: no musl build has ever run. If a release still fails in
+# aws-lc-sys's build script, the next lever is enabling that crate's `bindgen`
+# feature explicitly for musl targets.
+[dist.dependencies.apt]
+cmake = '*'
+clang = '*'
+libclang-dev = '*'
 
 # Intel macOS uses GitHub's current x64 image. Windows builds run on the
 # MSVC image so cargo-dist can produce archives, PowerShell, and MSI installers.
 [dist.github-custom-runners]
 aarch64-apple-darwin = "macos-14"
 aarch64-unknown-linux-gnu = "ubuntu-22.04-arm"
+aarch64-unknown-linux-musl = "ubuntu-22.04-arm"
 x86_64-apple-darwin = "macos-15-intel"
 x86_64-pc-windows-msvc = "windows-2022"
 x86_64-unknown-linux-gnu = "ubuntu-22.04"
+x86_64-unknown-linux-musl = "ubuntu-22.04"
