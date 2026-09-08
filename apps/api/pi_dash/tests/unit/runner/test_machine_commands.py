@@ -12,6 +12,8 @@ machine auth boundary), and the status poll loop the modal runs.
 from __future__ import annotations
 
 import json
+import pathlib
+import re
 
 import pytest
 from django.urls import reverse
@@ -20,6 +22,7 @@ from django.utils import timezone
 from pi_dash.runner.models import DevMachine, MachineSession, MachineToken
 from pi_dash.runner.services import machine_outbox
 from pi_dash.runner.services import tokens
+from pi_dash.runner.views.machine_commands import _VALID_AGENTS
 
 
 class _FakeRedis:
@@ -221,6 +224,39 @@ def test_enqueue_rejects_unknown_agent(
     resp = _enqueue(session_client, dev_machine, workspace, agent="skynet")
     assert resp.status_code == 400
     assert resp.data["error"] == "invalid_agent"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("agent", sorted(_VALID_AGENTS))
+def test_enqueue_accepts_every_supported_agent(
+    db, session_client, workspace, dev_machine, machine_token, live_session, _fake_redis, agent
+):
+    """Each allowlisted agent enqueues and reaches the machine verbatim."""
+    resp = _enqueue(session_client, dev_machine, workspace, agent=agent)
+    assert resp.status_code == 202, resp.data
+    entries = _fake_redis.streams[machine_outbox.stream_key(dev_machine.id)]
+    payload = json.loads(entries[-1][1]["payload"])
+    assert payload["agent"] == agent
+
+
+@pytest.mark.unit
+def test_valid_agents_matches_runner_schema():
+    """The allowlist must track runner/src/config/schema.rs:AgentKind.
+
+    Grok (PDASHOSS01-33) and Muse Code (PDASHOSS01-101) were each added to
+    the Rust enum and the web modal without this set, so selecting them in
+    "Add runner" 400'd with invalid_agent. Pin the two together so the next
+    backend can't drift the same way.
+    """
+    schema = pathlib.Path(__file__).resolve().parents[6] / "runner/src/config/schema.rs"
+    if not schema.is_file():
+        pytest.skip("runner source tree not present in this checkout")
+    body = re.search(r"pub enum AgentKind \{(.*?)\n\}", schema.read_text(), re.S)
+    assert body, "AgentKind enum not found in schema.rs"
+    variants = re.findall(r"^\s{4}([A-Z][A-Za-z0-9]*),", body.group(1), re.M)
+    assert variants, "no AgentKind variants parsed"
+    kebab = {re.sub(r"(?<!^)(?=[A-Z])", "-", v).lower() for v in variants}
+    assert kebab == set(_VALID_AGENTS)
 
 
 @pytest.mark.unit
