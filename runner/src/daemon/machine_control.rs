@@ -220,18 +220,23 @@ impl MachineControl {
         .await
         .map_err(|e| anyhow::anyhow!("cloud registration failed: {e}"))?;
 
-        // 2. Persist the `[[runner]]` block. `Legacy` workdir plan —
-        //    worktree pools are built once at daemon startup, so a
-        //    hot-added runner can't join one until the next restart;
-        //    running the agent directly in working_dir keeps config and
-        //    runtime consistent. Operators can migrate via the CLI.
+        // 2. Persist the `[[runner]]` block. `AutoPoolIfGit` — the same
+        //    plan `pidash runner add` defaults to: if `working_dir` is a
+        //    git repo, create or reuse a `[[workdir]]` pool and bind this
+        //    runner to it (migrating any existing legacy runner on the
+        //    exact same path). Legacy single-dir runners are deprecated and
+        //    no longer created by our own code; the pool exemption is what
+        //    lets two runners share one repo without a `DuplicateWorkingDir`
+        //    collision. Worktree pools are otherwise built once at daemon
+        //    startup, so `add_runner` below builds and registers this
+        //    runner's pool on hot-add — no restart required.
         let options = ApplyEnrollOptions {
             working_dir: (!cmd.working_dir.is_empty()).then(|| PathBuf::from(&cmd.working_dir)),
             agent_kind,
             model: (!cmd.model.is_empty()).then_some(cmd.model.as_str()),
             reasoning_effort: (!cmd.reasoning_effort.is_empty())
                 .then_some(cmd.reasoning_effort.as_str()),
-            workdir_plan: RunnerWorkdirPlan::Legacy,
+            workdir_plan: RunnerWorkdirPlan::AutoPoolIfGit,
         };
         let cloud_url = self.spawn_ctx.cloud_url();
         let applied = match apply_enroll_response(&self.spawn_ctx.paths, &resp, &cloud_url, options)
