@@ -81,6 +81,21 @@ def test_infer_agent_label_covers_every_backend(capability, expected):
     assert infer_agent_label(runner=runner) == expected
 
 
+@pytest.mark.parametrize(
+    "host_label",
+    ["museum-pi", "amused-badger", "grokking-notes", "provoked-box"],
+)
+def test_infer_agent_label_ignores_incidental_substrings(host_label):
+    """A host name that merely contains "muse"/"grok" is not that agent.
+
+    Generated host names really do produce words like "amused", so the bare
+    forms match on a word boundary rather than as substrings.
+    """
+    runner = SimpleNamespace(name="", host_label=host_label, capabilities=[], dev_machine=None)
+
+    assert infer_agent_label(runner=runner) == ""
+
+
 def test_classify_agent_model_access_error():
     diagnostic = classify_run_error("Selected model 'claude-fable-5' may not exist or you may not have access to it.")
 

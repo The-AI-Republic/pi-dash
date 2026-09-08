@@ -65,9 +65,13 @@ def _match_agent_label(value: str) -> str:
         return "Cursor"
     if "openclaw" in lowered or "open-claw" in lowered or "open_claw" in lowered or "acpx" in lowered:
         return "OpenClaw"
-    if "grok" in lowered:
+    if re.search(r"\bgrok\b", lowered):
         return "Grok"
-    if "muse_code" in lowered or "muse-code" in lowered or "muse code" in lowered or "muse" in lowered:
+    # "muse" is a common English substring ("museum", "amused" — the latter
+    # shows up in generated host names), so the bare form needs a word
+    # boundary. The explicit spellings stay substring matches because
+    # "muse_code" has no boundary between "muse" and "_code".
+    if "muse_code" in lowered or "muse-code" in lowered or "muse code" in lowered or re.search(r"\bmuse\b", lowered):
         return "Muse Code"
     return ""
 
