@@ -74,6 +74,7 @@ fn configures_every_supported_protocol_without_changing_other_runner_fields() {
         ("cursor_agent", AgentKind::CursorAgent),
         ("open_claw", AgentKind::OpenClaw),
         ("grok", AgentKind::Grok),
+        ("muse_code", AgentKind::MuseCode),
     ] {
         let path = manifest(
             root.path(),
@@ -90,6 +91,7 @@ fn configures_every_supported_protocol_without_changing_other_runner_fields() {
             AgentKind::CursorAgent => expected.cursor_agent.binary = binary,
             AgentKind::OpenClaw => expected.openclaw.binary = binary,
             AgentKind::Grok => expected.grok.binary = binary,
+            AgentKind::MuseCode => expected.muse_code.binary = binary,
         }
         package.apply_to_runner(&mut actual).unwrap();
         assert_eq!(

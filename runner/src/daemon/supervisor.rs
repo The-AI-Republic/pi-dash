@@ -467,6 +467,7 @@ fn agent_binary_for(config: &crate::config::schema::RunnerConfig) -> &str {
         crate::config::schema::AgentKind::CursorAgent => &config.cursor_agent.binary,
         crate::config::schema::AgentKind::OpenClaw => &config.openclaw.binary,
         crate::config::schema::AgentKind::Grok => &config.grok.binary,
+        crate::config::schema::AgentKind::MuseCode => &config.muse_code.binary,
     }
 }
 

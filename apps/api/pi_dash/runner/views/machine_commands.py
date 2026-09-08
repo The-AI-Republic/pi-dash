@@ -49,8 +49,13 @@ from pi_dash.runner.views.runners import (
 logger = logging.getLogger(__name__)
 
 # Mirrors runner/src/config/schema.rs:AgentKind (kebab-case wire values)
-# and the web modal's AGENT_OPTIONS.
-_VALID_AGENTS = frozenset({"claude-code", "codex", "cursor-agent", "open-claw"})
+# and the web modal's AGENT_OPTIONS. Every agent the modal offers must be
+# listed here or "Add runner" fails with invalid_agent before the command
+# ever reaches the machine — see test_valid_agents_matches_runner_schema,
+# which pins this set to the Rust enum so a new backend can't drift again.
+_VALID_AGENTS = frozenset(
+    {"claude-code", "codex", "cursor-agent", "open-claw", "grok", "muse-code"}
+)
 
 _RESULT_STATUSES = frozenset({"ok", "error"})
 
