@@ -694,6 +694,7 @@ mod tests {
             cursor_agent: Default::default(),
             openclaw: Default::default(),
             grok: Default::default(),
+            muse_code: Default::default(),
             approval_policy: Default::default(),
         }
     }

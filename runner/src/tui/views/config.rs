@@ -21,7 +21,14 @@ use crate::service::reload::ReloadOutcome;
 
 use super::super::app::AppData;
 
-pub const AGENT_KINDS: &[&str] = &["codex", "claude-code", "cursor-agent", "open-claw", "grok"];
+pub const AGENT_KINDS: &[&str] = &[
+    "codex",
+    "claude-code",
+    "cursor-agent",
+    "open-claw",
+    "grok",
+    "muse-code",
+];
 pub const LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +46,8 @@ pub enum FieldId {
     OpenClawModelDefault,
     GrokBinary,
     GrokModelDefault,
+    MuseCodeBinary,
+    MuseCodeModelDefault,
     ApprovalAutoReadonly,
     ApprovalAutoWrites,
     ApprovalAutoNetwork,
@@ -63,6 +72,8 @@ impl FieldId {
             FieldId::OpenClawModelDefault => "field:openclaw_model_default",
             FieldId::GrokBinary => "field:grok_binary",
             FieldId::GrokModelDefault => "field:grok_model_default",
+            FieldId::MuseCodeBinary => "field:muse_code_binary",
+            FieldId::MuseCodeModelDefault => "field:muse_code_model_default",
             FieldId::ApprovalAutoReadonly => "field:approval_auto_readonly",
             FieldId::ApprovalAutoWrites => "field:approval_auto_writes",
             FieldId::ApprovalAutoNetwork => "field:approval_auto_network",
@@ -86,6 +97,8 @@ impl FieldId {
             "field:openclaw_model_default" => FieldId::OpenClawModelDefault,
             "field:grok_binary" => FieldId::GrokBinary,
             "field:grok_model_default" => FieldId::GrokModelDefault,
+            "field:muse_code_binary" => FieldId::MuseCodeBinary,
+            "field:muse_code_model_default" => FieldId::MuseCodeModelDefault,
             "field:approval_auto_readonly" => FieldId::ApprovalAutoReadonly,
             "field:approval_auto_writes" => FieldId::ApprovalAutoWrites,
             "field:approval_auto_network" => FieldId::ApprovalAutoNetwork,
@@ -191,6 +204,18 @@ pub const FIELDS: &[FieldSpec] = &[
         kind: FieldKind::Text,
     },
     FieldSpec {
+        id: FieldId::MuseCodeBinary,
+        label: "binary",
+        section: "Muse Code",
+        kind: FieldKind::Text,
+    },
+    FieldSpec {
+        id: FieldId::MuseCodeModelDefault,
+        label: "model_default",
+        section: "Muse Code",
+        kind: FieldKind::Text,
+    },
+    FieldSpec {
         id: FieldId::ApprovalAutoReadonly,
         label: "auto_approve_readonly_shell",
         section: "Approval policy",
@@ -228,6 +253,7 @@ pub fn field_agent_kind(id: FieldId) -> Option<AgentKind> {
         FieldId::CursorBinary | FieldId::CursorModelDefault => Some(AgentKind::CursorAgent),
         FieldId::OpenClawBinary | FieldId::OpenClawModelDefault => Some(AgentKind::OpenClaw),
         FieldId::GrokBinary | FieldId::GrokModelDefault => Some(AgentKind::Grok),
+        FieldId::MuseCodeBinary | FieldId::MuseCodeModelDefault => Some(AgentKind::MuseCode),
         _ => None,
     }
 }
@@ -289,6 +315,7 @@ pub fn display_value(cfg: &Config, id: FieldId, runner_idx: usize) -> String {
             AgentKind::CursorAgent => "cursor-agent".into(),
             AgentKind::OpenClaw => "open-claw".into(),
             AgentKind::Grok => "grok".into(),
+            AgentKind::MuseCode => "muse-code".into(),
         },
         FieldId::CodexBinary => runner.codex.binary.clone(),
         FieldId::CodexModelDefault => runner.codex.model_default.clone().unwrap_or_default(),
@@ -310,6 +337,10 @@ pub fn display_value(cfg: &Config, id: FieldId, runner_idx: usize) -> String {
         }
         FieldId::GrokBinary => runner.grok.binary.clone(),
         FieldId::GrokModelDefault => runner.grok.model_default.clone().unwrap_or_default(),
+        FieldId::MuseCodeBinary => runner.muse_code.binary.clone(),
+        FieldId::MuseCodeModelDefault => {
+            runner.muse_code.model_default.clone().unwrap_or_default()
+        }
         FieldId::ApprovalAutoReadonly => runner
             .approval_policy
             .auto_approve_readonly_shell
@@ -415,6 +446,19 @@ pub fn set_text_value(
                 Some(s.to_string())
             };
         }
+        FieldId::MuseCodeBinary => {
+            if s.trim().is_empty() {
+                return Err("binary cannot be empty".into());
+            }
+            runner.muse_code.binary = s.to_string();
+        }
+        FieldId::MuseCodeModelDefault => {
+            runner.muse_code.model_default = if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            };
+        }
         FieldId::AgentKind
         | FieldId::ApprovalAutoReadonly
         | FieldId::ApprovalAutoWrites
@@ -459,7 +503,8 @@ pub fn cycle_enum(cfg: &mut Config, id: FieldId, runner_idx: usize) {
                 AgentKind::ClaudeCode => AgentKind::CursorAgent,
                 AgentKind::CursorAgent => AgentKind::OpenClaw,
                 AgentKind::OpenClaw => AgentKind::Grok,
-                AgentKind::Grok => AgentKind::Codex,
+                AgentKind::Grok => AgentKind::MuseCode,
+                AgentKind::MuseCode => AgentKind::Codex,
             };
         }
         FieldId::LogLevel => {
@@ -879,6 +924,7 @@ mod tests {
             cursor_agent: Default::default(),
             openclaw: Default::default(),
             grok: Default::default(),
+            muse_code: Default::default(),
             approval_policy: Default::default(),
         };
         runner.agent.kind = kind;

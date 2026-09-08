@@ -108,6 +108,7 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
             "cursor-agent",
             "acpx",
             "grok",
+            "muse",
         )
         .await;
     } else {
@@ -122,6 +123,7 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
                 &r.cursor_agent.binary,
                 &r.openclaw.binary,
                 &r.grok.binary,
+                &r.muse_code.binary,
             )
             .await;
         }
@@ -181,6 +183,7 @@ async fn run_agent_checks(
     cursor_binary: &str,
     openclaw_binary: &str,
     grok_binary: &str,
+    muse_binary: &str,
 ) {
     let tag = |base: &str| match prefix {
         Some(p) => format!("{base}@{p}"),
@@ -339,6 +342,30 @@ async fn run_agent_checks(
                 blocker: false,
             });
         }
+        crate::config::schema::AgentKind::MuseCode => {
+            match check_version(muse_binary).await {
+                Ok(detail) => checks.push(Check {
+                    name: tag("muse"),
+                    ok: true,
+                    detail,
+                    blocker: true,
+                }),
+                Err(e) => checks.push(Check {
+                    name: tag("muse"),
+                    ok: false,
+                    detail: e.to_string(),
+                    blocker: true,
+                }),
+            }
+            // Muse Code auth is via the `META_API_KEY` env var; there's no cheap
+            // non-interactive probe, so surface a hint rather than block.
+            checks.push(Check {
+                name: tag("muse-auth"),
+                ok: true,
+                detail: "assumed ok (set META_API_KEY if runs fail with auth errors)".to_string(),
+                blocker: false,
+            });
+        }
     }
 }
 
@@ -410,8 +437,8 @@ mod tests {
     //! per-runner tags are correct.
     use super::*;
     use crate::config::schema::{
-        AgentKind, ClaudeCodeSection, CursorAgentSection, CodexSection, Config, DaemonConfig,
-        GrokSection, OpenClawSection, RunnerConfig, WorkspaceSection,
+        AgentKind, ClaudeCodeSection, CodexSection, Config, CursorAgentSection, DaemonConfig,
+        GrokSection, MuseCodeSection, OpenClawSection, RunnerConfig, WorkspaceSection,
     };
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -447,6 +474,7 @@ mod tests {
             cursor_agent: CursorAgentSection::default(),
             openclaw: OpenClawSection::default(),
             grok: GrokSection::default(),
+            muse_code: MuseCodeSection::default(),
             approval_policy: Default::default(),
         }
     }
@@ -574,6 +602,7 @@ mod tests {
             "cursor-missing",
             "acpx-missing",
             "grok-missing",
+            "muse-missing",
         )
         .await;
         run_agent_checks(
@@ -585,6 +614,7 @@ mod tests {
             "cursor-missing",
             "acpx-missing",
             "grok-missing",
+            "muse-missing",
         )
         .await;
         run_agent_checks(
@@ -596,6 +626,7 @@ mod tests {
             "cursor-missing",
             "acpx-missing",
             "grok-missing",
+            "muse-missing",
         )
         .await;
         run_agent_checks(
@@ -607,6 +638,7 @@ mod tests {
             "cursor-missing",
             "acpx-missing",
             "grok-missing",
+            "muse-missing",
         )
         .await;
         run_agent_checks(
@@ -618,6 +650,20 @@ mod tests {
             "cursor-missing",
             "acpx-missing",
             "grok-missing",
+            "muse-missing",
+        )
+        .await;
+        let mut muse_checks: Vec<Check> = Vec::new();
+        run_agent_checks(
+            &mut muse_checks,
+            None,
+            AgentKind::MuseCode,
+            "codex-missing",
+            "claude-missing",
+            "cursor-missing",
+            "acpx-missing",
+            "grok-missing",
+            "muse-missing",
         )
         .await;
         assert!(codex_checks.iter().any(|c| c.name == "codex"));
@@ -630,5 +676,7 @@ mod tests {
         assert!(openclaw_checks.iter().any(|c| c.name == "openclaw"));
         assert!(grok_checks.iter().any(|c| c.name == "grok"));
         assert!(grok_checks.iter().any(|c| c.name == "grok-auth"));
+        assert!(muse_checks.iter().any(|c| c.name == "muse"));
+        assert!(muse_checks.iter().any(|c| c.name == "muse-auth"));
     }
 }

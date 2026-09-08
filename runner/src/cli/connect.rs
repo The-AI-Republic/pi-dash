@@ -190,7 +190,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         .unwrap_or_else(|| paths.runner_dir(resp.runner_id).join("workspace"));
 
     let agent_kind = args.agent.unwrap_or_default();
-    let (codex, claude_code, cursor_agent, openclaw, grok) =
+    let (codex, claude_code, cursor_agent, openclaw, grok, muse_code) =
         crate::cli::runner_ops::agent_sections_for(
             agent_kind,
             args.model.as_deref(),
@@ -210,6 +210,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         cursor_agent,
         openclaw,
         grok,
+        muse_code,
         approval_policy: Default::default(),
     };
 
@@ -528,6 +529,7 @@ pub async fn enroll_additional_runner(
         cursor_agent: Default::default(),
         openclaw: Default::default(),
         grok: Default::default(),
+        muse_code: Default::default(),
         approval_policy: Default::default(),
     };
     cfg.runners.push(new_runner.clone());
@@ -671,6 +673,7 @@ mod tests {
             cursor_agent: CursorAgentSection::default(),
             openclaw: crate::config::schema::OpenClawSection::default(),
             grok: crate::config::schema::GrokSection::default(),
+            muse_code: crate::config::schema::MuseCodeSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         }
     }
