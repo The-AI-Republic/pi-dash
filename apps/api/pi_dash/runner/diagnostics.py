@@ -63,8 +63,12 @@ def _match_agent_label(value: str) -> str:
         return "Codex"
     if "cursor_agent" in lowered or "cursor-agent" in lowered or "cursor" in lowered:
         return "Cursor"
-    if "openclaw" in lowered or "open-claw" in lowered or "acpx" in lowered:
+    if "openclaw" in lowered or "open-claw" in lowered or "open_claw" in lowered or "acpx" in lowered:
         return "OpenClaw"
+    if "grok" in lowered:
+        return "Grok"
+    if "muse_code" in lowered or "muse-code" in lowered or "muse code" in lowered or "muse" in lowered:
+        return "Muse Code"
     return ""
 
 

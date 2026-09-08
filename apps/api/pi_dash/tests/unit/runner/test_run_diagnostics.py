@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pi_dash.runner.diagnostics import classify_run_error, enrich_run_error
+from pi_dash.runner.diagnostics import classify_run_error, enrich_run_error, infer_agent_label
 
 
 pytestmark = pytest.mark.unit
@@ -56,6 +56,29 @@ def test_infer_agent_label_prefers_runner_over_error_mention():
     diagnostic = classify_run_error(enriched)
     assert diagnostic is not None
     assert diagnostic["source_label"] == "Codex"
+
+
+@pytest.mark.parametrize(
+    ("capability", "expected"),
+    [
+        ("agent:codex", "Codex"),
+        ("agent:claude_code", "Claude Code"),
+        ("agent:cursor_agent", "Cursor"),
+        ("agent:open_claw", "OpenClaw"),
+        ("agent:grok", "Grok"),
+        ("agent:muse_code", "Muse Code"),
+    ],
+)
+def test_infer_agent_label_covers_every_backend(capability, expected):
+    """Grok and Muse Code runs were labelled '' because the map lagged."""
+    runner = SimpleNamespace(
+        name="workx_runner01",
+        host_label="mini-build",
+        capabilities=[capability],
+        dev_machine=None,
+    )
+
+    assert infer_agent_label(runner=runner) == expected
 
 
 def test_classify_agent_model_access_error():

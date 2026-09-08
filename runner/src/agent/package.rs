@@ -103,6 +103,7 @@ impl AgentPackage {
             AgentKind::CursorAgent => runner.cursor_agent.binary = executable,
             AgentKind::OpenClaw => runner.openclaw.binary = executable,
             AgentKind::Grok => runner.grok.binary = executable,
+            AgentKind::MuseCode => runner.muse_code.binary = executable,
         }
         runner.agent.kind = self.protocol;
         Ok(())
