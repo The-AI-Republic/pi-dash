@@ -247,6 +247,9 @@ def sample_contexts(kind: str) -> List[Dict[str, Any]]:
 def kinds_for_section(section_key: str) -> List[str]:
     """All recipe kinds whose ordered section list contains ``section_key``."""
     kinds = [k for k, keys in recipes.RECIPES.items() if section_key in keys]
+    for kind, keys in recipes.MANAGED_RECIPES.items():
+        if section_key in keys and kind not in kinds:
+            kinds.append(kind)
     for kind, keys in recipes.CLOUD_RECIPES.items():
         if section_key in keys and kind not in kinds:
             kinds.append(kind)

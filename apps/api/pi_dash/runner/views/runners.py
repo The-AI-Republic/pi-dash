@@ -278,6 +278,14 @@ class RunnerListEndpoint(APIView):
         pod_id = request.query_params.get("pod")
         if pod_id:
             qs = qs.filter(pod_id=pod_id)
+        # Desktop-bundled runners are an implementation detail of the app: the
+        # user never registered them and cannot meaningfully manage them here,
+        # so they stay out of the "Add runner" / runner-management lists unless
+        # explicitly asked for (support and admin tooling pass the flag).
+        if request.query_params.get("include_bundled") not in ("1", "true", "yes"):
+            from pi_dash.runner.models import RunnerProvisioning
+
+            qs = qs.exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
         project_id = request.query_params.get("project")
         if project_id:
             qs = qs.filter(pod__project_id=project_id)

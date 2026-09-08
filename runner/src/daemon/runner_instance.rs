@@ -46,6 +46,10 @@ pub struct RunnerInstance {
     /// even if they weren't parked at the exact moment the signal was
     /// sent, preventing zombie heartbeats after per-runner teardown.
     pub remove_tx: watch::Sender<bool>,
+    /// Version string reported by this runner's agent binary, probed once at
+    /// startup. `None` when the binary is missing or did not answer — the
+    /// cloud then simply has no version to show, which is the honest answer.
+    pub engine_version: Arc<tokio::sync::RwLock<Option<String>>>,
 }
 
 impl RunnerInstance {
@@ -130,6 +134,7 @@ impl RunnerInstance {
             ack_tx,
             ack_rx: Arc::new(tokio::sync::Mutex::new(Some(ack_rx))),
             remove_tx,
+            engine_version: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 

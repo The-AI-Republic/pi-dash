@@ -35,6 +35,31 @@ pub enum RunnerCommand {
     List,
     /// Deregister a runner and remove its config block.
     Remove(RemoveArgs),
+    /// Use a developer-supplied local agent package; installs and starts nothing.
+    UsePackage(UsePackageArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct UsePackageArgs {
+    /// Existing local runner name whose agent entry point should change.
+    pub name: String,
+    /// Trusted local v1 agent package manifest (TOML).
+    #[arg(long)]
+    pub manifest: PathBuf,
+}
+
+fn use_package(args: UsePackageArgs, paths: &Paths) -> Result<()> {
+    let package = crate::agent::package::AgentPackage::from_manifest(&args.manifest)?;
+    file::mutate_config(paths, |config| {
+        let runner = config
+            .runners
+            .iter_mut()
+            .find(|runner| runner.name == args.name)
+            .with_context(|| format!("no configured runner named {:?}", args.name))?;
+        package.apply_to_runner(runner)
+    })?;
+    println!("Agent package configured for {:?}. No package was installed or started. Restart the owning daemon when idle to apply the change.", args.name);
+    Ok(())
 }
 
 #[derive(Debug, Clone, ClapArgs)]
@@ -124,6 +149,7 @@ pub async fn run(args: RunnerArgs, paths: &Paths) -> Result<()> {
         RunnerCommand::Add(a) => add(a, paths).await.map(|_| ()),
         RunnerCommand::List => list(paths),
         RunnerCommand::Remove(a) => remove(a, paths).await,
+        RunnerCommand::UsePackage(a) => use_package(a, paths),
     }
 }
 

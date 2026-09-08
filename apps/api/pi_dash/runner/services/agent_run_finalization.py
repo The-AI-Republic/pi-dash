@@ -20,7 +20,7 @@ TERMINAL_STATUSES = {
 }
 
 
-def finalize_agent_run(run_id, new_status, *, updates=None, expected_runner_id=None) -> bool:
+def finalize_agent_run(run_id, new_status, *, updates=None, expected_runner_id=None, expected_status=None) -> bool:
     """First-writer-wins terminal transition for either executor."""
     if new_status not in TERMINAL_STATUSES:
         raise ValueError("new_status must be terminal")
@@ -36,6 +36,8 @@ def finalize_agent_run(run_id, new_status, *, updates=None, expected_runner_id=N
         qs = AgentRun.objects.select_for_update().filter(pk=run_id).exclude(status__in=TERMINAL_STATUSES)
         if expected_runner_id is not None:
             qs = qs.filter(runner_id=expected_runner_id)
+        if expected_status is not None:
+            qs = qs.filter(status=expected_status)
         run = qs.first()
         if run is None:
             return False

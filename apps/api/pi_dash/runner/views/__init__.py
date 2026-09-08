@@ -21,6 +21,7 @@ from .chat import (
     ChatStartedEndpoint,
     chat_event_stream,
 )
+from .desktop import DesktopEnrollEndpoint
 from .enrollment import (
     MachineTokenRedeemEndpoint,
     MachineTokenTicketEndpoint,
@@ -101,6 +102,7 @@ __all__ = [
     "chat_event_stream",
     "MachineTokenRedeemEndpoint",
     "MachineTokenTicketEndpoint",
+    "DesktopEnrollEndpoint",
     "RunnerCreateEndpoint",
     "RunnerEnrollEndpoint",
     "RunnerInviteEndpoint",

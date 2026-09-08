@@ -12,6 +12,7 @@ import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 // services
 import { AgentRunService } from "@/services/runner";
+import { prepareAgentRun } from "@/services/agent-runtime";
 
 const agentRunService = new AgentRunService();
 
@@ -49,6 +50,7 @@ export function useCreateAgentRun() {
 
       setIsSubmitting(true);
       try {
+        await prepareAgentRun({ workspaceSlug, projectId, issueId });
         const run =
           mode === "run_ai"
             ? await agentRunService.runAi({
@@ -75,7 +77,10 @@ export function useCreateAgentRun() {
         }
         return run;
       } catch (error: unknown) {
-        const message = (error as { error?: string })?.error ?? t("Could not start the agent run. Please try again.");
+        const message =
+          (error as { error?: string; message?: string })?.error ??
+          (error as Error)?.message ??
+          t("Could not start the agent run. Please try again.");
         setToast({
           type: TOAST_TYPE.ERROR,
           title: t("Failed to start agent run"),

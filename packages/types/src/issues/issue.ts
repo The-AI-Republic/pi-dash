@@ -73,7 +73,7 @@ export type TBaseIssue = {
   // `default_agent_executor`. "local_runner" routes to `assigned_pod_id`;
   // "cloud_agent" has no pod. Changing it is rejected by the backend once the
   // issue has an active run, same as the pod.
-  agent_executor?: "local_runner" | "cloud_agent" | null;
+  agent_executor?: "local_runner" | "cloud_agent" | "managed_runner" | null;
 
   created_at: string;
   updated_at: string;

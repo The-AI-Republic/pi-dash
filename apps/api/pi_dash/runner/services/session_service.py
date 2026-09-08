@@ -61,6 +61,19 @@ def _merge_dev_metadata(current: Any, body: Dict[str, Any]) -> Dict[str, Any]:
     usable directory exists, which clears a stale value.
     """
     metadata = dict(current) if isinstance(current, dict) else {}
+
+    # ``engine_version`` is the agent CLI's own ``--version``, probed by the
+    # daemon at start. For a desktop-bundled runner this is the one number
+    # support needs to answer "which build is this user on", since the binary
+    # ships inside the app rather than being installed by the user.
+    if "engine_version" in body:
+        engine_version = body.get("engine_version")
+        if isinstance(engine_version, str):
+            if engine_version:
+                metadata["codex_version"] = engine_version[:64]
+            else:
+                metadata.pop("codex_version", None)
+
     if "working_dir" not in body:
         return metadata
 

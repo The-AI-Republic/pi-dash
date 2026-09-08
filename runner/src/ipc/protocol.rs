@@ -32,6 +32,8 @@ pub const IPC_VERSION: u32 = 3;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
+    /// Activate an already-persisted runner without restarting other runners.
+    RunnerActivateLocal { runner: String },
     /// One-shot current-state snapshot.
     StatusGet,
     /// Subscribe to status deltas (stream until the connection closes).

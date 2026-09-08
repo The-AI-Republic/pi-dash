@@ -87,6 +87,21 @@ def _comment_is_actively_synced(comment) -> bool:
     )
 
 
+#: User-facing copy for a refused ``managed_runner`` pin, keyed by the reason
+#: code ``managed_runner_availability`` returned. The picker shows the same
+#: strings, so a user never sees two different explanations for one situation.
+_MANAGED_UNAVAILABLE_DETAIL = {
+    "managed_runner_disabled": "Pi Dash Agent is not enabled on this instance",
+    "desktop_not_connected": "Open the Pi Dash desktop app to run on this computer",
+    "llm_config_missing": "Configure an AI provider in Pi Dash AI settings first",
+    "gateway_scopes_missing": "Sign in to Pi Dash again to refresh your AI access",
+    "byok_not_supported_on_desktop": (
+        "Pi Dash Agent on desktop uses OpenHub. Switch your AI provider to OpenHub to run here; "
+        "Pi Dash AI and the Cloud Agent keep using your own key."
+    ),
+}
+
+
 class IssueFlatSerializer(BaseSerializer):
     ## Contain only flat fields
 
@@ -270,6 +285,29 @@ class IssueCreateSerializer(BaseSerializer):
                     raise serializers.ValidationError(
                         {"agent_executor": "Pi Dash Cloud Agent is not available on this instance"}
                     )
+                if executor == AgentExecutorKind.MANAGED_RUNNER:
+                    # Pinning to the desktop is viewer-specific: the check is
+                    # "can the person making this request run it on their own
+                    # machine", which is exactly what the picker showed them.
+                    from pi_dash.managed_runner.errors import ManagedRunnerReason
+                    from pi_dash.managed_runner.policy import managed_runner_availability
+
+                    project = self.instance.project if self.instance is not None else attrs.get("project")
+                    if project is None:
+                        from pi_dash.db.models import Project
+
+                        project = Project.objects.filter(pk=self.context.get("project_id")).first()
+                    if project is None:
+                        raise serializers.ValidationError({"agent_executor": "A project is required for desktop runs"})
+                    viewer = getattr(self.context.get("request"), "user", None)
+                    available, reason = managed_runner_availability(project, viewer)
+                    # A desktop that has not enrolled this project yet fixes
+                    # itself the moment the app opens it, so accept the pin
+                    # rather than blocking on a race the client will resolve.
+                    if not available and reason != ManagedRunnerReason.NO_RUNNER_FOR_PROJECT:
+                        raise serializers.ValidationError(
+                            {"agent_executor": _MANAGED_UNAVAILABLE_DETAIL.get(reason, reason)}
+                        )
             # Same mid-flight rule as the pod: ``AgentRun.executor_kind`` is
             # snapshotted at creation, so switching targets under a live run
             # would silently apply only to the next dispatch.
@@ -1038,6 +1076,7 @@ class IssueSerializer(DynamicBaseSerializer):
             "parent_id",
             "cycle_id",
             "assigned_pod_id",
+            "agent_executor",
             "module_ids",
             "label_ids",
             "assignee_ids",

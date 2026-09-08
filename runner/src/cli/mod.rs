@@ -9,6 +9,7 @@ pub mod connect;
 pub mod context;
 pub mod doctor;
 mod install;
+pub mod managed;
 mod issue;
 mod project;
 mod remove;
@@ -140,6 +141,12 @@ pub enum Command {
     /// via the generated unit file. Not a user-facing verb.
     #[command(name = "__run", hide = true)]
     Run(run::Args),
+
+    /// Internal: provisioning verbs driven by the Pi Dash desktop app, which
+    /// owns the config directory these operate on. Not a user-facing verb —
+    /// configure a runner with `pidash runner add` instead.
+    #[command(name = "__managed", hide = true)]
+    Managed(managed::ManagedArgs),
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -176,6 +183,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Workpad(args) => run_crud(workpad::run(args, &paths).await),
         Command::Workspace(args) => run_crud(workspace::run(args, &paths).await),
         Command::Run(args) => run::run(args, &paths).await,
+        Command::Managed(args) => managed::run(args, &paths).await,
     }
 }
 

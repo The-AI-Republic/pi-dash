@@ -165,30 +165,14 @@ impl Supervisor {
         // case IPC falls back to the daemon-level state.
         let primary = instances.first().cloned();
 
-        // Snapshot of every configured runner the IPC server can
-        // route requests to. Built once at startup; runtime add /
-        // remove (Phase 7 of the parent design) will mutate this map
-        // when that work lands.
+        // Shared registry for IPC routing, including runners activated
+        // after startup by local enrollment or machine control.
         let ipc_instances: HashMap<uuid::Uuid, RunnerInstance> = instances
             .iter()
             .cloned()
             .map(|i| (i.runner_id, i))
             .collect();
-        let ipc = IpcServer {
-            path: paths.ipc_socket_path(),
-            primary_state: primary
-                .as_ref()
-                .map(|p| p.state.clone())
-                .unwrap_or_else(|| state.clone()),
-            paths: paths.clone(),
-            instances: Arc::new(ipc_instances),
-            pools: pools.clone(),
-        };
-        let ipc_handle = tokio::spawn(async move {
-            if let Err(e) = ipc.run().await {
-                tracing::error!("ipc server exited: {e:#}");
-            }
-        });
+        let ipc_instances = Arc::new(std::sync::RwLock::new(ipc_instances));
 
         if opts.offline {
             tracing::info!("offline mode: HTTP transport disabled");
@@ -206,7 +190,26 @@ impl Supervisor {
             mailboxes: mailboxes.clone(),
             hello_runners: hello_runners.clone(),
             daemon_state: state.clone(),
+            instances: ipc_instances.clone(),
+            activation_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
+
+        let ipc = IpcServer {
+            path: paths.ipc_socket_path(),
+            primary_state: primary
+                .as_ref()
+                .map(|p| p.state.clone())
+                .unwrap_or_else(|| state.clone()),
+            paths: paths.clone(),
+            instances: ipc_instances,
+            pools: pools.clone(),
+            spawn_ctx: spawn_ctx.clone(),
+        };
+        let ipc_handle = tokio::spawn(async move {
+            if let Err(e) = ipc.run().await {
+                tracing::error!("ipc server exited: {e:#}");
+            }
+        });
 
         // One RunnerLoop per instance. Each consumes from its mailbox.
         let mut loop_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
@@ -314,6 +317,8 @@ async fn build_runner_instance(
         RunnerInstance::new_offline(runner_cfg, paths, daemon.clone())
     };
     inst.paths.ensure()?;
+    // IPC must report the configured identity even before the first heartbeat.
+    inst.state.set_runner_id(inst.runner_id).await;
     Ok(inst)
 }
 
@@ -330,9 +335,31 @@ pub(crate) struct RunnerSpawnCtx {
     mailboxes: Arc<RwLock<HashMap<uuid::Uuid, mpsc::Sender<InboundEnvelope>>>>,
     hello_runners: Arc<RwLock<HelloRunnerMap>>,
     daemon_state: StateHandle,
+    instances: Arc<std::sync::RwLock<HashMap<uuid::Uuid, RunnerInstance>>>,
+    activation_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl RunnerSpawnCtx {
+    pub(crate) async fn activate_configured(&self, name: &str) -> Result<()> {
+        let cfg = crate::config::file::load_config(&self.paths)?;
+        cfg.validate()
+            .map_err(|e| anyhow::anyhow!("invalid config: {e}"))?;
+        if cfg.daemon.cloud_url != self.daemon.cloud_url
+            || cfg.daemon.dev_machine_id != self.daemon.dev_machine_id
+            || cfg.cli.as_ref().and_then(|cli| cli.token.as_deref())
+                != self.shared_machine_token.as_deref()
+        {
+            anyhow::bail!("daemon identity changed; restart before activating a runner");
+        }
+        let runner = cfg
+            .runners
+            .into_iter()
+            .find(|r| r.name == name)
+            .ok_or_else(|| anyhow::anyhow!("no configured runner named {name:?}"))?;
+        // add_runner initializes any new pool before registering the runner.
+        self.add_runner(runner).await
+    }
+
     pub(crate) fn cloud_url(&self) -> String {
         self.daemon.cloud_url.clone()
     }
@@ -342,11 +369,17 @@ impl RunnerSpawnCtx {
     /// Registers the instance in the shared mailbox / hello maps and
     /// spawns the same three tasks the startup loop spawns. Handles are
     /// deliberately detached: on daemon shutdown the tasks die with the
-    /// process, and the graceful drain walks `hello_runners`, which
-    /// includes hot-added runners. Known gap: the IPC server's instance
-    /// snapshot is built at startup, so the TUI won't list this runner
-    /// until the next daemon restart.
+    /// process, and the graceful drain and IPC registry include hot-added runners.
     pub(crate) async fn add_runner(&self, runner_cfg: RunnerConfig) -> Result<()> {
+        let _activation = self.activation_lock.lock().await;
+        if self
+            .instances
+            .read()
+            .expect("runner registry poisoned")
+            .contains_key(&runner_cfg.runner_id)
+        {
+            return Ok(());
+        }
         // Auto-pooled runners created from the cloud/UI reference a
         // `[[workdir]]` pool, but pools are otherwise seeded once at startup.
         // Build and register this runner's pool now if it isn't live yet —
@@ -384,7 +417,11 @@ impl RunnerSpawnCtx {
             );
         }
         let _tasks = spawn_instance_tasks(&inst, self).await;
-        tracing::info!(runner_id = %inst.runner_id, name = %inst.name, "hot-added runner from machine control session");
+        self.instances
+            .write()
+            .expect("runner registry poisoned")
+            .insert(inst.runner_id, inst.clone());
+        tracing::info!(runner_id = %inst.runner_id, name = %inst.name, "activated runner in running daemon");
         Ok(())
     }
 
@@ -422,10 +459,35 @@ struct SpawnedInstanceTasks {
     refresh: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// The binary this runner's configured agent kind will actually launch.
+fn agent_binary_for(config: &crate::config::schema::RunnerConfig) -> &str {
+    match config.agent.kind {
+        crate::config::schema::AgentKind::Codex => &config.codex.binary,
+        crate::config::schema::AgentKind::ClaudeCode => &config.claude_code.binary,
+        crate::config::schema::AgentKind::CursorAgent => &config.cursor_agent.binary,
+        crate::config::schema::AgentKind::OpenClaw => &config.openclaw.binary,
+        crate::config::schema::AgentKind::Grok => &config.grok.binary,
+    }
+}
+
 /// Spawn the RunnerLoop + HttpLoop + refresh loop for one instance.
 /// Extracted from `Supervisor::run`'s startup loop so the machine
 /// control session's hot-add path spawns byte-identical machinery.
 async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> SpawnedInstanceTasks {
+    // Probe the agent binary once per daemon start, in the background: the
+    // answer is only used for reporting, so it must never delay bringing the
+    // runner online (or fail startup if the binary is briefly unavailable
+    // during a desktop upgrade).
+    {
+        let slot = inst.engine_version.clone();
+        let binary = agent_binary_for(&inst.config).to_string();
+        let env = crate::agent::agent_env_for_config(&inst.config);
+        tokio::spawn(async move {
+            if let Some(version) = crate::util::shell::binary_version(&binary, &env).await {
+                *slot.write().await = Some(version);
+            }
+        });
+    }
     let mut tasks = SpawnedInstanceTasks {
         runner_loop: None,
         http_loop: None,
@@ -694,9 +756,20 @@ fn attach_body_for_instance(
     working_dir: Option<std::path::PathBuf>,
 ) -> AttachBody {
     let mut agent_versions = HashMap::new();
+    let kind_key = format!("{:?}", inst.config.agent.kind).to_ascii_lowercase();
+    // The agent binary's own version when we managed to probe it, falling back
+    // to the runner's version so the key is never absent (older cloud builds
+    // read it positionally). `try_read` keeps this function sync and lock-free:
+    // a probe in flight just means this attach reports the fallback and the
+    // next reconnect carries the real value.
+    let probed = inst
+        .engine_version
+        .try_read()
+        .ok()
+        .and_then(|guard| guard.clone());
     agent_versions.insert(
-        format!("{:?}", inst.config.agent.kind).to_ascii_lowercase(),
-        crate::RUNNER_VERSION.to_string(),
+        kind_key,
+        probed.unwrap_or_else(|| crate::RUNNER_VERSION.to_string()),
     );
     AttachBody {
         version: crate::RUNNER_VERSION.to_string(),
@@ -2901,12 +2974,12 @@ impl AssignWorker {
             let wd = self.runner_config.workspace.working_dir.clone();
             match crate::workspace::resolve(&wd, repo_url.as_deref()).await {
                 Ok(crate::workspace::Resolution::ExistingRepo(p))
-                | Ok(crate::workspace::Resolution::Cloned(p)) => p,
+                | Ok(crate::workspace::Resolution::Cloned(p))
+                | Ok(crate::workspace::Resolution::Directory(p)) => p,
                 Err(e) => {
                     let reason = match &e {
                         crate::workspace::ResolveError::Clone(_) => FailureReason::GitAuth,
-                        crate::workspace::ResolveError::MissingRepoUrl
-                        | crate::workspace::ResolveError::NonEmptyNonRepo(_)
+                        crate::workspace::ResolveError::NonEmptyNonRepo(_)
                         | crate::workspace::ResolveError::UnsupportedScheme(_) => {
                             FailureReason::WorkspaceSetup
                         }
@@ -2950,6 +3023,7 @@ impl AssignWorker {
         // Pooled runs SKIP this — the pool already checked the branch out in
         // the leased worktree (and holds the branch lock for it).
         if self.pool.is_none()
+            && crate::workspace::git::is_git_repo(&workspace_path)
             && let Some(branch) = git_work_branch.as_deref().filter(|s| !s.is_empty())
             && let Err(e) =
                 crate::workspace::git::checkout_work_branch(&workspace_path, branch).await
@@ -3677,6 +3751,72 @@ mod tests {
         let inst = RunnerInstance::new(runner_config("legacy", "WEB", relative), &paths, out_tx);
 
         assert_eq!(resolve_working_dir(&inst, &HashMap::new()), Some(expected));
+    }
+
+    #[tokio::test]
+    async fn repo_free_assignment_reaches_agent_spawn_and_skips_branch_checkout() {
+        for kind in [AgentKind::Codex, AgentKind::ClaudeCode] {
+            let tmp = tempfile::tempdir().unwrap();
+            let paths = paths_for(tmp.path());
+            paths.ensure().unwrap();
+            let wd = tmp.path().join("task-folder");
+            std::fs::create_dir_all(&wd).unwrap();
+            std::fs::write(wd.join("notes.txt"), "preserve user content").unwrap();
+            let mut config = runner_config("general-tasks", "TEST", wd.clone());
+            config.project_slug = None; // no cloud context lookup in this test
+            config.agent.kind = kind;
+            let missing_binary = tmp.path().join("missing-agent").to_string_lossy().into_owned();
+            config.codex.binary = missing_binary.clone();
+            config.claude_code.binary = missing_binary;
+            let runner_paths = paths.for_runner(config.runner_id);
+            runner_paths.ensure().unwrap();
+            let (tx, mut rx) = mpsc::channel(16);
+            let mut worker = AssignWorker {
+                runner_paths,
+                daemon_paths: paths,
+                runner_config: config.clone(),
+                pool: None,
+                state: StateHandle::new(Config {
+                    version: 2,
+                    daemon: Default::default(),
+                    runners: vec![config.clone()],
+                    workdirs: vec![],
+                    cli: None,
+                }),
+                approvals: ApprovalRouter::new(),
+                out: RunnerOut::new(config.runner_id, tx),
+                cancel: tokio_util::sync::CancellationToken::new(),
+            };
+            worker
+                .run(
+                    uuid::Uuid::new_v4(),
+                    "Summarize these notes".into(),
+                    None,
+                    Some("irrelevant-without-git".into()),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                rx.recv().await.unwrap().body,
+                ClientMsg::Accept { .. }
+            ));
+            // Deliberately absent engine proves the assignment got past
+            // workspace setup and reached the agent-specific spawn path.
+            let failure = rx.recv().await.unwrap().body;
+            assert!(matches!(
+                failure,
+                ClientMsg::RunFailed {
+                    reason: FailureReason::CodexCrash | FailureReason::AgentCrash,
+                    ..
+                }
+            ));
+            assert_eq!(
+                std::fs::read_to_string(wd.join("notes.txt")).unwrap(),
+                "preserve user content"
+            );
+            assert!(!wd.join(".git").exists());
+        }
     }
 
     #[test]

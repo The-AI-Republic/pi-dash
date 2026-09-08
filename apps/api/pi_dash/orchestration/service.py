@@ -20,6 +20,7 @@ from typing import Optional
 
 from django.db import transaction
 
+from pi_dash.core.agent_execution import AgentExecutorKind
 from pi_dash.db.models.issue import Issue, IssueComment
 from pi_dash.db.models.state import State, StateGroup
 from pi_dash.orchestration.agent_phases import (
@@ -525,7 +526,8 @@ def _create_project_move_handoff_run(*, issue: Issue, parent: AgentRun, pod: Pod
 
     The source run remains the lineage parent for audit/history only. Runner
     affinity is deliberately cleared because a source-pod runner can never
-    consume a target-pod run. The replacement goes through the executor seam
+    consume a target-pod run. A managed pin selected for the destination is
+    preserved. The replacement goes through the executor seam
     so a cloud-executor target project gets a dispatchable cloud run rather
     than a local row no runner will ever consume.
     """
@@ -546,9 +548,9 @@ def _create_project_move_handoff_run(*, issue: Issue, parent: AgentRun, pod: Pod
         # cloud project whose principal has no LLM config). Fall back to a
         # local-runner row so the handoff still lands somewhere visible.
         logger.warning("orchestration.project_move_handoff: executor unavailable: %s", exc)
-        execution = {"executor_kind": "local_runner", "tool_plan": {}}
+        execution = {"executor_kind": AgentExecutorKind.LOCAL_RUNNER, "tool_plan": {}}
     admission_error = execution.pop("_cloud_admission_error", None)
-    execution.pop("pinned_runner", None)
+    pinned_runner = execution.pop("pinned_runner", None)
 
     with transaction.atomic():
         existing = _active_run_for(issue)
@@ -560,7 +562,7 @@ def _create_project_move_handoff_run(*, issue: Issue, parent: AgentRun, pod: Pod
             pod=pod,
             work_item=issue,
             parent_run=parent,
-            pinned_runner=None,
+            pinned_runner=pinned_runner,
             status=AgentRunStatus.QUEUED,
             trigger=parent.trigger,
             prompt="",
@@ -841,7 +843,7 @@ def dispatch_scheduler_run(
         return None, f"no default pod for project {binding.project_id}"
 
     creator = binding.actor
-    if binding.project.default_agent_executor == "cloud_agent":
+    if binding.project.default_agent_executor == AgentExecutorKind.CLOUD_AGENT:
         from pi_dash.core.agent_execution import user_has_llm_config
         from pi_dash.core.permissions import ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER, check_project_role
 
@@ -887,7 +889,7 @@ def dispatch_scheduler_run(
         return None, str(exc)
     admission_error = execution.pop("_cloud_admission_error", None)
 
-    if execution["executor_kind"] == "cloud_agent" and binding.outcome_mode != "create_issue":
+    if execution["executor_kind"] == AgentExecutorKind.CLOUD_AGENT and binding.outcome_mode != "create_issue":
         # Permanent misconfiguration — refuse BEFORE creating a run so a
         # broken binding writes last_error once instead of minting a FAILED
         # AgentRun on every scheduler firing.

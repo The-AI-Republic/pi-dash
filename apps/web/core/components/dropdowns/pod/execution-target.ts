@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import type { IProject } from "@pi-dash/types";
+import type { IProject, TAgentExecutorKind } from "@pi-dash/types";
 
 /**
  * Execution target = where an issue's agent runs execute.
@@ -15,9 +15,10 @@ import type { IProject } from "@pi-dash/types";
  * dropdown whose other values are pod UUIDs.
  */
 export const CLOUD_AGENT_VALUE = "cloud_agent";
+export const MANAGED_AGENT_VALUE = "managed_runner";
 
 type TExecutionTargetIssue = {
-  agent_executor?: "local_runner" | "cloud_agent" | null;
+  agent_executor?: TAgentExecutorKind | null;
   assigned_pod_id?: string | null;
 };
 
@@ -25,7 +26,7 @@ type TExecutionTargetIssue = {
 export function effectiveExecutor(
   issue: TExecutionTargetIssue | undefined | null,
   project: IProject | undefined | null
-): "local_runner" | "cloud_agent" {
+): TAgentExecutorKind {
   return issue?.agent_executor ?? project?.default_agent_executor ?? "local_runner";
 }
 
@@ -34,7 +35,8 @@ export function executionTargetValue(
   issue: TExecutionTargetIssue | undefined | null,
   project: IProject | undefined | null
 ): string | null | undefined {
-  return effectiveExecutor(issue, project) === CLOUD_AGENT_VALUE ? CLOUD_AGENT_VALUE : issue?.assigned_pod_id;
+  const executor = effectiveExecutor(issue, project);
+  return executor === CLOUD_AGENT_VALUE || executor === MANAGED_AGENT_VALUE ? executor : issue?.assigned_pod_id;
 }
 
 /**
@@ -43,8 +45,8 @@ export function executionTargetValue(
  * would ignore the chosen pod on the next dispatch.
  */
 export function executionTargetPatch(value: string): Partial<TExecutionTargetIssue> {
-  return value === CLOUD_AGENT_VALUE
-    ? { agent_executor: CLOUD_AGENT_VALUE }
+  return value === CLOUD_AGENT_VALUE || value === MANAGED_AGENT_VALUE
+    ? { agent_executor: value }
     : { agent_executor: "local_runner", assigned_pod_id: value };
 }
 
@@ -52,4 +54,9 @@ export function executionTargetPatch(value: string): Partial<TExecutionTargetIss
 export function cloudAgentOption(project: IProject | undefined | null) {
   const option = project?.agent_executor_options?.find((o) => o.kind === CLOUD_AGENT_VALUE);
   return { available: option?.available ?? false, reasonCode: option?.reason_code ?? "" };
+}
+
+export function managedAgentOption(project: IProject | undefined | null) {
+  const option = project?.agent_executor_options?.find((o) => o.kind === MANAGED_AGENT_VALUE);
+  return { available: option?.available ?? false, reasonCode: option?.reason_code ?? "desktop_not_connected" };
 }

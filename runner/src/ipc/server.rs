@@ -32,7 +32,8 @@ pub struct IpcServer {
     /// per-runner request via the `runner` selector. Wrapped in `Arc`
     /// so the supervisor can hand it to the IPC task without giving up
     /// ownership.
-    pub instances: Arc<HashMap<Uuid, RunnerInstance>>,
+    pub instances: Arc<std::sync::RwLock<HashMap<Uuid, RunnerInstance>>>,
+    pub(crate) spawn_ctx: crate::daemon::supervisor::RunnerSpawnCtx,
     /// Worktree pools keyed by work-dir name. Snapshotted into `pidash status`
     /// so operators can see desk occupancy and queue depth. Empty for daemons
     /// with no `[[workdir]]` blocks. Wrapped in an `RwLock` because the hot-add
@@ -150,6 +151,10 @@ impl IpcServer {
 
     async fn dispatch(&self, req: Request, buf: &mut BufStream<IpcStream>) -> Result<Response> {
         match req {
+            Request::RunnerActivateLocal { runner } => {
+                self.spawn_ctx.activate_configured(&runner).await?;
+                Ok(Response::Ack)
+            }
             Request::StatusGet => Ok(Response::Status(self.status_snapshot().await)),
             Request::StatusSubscribe => {
                 let mut rx = self.primary_state.subscribe();
@@ -184,9 +189,9 @@ impl IpcServer {
                 // runner" — same shape as RunsGet / ApprovalsList. The
                 // TUI relies on this so the Runs tab works before the
                 // picker has been seeded by the Config refresh branch.
-                let candidates: Vec<&RunnerInstance> = match runner.as_deref() {
+                let candidates: Vec<RunnerInstance> = match runner.as_deref() {
                     Some(name) => vec![self.resolve_runner(Some(name))?],
-                    None => self.instances.values().collect(),
+                    None => self.all_instances(),
                 };
                 let cap = limit.unwrap_or(100);
                 let mut all = Vec::new();
@@ -206,9 +211,9 @@ impl IpcServer {
                 // instance's history. Without one, scan every instance
                 // — run IDs are globally unique, so the first match is
                 // authoritative.
-                let candidates: Vec<&RunnerInstance> = match runner.as_deref() {
+                let candidates: Vec<RunnerInstance> = match runner.as_deref() {
                     Some(name) => vec![self.resolve_runner(Some(name))?],
-                    None => self.instances.values().collect(),
+                    None => self.all_instances(),
                 };
                 for inst in candidates {
                     let index = crate::history::index::RunsIndex::load(&inst.paths)?;
@@ -230,9 +235,9 @@ impl IpcServer {
             }
             Request::ApprovalsList { runner } => {
                 let mut all = Vec::new();
-                let candidates: Vec<&RunnerInstance> = match runner.as_deref() {
+                let candidates: Vec<RunnerInstance> = match runner.as_deref() {
                     Some(name) => vec![self.resolve_runner(Some(name))?],
-                    None => self.instances.values().collect(),
+                    None => self.all_instances(),
                 };
                 for inst in candidates {
                     all.extend(inst.approvals.list_pending().await);
@@ -248,9 +253,9 @@ impl IpcServer {
                 // selector we route to that instance directly; without
                 // one, scan every instance and decide on whichever
                 // owns the approval.
-                let candidates: Vec<&RunnerInstance> = match runner.as_deref() {
+                let candidates: Vec<RunnerInstance> = match runner.as_deref() {
                     Some(name) => vec![self.resolve_runner(Some(name))?],
-                    None => self.instances.values().collect(),
+                    None => self.all_instances(),
                 };
                 for inst in candidates {
                     let resolved = inst
@@ -313,43 +318,46 @@ impl IpcServer {
     /// (the common single-runner install), return it. When `name` is
     /// `None` and there are multiple, refuse with a hint listing the
     /// configured names — the caller must disambiguate.
-    fn resolve_runner(&self, name: Option<&str>) -> Result<&RunnerInstance> {
+    fn resolve_runner(&self, name: Option<&str>) -> Result<RunnerInstance> {
+        let instances = self.all_instances();
+        let mut names: Vec<_> = instances.iter().map(|i| i.name.clone()).collect();
+        names.sort();
         match name {
-            Some(n) => self
-                .instances
-                .values()
-                .find(|i| i.name == n)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "no runner named {:?}; configured: [{}]",
-                        n,
-                        self.runner_names().join(", ")
-                    )
-                }),
+            Some(n) => instances.into_iter().find(|i| i.name == n).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no runner named {:?}; configured: [{}]",
+                    n,
+                    names.join(", ")
+                )
+            }),
             None => {
-                if self.instances.len() == 1 {
-                    Ok(self.instances.values().next().unwrap())
+                if instances.len() == 1 {
+                    Ok(instances.into_iter().next().unwrap())
                 } else {
                     anyhow::bail!(
                         "this daemon hosts {} runners ([{}]); pass --runner <name>",
-                        self.instances.len(),
-                        self.runner_names().join(", "),
+                        instances.len(),
+                        names.join(", "),
                     )
                 }
             }
         }
     }
 
-    fn runner_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.instances.values().map(|i| i.name.clone()).collect();
-        names.sort();
-        names
+    fn all_instances(&self) -> Vec<RunnerInstance> {
+        self.instances
+            .read()
+            .expect("runner registry poisoned")
+            .values()
+            .cloned()
+            .collect()
     }
 
     async fn status_snapshot(&self) -> StatusSnapshot {
         let daemon = self.primary_state.daemon_info().await;
-        let mut runners = Vec::with_capacity(self.instances.len());
-        for inst in self.instances.values() {
+        let instances = self.all_instances();
+        let mut runners = Vec::with_capacity(instances.len());
+        for inst in instances {
             runners.push(inst.state.runner_snapshot().await);
         }
         // Stable order so successive snapshots don't churn rendering.

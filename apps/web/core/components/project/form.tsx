@@ -18,7 +18,7 @@ import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { Tooltip } from "@pi-dash/propel/tooltip";
 import { EFileAssetType } from "@pi-dash/types";
 import type { IProject, IWorkspace } from "@pi-dash/types";
-import { CustomSelect, Input, TextArea, ToggleSwitch } from "@pi-dash/ui";
+import { CustomSelect, Input, TextArea } from "@pi-dash/ui";
 import { renderFormattedDate } from "@pi-dash/utils";
 import { CoverImage } from "@/components/common/cover-image";
 import { ImagePickerPopover } from "@/components/core/image-picker-popover";
@@ -458,27 +458,39 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
           </div>
         </div>
         <div className="flex flex-col gap-1">
-          <h4 className="text-13">{t("Use Pi Dash Cloud Agent by default")}</h4>
+          <h4 className="text-13">{t("Default AI execution target")}</h4>
           <div className="flex items-start justify-between gap-4">
             <p className="text-11 text-tertiary">
-              {cloudExecutorOption?.available === false
-                ? cloudExecutorOption.reason_code === "llm_config_missing"
-                  ? t("Configure your AI provider in Pi Dash AI settings to use the Cloud Agent.")
-                  : t("Unavailable on this instance. Ask an administrator to enable the Cloud Agent.")
-                : t(
-                    "New work items run on the Cloud Agent — no machine required. Turn this off to default to this project's pod instead. Either way both remain selectable per work item."
-                  )}
+              {t(
+                "Choose where this project's new runs execute. Pi Dash Agent requires the user's desktop app to remain open. Work items can override this default."
+              )}
             </p>
             <Controller
               name="default_agent_executor"
               control={control}
               render={({ field: { value, onChange } }) => (
-                <ToggleSwitch
-                  value={value === "cloud_agent"}
-                  onChange={(enabled) => onChange(enabled ? "cloud_agent" : "local_runner")}
-                  disabled={!isAdmin || cloudExecutorOption?.available === false}
-                  size="sm"
-                />
+                <select
+                  aria-label={t("Default AI execution target")}
+                  value={value ?? "local_runner"}
+                  onChange={(event) => onChange(event.target.value)}
+                  disabled={!isAdmin}
+                  className="rounded-md border border-subtle bg-surface-1 px-2 py-1 text-13"
+                >
+                  <option value="local_runner">{t("Local runner")}</option>
+                  <option value="cloud_agent" disabled={cloudExecutorOption?.available === false}>
+                    {t("Pi Dash Cloud Agent")}
+                  </option>
+                  <option
+                    value="managed_runner"
+                    disabled={
+                      !project.agent_executor_options?.some(
+                        (option) => option.kind === "managed_runner" && option.available
+                      )
+                    }
+                  >
+                    {t("Pi Dash Agent (desktop)")}
+                  </option>
+                </select>
               )}
             />
           </div>

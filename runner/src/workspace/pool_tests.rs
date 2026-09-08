@@ -341,16 +341,22 @@ async fn aborted_lease_salvages_dirty_tree_to_branch() {
 
     // Drop WITHOUT mark_success → outcome Aborted → salvage should commit.
     drop(lease);
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     // The WIP commit must be the tip of feat/x in the canonical clone's object
-    // DB. Check the latest commit message on feat/x.
-    let out = Command::new("git")
-        .current_dir(&canonical)
-        .args(["log", "-1", "--format=%s", "feat/x"])
-        .output()
-        .unwrap();
-    let subject = String::from_utf8_lossy(&out.stdout);
+    // DB. Wait for the observable result, not an assumed 300ms CI deadline.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let subject = loop {
+        let out = Command::new("git")
+            .current_dir(&canonical)
+            .args(["log", "-1", "--format=%s", "feat/x"])
+            .output()
+            .unwrap();
+        let subject = String::from_utf8_lossy(&out.stdout).into_owned();
+        if subject.contains("wip(pidash): salvaged") || tokio::time::Instant::now() >= deadline {
+            break subject;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
     assert!(
         subject.contains("wip(pidash): salvaged"),
         "feat/x tip should be the salvage commit, got: {subject}"

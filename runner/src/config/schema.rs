@@ -265,6 +265,28 @@ pub enum CleanMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodexSection {
     pub binary: String,
+    /// Managed-runner only: private `CODEX_HOME` this runner's agent uses.
+    ///
+    /// When set, the daemon exports it for the agent process so the bundled
+    /// engine reads Pi Dash's configuration instead of `~/.codex`, and the
+    /// user's own Codex install (if any) is neither read nor written. `None`
+    /// for user-enrolled runners, which keeps their behaviour byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_home: Option<PathBuf>,
+    /// Managed-runner only: directory prepended to the agent's `PATH`.
+    ///
+    /// Carries the bundled `pidash` CLI so the agent's `pidash issue|comment|
+    /// workpad` calls resolve to the app's copy rather than whatever is on the
+    /// user's `PATH` — or nothing at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_prepend: Option<PathBuf>,
+    /// Managed-runner only: file holding the short-lived model credential.
+    ///
+    /// Read once per agent spawn rather than cached, so a token the desktop
+    /// rotated between runs takes effect without restarting the daemon. Never
+    /// stored in this config, and never passed on a command line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_token_file: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_default: Option<String>,
     /// Reasoning-effort tier passed to codex `turn/start` (`low` / `medium`
@@ -284,6 +306,9 @@ impl Default for CodexSection {
         // would 400 from the OpenAI side before doing any work.
         Self {
             binary: "codex".to_string(),
+            codex_home: None,
+            path_prepend: None,
+            model_token_file: None,
             model_default: None,
             effort_default: None,
         }
@@ -622,6 +647,27 @@ impl Config {
             }
         }
 
+        // Managed Codex fields are all-or-nothing (see IncompleteManagedCodex).
+        for r in &self.runners {
+            let present = [
+                ("codex_home", r.codex.codex_home.is_some()),
+                ("path_prepend", r.codex.path_prepend.is_some()),
+                ("model_token_file", r.codex.model_token_file.is_some()),
+            ];
+            let set_count = present.iter().filter(|(_, has)| *has).count();
+            if set_count != 0 && set_count != present.len() {
+                let missing: Vec<&str> = present
+                    .iter()
+                    .filter(|(_, has)| !*has)
+                    .map(|(name, _)| *name)
+                    .collect();
+                return Err(ConfigError::IncompleteManagedCodex {
+                    runner: r.name.clone(),
+                    missing: missing.join(", "),
+                });
+            }
+        }
+
         // Duplicate name / runner_id detection. O(n²) is fine at n≤50.
         for (i, a) in self.runners.iter().enumerate() {
             for b in self.runners.iter().skip(i + 1) {
@@ -840,6 +886,17 @@ pub enum ConfigError {
         workdir: String,
         workdir_path: String,
     },
+    /// A managed runner declared some but not all of the managed Codex fields.
+    ///
+    /// They are a set: without `codex_home` the engine would read the user's
+    /// personal config, without `path_prepend` the agent could not find the
+    /// bundled CLI, and without `model_token_file` it has no credential. A
+    /// partial set is always a bug in whatever wrote the file, so refuse to
+    /// start rather than run in a half-configured state.
+    IncompleteManagedCodex {
+        runner: String,
+        missing: String,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -937,6 +994,10 @@ impl std::fmt::Display for ConfigError {
                  An agent executing inside a pooled work dir's tree would trample \
                  its git state; bind the runner to the work dir instead \
                  (`pidash runner add --workdir {workdir}`) or move one of the paths."
+            ),
+            ConfigError::IncompleteManagedCodex { runner, missing } => write!(
+                f,
+                "configuration error: runner {runner:?} sets some managed Codex                  fields but is missing {missing}. These are written together by                  the Pi Dash desktop app; a partial set means the config was                  hand-edited or a write was interrupted. Re-open the project in                  Pi Dash Desktop to rewrite it."
             ),
         }
     }
@@ -1370,5 +1431,106 @@ mod tests {
         // keep_paths is empty → omitted; setup_command None → omitted.
         assert!(!out.contains("keep_paths"), "out: {out}");
         assert!(!out.contains("setup_command"), "out: {out}");
+    }
+
+    // -----------------------------------------------------------------
+    // Managed Codex fields (.ai_design/managed_runner/design.md §9.3, §12.3)
+    // -----------------------------------------------------------------
+
+    fn managed_runner(name: &str) -> RunnerConfig {
+        let mut r = runner(name, "/work/managed");
+        r.codex.binary = "/app/bin/pidash-agent-engine".into();
+        r.codex.codex_home = Some(PathBuf::from("/app/managed/codex-home"));
+        r.codex.path_prepend = Some(PathBuf::from("/app/bin"));
+        r.codex.model_token_file = Some(PathBuf::from("/app/managed/runtime/model.token"));
+        r
+    }
+
+    #[test]
+    fn managed_codex_fields_default_to_none() {
+        // A user-enrolled runner must be untouched by this feature: absent
+        // fields mean the agent inherits the operator's environment exactly
+        // as it always has.
+        let section = CodexSection::default();
+        assert!(section.codex_home.is_none());
+        assert!(section.path_prepend.is_none());
+        assert!(section.model_token_file.is_none());
+        assert!(config_with(vec![runner("a", "/work/a")]).validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_complete_managed_codex_set() {
+        assert!(config_with(vec![managed_runner("desktop-host")]).validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_partial_managed_codex_set() {
+        // Half a set is always a bug in whatever wrote the file. Starting
+        // anyway would run the bundled engine against the *user's* Codex
+        // config, or with no credential at all — both worse than refusing.
+        for drop_field in ["codex_home", "path_prepend", "model_token_file"] {
+            let mut r = managed_runner("desktop-host");
+            match drop_field {
+                "codex_home" => r.codex.codex_home = None,
+                "path_prepend" => r.codex.path_prepend = None,
+                _ => r.codex.model_token_file = None,
+            }
+            let err = config_with(vec![r]).validate().unwrap_err();
+            match &err {
+                ConfigError::IncompleteManagedCodex { runner, missing } => {
+                    assert_eq!(runner, "desktop-host");
+                    assert!(
+                        missing.contains(drop_field),
+                        "error should name the missing field, got {missing:?}"
+                    );
+                }
+                other => panic!("expected IncompleteManagedCodex for {drop_field}, got {other:?}"),
+            }
+            // And the message must tell the operator what to do about it.
+            assert!(
+                err.to_string().contains("Pi Dash Desktop"),
+                "message should point at the app that owns this config: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_and_manual_runners_coexist() {
+        // A user may run the desktop app and a hand-installed runner on the
+        // same machine; neither validation nor the other's config is affected.
+        let cfg = config_with(vec![
+            managed_runner("desktop-host"),
+            runner("manual", "/work/manual"),
+        ]);
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+    }
+
+    #[test]
+    fn managed_codex_fields_round_trip_through_toml() {
+        // The desktop writes this file and the daemon reads it back; a serde
+        // rename or skip_serializing_if mistake would silently drop the
+        // managed paths and send the engine at ~/.codex.
+        let cfg = config_with(vec![managed_runner("desktop-host")]);
+        let text = toml::to_string(&cfg).expect("serialise");
+        let back: Config = toml::from_str(&text).expect("deserialise");
+        let codex = &back.runners[0].codex;
+        assert_eq!(codex.codex_home.as_deref(), Some(Path::new("/app/managed/codex-home")));
+        assert_eq!(codex.path_prepend.as_deref(), Some(Path::new("/app/bin")));
+        assert_eq!(
+            codex.model_token_file.as_deref(),
+            Some(Path::new("/app/managed/runtime/model.token"))
+        );
+        assert_eq!(codex.binary, "/app/bin/pidash-agent-engine");
+    }
+
+    #[test]
+    fn manual_runner_toml_omits_managed_fields() {
+        // skip_serializing_if keeps existing config.toml files byte-stable,
+        // so upgrading the runner does not rewrite every operator's config.
+        let cfg = config_with(vec![runner("manual", "/work/manual")]);
+        let text = toml::to_string(&cfg).expect("serialise");
+        assert!(!text.contains("codex_home"), "unexpected key in:\n{text}");
+        assert!(!text.contains("path_prepend"), "unexpected key in:\n{text}");
+        assert!(!text.contains("model_token_file"), "unexpected key in:\n{text}");
     }
 }

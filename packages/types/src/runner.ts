@@ -164,7 +164,7 @@ export const AGENT_RUN_TERMINAL_STATUSES: readonly TAgentRunStatus[] = [
   "refused",
 ] as const;
 
-export type TAgentExecutorKind = "local_runner" | "cloud_agent";
+export type TAgentExecutorKind = "local_runner" | "cloud_agent" | "managed_runner";
 
 export interface IAgentRunToolCall {
   id: string;

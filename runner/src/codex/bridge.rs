@@ -11,6 +11,7 @@ use uuid::Uuid;
 pub use crate::agent::{BridgeEvent, RunPayload};
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, FailureReason};
 use crate::codex::app_server::AppServer;
+use crate::util::shell::AgentEnv;
 use crate::codex::jsonrpc::{self, Incoming};
 use crate::codex::schema::{
     ApprovalResponseParams, ClientInfo, InitializeParams, NotificationKind, ThreadStartParams,
@@ -40,7 +41,18 @@ impl Bridge {
         model_default: Option<String>,
         effort_default: Option<String>,
     ) -> Result<Self> {
-        let server = AppServer::spawn(binary, cwd).await?;
+        Self::spawn_with_env(binary, cwd, model_default, effort_default, &AgentEnv::default()).await
+    }
+
+    /// [`Bridge::spawn`] with a Pi Dash-controlled agent environment.
+    pub async fn spawn_with_env(
+        binary: &str,
+        cwd: &Path,
+        model_default: Option<String>,
+        effort_default: Option<String>,
+        env: &AgentEnv,
+    ) -> Result<Self> {
+        let server = AppServer::spawn_with_env(binary, cwd, env).await?;
         Ok(Self {
             server,
             model_default,
