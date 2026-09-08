@@ -45,6 +45,16 @@ pub enum ManagedCommand {
     Enroll(EnrollArgs),
     /// Drop a project's managed runner from local config.
     Remove(RemoveArgs),
+    /// Print the current model credential for the managed engine's auth helper.
+    ModelToken(ModelTokenArgs),
+    /// Refresh host-owned paths for all projects before starting the daemon.
+    Rebind(EnginePathsArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct ModelTokenArgs {
+    #[arg(long)]
+    pub file: PathBuf,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -68,26 +78,32 @@ pub struct EnrollArgs {
     pub workspace: String,
     #[arg(long)]
     pub project: String,
+    #[command(flatten)]
+    pub engine_paths: EnginePathsArgs,
+    /// Working copy root for this project.
+    #[arg(long)]
+    pub working_dir: PathBuf,
+    /// Runner name; defaults to `desktop-<hostname>`.
+    #[arg(long)]
+    pub name: Option<String>,
+    #[arg(long)]
+    pub host_label: Option<String>,
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct EnginePathsArgs {
     /// Absolute path of the bundled agent engine binary.
     #[arg(long)]
     pub engine: PathBuf,
     /// Private `CODEX_HOME` the desktop wrote for this install.
     #[arg(long)]
     pub codex_home: PathBuf,
-    /// Working copy root for this project.
-    #[arg(long)]
-    pub working_dir: PathBuf,
     /// Directory prepended to the agent's `PATH` (holds the bundled CLI).
     #[arg(long)]
     pub path_prepend: PathBuf,
     /// File the short-lived model credential is read from.
     #[arg(long)]
     pub model_token_file: PathBuf,
-    /// Runner name; defaults to `desktop-<hostname>`.
-    #[arg(long)]
-    pub name: Option<String>,
-    #[arg(long)]
-    pub host_label: Option<String>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -103,6 +119,17 @@ pub async fn run(args: ManagedArgs, paths: &Paths) -> Result<()> {
         ManagedCommand::Bootstrap(a) => bootstrap(a, paths).await,
         ManagedCommand::Enroll(a) => enroll(a, paths).await,
         ManagedCommand::Remove(a) => remove(a, paths),
+        ManagedCommand::Rebind(a) => set_engine_paths(paths, &a, None),
+        ManagedCommand::ModelToken(a) => {
+            let token = std::fs::read_to_string(&a.file)
+                .context("managed model credential unavailable; reconnect Pi Dash Desktop")?;
+            let token = token.trim();
+            if token.is_empty() || token.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                anyhow::bail!("managed model credential is empty or malformed");
+            }
+            println!("{token}");
+            Ok(())
+        }
     }
 }
 
@@ -145,6 +172,8 @@ async fn enroll(args: EnrollArgs, paths: &Paths) -> Result<()> {
         .iter()
         .find(|r| r.project_slug.as_deref() == Some(args.project.as_str()))
     {
+        set_managed_codex_fields(paths, &args)?;
+        activate_if_running(paths, &existing.name).await?;
         println!(
             "{{\"ok\":true,\"reused\":true,\"runner_id\":\"{}\",\"name\":{:?}}}",
             existing.runner_id, existing.name
@@ -200,6 +229,7 @@ async fn enroll(args: EnrollArgs, paths: &Paths) -> Result<()> {
     // bundled engine, and threading them through would put desktop-only
     // concepts into the shared enrollment path.
     set_managed_codex_fields(paths, &args)?;
+    activate_if_running(paths, &applied.runner.name).await?;
 
     println!(
         "{{\"ok\":true,\"reused\":false,\"runner_id\":\"{}\",\"name\":{:?},\"first_runner\":{}}}",
@@ -222,23 +252,63 @@ fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// Apply the managed Codex paths to the runner block for `args.project`.
-fn set_managed_codex_fields(paths: &Paths, args: &EnrollArgs) -> Result<()> {
-    let mut cfg = file::load_config(paths).context("re-loading config.toml")?;
-    let Some(runner) = cfg
-        .runners
-        .iter_mut()
-        .find(|r| r.project_slug.as_deref() == Some(args.project.as_str()))
-    else {
-        anyhow::bail!("enrolled runner for {:?} not found in config", args.project);
+/// A new project joins the already-running daemon instead of waiting for an
+/// app restart. The first enrollment has no daemon yet; the host starts it.
+async fn activate_if_running(paths: &Paths, name: &str) -> Result<()> {
+    use crate::ipc::{
+        client::Client,
+        protocol::{Request, Response},
     };
-    runner.codex.binary = args.engine.to_string_lossy().into_owned();
-    runner.codex.codex_home = Some(args.codex_home.clone());
-    runner.codex.path_prepend = Some(args.path_prepend.clone());
-    runner.codex.model_token_file = Some(args.model_token_file.clone());
-    cfg.validate()
-        .map_err(|e| anyhow::anyhow!("managed config failed validation: {e}"))?;
-    file::write_config(paths, &cfg).context("writing managed Codex fields")
+    let Ok(mut client) = Client::connect(paths.ipc_socket_path()).await else {
+        return Ok(());
+    };
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.call(Request::RunnerActivateLocal {
+            runner: name.to_owned(),
+        }),
+    )
+    .await
+    .context("timed out activating managed runner")??;
+    match response {
+        Response::Ack => Ok(()),
+        Response::Error(error) => anyhow::bail!("activating managed runner: {}", error.message),
+        _ => anyhow::bail!("unexpected managed runner activation response"),
+    }
+}
+
+/// Refresh all host-owned engine paths before the daemon starts. AppImage
+/// resource paths change on every launch, including for projects not reopened.
+/// Working directories and user-installed runners are deliberately preserved.
+fn set_managed_codex_fields(paths: &Paths, args: &EnrollArgs) -> Result<()> {
+    set_engine_paths(paths, &args.engine_paths, Some(&args.project))
+}
+
+fn set_engine_paths(paths: &Paths, args: &EnginePathsArgs, project: Option<&str>) -> Result<()> {
+    file::mutate_config(paths, |cfg| {
+        if project.is_some_and(|project| {
+            !cfg.runners
+                .iter()
+                .any(|r| r.project_slug.as_deref() == Some(project))
+        }) {
+            anyhow::bail!("enrolled runner for {project:?} not found in config");
+        }
+        for runner in &mut cfg.runners {
+            if (project.is_some() && runner.project_slug.as_deref() == project)
+                || runner.codex.codex_home.is_some()
+                || runner.codex.model_token_file.is_some()
+            {
+                runner.codex.binary = args.engine.to_string_lossy().into_owned();
+                runner.codex.codex_home = Some(args.codex_home.clone());
+                runner.codex.path_prepend = Some(args.path_prepend.clone());
+                runner.codex.model_token_file = Some(args.model_token_file.clone());
+            }
+        }
+        cfg.validate()
+            .map_err(|e| anyhow::anyhow!("managed config failed validation: {e}"))?;
+        Ok(())
+    })
+    .map(|_| ())
 }
 
 /// Best-effort host name for the runner label; the cloud only uses it for

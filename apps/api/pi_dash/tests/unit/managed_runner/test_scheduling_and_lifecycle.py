@@ -175,6 +175,23 @@ def test_sweep_leaves_a_recent_wait_alone(project, create_user, bundled_runner):
     assert run.status == AgentRunStatus.QUEUED
 
 
+@pytest.mark.parametrize("new_status", [AgentRunStatus.ASSIGNED, AgentRunStatus.RUNNING, AgentRunStatus.CANCELLED])
+@override_settings(**MANAGED_SETTINGS, MANAGED_RUNNER_QUEUED_MAX_AGE_SECS=3600)
+def test_sweep_rechecks_status_after_its_scan(project, create_user, bundled_runner, monkeypatch, new_status):
+    from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+    run = _waiting_run(project, create_user, bundled_runner, age=timedelta(hours=2))
+
+    def transition_before_lock(run_id, *args, **kwargs):
+        AgentRun.objects.filter(pk=run_id).update(status=new_status, runner=bundled_runner)
+        return finalize_agent_run(run_id, *args, **kwargs)
+
+    monkeypatch.setattr("pi_dash.managed_runner.tasks.finalize_agent_run", transition_before_lock)
+    assert expire_waiting_runs() == 0
+    run.refresh_from_db()
+    assert run.status == new_status
+
+
 @override_settings(**MANAGED_SETTINGS, MANAGED_RUNNER_QUEUED_MAX_AGE_SECS=3600)
 def test_sweep_fails_a_wait_that_outlived_the_bound(project, create_user, bundled_runner):
     run = _waiting_run(project, create_user, bundled_runner, age=timedelta(hours=2))

@@ -3,6 +3,8 @@
 //! `interrupt`, `shutdown`) through [`AgentBridge`], so the supervisor does
 //! not have to know which underlying CLI is driving a run.
 
+pub mod package;
+
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::collections::VecDeque;

@@ -434,6 +434,24 @@ tickets.
 
 ## 9. Managed runner provisioning (desktop side)
 
+### OSS extension boundary: developer-owned packages
+
+The private desktop's bundled-engine product is separate from the OSS
+bring-your-own-package seam. OSS exposes `agent::package::AgentPackage` and
+`pidash runner use-package <name> --manifest <local-path>` for developers who
+already supply their own executable. A versioned local manifest selects an
+existing bridge protocol and executable path; applying it changes only that
+runner's agent kind and binary. It does not enroll a desktop, mark a runner as
+managed, install/download code, configure or distribute model credentials, or
+restart a running daemon. Existing runners remain unchanged by default.
+
+The integrator owns package delivery, compatibility, credentials, dependencies,
+updates, licensing and lifecycle. Entirely new protocols need an adapter; the
+manifest is not an arbitrary in-process plugin loader. Runners with private
+desktop-managed credential fields cannot be repurposed through this seam.
+See [`runner/docs/agent-packages.md`](../../runner/docs/agent-packages.md) for
+the version 1 contract and supported protocols.
+
 ### 9.1 Bundle layout
 
 Tauri `bundle.resources` (not `externalBin`; the project deliberately does
@@ -462,7 +480,7 @@ certificate during notarization (§24.2).
     data/ , runtime/        passed as data_override / runtime dir
   codex-home/
     config.toml             §12 — model provider, instructions, policy
-    (no auth.json)          model auth is env-injected per spawn, never persisted
+    (no auth.json)          model auth is read by the command-backed helper
   workdirs/
     <workspace-slug>/<project-slug>/   working copy per project (direct mode, §9.4)
   runtime/
@@ -622,8 +640,10 @@ scope here.
 
 - **Upgrade.** Codex and `pidash` versions are pinned per app release and
   update with the app through the existing updater
-  (`api/desktop/updates/…`). On upgrade the host rewrites `codex.binary`
-  and restarts the daemon.
+  (`api/desktop/updates/…`). Before starting each workspace daemon, the host
+  runs `pidash __managed rebind` to refresh all managed engine/resource paths,
+  including projects not reopened. This also handles changing AppImage mounts
+  on ordinary restarts. Runner IDs and working directories are preserved.
 - **Sign-out.** Stop the daemon, delete `runtime/model.token`, call
   `DELETE /api/v1/runner/dev-machines/desktop-enroll/` (revokes the
   `MachineToken`), remove `[cli].token` from the managed config. Runner
@@ -713,8 +733,11 @@ instructions    = "<Pi Dash base guidance>"
 name      = "Pi Dash"
 base_url  = "<OPENHUB_GATEWAY_BASE_URL>/v1"
 wire_api  = "responses"                 # the only wire API Codex supports
-env_key   = "PIDASH_GATEWAY_TOKEN"      # injected per spawn; never on disk
-requires_openai_auth = false            # no login screen, no auth.json
+[model_providers.pidash.auth]
+command = "<absolute bundled pidash path>"
+args = ["__managed", "model-token", "--file", "<managed/runtime/model.token>"]
+timeout_ms = 5000
+refresh_interval_ms = 30000
 
 [mcp_servers]                            # empty in v1 — §11
 ```
@@ -722,6 +745,13 @@ requires_openai_auth = false            # no login screen, no auth.json
 Exact `model_providers` fields per `model-provider-info/src/lib.rs:97`
 (`base_url`, `env_key`, `experimental_bearer_token`, `auth` command-backed
 token, `env_http_headers`, `requires_openai_auth`).
+
+The implementation uses command-backed auth, without `env_key`, a static
+bearer token, or `requires_openai_auth`. The helper prints only the current
+file contents and fails closed when the credential is missing or invalid.
+Codex refreshes during a running session and retries authentication failures;
+the host remains responsible for obtaining and atomically storing fresh tokens.
+See the [official configuration reference](https://developers.openai.com/codex/config-reference).
 
 ### 12.2 The engine honours the user's Pi Dash LLM settings
 
@@ -829,9 +859,12 @@ Extend the same mechanism:
 [ -n "${PIDASH_AGENT_CWD-}" ]      && cd -- "$PIDASH_AGENT_CWD"
 [ -n "${PIDASH_CODEX_HOME-}" ]     && export CODEX_HOME="$PIDASH_CODEX_HOME"
 [ -n "${PIDASH_AGENT_PATH_PREPEND-}" ] && export PATH="$PIDASH_AGENT_PATH_PREPEND:$PATH"
-[ -n "${PIDASH_GATEWAY_TOKEN_FILE-}" ] && export PIDASH_GATEWAY_TOKEN="$(cat "$PIDASH_GATEWAY_TOKEN_FILE")"
 exec "$@"
 ```
+
+Legacy environment-token injection remains supported by the runner, but the
+current desktop config uses the command-backed helper (§12.1), so its model
+credential is not frozen in the engine's process environment.
 
 The agent's own `pidash issue|comment|workpad|…` calls (§11) resolve
 their cloud URL, workspace and token from the config in
@@ -909,15 +942,15 @@ terminal, another app, or after the user signs out of Pi Dash.
 An executable the user owns cannot be made un-runnable. It **can** be made
 useless outside the app, which satisfies the intent:
 
-| Property                          | How                                                                                                                                                                                                                                                                                               |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Separate namespace**            | own binary path under app resources, shipped as `pidash-agent-engine` rather than `codex` (rename verified in §24.8); own `CODEX_HOME`; own `pidash` config/data/runtime dirs; own workdir pool. Zero reads or writes to `~/.codex`, `~/.config/pidash`, or anything on the user's `PATH`.        |
-| **No standalone auth path**       | `requires_openai_auth = false`; no `auth.json` is ever created; ChatGPT OAuth is never invoked. The only credential Codex sees is the gateway token, injected per spawn from a runtime file the desktop host owns and deletes on sign-out (§12.3, §14.2).                                         |
-| **Auth inherited from Pi Dash**   | the gateway token is derived from the desktop session by the host and refreshed by the host. Nothing else can mint it.                                                                                                                                                                            |
-| **Dead on sign-out**              | sign-out stops the daemon, deletes the token file, revokes the `MachineToken`, and removes the `[cli].token`. A copied binary plus a copied config directory has no way to reach the gateway or the cloud.                                                                                        |
-| **Dead when the app is closed**   | the daemon is a child of the app, not a service; the token file lives in `runtime_dir` and is removed on exit.                                                                                                                                                                                    |
-| **Not invokable from a terminal** | running the binary by absolute path yields a Codex with no provider credential (`env_key` unset → the provider refuses) and no MCP servers; running the bundled `pidash` without the override paths finds no config. Neither is on `PATH`, neither has a shell completion, neither is documented. |
-| **Distinct wire identity**        | desktop model traffic is attributable to the app on the OpenHub side — mechanism is §24.4 (the gateway token is the user's IdP access token, so Pi Dash cannot add a claim to it; attribution has to be a request header or a per-client credential OpenHub defines).                             |
+| Property                           | How                                                                                                                                                                                                                                                                                        |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Separate namespace**             | own binary path under app resources, shipped as `pidash-agent-engine` rather than `codex` (rename verified in §24.8); own `CODEX_HOME`; own `pidash` config/data/runtime dirs; own workdir pool. Zero reads or writes to `~/.codex`, `~/.config/pidash`, or anything on the user's `PATH`. |
+| **No standalone auth path**        | Command-backed auth reads only Pi Dash's runtime credential file; no `auth.json`, OpenAI key, or ChatGPT login is configured (§12.1, §14.2).                                                                                                                                               |
+| **Auth inherited from Pi Dash**    | the gateway token is derived from the desktop session by the host and refreshed by the host. Nothing else can mint it.                                                                                                                                                                     |
+| **Dead on sign-out**               | sign-out stops the daemon, deletes the token file, revokes the `MachineToken`, and removes the `[cli].token`. A copied binary plus a copied config directory has no way to reach the gateway or the cloud.                                                                                 |
+| **Dead when the app is closed**    | the daemon is a child of the app, not a service; the token file lives in `runtime_dir` and is removed on exit.                                                                                                                                                                             |
+| **Managed configuration required** | The bundled engine has no Pi Dash credentials without the managed configuration and runtime file. This is not DRM: the OS user controls their own binaries and files.                                                                                                                      |
+| **Distinct wire identity**         | desktop model traffic is attributable to the app on the OpenHub side — mechanism is §24.4 (the gateway token is the user's IdP access token, so Pi Dash cannot add a claim to it; attribution has to be a request header or a per-client credential OpenHub defines).                      |
 
 The one thing this does not do is DRM: a determined user with a live
 session could extract the short-lived token while the app is open. That
@@ -937,12 +970,12 @@ argued separately; v1 relaxes nothing.
 
 ### 14.2 Credentials on the laptop
 
-| Secret                | Where                                                        | Lifetime                                                                                            |
-| --------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| Pi Dash session       | webview cookie jar (existing)                                | existing                                                                                            |
-| `MachineToken`        | `managed/pidash/credentials`, `0600`                         | until sign-out / revoke                                                                             |
-| OpenHub gateway token | `managed/runtime/model.token`, `0600`, rewritten by the host | the IdP access token's own TTL; refreshed by the host before expiry (§14.3), re-read per spawn      |
-| `[cli].token`         | `config.toml` (existing `pidash` layout)                     | **is** the MachineToken (`cli/auth/login.rs:57` writes the machine token there); one token, not two |
+| Secret                | Where                                                        | Lifetime                                                                                                            |
+| --------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| Pi Dash session       | webview cookie jar (existing)                                | existing                                                                                                            |
+| `MachineToken`        | `managed/pidash/credentials`, `0600`                         | until sign-out / revoke                                                                                             |
+| OpenHub gateway token | `managed/runtime/model.token`, `0600`, rewritten by the host | the IdP access token's own TTL; refreshed by the host before expiry (§14.3), re-read by the auth helper during runs |
+| `[cli].token`         | `config.toml` (existing `pidash` layout)                     | **is** the MachineToken (`cli/auth/login.rs:57` writes the machine token there); one token, not two                 |
 
 No OpenAI key, no ChatGPT credential, no BYOK key, no `auth.json`.
 
@@ -956,12 +989,11 @@ cookies, bounded the same way (short TTL, deleted on sign-out, never
 written anywhere but the `0600` runtime file). The refresh token never
 leaves the server.
 
-Open item §24.4: long runs must survive token expiry. Codex reads
-`env_key` at spawn; a run longer than the token TTL fails at the gateway
-with a 401 the bridge surfaces as `AwaitingReauth`. Options: a longer-lived
-desktop-scoped gateway token, or Codex's command-backed `auth` provider
-(`model-provider-info/src/lib.rs:113`) invoking a `pidash` subcommand that
-returns a fresh token from the IPC socket. Decide before implementation.
+Resolved: long runs use the command-backed `auth` provider (§12.1), invoking
+`pidash __managed model-token --file <absolute path>` to re-read the host's
+credential file. The refresh token never leaves the server. A real-engine
+offline regression completes two turns in one process, simulates a gateway
+401 between them, and verifies that the retry carries the rotated credential.
 
 ### 14.3 Token delivery endpoint
 
@@ -977,10 +1009,11 @@ current token until it expires).
 
 Client behaviour (overlay JS → host via `invoke`):
 
-- fetch on daemon start, then re-fetch at 80% of the remaining TTL;
+- fetch on daemon start; check every minute and on focus, refreshing when
+  fewer than two minutes of the actual token TTL remain;
 - write atomically (temp file + rename) to `managed/runtime/model.token`;
-- the daemon reads the file **per spawn** (§12.3), so a rotated token
-  applies to the next run without a restart;
+- the engine's auth helper re-reads the file during the run (§12.1), so a
+  rotated token applies without a process or task restart;
 - on `401` stop the daemon, delete the file, surface "Sign in again".
 
 §24.4 covers the case of a single run outliving one token.
@@ -1259,12 +1292,10 @@ backward-compatible `pidash` release; row 13 depends on 9, 9a and 12.
 3. **Windows.** `login_shell_command` on Windows spawns directly with no
    shell; verify the managed env path and Codex's Windows sandbox
    behaviour on a real install rather than assuming Unix parity.
-4. **Gateway token TTL vs. run length, and client attribution.** The
-   token is the user's home-page access token; its TTL bounds a single
-   run unless Codex's command-backed `auth` provider is used to re-read
-   the file mid-run (§14.2). Attribution cannot be a claim Pi Dash adds;
-   OpenHub must define a request header or a per-client credential.
-   Both need an answer from the OpenHub side before §14.3 is final.
+4. **Gateway client attribution.** Token rotation during long runs is
+   implemented with command-backed auth (§14.2). Attribution cannot be a
+   claim Pi Dash adds; OpenHub must define a request header or a per-client
+   credential. Attribution remains an OpenHub-side decision.
 5. **OpenHub `/v1/responses` coverage.** The gateway README says
    Responses is "served natively where the provider supports it". Confirm
    that the default desktop model's provider supports streaming +

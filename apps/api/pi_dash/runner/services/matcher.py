@@ -186,6 +186,12 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
         )
     )
     qs = filter_runs_usable_by_runner(qs, runner)
+    from pi_dash.runner.models import RunnerProvisioning
+
+    if runner.provisioning == RunnerProvisioning.DESKTOP_BUNDLED:
+        qs = qs.filter(executor_kind=AgentExecutorKind.MANAGED_RUNNER, pinned_runner=runner)
+    else:
+        qs = qs.filter(executor_kind=AgentExecutorKind.LOCAL_RUNNER)
     return (
         qs
         # Pinned-to-me sorts before unpinned via an integer rank: 0 for the

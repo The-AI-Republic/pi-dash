@@ -165,30 +165,14 @@ impl Supervisor {
         // case IPC falls back to the daemon-level state.
         let primary = instances.first().cloned();
 
-        // Snapshot of every configured runner the IPC server can
-        // route requests to. Built once at startup; runtime add /
-        // remove (Phase 7 of the parent design) will mutate this map
-        // when that work lands.
+        // Shared registry for IPC routing, including runners activated
+        // after startup by local enrollment or machine control.
         let ipc_instances: HashMap<uuid::Uuid, RunnerInstance> = instances
             .iter()
             .cloned()
             .map(|i| (i.runner_id, i))
             .collect();
-        let ipc = IpcServer {
-            path: paths.ipc_socket_path(),
-            primary_state: primary
-                .as_ref()
-                .map(|p| p.state.clone())
-                .unwrap_or_else(|| state.clone()),
-            paths: paths.clone(),
-            instances: Arc::new(ipc_instances),
-            pools: pools.clone(),
-        };
-        let ipc_handle = tokio::spawn(async move {
-            if let Err(e) = ipc.run().await {
-                tracing::error!("ipc server exited: {e:#}");
-            }
-        });
+        let ipc_instances = Arc::new(std::sync::RwLock::new(ipc_instances));
 
         if opts.offline {
             tracing::info!("offline mode: HTTP transport disabled");
@@ -206,7 +190,26 @@ impl Supervisor {
             mailboxes: mailboxes.clone(),
             hello_runners: hello_runners.clone(),
             daemon_state: state.clone(),
+            instances: ipc_instances.clone(),
+            activation_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
+
+        let ipc = IpcServer {
+            path: paths.ipc_socket_path(),
+            primary_state: primary
+                .as_ref()
+                .map(|p| p.state.clone())
+                .unwrap_or_else(|| state.clone()),
+            paths: paths.clone(),
+            instances: ipc_instances,
+            pools: pools.clone(),
+            spawn_ctx: spawn_ctx.clone(),
+        };
+        let ipc_handle = tokio::spawn(async move {
+            if let Err(e) = ipc.run().await {
+                tracing::error!("ipc server exited: {e:#}");
+            }
+        });
 
         // One RunnerLoop per instance. Each consumes from its mailbox.
         let mut loop_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
@@ -314,6 +317,8 @@ async fn build_runner_instance(
         RunnerInstance::new_offline(runner_cfg, paths, daemon.clone())
     };
     inst.paths.ensure()?;
+    // IPC must report the configured identity even before the first heartbeat.
+    inst.state.set_runner_id(inst.runner_id).await;
     Ok(inst)
 }
 
@@ -330,9 +335,31 @@ pub(crate) struct RunnerSpawnCtx {
     mailboxes: Arc<RwLock<HashMap<uuid::Uuid, mpsc::Sender<InboundEnvelope>>>>,
     hello_runners: Arc<RwLock<HelloRunnerMap>>,
     daemon_state: StateHandle,
+    instances: Arc<std::sync::RwLock<HashMap<uuid::Uuid, RunnerInstance>>>,
+    activation_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl RunnerSpawnCtx {
+    pub(crate) async fn activate_configured(&self, name: &str) -> Result<()> {
+        let cfg = crate::config::file::load_config(&self.paths)?;
+        cfg.validate()
+            .map_err(|e| anyhow::anyhow!("invalid config: {e}"))?;
+        if cfg.daemon.cloud_url != self.daemon.cloud_url
+            || cfg.daemon.dev_machine_id != self.daemon.dev_machine_id
+            || cfg.cli.as_ref().and_then(|cli| cli.token.as_deref())
+                != self.shared_machine_token.as_deref()
+        {
+            anyhow::bail!("daemon identity changed; restart before activating a runner");
+        }
+        let runner = cfg
+            .runners
+            .into_iter()
+            .find(|r| r.name == name)
+            .ok_or_else(|| anyhow::anyhow!("no configured runner named {name:?}"))?;
+        // add_runner initializes any new pool before registering the runner.
+        self.add_runner(runner).await
+    }
+
     pub(crate) fn cloud_url(&self) -> String {
         self.daemon.cloud_url.clone()
     }
@@ -342,11 +369,17 @@ impl RunnerSpawnCtx {
     /// Registers the instance in the shared mailbox / hello maps and
     /// spawns the same three tasks the startup loop spawns. Handles are
     /// deliberately detached: on daemon shutdown the tasks die with the
-    /// process, and the graceful drain walks `hello_runners`, which
-    /// includes hot-added runners. Known gap: the IPC server's instance
-    /// snapshot is built at startup, so the TUI won't list this runner
-    /// until the next daemon restart.
+    /// process, and the graceful drain and IPC registry include hot-added runners.
     pub(crate) async fn add_runner(&self, runner_cfg: RunnerConfig) -> Result<()> {
+        let _activation = self.activation_lock.lock().await;
+        if self
+            .instances
+            .read()
+            .expect("runner registry poisoned")
+            .contains_key(&runner_cfg.runner_id)
+        {
+            return Ok(());
+        }
         // Auto-pooled runners created from the cloud/UI reference a
         // `[[workdir]]` pool, but pools are otherwise seeded once at startup.
         // Build and register this runner's pool now if it isn't live yet —
@@ -384,7 +417,11 @@ impl RunnerSpawnCtx {
             );
         }
         let _tasks = spawn_instance_tasks(&inst, self).await;
-        tracing::info!(runner_id = %inst.runner_id, name = %inst.name, "hot-added runner from machine control session");
+        self.instances
+            .write()
+            .expect("runner registry poisoned")
+            .insert(inst.runner_id, inst.clone());
+        tracing::info!(runner_id = %inst.runner_id, name = %inst.name, "activated runner in running daemon");
         Ok(())
     }
 

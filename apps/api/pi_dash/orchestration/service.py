@@ -526,7 +526,8 @@ def _create_project_move_handoff_run(*, issue: Issue, parent: AgentRun, pod: Pod
 
     The source run remains the lineage parent for audit/history only. Runner
     affinity is deliberately cleared because a source-pod runner can never
-    consume a target-pod run. The replacement goes through the executor seam
+    consume a target-pod run. A managed pin selected for the destination is
+    preserved. The replacement goes through the executor seam
     so a cloud-executor target project gets a dispatchable cloud run rather
     than a local row no runner will ever consume.
     """
@@ -549,7 +550,7 @@ def _create_project_move_handoff_run(*, issue: Issue, parent: AgentRun, pod: Pod
         logger.warning("orchestration.project_move_handoff: executor unavailable: %s", exc)
         execution = {"executor_kind": AgentExecutorKind.LOCAL_RUNNER, "tool_plan": {}}
     admission_error = execution.pop("_cloud_admission_error", None)
-    execution.pop("pinned_runner", None)
+    pinned_runner = execution.pop("pinned_runner", None)
 
     with transaction.atomic():
         existing = _active_run_for(issue)
@@ -561,7 +562,7 @@ def _create_project_move_handoff_run(*, issue: Issue, parent: AgentRun, pod: Pod
             pod=pod,
             work_item=issue,
             parent_run=parent,
-            pinned_runner=None,
+            pinned_runner=pinned_runner,
             status=AgentRunStatus.QUEUED,
             trigger=parent.trigger,
             prompt="",

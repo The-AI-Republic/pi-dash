@@ -48,6 +48,7 @@ def expire_waiting_runs() -> int:
         if finalize_agent_run(
             run_id,
             AgentRunStatus.FAILED,
+            expected_status=AgentRunStatus.QUEUED,
             updates={
                 "error_code": ManagedRunnerReason.NOT_CONNECTED,
                 "error": (

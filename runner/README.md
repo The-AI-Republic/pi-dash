@@ -2,6 +2,20 @@
 
 Local daemon + TUI (`pidash` binary) that connects a developer machine to the Pi Dash cloud and drives `codex app-server` for assigned tasks.
 
+## Developer-owned agent packages
+
+OSS exposes an optional [agent package seam](docs/agent-packages.md) for
+developers who supply their own executable or protocol adapter:
+
+```bash
+pidash runner use-package my-runner --manifest /path/to/agent-package.toml
+```
+
+The manifest selects an existing bridge protocol and a local executable. OSS
+does not bundle, download, install, authenticate, or update the agent package.
+The developer owns those responsibilities and restarts the owning daemon when
+idle. Ordinary task folders do not require Git.
+
 ## Install
 
 Prebuilt binaries for macOS (arm64, x86_64), Linux (arm64, x86_64 — glibc and musl), and Windows (x86_64) are published to GitHub Releases. The one-liners below download the installer, verify checksums, drop `pidash` into the standard install path, and immediately start the device-code login so the host is registered with your Pi Dash cloud before you leave the terminal.

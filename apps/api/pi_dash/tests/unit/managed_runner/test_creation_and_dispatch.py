@@ -44,6 +44,45 @@ def _fields(project, user, **kw):
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("online", [True, False])
+@override_settings(**MANAGED_SETTINGS)
+def test_project_move_preserves_destination_managed_pin(
+    project, create_user, bundled_runner, issue_for_project, openhub_lane, online
+):
+    from unittest.mock import patch
+    from django.db import transaction
+    from pi_dash.orchestration.service import _create_project_move_handoff_run
+
+    if not online:
+        bundled_runner.status = RunnerStatus.OFFLINE
+        bundled_runner.save(update_fields=["status"])
+    issue = issue_for_project
+    issue.agent_executor = AgentExecutorKind.MANAGED_RUNNER
+    issue.save(update_fields=["agent_executor"])
+    parent = AgentRun.objects.create(
+        workspace=project.workspace,
+        created_by=create_user,
+        pod=bundled_runner.pod,
+        work_item=issue,
+        executor_kind=AgentExecutorKind.LOCAL_RUNNER,
+        status=AgentRunStatus.CANCELLED,
+        prompt="prior run",
+    )
+    with patch("pi_dash.orchestration.service.build_first_turn", return_value="moved task"), patch(
+        "pi_dash.cloud_agent.creation.dispatch_after_commit"
+    ):
+        run = _create_project_move_handoff_run(issue=issue, parent=parent, pod=bundled_runner.pod)
+    assert run.executor_kind == AgentExecutorKind.MANAGED_RUNNER
+    assert run.pinned_runner_id == bundled_runner.id
+    assert run.status == AgentRunStatus.QUEUED
+    if not online:
+        assert run.error_code == ManagedRunnerReason.NOT_CONNECTED
+        bundled_runner.status = RunnerStatus.ONLINE
+        bundled_runner.save(update_fields=["status"])
+    with transaction.atomic():
+        assert matcher.next_for_runner(bundled_runner).id == run.id
+
+
 @override_settings(**MANAGED_SETTINGS)
 def test_resolve_accepts_managed_when_enabled(project):
     assert (
@@ -162,6 +201,60 @@ def test_managed_run_row_is_insertable_with_a_pinned_runner(
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("drain", ["runner", "pod"])
+def test_actual_dispatch_keeps_unpinned_local_work_off_desktop(project, create_user, bundled_runner, drain):
+    from unittest.mock import patch
+
+    pod = project.pods.get(is_default=True)
+    run = AgentRun.objects.create(
+        workspace=project.workspace,
+        created_by=create_user,
+        pod=pod,
+        executor_kind=AgentExecutorKind.LOCAL_RUNNER,
+        status=AgentRunStatus.QUEUED,
+        prompt="",
+    )
+    with patch("pi_dash.runner.services.pubsub.send_to_runner"):
+        if drain == "runner":
+            assert matcher.drain_for_runner(bundled_runner) is False
+        else:
+            assert matcher.drain_pod(pod) == 0
+    run.refresh_from_db()
+    assert run.status == AgentRunStatus.QUEUED
+    assert run.runner_id is None
+
+
+def test_actual_dispatch_delivers_only_managed_pin_to_desktop(project, create_user, bundled_runner):
+    from unittest.mock import patch
+
+    run = AgentRun.objects.create(
+        workspace=project.workspace,
+        created_by=create_user,
+        pod=bundled_runner.pod,
+        executor_kind=AgentExecutorKind.MANAGED_RUNNER,
+        pinned_runner=bundled_runner,
+        status=AgentRunStatus.QUEUED,
+        prompt="",
+    )
+    with patch("pi_dash.runner.services.pubsub.send_to_runner"):
+        assert matcher.drain_for_runner(bundled_runner) is True
+    run.refresh_from_db()
+    assert run.runner_id == bundled_runner.id
+    assert run.status == AgentRunStatus.ASSIGNED
+
+
+def test_unpinned_managed_run_cannot_fall_back_to_manual_runner(project, create_user, manual_runner):
+    AgentRun.objects.create(
+        workspace=project.workspace,
+        created_by=create_user,
+        pod=manual_runner.pod,
+        executor_kind=AgentExecutorKind.MANAGED_RUNNER,
+        status=AgentRunStatus.QUEUED,
+        prompt="",
+    )
+    assert matcher.next_for_runner(manual_runner) is None
+
+
 @override_settings(**MANAGED_SETTINGS)
 def test_bundled_runner_never_takes_unpinned_pod_work(project, create_user, bundled_runner):
     """``select_runner_in_pod`` powers unpinned local dispatch; a bundled
@@ -198,7 +291,9 @@ def test_pinned_managed_run_is_not_offered_by_drain_pod(
 
 
 @override_settings(**MANAGED_SETTINGS)
-def test_preflight_is_structural_for_managed_issues(project, create_user, openhub_lane, bundled_runner, issue_for_project):
+def test_preflight_is_structural_for_managed_issues(
+    project, create_user, openhub_lane, bundled_runner, issue_for_project
+):
     """Offline is not a structural failure: the preflight must still say yes
     so the run is created and waits (§8.5), rather than bouncing the issue."""
     issue_for_project.agent_executor = AgentExecutorKind.MANAGED_RUNNER
