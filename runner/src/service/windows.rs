@@ -39,6 +39,28 @@ pub async fn uninstall(_paths: &Paths) -> Result<()> {
     }
 }
 
+/// Self-heal for `pidash restart`: re-register the task when it's gone.
+///
+/// Unlike systemd/launchd there is no file to stat, so existence is decided
+/// by `schtasks /Query` succeeding. Deliberately *not* by classifying its
+/// error text: schtasks.exe localizes its messages, so matching the English
+/// "cannot find" (as `looks_task_missing` does, acceptably, for the tolerant
+/// `uninstall` path) would leave this self-heal a silent no-op on a German or
+/// Japanese host — precisely the machines it exists to repair.
+///
+/// So a clean exit means "present, leave it alone" and anything else means
+/// "try the repair". That errs toward rewriting when the query fails for some
+/// other reason (access denied, schtasks.exe missing), which is the safe
+/// direction: `/Create /F` either restores a working task or fails with the
+/// real reason, which the caller logs before the start attempt reports it.
+pub(crate) async fn rewrite_unit_if_missing(paths: &Paths) -> Result<bool> {
+    if run_schtasks(&["/Query", "/TN", TASK_NAME]).await.is_ok() {
+        return Ok(false);
+    }
+    write_unit(paths).await?;
+    Ok(true)
+}
+
 pub async fn start() -> Result<()> {
     run_schtasks(&["/Run", "/TN", TASK_NAME]).await?;
     Ok(())
