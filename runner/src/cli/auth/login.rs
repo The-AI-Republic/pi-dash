@@ -36,6 +36,12 @@ pub struct Args {
     #[arg(long)]
     pub no_browser: bool,
 
+    /// Re-enroll this host against a different cloud, overwriting the
+    /// existing `[daemon].cloud_url`. Without this, login refuses to
+    /// rebind a host that's already enrolled with another cloud.
+    #[arg(long)]
+    pub force: bool,
+
     /// Workspace slug to bind this CLI install to after login.
     #[arg(long, hide = true)]
     pub workspace: Option<String>,
@@ -113,7 +119,7 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
     // local config and workspace binding. It is replaced below by a shared
     // dev-machine MachineToken, which is the credential used by both the CLI
     // and all runners hosted by this install.
-    runner_ops::write_cli_token(paths, &cloud_url, &token.access_token)
+    runner_ops::write_cli_token(paths, &cloud_url, &token.access_token, args.force)
         .context("writing temporary [cli].token to config.toml")?;
 
     println!();
@@ -145,7 +151,7 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         &host_label,
     )
     .await?;
-    runner_ops::write_cli_token(paths, &cloud_url, &machine_token.machine_token)
+    runner_ops::write_cli_token(paths, &cloud_url, &machine_token.machine_token, args.force)
         .context("writing dev-machine token to config.toml")?;
     if machine_token.workspace_slug != workspace_slug {
         runner_ops::write_cli_workspace(paths, &machine_token.workspace_slug)

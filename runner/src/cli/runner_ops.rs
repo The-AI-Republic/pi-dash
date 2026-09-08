@@ -186,7 +186,12 @@ pub fn load_cli_token(paths: &Paths) -> Result<Option<String>> {
 ///
 /// Preserves any pre-existing `[cli].workspace_slug` so a re-login
 /// (e.g. token refresh) doesn't wipe the host's workspace binding.
-pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str) -> Result<()> {
+///
+/// `force` controls the cloud-URL mismatch guard: normally we refuse to
+/// overwrite `[cli]` when this host is already enrolled with a different
+/// cloud, but `pidash auth login --force` sets this to rebind the host's
+/// `[daemon].cloud_url` to the new cloud instead of bailing.
+pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str, force: bool) -> Result<()> {
     let mut cfg = if paths.config_path().exists() {
         file::load_config(paths)?
     } else {
@@ -205,13 +210,18 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str) -> Result<()
             cli: None,
         }
     };
-    // Pre-existing config? Don't quietly rebind it to a different cloud.
+    // Pre-existing config? Don't quietly rebind it to a different cloud
+    // unless the caller explicitly forces it (`pidash auth login --force`).
     if !cfg.daemon.cloud_url.is_empty() && cfg.daemon.cloud_url != cloud_url {
-        anyhow::bail!(
-            "this host is already enrolled with cloud {} — refusing to overwrite [cli] for a different cloud {}",
-            cfg.daemon.cloud_url,
-            cloud_url
-        );
+        if !force {
+            anyhow::bail!(
+                "this host is already enrolled with cloud {} — refusing to overwrite [cli] for a different cloud {} (pass --force to re-enroll against the new cloud)",
+                cfg.daemon.cloud_url,
+                cloud_url
+            );
+        }
+        // Forced re-enrollment: rebind the daemon to the new cloud.
+        cfg.daemon.cloud_url = cloud_url.to_string();
     }
     if cfg.daemon.cloud_url.is_empty() {
         cfg.daemon.cloud_url = cloud_url.to_string();
@@ -474,7 +484,7 @@ pub async fn apply_enroll_response(
         .as_deref()
         .filter(|t| !t.trim().is_empty())
     {
-        write_cli_token(paths, cloud_url, machine_token)
+        write_cli_token(paths, cloud_url, machine_token, false)
             .context("writing shared dev-machine token to [cli].token")?;
     }
     if resp.refresh_token.trim().is_empty() {
@@ -1004,7 +1014,7 @@ mod tests {
     fn write_then_load_cli_token_roundtrips() {
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
-        write_cli_token(&paths, "https://example.com", "pi_dash_api_xxx").unwrap();
+        write_cli_token(&paths, "https://example.com", "pi_dash_api_xxx", false).unwrap();
         let token = load_cli_token(&paths).unwrap();
         assert_eq!(token.as_deref(), Some("pi_dash_api_xxx"));
     }
@@ -1013,7 +1023,7 @@ mod tests {
     fn ensure_dev_machine_id_mints_once_and_persists() {
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
-        write_cli_token(&paths, "https://example.com", "pi_dash_api_xxx").unwrap();
+        write_cli_token(&paths, "https://example.com", "pi_dash_api_xxx", false).unwrap();
         let first = ensure_dev_machine_id(&paths).unwrap();
         let second = ensure_dev_machine_id(&paths).unwrap();
         let cfg = file::load_config(&paths).unwrap();
@@ -1025,7 +1035,7 @@ mod tests {
     fn write_then_load_cli_workspace_roundtrips() {
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
-        write_cli_token(&paths, "https://example.com", "pi_dash_api_xxx").unwrap();
+        write_cli_token(&paths, "https://example.com", "pi_dash_api_xxx", false).unwrap();
         assert_eq!(load_cli_workspace(&paths).unwrap(), None);
         write_cli_workspace(&paths, "acme").unwrap();
         assert_eq!(load_cli_workspace(&paths).unwrap().as_deref(), Some("acme"));
@@ -1038,13 +1048,48 @@ mod tests {
         // every time their token rolls.
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
-        write_cli_token(&paths, "https://example.com", "tok-1").unwrap();
+        write_cli_token(&paths, "https://example.com", "tok-1", false).unwrap();
         write_cli_workspace(&paths, "acme").unwrap();
-        write_cli_token(&paths, "https://example.com", "tok-2").unwrap();
+        write_cli_token(&paths, "https://example.com", "tok-2", false).unwrap();
         let cfg = file::load_config(&paths).unwrap();
         let cli = cfg.cli.expect("cli section");
         assert_eq!(cli.token.as_deref(), Some("tok-2"));
         assert_eq!(cli.workspace_slug.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn write_cli_token_refuses_different_cloud_without_force() {
+        // A host already enrolled with one cloud must not be silently
+        // rebound to another — `pidash auth login --url <other>` bails
+        // unless the operator passes --force.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        write_cli_token(&paths, "https://one.example.com", "tok-1", false).unwrap();
+        let err = write_cli_token(&paths, "https://two.example.com", "tok-2", false)
+            .expect_err("rebind to a different cloud without --force must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("already enrolled") && msg.contains("--force"),
+            "unexpected error message: {msg}"
+        );
+        // The original binding and token are left untouched.
+        let cfg = file::load_config(&paths).unwrap();
+        assert_eq!(cfg.daemon.cloud_url, "https://one.example.com");
+        assert_eq!(cfg.cli.and_then(|c| c.token).as_deref(), Some("tok-1"));
+    }
+
+    #[test]
+    fn write_cli_token_force_rebinds_to_different_cloud() {
+        // `pidash auth login --url <other> --force` re-enrolls the host:
+        // both [daemon].cloud_url and [cli].token move to the new cloud.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        write_cli_token(&paths, "https://one.example.com", "tok-1", false).unwrap();
+        write_cli_token(&paths, "https://two.example.com", "tok-2", true)
+            .expect("forced rebind to a different cloud should succeed");
+        let cfg = file::load_config(&paths).unwrap();
+        assert_eq!(cfg.daemon.cloud_url, "https://two.example.com");
+        assert_eq!(cfg.cli.and_then(|c| c.token).as_deref(), Some("tok-2"));
     }
 
     #[test]
@@ -1054,7 +1099,7 @@ mod tests {
         // flow gates this; the helper itself does not refuse.
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
-        write_cli_token(&paths, "https://example.com", "tok").unwrap();
+        write_cli_token(&paths, "https://example.com", "tok", false).unwrap();
         write_cli_workspace(&paths, "acme").unwrap();
         write_cli_workspace(&paths, "zenith").unwrap();
         assert_eq!(
@@ -1068,7 +1113,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         // Seed config with a runner block + token via the normal flow.
-        write_cli_token(&paths, "https://example.com", "pi_dash_api_xxx").unwrap();
+        write_cli_token(&paths, "https://example.com", "pi_dash_api_xxx", false).unwrap();
         // Append a runner block manually by writing config.
         let mut cfg = file::load_config(&paths).unwrap();
         cfg.runners.push(RunnerConfig {
