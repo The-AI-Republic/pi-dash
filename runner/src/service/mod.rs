@@ -83,8 +83,14 @@ pub(crate) fn capture_install_time_path() -> Option<String> {
 /// debugging doesn't get clobbered on the next `pidash restart`.
 ///
 /// Backends whose "unit" is a file (systemd, launchd) pass its path.
-/// `windows` can't: a scheduled task has no file to stat, so it implements
-/// the same contract against `schtasks /Query` directly.
+/// `windows` can't — a scheduled task has no file to stat — so it applies the
+/// same rule against `schtasks /Query` directly.
+///
+/// Both resolve an *unreadable* unit the same way, toward rewriting:
+/// `Path::exists()` reports `false` when a permission or IO error hides the
+/// file, and Windows treats only a clean `/Query` exit as proof of existence.
+/// Guessing "absent" there is the safe guess — the write that follows either
+/// repairs the install or fails with the real reason.
 pub(crate) async fn rewrite_unit_if_absent<F, Fut>(unit: &Path, write: F) -> Result<bool>
 where
     F: FnOnce() -> Fut,
