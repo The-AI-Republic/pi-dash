@@ -75,6 +75,28 @@ pub(crate) fn capture_install_time_path() -> Option<String> {
     Some(value)
 }
 
+/// Shared self-heal rule: rewrite the unit only when it is absent.
+///
+/// Stated once here rather than three times because the invariant is the
+/// interesting part, not the per-backend plumbing — we rewrite a *missing*
+/// unit, never an existing one, so an operator hand-editing their unit for
+/// debugging doesn't get clobbered on the next `pidash restart`.
+///
+/// Backends whose "unit" is a file (systemd, launchd) pass its path.
+/// `windows` can't: a scheduled task has no file to stat, so it implements
+/// the same contract against `schtasks /Query` directly.
+pub(crate) async fn rewrite_unit_if_absent<F, Fut>(unit: &Path, write: F) -> Result<bool>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    if unit.exists() {
+        return Ok(false);
+    }
+    write().await?;
+    Ok(true)
+}
+
 pub enum Service {
     #[cfg(target_os = "linux")]
     Systemd,
@@ -131,6 +153,25 @@ impl Service {
             Service::Launchd => launchd::write_unit(paths).await,
             #[cfg(windows)]
             Service::WindowsTask => windows::write_unit(paths).await,
+        }
+    }
+
+    /// Rewrite the unit if the service manager no longer has one, returning
+    /// whether it was rewritten. Every backend implements this: a unit can go
+    /// missing on any OS (`pidash uninstall`/`remove`, manual cleanup, or a
+    /// `pidash update` that swapped the binary without ever writing one), and
+    /// on every OS the result is a `restart` that can't recover on its own.
+    ///
+    /// Callers treat a failure here as non-fatal — it's a best-effort repair
+    /// before the real start attempt, which produces the actionable error.
+    pub async fn rewrite_unit_if_missing(&self, paths: &Paths) -> Result<bool> {
+        match self {
+            #[cfg(target_os = "linux")]
+            Service::Systemd => systemd::rewrite_unit_if_missing(paths).await,
+            #[cfg(target_os = "macos")]
+            Service::Launchd => launchd::rewrite_unit_if_missing(paths).await,
+            #[cfg(windows)]
+            Service::WindowsTask => windows::rewrite_unit_if_missing(paths).await,
         }
     }
 
@@ -221,5 +262,68 @@ impl Service {
             #[cfg(windows)]
             Service::WindowsTask => windows::diagnose_recent_exit().await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// An existing unit is left alone — the rule that keeps `pidash restart`
+    /// from clobbering a plist/unit an operator edited by hand.
+    #[tokio::test]
+    async fn absent_helper_does_not_rewrite_existing_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = dir.path().join("pidash.service");
+        std::fs::write(&unit, "[Unit]\n").unwrap();
+        let writes = AtomicUsize::new(0);
+
+        let rewrote = rewrite_unit_if_absent(&unit, || async {
+            writes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert!(!rewrote);
+        assert_eq!(writes.load(Ordering::SeqCst), 0, "must not rewrite");
+        assert_eq!(std::fs::read_to_string(&unit).unwrap(), "[Unit]\n");
+    }
+
+    /// The regression this exists for: a missing unit is rewritten rather
+    /// than left for `enable`/`bootstrap` to fail on.
+    #[tokio::test]
+    async fn absent_helper_rewrites_missing_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = dir.path().join("pidash.service");
+        let writes = AtomicUsize::new(0);
+
+        let rewrote = rewrite_unit_if_absent(&unit, || async {
+            writes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert!(rewrote);
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+    }
+
+    /// A failing write propagates instead of reporting a repair that didn't
+    /// happen — the caller logs it and lets the start attempt produce the
+    /// actionable error.
+    #[tokio::test]
+    async fn absent_helper_propagates_write_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = dir.path().join("pidash.service");
+
+        let err = rewrite_unit_if_absent(&unit, || async {
+            anyhow::bail!("permission denied");
+        })
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("permission denied"));
     }
 }

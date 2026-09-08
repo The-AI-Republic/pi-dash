@@ -39,6 +39,31 @@ pub async fn uninstall(_paths: &Paths) -> Result<()> {
     }
 }
 
+/// Self-heal for `pidash restart`: re-register the task when it's gone.
+///
+/// Unlike systemd/launchd there is no file to stat, so "missing" is decided
+/// by `schtasks /Query` failing with a not-found error. An *ambiguous*
+/// failure (access denied, schtasks.exe unavailable) deliberately does not
+/// rewrite: `write_unit` passes `/F`, which would overwrite a task the
+/// operator may have tuned by hand, and the subsequent start attempt will
+/// surface the real error anyway.
+pub(crate) async fn rewrite_unit_if_missing(paths: &Paths) -> Result<bool> {
+    match run_schtasks(&["/Query", "/TN", TASK_NAME]).await {
+        Ok(_) => Ok(false),
+        Err(e) if looks_task_missing(&e) => {
+            write_unit(paths).await?;
+            Ok(true)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "could not determine whether scheduled task {TASK_NAME} exists ({e:#}); \
+                 leaving it as-is"
+            );
+            Ok(false)
+        }
+    }
+}
+
 pub async fn start() -> Result<()> {
     run_schtasks(&["/Run", "/TN", TASK_NAME]).await?;
     Ok(())

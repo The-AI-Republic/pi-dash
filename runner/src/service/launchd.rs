@@ -567,24 +567,19 @@ fn ensure_plist_present(plist: &Path) -> Result<()> {
 /// a plist-less machine recover transparently instead of bailing with the
 /// `ensure_plist_present` error the operator would have to act on by hand.
 ///
-/// We only rewrite when missing (not unconditionally on every restart) so
-/// operators hand-editing the plist for debugging don't get clobbered.
+/// The "rewrite only when missing" rule lives in `service::rewrite_unit_if_absent`
+/// so all three backends state it once; see there for why we never clobber an
+/// existing plist.
 ///
 /// Gated to `target_os = "macos"` (not the module's broader `macos || test`
-/// gate) because the only call site is also `cfg(target_os = "macos")`. The
-/// module's `test` arm exists so the path/exit-status parsers are unit-
-/// testable on Linux CI runners; this self-heal does macOS-specific I/O
-/// (`write_unit` renders the launchd plist) and has no Linux test path of
-/// its own, so compiling it on Linux would just produce a dead-code warning
-/// under `-D dead-code`.
+/// gate) because the `Service::Launchd` arm that calls it is too. The module's
+/// `test` arm exists so the path/exit-status parsers are unit-testable on Linux
+/// CI runners; this self-heal does macOS-specific I/O (`write_unit` renders the
+/// launchd plist), so compiling it on Linux would just produce a dead-code
+/// warning under `-D dead-code`.
 #[cfg(target_os = "macos")]
 pub(crate) async fn rewrite_unit_if_missing(paths: &Paths) -> Result<bool> {
-    let plist = plist_path()?;
-    if plist.exists() {
-        return Ok(false);
-    }
-    write_unit(paths).await?;
-    Ok(true)
+    super::rewrite_unit_if_absent(&plist_path()?, || write_unit(paths)).await
 }
 
 fn plist_path() -> Result<PathBuf> {
