@@ -6,17 +6,19 @@
 
 import { useState } from "react";
 import { observer } from "mobx-react";
-import { HelpCircle, Plus } from "lucide-react";
+import { HelpCircle, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 import { useNavigate } from "react-router";
 import useSWR from "swr";
 import { useTranslation } from "@pi-dash/i18n";
+import { IconButton } from "@pi-dash/propel/icon-button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { PodService, RunnerService } from "@pi-dash/services";
 import type { IPod, IRunner } from "@pi-dash/types";
-import { AlertModalCore, Badge, Button, Tooltip } from "@pi-dash/ui";
+import { AlertModalCore, Badge, Button, CustomMenu, Tooltip } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
 import { AddRunnerModal } from "@/components/runners/add-runner-modal";
 import { CreatePodModal } from "@/components/runners/create-pod-modal";
+import { EditPodModal } from "@/components/runners/edit-pod-modal";
 import { RUNNER_STATUS_I18N_LABELS, STATUS_BADGE_VARIANT } from "@/components/runners/runner-status";
 import { RunnersTabs } from "@/components/runners/runners-tabs";
 import { useSelectedPodFilter } from "@/hooks/use-selected-pod-filter";
@@ -55,11 +57,43 @@ const RunnersListPage = observer(function RunnersListPage() {
 
   const [addOpen, setAddOpen] = useState(false);
   const [createPodOpen, setCreatePodOpen] = useState(false);
+  const [editPod, setEditPod] = useState<IPod | null>(null);
+  const [deletePod, setDeletePod] = useState<IPod | null>(null);
+  const [deletingPod, setDeletingPod] = useState(false);
   const { selectedPodId, setSelectedPodId, filteredRunners, selectedPod } = useSelectedPodFilter(runners, pods);
   const [deleteRunner, setDeleteRunner] = useState<IRunner | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [revokeRunner, setRevokeRunner] = useState<IRunner | null>(null);
   const [revoking, setRevoking] = useState(false);
+
+  async function confirmDeletePod() {
+    if (!deletePod) return;
+    setDeletingPod(true);
+    try {
+      await podService.remove(deletePod.id);
+      // Clearing the filter avoids stranding the list on a pod that no
+      // longer exists.
+      if (selectedPodId === deletePod.id) setSelectedPodId(null);
+      setDeletePod(null);
+      mutatePods();
+    } catch (e: unknown) {
+      const err = e as { error?: string; code?: string } | null;
+      // Surface the server's §7.2 delete guards in plain language; fall back
+      // to the raw message for anything unrecognized.
+      const byCode: Record<string, string> = {
+        pod_has_runners: t("Move or revoke this pod's runners before deleting it."),
+        pod_has_active_runs: t("This pod has active runs. Cancel them or wait before deleting it."),
+        default_pod_undeletable: t("You can't delete the project's default pod. Promote another pod first."),
+      };
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: t("Error!"),
+        message: (err?.code && byCode[err.code]) || err?.error || t("Failed to delete pod"),
+      });
+    } finally {
+      setDeletingPod(false);
+    }
+  }
 
   async function confirmDeleteRunner() {
     if (!deleteRunner) return;
@@ -160,28 +194,59 @@ const RunnersListPage = observer(function RunnersListPage() {
             {(pods ?? []).map((p) => {
               const isSelected = p.id === selectedPodId;
               return (
-                <button
+                <div
                   key={p.id}
-                  type="button"
-                  aria-pressed={isSelected}
-                  aria-label={t("Filter runners by pod {name}", { name: p.name })}
-                  onClick={() => setSelectedPodId(isSelected ? null : p.id)}
-                  className={`rounded-md border px-3 py-2 text-left text-12 transition-colors ${
+                  className={`relative rounded-md border text-12 transition-colors ${
                     isSelected
                       ? "border-accent-strong bg-accent-primary/10 ring-1 ring-accent-strong"
                       : "border-subtle bg-layer-1 hover:border-strong"
                   }`}
                 >
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-primary">{p.name}</span>
-                    {p.is_default && (
-                      <Badge variant="accent-neutral" size="sm">
-                        {t("default")}
-                      </Badge>
-                    )}
+                  <button
+                    type="button"
+                    aria-pressed={isSelected}
+                    aria-label={t("Filter runners by pod {name}", { name: p.name })}
+                    onClick={() => setSelectedPodId(isSelected ? null : p.id)}
+                    className="w-full rounded-md px-3 py-2 pr-9 text-left"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-primary">{p.name}</span>
+                      {p.is_default && (
+                        <Badge variant="accent-neutral" size="sm">
+                          {t("default")}
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="text-secondary">{t("{count} runner(s)", { count: p.runner_count })}</div>
+                  </button>
+                  <div className="absolute top-1 right-1">
+                    <CustomMenu
+                      customButton={
+                        <IconButton
+                          icon={MoreHorizontal}
+                          variant="ghost"
+                          size="sm"
+                          aria-label={t("Pod actions for {name}", { name: p.name })}
+                        />
+                      }
+                      placement="bottom-end"
+                      closeOnSelect
+                    >
+                      <CustomMenu.MenuItem key="edit" onClick={() => setEditPod(p)} className="flex items-center gap-2">
+                        <Pencil className="size-3 shrink-0" />
+                        {t("Edit")}
+                      </CustomMenu.MenuItem>
+                      <CustomMenu.MenuItem
+                        key="delete"
+                        onClick={() => setDeletePod(p)}
+                        className="flex items-center gap-2 text-danger-primary"
+                      >
+                        <Trash2 className="size-3 shrink-0" />
+                        {t("Delete")}
+                      </CustomMenu.MenuItem>
+                    </CustomMenu>
                   </div>
-                  <div className="text-secondary">{t("{count} runner(s)", { count: p.runner_count })}</div>
-                </button>
+                </div>
               );
             })}
             <button
@@ -293,6 +358,18 @@ const RunnersListPage = observer(function RunnersListPage() {
           onCreated={() => mutatePods()}
         />
       )}
+      <EditPodModal isOpen={!!editPod} pod={editPod} onClose={() => setEditPod(null)} onUpdated={() => mutatePods()} />
+      <AlertModalCore
+        isOpen={!!deletePod}
+        handleClose={() => (deletingPod ? null : setDeletePod(null))}
+        handleSubmit={confirmDeletePod}
+        isSubmitting={deletingPod}
+        title={t("Delete pod?")}
+        content={t(
+          "The pod is removed and any issues assigned to it are unassigned. Runners and past runs are preserved. A pod with active runners or runs, or a project's default pod, can't be deleted."
+        )}
+        primaryButtonText={{ default: t("Delete"), loading: t("Delete") }}
+      />
       <AlertModalCore
         isOpen={!!deleteRunner}
         handleClose={() => (deleting ? null : setDeleteRunner(null))}
