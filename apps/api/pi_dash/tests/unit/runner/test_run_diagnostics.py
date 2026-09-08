@@ -59,6 +59,29 @@ def test_infer_agent_label_prefers_runner_over_error_mention():
 
 
 @pytest.mark.parametrize(
+    ("runner_name", "expected"),
+    [
+        ("workx_codex01", "Codex"),
+        ("workx-claude-code-01", "Claude Code"),
+        ("workx-cursor-agent-01", "Cursor"),
+        ("workx-open-claw-01", "OpenClaw"),
+        ("workx-grok-01", "Grok"),
+        ("workx-muse-code-01", "Muse Code"),
+    ],
+)
+def test_infer_agent_label_covers_every_backend_from_runner_name(runner_name, expected):
+    """Every backend is recognised from the runner name.
+
+    The name is asserted rather than ``capabilities`` because the name is a
+    signal production actually populates — see
+    ``test_capabilities_is_not_yet_populated_in_production`` below.
+    """
+    runner = SimpleNamespace(name=runner_name, host_label="", capabilities=[], dev_machine=None)
+
+    assert infer_agent_label(runner=runner) == expected
+
+
+@pytest.mark.parametrize(
     ("capability", "expected"),
     [
         ("agent:codex", "Codex"),
@@ -69,16 +92,37 @@ def test_infer_agent_label_prefers_runner_over_error_mention():
         ("agent:muse_code", "Muse Code"),
     ],
 )
-def test_infer_agent_label_covers_every_backend(capability, expected):
-    """Grok and Muse Code runs were labelled '' because the map lagged."""
-    runner = SimpleNamespace(
-        name="workx_runner01",
-        host_label="mini-build",
-        capabilities=[capability],
-        dev_machine=None,
-    )
+def test_infer_agent_label_reads_agent_capability_when_present(capability, expected):
+    """Forward-compatible: the matcher handles the serde snake_case spelling.
+
+    ``open_claw`` and ``muse_code`` are the spellings an ``agent:<kind>``
+    capability would carry, and neither was matched before. Note this path
+    is not yet exercised in production — see the test below.
+    """
+    runner = SimpleNamespace(name="", host_label="", capabilities=[capability], dev_machine=None)
 
     assert infer_agent_label(runner=runner) == expected
+
+
+def test_capabilities_is_not_yet_populated_in_production():
+    """``Runner.capabilities`` has no writer, so it cannot identify an agent.
+
+    It is ``default=list`` on the model, listed in the serializer's
+    ``read_only_fields``, never set at enrollment, and never written by
+    ``apply_hello`` — the daemon does not report which ``AgentKind`` it
+    drives. So a Grok or Muse Code runner left on its agent's default model
+    (the modal's default for both) still falls through to the generic
+    label. Fixing that needs a daemon-side change; this test documents the
+    gap so the capability tests above are not mistaken for production
+    coverage.
+    """
+    from pi_dash.runner.serializers import RunnerSerializer
+
+    assert "capabilities" in RunnerSerializer.Meta.read_only_fields
+
+    runner = SimpleNamespace(name="mini-build", host_label="host-01", capabilities=[], dev_machine=None)
+
+    assert infer_agent_label(runner=runner) == ""
 
 
 @pytest.mark.parametrize(

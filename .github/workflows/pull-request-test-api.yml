@@ -13,6 +13,11 @@ on:
     paths:
       - "apps/api/**"
       - ".github/workflows/pull-request-test-api.yml"
+      # test_valid_agents_matches_runner_schema pins the API's agent
+      # allowlist to this enum. A PR adding an AgentKind variant touches
+      # runner/ and apps/web but not apps/api, so without this path the
+      # guard would not run on the one PR shape it exists to catch.
+      - "runner/src/config/schema.rs"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
