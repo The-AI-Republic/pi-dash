@@ -72,9 +72,10 @@ def test_infer_agent_label_prefers_runner_over_error_mention():
 def test_infer_agent_label_covers_every_backend_from_runner_name(runner_name, expected):
     """Every backend is recognised from the runner name.
 
-    The name is asserted rather than ``capabilities`` because the name is a
-    signal production actually populates — see
-    ``test_capabilities_is_not_yet_populated_in_production`` below.
+    The name is asserted rather than ``capabilities`` to keep this a
+    name-only signal test; capabilities has its own coverage in
+    ``test_populated_capability_identifies_the_agent_over_neutral_signals``
+    below.
     """
     runner = SimpleNamespace(name=runner_name, host_label="", capabilities=[], dev_machine=None)
 
@@ -104,25 +105,32 @@ def test_infer_agent_label_reads_agent_capability_when_present(capability, expec
     assert infer_agent_label(runner=runner) == expected
 
 
-def test_capabilities_is_not_yet_populated_in_production():
-    """``Runner.capabilities`` has no writer, so it cannot identify an agent.
+def test_populated_capability_identifies_the_agent_over_neutral_signals():
+    """The daemon now reports its ``AgentKind``, so capabilities is a writer.
 
-    It is ``default=list`` on the model, listed in the serializer's
-    ``read_only_fields``, never set at enrollment, and never written by
-    ``apply_hello`` — the daemon does not report which ``AgentKind`` it
-    drives. So a Grok or Muse Code runner left on its agent's default model
-    (the modal's default for both) still falls through to the generic
-    label. Fixing that needs a daemon-side change; this test documents the
-    gap so the capability tests above are not mistaken for production
-    coverage.
+    ``apply_hello`` persists the reported kind as an ``agent:<kind>``
+    capability (see ``session_service._agent_capabilities`` and its
+    ``test_apply_hello_persists_agent_kind_capability`` coverage). It stays
+    listed in the serializer's ``read_only_fields`` — an API *client* still
+    cannot set it; the value is written server-side from the Hello payload.
+
+    This closes the gap the old ``test_capabilities_is_not_yet_populated_in_production``
+    pinned: a Grok / Muse Code runner left on its agent's default model, with a
+    neutral host name and no model slug, previously fell through to the generic
+    label. With the capability populated it is now identified exactly.
     """
     from pi_dash.runner.serializers import RunnerSerializer
 
     assert "capabilities" in RunnerSerializer.Meta.read_only_fields
 
-    runner = SimpleNamespace(name="mini-build", host_label="host-01", capabilities=[], dev_machine=None)
+    runner = SimpleNamespace(
+        name="mini-build",
+        host_label="host-01",
+        capabilities=["agent:muse_code"],
+        dev_machine=None,
+    )
 
-    assert infer_agent_label(runner=runner) == ""
+    assert infer_agent_label(runner=runner) == "Muse Code"
 
 
 @pytest.mark.parametrize(

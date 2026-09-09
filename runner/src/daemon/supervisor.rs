@@ -788,6 +788,7 @@ fn attach_body_for_instance(
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default(),
         agent_versions,
+        agent_kind: inst.config.agent.kind,
     }
 }
 

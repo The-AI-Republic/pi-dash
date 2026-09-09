@@ -31,6 +31,7 @@ use uuid::Uuid;
 use crate::cloud::protocol::{
     ClientMsg, Envelope, RunnerStatus as WireStatus, ServerMsg, WIRE_VERSION,
 };
+use crate::config::schema::AgentKind;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -317,6 +318,13 @@ pub struct AttachBody {
     /// persists it on the Runner row and surfaces it in runner detail.
     pub working_dir: String,
     pub agent_versions: HashMap<String, String>,
+    /// The `AgentKind` this runner is configured to drive, so the cloud can
+    /// identify the agent exactly instead of guessing from the model slug /
+    /// runner name / host label (`session_service.apply_hello` persists it as an
+    /// `agent:<kind>` capability). Serialised snake_case (`"claude_code"`,
+    /// `"muse_code"`) — the same spelling the diagnostics matcher expects. A
+    /// cloud that predates this field simply ignores it.
+    pub agent_kind: AgentKind,
 }
 
 // ---------------------------------------------------------------------------
@@ -2498,6 +2506,7 @@ mod tests {
             host_label: "h".into(),
             working_dir: "/tmp/wd".into(),
             agent_versions: std::collections::HashMap::new(),
+            agent_kind: AgentKind::default(),
         }
     }
 
@@ -2536,7 +2545,8 @@ mod tests {
         // Regression: AttachBody must NOT carry any observability fields.
         // The poll path is the single ingestion site for the
         // per-active-run snapshot; session-open stays a thin
-        // identity/resume body.
+        // identity/resume body. `agent_kind` is identity, not observability —
+        // which agent this runner drives, persisted once on session-open.
         let body = sample_attach_body();
         let v = serde_json::to_value(&body).unwrap();
         let keys: std::collections::BTreeSet<_> = v.as_object().unwrap().keys().cloned().collect();
@@ -2550,6 +2560,7 @@ mod tests {
             "host_label",
             "working_dir",
             "agent_versions",
+            "agent_kind",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -2558,6 +2569,18 @@ mod tests {
             keys, expected,
             "AttachBody serialised key set drifted: {keys:?}"
         );
+    }
+
+    #[test]
+    fn attach_body_reports_agent_kind_snake_case() {
+        // Contract with `session_service.apply_hello`, which persists the
+        // value as an `agent:<kind>` capability the diagnostics matcher reads.
+        // The spelling must stay snake_case (`muse_code`, not `musecode` /
+        // `muse-code`) so `infer_agent_label` matches it.
+        let mut body = sample_attach_body();
+        body.agent_kind = AgentKind::MuseCode;
+        let v = serde_json::to_value(&body).unwrap();
+        assert_eq!(v["agent_kind"], serde_json::json!("muse_code"));
     }
 
     #[test]

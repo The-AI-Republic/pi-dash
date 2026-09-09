@@ -12,6 +12,7 @@ Carved out of ``consumers.py`` per ``.ai_design/move_to_https/tasks.md``
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 from uuid import UUID
@@ -87,11 +88,37 @@ def _merge_dev_metadata(current: Any, body: Dict[str, Any]) -> Dict[str, Any]:
     return metadata
 
 
+_AGENT_KIND_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+
+
+def _agent_capabilities(body: Dict[str, Any], current: Any) -> tuple[list, bool]:
+    """Derive the ``capabilities`` list from the Hello's ``agent_kind``.
+
+    The daemon reports the ``AgentKind`` it drives as a snake_case string
+    (``"claude_code"``, ``"muse_code"``); we persist it as an ``agent:<kind>``
+    capability so ``diagnostics.infer_agent_label`` reads an exact signal
+    instead of guessing from the model slug / runner name / host label.
+
+    Returns ``(capabilities, changed)``. An older daemon omits ``agent_kind``
+    entirely — leave any existing value untouched rather than clobbering it with
+    an empty list. The value is validated against a strict charset so a
+    malformed payload can never inject arbitrary text into the field.
+    """
+    raw = body.get("agent_kind")
+    if not isinstance(raw, str) or not _AGENT_KIND_RE.match(raw):
+        return list(current) if isinstance(current, list) else [], False
+    desired = [f"agent:{raw}"]
+    if isinstance(current, list) and current == desired:
+        return desired, False
+    return desired, True
+
+
 def apply_hello(runner: Runner, body: Dict[str, Any]) -> None:
     """Update runner metadata + reap stale busy runs.
 
     ``body`` is the session-open / Hello payload. Persists ``os``,
-    ``arch``, ``version``, known development metadata, and bumps
+    ``arch``, ``version``, the agent kind the daemon drives (as an
+    ``agent:<kind>`` capability), known development metadata, and bumps
     ``last_heartbeat_at``.
     """
     runner.os = body.get("os", "") or runner.os
@@ -99,15 +126,18 @@ def apply_hello(runner: Runner, body: Dict[str, Any]) -> None:
     runner.runner_version = body.get("version", "") or runner.runner_version
     runner.dev_metadata = _merge_dev_metadata(runner.dev_metadata, body)
     runner.last_heartbeat_at = timezone.now()
-    runner.save(
-        update_fields=[
-            "os",
-            "arch",
-            "runner_version",
-            "dev_metadata",
-            "last_heartbeat_at",
-        ]
-    )
+    update_fields = [
+        "os",
+        "arch",
+        "runner_version",
+        "dev_metadata",
+        "last_heartbeat_at",
+    ]
+    capabilities, capabilities_changed = _agent_capabilities(body, runner.capabilities)
+    if capabilities_changed:
+        runner.capabilities = capabilities
+        update_fields.append("capabilities")
+    runner.save(update_fields=update_fields)
     # Session open redelivers ASSIGNED / WAITING_FOR_WORKTREE runs the
     # restarted daemon no longer reports (design §6.3) — reaping them here
     # would fail the very runs ``build_session_open_redeliver`` is about to
