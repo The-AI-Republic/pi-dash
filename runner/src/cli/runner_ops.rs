@@ -8,7 +8,7 @@
 //! shared dev-machine token in `[cli].token`.
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::cloud::http::{EnrollResponse, RunnerCredentials, write_runner_credentials};
 use crate::config::file;
@@ -345,6 +345,20 @@ pub fn default_working_dir(
     runner_name: &str,
     runner_id: Uuid,
 ) -> PathBuf {
+    default_working_dir_in(&paths.data_dir, project_slug, runner_name, runner_id)
+}
+
+/// [`default_working_dir`] against a bare `data_dir` rather than a full
+/// [`Paths`]. Kept separate so the legacy-pool migration
+/// ([`crate::config::migrate`]), which only has the data dir in hand, can
+/// assign a displaced runner exactly the directory a fresh `runner add` would
+/// have — the naming rule lives in one place.
+pub fn default_working_dir_in(
+    data_dir: &Path,
+    project_slug: &str,
+    runner_name: &str,
+    runner_id: Uuid,
+) -> PathBuf {
     fn slug(s: &str, fallback: &str) -> String {
         let out: String = s
             .chars()
@@ -366,8 +380,7 @@ pub fn default_working_dir(
     let proj = slug(project_slug, "project");
     let name = slug(runner_name, "runner");
     let short: String = runner_id.simple().to_string().chars().take(8).collect();
-    paths
-        .data_dir
+    data_dir
         .join("workspaces")
         .join(format!("{proj}_{name}_{short}"))
 }

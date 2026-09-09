@@ -33,26 +33,44 @@ know where the agent now works.
 
 ## Case 2 — several runners sharing one `[[workdir]]`
 
-This cannot migrate automatically: only one runner can keep the shared
-directory, and silently moving the others would run their agents somewhere you
-didn't choose. The daemon **refuses to start** and prints the exact edit, for
-example:
+Only one runner can keep the shared directory now. The upgrade picks the
+**first runner in config order** as the winner: it keeps the canonical clone
+(`[[workdir]].path`), exactly like Case 1. Every other runner that referenced
+the same pool is moved to its **own new working directory** —
+`<data_dir>/workspaces/<project-slug>_<runner-slug>_<id>`, the same location a
+fresh `pidash runner add` (with no `--working-dir`) would have chosen. The
+daemon starts, and each move is recorded in the log, for example:
 
 ```
-configuration error: the worktree pool was removed (PDASHOSS01-134), but
-config.toml still shares one work dir across several runners: runners "codex",
-"claude" shared workdir "repo" (canonical clone "/home/me/repo"). Each runner
-now needs its own working directory. Keep one runner's [runner.workspace]
-working_dir at the canonical clone shown above, and point every other sharing
-runner at a distinct directory — an empty path is fine, the daemon clones the
-repo into it on first run. Then delete the [[workdir]] tables and the
-`workdir = ...` lines.
+runner "codex": keeps working_dir "/home/me/repo" — formerly the canonical
+clone of removed pool "repo". Runs now execute here directly instead of in a
+leased worktree.
+runner "claude": shared removed pool "repo" with another runner, which keeps the
+canonical clone "/home/me/repo". This runner now has its own working_dir
+"…/workspaces/test_claude_1a2b3c4d" (created empty; the repo is cloned into it on
+first run). Its previous working_dir "/home/me/repo" is no longer used.
 ```
 
-Edit `config.toml` accordingly: keep one runner on the canonical clone, and give
-each other runner its own `working_dir`. A directory that doesn't exist yet (or
-is empty) is fine — the daemon clones the repository into it on first run, so
-you don't have to pre-populate anything.
+Nothing moves silently — every displaced runner is named in the log with both
+its old and new directory.
+
+### Why a displaced runner needs a clone, not just an empty folder
+
+A runner's working directory isn't a bare scratch folder — it has to contain a
+**checkout of the project repository**, because that's where the agent reads and
+edits code, commits, and pushes. Under the old pool, the sharing runners didn't
+each own a copy: they shared one canonical clone and got cheap git worktrees off
+it. Splitting them to one-dir-per-runner means each displaced runner needs its
+own copy of the repo.
+
+That copy is created **lazily, not at upgrade time**. The new directory starts
+empty; on the runner's first run the cloud hands it the repository URL, and
+`workspace::resolve` clones into the empty directory then (an empty dir + a repo
+URL → `git clone`). So the upgrade itself does no network I/O and can't be slow —
+you just pay a one-time clone the first time each displaced runner actually runs.
+If you'd rather not wait for that first-run clone, you can pre-populate the new
+directory with your own clone of the repo; the runner will detect the existing
+`.git` and use it as-is.
 
 ## Case 3 — legacy runners with `working_dir` and no `[[workdir]]`
 
@@ -64,8 +82,9 @@ valid.
 ## Leftover directories are never deleted
 
 The pool's worktrees and any per-runner chat worktree may contain uncommitted
-agent work, so the upgrade **never removes them**. It reports their locations so
-you can recover anything you need and clean up on your own schedule:
+agent work, so the upgrade **never removes them** — they are kept in place for
+backward compatibility. The new build simply stops using them; it reports their
+locations so you can recover anything you need and clean up on your own schedule:
 
 - pool worktrees: `<data_dir>/worktrees/<workdir-name>/` (or the `worktrees_dir`
   override, if the `[[workdir]]` set one);

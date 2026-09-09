@@ -22,10 +22,12 @@ pub fn load_config(paths: &Paths) -> Result<Config> {
     // Migrate pre-134 pooled configs. The `[[workdir]]` tables and per-runner
     // `workdir = "..."` key were removed with the worktree pool; serde drops
     // them silently, so re-read the raw TOML and reconcile `working_dir`
-    // (PDASHOSS01-135). Case 1 (one runner per pool) is applied in place and
-    // reported; case 2 (a shared pool) returns an actionable error naming the
-    // exact edit so the daemon refuses to start rather than run an agent in the
-    // wrong directory.
+    // (PDASHOSS01-135). Case 1 (one runner per pool) is repointed at the
+    // canonical clone; case 2 (a shared pool) keeps the first runner on the
+    // canonical clone and moves the other sharers to their own fresh dirs.
+    // Every move is reported via `tracing::warn!` so no agent silently changes
+    // directory. Only a structurally broken config (a `workdir` reference no
+    // `[[workdir]]` defines) still errors out.
     let raw: toml::Value =
         toml::from_str(&text).with_context(|| format!("parsing {path:?} for migration"))?;
     match super::migrate::migrate_legacy_pool(&mut cfg, &raw, &paths.data_dir) {
@@ -753,10 +755,12 @@ binary = "codex"
     }
 
     #[test]
-    fn load_config_rejects_shared_pool_with_actionable_message() {
-        // N runners sharing one pool: load_config must fail (so the daemon
-        // never starts an agent in a silently-changed directory) with a
-        // message that names the runners, the shared path, and the edit.
+    fn load_config_migrates_shared_pool_first_runner_wins() {
+        // N runners sharing one pool: load_config must succeed (per the
+        // operator decision on PDASHOSS01-135) with the first runner in config
+        // order keeping the canonical clone and the other sharer displaced to
+        // its own fresh dir — never the same directory, so the migrated config
+        // still satisfies 134's one-dir-per-runner validation.
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         std::fs::create_dir_all(&paths.config_dir).unwrap();
@@ -791,12 +795,37 @@ working_dir = "/home/me/repo"
             uuid::Uuid::new_v4()
         );
         std::fs::write(paths.config_path(), body).unwrap();
-        let err = load_config(&paths).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("\"codex\""), "message: {msg}");
-        assert!(msg.contains("\"claude\""), "message: {msg}");
-        assert!(msg.contains("/home/me/repo"), "message: {msg}");
-        assert!(msg.contains("working_dir"), "message: {msg}");
+        let loaded = load_config(&paths).unwrap();
+        let codex = loaded
+            .runners
+            .iter()
+            .find(|r| r.name == "codex")
+            .expect("codex present");
+        let claude = loaded
+            .runners
+            .iter()
+            .find(|r| r.name == "claude")
+            .expect("claude present");
+        assert_eq!(
+            codex.workspace.working_dir,
+            std::path::PathBuf::from("/home/me/repo"),
+            "first runner keeps the canonical clone",
+        );
+        assert_ne!(
+            claude.workspace.working_dir,
+            std::path::PathBuf::from("/home/me/repo"),
+            "second sharer is displaced off the shared path",
+        );
+        assert!(
+            claude
+                .workspace
+                .working_dir
+                .starts_with(paths.data_dir.join("workspaces")),
+            "displaced runner lands under the data dir: {:?}",
+            claude.workspace.working_dir,
+        );
+        // The migrated config satisfies one-dir-per-runner validation.
+        loaded.validate().expect("migrated config should validate");
     }
 
     #[test]

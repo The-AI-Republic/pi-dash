@@ -18,9 +18,15 @@
 //!   directly at `workdir.path` (the canonical clone its runs already shared
 //!   via leased worktrees) and report the change. Behaviour is equivalent.
 //! - **Case 2 — N runners sharing one `[[workdir]]`.** Only one runner can keep
-//!   the shared path; picking a winner silently would move the others' agents
-//!   without telling anyone. Refuse to load with a message naming the runners,
-//!   the shared path, and the exact edit required.
+//!   the shared path. Per the operator decision on PDASHOSS01-135, the **first
+//!   runner in config order wins** and keeps the canonical clone; every other
+//!   sharer is given its own new working dir (the same
+//!   `data_dir/workspaces/<proj>_<runner>_<id>` a fresh `runner add` would pick,
+//!   via [`crate::cli::runner_ops::default_working_dir_in`]). That directory
+//!   starts empty; the runner needs a checkout of the project to work in, so the
+//!   cloud's per-run `repo_url` populates it with a `git clone` on first run
+//!   (`workspace::resolve`) — nothing is cloned at upgrade time. Every
+//!   reassignment is reported, so no agent moves silently.
 //! - **Case 3 — legacy runners with no `[[workdir]]`.** Nothing here; the early
 //!   return leaves them to 134's ordinary validation.
 //!
@@ -29,7 +35,7 @@
 //! (`data_dir/runners/<id>/chat-worktree/`) may hold uncommitted agent work, so
 //! they are never touched — only reported.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use super::schema::Config;
@@ -70,14 +76,15 @@ struct LegacyWorkdir {
 ///
 /// `raw` is the same TOML text parsed as a generic [`toml::Value`] — the parsed
 /// `Config` cannot be used for detection because serde already discarded the
-/// removed keys. `data_dir` is used only to locate leftover pool directories to
-/// report.
+/// removed keys. `data_dir` locates leftover pool directories to report and is
+/// the root under which displaced sharers (case 2) get their new working dirs.
 ///
 /// Returns `Ok(None)` when the config has no legacy pool keys (the common path
 /// for anything written at or after 134 — no work, no allocation of a report).
-/// Returns `Ok(Some(_))` when case 1 was applied in place. Returns `Err` when
-/// the migration is ambiguous (case 2) or structurally broken (a `workdir`
-/// reference to a name no `[[workdir]]` defines).
+/// Returns `Ok(Some(_))` when case 1 or case 2 was applied in place (the report
+/// names every runner whose directory moved). Returns `Err` only when the config
+/// is structurally broken — a `workdir` reference to a name no `[[workdir]]`
+/// defines.
 pub fn migrate_legacy_pool(
     cfg: &mut Config,
     raw: &toml::Value,
@@ -125,48 +132,25 @@ pub fn migrate_legacy_pool(
         });
     }
 
-    // Case 2: a pool shared by two or more runners. Only one runner can keep
-    // the shared path; auto-picking a winner would move the others' agents to a
-    // different directory with no operator signal, so refuse with the edit.
-    let mut shared: Vec<String> = Vec::new();
-    for (workdir, runners) in &by_workdir {
-        if runners.len() >= 2 {
-            let path = workdirs
-                .get(*workdir)
-                .map(|w| w.path.display().to_string())
-                .unwrap_or_else(|| "<unknown>".to_string());
-            shared.push(format!(
-                "runners {} shared workdir {:?} (canonical clone {:?})",
-                quote_join(runners),
-                workdir,
-                path
-            ));
-        }
-    }
-    if !shared.is_empty() {
-        return Err(LegacyMigrationError {
-            message: format!(
-                "configuration error: the worktree pool was removed \
-                 (PDASHOSS01-134), but config.toml still shares one work dir \
-                 across several runners: {}. Each runner now needs its own \
-                 working directory. Keep one runner's [runner.workspace] \
-                 working_dir at the canonical clone shown above, and point every \
-                 other sharing runner at a distinct directory — an empty path is \
-                 fine, the daemon clones the repo into it on first run. Then \
-                 delete the [[workdir]] tables and the `workdir = ...` lines.",
-                shared.join("; ")
-            ),
-        });
-    }
-
-    // Case 1: every referenced pool is used by exactly one runner. Repoint that
-    // runner at the canonical clone so it runs where its worktrees used to be
-    // sourced from, and record the move.
+    // Repoint each referencing runner, walking `refs` in config order. The
+    // first runner to reference a given pool wins it (case 1 is just the N=1 of
+    // this) and keeps the canonical clone; a second-or-later sharer (case 2)
+    // can't have the same path — the operator chose "first runner wins", so it
+    // is displaced to its own fresh dir. Every move is reported, so no agent
+    // silently changes directory.
     let mut report: Vec<String> = Vec::new();
+    let mut claimed: BTreeSet<&str> = BTreeSet::new();
     for (runner_name, workdir_name) in &refs {
         let info = workdirs.get(workdir_name.as_str()).expect(
             "dangling references were rejected above, so every ref resolves here",
         );
+        // Snapshot what we need from the pool table before the mutable borrow
+        // of `cfg.runners` below.
+        let canonical = info.path.clone();
+        // `insert` returns true the first time we see this pool — that runner
+        // wins and keeps the canonical clone; later sharers are displaced.
+        let is_winner = claimed.insert(workdir_name.as_str());
+
         let Some(runner) = cfg.runners.iter_mut().find(|r| &r.name == runner_name) else {
             // The raw `[[runner]]` had a name the parsed Config doesn't — the
             // file is internally inconsistent. Report it but don't fail the
@@ -177,22 +161,49 @@ pub fn migrate_legacy_pool(
             ));
             continue;
         };
-        let target = info.path.clone();
         let previous = runner.workspace.working_dir.clone();
-        runner.workspace.working_dir = target.clone();
-        if previous == info.path {
-            report.push(format!(
-                "runner {runner_name:?}: keeps working_dir {:?} — formerly the \
-                 canonical clone of removed pool {workdir_name:?}. Runs now execute \
-                 here directly instead of in a leased worktree.",
-                target.display()
-            ));
+
+        if is_winner {
+            // Keeps the shared canonical clone: it runs where its worktrees
+            // used to be sourced from. Behaviour is equivalent for this runner.
+            runner.workspace.working_dir = canonical.clone();
+            if previous == canonical {
+                report.push(format!(
+                    "runner {runner_name:?}: keeps working_dir {:?} — formerly the \
+                     canonical clone of removed pool {workdir_name:?}. Runs now \
+                     execute here directly instead of in a leased worktree.",
+                    canonical.display()
+                ));
+            } else {
+                report.push(format!(
+                    "runner {runner_name:?}: now runs directly in {:?} (the canonical \
+                     clone of removed pool {workdir_name:?}); its previous \
+                     working_dir {:?} was a pool placeholder and is no longer used.",
+                    canonical.display(),
+                    previous.display()
+                ));
+            }
         } else {
+            // A second-or-later sharer of the same pool. It cannot keep the
+            // canonical clone (one dir per runner now), so give it the same
+            // fresh dir a `runner add` with no --working-dir would pick. It
+            // starts empty; the cloud clones the repo into it on first run.
+            let project_slug = runner.project_slug.as_deref().unwrap_or("project");
+            let assigned = crate::cli::runner_ops::default_working_dir_in(
+                data_dir,
+                project_slug,
+                runner_name,
+                runner.runner_id,
+            );
+            runner.workspace.working_dir = assigned.clone();
             report.push(format!(
-                "runner {runner_name:?}: now runs directly in {:?} (the canonical \
-                 clone of removed pool {workdir_name:?}); its previous \
-                 working_dir {:?} was a pool placeholder and is no longer used.",
-                target.display(),
+                "runner {runner_name:?}: shared removed pool {workdir_name:?} with \
+                 another runner, which keeps the canonical clone {:?}. This runner \
+                 now has its own working_dir {:?} (created empty; the repo is cloned \
+                 into it on first run). Its previous working_dir {:?} is no longer \
+                 used.",
+                canonical.display(),
+                assigned.display(),
                 previous.display()
             ));
         }
@@ -447,9 +458,10 @@ mod tests {
     }
 
     #[test]
-    fn case2_shared_pool_fails_with_actionable_message() {
-        // N runners sharing one pool: refuse, naming both runners, the shared
-        // path, and the edit required.
+    fn case2_shared_pool_first_runner_wins_others_get_new_dirs() {
+        // N runners sharing one pool: the first in config order keeps the
+        // canonical clone; every other sharer is displaced to its own fresh
+        // dir under data_dir/workspaces, and every move is reported.
         let mut cfg = config_with(vec![
             runner("codex", "/home/me/repo"),
             runner("claude", "/home/me/repo"),
@@ -470,14 +482,38 @@ mod tests {
             [runner.workspace]
             working_dir = "/home/me/repo"
         "#);
-        let err = migrate_legacy_pool(&mut cfg, &value, Path::new("/data")).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("\"codex\""), "{msg}");
-        assert!(msg.contains("\"claude\""), "{msg}");
-        assert!(msg.contains("/home/me/repo"), "{msg}");
-        assert!(msg.contains("working_dir"), "{msg}");
-        // Nothing should have been mutated on the failed path.
-        assert_eq!(cfg.runners[0].workspace.working_dir, PathBuf::from("/home/me/repo"));
+        let migration = migrate_legacy_pool(&mut cfg, &value, Path::new("/data"))
+            .unwrap()
+            .expect("case 2 migrates in place, first runner wins");
+
+        // Winner (first in config order) keeps the canonical clone.
+        assert_eq!(
+            cfg.runners[0].workspace.working_dir,
+            PathBuf::from("/home/me/repo"),
+            "first runner should keep the canonical clone",
+        );
+        // Loser gets a distinct, non-shared dir under data_dir/workspaces.
+        let loser = &cfg.runners[1].workspace.working_dir;
+        assert_ne!(
+            loser,
+            &PathBuf::from("/home/me/repo"),
+            "second sharer must not keep the shared path",
+        );
+        assert!(
+            loser.starts_with("/data/workspaces"),
+            "loser should be reassigned under the data dir: {loser:?}",
+        );
+        assert_ne!(
+            cfg.runners[0].workspace.working_dir, cfg.runners[1].workspace.working_dir,
+            "the two runners must no longer resolve to the same dir",
+        );
+        // The move is announced for both runners, not silent.
+        assert!(
+            migration.report.iter().any(|l| l.contains("\"claude\"")
+                && l.contains("has its own working_dir")),
+            "report should announce the displaced runner: {:?}",
+            migration.report
+        );
     }
 
     #[test]
