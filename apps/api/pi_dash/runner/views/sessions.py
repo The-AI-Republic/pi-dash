@@ -388,13 +388,11 @@ def _poll_bookkeeping(runner, body: Dict[str, Any], sid):
                 "last_heartbeat_at": now_ts,
                 "status": RunnerStatus.BUSY if reports_busy else RunnerStatus.ONLINE,
             }
-            # Capacity hint (design §6.4): persist the free-desk count the
-            # runner reports for its work-dir pool so the matcher can prefer
-            # runners with spare worktrees. Additive + optional — old runners
-            # omit the field and we leave the column untouched.
-            free_worktrees = session_service.parse_free_worktrees(status_entry.get("free_worktrees"))
-            if free_worktrees is not None:
-                runner_updates["free_worktrees"] = free_worktrees
+            # The worktree pool is retired (PDASHOSS01-137): there is no
+            # per-runner desk capacity to track, so a reported ``free_worktrees``
+            # hint is no longer persisted. A post-retirement daemon omits the
+            # field and a pre-retirement daemon still sends it — either way it
+            # is simply ignored here, and the deprecated column is left untouched.
             Runner.objects.filter(pk=runner.id).update(**runner_updates)
             if status_entry:
                 session_service.reap_stale_busy_runs(runner, status_entry)
