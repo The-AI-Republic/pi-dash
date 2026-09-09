@@ -207,3 +207,35 @@ def test_engine_version_is_length_capped(bundled_runner):
     apply_hello(bundled_runner, {"engine_version": "v" * 500})
     bundled_runner.refresh_from_db()
     assert len(bundled_runner.dev_metadata["codex_version"]) <= 64
+
+
+def test_apply_hello_persists_agent_kind_capability(bundled_runner):
+    """The daemon reports the ``AgentKind`` it drives; we persist it as an
+    ``agent:<kind>`` capability so diagnostics can identify the agent exactly."""
+    from pi_dash.runner.services.session_service import apply_hello
+
+    apply_hello(bundled_runner, {"os": "linux", "agent_kind": "muse_code"})
+    bundled_runner.refresh_from_db()
+    assert bundled_runner.capabilities == ["agent:muse_code"]
+
+
+def test_apply_hello_without_agent_kind_leaves_capabilities_untouched(bundled_runner):
+    """An older daemon omits ``agent_kind`` — a missing field must not clobber a
+    previously-reported capability with an empty list."""
+    from pi_dash.runner.services.session_service import apply_hello
+
+    bundled_runner.capabilities = ["agent:codex"]
+    bundled_runner.save(update_fields=["capabilities"])
+
+    apply_hello(bundled_runner, {"os": "linux", "version": "0.1.21"})
+    bundled_runner.refresh_from_db()
+    assert bundled_runner.capabilities == ["agent:codex"]
+
+
+def test_apply_hello_rejects_malformed_agent_kind(bundled_runner):
+    """A malformed ``agent_kind`` cannot inject arbitrary text into the field."""
+    from pi_dash.runner.services.session_service import apply_hello
+
+    apply_hello(bundled_runner, {"agent_kind": "not a kind; drop table"})
+    bundled_runner.refresh_from_db()
+    assert bundled_runner.capabilities == []
