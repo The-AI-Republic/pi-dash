@@ -362,7 +362,15 @@ def test_move_without_active_run_does_not_require_target_pod(
     target_pod.save(update_fields=["deleted_at"])
     issue = _make_issue(source_project, create_user)
 
+    # Without active runs the move must NOT suppress immediate dispatch, so
+    # the post-save signal takes the ``dispatch_immediate=True`` branch —
+    # which now routes through ``route_state_transition`` (the debounce /
+    # phase-change-supersede layer), not a direct inline dispatch. The
+    # suppressed branch (a move *with* active runs) would call
+    # ``handle_issue_state_transition(dispatch_immediate=False)`` instead.
     with patch(
+        "pi_dash.orchestration.signals.route_state_transition"
+    ) as route, patch(
         "pi_dash.orchestration.signals.handle_issue_state_transition"
     ) as transition:
         moved = _move(
@@ -375,7 +383,9 @@ def test_move_without_active_run_does_not_require_target_pod(
 
     assert moved.project_id == target_project.id
     assert moved.assigned_pod_id is None
-    assert transition.call_args.kwargs["dispatch_immediate"] is True
+    assert route.called is True
+    # The suppressed inline path must not have been taken.
+    assert transition.called is False
 
 
 @pytest.mark.unit

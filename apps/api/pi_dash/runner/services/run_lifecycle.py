@@ -53,6 +53,12 @@ def _has_project_move_handoff(run: AgentRun) -> bool:
     return bool((run.run_config or {}).get(PROJECT_MOVE_HANDOFF_CONFIG_KEY))
 
 
+def _has_phase_change_handoff(run: AgentRun) -> bool:
+    from pi_dash.orchestration.service import PHASE_CHANGE_HANDOFF_CONFIG_KEY
+
+    return bool((run.run_config or {}).get(PHASE_CHANGE_HANDOFF_CONFIG_KEY))
+
+
 def _normalize_model(raw: Any) -> str:
     return str(raw or "").strip()[:128]
 

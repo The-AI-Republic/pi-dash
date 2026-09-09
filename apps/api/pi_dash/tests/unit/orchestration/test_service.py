@@ -903,3 +903,323 @@ def test_review_to_in_progress_with_no_resume_target_uses_fresh_session(
     assert outcome.created_run.parent_run_id is None
     assert outcome.created_run.parent_run_id != review_run.id
     assert outcome.created_run.pinned_runner_id is None
+
+
+# ---------------------------------------------------------------------------
+# State-transition debounce + phase-change supersede (PDASHOSS01-139).
+#
+# See ``.ai_design/state_transition_debounce/design.md``.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def capture_debounce(monkeypatch):
+    """Capture debounced-dispatch enqueues instead of hitting Celery.
+
+    ``no_runner_dispatch`` forces ``transaction.on_commit`` to fire inline,
+    so ``_schedule_pending_dispatch``'s enqueue runs synchronously — we just
+    record ``(issue_id, token)`` rather than shipping a task to the broker.
+    """
+    from pi_dash.bgtasks import state_transition_debounce as deb
+
+    calls = []
+    monkeypatch.setattr(
+        deb.dispatch_debounced_transition,
+        "apply_async",
+        lambda args, countdown=None: calls.append((args[0], args[1], countdown)),
+    )
+    return calls
+
+
+def _make_running_run(issue, runner):
+    from django.utils import timezone
+
+    return AgentRun.objects.create(
+        workspace=issue.workspace,
+        owner=runner.owner,
+        pod=runner.pod,
+        work_item=issue,
+        runner=runner,
+        status=AgentRunStatus.RUNNING,
+        prompt="impl work",
+        started_at=timezone.now() - timezone.timedelta(minutes=2),
+    )
+
+
+@pytest.mark.unit
+def test_route_ticking_entry_debounces_no_inline_dispatch(
+    seeded, issue, states, runner_for_workspace, capture_debounce
+):
+    """Entering a ticking state schedules a debounce and does NOT dispatch
+    inline or arm the ticker."""
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+    from pi_dash.db.models.issue_pending_dispatch import IssuePendingDispatch
+
+    service.route_state_transition(
+        issue=issue,
+        from_state=states["todo"],
+        to_state=states["in_progress"],
+    )
+
+    assert AgentRun.objects.filter(work_item=issue).count() == 0
+    assert IssueAgentTicker.objects.filter(issue=issue).exists() is False
+    pending = IssuePendingDispatch.objects.get(issue=issue)
+    assert pending.token == 1
+    assert pending.dispatch_at is not None
+    # One enqueue, carrying the current token, at the debounce delay.
+    assert capture_debounce == [(str(issue.id), 1, service.DEBOUNCE_SECONDS)]
+
+
+@pytest.mark.unit
+def test_debounce_coalesces_rapid_transitions_into_one_review_run(
+    seeded, issue, states, runner_for_workspace, capture_debounce
+):
+    """Todo → In Progress → In Review inside the window produces exactly one
+    run, on the review template, when the final debounce fires."""
+    service.route_state_transition(
+        issue=issue, from_state=states["todo"], to_state=states["in_progress"]
+    )
+    service.route_state_transition(
+        issue=issue, from_state=states["in_progress"], to_state=states["in_review"]
+    )
+    # The card now reads In Review.
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_review"])
+
+    tokens = [tok for (_iid, tok, _cd) in capture_debounce]
+    assert tokens == [1, 2]
+
+    # The stale first job is a no-op.
+    stale = service.run_debounced_dispatch(str(issue.id), 1)
+    assert stale.reason == "stale-token"
+    assert AgentRun.objects.filter(work_item=issue).count() == 0
+
+    # The final job dispatches a single fresh review run.
+    outcome = service.run_debounced_dispatch(str(issue.id), 2)
+    assert outcome.reason == "created"
+    assert AgentRun.objects.filter(work_item=issue).count() == 1
+    # Fresh session = review-template entry (parent + pin cleared).
+    assert outcome.created_run.parent_run_id is None
+    assert outcome.created_run.pinned_runner_id is None
+
+
+@pytest.mark.unit
+def test_debounce_cancelled_when_landing_on_non_ticking_state(
+    seeded, issue, states, runner_for_workspace, capture_debounce
+):
+    """Todo → In Progress → Todo inside the window produces zero runs and
+    leaves no armed ticker."""
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+    from pi_dash.db.models.issue_pending_dispatch import IssuePendingDispatch
+
+    service.route_state_transition(
+        issue=issue, from_state=states["todo"], to_state=states["in_progress"]
+    )
+    service.route_state_transition(
+        issue=issue, from_state=states["in_progress"], to_state=states["todo"]
+    )
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["todo"])
+
+    # The clear bumped the token past the scheduled job's token.
+    pending = IssuePendingDispatch.objects.get(issue=issue)
+    assert pending.token == 2
+    assert pending.dispatch_at is None
+
+    # Firing the (stale) scheduled job is a no-op.
+    outcome = service.run_debounced_dispatch(str(issue.id), 1)
+    assert outcome.reason == "stale-token"
+    assert AgentRun.objects.filter(work_item=issue).count() == 0
+    ticker = IssueAgentTicker.objects.filter(issue=issue).first()
+    assert ticker is None or ticker.enabled is False
+
+
+@pytest.mark.unit
+def test_debounce_job_stale_token_is_noop(
+    seeded, issue, states, runner_for_workspace, capture_debounce
+):
+    """A delayed job whose token no longer matches never dispatches."""
+    service.route_state_transition(
+        issue=issue, from_state=states["todo"], to_state=states["in_progress"]
+    )
+    # A newer transition bumps the token to 2.
+    service.route_state_transition(
+        issue=issue, from_state=states["in_progress"], to_state=states["in_review"]
+    )
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_review"])
+
+    outcome = service.run_debounced_dispatch(str(issue.id), 1)
+    assert outcome.reason == "stale-token"
+    assert AgentRun.objects.filter(work_item=issue).count() == 0
+
+
+@pytest.mark.unit
+def test_debounce_job_noop_when_issue_deleted(
+    seeded, issue, states, runner_for_workspace, capture_debounce
+):
+    """Issue deletion inside the window cancels the pending dispatch."""
+    service.route_state_transition(
+        issue=issue, from_state=states["todo"], to_state=states["in_progress"]
+    )
+    issue_id = str(issue.id)
+    Issue.all_objects.filter(pk=issue.pk).delete()
+
+    outcome = service.run_debounced_dispatch(issue_id, 1)
+    assert outcome.reason == "issue-gone"
+
+
+@pytest.mark.unit
+def test_phase_change_supersedes_executing_run(
+    seeded, issue, states, runner_for_workspace, monkeypatch
+):
+    """A phase change while a run is executing requests cancellation, stashes
+    the handoff marker, and arms the new phase's ticker."""
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    monkeypatch.setattr(service, "_send_phase_change_cancel", lambda *a, **k: None)
+
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    impl_run = _make_running_run(issue, runner_for_workspace)
+
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_review"])
+    issue.refresh_from_db()
+    service.route_state_transition(
+        issue=issue,
+        from_state=states["in_progress"],
+        to_state=states["in_review"],
+    )
+
+    impl_run.refresh_from_db()
+    assert impl_run.status == AgentRunStatus.CANCEL_REQUESTED
+    marker = (impl_run.run_config or {}).get(service.PHASE_CHANGE_HANDOFF_CONFIG_KEY)
+    assert marker is not None
+    assert marker["target_state_id"] == str(states["in_review"].id)
+    assert marker["fresh_session"] is True
+    # New phase ticker armed; impl run captured as the resume parent.
+    ticker = IssueAgentTicker.objects.get(issue=issue)
+    assert ticker.enabled is True
+    assert ticker.resume_parent_run_id == impl_run.pk
+    # No successor yet — the slot is still held by the cancel-requested run.
+    assert (
+        AgentRun.objects.filter(work_item=issue).exclude(pk=impl_run.pk).count() == 0
+    )
+
+
+@pytest.mark.unit
+def test_phase_change_successor_created_on_terminal_and_ticker_survives(
+    seeded, issue, states, runner_for_workspace, monkeypatch
+):
+    """Once the superseded run terminates, the successor is created and the
+    new phase's ticker is NOT disarmed by the old run's completed payload."""
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+    from pi_dash.runner.services import matcher
+    from pi_dash.runner.services.agent_run_finalization import apply_terminal_effects
+
+    monkeypatch.setattr(service, "_send_phase_change_cancel", lambda *a, **k: None)
+    monkeypatch.setattr(matcher, "drain_for_runner_by_id", mock.Mock())
+
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    impl_run = _make_running_run(issue, runner_for_workspace)
+
+    # The card now reads In Review (the signal persists this before firing).
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_review"])
+    issue.refresh_from_db()
+    service.route_state_transition(
+        issue=issue,
+        from_state=states["in_progress"],
+        to_state=states["in_review"],
+    )
+    impl_run.refresh_from_db()
+    assert impl_run.status == AgentRunStatus.CANCEL_REQUESTED
+
+    # The runner acknowledges: the run terminates with a completed payload
+    # that, absent the handoff guard, would disarm the freshly-armed ticker.
+    from django.utils import timezone
+
+    AgentRun.objects.filter(pk=impl_run.pk).update(
+        status=AgentRunStatus.CANCELLED,
+        done_payload={"status": "completed"},
+        ended_at=timezone.now(),
+        terminal_hooks_applied_at=None,
+    )
+    apply_terminal_effects(impl_run.id)
+
+    # A fresh review successor now exists and holds the slot.
+    successor = (
+        AgentRun.objects.filter(work_item=issue)
+        .exclude(pk=impl_run.pk)
+        .order_by("-created_at")
+        .first()
+    )
+    assert successor is not None
+    assert successor.parent_run_id is None
+    assert successor.pinned_runner_id is None
+    # The review ticker survived the cancelled run's completed payload.
+    ticker = IssueAgentTicker.objects.get(issue=issue)
+    assert ticker.enabled is True
+    # The marker records the replacement for idempotency.
+    impl_run.refresh_from_db()
+    marker = impl_run.run_config[service.PHASE_CHANGE_HANDOFF_CONFIG_KEY]
+    assert marker["replacement_run_id"] == str(successor.id)
+
+
+@pytest.mark.unit
+def test_phase_change_supersedes_queued_run_immediately(
+    seeded, issue, states, runner_for_workspace, monkeypatch
+):
+    """A QUEUED (not-yet-executing) run is cancelled and its successor
+    created in the same transaction — there is no runner to acknowledge."""
+    monkeypatch.setattr(service, "_send_phase_change_cancel", lambda *a, **k: None)
+
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    queued = AgentRun.objects.create(
+        workspace=issue.workspace,
+        owner=runner_for_workspace.owner,
+        pod=runner_for_workspace.pod,
+        work_item=issue,
+        status=AgentRunStatus.QUEUED,
+        prompt="impl work",
+    )
+
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_review"])
+    issue.refresh_from_db()
+    service.route_state_transition(
+        issue=issue,
+        from_state=states["in_progress"],
+        to_state=states["in_review"],
+    )
+
+    queued.refresh_from_db()
+    assert queued.status == AgentRunStatus.CANCELLED
+    successor = (
+        AgentRun.objects.filter(work_item=issue).exclude(pk=queued.pk).first()
+    )
+    assert successor is not None
+    assert successor.parent_run_id is None
+
+
+@pytest.mark.unit
+def test_active_run_non_ticking_exit_leaves_run_untouched(
+    seeded, issue, states, runner_for_workspace, paused_state
+):
+    """Open-question default (option a): moving to a non-ticking state while
+    a run is in flight leaves the run running (today's behavior) and disarms
+    the ticker. No handoff marker, no cancellation."""
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    IssueAgentTicker.objects.create(issue=issue, enabled=True, next_run_at=None)
+    impl_run = _make_running_run(issue, runner_for_workspace)
+
+    service.route_state_transition(
+        issue=issue,
+        from_state=states["in_progress"],
+        to_state=paused_state,
+    )
+
+    impl_run.refresh_from_db()
+    assert impl_run.status == AgentRunStatus.RUNNING
+    assert service.PHASE_CHANGE_HANDOFF_CONFIG_KEY not in (impl_run.run_config or {})
+    assert IssueAgentTicker.objects.get(issue=issue).enabled is False

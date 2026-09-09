@@ -980,12 +980,16 @@ def test_skip_immediate_dispatch_header_suppresses_run_creation_on_state_change(
 
 
 @pytest.mark.unit
-def test_no_skip_header_creates_run_on_state_change(db, session_client, workspace, project):
-    """Sanity: without the header, the existing immediate-dispatch path
-    fires. This guards against accidentally inverting the default."""
+def test_no_skip_header_debounces_dispatch_on_state_change(db, session_client, workspace, project):
+    """Sanity: without the header, the transition schedules the 15s debounce
+    (rather than dispatching inline), and firing that debounce creates the
+    run. This guards against accidentally inverting the default while
+    reflecting the PDASHOSS01-139 debounce behavior."""
     from crum import impersonate
 
     from pi_dash.db.models import Issue, Project, State
+    from pi_dash.db.models.issue_pending_dispatch import IssuePendingDispatch
+    from pi_dash.orchestration.service import run_debounced_dispatch
     from pi_dash.prompting.seed import seed_default_template
 
     seed_default_template()
@@ -1013,6 +1017,14 @@ def test_no_skip_header_creates_run_on_state_change(db, session_client, workspac
         format="json",
     )
     assert resp.status_code == status.HTTP_204_NO_CONTENT
+    # Deferred, not inline: no run yet, but a debounce is armed.
+    assert AgentRun.objects.filter(work_item=issue).count() == 0
+    pending = IssuePendingDispatch.objects.get(issue=issue)
+    assert pending.token >= 1
+
+    # Firing the debounced job dispatches exactly one run.
+    outcome = run_debounced_dispatch(str(issue.id), pending.token)
+    assert outcome.reason == "created"
     assert AgentRun.objects.filter(work_item=issue).count() == 1
 
 

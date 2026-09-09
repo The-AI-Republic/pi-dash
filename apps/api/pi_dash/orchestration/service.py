@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Optional
 
 from django.db import transaction
+from django.db.models import F
+from django.utils import timezone
 
 from pi_dash.core.agent_execution import AgentExecutorKind
 from pi_dash.db.models.issue import Issue, IssueComment
@@ -54,6 +57,23 @@ _PROMPT_BUILD_ERRORS = (PromptRenderError, RecipeNotFound, PromptRegistryError)
 # locked run makes the terminal callback idempotent without introducing a
 # second coordination table.
 PROJECT_MOVE_HANDOFF_CONFIG_KEY = "_project_move_handoff"
+
+# Stored on the source run while a phase-change supersede waits for the
+# source runner to acknowledge cancellation. Mirrors the project-move
+# handoff exactly (see :func:`supersede_active_run` /
+# :func:`complete_phase_change_handoff`): the marker carries the new
+# phase's target state and the successor's session shape so the terminal
+# callback can create the replacement once the old run reaches a terminal
+# status, without violating the single-active-run guardrail.
+PHASE_CHANGE_HANDOFF_CONFIG_KEY = "_phase_change_handoff"
+
+# Quiet period, in seconds, before a state transition that targets a
+# ticking state actually dispatches. A further transition within the
+# window replaces the pending intent and restarts the clock (see
+# :func:`route_state_transition`). A project-level override is a possible
+# future refinement; today this is a single constant.
+# See ``.ai_design/state_transition_debounce/design.md``.
+DEBOUNCE_SECONDS = 15
 
 #: DEPRECATED: retained only for backward compatibility with external
 #: importers (tests, integrations). Internal callers must use
@@ -256,6 +276,470 @@ def handle_issue_state_transition(
         fresh_session=fresh_session,
         trigger=AgentRunTrigger.STATE_TRANSITION,
     )
+
+
+# ----------------------------------------------------------------------
+# Debounced dispatch + phase-change supersede (PDASHOSS01-139)
+#
+# The ``post_save(Issue)`` signal routes every ``dispatch_immediate=True``
+# transition through :func:`route_state_transition`, which either:
+#
+# - supersedes an in-flight run when the transition crosses to a different
+#   ticking phase while a run is active (Part 2), or
+# - schedules a 15s-debounced dispatch when the target is a ticking state
+#   and no run is active yet (Part 1), or
+# - falls back to synchronous :func:`handle_issue_state_transition` when a
+#   run already holds the slot (dispatch would be a no-op) or the target is
+#   non-ticking (disarm only).
+#
+# ``dispatch_immediate=False`` callers (Comment & Run, project move, the
+# no-eligible-runner bounce) never enter this router — they own their own
+# dispatch and call :func:`handle_issue_state_transition` directly.
+#
+# See ``.ai_design/state_transition_debounce/design.md``.
+# ----------------------------------------------------------------------
+
+
+def route_state_transition(
+    issue: Issue,
+    from_state: Optional[State],
+    to_state: Optional[State],
+    actor=None,
+) -> None:
+    """Signal-side entry point for a user-driven state transition.
+
+    Decides between phase-change supersede, debounced dispatch, and
+    synchronous fall-through. Never dispatches inline for the common
+    "enter a ticking state" case — that is deferred to the debounce job.
+    """
+    # No prior state (issue just created, or the prior state was deleted):
+    # there is nothing to "settle" against and no mis-drop to correct, so
+    # keep the pre-debounce behavior — arm/dispatch inline. The debounce is
+    # about *transitions* between existing states.
+    if from_state is None:
+        handle_issue_state_transition(issue, from_state, to_state, actor)
+        return
+
+    active = _active_run_for(issue)
+
+    # Part 2 — a phase change while a run is in flight supersedes it.
+    if (
+        active is not None
+        and is_ticking_state(from_state)
+        and is_ticking_state(to_state)
+        and from_state.group != to_state.group
+    ):
+        _clear_pending_dispatch(issue)
+        supersede_active_run(
+            issue,
+            from_state=from_state,
+            to_state=to_state,
+            active=active,
+            actor=actor,
+        )
+        return
+
+    # A run already holds the single-active-run slot: a debounced dispatch
+    # would only ever return ``active-run-exists``. Fall through to the
+    # synchronous handler so arm/disarm still resolve (today's behavior);
+    # it will not create a second run.
+    if active is not None:
+        _clear_pending_dispatch(issue)
+        handle_issue_state_transition(issue, from_state, to_state, actor)
+        return
+
+    # Non-ticking target, no active run: nothing to dispatch. Cancel any
+    # pending debounce and disarm synchronously. This is the settling-window
+    # cancel path (Todo → In Progress → Todo ends with no run, no armed
+    # ticker) and the bounce-to-Backlog path (which must not re-enter the
+    # debounce and loop).
+    if not is_ticking_state(to_state):
+        _clear_pending_dispatch(issue)
+        handle_issue_state_transition(issue, from_state, to_state, actor)
+        return
+
+    # Part 1 — ticking target, no active run: debounce the dispatch.
+    _schedule_pending_dispatch(issue, from_state, to_state)
+
+
+def _schedule_pending_dispatch(
+    issue: Issue,
+    from_state: Optional[State],
+    to_state: Optional[State],
+) -> None:
+    """Record the pending dispatch intent and schedule the delayed job.
+
+    Bumps the issue's debounce ``token`` and (re)arms the delayed job for
+    ``DEBOUNCE_SECONDS`` from now. A prior scheduled job for the same issue
+    becomes a no-op because it carries the old token. The job is dispatched
+    on transaction commit so it can never read the row before it lands.
+    """
+    from pi_dash.db.models.issue_pending_dispatch import IssuePendingDispatch
+
+    with transaction.atomic():
+        pending, _ = IssuePendingDispatch.objects.select_for_update().get_or_create(
+            issue=issue
+        )
+        pending.token = (pending.token or 0) + 1
+        pending.dispatch_at = timezone.now() + timedelta(seconds=DEBOUNCE_SECONDS)
+        pending.from_state = from_state
+        pending.to_state = to_state
+        pending.save(
+            update_fields=["token", "dispatch_at", "from_state", "to_state", "updated_at"]
+        )
+        token = pending.token
+
+    def _enqueue(issue_id=str(issue.id), tok=token):
+        from pi_dash.bgtasks.state_transition_debounce import (
+            dispatch_debounced_transition,
+        )
+
+        dispatch_debounced_transition.apply_async(
+            args=[issue_id, tok],
+            countdown=DEBOUNCE_SECONDS,
+        )
+
+    transaction.on_commit(_enqueue)
+    logger.info(
+        "orchestration.debounce: scheduled issue=%s token=%s in %ss",
+        issue.pk,
+        token,
+        DEBOUNCE_SECONDS,
+    )
+
+
+def _clear_pending_dispatch(issue: Issue) -> None:
+    """Invalidate any pending debounced dispatch for ``issue``.
+
+    Bumps the token (so an already-scheduled job no-ops) and clears
+    ``dispatch_at``. Cheap no-op when no row exists.
+    """
+    from pi_dash.db.models.issue_pending_dispatch import IssuePendingDispatch
+
+    IssuePendingDispatch.objects.filter(issue=issue).update(
+        token=F("token") + 1,
+        dispatch_at=None,
+    )
+
+
+def run_debounced_dispatch(issue_id, token) -> TransitionOutcome:
+    """Fire a debounced dispatch, or no-op if it has been superseded.
+
+    Re-reads the issue and its pending-dispatch row under a row lock,
+    validates the token, consumes the pending intent, then delegates to the
+    unchanged :func:`handle_issue_state_transition` against the issue's
+    *current* state. The stored ``from_state`` preserves the cross-phase
+    session-shape decision the inline path would have made.
+    """
+    from pi_dash.db.models.issue_pending_dispatch import IssuePendingDispatch
+
+    with transaction.atomic():
+        issue = (
+            Issue.all_objects.select_for_update(of=("self",))
+            .select_related("state", "project", "workspace", "assigned_pod")
+            .filter(pk=issue_id)
+            .first()
+        )
+        if issue is None:
+            # Issue deleted (or moved) inside the window — nothing to do.
+            return TransitionOutcome(reason="issue-gone")
+        pending = IssuePendingDispatch.objects.select_for_update().filter(issue=issue).first()
+        if pending is None or pending.token != token:
+            # A later transition (or a clear) bumped the token; this job is
+            # stale.
+            return TransitionOutcome(reason="stale-token")
+        from_state = pending.from_state
+        # Consume: bump the token so a duplicate delivery of *this* job
+        # no-ops, and drop the armed marker.
+        pending.token = (pending.token or 0) + 1
+        pending.dispatch_at = None
+        pending.save(update_fields=["token", "dispatch_at", "updated_at"])
+
+    # Resolve against the issue's authoritative current state. Dispatch is
+    # done outside the issue row lock so the prompt build / dispatch work
+    # does not hold it. ``from_state`` may be stale relative to the current
+    # state, but it only feeds the cross-phase session-shape branch, which
+    # ``handle_issue_state_transition`` re-guards against the current state.
+    to_state = issue.state
+    return handle_issue_state_transition(
+        issue=issue,
+        from_state=from_state,
+        to_state=to_state,
+        actor=None,
+        dispatch_immediate=True,
+    )
+
+
+def _send_phase_change_cancel(runner_id, run_id) -> None:
+    """Best-effort cancellation request for a phase-change handoff.
+
+    Mirrors ``utils.issue_move._send_project_move_cancel``: the persisted
+    CANCEL_REQUESTED status is authoritative, so a transient delivery
+    failure cannot lose the handoff intent — the runner re-receives the
+    cancel frame at session open.
+    """
+    from pi_dash.runner.services.outbox import RunnerOfflineError
+    from pi_dash.runner.services.pubsub import send_to_runner
+
+    try:
+        send_to_runner(
+            runner_id,
+            {
+                "v": 1,
+                "type": "cancel",
+                "run_id": str(run_id),
+                "reason": "issue_phase_changed",
+            },
+        )
+    except RunnerOfflineError:
+        logger.info(
+            "orchestration.phase_change: runner %s offline; cancel for run %s "
+            "will be redelivered at session open",
+            runner_id,
+            run_id,
+        )
+    except Exception:
+        logger.exception(
+            "orchestration.phase_change: failed to deliver cancel for run %s",
+            run_id,
+        )
+
+
+#: Active statuses whose run has no executing agent process yet — safe to
+#: cancel and hand off in the same transaction. Anything else is executing
+#: on a runner and must go through CANCEL_REQUESTED → runner-ack first.
+_INERT_HANDOFF_STATUSES = (
+    AgentRunStatus.QUEUED,
+    AgentRunStatus.PAUSED_AWAITING_INPUT,
+)
+
+
+def supersede_active_run(
+    issue: Issue,
+    *,
+    from_state: State,
+    to_state: State,
+    active: AgentRun,
+    actor=None,
+) -> None:
+    """Cancel the in-flight run and hand off to the new phase's run.
+
+    Mirrors the cross-project move handoff:
+
+    - Disarm the old phase's ticker and arm the new phase's ticker
+      (resolving cadence against ``to_state``), capturing the resume parent
+      on the started → review/test forward transition.
+    - Stash the phase-change handoff marker (target state, session shape)
+      on the run.
+    - An inert run (QUEUED / PAUSED, no runner) is cancelled and its
+      successor created in the same transaction. An executing run enters
+      CANCEL_REQUESTED; the successor is created by
+      :func:`complete_phase_change_handoff` once the runner acknowledges.
+
+    The successor's session shape matches a clean phase entry:
+    ``fresh_session`` for In Review / In Test, resume-parent for the
+    review → In Progress hand-back.
+    """
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+    from pi_dash.orchestration import scheduling
+
+    to_cfg = phase_config_for(to_state)
+
+    # Capture the pre-review implementation run so a later review → In
+    # Progress hand-back resumes that exact session (matches the inline
+    # cross-phase capture in ``handle_issue_state_transition``).
+    resume_parent = active if from_state.group == StateGroup.STARTED.value else None
+
+    # Resolve the successor's session shape against the target phase.
+    fresh_session = False
+    parent_run_id: Optional[str] = None
+    if to_cfg is not None and to_cfg.fresh_session_on_entry:
+        fresh_session = True
+    else:
+        ticker = IssueAgentTicker.objects.filter(issue=issue).first()
+        if ticker is not None and ticker.resume_parent_run_id is not None:
+            parent_run_id = str(ticker.resume_parent_run_id)
+        else:
+            # No resume target (e.g. forward path skipped the impl phase).
+            # A fresh session is correct rather than parenting off a
+            # review run.
+            fresh_session = True
+
+    cancel_after_commit = None
+    create_successor_now = False
+
+    with transaction.atomic():
+        src = AgentRun.objects.select_for_update(of=("self",)).filter(pk=active.pk).first()
+        if src is None or src.is_terminal:
+            # The run finished on its own between the signal read and here.
+            # Fall back to the ordinary inline handler, which will arm the
+            # new phase and dispatch a fresh run.
+            handle_issue_state_transition(issue, from_state, to_state, actor)
+            return
+
+        # Ticker: disarm the old phase, arm the new phase against the
+        # current (target) state.
+        scheduling.disarm_ticker(issue)
+        scheduling.arm_ticker(issue, dispatch_immediate=True)
+        if resume_parent is not None:
+            IssueAgentTicker.objects.filter(issue=issue).update(resume_parent_run=resume_parent)
+
+        marker = {
+            "target_state_id": str(to_state.id),
+            "target_group": to_state.group,
+            "fresh_session": fresh_session,
+            "parent_run_id": parent_run_id,
+        }
+        config = dict(src.run_config or {})
+        config[PHASE_CHANGE_HANDOFF_CONFIG_KEY] = marker
+        src.run_config = config
+
+        now = timezone.now()
+        if src.status in _INERT_HANDOFF_STATUSES and src.runner_id is None:
+            # No executing agent — cancel and hand off in this transaction.
+            src.status = AgentRunStatus.CANCELLED
+            src.ended_at = now
+            src.queue_position = None
+            src.save(update_fields=["status", "ended_at", "queue_position", "run_config"])
+            create_successor_now = True
+        else:
+            src.status = AgentRunStatus.CANCEL_REQUESTED
+            src.queue_position = None
+            src.save(update_fields=["status", "queue_position", "run_config"])
+            if src.runner_id is not None:
+                cancel_after_commit = (src.runner_id, src.id)
+
+        source_id = src.id
+
+    if create_successor_now:
+        complete_phase_change_handoff(source_id)
+    if cancel_after_commit is not None:
+        runner_id, run_id = cancel_after_commit
+        transaction.on_commit(lambda rid=runner_id, run=run_id: _send_phase_change_cancel(rid, run))
+    logger.info(
+        "orchestration.phase_change: superseded run=%s issue=%s %s→%s "
+        "(fresh_session=%s)",
+        active.pk,
+        issue.pk,
+        from_state.group,
+        to_state.group,
+        fresh_session,
+    )
+
+
+def _create_phase_change_successor_run(*, issue: Issue, source: AgentRun, pod: Pod, marker: dict) -> Optional[AgentRun]:
+    """Create + dispatch the new phase's run after the source has stopped.
+
+    Reuses :func:`_create_and_dispatch_run` so the successor renders the
+    target phase's template (chosen by ``issue.state``) with the resolved
+    session shape and a fresh repository snapshot.
+    """
+    parent = None
+    if not marker.get("fresh_session") and marker.get("parent_run_id"):
+        parent = AgentRun.objects.filter(pk=marker["parent_run_id"]).first()
+
+    with transaction.atomic():
+        existing = _active_run_for(issue)
+        if existing is not None:
+            return existing
+        outcome = _create_and_dispatch_run(
+            issue=issue,
+            parent=parent,
+            creator=source.created_by,
+            pod=pod,
+            fresh_session=bool(marker.get("fresh_session")),
+            trigger=source.trigger or AgentRunTrigger.STATE_TRANSITION,
+        )
+    return outcome.created_run
+
+
+def complete_phase_change_handoff(run_id) -> Optional[AgentRun]:
+    """Create the new-phase successor for a stopped superseded run.
+
+    Called from the terminal callback once the old run reaches a terminal
+    status. Locks issue → run (matching issue moves and
+    ``complete_project_move_handoff``) so duplicate lifecycle deliveries
+    cannot create two successors.
+
+    Suppressed when the issue has since moved to yet another phase (a
+    second supersede owns the newer transition), or when another active run
+    already holds the slot.
+    """
+    with transaction.atomic():
+        work_item_id = (
+            AgentRun.objects.filter(pk=run_id).values_list("work_item_id", flat=True).first()
+        )
+        if work_item_id is None:
+            return None
+
+        issue = (
+            Issue.all_objects.select_for_update(of=("self",))
+            .select_related("project", "workspace", "state", "assigned_pod")
+            .filter(pk=work_item_id)
+            .first()
+        )
+        if issue is None:
+            return None
+
+        source = (
+            AgentRun.objects.select_for_update(of=("self",))
+            .select_related("created_by")
+            .filter(pk=run_id)
+            .first()
+        )
+        if source is None or not source.is_terminal:
+            return None
+
+        config = dict(source.run_config or {})
+        marker = dict(config.get(PHASE_CHANGE_HANDOFF_CONFIG_KEY) or {})
+        if not marker:
+            return None
+
+        replacement_id = marker.get("replacement_run_id")
+        if replacement_id:
+            return AgentRun.objects.filter(pk=replacement_id).first()
+
+        # The issue changed phase again during cancellation — a newer
+        # supersede (or debounce) owns that transition; do not create a run
+        # for a phase the issue has already left.
+        target_state_id = marker.get("target_state_id")
+        current_state_id = str(issue.state_id) if issue.state_id else None
+        if target_state_id and current_state_id != str(target_state_id):
+            marker["suppressed"] = "phase_changed_again"
+            config[PHASE_CHANGE_HANDOFF_CONFIG_KEY] = marker
+            source.run_config = config
+            source.save(update_fields=["run_config"])
+            return None
+
+        active = _active_run_for(issue)
+        if active is not None:
+            # A concurrent Run AI / debounce won the slot; treat it as the
+            # replacement rather than violating one-active-run.
+            marker["replacement_run_id"] = str(active.id)
+            config[PHASE_CHANGE_HANDOFF_CONFIG_KEY] = marker
+            source.run_config = config
+            source.save(update_fields=["run_config"])
+            return active
+
+        pod = _resolve_pod_for_issue(issue)
+        if pod is None:
+            logger.error(
+                "orchestration.phase_change: no pod for issue %s; cannot hand off",
+                issue.id,
+            )
+            return None
+
+        replacement = _create_phase_change_successor_run(
+            issue=issue,
+            source=source,
+            pod=pod,
+            marker=marker,
+        )
+        marker["replacement_run_id"] = str(replacement.id) if replacement is not None else None
+        config[PHASE_CHANGE_HANDOFF_CONFIG_KEY] = marker
+        source.run_config = config
+        source.save(update_fields=["run_config"])
+        return replacement
 
 
 def _resolve_fallback_creator(issue: Issue):

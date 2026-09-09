@@ -106,6 +106,8 @@ from .description import Description, DescriptionVersion
 
 from .issue_agent_ticker import IssueAgentTicker
 
+from .issue_pending_dispatch import IssuePendingDispatch
+
 from .scheduler import Scheduler, SchedulerBinding, SchedulerSource
 
 from .loop import LoopJob, LoopTarget, LoopUserPreference, SkipReason
