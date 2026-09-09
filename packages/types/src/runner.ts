@@ -144,7 +144,6 @@ export interface IRunner {
 export type TAgentRunStatus =
   | "queued"
   | "assigned"
-  | "waiting_for_worktree"
   | "running"
   | "cancel_requested"
   | "awaiting_approval"
@@ -233,9 +232,6 @@ export interface IAgentRun {
     limits?: Record<string, number>;
   };
   tool_calls: IAgentRunToolCall[];
-  /** Place in the runner's local worktree queue while
-   * ``waiting_for_worktree``; ``null`` otherwise (display only). */
-  queue_position?: number | null;
   events?: IAgentRunEvent[];
 }
 

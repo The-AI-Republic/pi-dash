@@ -42,7 +42,6 @@ type Props = {
 const ACTIVE_RUN_STATUSES = new Set<TAgentRunStatus>([
   "queued",
   "assigned",
-  "waiting_for_worktree",
   "running",
   "cancel_requested",
   "awaiting_approval",
@@ -183,19 +182,6 @@ function getRunView(
         icon: LoaderCircle,
         iconClassName: "animate-spin text-accent-primary",
       };
-    case "waiting_for_worktree": {
-      const position = run.queue_position;
-      const queueDetail =
-        typeof position === "number" && position > 0 ? t("Queued (position {count})", { count: position }) : null;
-      return {
-        title: t("AI agent is waiting for a worktree"),
-        detail: queueDetail ?? runnerDetail ?? t("Queued on the runner's machine for a free worktree."),
-        badge: t("Queued on runner"),
-        badgeVariant: "brand",
-        icon: Clock3,
-        iconClassName: "text-accent-primary",
-      };
-    }
     case "running":
       return {
         title: t("AI agent is working on this issue"),
