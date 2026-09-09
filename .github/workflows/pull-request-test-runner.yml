@@ -15,6 +15,19 @@ on:
       - "Cargo.lock"
       - "runner/**"
       - ".github/workflows/pull-request-test-runner.yml"
+  # Post-merge validation: GitHub re-runs PR checks on synchronize, not when
+  # the base moves, so two PRs green against an older main can merge into a
+  # main that does not build. Run again on push to main to report that
+  # immediately. The merge commit carries the merged PR's files, so these
+  # path filters still fire for the change that broke main.
+  push:
+    branches:
+      - "main"
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "runner/**"
+      - ".github/workflows/pull-request-test-runner.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

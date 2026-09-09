@@ -18,6 +18,16 @@ on:
       # runner/ and apps/web but not apps/api, so without this path the
       # guard would not run on the one PR shape it exists to catch.
       - "runner/src/config/schema.rs"
+  # Post-merge validation: PR checks don't re-run when the base branch moves,
+  # so a main built from two independently-green PRs may still be broken.
+  # Run pytest again on push to main to surface it immediately.
+  push:
+    branches:
+      - "main"
+    paths:
+      - "apps/api/**"
+      - ".github/workflows/pull-request-test-api.yml"
+      - "runner/src/config/schema.rs"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
