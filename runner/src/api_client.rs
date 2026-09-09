@@ -324,7 +324,6 @@ mod resolve_tests {
                 workspace: WorkspaceSection {
                     working_dir: std::path::PathBuf::from("/tmp/wd"),
                 },
-                workdir: None,
                 agent: AgentSection::default(),
                 codex: CodexSection::default(),
                 claude_code: ClaudeCodeSection::default(),
@@ -334,7 +333,6 @@ mod resolve_tests {
                 muse_code: Default::default(),
                 approval_policy: ApprovalPolicySection::default(),
             }],
-            workdirs: vec![],
             cli: Some(CliSection {
                 token: Some(token.into()),
                 workspace_slug: None,

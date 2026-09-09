@@ -917,7 +917,6 @@ mod tests {
             workspace: WorkspaceSection {
                 working_dir: PathBuf::from("/tmp/pidash-test"),
             },
-            workdir: None,
             agent: Default::default(),
             codex: Default::default(),
             claude_code: Default::default(),
@@ -939,7 +938,6 @@ mod tests {
                 auto_update: true,
             },
             runners: vec![runner],
-            workdirs: vec![],
             cli: None,
         }
     }

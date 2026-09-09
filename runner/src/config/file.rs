@@ -237,7 +237,6 @@ mod tests {
             project_slug: Some("TEST".into()),
             pod_id: None,
             workspace: WorkspaceSection { working_dir },
-            workdir: None,
             agent: Default::default(),
             codex: Default::default(),
             claude_code: Default::default(),
@@ -265,7 +264,6 @@ mod tests {
                 auto_update: true,
             },
             runners: vec![sample_runner("t", tmp.path().join("wd"))],
-            workdirs: vec![],
         cli: None,
         };
         write_config(&paths, &cfg).unwrap();
@@ -497,7 +495,6 @@ model_default = "o4-mini"
                 sample_runner("a", tmp.path().join("wd-a")),
                 sample_runner("b", tmp.path().join("wd-b")),
             ],
-            workdirs: vec![],
         cli: None,
         };
         write_config(&paths, &cfg).unwrap();
@@ -547,7 +544,6 @@ model_default = "o4-mini"
                 sample_runner("b", tmp.path().join("wd-b")),
                 sample_runner("c", tmp.path().join("wd-c")),
             ],
-            workdirs: vec![],
             cli: None,
         };
         write_config(&paths, &cfg).unwrap();
@@ -580,7 +576,6 @@ model_default = "o4-mini"
                 auto_update: true,
             },
             runners: vec![sample_runner("keep", tmp.path().join("wd"))],
-            workdirs: vec![],
         cli: None,
         };
         write_config(&paths, &cfg).unwrap();
@@ -623,7 +618,6 @@ model_default = "o4-mini"
                 sample_runner("a", tmp.path().join("wd-a")),
                 sample_runner("b", tmp.path().join("wd-b")),
             ],
-            workdirs: vec![],
             cli: None,
         };
         write_config(&paths, &cfg).unwrap();

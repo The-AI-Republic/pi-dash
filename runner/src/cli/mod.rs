@@ -27,7 +27,6 @@ mod stop;
 mod tui;
 mod uninstall;
 pub mod update;
-mod workdir;
 mod workpad;
 mod workspace;
 
@@ -75,10 +74,6 @@ pub enum Command {
 
     /// Manage runners under the active connection (add / list / remove).
     Runner(runner::RunnerArgs),
-
-    /// Manage shared work directories (worktree pools): `workdir add` /
-    /// `list` / `remove`. Lets multiple runners share one repo checkout.
-    Workdir(workdir::WorkdirArgs),
 
     /// Read Pi Dash projects in the active workspace.
     Project(project::ProjectArgs),
@@ -163,7 +158,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Connect(args) => connect::run(args, &paths).await,
         Command::Config(args) => config_cmd::run(args, &paths).await,
         Command::Runner(args) => runner::run(args, &paths).await,
-        Command::Workdir(args) => workdir::run(args, &paths).await,
         Command::Project(args) => run_crud(project::run(args, &paths).await),
         Command::Context(args) => run_crud(context::run(args, &paths).await),
         Command::Install(args) => install::run(args, &paths).await,

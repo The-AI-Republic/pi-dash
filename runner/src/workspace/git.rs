@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
 use uuid::Uuid;
@@ -60,36 +60,16 @@ pub async fn workspace_state(path: &Path) -> Result<WorkspaceState> {
 }
 
 /// Fetch from origin and check out the given branch so the agent can commit
-/// directly onto an existing feature branch. Called before the Codex process
-/// spawns when an issue specifies `git_work_branch`, and by the worktree pool
-/// at lease-grant time.
-///
-/// Refuses when the branch is already checked out in a *different* worktree:
-/// `git checkout -B` does not reliably enforce the one-branch-one-checkout
-/// invariant (it succeeds when the ref value would not move), so the pool's
-/// branch lock (design §4.3) must be enforced here, fail-closed.
+/// directly onto an existing feature branch. Called before the agent process
+/// spawns when an issue specifies `git_work_branch`.
 ///
 /// Resets the local branch to `origin/<branch>` unless the local ref is
-/// strictly ahead of origin (e.g. a salvaged WIP commit whose push failed) —
-/// resetting then would silently destroy the only copy of salvaged work.
+/// strictly ahead of origin (e.g. a WIP commit whose push failed) —
+/// resetting then would silently destroy the only copy of that work.
+///
+/// (Removing this platform-side checkout is scoped to PDASHOSS01-136.)
 pub async fn checkout_work_branch(path: &Path, branch: &str) -> Result<()> {
     validate_branch_name(branch)?;
-
-    // Branch-lock guard (fail-closed): if we cannot list worktrees, or the
-    // branch is held by another worktree, refuse rather than risk two
-    // checkouts of one branch fighting via reset/salvage.
-    let held = checked_out_branches(path)
-        .await
-        .context("git worktree list (branch-lock check)")?;
-    if let Some(holder) = held.get(branch) {
-        let same = match (holder.canonicalize(), path.canonicalize()) {
-            (Ok(a), Ok(b)) => a == b,
-            _ => holder == path,
-        };
-        if !same {
-            anyhow::bail!("branch {branch:?} is already checked out at {holder:?}");
-        }
-    }
 
     git_output(path, &["fetch", "origin", branch])
         .await
@@ -130,105 +110,7 @@ pub async fn current_branch(worktree: &Path) -> Result<Option<String>> {
     if name == "HEAD" { Ok(None) } else { Ok(Some(name)) }
 }
 
-/// Add a detached-HEAD worktree of `repo` at `worktree_path`. Detached so the
-/// fresh desk holds no branch lock until a run checks one out. Worktree
-/// pooling (`.ai_design/worktree_pooling/design.md` §4.2).
-pub async fn worktree_add(repo: &Path, worktree_path: &Path) -> Result<()> {
-    if let Some(parent) = worktree_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("creating worktree parent {parent:?}"))?;
-    }
-    // `--` before the path keeps a hostile/odd path from being read as a flag.
-    git_output(
-        repo,
-        &[
-            "worktree",
-            "add",
-            "--detach",
-            "--",
-            &worktree_path.to_string_lossy(),
-        ],
-    )
-    .await
-    .with_context(|| format!("git worktree add {worktree_path:?}"))?;
-    Ok(())
-}
-
-/// Remove a worktree. `force` drops it even if dirty (used when a worktree is
-/// corrupt or being reclaimed). Always followed by `worktree_prune` by callers
-/// that delete the directory out from under git.
-pub async fn worktree_remove(repo: &Path, worktree_path: &Path, force: bool) -> Result<()> {
-    let path = worktree_path.to_string_lossy().to_string();
-    let mut args = vec!["worktree", "remove"];
-    if force {
-        args.push("--force");
-    }
-    args.push("--");
-    args.push(&path);
-    git_output(repo, &args)
-        .await
-        .with_context(|| format!("git worktree remove {worktree_path:?}"))?;
-    Ok(())
-}
-
-/// `git worktree prune` — clears bookkeeping for worktrees whose directories
-/// vanished (e.g. a crash, or a forced `rm -rf`). Cheap and idempotent.
-pub async fn worktree_prune(repo: &Path) -> Result<()> {
-    git_output(repo, &["worktree", "prune"])
-        .await
-        .context("git worktree prune")?;
-    Ok(())
-}
-
-/// Map of branch name -> worktree path for every branch currently checked out
-/// across `repo` and all its worktrees (including the canonical clone itself).
-/// This is the branch-lock source of truth: git refuses to check out a branch
-/// that's already checked out elsewhere, so the pool consults this before
-/// granting a lease (design §4.3).
-pub async fn checked_out_branches(repo: &Path) -> Result<std::collections::HashMap<String, PathBuf>> {
-    let out = git_output(repo, &["worktree", "list", "--porcelain"]).await?;
-    let mut map = std::collections::HashMap::new();
-    let mut current_path: Option<PathBuf> = None;
-    for line in out.lines() {
-        if let Some(rest) = line.strip_prefix("worktree ") {
-            current_path = Some(PathBuf::from(rest.trim()));
-        } else if let Some(rest) = line.strip_prefix("branch ") {
-            // Porcelain emits the full ref, e.g. `refs/heads/feature`.
-            let branch = rest
-                .trim()
-                .strip_prefix("refs/heads/")
-                .unwrap_or(rest.trim())
-                .to_string();
-            if let Some(p) = &current_path {
-                map.insert(branch, p.clone());
-            }
-        }
-        // A `detached` line (no `branch`) means that worktree holds no lock.
-    }
-    Ok(map)
-}
-
-/// Disable auto-gc on a repo so a background `git gc` can't race concurrent
-/// worktree checkouts/fetches against the shared object database (pool init).
-pub async fn set_gc_auto_off(repo: &Path) -> Result<()> {
-    git_output(repo, &["config", "gc.auto", "0"])
-        .await
-        .context("git config gc.auto 0")?;
-    Ok(())
-}
-
-/// Park a worktree on a detached HEAD so it holds no branch lock while idle in
-/// the pool (design §4.4). No-op-safe to call on an already-detached worktree.
-pub async fn detach_head(worktree: &Path) -> Result<()> {
-    git_output(worktree, &["checkout", "--detach"])
-        .await
-        .context("git checkout --detach")?;
-    Ok(())
-}
-
-/// Scrub a leased worktree before it returns to the pool, per `mode`
-/// (design §4.4):
+/// Scrub a working directory between runs, per `mode`:
 /// - `KeepIgnored`: `reset --hard` + `clean -fd` (keep gitignored files).
 /// - `Allowlist`: like `Full` but `--exclude`s each `keep_paths` glob.
 /// - `Full`: `reset --hard` + `clean -fdx` (pristine).
@@ -273,17 +155,18 @@ pub async fn reset_clean(
     Ok(())
 }
 
-/// Best-effort salvage of a dirty worktree before it's cleaned and recycled
-/// (design §4.4 step 1). Commits everything as a WIP commit on a branch that
-/// will survive the desk's reset/park, and tries to push it.
+/// Best-effort salvage of a dirty working directory. Commits everything as a
+/// WIP commit and tries to push it.
 ///
 /// The commit lands on whatever branch HEAD is actually on — the truthful
 /// location of the work, even if the agent switched branches mid-run. When
-/// HEAD is detached (so a plain commit would be orphaned by the park step),
-/// the WIP is parked on a dedicated `pidash/salvage/<holder>` branch instead;
-/// no existing branch ref is ever moved. The commit is left on the local
-/// branch even if the push fails. Returns `Ok(Some(sha))` if a WIP commit was
-/// made, `Ok(None)` if the tree was clean (nothing to salvage).
+/// HEAD is detached (so a plain commit would be orphaned), the WIP is parked on
+/// a dedicated `pidash/salvage/<holder>` branch instead; no existing branch ref
+/// is ever moved. The commit is left on the local branch even if the push
+/// fails. Returns `Ok(Some(sha))` if a WIP commit was made, `Ok(None)` if the
+/// tree was clean (nothing to salvage).
+///
+/// (Removing this platform-side salvage is scoped to PDASHOSS01-136.)
 pub async fn salvage_wip(worktree: &Path, holder: Uuid, label: &str) -> Result<Option<String>> {
     // Nothing to do if the tree is clean.
     let status = git_output(worktree, &["status", "--porcelain"]).await?;
@@ -321,98 +204,6 @@ pub async fn salvage_wip(worktree: &Path, holder: Uuid, label: &str) -> Result<O
         tracing::warn!(branch = %target, error = %e, "salvage push failed; WIP commit kept locally");
     }
     Ok(sha)
-}
-
-/// Resolve a repo's default branch — `origin/HEAD`'s target if set, else the
-/// repo's current branch, else `main`. Used to branch fresh chat sessions from
-/// the right place (design `make_chat_issue_parallel_working` Phase 2).
-pub async fn default_branch(repo: &Path) -> Result<String> {
-    if let Ok(s) =
-        git_output(repo, &["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]).await
-        && let Some(b) = s.strip_prefix("origin/")
-        && !b.is_empty()
-    {
-        return Ok(b.to_string());
-    }
-    if let Ok(Some(b)) = current_branch(repo).await {
-        return Ok(b);
-    }
-    Ok("main".to_string())
-}
-
-async fn rev_exists(worktree: &Path, rev: &str) -> bool {
-    git_output(worktree, &["rev-parse", "--verify", "--quiet", rev])
-        .await
-        .is_ok()
-}
-
-/// Start (or resume) a chat session's branch in the dedicated chat worktree
-/// (Phase 2). Any leftover dirty state from a previous session that did not end
-/// cleanly (e.g. a crash) is salvaged first, then the session branch is checked
-/// out: resumed from `origin/<branch>` if it already exists (revive), otherwise
-/// branched fresh from the default branch. Best-effort fetch keeps it offline-
-/// tolerant.
-pub async fn start_chat_session(
-    worktree: &Path,
-    branch: &str,
-    default_branch: &str,
-    holder: Uuid,
-) -> Result<()> {
-    validate_branch_name(branch)?;
-    if let Err(e) = salvage_wip(worktree, holder, "previous chat session (recovered)").await {
-        tracing::warn!(error = %e, "chat session: salvage of leftover state failed");
-    }
-    let _ = git_output(worktree, &["fetch", "origin"]).await;
-
-    let remote_session = format!("origin/{branch}");
-    let remote_default = format!("origin/{default_branch}");
-    let start_point = if rev_exists(worktree, &remote_session).await {
-        remote_session
-    } else if rev_exists(worktree, &remote_default).await {
-        remote_default
-    } else if rev_exists(worktree, default_branch).await {
-        default_branch.to_string()
-    } else {
-        // Brand-new repo with no usable start point: (re)label HEAD.
-        "HEAD".to_string()
-    };
-    git_output(worktree, &["checkout", "-B", branch, &start_point])
-        .await
-        .with_context(|| format!("git checkout -B {branch} {start_point}"))?;
-    Ok(())
-}
-
-/// Commit everything in the worktree and push the current branch, so a chat
-/// session never leaves work local-only (Phase 2). Returns `Ok(false)` when the
-/// tree is clean (nothing to persist). Push failures are logged, not fatal —
-/// the local commit is the durable artifact.
-pub async fn commit_and_push_all(worktree: &Path, message: &str) -> Result<bool> {
-    let status = git_output(worktree, &["status", "--porcelain"]).await?;
-    if status.trim().is_empty() {
-        return Ok(false);
-    }
-    let branch = match current_branch(worktree).await? {
-        Some(b) => b,
-        None => {
-            let name = "pidash/chat-recovered".to_string();
-            git_output(worktree, &["checkout", "-b", &name]).await.ok();
-            name
-        }
-    };
-    git_output(worktree, &["add", "-A"])
-        .await
-        .context("git add -A (chat)")?;
-    // Unlike salvage (which must never be blocked), a chat-session persist
-    // commit runs the repo's commit hooks — secret-scanning / lint / policy
-    // gates SHOULD apply to agent-authored code we're about to push to origin.
-    git_output(worktree, &["commit", "-q", "-m", message])
-        .await
-        .context("git commit (chat)")?;
-    let refspec = format!("HEAD:refs/heads/{branch}");
-    if let Err(e) = git_output(worktree, &["push", "origin", &refspec]).await {
-        tracing::warn!(branch = %branch, error = %e, "chat session push failed; commit kept locally");
-    }
-    Ok(true)
 }
 
 /// Injection-level validation: reject names that could be mistaken for a git
@@ -476,54 +267,5 @@ mod tests {
         assert!(validate_branch_name("feat/pinned-branch").is_ok());
         assert!(validate_branch_name("release/1.2.3").is_ok());
         assert!(validate_branch_name("user/jdoe/fix_42").is_ok());
-    }
-
-    // ---- Worktree primitives (the pool's branch-lock source of truth) ----
-
-    use std::process::Command;
-
-    fn run_git(dir: &std::path::Path, args: &[&str]) {
-        let out = Command::new("git")
-            .current_dir(dir)
-            .args(args)
-            .output()
-            .expect("git");
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
-    }
-
-    #[tokio::test]
-    async fn checked_out_branches_reports_worktree_branches_and_detach_releases() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let repo = tmp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        run_git(&repo, &["init", "-q", "-b", "main"]);
-        run_git(&repo, &["config", "user.email", "t@t.io"]);
-        run_git(&repo, &["config", "user.name", "t"]);
-        std::fs::write(repo.join("f"), "x").unwrap();
-        run_git(&repo, &["add", "-A"]);
-        run_git(&repo, &["commit", "-q", "-m", "init"]);
-        run_git(&repo, &["branch", "feat/x"]);
-
-        // Add a worktree checked out on feat/x.
-        let wt = tmp.path().join("wt-feat");
-        worktree_add(&repo, &wt).await.unwrap();
-        run_git(&wt, &["checkout", "feat/x"]);
-
-        let map = checked_out_branches(&repo).await.unwrap();
-        // main is held by the canonical clone; feat/x by the worktree.
-        assert!(map.contains_key("main"), "map: {map:?}");
-        assert_eq!(map.get("feat/x").map(|p| p.as_path()), Some(wt.as_path()));
-
-        // Park the worktree on detached HEAD → it releases feat/x.
-        detach_head(&wt).await.unwrap();
-        let map2 = checked_out_branches(&repo).await.unwrap();
-        assert!(
-            !map2.contains_key("feat/x"),
-            "detached worktree should hold no branch lock: {map2:?}"
-        );
-
-        // Clean up bookkeeping.
-        worktree_remove(&repo, &wt, true).await.unwrap();
-        worktree_prune(&repo).await.unwrap();
     }
 }
