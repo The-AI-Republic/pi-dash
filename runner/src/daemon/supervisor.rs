@@ -1049,7 +1049,6 @@ impl RunnerLoop {
                     run_id,
                     prompt,
                     repo_url,
-                    git_work_branch,
                     expected_codex_model,
                     ..
                 } => {
@@ -1143,13 +1142,7 @@ impl RunnerLoop {
                             cancel,
                         };
                         if let Err(e) = worker
-                            .run(
-                                run_id,
-                                prompt,
-                                repo_url,
-                                git_work_branch,
-                                expected_codex_model,
-                            )
+                            .run(run_id, prompt, repo_url, expected_codex_model)
                             .await
                         {
                             tracing::error!("run {run_id} failed: {e:#}");
@@ -2662,17 +2655,10 @@ impl AssignWorker {
         run_id: uuid::Uuid,
         prompt: String,
         repo_url: Option<String>,
-        git_work_branch: Option<String>,
         expected_codex_model: Option<String>,
     ) -> Result<()> {
-        self.handle_assign(
-            run_id,
-            prompt,
-            repo_url,
-            git_work_branch,
-            expected_codex_model,
-        )
-        .await
+        self.handle_assign(run_id, prompt, repo_url, expected_codex_model)
+            .await
     }
 
     async fn handle_assign(
@@ -2680,7 +2666,6 @@ impl AssignWorker {
         run_id: uuid::Uuid,
         prompt: String,
         repo_url: Option<String>,
-        git_work_branch: Option<String>,
         expected_codex_model: Option<String>,
     ) -> Result<()> {
         // Resolve the directory the agent runs in: this runner's single,
@@ -2733,28 +2718,10 @@ impl AssignWorker {
             );
         }
 
-        // Pre-flight checkout: if the issue pins an existing branch, land on
-        // it before the agent runs so it commits onto that branch directly.
-        // When not set, the agent handles branch creation per the prompt.
-        // (Removing this platform-side checkout is scoped to PDASHOSS01-136.)
-        if crate::workspace::git::is_git_repo(&workspace_path)
-            && let Some(branch) = git_work_branch.as_deref().filter(|s| !s.is_empty())
-            && let Err(e) =
-                crate::workspace::git::checkout_work_branch(&workspace_path, branch).await
-        {
-            self.send(ClientMsg::RunFailed {
-                run_id,
-                reason: FailureReason::WorkspaceSetup,
-                detail: Some(format!("checkout {branch}: {e:#}")),
-                ended_at: Utc::now(),
-                tokens: None,
-                model: None,
-            })
-            .await;
-            // Same reason as above: clear the early-stamp on failure.
-            self.state.set_current_run(None).await;
-            return Ok(());
-        }
+        // No platform-side branch checkout: the cloud supplies the work branch
+        // in the prompt context and the agent checks it out (or creates one off
+        // the base branch) itself. The platform supplies git information; the
+        // agent performs git operations (PDASHOSS01-136).
 
         let ws_state = crate::workspace::git::workspace_state(&workspace_path)
             .await
@@ -3489,7 +3456,6 @@ mod tests {
                     uuid::Uuid::new_v4(),
                     "Summarize these notes".into(),
                     None,
-                    Some("irrelevant-without-git".into()),
                     None,
                 )
                 .await
