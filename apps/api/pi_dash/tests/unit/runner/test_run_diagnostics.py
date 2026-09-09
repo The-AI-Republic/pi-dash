@@ -97,8 +97,9 @@ def test_infer_agent_label_reads_agent_capability_when_present(capability, expec
     """Forward-compatible: the matcher handles the serde snake_case spelling.
 
     ``open_claw`` and ``muse_code`` are the spellings an ``agent:<kind>``
-    capability would carry, and neither was matched before. Note this path
-    is not yet exercised in production — see the test below.
+    capability would carry, and neither was matched before. This path is now
+    exercised in production — ``apply_hello`` writes the capability; see
+    ``test_populated_capability_identifies_the_agent_over_neutral_signals``.
     """
     runner = SimpleNamespace(name="", host_label="", capabilities=[capability], dev_machine=None)
 
