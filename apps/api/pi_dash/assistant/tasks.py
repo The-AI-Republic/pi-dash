@@ -446,7 +446,9 @@ def _classify_error(exc: Exception) -> tuple[str, str]:
         return "provider_out_of_credit", "The provider rejected the request for lack of credit."
     if any(s in text for s in ("401", "unauthorized", "api key", "authentication", "invalid_api_key")):
         return "provider_auth_failed", "Your API key was rejected by the provider."
-    if any(s in text for s in ("connection", "timeout", "timed out", "unreachable", "could not connect", "name resolution")):
+    if any(
+        s in text for s in ("connection", "timeout", "timed out", "unreachable", "could not connect", "name resolution")
+    ):
         return "provider_unreachable", "Could not reach the configured provider endpoint."
     if any(s in text for s in ("model_not_found", "does not exist", "unknown model", "no such model")):
         return "model_invalid", "The configured model name was not accepted by the provider."

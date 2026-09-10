@@ -58,8 +58,13 @@ class GitProviderAccountListCreateEndpoint(BaseAPIView):
     @allow_permission(allowed_roles=[ROLE.ADMIN, ROLE.MEMBER], level="WORKSPACE")
     def get(self, request, slug):
         workspace = get_object_or_404(Workspace, slug=slug)
-        accounts = GitProviderAccount.objects.filter(workspace=workspace).order_by("provider", "host_url", "display_name")
-        return Response({"accounts": [serialize_provider_account(account) for account in accounts]}, status=status.HTTP_200_OK)
+        accounts = GitProviderAccount.objects.filter(workspace=workspace).order_by(
+            "provider", "host_url", "display_name"
+        )
+        return Response(
+            {"accounts": [serialize_provider_account(account) for account in accounts]},
+            status=status.HTTP_200_OK,
+        )
 
     @allow_permission(allowed_roles=[ROLE.ADMIN], level="WORKSPACE")
     def post(self, request, slug):
@@ -71,7 +76,9 @@ class GitProviderAccountListCreateEndpoint(BaseAPIView):
         if not token:
             return Response({"error": "token is required"}, status=status.HTTP_400_BAD_REQUEST)
         auth_type = (request.data.get("auth_type") or "pat").strip()
-        host_url = (request.data.get("host_url") or ("https://github.com" if provider == "github" else _gitlab_host())).rstrip("/")
+        host_url = (
+            request.data.get("host_url") or ("https://github.com" if provider == "github" else _gitlab_host())
+        ).rstrip("/")
         try:
             account = create_provider_account(
                 workspace=workspace,
