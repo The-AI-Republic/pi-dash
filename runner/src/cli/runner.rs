@@ -12,11 +12,11 @@ use clap::{Args as ClapArgs, Subcommand};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use crate::cli::runner_ops::{self, AppliedWorkdir, ApplyEnrollOptions, RunnerWorkdirPlan};
+use crate::cli::runner_ops::{self, ApplyEnrollOptions};
 use crate::cloud::http::{CreateRunnerRequest, SharedHttpTransport, create_runner};
 use crate::cloud::runners::{delete_runner, probe_cloud_reachable};
 use crate::config::file;
-use crate::config::schema::{AgentKind, DEFAULT_POOL_SIZE, MAX_RUNNERS_PER_DAEMON, RunnerConfig};
+use crate::config::schema::{AgentKind, MAX_RUNNERS_PER_DAEMON, RunnerConfig};
 use crate::util::confirm::maybe_confirm;
 use crate::util::paths::Paths;
 use crate::util::runner_name;
@@ -86,28 +86,12 @@ pub struct AddArgs {
     #[arg(long)]
     pub pod: Option<String>,
 
-    /// Working directory the runner clones into. Defaults to a path
-    /// derived from the runner's data dir. Ignored when `--workdir` is given
-    /// (pooled runners execute in leased worktrees, not this path).
+    /// Working directory the runner works in — one exclusive directory per
+    /// runner. Defaults to an auto-created path under the data dir named
+    /// `<project>_<runner>_<id>`. Two runners can never share (or nest) a
+    /// working directory; config load fails if they do.
     #[arg(long)]
     pub working_dir: Option<PathBuf>,
-
-    /// Name of a shared `[[workdir]]` (see `pidash workdir add`) this runner
-    /// executes in. When set, the runner leases a git worktree from that work
-    /// dir's pool for each run instead of using its own `working_dir` — this
-    /// is what lets several runners share one repo checkout.
-    #[arg(long)]
-    pub workdir: Option<String>,
-
-    /// Deprecated: opt out of the default worktree pool and create a legacy
-    /// runner that executes the agent directly in `working_dir`. Without this
-    /// flag, `runner add` auto-provisions (or reuses) a pool from `working_dir`
-    /// so lane-isolation features — notably concurrent chat during an issue
-    /// run — work out of the box. Ignored when `--workdir` is given (that
-    /// already selects a pool). Old configs are unaffected; this only changes
-    /// what a *new* `runner add` writes.
-    #[arg(long)]
-    pub no_pool: bool,
 
     /// Which agent CLI this runner drives.
     #[arg(long, value_enum, default_value_t = AgentKind::Codex)]
@@ -185,28 +169,6 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         );
     }
 
-    // `--workdir` must name an existing [[workdir]] BEFORE we enroll: failing
-    // after enrollment would leave a cloud-registered runner bound to nothing,
-    // and re-running the command would then create a second runner.
-    if let Some(workdir_name) = args.workdir.as_deref() {
-        let exists = paths.config_path().exists()
-            && file::load_config(paths)?
-                .workdirs
-                .iter()
-                .any(|w| w.name == workdir_name);
-        if !exists {
-            anyhow::bail!(
-                "no work dir named {workdir_name:?}; add it first with \
-                 `pidash workdir add --name {workdir_name} --path <repo>`"
-            );
-        }
-    }
-    if args.no_pool && args.workdir.is_none() {
-        eprintln!(
-            "Warning: `pidash runner add --no-pool` is deprecated. New runners should use the default worktree pool mode or `--workdir <name>`."
-        );
-    }
-
     let api_token = ensure_cli_token(paths, args.url.as_deref(), args.workspace.as_deref()).await?;
 
     let cloud_url = if paths.config_path().exists() {
@@ -261,16 +223,6 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
     // The rollback uses the same X-Api-Key surface as `pidash runner
     // remove` (cascade so any daemon already polling tears down too); a
     // failed rollback is logged but does not mask the original error.
-    let workdir_plan = if let Some(workdir_name) = args.workdir.as_deref() {
-        RunnerWorkdirPlan::Existing {
-            name: workdir_name.to_string(),
-        }
-    } else if args.no_pool {
-        RunnerWorkdirPlan::Legacy
-    } else {
-        RunnerWorkdirPlan::AutoPoolIfGit
-    };
-
     let applied = match runner_ops::apply_enroll_response(
         paths,
         &resp,
@@ -280,7 +232,6 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
             agent_kind: args.agent,
             model: args.model.as_deref(),
             reasoning_effort: args.reasoning_effort.as_deref(),
-            workdir_plan,
         },
     )
     .await
@@ -312,68 +263,13 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         }
     };
 
-    match &applied.workdir {
-        Some(AppliedWorkdir::Existing {
-            name,
-            migrated_legacy_runners,
-        }) => {
-            println!(
-                "Runner bound to work dir {name:?} (leases worktrees from its pool){}.",
-                migration_note(migrated_legacy_runners)
-            );
-        }
-        Some(AppliedWorkdir::AutoPool {
-            name,
-            path,
-            created,
-            migrated_legacy_runners,
-        }) => {
-            // A pooled canonical clone should sit on a detached HEAD so leased
-            // worktrees (incl. the chat lane's) can check out any branch.
-            // Best-effort: a branch left checked out only makes runs that pin
-            // it wait, so never fail the add over it.
-            match crate::workspace::git::current_branch(path).await {
-                Ok(Some(branch)) => match crate::workspace::git::detach_head(path).await {
-                    Ok(()) => println!(
-                        "Auto-pooled runner via work dir {name:?}{}{}; detached the canonical clone off \
-                         {branch} so worktrees lease freely. Pass --no-pool for the legacy single-dir mode.",
-                        pool_note(*created),
-                        migration_note(migrated_legacy_runners)
-                    ),
-                    Err(e) => println!(
-                        "Auto-pooled runner via work dir {name:?}{}{}. Note: couldn't detach the canonical \
-                         clone off {branch} ({e}); runs pinning {branch} will wait until you run \
-                         `git -C {} checkout --detach`.",
-                        pool_note(*created),
-                        migration_note(migrated_legacy_runners),
-                        path.display()
-                    ),
-                },
-                _ => println!(
-                    "Auto-pooled runner via work dir {name:?}{}{}. Pass --no-pool for the legacy single-dir mode.",
-                    pool_note(*created),
-                    migration_note(migrated_legacy_runners)
-                ),
-            }
-        }
-        None if !args.no_pool && args.workdir.is_none() => {
-            let working_dir = std::path::absolute(&applied.runner.workspace.working_dir)
-                .unwrap_or_else(|_| applied.runner.workspace.working_dir.clone());
-            if !crate::workspace::git::is_git_repo(&working_dir) {
-                println!(
-                    "Runner added non-pooled: working_dir {} is not a git repo yet. \
-                     Once it's cloned, enable concurrent chat by pooling it: \
-                     `pidash workdir add --name <n> --path {0}` then rebind with `--workdir <n>`.",
-                    working_dir.display()
-                );
-            }
-        }
-        None => {}
-    }
-
     println!(
         "Added runner {} ({}) under project {}.",
         applied.runner.name, applied.runner.runner_id, resp.project_identifier
+    );
+    println!(
+        "Working directory: {}",
+        applied.runner.workspace.working_dir.display()
     );
     let working_dir = &applied.runner.workspace.working_dir;
     if crate::workspace::git::is_git_repo(working_dir) {
@@ -453,22 +349,6 @@ async fn ensure_cli_token(
         .ok_or_else(|| {
             anyhow::anyhow!("auth login completed but no CLI token was written to config.toml")
         })
-}
-
-fn pool_note(created: bool) -> String {
-    if created {
-        format!(" (pool_size {DEFAULT_POOL_SIZE})")
-    } else {
-        String::new()
-    }
-}
-
-fn migration_note(names: &[String]) -> String {
-    if names.is_empty() {
-        String::new()
-    } else {
-        format!("; migrated existing legacy runner(s): {}", names.join(", "))
-    }
 }
 
 fn hostname_or_unknown() -> String {

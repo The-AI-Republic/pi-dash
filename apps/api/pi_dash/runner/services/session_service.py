@@ -400,32 +400,6 @@ def upsert_runner_live_state(runner: Runner, status_entry: Dict[str, Any]) -> No
         state.save(update_fields=sorted(set(update_fields)) + ["updated_at"])
 
 
-# ``Runner.free_worktrees`` is an IntegerField; Postgres rejects anything
-# above the signed-int32 ceiling, so out-of-range reports are clamped
-# rather than allowed to 500 the poll handler.
-FREE_WORKTREES_MAX = 2**31 - 1
-
-
-def parse_free_worktrees(raw: Any) -> Optional[int]:
-    """Coerce a reported ``free_worktrees`` hint to a non-negative int.
-
-    Returns ``None`` for a missing or malformed value so the poll handler
-    leaves the stored hint untouched (a pre-feature runner omits the field;
-    a malformed one should never wipe a known-good value). Values beyond the
-    column's int32 range are clamped rather than 500ing the poll. See
-    ``.ai_design/worktree_pooling/design.md`` §6.4.
-    """
-    if raw is None:
-        return None
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return None
-    if value < 0:
-        return None
-    return min(value, FREE_WORKTREES_MAX)
-
-
 def build_session_open_redeliver(runner: Runner, in_flight_run_id: Optional[str]) -> Optional[Dict[str, Any]]:
     """Return an ``Assign``-shaped payload to redeliver at session open.
 

@@ -83,9 +83,9 @@ function disabledReason(runner?: IRunner, session?: IAgentChatSession | null): s
   if (runner.status === "offline") return "Runner offline";
   if (runner.status === "revoked") return "Runner revoked";
   // "busy" no longer blocks chat: the runner serves chat concurrently with an
-  // issue run in a dedicated worktree, and "busy" is also reported while a chat
-  // turn is in flight. The mid-turn case is covered by the active_message check
-  // below. See design make_chat_issue_parallel_working §3.4.
+  // issue run, and "busy" is also reported while a chat turn is in flight. The
+  // mid-turn case is covered by the active_message check below.
+  // See design make_chat_issue_parallel_working §3.4.
   if (session?.status === "closed") return "Session closed";
   if (session?.active_message_id || session?.active_turn_id) return "Response in progress";
   return null;
@@ -186,7 +186,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     let cancelled = false;
     async function warmSelectedRunner() {
       // A "busy" runner (running an issue and/or already chatting) can still be
-      // warmed: chat runs concurrently in a dedicated worktree. Only offline /
+      // warmed: chat runs concurrently with issue work. Only offline /
       // revoked runners can't serve chat (the server also rejects those). Not
       // warming a busy runner would skip the warm step that seeds
       // local_thread_id/local_session_id and break revive continuity.

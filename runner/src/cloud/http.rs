@@ -1180,12 +1180,6 @@ pub struct PollStatus {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_count: Option<u32>,
-    /// Free worktree desks in this runner's work dir pool, when it has one.
-    /// The cloud stores it and uses it as a soft capacity hint when choosing
-    /// between equally-eligible runners (design §6.4). Optional / additive —
-    /// an old cloud ignores it; a runner with no pool omits it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub free_worktrees: Option<u32>,
 }
 
 /// Wire-side wrapper used to express the three states of `observed_run_id`:
@@ -1263,7 +1257,6 @@ impl PollStatus {
             tokens: None,
             model: None,
             turn_count: None,
-            free_worktrees: None,
         }
     }
 
@@ -1288,7 +1281,6 @@ impl PollStatus {
             tokens: None,
             model: None,
             turn_count: None,
-            free_worktrees: None,
         }
     }
 
@@ -1360,10 +1352,6 @@ pub struct HttpLoop {
     /// which is identical to the v3 wire shape — used by tests and any
     /// caller that doesn't want to thread state through.
     pub state: Option<crate::daemon::state::StateHandle>,
-    /// This runner's worktree pool, when it references a work dir. When set,
-    /// `poll_once` reports `free_worktrees` so the cloud can prefer a runner
-    /// with a free desk (design §6.4). `None` for legacy runners.
-    pub pool: Option<crate::workspace::pool::PoolHandle>,
     teardown_rx: Option<watch::Receiver<bool>>,
     inline_acks: VecDeque<String>,
     /// Bounded mid-dedupe (design.md §8 / Decision 21). At-least-once
@@ -1483,7 +1471,6 @@ impl HttpLoop {
             shutdown,
             attach_body,
             state: None,
-            pool: None,
             teardown_rx: None,
             inline_acks: VecDeque::new(),
             mid_dedupe: MidDedupe::with_capacity(MID_DEDUPE_CAPACITY),
@@ -1496,13 +1483,6 @@ impl HttpLoop {
     /// `agent_observability_v1` flag is enabled.
     pub fn with_state(mut self, state: crate::daemon::state::StateHandle) -> Self {
         self.state = Some(state);
-        self
-    }
-
-    /// Attach this runner's worktree pool so `poll_once` reports the free-desk
-    /// capacity hint (design §6.4).
-    pub fn with_pool(mut self, pool: Option<crate::workspace::pool::PoolHandle>) -> Self {
-        self.pool = pool;
         self
     }
 
@@ -1737,7 +1717,7 @@ impl HttpLoop {
         }
         let wire_status = *self.status_rx.borrow();
         let in_flight = *self.in_flight_rx.borrow();
-        let mut status = match self.state.as_ref() {
+        let status = match self.state.as_ref() {
             Some(state) if state.agent_observability_v1() => {
                 let snapshot = state.observability_snapshot().await;
                 let approvals = state.approvals_pending_value().await;
@@ -1745,12 +1725,6 @@ impl HttpLoop {
             }
             _ => PollStatus::from_wire(wire_status, in_flight),
         };
-        // Capacity hint: free desks in this runner's pool (design §6.4).
-        if let Some(pool) = self.pool.as_ref()
-            && let Some(snap) = pool.snapshot().await
-        {
-            status.free_worktrees = Some(snap.free_worktrees());
-        }
         let resp = self
             .client
             .poll(acks, status, self.long_poll_interval_secs)

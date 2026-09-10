@@ -21,7 +21,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use uuid::Uuid;
 
-use crate::cli::runner_ops::{ApplyEnrollOptions, RunnerWorkdirPlan, apply_enroll_response};
+use crate::cli::runner_ops::{ApplyEnrollOptions, apply_enroll_response};
 use crate::cloud::http::{
     CreateRunnerRequest, MachineClient, PollMessage, TransportError, create_runner,
 };
@@ -220,23 +220,16 @@ impl MachineControl {
         .await
         .map_err(|e| anyhow::anyhow!("cloud registration failed: {e}"))?;
 
-        // 2. Persist the `[[runner]]` block. `AutoPoolIfGit` — the same
-        //    plan `pidash runner add` defaults to: if `working_dir` is a
-        //    git repo, create or reuse a `[[workdir]]` pool and bind this
-        //    runner to it (migrating any existing legacy runner on the
-        //    exact same path). Legacy single-dir runners are deprecated and
-        //    no longer created by our own code; the pool exemption is what
-        //    lets two runners share one repo without a `DuplicateWorkingDir`
-        //    collision. Worktree pools are otherwise built once at daemon
-        //    startup, so `add_runner` below builds and registers this
-        //    runner's pool on hot-add — no restart required.
+        // 2. Persist the `[[runner]]` block. The runner gets one exclusive
+        //    working directory: the caller's `working_dir` when supplied,
+        //    otherwise an auto-created path under the data dir. `add_runner`
+        //    below brings it up on hot-add — no restart required.
         let options = ApplyEnrollOptions {
             working_dir: (!cmd.working_dir.is_empty()).then(|| PathBuf::from(&cmd.working_dir)),
             agent_kind,
             model: (!cmd.model.is_empty()).then_some(cmd.model.as_str()),
             reasoning_effort: (!cmd.reasoning_effort.is_empty())
                 .then_some(cmd.reasoning_effort.as_str()),
-            workdir_plan: RunnerWorkdirPlan::AutoPoolIfGit,
         };
         let cloud_url = self.spawn_ctx.cloud_url();
         let applied = match apply_enroll_response(&self.spawn_ctx.paths, &resp, &cloud_url, options)

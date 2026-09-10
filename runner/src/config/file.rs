@@ -19,6 +19,29 @@ pub fn load_config(paths: &Paths) -> Result<Config> {
             runner.codex.model_default = None;
         }
     }
+    // Migrate pre-134 pooled configs. The `[[workdir]]` tables and per-runner
+    // `workdir = "..."` key were removed with the worktree pool; serde drops
+    // them silently, so re-read the raw TOML and reconcile `working_dir`
+    // (PDASHOSS01-135). Case 1 (one runner per pool) is repointed at the
+    // canonical clone; case 2 (a shared pool) keeps the first runner on the
+    // canonical clone and moves the other sharers to their own fresh dirs.
+    // Every move is reported via `tracing::warn!` so no agent silently changes
+    // directory. Only a structurally broken config (a `workdir` reference no
+    // `[[workdir]]` defines) still errors out.
+    let raw: toml::Value =
+        toml::from_str(&text).with_context(|| format!("parsing {path:?} for migration"))?;
+    match super::migrate::migrate_legacy_pool(&mut cfg, &raw, &paths.data_dir) {
+        Ok(Some(migration)) => {
+            for line in &migration.report {
+                tracing::warn!(target: "config.migrate", "{line}");
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            return Err(anyhow::Error::new(e))
+                .with_context(|| format!("migrating legacy worktree-pool config at {path:?}"));
+        }
+    }
     Ok(cfg)
 }
 
@@ -237,7 +260,6 @@ mod tests {
             project_slug: Some("TEST".into()),
             pod_id: None,
             workspace: WorkspaceSection { working_dir },
-            workdir: None,
             agent: Default::default(),
             codex: Default::default(),
             claude_code: Default::default(),
@@ -265,7 +287,6 @@ mod tests {
                 auto_update: true,
             },
             runners: vec![sample_runner("t", tmp.path().join("wd"))],
-            workdirs: vec![],
         cli: None,
         };
         write_config(&paths, &cfg).unwrap();
@@ -497,7 +518,6 @@ model_default = "o4-mini"
                 sample_runner("a", tmp.path().join("wd-a")),
                 sample_runner("b", tmp.path().join("wd-b")),
             ],
-            workdirs: vec![],
         cli: None,
         };
         write_config(&paths, &cfg).unwrap();
@@ -547,7 +567,6 @@ model_default = "o4-mini"
                 sample_runner("b", tmp.path().join("wd-b")),
                 sample_runner("c", tmp.path().join("wd-c")),
             ],
-            workdirs: vec![],
             cli: None,
         };
         write_config(&paths, &cfg).unwrap();
@@ -580,7 +599,6 @@ model_default = "o4-mini"
                 auto_update: true,
             },
             runners: vec![sample_runner("keep", tmp.path().join("wd"))],
-            workdirs: vec![],
         cli: None,
         };
         write_config(&paths, &cfg).unwrap();
@@ -623,7 +641,6 @@ model_default = "o4-mini"
                 sample_runner("a", tmp.path().join("wd-a")),
                 sample_runner("b", tmp.path().join("wd-b")),
             ],
-            workdirs: vec![],
             cli: None,
         };
         write_config(&paths, &cfg).unwrap();
@@ -685,5 +702,164 @@ model_default = "o4-mini"
         let loaded = load_credentials(&paths).unwrap();
         assert!(loaded.api_token.is_none());
         assert!(loaded.connection_name.is_none());
+    }
+
+    // ---- Legacy worktree-pool migration (PDASHOSS01-135) ----
+
+    #[test]
+    fn load_config_migrates_single_pooled_runner_to_canonical_clone() {
+        // A pre-134 `runner add --workdir` config: one runner bound to a
+        // `[[workdir]]`, its `working_dir` a per-runner placeholder. After
+        // 134 removed the pool, load_config must repoint it at the canonical
+        // clone so the agent runs where its worktrees came from, not in the
+        // empty placeholder.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let body = format!(
+            r#"
+version = 2
+
+[daemon]
+cloud_url = "https://x"
+
+[[workdir]]
+name = "repo"
+path = "/home/me/repo"
+pool_size = 2
+
+[[runner]]
+name = "codex"
+runner_id = "{}"
+project_slug = "TEST"
+workdir = "repo"
+
+[runner.workspace]
+working_dir = "/data/runners/x/workspace"
+
+[runner.codex]
+binary = "codex"
+"#,
+            uuid::Uuid::new_v4()
+        );
+        std::fs::write(paths.config_path(), body).unwrap();
+        let loaded = load_config(&paths).unwrap();
+        let primary = loaded.primary_runner().expect("runner");
+        assert_eq!(
+            primary.workspace.working_dir,
+            std::path::PathBuf::from("/home/me/repo"),
+            "single pooled runner should be repointed at the canonical clone",
+        );
+        // And the migrated config passes 134's validation (one dir per runner).
+        loaded.validate().expect("migrated config should validate");
+    }
+
+    #[test]
+    fn load_config_migrates_shared_pool_first_runner_wins() {
+        // N runners sharing one pool: load_config must succeed (per the
+        // operator decision on PDASHOSS01-135) with the first runner in config
+        // order keeping the canonical clone and the other sharer displaced to
+        // its own fresh dir — never the same directory, so the migrated config
+        // still satisfies 134's one-dir-per-runner validation.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let body = format!(
+            r#"
+version = 2
+
+[daemon]
+cloud_url = "https://x"
+
+[[workdir]]
+name = "repo"
+path = "/home/me/repo"
+
+[[runner]]
+name = "codex"
+runner_id = "{}"
+project_slug = "TEST"
+workdir = "repo"
+[runner.workspace]
+working_dir = "/home/me/repo"
+
+[[runner]]
+name = "claude"
+runner_id = "{}"
+project_slug = "TEST"
+workdir = "repo"
+[runner.workspace]
+working_dir = "/home/me/repo"
+"#,
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4()
+        );
+        std::fs::write(paths.config_path(), body).unwrap();
+        let loaded = load_config(&paths).unwrap();
+        let codex = loaded
+            .runners
+            .iter()
+            .find(|r| r.name == "codex")
+            .expect("codex present");
+        let claude = loaded
+            .runners
+            .iter()
+            .find(|r| r.name == "claude")
+            .expect("claude present");
+        assert_eq!(
+            codex.workspace.working_dir,
+            std::path::PathBuf::from("/home/me/repo"),
+            "first runner keeps the canonical clone",
+        );
+        assert_ne!(
+            claude.workspace.working_dir,
+            std::path::PathBuf::from("/home/me/repo"),
+            "second sharer is displaced off the shared path",
+        );
+        assert!(
+            claude
+                .workspace
+                .working_dir
+                .starts_with(paths.data_dir.join("workspaces")),
+            "displaced runner lands under the data dir: {:?}",
+            claude.workspace.working_dir,
+        );
+        // The migrated config satisfies one-dir-per-runner validation.
+        loaded.validate().expect("migrated config should validate");
+    }
+
+    #[test]
+    fn load_config_leaves_legacy_config_without_pool_keys_untouched() {
+        // Case 3: a legacy single-dir runner with no `[[workdir]]` and no
+        // `workdir` key loads exactly as before — the migration is a no-op.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let body = format!(
+            r#"
+version = 2
+
+[daemon]
+cloud_url = "https://x"
+
+[[runner]]
+name = "codex"
+runner_id = "{}"
+project_slug = "TEST"
+
+[runner.workspace]
+working_dir = "/work/codex"
+
+[runner.codex]
+binary = "codex"
+"#,
+            uuid::Uuid::new_v4()
+        );
+        std::fs::write(paths.config_path(), body).unwrap();
+        let loaded = load_config(&paths).unwrap();
+        assert_eq!(
+            loaded.primary_runner().unwrap().workspace.working_dir,
+            std::path::PathBuf::from("/work/codex"),
+        );
     }
 }

@@ -54,9 +54,10 @@ HEARTBEAT_GRACE = timedelta(seconds=90)
 NON_TERMINAL_STATUSES = (
     AgentRunStatus.QUEUED,
     AgentRunStatus.ASSIGNED,
-    # A run waiting on a worktree lease still occupies its single-tenant
-    # runner and must block pod deletion exactly like ASSIGNED. See
-    # .ai_design/worktree_pooling/design.md §6.2.
+    # WAITING_FOR_WORKTREE is retired (PDASHOSS01-137): no new run enters it,
+    # but historical rows may still hold it, and while non-terminal such a run
+    # must block pod deletion exactly like ASSIGNED. Kept in the set so those
+    # rows keep gating correctly. See .ai_design/worktree_pooling/design.md §6.2.
     AgentRunStatus.WAITING_FOR_WORKTREE,
     AgentRunStatus.RUNNING,
     AgentRunStatus.CANCEL_REQUESTED,
@@ -68,11 +69,10 @@ NON_TERMINAL_STATUSES = (
 # Statuses that indicate a runner is currently serving a run.
 BUSY_STATUSES = (
     AgentRunStatus.ASSIGNED,
-    # The runner has accepted the run and is queueing it locally for a
-    # worktree — it is committed to this run and cannot take other work.
-    # The single-tenant runner reports it as ``in_flight_run`` while it
-    # waits, so the heartbeat reaper (which fails BUSY runs the runner no
-    # longer claims) needs no change beyond this membership.
+    # Retired (PDASHOSS01-137): no new run enters WAITING_FOR_WORKTREE, but a
+    # historical row still occupies its runner and reports as ``in_flight_run``
+    # while active, so the heartbeat reaper keeps treating it as busy. Kept in
+    # the set for those rows.
     AgentRunStatus.WAITING_FOR_WORKTREE,
     AgentRunStatus.RUNNING,
     AgentRunStatus.CANCEL_REQUESTED,
@@ -111,30 +111,12 @@ def select_runner_in_pod(pod: Pod) -> Optional[Runner]:
         # An active chat no longer excludes a runner from issue assignment:
         # chat and issue runs are concurrent (design §3.4). BUSY_STATUSES still
         # keeps the assign lane single-tenant (one issue at a time).
-        # Capacity hint (design §6.4): among equally-eligible idle runners,
-        # prefer one whose work-dir pool reports a free desk. This is a
-        # PREFERENCE, never a gate — runners with ``free_worktrees`` of 0 or
-        # ``None`` (a runner that predates the hint) stay eligible and sort
-        # after free-desk runners, then fall back to freshest-heartbeat
-        # (``-last_heartbeat_at``, newest first). A
-        # stale hint costs at most some local queue time, never a stuck run.
-        .annotate(_has_free_desk=_free_desk_rank())
-        .order_by("_has_free_desk", "-last_heartbeat_at")
+        # The worktree pool is retired (PDASHOSS01-137): there is no per-runner
+        # desk capacity to prefer, so among equally-eligible idle runners the
+        # only ranking left is freshest heartbeat (``-last_heartbeat_at``,
+        # newest first). ``Runner.free_worktrees`` is no longer written or read.
+        .order_by("-last_heartbeat_at")
         .first()
-    )
-
-
-def _free_desk_rank() -> models.Case:
-    """Rank annotation: 0 when the runner reports a free desk, else 1.
-
-    ``free_worktrees > 0`` sorts first (rank 0); 0 and ``NULL`` share the
-    no-free-desk group (rank 1), so old runners without the hint never lose
-    eligibility. ``order_by`` ascending puts the free-desk group ahead.
-    """
-    return models.Case(
-        models.When(free_worktrees__gt=0, then=models.Value(0)),
-        default=models.Value(1),
-        output_field=models.IntegerField(),
     )
 
 

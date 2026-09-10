@@ -6,6 +6,9 @@ customizable: overridable
 
 ## Step 2 — Implementation and validation
 
+Before editing any files, make sure you are on the work branch — the platform performs **no** branch checkout for you; every git operation is yours to run.
+{% if repo.work_branch %}This issue pins `{{ repo.work_branch }}`: commit directly onto it. You checked it out in Step 1's repository sync; if you are not on it, `git checkout {{ repo.work_branch }}` (creating it from `origin/{{ repo.work_branch }}` when it is not yet local).{% else %}No branch is pinned: derive and commit onto the fresh feature branch you created from {% if repo.base_branch %}`{{ repo.base_branch }}`{% else %}the base branch{% endif %} in Step 1 — never onto the base branch itself.{% endif %}
+
 1. Implement against the hierarchical TODOs. Update the workpad after each meaningful milestone and keep `### Phase`, `### Progress Checkpoints`, and `### Autonomy / Escalation` current:
    - `investigation_complete`
    - `design_choice_recorded`

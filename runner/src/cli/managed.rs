@@ -25,7 +25,7 @@ use clap::{Args as ClapArgs, Subcommand};
 use std::io::Read;
 use std::path::PathBuf;
 
-use crate::cli::runner_ops::{self, ApplyEnrollOptions, RunnerWorkdirPlan};
+use crate::cli::runner_ops::{self, ApplyEnrollOptions};
 use crate::cloud::http::{CreateRunnerRequest, SharedHttpTransport, create_runner};
 use crate::config::file;
 use crate::config::schema::AgentKind;
@@ -215,10 +215,6 @@ async fn enroll(args: EnrollArgs, paths: &Paths) -> Result<()> {
             agent_kind: AgentKind::Codex,
             model: None,
             reasoning_effort: None,
-            // Direct working-dir mode: one project, one clone, no pool. The
-            // desktop can be promoted to a pooled workdir later without a
-            // re-clone, since the canonical clone already exists by then.
-            workdir_plan: RunnerWorkdirPlan::Legacy,
         },
     )
     .await
