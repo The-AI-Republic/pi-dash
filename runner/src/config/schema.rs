@@ -178,24 +178,6 @@ pub struct WorkspaceSection {
     pub working_dir: PathBuf,
 }
 
-/// How a working directory is scrubbed between runs. Retained for
-/// `workspace::git::reset_clean`, whose removal is scoped to PDASHOSS01-136
-/// ("remove residual platform git enforcement").
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, clap::ValueEnum)]
-#[serde(rename_all = "kebab-case")]
-pub enum CleanMode {
-    /// `git reset --hard` + `git clean -fd`: drop tracked changes and stray
-    /// untracked files, but KEEP gitignored files (`node_modules`, caches,
-    /// `.env`). Default.
-    #[default]
-    KeepIgnored,
-    /// Like `full`, but preserve `keep_paths` globs. Warm where it matters,
-    /// pristine everywhere else.
-    Allowlist,
-    /// `git reset --hard` + `git clean -fdx`: pristine but cold.
-    Full,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodexSection {
     pub binary: String,
