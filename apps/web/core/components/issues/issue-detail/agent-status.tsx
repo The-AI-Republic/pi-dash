@@ -273,7 +273,6 @@ function getRunView(
         iconClassName: "text-danger-primary",
       };
     case "completed":
-    default:
       return {
         title: t("AI agent run completed"),
         detail: doneDetail,
@@ -282,6 +281,23 @@ function getRunView(
         icon: CircleCheck,
         iconClassName: "text-success-primary",
       };
+    default: {
+      // A status the union no longer carries. Today that is a historical
+      // `waiting_for_worktree` row: PDASHOSS01-137 stopped emitting the status
+      // but deliberately kept the enum member, and still counts it as
+      // non-terminal — so the API hands such a row over as `active_run`.
+      // Falling through to `completed` would report a run that never started
+      // as a success, so render it neutrally with its raw status instead.
+      const unknownStatus = String(run.status);
+      return {
+        title: t("AI agent run is in a retired state"),
+        detail: runnerDetail ?? t("Reported status: {status}", { status: unknownStatus }),
+        badge: unknownStatus,
+        badgeVariant: "neutral",
+        icon: Clock3,
+        iconClassName: "text-tertiary",
+      };
+    }
   }
 }
 
