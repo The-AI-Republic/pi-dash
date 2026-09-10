@@ -13,17 +13,15 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
-from django.urls import reverse
 from rest_framework import status
 
-from pi_dash.db.models import User, Workspace, WorkspaceMember
+from pi_dash.db.models import User, WorkspaceMember
 from pi_dash.db.models.project import Project
 from pi_dash.runner.models import (
     AgentRun,
     AgentRunStatus,
     Pod,
     Runner,
-    RunnerStatus,
 )
 
 

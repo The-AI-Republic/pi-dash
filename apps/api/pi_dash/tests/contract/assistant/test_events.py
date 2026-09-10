@@ -6,7 +6,6 @@ import pytest
 
 from pi_dash.assistant.models import (
     AssistantEvent,
-    AssistantMessage,
     AssistantThread,
     AssistantTurn,
     MessageKind,
