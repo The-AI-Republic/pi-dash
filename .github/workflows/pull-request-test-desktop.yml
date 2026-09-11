@@ -12,8 +12,6 @@ on:
       - "reopened"
     paths:
       - "desktop/**"
-      - "desktop-overlay/**"
-      - "apps/web/ce/components/desktop/**"
       - ".github/workflows/pull-request-test-desktop.yml"
   # Post-merge validation, same reasoning as the runner workflow: PR checks
   # don't re-run when the base moves.
@@ -22,8 +20,6 @@ on:
       - "main"
     paths:
       - "desktop/**"
-      - "desktop-overlay/**"
-      - "apps/web/ce/components/desktop/**"
       - ".github/workflows/pull-request-test-desktop.yml"
 
 concurrency:
@@ -70,37 +66,3 @@ jobs:
 
       - name: Test release packaging helpers
         run: python -m unittest discover -s desktop/tests -p 'test_*.py' -v
-
-  web:
-    name: desktop web tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      NODE_OPTIONS: "--max-old-space-size=4096"
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-
-      - name: Enable Corepack and pnpm
-        run: corepack enable pnpm
-
-      - name: Get pnpm store directory
-        shell: bash
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
-
-      - name: Cache pnpm store
-        uses: actions/cache@v5
-        with:
-          path: ${{ env.STORE_PATH }}
-          key: pnpm-store-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            pnpm-store-${{ runner.os }}-
-
-      # Runs apps/web/tests/desktop/ on the OSS tree + desktop-overlay/, the
-      # same tree desktop/scripts/dev-prep.sh bundles.
-      - name: Run desktop web tests
-        run: bash desktop/scripts/test-overlay.sh

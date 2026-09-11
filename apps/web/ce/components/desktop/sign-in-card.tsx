@@ -13,7 +13,10 @@
  *
  * The community server has no desktop sign-in hand-off yet, so this card
  * points the user at the web app instead of offering a form that could
- * not establish a desktop session.
+ * not establish a desktop session. It deliberately does not say "Sign in to
+ * Pi Dash": that heading is what an edition's sign-in card is recognised by
+ * (build.rs with PIDASH_DESKTOP_EXTERNAL_SIGNIN=1), so a build that expects
+ * an edition card but ships this one fails instead of passing.
  */
 
 import { WEB_URL } from "@pi-dash/constants";
@@ -28,7 +31,7 @@ function openWebApp() {
     return;
   }
   core.invoke("open_in_browser", { url: WEB_URL }).catch((error: unknown) => {
-    console.error("desktop open_in_browser failed", error);
+    console.error("open_in_browser failed", error);
   });
 }
 
@@ -36,9 +39,9 @@ export function DesktopSignInCard() {
   return (
     <div className="shadow-md flex w-full max-w-md flex-col items-center gap-6 rounded-2xl border border-subtle bg-surface-1 p-8 text-center sm:p-10">
       <div className="flex flex-col items-center gap-2">
-        <h2 className="text-h2-semibold text-primary">Sign in to Pi Dash</h2>
+        <h2 className="text-h2-semibold text-primary">Desktop sign-in isn&apos;t available yet</h2>
         <p className="text-body-md-regular text-secondary">
-          Signing in from the desktop app isn&apos;t available for this server yet. You can keep using Pi Dash in your
+          This server doesn&apos;t support signing in from the desktop app yet. You can keep using Pi Dash in your
           browser in the meantime.
         </p>
       </div>

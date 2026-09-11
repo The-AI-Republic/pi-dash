@@ -1,0 +1,85 @@
+name: Test desktop web
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - "main"
+      - "preview"
+    types:
+      - "opened"
+      - "synchronize"
+      - "reopened"
+    paths:
+      - "desktop-overlay/**"
+      - "desktop/scripts/merge-web-tree.sh"
+      - "desktop/scripts/test-overlay.sh"
+      # desktop-overlay replaces apps/web files wholesale and builds on
+      # apps/web internals and workspace packages, so their changes can
+      # break it too.
+      - "apps/web/**"
+      - "packages/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "turbo.json"
+      - ".github/workflows/pull-request-test-desktop-web.yml"
+  # Post-merge validation, same reasoning as the runner workflow: PR checks
+  # don't re-run when the base moves.
+  push:
+    branches:
+      - "main"
+    paths:
+      - "desktop-overlay/**"
+      - "desktop/scripts/merge-web-tree.sh"
+      - "desktop/scripts/test-overlay.sh"
+      # desktop-overlay replaces apps/web files wholesale and builds on
+      # apps/web internals and workspace packages, so their changes can
+      # break it too.
+      - "apps/web/**"
+      - "packages/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "turbo.json"
+      - ".github/workflows/pull-request-test-desktop-web.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    name: desktop web tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NODE_OPTIONS: "--max-old-space-size=4096"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Enable Corepack and pnpm
+        run: corepack enable pnpm
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Cache pnpm store
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
+
+      # Runs apps/web/tests/desktop/ on the OSS tree + desktop-overlay/, the
+      # same tree desktop/scripts/dev-prep.sh bundles.
+      - name: Run desktop web tests
+        run: bash desktop/scripts/test-overlay.sh
