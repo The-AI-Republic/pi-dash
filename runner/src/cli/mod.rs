@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 
+mod agent_install;
 mod ai;
 pub mod auth;
 mod comment;
