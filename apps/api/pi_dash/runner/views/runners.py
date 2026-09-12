@@ -37,6 +37,7 @@ from pi_dash.runner.services.pubsub import (
     send_runner_revoke,
 )
 from pi_dash.runner.services.runner_delete import (
+    delete_dev_machine as delete_dev_machine_svc,
     delete_runner as delete_runner_svc,
     parse_purge_local,
 )
@@ -243,6 +244,46 @@ class DevMachineRotateEndpoint(APIView):
                 close_runner_session(runner_id)
 
         return Response(_serialize_dev_machine(machine, request.user, workspace_id), status=status.HTTP_200_OK)
+
+
+class DevMachineDeleteEndpoint(APIView):
+    """``DELETE /api/runners/dev-machines/<machine_id>/`` — hard-delete a
+    dev-machine connection.
+
+    The destructive counterpart to revoke: revoke leaves the machine in
+    the list marked revoked (history preserved); delete removes the
+    connection entirely — its tokens are invalidated, its runners are torn
+    down, and the machine row is dropped so it disappears from the page.
+
+    Owner-scoped like every other dev-machine action (the machine must be
+    in the caller's workspace scope). Accepts a ``?purge_local=true|false``
+    query flag (default ``true``) with the same semantics as the
+    runner-delete endpoint.
+    """
+
+    authentication_classes = [BaseSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, machine_id):
+        workspace_id = _request_workspace_id(request)
+        if not workspace_id:
+            return Response(
+                {"error": "workspace is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not is_workspace_member(request.user, workspace_id):
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            purge_local = parse_purge_local(request.query_params)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        machine = DevMachine.objects.filter(pk=machine_id).first()
+        if machine is None or not _machine_is_in_workspace_scope(request.user, machine, workspace_id):
+            return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        delete_dev_machine_svc(machine, purge_local=purge_local)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class RunnerListEndpoint(APIView):
