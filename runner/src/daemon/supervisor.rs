@@ -3386,6 +3386,7 @@ mod tests {
             config_dir: root.join("config"),
             data_dir: root.join("data"),
             runtime_dir: root.join("runtime"),
+            machine_context_dir: root.join("config"),
         }
     }
 

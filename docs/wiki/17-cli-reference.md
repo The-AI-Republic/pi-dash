@@ -242,9 +242,28 @@ List projects in the active workspace. Prints JSON.
 pidash project list
 ```
 
+Pi Dash writes two `context.md` files so an agent can tell which project a
+directory belongs to and what else exists in the workspace:
+
+- **Working-dir** `<working_dir>/.pidash/context.md` (`scope: "project"`) — the
+  single project that working directory belongs to. Authoritative for "which
+  project am I working in". Written at `runner add` and when the daemon resolves
+  a workspace, and excluded from the repo via `$GIT_DIR/info/exclude` (never
+  `.gitignore`).
+- **Machine-level** `~/.pidash/context.md` (`scope: "machine"`) — every project
+  in every workspace this machine is bound to, keyed by workspace slug. The
+  lookup table for "what else exists in this workspace" and the fallback when
+  there is no working-dir file. Written on `auth login` and refreshable with
+  `pidash context refresh`. Its location follows `PIDASH_CONFIG_DIR` when set,
+  otherwise `~/.pidash`.
+
+Both files carry a `generated_at` RFC 3339 UTC stamp, and each project carries a
+`repo_url`.
+
 ### `pidash context init`
 
-Write `.pidash/context.md` for a local workspace directory.
+Write the working-dir `.pidash/context.md` for a local directory, scoped to one
+project.
 
 ```
 pidash context init --project <PROJECT> [--workspace <PATH>]
@@ -254,6 +273,16 @@ pidash context init --project <PROJECT> [--workspace <PATH>]
 | ----------------- | --------------------------------------------------- |
 | `--project <P>`   | Project identifier or UUID. **Required.**           |
 | `--workspace <P>` | Local workspace dir. Defaults to current directory. |
+
+### `pidash context refresh`
+
+Rewrite the machine-level `~/.pidash/context.md` for the bound workspace,
+replacing that workspace's project list wholesale (pruning deleted projects) and
+leaving other workspaces intact.
+
+```
+pidash context refresh
+```
 
 ---
 
