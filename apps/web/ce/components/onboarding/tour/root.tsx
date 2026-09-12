@@ -8,7 +8,7 @@ import { useState } from "react";
 import { observer } from "mobx-react";
 // pi dash imports
 import { Button } from "@pi-dash/propel/button";
-import { CloseIcon, PiSymbol } from "@pi-dash/propel/icons";
+import { CloseIcon } from "@pi-dash/propel/icons";
 // assets
 // TODO(onboarding): replace these reused Plane-era screenshots with Pi Dash-native captures
 // (runner CLI, runner chat, workpad) once design provides them.
@@ -28,6 +28,9 @@ export type TOnboardingTourProps = {
 };
 
 export type TTourSteps = "welcome" | "work-items" | "runners" | "chat" | "workpads" | "pages";
+
+// Pi Dash core concept video shown on the welcome screen (https://youtu.be/-sitbwrwjno).
+const CORE_CONCEPT_VIDEO_EMBED_URL = "https://www.youtube.com/embed/-sitbwrwjno";
 
 const TOUR_STEPS: {
   key: TTourSteps;
@@ -98,16 +101,24 @@ export const TourRoot = observer(function TourRoot(props: TOnboardingTourProps) 
       {step === "welcome" ? (
         <div className="w-4/5 overflow-hidden rounded-[10px] bg-surface-1 md:w-1/2 lg:w-2/5">
           <div className="h-full overflow-hidden">
-            <div className="grid h-64 place-items-center bg-accent-primary">
-              <PiSymbol className="h-20 w-auto text-on-color" />
+            <div className="aspect-video w-full bg-accent-primary">
+              <iframe
+                src={CORE_CONCEPT_VIDEO_EMBED_URL}
+                title="Pi Dash core concept video"
+                className="h-full w-full border-0"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                sandbox="allow-scripts allow-presentation allow-popups allow-popups-to-escape-sandbox"
+                allowFullScreen
+              />
             </div>
             <div className="flex flex-col overflow-y-auto p-6">
               <h3 className="font-semibold sm:text-18">
-                Welcome to Pi Dash, {currentUser?.first_name} {currentUser?.last_name}
+                Welcome to Pi Dash{currentUser?.first_name ? `, ${currentUser.first_name}` : ""} — watch the core
+                concept video
               </h3>
               <p className="mt-3 text-13 text-secondary">
-                Pi Dash is where you plan work and dispatch it to AI coding agents. Define what needs to be done,
-                connect a runner, and watch your agents execute it — with you in the loop the whole way.
+                Take a couple of minutes to see how Pi Dash works: plan work, dispatch it to AI coding agents, and stay
+                in the loop the whole way. Then take the product tour or jump right in.
               </p>
               <div className="flex h-full items-end">
                 <div className="mt-12 flex items-center gap-6">
