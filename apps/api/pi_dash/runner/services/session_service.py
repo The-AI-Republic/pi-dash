@@ -278,10 +278,14 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
         pids=pod_ids,
         handoff_ids=tuple(stopped_cancel_ids),
     ):
-        from pi_dash.orchestration.service import complete_project_move_handoff
+        from pi_dash.orchestration.service import (
+            complete_phase_change_handoff,
+            complete_project_move_handoff,
+        )
 
         for handoff_id in handoff_ids:
             complete_project_move_handoff(handoff_id)
+            complete_phase_change_handoff(handoff_id)
         drain_for_runner_by_id(rid)
         for pid in pids:
             drain_pod_by_id(pid)

@@ -79,12 +79,15 @@ def apply_terminal_effects(run_id) -> bool:
     """Apply orchestration hooks once, then deliver capacity release at least once."""
     from pi_dash.runner.services.run_lifecycle import (
         _apply_post_run_orchestration,
+        _has_phase_change_handoff,
         _has_project_move_handoff,
         _post_failure_comment,
     )
     from pi_dash.runner.services.scheduler_hook import update_scheduler_binding_on_terminate
 
-    pending_handoff = False
+    # ``None`` = no handoff; otherwise the handoff kind whose completer runs
+    # after this transaction (respecting the issue → run lock order).
+    pending_handoff = None
     with transaction.atomic():
         # Lock order: issue → run, matching issue moves and
         # complete_project_move_handoff. The post-run hooks below lock the
@@ -105,7 +108,9 @@ def apply_terminal_effects(run_id) -> bool:
         if run is None:
             return False
         if run.terminal_hooks_applied_at is None:
-            has_handoff = _has_project_move_handoff(run)
+            has_project_move = _has_project_move_handoff(run)
+            has_phase_change = _has_phase_change_handoff(run)
+            has_handoff = has_project_move or has_phase_change
             if run.status == AgentRunStatus.FAILED and not has_handoff:
                 try:
                     # Keep this best-effort side effect behind a savepoint: a
@@ -119,12 +124,13 @@ def apply_terminal_effects(run_id) -> bool:
                         run.id,
                     )
             if has_handoff:
-                # A source-project run stopped for a move must not
-                # disarm/pause the issue after it already belongs to the
-                # target project; the handoff completion (below, after
-                # this transaction to respect the issue → run lock order)
-                # creates the target-project replacement instead.
-                pending_handoff = True
+                # A run stopped for a handoff must not disarm/pause the
+                # issue: for a project move it already belongs to the target
+                # project, and for a phase change the new phase's ticker was
+                # just armed and its successor is still to be created. The
+                # completer (below, after this transaction to respect the
+                # issue → run lock order) creates the replacement instead.
+                pending_handoff = "project_move" if has_project_move else "phase_change"
             else:
                 _apply_post_run_orchestration(run)
             if run.scheduler_binding_id:
@@ -139,17 +145,26 @@ def apply_terminal_effects(run_id) -> bool:
             run.terminal_hooks_applied_at = timezone.now()
             run.save(update_fields=["terminal_hooks_applied_at"])
 
-    if pending_handoff:
-        from pi_dash.orchestration.service import complete_project_move_handoff
+    if pending_handoff is not None:
+        from pi_dash.orchestration.service import (
+            complete_phase_change_handoff,
+            complete_project_move_handoff,
+        )
 
+        completer = (
+            complete_project_move_handoff
+            if pending_handoff == "project_move"
+            else complete_phase_change_handoff
+        )
         try:
-            complete_project_move_handoff(run_id)
+            completer(run_id)
         except Exception:
             # The terminal transition is already committed; a handoff
             # recovery failure must not strand capacity release. The durable
             # marker stays on the run for reconciliation.
             logger.exception(
-                "failed to complete project-move handoff for run %s",
+                "failed to complete %s handoff for run %s",
+                pending_handoff,
                 run_id,
             )
 

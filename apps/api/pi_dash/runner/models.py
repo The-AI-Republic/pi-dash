@@ -642,23 +642,25 @@ class Runner(models.Model):
 
         def _complete_project_move_handoffs(run_ids=tuple(affected_run_ids)):
             from pi_dash.orchestration.service import (
+                complete_phase_change_handoff,
                 complete_project_move_handoff,
             )
 
             for run_id in run_ids:
-                try:
-                    complete_project_move_handoff(run_id)
-                except Exception:
-                    # Revocation is already committed. A handoff recovery
-                    # failure must not prevent source-pod draining or delayed
-                    # stream cleanup; leave the durable marker in place and
-                    # log enough context for reconciliation.
-                    _logger.exception(
-                        "failed to complete project-move handoff after "
-                        "revoking runner %s (run %s)",
-                        self.pk,
-                        run_id,
-                    )
+                for completer in (complete_project_move_handoff, complete_phase_change_handoff):
+                    try:
+                        completer(run_id)
+                    except Exception:
+                        # Revocation is already committed. A handoff recovery
+                        # failure must not prevent source-pod draining or
+                        # delayed stream cleanup; leave the durable marker in
+                        # place and log enough context for reconciliation.
+                        _logger.exception(
+                            "failed to complete handoff after revoking "
+                            "runner %s (run %s)",
+                            self.pk,
+                            run_id,
+                        )
 
         if affected_run_ids:
             transaction.on_commit(_complete_project_move_handoffs)

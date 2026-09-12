@@ -25,7 +25,10 @@ from django.dispatch import receiver
 
 from pi_dash.db.models.issue import Issue
 from pi_dash.db.models.state import State
-from pi_dash.orchestration.service import handle_issue_state_transition
+from pi_dash.orchestration.service import (
+    handle_issue_state_transition,
+    route_state_transition,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,13 +74,26 @@ def fire_state_transition(sender, instance: Issue, created: bool, **kwargs) -> N
     )
 
     try:
-        handle_issue_state_transition(
-            issue=instance,
-            from_state=from_state,
-            to_state=to_state,
-            actor=None,
-            dispatch_immediate=dispatch_immediate,
-        )
+        if dispatch_immediate:
+            # Normal user-driven transition: route through the debounce /
+            # phase-change-supersede layer instead of dispatching inline.
+            route_state_transition(
+                issue=instance,
+                from_state=from_state,
+                to_state=to_state,
+                actor=None,
+            )
+        else:
+            # Caller owns its own dispatch (Comment & Run, project move,
+            # the no-eligible-runner bounce): arm/disarm synchronously with
+            # no debounced dispatch of our own.
+            handle_issue_state_transition(
+                issue=instance,
+                from_state=from_state,
+                to_state=to_state,
+                actor=None,
+                dispatch_immediate=False,
+            )
     except Exception:  # noqa: BLE001 — never let orchestration crash issue save
         global orchestration_error_count
         orchestration_error_count += 1
