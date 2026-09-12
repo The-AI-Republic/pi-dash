@@ -126,6 +126,18 @@ def apply_hello(runner: Runner, body: Dict[str, Any]) -> None:
     runner.runner_version = body.get("version", "") or runner.runner_version
     runner.dev_metadata = _merge_dev_metadata(runner.dev_metadata, body)
     runner.last_heartbeat_at = timezone.now()
+    # Observability (design §15.1): a bundled runner ships its agent binary
+    # inside the desktop app, so the engine version it self-reports at session
+    # open is support's only signal for "which build is this user on". Emit it
+    # only when the runner actually reports a non-empty value this open — a
+    # legacy or non-managed daemon that never sends it produces no noise.
+    reported_engine_version = body.get("engine_version")
+    if isinstance(reported_engine_version, str) and reported_engine_version:
+        logger.info(
+            "managed_runner.engine_version runner=%s version=%s",
+            runner.id,
+            reported_engine_version[:64],
+        )
     update_fields = [
         "os",
         "arch",
