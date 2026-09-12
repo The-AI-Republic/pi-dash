@@ -143,6 +143,47 @@ pidash runner add --project X    # add another runner
 pidash runner list / remove      # manage runners
 ```
 
+### Agent CLI auto-install
+
+`--agent` selects which coding agent the runner drives (`codex` by default;
+also `claude-code`, `cursor-agent`, `open-claw`, `grok`, `muse-code`). If the
+selected agent's CLI isn't present on the machine, `pidash runner add` installs
+it for you by invoking **the vendor's own official install script** — Pi Dash
+never bundles, mirrors, or ships an agent binary, so you always get the vendor's
+latest supported build:
+
+```bash
+pidash runner add --project WEB --agent claude-code
+```
+
+What happens when the agent is missing:
+
+1. Pi Dash prints which agent is missing and the exact official command it's
+   about to run, then runs it with output streamed to your terminal
+   (`curl … | bash` on macOS/Linux/WSL, PowerShell on Windows).
+2. After the installer finishes, Pi Dash re-detects the binary, resolves its
+   **absolute path** (installers often drop it in `~/.local/bin`, which may not
+   be on the current `PATH` yet), and records that path in the runner's config.
+3. Installers don't authenticate the agent, so Pi Dash prints the one login step
+   still needed (e.g. run `claude` and follow `/login`, or `codex login`) before
+   the runner can pick up work.
+
+`runner add` never hard-fails on an install error: if the installer can't run
+(no network, no scriptable installer for that agent), Pi Dash prints the error,
+falls back to opening the vendor's install page in your browser, and leaves
+`pidash doctor` reporting the agent as missing. Agents that are already
+installed are left untouched.
+
+Verified official installers exist for `claude-code`, `codex`, and
+`cursor-agent`; `open-claw`, `grok`, and `muse-code` currently use the
+open-install-page fallback until a vendor script is confirmed.
+
+Pass `--skip-agent-install` if you manage agent installs yourself:
+
+```bash
+pidash runner add --project WEB --agent claude-code --skip-agent-install
+```
+
 ## Task folders and Git
 
 Direct-mode runners can execute coding and non-coding tasks in an ordinary
