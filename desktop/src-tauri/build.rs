@@ -5,6 +5,7 @@
 fn main() {
     println!("cargo:rerun-if-env-changed=PI_DASH_URL");
     println!("cargo:rerun-if-env-changed=VITE_API_BASE_URL");
+    println!("cargo:rerun-if-env-changed=VITE_WEB_BASE_URL");
     println!("cargo:rerun-if-env-changed=PI_DASH_OSS_SHA");
     println!("cargo:rerun-if-env-changed=PIDASH_DESKTOP_EXTERNAL_SIGNIN");
     // PIDASH_DESKTOP_HOT_RELOAD is read by main.rs via option_env! at
@@ -76,6 +77,7 @@ fn main() {
             );
         }
         validate_baked_api_base(&dist);
+        validate_baked_web_base(&dist);
         // Editions whose sign-in hands off to the system browser (an OIDC
         // provider that must not run inside the webview) opt into checking
         // that the bundled sign-in screen actually does so.
@@ -103,6 +105,40 @@ fn validate_baked_api_base(dist: &std::path::Path) {
         panic!(
             "Release build but desktop/src-tauri/dist does not contain VITE_API_BASE_URL={expected:?}. \
             The SPA bundle may have been baked with the wrong backend URL or a stale artifact."
+        );
+    }
+}
+
+/// The public web origin the SPA builds shareable links from.
+///
+/// Bundled pages run on a Tauri-owned origin, so anything that resolves a
+/// shareable URL against `window.location.origin` would hand the user a
+/// `tauri://localhost` link. `desktop-overlay`'s `desktopWebUrl` resolves
+/// against `VITE_WEB_BASE_URL` instead, which only works if the value was
+/// actually baked into the bundle.
+///
+/// Falls back to `PI_DASH_URL`, which `dev-prep.sh` uses as the default and
+/// which `main.rs` requires via `env!` in release -- so in a release build
+/// this is never empty, and the panic below is reachable only from a
+/// hand-managed `dist/`.
+fn validate_baked_web_base(dist: &std::path::Path) {
+    let expected = std::env::var("VITE_WEB_BASE_URL")
+        .or_else(|_| std::env::var("PI_DASH_URL"))
+        .unwrap_or_default();
+    if expected.trim().is_empty() {
+        panic!(
+            "Release build but neither VITE_WEB_BASE_URL nor PI_DASH_URL is set. The bundled \
+             desktop SPA could expose its Tauri origin in copied links."
+        );
+    }
+
+    let mut saw_expected = false;
+    scan_text_assets(dist, &expected, &mut saw_expected);
+
+    if !saw_expected {
+        panic!(
+            "Release build but desktop/src-tauri/dist does not contain the configured web \
+             origin {expected:?}. The SPA bundle may have a stale or missing VITE_WEB_BASE_URL."
         );
     }
 }

@@ -60,7 +60,7 @@ print_bake_info() {
         sed 's/^/[dev-prep]   /' "$info"
     else
         echo "[dev-prep] WARNING: no $info sidecar — dist/ origin is unknown."
-        echo "[dev-prep] WARNING: if the SPA was baked against a different API base, every API call from the shipped binary will go to the wrong host."
+        echo "[dev-prep] WARNING: if the SPA was baked against different API/web bases, API calls or copied links from the shipped binary can target the wrong host."
     fi
 }
 
@@ -111,11 +111,13 @@ fi
 # applies when unset.
 API_BASE="${VITE_API_BASE_URL:-http://localhost:8000}"
 
-# The desktop sign-in card links the user at the web app (ce/components/
-# desktop/sign-in-card.tsx reads WEB_URL, i.e. VITE_WEB_BASE_URL). Nothing
-# else in a desktop build sets it, and an unset one renders a card with no
-# action at all, so default it to the sign-in origin — the same server the
-# deep-link hand-off targets. Already in turbo.json globalEnv, so the build
+# The public web origin baked into the SPA. Two things read it: the desktop
+# sign-in card (ce/components/desktop/sign-in-card.tsx, via WEB_URL) and
+# desktop-overlay's desktopWebUrl(), which builds shareable work-item links —
+# bundled pages run on a Tauri origin, so a link resolved against
+# window.location.origin would come out as tauri://localhost. Nothing else in a
+# desktop build sets it, so default it to the sign-in origin, the same server
+# the deep-link hand-off targets. Already in turbo.json globalEnv, so the build
 # cache key tracks it.
 WEB_BASE="${VITE_WEB_BASE_URL:-${PI_DASH_URL:-}}"
 
@@ -129,7 +131,7 @@ echo "[dev-prep] OSS source:  $OSS_DIR"
 echo "[dev-prep] Build tree:  $DEV_TREE"
 echo "[dev-prep] Dist target: $DIST"
 echo "[dev-prep] API base:    $API_BASE  (VITE_API_BASE_URL → baked into SPA)"
-echo "[dev-prep] Web base:    ${WEB_BASE:-<unset>}  (VITE_WEB_BASE_URL → sign-in card link)"
+echo "[dev-prep] Web base:    ${WEB_BASE:-<unset>}  (VITE_WEB_BASE_URL → sign-in card + shareable links)"
 echo "[dev-prep] Preparing bundled runner and agent engine"
 bash "$SCRIPT_DIR/prepare-agent.sh"
 echo "[dev-prep] Sign-in target: ${PI_DASH_URL:-<unset, main.rs default>}  (PI_DASH_URL → main.rs deep-link)"
