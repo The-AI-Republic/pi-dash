@@ -96,6 +96,17 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
                 "work_branch": "pi-dash/sample-0",
                 "description": "Parent description.",
                 "comments_count": 3,
+                "code_reviews": [
+                    {
+                        "url": "https://github.com/sample-org/sample-repo/pull/3",
+                        "title": "Parent PR title",
+                        "state": "open",
+                        "merged": False,
+                        "draft": False,
+                        "provider": "github",
+                        "external_iid": "3",
+                    },
+                ],
             },
             "lineage": [
                 {"identifier": "SAMPLE-1", "title": "Sample issue title"},
