@@ -44,13 +44,25 @@ class RunnerAdmin(admin.ModelAdmin):
         "dev_machine",
         "visibility",
         "status",
+        "provisioning",
+        "runner_version",
+        "codex_version",
         "host_label",
         "refresh_token_generation",
         "last_heartbeat_at",
         "revoked_at",
     )
-    list_filter = ("status", "visibility", "workspace")
+    list_filter = ("status", "visibility", "provisioning", "workspace")
     search_fields = ("name", "owner__email", "host_label")
+
+    @admin.display(description="codex version")
+    def codex_version(self, obj):
+        # Support's "which build is this user on" signal (design §15.1). The
+        # engine version is whitelisted into ``dev_metadata.codex_version`` at
+        # session open (see ``session_service._merge_dev_metadata``).
+        if isinstance(obj.dev_metadata, dict):
+            return obj.dev_metadata.get("codex_version") or "—"
+        return "—"
     readonly_fields = (
         "refresh_token_hash",
         "refresh_token_fingerprint",
