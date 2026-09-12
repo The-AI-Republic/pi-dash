@@ -21,7 +21,7 @@ import type { TDropdownProps } from "@/components/dropdowns/types";
 // hooks
 import { useDropdown } from "@/hooks/use-dropdown";
 // local imports
-import { CLOUD_AGENT_VALUE, MANAGED_AGENT_VALUE } from "./execution-target";
+import { CLOUD_AGENT_VALUE, MANAGED_AGENT_VALUE, managedRunnerReasonCopy } from "./execution-target";
 
 const matchesQuery = (label: string, query: string) =>
   query === "" || label.toLowerCase().includes(query.toLowerCase());
@@ -106,12 +106,9 @@ export function PodDropdownBase(props: TPodDropdownBaseProps) {
     : isCloudSelected
       ? t("Pi Dash Cloud Agent")
       : selectedPod?.name;
-  const managedUnavailableReason =
-    managedAgent?.reasonCode === "byok_not_supported_on_desktop"
-      ? t("Select OpenHub in AI Assistant settings to run on your desktop.")
-      : managedAgent?.reasonCode === "managed_runner_disabled"
-        ? t("Pi Dash Agent is not enabled on this server.")
-        : t("Open this project in Pi Dash Desktop to connect its agent.");
+  // `null` for reasons the desktop resolves silently (no_managed_runner_for_project);
+  // those render no explanation line at all.
+  const managedUnavailableReason = managedAgent ? managedRunnerReasonCopy(managedAgent.reasonCode, t) : null;
   const cloudUnavailableReason =
     cloudAgent?.reasonCode === "llm_config_missing"
       ? t("Configure your AI provider in Pi Dash AI settings to use the Cloud Agent.")
@@ -250,7 +247,9 @@ export function PodDropdownBase(props: TPodDropdownBaseProps) {
                     <Monitor className="size-3.5 flex-shrink-0" />
                     <div>
                       <p>{t("Pi Dash Agent (desktop)")}</p>
-                      {!managedAgent.available && <p className="text-9">{managedUnavailableReason}</p>}
+                      {!managedAgent.available && managedUnavailableReason && (
+                        <p className="text-9">{managedUnavailableReason}</p>
+                      )}
                     </div>
                   </div>
                   {isManagedSelected && <Check className="size-3.5 flex-shrink-0" />}

@@ -15,6 +15,8 @@ import { Button } from "@pi-dash/propel/button";
 import type { TAgentRunStatus, TIssue, TIssueAgentRunSummary, TIssueAgentTicker } from "@pi-dash/types";
 import { AlertModalCore } from "@pi-dash/ui";
 import { cn } from "@pi-dash/utils";
+// components
+import { executorKindLabel } from "@/components/dropdowns/pod/execution-target";
 // local imports
 import type { TIssueOperations } from "./root";
 import { useAbortRun } from "./use-abort-run";
@@ -161,18 +163,24 @@ function getRunView(
     getPayloadString(run.done_payload, "summary");
 
   switch (run.status) {
-    case "queued":
+    case "queued": {
+      // A managed run queues visibly when the owner's desktop is closed
+      // (§8.5): it is waiting for that one machine, not for shared capacity.
+      const queuedDetail =
+        run.executor_kind === "cloud_agent"
+          ? t("Waiting for Pi Dash Cloud Agent capacity.")
+          : run.executor_kind === "managed_runner" && run.error_code === "desktop_not_connected"
+            ? t("Waiting for your desktop")
+            : (runnerDetail ?? t("Waiting for an available runner."));
       return {
         title: t("AI agent is queued"),
-        detail:
-          run.executor_kind === "cloud_agent"
-            ? t("Waiting for Pi Dash Cloud Agent capacity.")
-            : (runnerDetail ?? t("Waiting for an available runner.")),
+        detail: queuedDetail,
         badge: t("Queued"),
         badgeVariant: "neutral",
         icon: Clock3,
         iconClassName: "text-tertiary",
       };
+    }
     case "assigned":
       return {
         title: t("AI agent is starting on this issue"),
@@ -446,9 +454,7 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
           {status?.latest_run ? (
             <div className="rounded-sm bg-layer-2 px-2 py-1">
               <span className="block text-placeholder">{t("Executor")}</span>
-              <span className="text-primary">
-                {status.latest_run.executor_kind === "cloud_agent" ? t("Pi Dash Cloud Agent") : t("Local Runner")}
-              </span>
+              <span className="text-primary">{executorKindLabel(status.latest_run.executor_kind, t)}</span>
             </div>
           ) : null}
           {nextTick ? (
