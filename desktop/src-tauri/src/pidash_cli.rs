@@ -57,7 +57,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
 
 /// Result of [`detect_pidash_cli`].
 #[derive(Debug, Serialize, Clone)]
@@ -303,6 +303,11 @@ pub async fn detect_pidash_cli() -> PidashStatus {
 /// The URL and SHA-256 must be updated together. Pinning the release tag
 /// closes the `releases/latest` substitution risk; verifying the script
 /// body before execution closes corrupted or replaced asset downloads.
+///
+/// `INSTALLER_RELEASE_TAG` is read only by the tests below: it exists so a
+/// version bump that updates one URL and forgets the other fails the suite
+/// instead of shipping a mismatched pair.
+#[cfg(test)]
 const INSTALLER_RELEASE_TAG: &str = "pidash-v0.1.15";
 const INSTALLER_URL_SH: &str =
     "https://github.com/The-AI-Republic/pi-dash/releases/download/pidash-v0.1.15/pidash-installer.sh";
@@ -586,270 +591,9 @@ fn run_installer<R: Runtime>(
     Ok(())
 }
 
-/// Marker file recording that the `pidash` CLI has been *present* on this
-/// machine — written when we detect it installed, or when our silent install
-/// succeeds. It is deliberately NOT written on install failure.
-///
-/// This "have we ever seen it" semantics (rather than "have we attempted") is
-/// what lets the two guarantees coexist:
-///   * A CLI the user deliberately uninstalled stays uninstalled: absent CLI +
-///     marker present ⇒ it was here before and is gone now ⇒ don't reinstall.
-///   * A transient first-launch failure (offline, no `curl`, proxy) is NOT
-///     permanent: no marker was written, so the next launch retries. Writing
-///     the marker on failure (the earlier design) would have disabled
-///     auto-install forever after one offline boot.
-const PRESENCE_MARKER: &str = "pidash-cli-present";
-
-/// Absolute path to the presence marker under the app's config dir, or None if
-/// the platform config dir can't be resolved (in which case we proceed without
-/// the guard rather than block install entirely — see the per-launch-reinstall
-/// caveat where this is consumed).
-fn presence_marker_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
-    match app.path().app_config_dir() {
-        Ok(dir) => Some(dir.join(PRESENCE_MARKER)),
-        Err(e) => {
-            eprintln!("pidash-cli: could not resolve app config dir for marker: {e}");
-            None
-        }
-    }
-}
-
-/// Best-effort write of the presence marker (idempotent — an empty file whose
-/// mere existence is the signal). Failures are logged, not fatal.
-fn write_presence_marker(path: &PathBuf) {
-    if path.exists() {
-        return;
-    }
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!(
-                "pidash-cli: could not create config dir {}: {e}",
-                parent.display()
-            );
-            return;
-        }
-    }
-    if let Err(e) = std::fs::write(path, b"") {
-        eprintln!(
-            "pidash-cli: could not write presence marker {}: {e}",
-            path.display()
-        );
-    }
-}
-
-/// Pure gate for the startup auto-install: run the installer only when the CLI
-/// is absent AND we've never recorded it present (no deliberate-uninstall
-/// marker). Extracted as a pure fn so the decision is unit-testable without a
-/// Tauri app, the real filesystem, or a subprocess.
-fn should_attempt_autoinstall(already_installed: bool, presence_marker_exists: bool) -> bool {
-    !already_installed && !presence_marker_exists
-}
-
-/// Startup auto-install entry point, spawned (not awaited) from `main.rs`'s
-/// `setup()` — same fire-and-forget shape as the updater check so the window
-/// opens immediately.
-///
-/// Flow: detect → if present, record the presence marker and stop. Else, if the
-/// marker exists, the CLI was here before and the user removed it — don't
-/// reinstall. Else run the SHA-pinned, HTTPS-only OSS installer silently and,
-/// only on success, record the marker (a transient failure leaves no marker so
-/// the next launch retries). The installer command is byte-for-byte the same
-/// one the manual [`install_pidash_cli`] command uses — only the trigger
-/// (startup vs. a button) and the output sink (stderr vs. the webview log
-/// stream) differ.
-pub async fn auto_install_if_missing<R: Runtime>(app: AppHandle<R>) {
-    // Detection makes blocking subprocess calls — keep them off the async
-    // runtime thread (shared with all IPC dispatch), same as the command.
-    let status = tauri::async_runtime::spawn_blocking(detect_pidash_cli_sync)
-        .await
-        .unwrap_or_else(|_| PidashStatus::not_installed());
-    let marker = presence_marker_path(&app);
-
-    if status.installed {
-        // Record that the CLI is present (however it got here — our install, a
-        // prior manual install, Homebrew, …). Once recorded, a *later* absence
-        // reads as a deliberate uninstall and the gate below won't reinstall.
-        if let Some(ref m) = marker {
-            write_presence_marker(m);
-        }
-        eprintln!(
-            "pidash-cli: already installed (version {}), skipping auto-install",
-            status.version.as_deref().unwrap_or("unknown"),
-        );
-        return;
-    }
-
-    let marker_exists = marker.as_ref().map(|m| m.exists()).unwrap_or(false);
-    if !should_attempt_autoinstall(status.installed, marker_exists) {
-        eprintln!(
-            "pidash-cli: not installed, but was present before (marker {}); \
-             not reinstalling a CLI the user removed. Use the manual install \
-             action to reinstall.",
-            marker
-                .as_ref()
-                .map(|m| m.display().to_string())
-                .unwrap_or_else(|| "<unresolved>".to_string()),
-        );
-        return;
-    }
-
-    // Shared concurrency guard: if a manual install is already running we skip
-    // rather than race it on the same destination. The guard clears on drop.
-    let Some(_guard) = InstallInProgressGuard::acquire() else {
-        eprintln!("pidash-cli: an install is already in progress; skipping auto-install");
-        return;
-    };
-
-    eprintln!("pidash-cli: not found — starting silent background install");
-    let (program, args) = installer_command();
-    let result = tauri::async_runtime::spawn_blocking(move || run_installer_silent(&program, &args))
-        .await
-        .unwrap_or_else(|e| Err(format!("auto-install task panicked: {e}")));
-
-    match result {
-        Ok(()) => {
-            // Record presence ONLY on success. A failed attempt leaves no
-            // marker, so the next launch retries instead of being permanently
-            // disabled by a one-off transient failure.
-            if let Some(ref m) = marker {
-                write_presence_marker(m);
-            }
-            eprintln!("pidash-cli: silent install completed");
-        }
-        Err(e) => eprintln!("pidash-cli: silent install failed (will retry next launch): {e}"),
-    }
-}
-
-/// Silent counterpart to [`run_installer`] for the background auto-install.
-///
-/// Identical spawn + wait + reader-thread structure, but installer output goes
-/// to the desktop process's stderr instead of the webview `pidash-install-log`
-/// event stream. There is no UI to render it during a background install, and
-/// keeping installer output off the (elevated-privilege) webview entirely
-/// sidesteps the DOM-injection concern in this module's rendering-contract
-/// note.
-fn run_installer_silent(program: &PathBuf, args: &[String]) -> Result<(), String> {
-    use std::io::{BufRead, BufReader};
-
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to spawn {}: {e}", program.display()))?;
-
-    let stdout = child.stdout.take().ok_or("missing stdout pipe")?;
-    let stderr = child.stderr.take().ok_or("missing stderr pipe")?;
-
-    let stdout_thread = std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            eprintln!("pidash-cli install: {line}");
-        }
-    });
-    let stderr_thread = std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            eprintln!("pidash-cli install: {line}");
-        }
-    });
-
-    let status = child
-        .wait()
-        .map_err(|e| format!("installer wait failed: {e}"))?;
-    let _ = stdout_thread.join();
-    let _ = stderr_thread.join();
-
-    if !status.success() {
-        return Err(format!(
-            "installer exited with status {}",
-            status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "<signal>".to_string())
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Fresh, collision-free temp dir per call. Tests share a process (and run
-    /// on threads), so the pid alone isn't unique — append a monotonic counter.
-    fn unique_temp_dir() -> PathBuf {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("pidash-cli-test-{}-{}", std::process::id(), n));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        dir
-    }
-
-    #[test]
-    fn autoinstall_gate_truth_table() {
-        // The only case that proceeds: absent AND never recorded present.
-        assert!(should_attempt_autoinstall(false, false));
-        // Already installed → skip, regardless of the marker. Detection is the
-        // primary gate; "if pidash is already installed, skip".
-        assert!(!should_attempt_autoinstall(true, false));
-        assert!(!should_attempt_autoinstall(true, true));
-        // Absent but marker present → the CLI was here before and is gone now
-        // (deliberate uninstall) → skip, don't reinstall behind the user's back.
-        assert!(!should_attempt_autoinstall(false, true));
-    }
-
-    #[test]
-    fn missing_marker_allows_first_attempt() {
-        let dir = unique_temp_dir();
-        let marker = dir.join(PRESENCE_MARKER);
-        assert!(!marker.exists(), "fresh temp dir has no marker");
-        // Not installed + never-seen (no marker) → the gate proceeds.
-        assert!(should_attempt_autoinstall(false, marker.exists()));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn removed_after_presence_recorded_is_not_reinstalled() {
-        // Regression guard for the "don't reinstall a deliberately-removed CLI"
-        // guarantee. Sequence: CLI seen present (marker written) → user
-        // uninstalls (detection now absent) → next launch must NOT auto-install.
-        let dir = unique_temp_dir();
-        let marker = dir.join(PRESENCE_MARKER);
-
-        // Detection found it present on some earlier launch → marker recorded.
-        write_presence_marker(&marker);
-        assert!(marker.exists());
-
-        // Later launch: binary is gone (absent), but the marker persists →
-        // gate must refuse to reinstall.
-        assert!(!should_attempt_autoinstall(false, marker.exists()));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn write_presence_marker_creates_file_and_missing_parents() {
-        let dir = unique_temp_dir();
-        // Parent dir intentionally doesn't exist yet — the writer must mkdir -p
-        // (mirrors the real app-config-dir path not existing on first launch).
-        let marker = dir.join("config").join(PRESENCE_MARKER);
-        assert!(!marker.exists());
-
-        write_presence_marker(&marker);
-        assert!(marker.exists(), "marker should exist after write");
-
-        // Post-write, the gate must now treat the CLI as previously-present.
-        assert!(!should_attempt_autoinstall(false, marker.exists()));
-
-        // Idempotent: writing again over an existing marker is a no-op, not an
-        // error (a second launch before detection catches up must not panic).
-        write_presence_marker(&marker);
-        assert!(marker.exists());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[test]
     fn shared_seq_counter_is_unique_and_contiguous_across_threads() {

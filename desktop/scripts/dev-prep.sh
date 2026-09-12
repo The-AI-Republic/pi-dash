@@ -111,6 +111,14 @@ fi
 # applies when unset.
 API_BASE="${VITE_API_BASE_URL:-http://localhost:8000}"
 
+# The desktop sign-in card links the user at the web app (ce/components/
+# desktop/sign-in-card.tsx reads WEB_URL, i.e. VITE_WEB_BASE_URL). Nothing
+# else in a desktop build sets it, and an unset one renders a card with no
+# action at all, so default it to the sign-in origin — the same server the
+# deep-link hand-off targets. Already in turbo.json globalEnv, so the build
+# cache key tracks it.
+WEB_BASE="${VITE_WEB_BASE_URL:-${PI_DASH_URL:-}}"
+
 VERIFY_HOOK="${PIDASH_DESKTOP_VERIFY_HOOK:-}"
 if [[ -n "$VERIFY_HOOK" && ! -f "$VERIFY_HOOK" ]]; then
     echo "[dev-prep] ERROR: PIDASH_DESKTOP_VERIFY_HOOK is not a file: $VERIFY_HOOK" >&2
@@ -121,6 +129,7 @@ echo "[dev-prep] OSS source:  $OSS_DIR"
 echo "[dev-prep] Build tree:  $DEV_TREE"
 echo "[dev-prep] Dist target: $DIST"
 echo "[dev-prep] API base:    $API_BASE  (VITE_API_BASE_URL → baked into SPA)"
+echo "[dev-prep] Web base:    ${WEB_BASE:-<unset>}  (VITE_WEB_BASE_URL → sign-in card link)"
 echo "[dev-prep] Preparing bundled runner and agent engine"
 bash "$SCRIPT_DIR/prepare-agent.sh"
 echo "[dev-prep] Sign-in target: ${PI_DASH_URL:-<unset, main.rs default>}  (PI_DASH_URL → main.rs deep-link)"
@@ -138,7 +147,7 @@ if command -v corepack >/dev/null 2>&1; then
 fi
 
 echo "[dev-prep] pnpm install"
-VITE_API_BASE_URL="$API_BASE" pnpm install --frozen-lockfile
+VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" pnpm install --frozen-lockfile
 
 # turbo run build --filter=web follows turbo.json's build.dependsOn ^build
 # and builds every workspace package web depends on. pnpm --filter=web
@@ -152,7 +161,7 @@ VITE_API_BASE_URL="$API_BASE" pnpm install --frozen-lockfile
 # into web, …). Rebuilding everything costs a minute or two; shipping a
 # stale bundle cost a lot more.
 echo "[dev-prep] turbo run build --filter=web --force"
-VITE_API_BASE_URL="$API_BASE" pnpm exec turbo run build --filter=web --force
+VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" pnpm exec turbo run build --filter=web --force
 
 CLIENT="$DEV_TREE/apps/web/build/client"
 INDEX="$CLIENT/index.html"
@@ -186,12 +195,25 @@ if [[ -n "$VERIFY_HOOK" ]]; then
     fi
 fi
 
-# Atomic dist/ replacement. Build into a sibling staging dir, then
-# `mv -T` it on top of the live dist/ in a single rename. Interruptions
-# (SIGINT, SIGTERM, OOM kill) leave the previous dist/ intact rather than
-# stranding the build at a half-copied state that build.rs would accept
-# but the webview would 404 on.
+# dist/ replacement. Build into a sibling staging dir, move the live dist/
+# aside, then move the staging dir into place. rename(2) cannot replace a
+# non-empty directory in one call, so the swap is two renames — but the
+# previous bundle survives as $BACKUP for the whole window, and the trap below
+# puts it back if we are interrupted (SIGINT, SIGTERM, OOM kill) between them.
+# Without that, an interruption left no dist/ at all — including the committed
+# index.html placeholder that tauri.conf.json's frontendDist requires — and the
+# next cargo build failed until the operator ran `git checkout .../dist`.
 STAGING="$DIST.new"
+BACKUP="$DIST.prev"
+
+restore_dist() {
+    if [[ ! -e "$DIST" && -d "$BACKUP" ]]; then
+        mv "$BACKUP" "$DIST" 2>/dev/null || true
+        echo "[dev-prep] Restored the previous dist/ after an interrupted swap." >&2
+    fi
+}
+trap restore_dist EXIT INT TERM
+
 echo "[dev-prep] Copying $CLIENT → $STAGING"
 rm -rf "$STAGING"
 mkdir -p "$STAGING"
@@ -202,15 +224,22 @@ cp -a "$CLIENT/." "$STAGING/"
 # operator-facing.
 {
     echo "api_base=$API_BASE"
+    echo "web_base=${WEB_BASE:-<unset>}"
     echo "pi_dash_url=${PI_DASH_URL:-<unset>}"
     echo "oss_sha=${PI_DASH_OSS_SHA:-<unset>}"
     echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } > "$STAGING/bake-info.txt"
 
-# rsync would be marginally safer than mv if dist/ contained mount points,
-# but for a plain dir mv -T (Linux) / mv (mac, where -T is unsupported but
-# behaves the same on a non-existent dest) is atomic on the same filesystem.
-rm -rf "$DIST"
-mv "$STAGING" "$DIST"
+rm -rf "$BACKUP"
+if [[ -e "$DIST" ]]; then
+    mv "$DIST" "$BACKUP"
+fi
+if ! mv "$STAGING" "$DIST"; then
+    # Put the previous bundle back rather than leaving no dist/ behind.
+    restore_dist
+    echo "[dev-prep] ERROR: could not move $STAGING into $DIST" >&2
+    exit 1
+fi
+rm -rf "$BACKUP"
 
 echo "[dev-prep] Done. index.html=${INDEX_SIZE}B, $(ls "$DIST/assets" | wc -l) assets, api_base=$API_BASE."

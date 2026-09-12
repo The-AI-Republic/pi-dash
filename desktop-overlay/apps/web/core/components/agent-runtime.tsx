@@ -6,7 +6,7 @@
 
 import { useEffect, useState } from "react";
 import { observer } from "mobx-react";
-import { useParams } from "react-router";
+import { useMatches } from "react-router";
 import { useUser } from "@/hooks/store/user";
 import { useProject } from "@/hooks/store/use-project";
 import { connectAgentProject, isDesktop, refreshAgentRuntime, resumeAgentRuntime } from "@/services/agent-runtime";
@@ -14,15 +14,22 @@ import { connectAgentProject, isDesktop, refreshAgentRuntime, resumeAgentRuntime
 export const AgentRuntime = observer(function AgentRuntime() {
   const { data: user } = useUser();
   const { fetchProjectDetails, workspaceProjectIds, getProjectById } = useProject();
+  // `useParams()` resolves against the route that renders the component, and
+  // this one is mounted on the root route (`app/provider.tsx`, inside
+  // `root.tsx`'s `<AppProvider>`). The root route declares no path params, so
+  // `useParams()` would return `{}` on every page and the project effect below
+  // would never run. `useMatches()` reads the whole matched chain from the
+  // router state instead; the leaf match carries the accumulated params.
+  const matches = useMatches();
   const {
     workspaceSlug,
     projectId: routeProjectId,
     workItem,
-  } = useParams<{
-    workspaceSlug: string;
-    projectId: string;
-    workItem: string;
-  }>();
+  } = (matches[matches.length - 1]?.params ?? {}) as {
+    workspaceSlug?: string;
+    projectId?: string;
+    workItem?: string;
+  };
   // Direct /browse/IDENTIFIER-123 links have no projectId route parameter.
   // Resolve only within the active workspace: identifiers can repeat elsewhere.
   const projectId =
@@ -75,6 +82,9 @@ export const AgentRuntime = observer(function AgentRuntime() {
     resumeAgentRuntime(user.id);
     setMessage("Preparing Pi Dash Agent…");
     void connectAgentProject(workspaceSlug, projectId).then(
+      // Terminal handler: the chain ends here (`void`), and enrollment reports
+      // through setMessage rather than a resolved value.
+      // eslint-disable-next-line promise/always-return
       async () => {
         enrolled = true;
         await refreshProject();
@@ -85,6 +95,7 @@ export const AgentRuntime = observer(function AgentRuntime() {
     );
     const reconnect = () => {
       void connectAgentProject(workspaceSlug, projectId).then(
+        // eslint-disable-next-line promise/always-return -- terminal handler, as above.
         async () => {
           enrolled = true;
           await refreshProject();

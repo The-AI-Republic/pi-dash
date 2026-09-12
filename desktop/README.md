@@ -65,7 +65,7 @@ absolute base URLs, asset resolution) that hot-reload mode never exercises.
 > `tauri://localhost`. Anything that constructs a URL against
 > `window.location.origin` and then passes it to a Rust command — e.g.
 > `open_in_browser`, which only accepts `http`/`https` schemes — will
-> *appear* to work in dev and silently fail in release. When you need
+> _appear_ to work in dev and silently fail in release. When you need
 > an absolute API URL inside the SPA, use the baked-in `API_BASE_URL`
 > (from `VITE_API_BASE_URL`), not `window.location.origin`.
 
@@ -86,10 +86,10 @@ cargo tauri dev
 #   (in another terminal) cd apps/web && pnpm dev
 PIDASH_DESKTOP_HOT_RELOAD=1 cargo tauri dev
 
-# Release build against your own server. Both variables are required and
-# may point at different hosts (see below).
+# Release build against your own server. Both variables are required, and
+# they must share a cookie domain (see below).
 PI_DASH_URL=https://pidash.example.com \
-  VITE_API_BASE_URL=https://api.pidash.example.com \
+  VITE_API_BASE_URL=https://pidash.example.com \
   cargo tauri build
 
 # Release build against a pre-built dist/. dev-prep.sh skips the merge and
@@ -97,27 +97,37 @@ PI_DASH_URL=https://pidash.example.com \
 # build used — dev-prep prints dist/bake-info.txt so you can verify.
 PIDASH_SKIP_DEV_PREP=1 \
   PI_DASH_URL=https://pidash.example.com \
-  VITE_API_BASE_URL=https://api.pidash.example.com \
+  VITE_API_BASE_URL=https://pidash.example.com \
   cargo tauri build
 ```
 
 ### Environment variables
 
-| Var | What it controls | Default (if unset) |
-|---|---|---|
-| `PI_DASH_URL` | Server origin `main.rs` uses for the sign-in hand-off (`/api/auth/desktop-exchange/`) and for bouncing server-hosted pages back into the bundle. `env!`-enforced in release. | `http://localhost:3000` (hot-reload) / `http://localhost:8000` (bundled-dev) |
-| `VITE_API_BASE_URL` | API origin baked into the SPA bundle at build time. SPA `axios` calls go here. | `http://localhost:8000` (bundled-dev) |
-| `PIDASH_DESKTOP_HOT_RELOAD` | `=1` flips main.rs to `WebviewUrl::External(PI_DASH_URL)`, skips dev-prep.sh. | unset |
-| `PIDASH_SKIP_DEV_PREP` | `=1` makes dev-prep.sh reuse whatever `dist/` already contains (CI that pre-populates dist/, or a hand-managed dist/). | unset |
-| `PIDASH_DESKTOP_EXTRA_OVERLAYS` | Colon-separated directories applied after the workspace and before `desktop-overlay/`. | unset |
-| `PIDASH_DESKTOP_DEV_TREE` | Where the merged web tree is built (dev-prep.sh, test-overlay.sh). | `desktop/.dev-tree` |
-| `PIDASH_DESKTOP_VERIFY_HOOK` | Script dev-prep.sh runs with the built client directory after its own checks. | unset |
-| `PIDASH_DESKTOP_EXTERNAL_SIGNIN` | `=1` makes the release `build.rs` require that the bundled sign-in screen hands off to the system browser (`open_in_browser`). | unset |
-| `PIDASH_RUNNER_PROFILE` / `CODEX_BUNDLE_VERSION` | Cargo profile for the locally built runner / pinned agent-engine release staged by prepare-agent.sh. | `dev` / `rust-v0.153.4` |
+| Var                                              | What it controls                                                                                                                                                             | Default (if unset)                                                           |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `PI_DASH_URL`                                    | Server origin `main.rs` uses for the sign-in hand-off (`/api/auth/desktop-exchange/`) and for bouncing server-hosted pages back into the bundle. `env!`-enforced in release. | `http://localhost:3000` (hot-reload) / `http://localhost:8000` (bundled-dev) |
+| `VITE_API_BASE_URL`                              | API origin baked into the SPA bundle at build time. SPA `axios` calls go here.                                                                                               | `http://localhost:8000` (bundled-dev)                                        |
+| `PIDASH_DESKTOP_HOT_RELOAD`                      | `=1` flips main.rs to `WebviewUrl::External(PI_DASH_URL)`, skips dev-prep.sh.                                                                                                | unset                                                                        |
+| `PIDASH_SKIP_DEV_PREP`                           | `=1` makes dev-prep.sh reuse whatever `dist/` already contains (CI that pre-populates dist/, or a hand-managed dist/).                                                       | unset                                                                        |
+| `PIDASH_DESKTOP_EXTRA_OVERLAYS`                  | Colon-separated directories applied after the workspace and before `desktop-overlay/`.                                                                                       | unset                                                                        |
+| `PIDASH_DESKTOP_DEV_TREE`                        | Where the merged web tree is built (dev-prep.sh, test-overlay.sh).                                                                                                           | `desktop/.dev-tree`                                                          |
+| `PIDASH_DESKTOP_VERIFY_HOOK`                     | Script dev-prep.sh runs with the built client directory after its own checks.                                                                                                | unset                                                                        |
+| `PIDASH_DESKTOP_EXTERNAL_SIGNIN`                 | `=1` makes the release `build.rs` require that the bundled sign-in screen hands off to the system browser (`open_in_browser`).                                               | unset                                                                        |
+| `PIDASH_RUNNER_PROFILE` / `CODEX_BUNDLE_VERSION` | Cargo profile for the locally built runner / pinned agent-engine release staged by prepare-agent.sh.                                                                         | `dev` / `rust-v0.153.4`                                                      |
 
-If you set `PI_DASH_URL` and nothing else for a release build, the SPA gets
-baked with the default API base. Always set both together for non-default
-targets.
+Set both together for non-default targets. A release build with
+`VITE_API_BASE_URL` unset does not silently fall back to a default — `build.rs`
+fails the build, and fails it again if the built bundle does not actually
+contain the URL you passed.
+
+**`PI_DASH_URL` and `VITE_API_BASE_URL` must share a cookie domain.** The
+sign-in hand-off navigates the webview to `PI_DASH_URL` +
+`/api/auth/desktop-exchange/`, so the session cookies are set on the
+`PI_DASH_URL` origin, while the bundled SPA makes credentialed calls to
+`VITE_API_BASE_URL`. Give them the same origin, or — if they are sibling
+subdomains, as they are in AI Republic's cloud build — make sure the server
+issues its session cookies on the parent domain that covers both. Otherwise the
+exchange appears to succeed and every subsequent API call is unauthenticated.
 
 ### Server requirements
 

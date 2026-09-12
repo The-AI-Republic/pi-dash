@@ -19,18 +19,28 @@
  * an edition card but ships this one fails instead of passing.
  */
 
-import { WEB_URL } from "@pi-dash/constants";
+import { API_BASE_URL, WEB_URL } from "@pi-dash/constants";
 import { Button } from "@pi-dash/propel/button";
 
 type TauriCore = { invoke(command: string, args?: Record<string, unknown>): Promise<unknown> };
 
+/**
+ * Where "open in your browser" sends the user. `WEB_URL` is the right answer
+ * when the build baked `VITE_WEB_BASE_URL` (`desktop/scripts/dev-prep.sh`
+ * defaults it to the sign-in origin). Older or external pipelines may not set
+ * it, and a card whose only action is hidden is a dead end — so fall back to
+ * the API origin, which every desktop bundle has (`build.rs` fails a release
+ * build without it) and which serves the web app in a default deployment.
+ */
+const BROWSER_URL = WEB_URL || API_BASE_URL;
+
 function openWebApp() {
   const core = (window as unknown as { __TAURI__?: { core?: TauriCore } }).__TAURI__?.core;
   if (!core) {
-    window.location.assign(WEB_URL);
+    window.location.assign(BROWSER_URL);
     return;
   }
-  core.invoke("open_in_browser", { url: WEB_URL }).catch((error: unknown) => {
+  core.invoke("open_in_browser", { url: BROWSER_URL }).catch((error: unknown) => {
     console.error("open_in_browser failed", error);
   });
 }
@@ -45,7 +55,7 @@ export function DesktopSignInCard() {
           browser in the meantime.
         </p>
       </div>
-      {WEB_URL ? (
+      {BROWSER_URL ? (
         <Button variant="primary" size="xl" className="w-full" onClick={openWebApp}>
           Open Pi Dash in your browser
         </Button>

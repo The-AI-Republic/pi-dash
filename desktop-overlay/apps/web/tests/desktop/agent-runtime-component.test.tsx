@@ -17,8 +17,15 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("mobx-react", () => ({ observer: (component: unknown) => component }));
+// Mirrors the real router shape: the root route match carries no params and
+// the leaf match carries the accumulated ones. AgentRuntime renders on the
+// root route, so a component that read params from its own route context
+// would see `{}` here — exactly as it does in the app.
 vi.mock("react-router", () => ({
-  useParams: () => mocks.params,
+  useMatches: () => [
+    { id: "root", params: {} },
+    { id: "leaf", params: mocks.params },
+  ],
 }));
 vi.mock("@/hooks/store/user", () => ({ useUser: () => ({ data: { id: "user" } }) }));
 vi.mock("@/hooks/store/use-project", () => ({

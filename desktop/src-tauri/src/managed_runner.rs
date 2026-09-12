@@ -354,6 +354,9 @@ pub async fn managed_start_daemon<R: Runtime>(
 /// The cloud's heartbeat reaper will clean up whatever we kill mid-run, but a
 /// killed run is a failed run in the user's history — worth a few seconds of
 /// patience on a normal window close.
+///
+/// `grace_seconds` applies on Unix only; on Windows there is no way to ask this
+/// daemon to exit, so the stop is immediate (see `stop_daemon`).
 #[tauri::command]
 pub async fn managed_stop_daemon<R: Runtime>(
     app: AppHandle<R>,
@@ -414,7 +417,7 @@ pub async fn managed_doctor<R: Runtime>(app: AppHandle<R>) -> Result<serde_json:
         "host_label": format!("desktop-{}", device_id.trim()),
         "runner_present": paths.runner.exists(),
         "engine_present": paths.engine.exists(),
-        "config_present": paths.config_dir.join("config.toml").exists(),
+        "config_present": config_present(&paths.config_dir),
         "token_present": paths.model_token_file.exists(),
         "codex_home": paths.codex_home.to_string_lossy(),
     }))
@@ -423,6 +426,26 @@ pub async fn managed_doctor<R: Runtime>(app: AppHandle<R>) -> Result<serde_json:
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
+
+/// Whether any workspace on this machine has a written `pidash` config.
+///
+/// `managed_bootstrap` goes through `ManagedPaths::for_workspace`, which roots
+/// `config_dir` at `<config_dir>/<workspace>/`, so the config never lands at
+/// the top level that `ManagedPaths::resolve` returns — probing that path
+/// directly reports "not configured" on a fully provisioned machine. Mirrors
+/// the layout `managed_sign_out` already walks: the per-workspace
+/// subdirectories, plus the flat path older installs wrote.
+fn config_present(config_dir: &Path) -> bool {
+    if config_dir.join("config.toml").is_file() {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(config_dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry.file_type().is_ok_and(|kind| kind.is_dir()) && entry.path().join("config.toml").is_file()
+    })
+}
 
 /// A `pidash` invocation pointed at the managed tree.
 ///
@@ -472,21 +495,40 @@ fn stop_daemon<R: Runtime>(app: &AppHandle<R>, grace_seconds: u64) {
         return;
     };
     let children = std::mem::take(&mut *guard);
+    // Windows has no way to ask this daemon to exit (see the loop below), so the
+    // grace period does not apply there.
+    #[cfg(not(unix))]
+    let _ = grace_seconds;
     for (_, mut child) in children {
-        // Poll rather than sleeping the full grace period: a daemon with nothing
-        // in flight exits immediately and the user should not wait for a timer.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(grace_seconds);
+        // Ask the daemon to finish its current run and exit, then wait for it.
+        //
+        // Unix only. `base_command` spawns every `pidash` invocation with
+        // CREATE_NO_WINDOW on Windows so a GUI app never flashes a console, and
+        // a process with no console cannot receive console control events —
+        // GenerateConsoleCtrlEvent only reaches a process group sharing the
+        // caller's console. A real graceful stop on Windows needs an
+        // out-of-band channel the daemon listens on (a control socket, or a
+        // stop file polled by `pidash __run`); none exists today. Until one
+        // does, waiting out the grace period on Windows would only delay a kill
+        // that is going to happen regardless, so go straight to it rather than
+        // hanging every app exit for `grace_seconds`.
         #[cfg(unix)]
-        unsafe {
-            // SIGTERM asks the daemon to finish its current run and shut down
-            // cleanly; SIGKILL below is the fallback if it does not.
-            libc::kill(child.id() as i32, libc::SIGTERM);
-        }
-        while std::time::Instant::now() < deadline {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
-                Err(_) => break,
+        {
+            unsafe {
+                // SIGTERM asks the daemon to finish its current run and shut
+                // down cleanly; the kill below is the fallback if it does not.
+                libc::kill(child.id() as i32, libc::SIGTERM);
+            }
+            // Poll rather than sleeping the full grace period: a daemon with
+            // nothing in flight exits immediately and the user should not wait
+            // for a timer.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(grace_seconds);
+            while std::time::Instant::now() < deadline {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
+                    Err(_) => break,
+                }
             }
         }
         let _ = child.kill();

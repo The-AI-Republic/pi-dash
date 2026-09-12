@@ -81,7 +81,14 @@ for overlay in "${OVERLAYS[@]}"; do
     echo "[merge-web-tree] Applying $overlay"
     # An overlay's top-level README.md documents the overlay itself; it must
     # not replace the workspace README.
-    rsync -a --exclude='.gitkeep' --exclude='/README.md' "$overlay/" "$DEST/"
+    #
+    # --ignore-times is load-bearing, not a speed knob. rsync's default
+    # quick-check skips any file whose size AND mtime already match the
+    # destination, and a later layer must win even then: a fresh CI checkout
+    # gives every file the same mtime, so an edition file and the desktop file
+    # that overrides it can collide on both, and the desktop layer would be
+    # silently dropped. Overlays are small; always write them.
+    rsync -a --ignore-times --exclude='.gitkeep' --exclude='/README.md' "$overlay/" "$DEST/"
 done
 
 # Sanity: the web app must exist after overlay merge.
