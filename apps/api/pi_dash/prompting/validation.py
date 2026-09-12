@@ -93,6 +93,7 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
             "parent": {
                 "identifier": "SAMPLE-0",
                 "title": "Parent issue",
+                "state": "In Test",
                 "work_branch": "pi-dash/sample-0",
                 "description": "Parent description.",
                 "comments_count": 3,
@@ -101,6 +102,12 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
                 {"identifier": "SAMPLE-1", "title": "Sample issue title"},
                 {"identifier": "SAMPLE-0", "title": "Parent issue"},
                 {"identifier": "SAMPLE-root", "title": "Root issue"},
+            ],
+            "children": [
+                {"identifier": "SAMPLE-2", "title": "Child issue", "state": "Backlog"},
+            ],
+            "related": [
+                {"identifier": "SAMPLE-9", "title": "Related issue", "state": "Cancelled"},
             ],
             "run": {
                 "id": "00000000-0000-0000-0000-000000000003",
@@ -162,6 +169,8 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
         "code_reviews": [],
         "parent": None,
         "lineage": None,
+        "children": [],
+        "related": [],
         "run": {
             "id": "00000000-0000-0000-0000-000000000003",
             "kind": kind,

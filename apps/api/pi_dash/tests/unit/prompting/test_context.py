@@ -355,6 +355,139 @@ def test_context_lineage_populated_for_grandparent(workspace, project, state, cr
 
 
 @pytest.mark.unit
+def test_context_parent_includes_state(workspace, project, state, create_user, run, issue):
+    parent = Issue.objects.create(
+        name="Umbrella epic",
+        workspace=workspace,
+        project=project,
+        state=state,  # "Todo"
+        created_by=create_user,
+    )
+    issue.parent = parent
+    issue.save(update_fields=["parent"])
+
+    ctx = build_context(issue, run)
+    assert ctx["parent"]["state"] == "Todo"
+
+
+# ----------------------------------------------------------------------
+# Children (down) + relates_to siblings (across) — PDASHOSS01-160
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_context_children_empty_when_none(issue, run):
+    ctx = build_context(issue, run)
+    assert ctx["children"] == []
+
+
+@pytest.mark.unit
+def test_context_includes_direct_children(workspace, project, state, create_user, run, issue):
+    child_a = Issue.objects.create(
+        name="Broken-out child A", workspace=workspace, project=project, state=state, created_by=create_user
+    )
+    child_b = Issue.objects.create(
+        name="Broken-out child B", workspace=workspace, project=project, state=state, created_by=create_user
+    )
+    child_a.parent = issue
+    child_a.save(update_fields=["parent"])
+    child_b.parent = issue
+    child_b.save(update_fields=["parent"])
+
+    ctx = build_context(issue, run)
+    children = ctx["children"]
+    assert len(children) == 2
+    titles = {c["title"] for c in children}
+    assert titles == {"Broken-out child A", "Broken-out child B"}
+    for c in children:
+        assert c["identifier"].startswith("TP-")
+        assert c["state"] == "Todo"
+
+
+@pytest.mark.unit
+def test_context_children_are_direct_only_not_grandchildren(workspace, project, state, create_user, run, issue):
+    child = Issue.objects.create(
+        name="Direct child", workspace=workspace, project=project, state=state, created_by=create_user, parent=issue
+    )
+    Issue.objects.create(
+        name="Grandchild", workspace=workspace, project=project, state=state, created_by=create_user, parent=child
+    )
+
+    ctx = build_context(issue, run)
+    titles = {c["title"] for c in ctx["children"]}
+    assert titles == {"Direct child"}
+
+
+@pytest.mark.unit
+def test_context_related_empty_when_none(issue, run):
+    ctx = build_context(issue, run)
+    assert ctx["related"] == []
+
+
+def _make_relation(issue, related, relation_type, create_user):
+    from pi_dash.db.models import IssueRelation
+
+    return IssueRelation.objects.create(
+        issue=issue,
+        related_issue=related,
+        relation_type=relation_type,
+        project=issue.project,
+        workspace=issue.workspace,
+        created_by=create_user,
+    )
+
+
+@pytest.mark.unit
+def test_context_related_merges_both_directions(workspace, project, state, create_user, run, issue):
+    # A relates_to link created from either side must surface, since the
+    # relation is symmetric.
+    other_a = Issue.objects.create(
+        name="Linked from our side", workspace=workspace, project=project, state=state, created_by=create_user
+    )
+    other_b = Issue.objects.create(
+        name="Linked from their side", workspace=workspace, project=project, state=state, created_by=create_user
+    )
+    _make_relation(issue, other_a, "relates_to", create_user)  # issue -> other_a
+    _make_relation(other_b, issue, "relates_to", create_user)  # other_b -> issue
+
+    ctx = build_context(issue, run)
+    titles = {r["title"] for r in ctx["related"]}
+    assert titles == {"Linked from our side", "Linked from their side"}
+    for r in ctx["related"]:
+        assert r["identifier"].startswith("TP-")
+        assert r["state"] == "Todo"
+
+
+@pytest.mark.unit
+def test_context_related_excludes_other_relation_types(workspace, project, state, create_user, run, issue):
+    # Only relates_to is surfaced; blocked_by / duplicate are not (this issue's
+    # documented assumption).
+    blocker = Issue.objects.create(
+        name="Blocks us", workspace=workspace, project=project, state=state, created_by=create_user
+    )
+    dup = Issue.objects.create(
+        name="Duplicate", workspace=workspace, project=project, state=state, created_by=create_user
+    )
+    _make_relation(issue, blocker, "blocked_by", create_user)
+    _make_relation(issue, dup, "duplicate", create_user)
+
+    ctx = build_context(issue, run)
+    assert ctx["related"] == []
+
+
+@pytest.mark.unit
+def test_context_related_excludes_soft_deleted(workspace, project, state, create_user, run, issue):
+    other = Issue.objects.create(
+        name="Was related", workspace=workspace, project=project, state=state, created_by=create_user
+    )
+    rel = _make_relation(issue, other, "relates_to", create_user)
+    rel.delete()  # soft delete
+
+    ctx = build_context(issue, run)
+    assert ctx["related"] == []
+
+
+@pytest.mark.unit
 def test_context_includes_project_description_when_set(workspace, create_user):
     project = Project.objects.create(
         name="Documented Project",

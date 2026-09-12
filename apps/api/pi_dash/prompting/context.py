@@ -69,6 +69,83 @@ def _ancestor_chain(issue: Issue) -> list[Issue]:
     return chain
 
 
+#: Upper bound on how many children / related work items are inlined into the
+#: "Work item relationships" section. An issue with a huge fan-out of sub-items
+#: or cross-links must not blow up the prompt; beyond this cap the extra items
+#: are simply not listed (the required-reading directive still points the agent
+#: at the CLI for anything it needs to chase further).
+_MAX_RELATIONSHIP_ITEMS = 25
+
+
+def _issue_ref(issue: Issue) -> Dict[str, Any]:
+    """Compact ``{identifier, title, state}`` for a connected work item.
+
+    Used for children and related ("relates_to") work items in the relationships
+    section — enough to recognize and fetch an item, without inlining its body.
+    """
+    state = getattr(issue, "state", None)
+    return {
+        "identifier": _issue_identifier(issue),
+        "title": issue.name or "",
+        "state": state.name if state else "",
+    }
+
+
+def _children_context(issue: Issue) -> list[Dict[str, Any]]:
+    """Direct child issues (one level down) as ``{identifier, title, state}``.
+
+    Uses ``issue_objects`` so triage / draft / archived children are excluded —
+    the same manager the rest of the app counts sub-issues through. Ordered
+    oldest-first (creation order mirrors how scope was broken out) and capped at
+    ``_MAX_RELATIONSHIP_ITEMS`` so a large fan-out can't blow up the prompt.
+    """
+    children = (
+        Issue.issue_objects.filter(parent=issue)
+        .select_related("state", "project")
+        .order_by("created_at")
+    )
+    return [_issue_ref(child) for child in children[:_MAX_RELATIONSHIP_ITEMS]]
+
+
+def _related_context(issue: Issue) -> list[Dict[str, Any]]:
+    """``relates_to`` work items, both link directions merged and deduped.
+
+    ``relates_to`` is symmetric (``IssueRelationChoices._RELATION_PAIRS`` marks
+    it as its own inverse), so a link created from either side must surface here.
+    Query both endpoints — the same ``Q(issue_id=...) | Q(related_issue_id=...)``
+    shape as ``app/views/issue/relation.py`` — collect the *other* end of each
+    relation, dedupe (the two directions can both exist as rows), skip self /
+    soft-deleted-target rows, and cap at ``_MAX_RELATIONSHIP_ITEMS``. The default
+    manager already excludes soft-deleted relations.
+    """
+    from django.db.models import Q
+
+    from pi_dash.db.models.issue import IssueRelation
+
+    relations = (
+        IssueRelation.objects.filter(relation_type="relates_to")
+        .filter(Q(issue_id=issue.id) | Q(related_issue_id=issue.id))
+        .select_related(
+            "issue__state",
+            "issue__project",
+            "related_issue__state",
+            "related_issue__project",
+        )
+        .order_by("-created_at")
+    )
+    seen: set[Any] = set()
+    out: list[Dict[str, Any]] = []
+    for rel in relations:
+        other = rel.related_issue if rel.issue_id == issue.id else rel.issue
+        if other is None or other.id == issue.id or other.id in seen:
+            continue
+        seen.add(other.id)
+        out.append(_issue_ref(other))
+        if len(out) >= _MAX_RELATIONSHIP_ITEMS:
+            break
+    return out
+
+
 def _absolute_issue_url(issue: Issue) -> str:
     """Return a best-effort deep link. Full URL construction lives in the
     web layer; we return a relative path so templates still have something
@@ -386,6 +463,7 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
             {
                 "identifier": _issue_identifier(parent),
                 "title": parent.name or "",
+                "state": (parent.state.name if getattr(parent, "state", None) else ""),
                 "work_branch": (getattr(parent, "git_work_branch", "") or None),
                 "description": _issue_description_markdown(parent),
                 "comments_count": _issue_comment_count(parent),
@@ -404,6 +482,12 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
             if len(ancestors) > 2
             else None
         ),
+        # Direct children (one level down) and `relates_to` siblings, rendered
+        # together with the ancestor chain in the "Work item relationships"
+        # section. Empty lists when the issue has none — the template omits the
+        # corresponding group so no empty heading or dangling directive renders.
+        "children": _children_context(issue),
+        "related": _related_context(issue),
         "run": {
             "id": str(run.id),
             "kind": _issue_run_kind(issue),

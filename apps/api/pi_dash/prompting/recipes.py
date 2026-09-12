@@ -30,6 +30,7 @@ KIND_DIRECT = "direct"
 RECIPES: dict[str, tuple[str, ...]] = {
     KIND_CODING_TASK: (
         "intro",
+        "relationships",
         "session-framing",
         "pidash-cli",
         "default-posture",

@@ -28,23 +28,6 @@ No description provided.
 
 Comments to date (chronological — humans and the agent's own prior runs):
 {{ comments_section }}
-{% if parent %}
-
-Parent issue context (this issue is a sub-issue of {{ parent.identifier }}):
-- Parent {{ parent.identifier }}: {{ parent.title }}
-- Parent description:
-{% if parent.description %}
-{{ parent.description }}
-{% else %}
-(no description on the parent issue)
-{% endif %}
-- The parent has {{ parent.comments_count }} comment(s); their contents are not included here. Run `pidash comment list {{ parent.identifier }}` to read them.
-{% if lineage %}
-- This issue has a multi-level parent lineage. Full chain, current issue first up to the root:
-{% for node in lineage %}{{ node.identifier }}: {{ node.title }}{% if loop.first %} (current){% endif %}{% if not loop.last %} → {% endif %}{% endfor %}
-{% endif %}
-- **The ancestor chain is required reading before you implement.** {% if lineage %}Only the direct parent's content is shown above. {% endif %}As a required part of analyze-and-scope (Step 0.5), walk from the direct parent {% if lineage %}up to the root issue{% else %}(the chain here is just the parent){% endif %}: run `pidash issue get <ANCESTOR-ID>` and `pidash comment list <ANCESTOR-ID>` for each ancestor{% if lineage %} (the root is `pidash issue get {{ lineage[-1].identifier }}`){% endif %}, fold their framing / acceptance criteria / design decisions / research findings into your workpad, and use them to judge whether this issue is ready to implement. Do this once and record what you learn so continuation runs don't re-fetch.
-{% endif %}
 
 Repository:
 {% if repo.url %}
