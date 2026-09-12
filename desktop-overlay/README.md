@@ -40,10 +40,10 @@ silently replaces the edition's version. So:
 
 Current seams:
 
-| Seam (`@/pi-dash-web/components/desktop/…`) | Used by | Community default |
-|---|---|---|
-| `sign-in-card.tsx` — `DesktopSignInCard` | `app/(home)/page.tsx` | Explains that desktop sign-in isn't available for this server yet and opens the web app |
-| `agent-runtime-edition.ts` — `AGENT_RUNTIME_REASON_MESSAGES`, `CSRF_TOKEN_PATH` | `core/services/agent-runtime.ts` | Generic messages for managed-runner reason codes; `/auth/get-csrf-token/` |
+| Seam (`@/pi-dash-web/components/desktop/…`)                                     | Used by                          | Community default                                                                       |
+| ------------------------------------------------------------------------------- | -------------------------------- | --------------------------------------------------------------------------------------- |
+| `sign-in-card.tsx` — `DesktopSignInCard`                                        | `app/(home)/page.tsx`            | Explains that desktop sign-in isn't available for this server yet and opens the web app |
+| `agent-runtime-edition.ts` — `AGENT_RUNTIME_REASON_MESSAGES`, `CSRF_TOKEN_PATH` | `core/services/agent-runtime.ts` | Generic messages for managed-runner reason codes; `/auth/get-csrf-token/`               |
 
 ## Path convention
 
@@ -75,6 +75,16 @@ desktop/src-tauri/dist/
   — the real implementations of the `apps/web` agent-runtime stubs: enroll
   this machine, write the engine config and model credential, supervise the
   bundled daemon.
+- `apps/web/core/utils/desktop-web-url.ts` — resolves an in-app path against
+  `VITE_WEB_BASE_URL` (baked by `dev-prep.sh`, defaulting to `PI_DASH_URL`).
+  Bundled pages run on a Tauri-owned origin, so anything that builds a
+  shareable link from `window.location.origin` would hand the user a
+  `tauri://localhost` URL.
+- `apps/web/core/components/issues/issue-detail/issue-detail-quick-actions.tsx`,
+  `issue-layouts/quick-action-dropdowns/helper.tsx` and
+  `peek-overview/header.tsx` — the three copy-link paths, routed through
+  `desktopWebUrl()` instead of the bundle origin. Each is otherwise identical
+  to its `apps/web` original; keep them in step when that original changes.
 - `apps/web/tests/desktop/` — tests for the above; run them with
   `bash desktop/scripts/test-overlay.sh`.
 
