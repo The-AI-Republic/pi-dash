@@ -462,7 +462,18 @@ def _resolve_creator_for_trigger(issue: Issue, *, triggered_by: str, actor=None)
         candidates = [actor]
     else:
         candidates = [issue.created_by, issue.project.project_lead, issue.project.default_assignee]
-        candidates.extend(issue.assignees.all().order_by("id"))
+        # Live assignees only. ``Issue.assignees`` is a plain M2M over the
+        # soft-deleted ``IssueAssignee`` through-model, so it would also offer
+        # up users who were un-assigned — making a former assignee the
+        # execution principal (and LLM-config owner) for a cloud run.
+        from pi_dash.db.models.issue import IssueAssignee
+        from pi_dash.db.models.user import User
+
+        candidates.extend(
+            User.objects.filter(
+                pk__in=IssueAssignee.objects.filter(issue=issue).values_list("assignee_id", flat=True)
+            ).order_by("id")
+        )
     from pi_dash.core.agent_execution import user_has_llm_config
 
     seen = set()

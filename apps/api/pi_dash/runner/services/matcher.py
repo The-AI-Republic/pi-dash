@@ -383,11 +383,14 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
 
     - ``run_creator_id`` (the user the dispatch is being attributed to),
     - ``issue.created_by_id`` (the issue creator),
-    - any current ``issue.assignees``.
+    - any current (non-soft-deleted) issue assignee.
 
-    ``issue.assignees`` is the M2M live manager; the existing matcher
-    (``filter_runs_usable_by_runner``) traverses it the same way, so
-    the preflight stays consistent with the dispatch gate it shadows.
+    Assignees are read through ``IssueAssignee.objects`` — the soft-delete
+    manager — rather than the ``Issue.assignees`` M2M. The un-assign path
+    only stamps ``deleted_at`` on the through row, and a plain M2M join does
+    not honour that, so the M2M would report every user ever assigned. The
+    dispatch gate it shadows (``filter_runs_usable_by_runner``) applies the
+    same ``deleted_at`` condition, so preflight and dispatch stay consistent.
 
     Transient status is **deliberately ignored** — OFFLINE / BUSY runners
     still count as "registered" because the owner can flip them back on and
@@ -407,6 +410,7 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
     ignored here for the same reason as above — a closed laptop is not a
     structural failure, and the creation path (§8.5) decides whether to wait.
     """
+    from pi_dash.db.models.issue import IssueAssignee
     from pi_dash.runner.models import RunnerProvisioning
 
     if effective_executor_for_issue(issue) == AgentExecutorKind.MANAGED_RUNNER:
@@ -427,7 +431,9 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
         eligible_owner_ids.add(run_creator_id)
     if issue.created_by_id is not None:
         eligible_owner_ids.add(issue.created_by_id)
-    eligible_owner_ids.update(issue.assignees.values_list("id", flat=True))
+    eligible_owner_ids.update(
+        IssueAssignee.objects.filter(issue=issue).values_list("assignee_id", flat=True)
+    )
     eligible_owner_ids.discard(None)
     if not eligible_owner_ids:
         return False
