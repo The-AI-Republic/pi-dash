@@ -281,6 +281,7 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "cancel_reason",
             "prompt",
             "thread_id",
+            "agent_metadata",
             "runner",
             "work_item",
             "pod",
