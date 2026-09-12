@@ -156,7 +156,7 @@ The three user-facing rules that make the rest work:
 ## 6. Architecture
 
 ```
-┌──────────────── Pi Dash Desktop (Tauri, proprietary) ────────────────┐
+┌──────────────── Pi Dash Desktop (Tauri) ─────────────────────────────┐
 │  webview (cloud SPA + desktop overlay)                                │
 │     │ invoke()                                                        │
 │  Rust host                                                            │
@@ -1124,7 +1124,7 @@ Desktop build inputs (CI): `PIDASH_BUNDLE_VERSION`, `CODEX_BUNDLE_VERSION`
   `CODEX_HOME`/`PATH` after an rc file that clobbers them (Unix); Windows
   direct-spawn env; `CodexSection` new fields default to none;
   `spawn_from_config` passes the absolute binary.
-- **Desktop** (`private-pi-dash/desktop`): enrollment against a mock cloud;
+- **Desktop** (`desktop/`): enrollment against a mock cloud;
   config writer idempotency; token file rotation; daemon start/stop tied to
   app lifecycle; existing-Codex detection reports and does not depend.
 - **End-to-end** (test env, behind VPN): fresh VM per OS → install → sign in
@@ -1230,7 +1230,7 @@ cloud runs.
 | 10  | `dev_metadata.codex_version` whitelist                                                                                                                                                                               | `runner/services/session_service.py`                                                                                                                                                       |
 | 11  | Doctor check `managed.E001`; `startup checks`                                                                                                                                                                        | `cloud_agent/checks.py`-style module `managed_runner/checks.py`                                                                                                                            |
 | 12  | Runner: `CodexSection.{codex_home,path_prepend,model_token_file}`; wrapper-script re-assert + `PIDASH_CONFIG_DIR`/`PIDASH_DATA_DIR` injection; Windows env; `engine_version` in session-open; `\_\_managed bootstrap | enroll                                                                                                                                                                                     | remove` subcommands | `runner/src/config/schema.rs`, `runner/src/util/shell.rs`, `runner/src/codex/app_server.rs`, `runner/src/cloud/protocol.rs`, `runner/src/cli/managed.rs` (new) |
-| 13  | Desktop: bundle resources; host controller (spawn `__run`, `__managed`, token file, graceful stop); overlay JS (enroll/profile/token calls, Run affordance, first-run copy); existing-Codex detector; About/licenses | `private-pi-dash/desktop/src-tauri/…`, `tauri.conf.json`, `release-desktop.yml`, `desktop-overlay/apps/web/…`                                                                              |
+| 13  | Desktop: bundle resources; host controller (spawn `__run`, `__managed`, token file, graceful stop); overlay JS (enroll/profile/token calls, Run affordance, first-run copy); existing-Codex detector; About/licenses | `desktop/src-tauri/…`, `tauri.conf.json`, `desktop-overlay/apps/web/…` (OSS); `release-desktop.yml` (cloud release)                                                                            |
 | 14  | Web: executor picker third option + reason copy; "Runs on this computer" affordance; project setting                                                                                                                 | `apps/web` (OSS) + overlay                                                                                                                                                                 |
 
 Order: 1 → 2 → 7 (boot must pass) → 3–6, 8–11 in any order → 12 → 13 → 14.
@@ -1334,7 +1334,7 @@ backward-compatible `pidash` release; row 13 depends on 9, 9a and 12.
 - `runner/src/agent/mod.rs`, `runner/src/codex/app_server.rs`,
   `runner/src/util/shell.rs`, `runner/src/config/schema.rs`,
   `runner/src/ipc/protocol.rs`, `runner/src/cloud/protocol.rs`.
-- `private-pi-dash/desktop/README.md`, `desktop/src-tauri/src/main.rs`,
+- `desktop/README.md`, `desktop/src-tauri/src/main.rs`,
   `desktop/src-tauri/src/pidash_cli.rs`,
   `pi_dash_cloud/airepublic/views.py` (desktop exchange),
   `pi_dash_cloud/openhub/{llm,tokens,mcp}.py`,
