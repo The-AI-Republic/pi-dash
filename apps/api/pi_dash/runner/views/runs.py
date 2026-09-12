@@ -107,7 +107,12 @@ def _can_view_run(user, run: AgentRun) -> bool:
     if run.work_item_id is not None:
         if run.work_item.created_by_id == user.id:
             return True
-        if run.work_item.assignees.filter(pk=user.id).exists():
+        # Through-model, not the ``assignees`` M2M: un-assignment soft-deletes
+        # the IssueAssignee row and a plain M2M join ignores ``deleted_at``,
+        # which would leave every past assignee able to view and cancel.
+        from pi_dash.db.models.issue import IssueAssignee
+
+        if IssueAssignee.objects.filter(issue_id=run.work_item_id, assignee_id=user.id).exists():
             return True
     return is_workspace_admin(user, run.workspace_id)
 
@@ -128,13 +133,16 @@ class AgentRunListEndpoint(APIView):
         # signals are surfaced:
         #   1. created_by == caller (free-form runs they kicked off)
         #   2. work_item.created_by == caller (their issues)
-        #   3. work_item.assignees contains caller (issues assigned to them)
+        #   3. work_item has a live IssueAssignee for the caller (issues
+        #      currently assigned to them — soft-deleted rows do not count,
+        #      so un-assignment actually withdraws the grant)
         # Tick-driven runs carry created_by = agent system bot per
         # ``orchestration/scheduling._resolve_creator_for_trigger``, so a
         # creator-only filter would hide them from the human owner of the
         # issue. The OR over (1)+(2)+(3) puts them back in view.
-        # ``distinct()`` guards against duplicates from the assignees join
-        # when the caller satisfies more than one clause.
+        # ``distinct()`` guards against duplicates from the assignee join
+        # when the caller satisfies more than one clause (and from repeat
+        # assign/un-assign cycles, which leave several through rows).
         #
         # Mandatory workspace-membership scope: clause (2) and (3) join
         # through ``work_item`` whose project lives in some workspace —
@@ -152,7 +160,10 @@ class AgentRunListEndpoint(APIView):
                 Q(created_by=request.user)
                 | Q(runner__owner=request.user)
                 | Q(work_item__created_by=request.user)
-                | Q(work_item__assignees=request.user)
+                | Q(
+                    work_item__issue_assignee__assignee=request.user,
+                    work_item__issue_assignee__deleted_at__isnull=True,
+                )
                 | Q(workspace_id__in=admin_workspaces)
             )
             # Private-runner gate, mirroring ``_can_view_run``: involvement or
