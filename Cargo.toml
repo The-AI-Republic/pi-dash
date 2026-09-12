@@ -1,5 +1,8 @@
 [workspace]
 members = ["runner"]
+# The Tauri desktop app is its own workspace (desktop/src-tauri/Cargo.lock) so
+# its GUI dependency tree stays out of the runner's lockfile and CI.
+exclude = ["desktop"]
 resolver = "3"
 
 [profile.release]

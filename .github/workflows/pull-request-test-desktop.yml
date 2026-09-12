@@ -1,0 +1,72 @@
+name: Test desktop app
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - "main"
+      - "main-test"
+      - "preview"
+    types:
+      - "opened"
+      - "synchronize"
+      - "reopened"
+    paths:
+      - "desktop/**"
+      - ".github/workflows/pull-request-test-desktop.yml"
+  # Post-merge validation, same reasoning as the runner workflow: PR checks
+  # don't re-run when the base moves.
+  push:
+    branches:
+      - "main"
+      # Staging branch for cross-repo work (the desktop move). Without it,
+      # nothing validates main-test before or after a merge.
+      - "main-test"
+    paths:
+      - "desktop/**"
+      - ".github/workflows/pull-request-test-desktop.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: cargo test + packaging tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            libssl-dev \
+            libsoup-3.0-dev \
+            patchelf
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        working-directory: desktop/src-tauri
+        run: rustup show
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+
+      # Debug profile: build.rs only enforces a real dist/ bundle in release,
+      # so the committed placeholder is enough here.
+      - name: Test
+        working-directory: desktop/src-tauri
+        run: cargo test --locked
+
+      - name: Test release packaging helpers
+        run: python -m unittest discover -s desktop/tests -p 'test_*.py' -v
