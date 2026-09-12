@@ -5,6 +5,7 @@ on:
   pull_request:
     branches:
       - "main"
+      - "main-test"
       - "preview"
     types:
       - "opened"
@@ -28,6 +29,9 @@ on:
   push:
     branches:
       - "main"
+      # Staging branch for cross-repo work (the desktop move). Without it,
+      # nothing validates main-test before or after a merge.
+      - "main-test"
     paths:
       - "desktop-overlay/**"
       - "desktop/scripts/merge-web-tree.sh"
