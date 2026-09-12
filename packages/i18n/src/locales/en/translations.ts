@@ -341,6 +341,7 @@ export default {
   "Confirm password": "Confirm password",
   Confirming: "Confirming",
   "Congrats!": "Congrats!",
+  Connected: "Connected",
   Connection: "Connection",
   "Consider and discuss work items before you add them to your project.":
     "Consider and discuss work items before you add them to your project.",
