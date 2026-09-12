@@ -17,6 +17,15 @@ The CLI reads the following from the process environment — never pass them as 
 {% if run.kind != "scheduler" %}- `PIDASH_ISSUE_IDENTIFIER` — the current issue identifier (`{{ issue.identifier }}`). When set, `pidash state list` defaults to this issue's project so you can call it with no args.
 {% else %}- `PIDASH_PROJECT` — the project (`{{ project.identifier }}`) this scheduled run is scoped to. There is no single current issue — you operate across the project. Pass `--project {{ project.identifier }}` explicitly to commands that need it.
 {% endif %}
+### Working context files (`context.md`)
+
+Two `context.md` files on the dev machine describe the Pi Dash projects available to you. Both carry a `generated_at` RFC 3339 UTC stamp so you can judge staleness, and each project entry carries a `repo_url` you can match against a local checkout.
+
+- **Working-dir** `<working_dir>/.pidash/context.md` (`scope: "project"`) — the single project this working directory belongs to. This is **authoritative for "which project am I working in"**.
+- **Machine-level** `~/.pidash/context.md` (`scope: "machine"`) — every project in every workspace this machine is bound to, grouped under a `workspaces:` list keyed by slug. This is the **lookup table for "what else exists in this workspace"** — use it to find a related issue's project or file a follow-up in a different project — and the **fallback** when there is no working-dir file.
+
+Precedence: trust the working-dir file for your current project; consult the machine-level file for everything else. If the machine-level file looks stale or is missing, run `pidash context refresh` to rewrite it for the bound workspace. (Its path follows `PIDASH_CONFIG_DIR` when set, otherwise `~/.pidash`.)
+
 ### Output contract
 
 On success every command prints a single JSON document to stdout and exits `0`. On failure, a JSON object with an `error` field is printed to stderr and the exit code is non-zero. Parse the stderr JSON rather than pattern-matching the human message. Retry only transient failures; never retry the same command more than twice.

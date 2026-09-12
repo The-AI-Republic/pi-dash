@@ -449,6 +449,7 @@ mod tests {
             config_dir: dir.path().join("config"),
             data_dir: dir.path().join("data"),
             runtime_dir: dir.path().join("runtime"),
+            machine_context_dir: dir.path().join("config"),
         };
         paths.ensure().unwrap();
         (dir, paths)
