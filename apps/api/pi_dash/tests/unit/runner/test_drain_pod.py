@@ -128,43 +128,23 @@ def test_select_runner_in_pod_skips_stale_heartbeat(db, create_user, workspace, 
         assert matcher.select_runner_in_pod(pod) is None
 
 
-# ---------- worktree capacity hint retired (PDASHOSS01-137) ----------
-# ``free_worktrees`` is no longer written or read; the matcher ranks eligible
-# idle runners by freshest heartbeat only. A leftover column value on a
-# historical row must not influence selection.
+# ---------- worktree capacity hint retired (PDASHOSS01-137/156) ----------
+# The per-runner capacity hint is gone; the matcher ranks eligible idle runners
+# by freshest heartbeat alone.
 
 
 @pytest.mark.unit
-def test_select_runner_in_pod_ranks_by_heartbeat_ignoring_free_worktrees(db, create_user, workspace, pod):
-    """The freshest-heartbeat runner wins even when an older runner carries a
-    non-zero ``free_worktrees`` value — the retired hint no longer ranks."""
+def test_select_runner_in_pod_ranks_by_heartbeat_alone(db, create_user, workspace, pod):
+    """Among equally-eligible idle runners the freshest heartbeat wins — the
+    only ranking left now that the worktree capacity hint is retired."""
     from django.db import transaction
 
     fresh = _make_runner(create_user, workspace, pod, "fresh", heartbeat_ago_s=1)
-    fresh.free_worktrees = 0
-    fresh.save(update_fields=["free_worktrees"])
-
-    older_with_stale_hint = _make_runner(create_user, workspace, pod, "older", heartbeat_ago_s=20)
-    older_with_stale_hint.free_worktrees = 2
-    older_with_stale_hint.save(update_fields=["free_worktrees"])
+    _make_runner(create_user, workspace, pod, "older", heartbeat_ago_s=20)
 
     with transaction.atomic():
         picked = matcher.select_runner_in_pod(pod)
     assert picked.pk == fresh.pk
-
-
-@pytest.mark.unit
-def test_select_runner_in_pod_selects_runner_with_zero_free_worktrees(db, create_user, workspace, pod):
-    """A stale ``free_worktrees == 0`` is not a gate — the sole eligible idle
-    runner is still selected."""
-    from django.db import transaction
-
-    full = _make_runner(create_user, workspace, pod, "full")
-    full.free_worktrees = 0
-    full.save(update_fields=["free_worktrees"])
-    with transaction.atomic():
-        picked = matcher.select_runner_in_pod(pod)
-    assert picked.pk == full.pk
 
 
 # ---------------- next_queued_run_for_pod ----------------

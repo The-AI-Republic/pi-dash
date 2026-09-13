@@ -583,10 +583,9 @@ class AgentRunCancelEndpoint(APIView):
                 # new Assign arrives while the cancelled process is still
                 # winding down.
                 locked.status = AgentRunStatus.CANCEL_REQUESTED
-                locked.queue_position = None
                 locked.cancel_requested_at = timezone.now()
                 locked.cancel_reason = reason
-                locked.save(update_fields=["status", "queue_position", "cancel_requested_at", "cancel_reason"])
+                locked.save(update_fields=["status", "cancel_requested_at", "cancel_reason"])
                 run = locked
             else:
                 from pi_dash.runner.services.agent_run_finalization import finalize_agent_run

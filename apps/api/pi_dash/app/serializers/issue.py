@@ -1314,7 +1314,6 @@ class IssueDetailSerializer(IssueSerializer):
             "id": str(run.id),
             "status": run.status,
             "executor_kind": run.executor_kind,
-            "queue_position": run.queue_position,
             "runner": str(run.runner_id) if run.runner_id else None,
             "runner_name": run.runner.name if run.runner_id and run.runner else None,
             "created_at": self._serialize_datetime(run.created_at),

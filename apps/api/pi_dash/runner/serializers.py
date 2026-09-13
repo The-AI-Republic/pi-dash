@@ -289,7 +289,6 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "owner",
             "created_at",
             "assigned_at",
-            "queue_position",
             "started_at",
             "ended_at",
             "done_payload",

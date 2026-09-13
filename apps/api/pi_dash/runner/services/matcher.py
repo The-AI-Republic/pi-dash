@@ -114,7 +114,7 @@ def select_runner_in_pod(pod: Pod) -> Optional[Runner]:
         # The worktree pool is retired (PDASHOSS01-137): there is no per-runner
         # desk capacity to prefer, so among equally-eligible idle runners the
         # only ranking left is freshest heartbeat (``-last_heartbeat_at``,
-        # newest first). ``Runner.free_worktrees`` is no longer written or read.
+        # newest first). The retired per-runner capacity hint is gone.
         .order_by("-last_heartbeat_at")
         .first()
     )

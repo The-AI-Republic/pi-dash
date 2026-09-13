@@ -206,8 +206,10 @@ class AgentRunStatus(models.TextChoices):
     ASSIGNED = "assigned", "Assigned"
     # Non-terminal: the run is assigned to a single-tenant runner that has
     # accepted it but cannot acquire a worktree lease yet, so it waits in the
-    # daemon's local queue. Sits between ASSIGNED and RUNNING; the runner
-    # reports ``queue_position`` for display. See
+    # daemon's local queue. Sits between ASSIGNED and RUNNING. Retained because
+    # historical rows still hold it and it keeps gating (busy / non-terminal
+    # status sets, work_item uniqueness); the worktree pool that created new
+    # rows in this status is retired. See
     # ``.ai_design/worktree_pooling/design.md`` §6.1.
     WAITING_FOR_WORKTREE = "waiting_for_worktree", "Waiting for Worktree"
     RUNNING = "running", "Running"
@@ -454,12 +456,6 @@ class Runner(models.Model):
     dev_metadata = models.JSONField(default=dict, blank=True)
     protocol_version = models.PositiveIntegerField(default=1)
     last_heartbeat_at = models.DateTimeField(null=True, blank=True)
-    # Free worktree count in this runner's work-dir pool, reported in the
-    # long-poll status body. A capacity *hint* the matcher prefers (never
-    # gates) when choosing between equally-eligible idle runners. ``None``
-    # means the runner predates the feature (no hint). See
-    # ``.ai_design/worktree_pooling/design.md`` §6.4.
-    free_worktrees = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
@@ -990,11 +986,6 @@ class AgentRun(models.Model):
     total_tokens = models.BigIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     assigned_at = models.DateTimeField(null=True, blank=True)
-    # Display-only position in the runner's local worktree queue while the
-    # run is WAITING_FOR_WORKTREE. The runner is the source of truth and
-    # reports it via the ``queued`` lifecycle verb; the cloud never computes
-    # it. See ``.ai_design/worktree_pooling/design.md`` §6.1.
-    queue_position = models.PositiveSmallIntegerField(null=True, blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
     ended_at = models.DateTimeField(null=True, blank=True)
 
@@ -1035,7 +1026,6 @@ class AgentRun(models.Model):
                         pinned_runner__isnull=True,
                         owner__isnull=True,
                         assigned_at__isnull=True,
-                        queue_position__isnull=True,
                     )
                 ),
                 name="agent_run_cloud_has_no_local_assignment",

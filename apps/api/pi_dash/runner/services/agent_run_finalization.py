@@ -27,7 +27,6 @@ def finalize_agent_run(run_id, new_status, *, updates=None, expected_runner_id=N
     values = {
         "status": new_status,
         "ended_at": timezone.now(),
-        "queue_position": None,
         "terminal_hooks_applied_at": None,
         "terminal_capacity_released_at": None,
         **(updates or {}),
