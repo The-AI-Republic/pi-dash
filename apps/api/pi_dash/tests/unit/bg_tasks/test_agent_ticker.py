@@ -467,8 +467,32 @@ def test_fire_tick_free_pending_entry_fires_on_a_spent_pool_then_stops(
     sched.refresh_from_db()
     assert sched.used == 10
     assert sched.enabled is False
-    assert sched.disarm_reason == TickerDisarmReason.CAP_HIT
+    # POOL_SPENT, not CAP_HIT: this free run must not end in an auto-Pause.
+    assert sched.disarm_reason == TickerDisarmReason.POOL_SPENT
     assert AgentRun.objects.filter(work_item=issue, parent_run__isnull=False).count() == 1
+
+
+@pytest.mark.unit
+def test_fire_tick_free_pending_entry_is_created_as_the_person_who_asked(
+    seeded, issue, runner_for_workspace, create_user
+):
+    """The queued human lever fires as that person, with their trigger —
+    exactly as if it had dispatched immediately."""
+    _make_prior_run(issue, runner_for_workspace)
+    sched = _make_due_schedule(issue, used=4)
+    sched.pending_entry = True
+    sched.pending_entry_free = True
+    sched.pending_entry_actor = create_user
+    sched.pending_entry_trigger = "comment_and_run"
+    sched.save(update_fields=["pending_entry", "pending_entry_free", "pending_entry_actor", "pending_entry_trigger"])
+
+    assert fire_tick(str(sched.id)) is True
+    sched.refresh_from_db()
+    assert sched.pending_entry_actor_id is None
+    assert sched.pending_entry_trigger == ""
+    run = AgentRun.objects.filter(work_item=issue, parent_run__isnull=False).get()
+    assert run.trigger == "comment_and_run"
+    assert run.created_by_id == create_user.id
 
 
 @pytest.mark.unit

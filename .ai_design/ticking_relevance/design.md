@@ -11,6 +11,27 @@
 > `RUN_ENV` read by `util::shell::login_shell_command`, which every bridge
 > already goes through, rather than by threading a parameter into each
 > bridge's spawn signature.
+>
+> **Post-review amendments** (PR #387 code review): (1) a bridge's terminal
+> payload is _merged_ into a yielded `done_payload`, never replacing it;
+> (2) a run that failed / was cancelled without yielding keeps the clock
+> ticking (only a _completed_ run gets the per-kind default; a paused one
+> is `waiting_on_human`); (3) parking on a spent pool uses a distinct
+> `pool_spent` disarm reason — `cap_hit` is reserved for the timer tick that
+> consumed the last run and is the only reason that auto-Pauses, so the
+> Re-tick the §5.4 comment points at stays reachable; (4) a queued human
+> entry remembers who asked (`pending_entry_actor` / `_trigger`) and fires
+> as them; (5) a human lever on a switched-off clock still fires its one
+> run, then `fire_tick` re-applies the switch; (6) the yield endpoint and
+> the run-id header require the run to be the caller's (creator, run
+> owner, or runner owner) — membership alone is not authority; (7) a run id
+> that is not active on _this_ issue makes the request a plain one rather
+> than a 400 (the CLI sends the header on every write); (8) the cloud
+> agent's `pidash_transition_current_issue` tool attributes its move to the
+> run; (9) the human levers re-time the clock inside the dispatch
+> transaction, so a click that produced no run leaves the ticker untouched;
+> (10) migration `0163` folds prior Re-tick grants into `granted` and stamps
+> `cap_hit` on rows already over the new pool.
 > Builds on `.ai_design/issue_ticking_system/`,
 > `.ai_design/create_review_state/`, `.ai_design/create_test_state/` and
 > `.ai_design/ticking_optimization/` (fresh session per run, workpad as

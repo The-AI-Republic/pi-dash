@@ -49,7 +49,14 @@ class TickerDisarmReason(models.TextChoices):
 
     NONE = "", "None"
     LEFT_TICKING_STATE = "left_ticking_state", "Left Ticking State"
+    #: A timer tick consumed the last run in the pool. The only reason that
+    #: auto-Pauses an In Progress issue (``maybe_apply_deferred_pause``).
     CAP_HIT = "cap_hit", "Cap Hit"
+    #: The pool was already spent when the issue moved (an agent parked it
+    #: in its truthful state, or a human moved it and got one free run).
+    #: Never auto-pauses — the human is expected to Re-tick from here, and
+    #: Re-tick needs the issue to stay in the bucket.
+    POOL_SPENT = "pool_spent", "Pool Spent"
     TERMINAL_SIGNAL = "terminal_signal", "Terminal Signal"
     USER_DISABLED = "user_disabled", "User Disabled"
 
@@ -121,6 +128,20 @@ class IssueAgentTicker(BaseModel):
     #: Comment & Run, Run AI, Re-tick) and therefore must not count against
     #: the pool when ``fire_tick`` claims it.
     pending_entry_free = models.BooleanField(default=False)
+    #: Who asked for the pending entry (a human lever), so the queued run is
+    #: created as that person — same LLM config / runner eligibility as if
+    #: it had dispatched immediately. ``None`` for an agent-queued entry.
+    pending_entry_actor = models.ForeignKey(
+        "db.User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    #: The ``AgentRunTrigger`` the pending entry should be created with
+    #: (``run_ai`` / ``comment_and_run`` / ``state_transition``); empty for
+    #: an agent-queued entry, which fires as a ``tick``.
+    pending_entry_trigger = models.CharField(max_length=24, blank=True, default="")
 
     #: The latest implementation-phase run, captured on every cross-stage
     #: move so a hand-back to In Progress can parent off the implementation

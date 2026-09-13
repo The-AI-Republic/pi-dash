@@ -191,18 +191,25 @@ def apply_run_paused(
     if model_value:
         usage_updates["llm_model"] = model_value
 
-    updated = (
-        AgentRun.objects.filter(id=run_id, runner=runner)
-        .exclude(status__in=TERMINAL_RUN_STATUSES)
-        .exclude(status=AgentRunStatus.CANCEL_REQUESTED)
-        .update(
+    from pi_dash.runner.services.agent_run_finalization import merge_done_payload
+
+    with transaction.atomic():
+        pausing = (
+            AgentRun.objects.select_for_update()
+            .filter(id=run_id, runner=runner)
+            .exclude(status__in=TERMINAL_RUN_STATUSES)
+            .exclude(status=AgentRunStatus.CANCEL_REQUESTED)
+            .first()
+        )
+        if pausing is None:
+            return
+        # Keep a ``pidash run yield`` the agent already made; the pause
+        # payload carries the question, not the stage outcome.
+        AgentRun.objects.filter(pk=pausing.pk).update(
             status=AgentRunStatus.PAUSED_AWAITING_INPUT,
-            done_payload=payload,
+            done_payload=merge_done_payload(pausing.done_payload, payload),
             **usage_updates,
         )
-    )
-    if not updated:
-        return
     try:
         run = AgentRun.objects.select_related("work_item").get(id=run_id)
     except AgentRun.DoesNotExist:

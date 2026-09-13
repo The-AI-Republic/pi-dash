@@ -127,7 +127,7 @@ export type TIssueAgentTicker = {
   pending_entry?: boolean;
   next_run_at: string | null;
   last_tick_at: string | null;
-  disarm_reason?: "" | "left_ticking_state" | "cap_hit" | "terminal_signal" | "user_disabled";
+  disarm_reason?: "" | "left_ticking_state" | "cap_hit" | "pool_spent" | "terminal_signal" | "user_disabled";
   /** True only when re-ticking would actually do something: the issue is
    * still in a ticking state (In Progress / In Review / In Test) AND its
    * pool is spent. Gates the "re-tick" button so it never appears when the

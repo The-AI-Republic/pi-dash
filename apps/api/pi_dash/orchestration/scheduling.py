@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Optional
+from typing import Any, Optional
 
 from django.db import transaction
 from django.utils import timezone
@@ -39,7 +39,7 @@ from pi_dash.db.models.issue_agent_ticker import (
     jitter_seconds,
 )
 from pi_dash.orchestration.agent_phases import is_ticking_state
-from pi_dash.runner.models import AgentRun, AgentRunTrigger
+from pi_dash.runner.models import AgentRun, AgentRunStatus, AgentRunTrigger
 
 logger = logging.getLogger(__name__)
 
@@ -126,24 +126,34 @@ class TickerEvent:
     #: dispatch a run right now (so the clock only needs re-timing) — or
     #: wants ``reconcile`` to queue one if the issue is busy.
     want_run: bool = True
+    #: For human levers: who asked, and the ``AgentRunTrigger`` the run
+    #: should carry. Remembered on the ticker when the entry has to be
+    #: queued, so the run that fires later is created as that person
+    #: (LLM config, runner eligibility) and labelled correctly.
+    actor: Optional[Any] = None
+    trigger: str = ""
 
     # Convenience constructors — keep call sites readable.
     @classmethod
-    def entered_bucket(cls, *, moved_by_run=None, resume_parent=None, want_run=True):
+    def entered_bucket(cls, *, moved_by_run=None, resume_parent=None, want_run=True, actor=None):
         return cls(
             TickerEventKind.ENTERED_BUCKET,
             moved_by_run=moved_by_run,
             resume_parent=resume_parent,
             want_run=want_run,
+            actor=actor,
+            trigger=AgentRunTrigger.STATE_TRANSITION.value,
         )
 
     @classmethod
-    def moved_stage(cls, *, moved_by_run=None, resume_parent=None, want_run=True):
+    def moved_stage(cls, *, moved_by_run=None, resume_parent=None, want_run=True, actor=None):
         return cls(
             TickerEventKind.MOVED_STAGE,
             moved_by_run=moved_by_run,
             resume_parent=resume_parent,
             want_run=want_run,
+            actor=actor,
+            trigger=AgentRunTrigger.STATE_TRANSITION.value,
         )
 
     @classmethod
@@ -155,12 +165,22 @@ class TickerEvent:
         return cls(TickerEventKind.RUN_ENDED, run=run, outcome=outcome)
 
     @classmethod
-    def human_run_requested(cls, *, want_run: bool = True):
-        return cls(TickerEventKind.HUMAN_RUN_REQUESTED, want_run=want_run)
+    def human_run_requested(cls, *, want_run: bool = True, actor=None, trigger: str = ""):
+        return cls(
+            TickerEventKind.HUMAN_RUN_REQUESTED,
+            want_run=want_run,
+            actor=actor,
+            trigger=trigger or AgentRunTrigger.RUN_AI.value,
+        )
 
     @classmethod
-    def retick(cls, *, want_run: bool = True):
-        return cls(TickerEventKind.RETICK, want_run=want_run)
+    def retick(cls, *, want_run: bool = True, actor=None):
+        return cls(
+            TickerEventKind.RETICK,
+            want_run=want_run,
+            actor=actor,
+            trigger=AgentRunTrigger.RUN_AI.value,
+        )
 
 
 @dataclass
@@ -232,6 +252,8 @@ _TICKER_CLOCK_FIELDS = (
     "next_run_at",
     "pending_entry",
     "pending_entry_free",
+    "pending_entry_actor",
+    "pending_entry_trigger",
     "granted",
     "resume_parent_run",
     "updated_at",
@@ -242,48 +264,64 @@ def _save_clock(ticker: IssueAgentTicker) -> None:
     ticker.save(update_fields=list(_TICKER_CLOCK_FIELDS))
 
 
+def _clear_pending(ticker: IssueAgentTicker) -> None:
+    ticker.pending_entry = False
+    ticker.pending_entry_free = False
+    ticker.pending_entry_actor = None
+    ticker.pending_entry_trigger = ""
+
+
 def _stop_clock(ticker: IssueAgentTicker, reason: str) -> None:
     ticker.enabled = False
     ticker.disarm_reason = reason
-    ticker.pending_entry = False
-    ticker.pending_entry_free = False
+    _clear_pending(ticker)
 
 
-def _queue_entry(ticker: IssueAgentTicker, *, free: bool) -> None:
+def _queue_entry(ticker: IssueAgentTicker, *, free: bool, actor=None, trigger: str = "") -> None:
     """Owe an entry run for the current stage (design §4.5).
 
     ``next_run_at = now`` so the scanner picks it up on its next pass;
     ``fire_tick`` refuses while a run is active and leaves the clock
     untouched, so the entry fires as soon as the issue is free. ``enabled``
     must be ``True`` even when the pool is spent and the entry is free — the
-    scan admits pending rows regardless of cap.
+    scan admits pending rows regardless of cap — and even when the user or
+    project switched automatic ticking off: a human asked for *this* run.
+    ``fire_tick`` re-applies the switch after the claim so no timer tick
+    follows on a disabled clock.
     """
     ticker.enabled = True
     ticker.disarm_reason = TickerDisarmReason.NONE
     ticker.next_run_at = timezone.now()
     ticker.pending_entry = True
     ticker.pending_entry_free = free
+    ticker.pending_entry_actor = actor if free else None
+    ticker.pending_entry_trigger = trigger if free else ""
+
+
+def _stop_for_switch(ticker: IssueAgentTicker) -> None:
+    _stop_clock(
+        ticker,
+        TickerDisarmReason.USER_DISABLED if ticker.user_disabled else TickerDisarmReason.NONE,
+    )
 
 
 def _retime_clock(ticker: IssueAgentTicker, issue: Issue) -> None:
     """Arm the clock for the current stage's interval if the pool allows.
 
-    Leaves the pool's ``cap_hit`` stop in place when the budget is spent —
-    a human-started run does not resurrect automatic ticking.
+    A spent pool stops the clock with ``POOL_SPENT`` (not ``CAP_HIT`` — that
+    reason is reserved for the timer tick that consumed the last run, and it
+    is the only one that auto-Pauses; a human-started run on a spent pool
+    must leave the issue where the human can Re-tick it).
     """
     if not _clock_allowed(issue, ticker):
-        _stop_clock(
-            ticker,
-            TickerDisarmReason.USER_DISABLED if ticker.user_disabled else TickerDisarmReason.NONE,
-        )
+        _stop_for_switch(ticker)
         return
     if ticker.cap_reached():
-        _stop_clock(ticker, TickerDisarmReason.CAP_HIT)
+        _stop_clock(ticker, TickerDisarmReason.POOL_SPENT)
         return
     ticker.enabled = True
     ticker.disarm_reason = TickerDisarmReason.NONE
-    ticker.pending_entry = False
-    ticker.pending_entry_free = False
+    _clear_pending(ticker)
     ticker.next_run_at = _compute_next_run_at(ticker.effective_interval_seconds())
 
 
@@ -368,14 +406,13 @@ def _on_enter_or_move(issue: Issue, event: TickerEvent) -> TickerDecision:
         if ticker.cap_reached():
             # Pool spent: nothing fires. The issue sits in its truthful
             # state; the run that moved it owes the human a comment (§5.4).
-            _stop_clock(ticker, TickerDisarmReason.CAP_HIT)
+            # ``POOL_SPENT``, not ``CAP_HIT``: parking must not auto-Pause
+            # the issue out from under the Re-tick the comment points at.
+            _stop_clock(ticker, TickerDisarmReason.POOL_SPENT)
             decision.parked = True
             decision.reason = "pool-spent"
         elif not clock_allowed:
-            _stop_clock(
-                ticker,
-                TickerDisarmReason.USER_DISABLED if ticker.user_disabled else TickerDisarmReason.NONE,
-            )
+            _stop_for_switch(ticker)
             decision.reason = "ticking-disabled"
         else:
             # The agent moves the issue from inside its own run, so a
@@ -390,7 +427,7 @@ def _on_enter_or_move(issue: Issue, event: TickerEvent) -> TickerDecision:
             _retime_clock(ticker, issue)
             decision.reason = "retimed"
         elif _issue_has_active_run(issue):
-            _queue_entry(ticker, free=True)
+            _queue_entry(ticker, free=True, actor=event.actor, trigger=event.trigger)
             decision.queued = True
             decision.reason = "free-entry-queued"
         else:
@@ -436,7 +473,17 @@ def _on_run_ended(issue: Issue, event: TickerEvent) -> TickerDecision:
 
     outcome = event.outcome if event.outcome is not None else outcome_for_run(run)
     if outcome is None:
-        outcome = default_outcome_for_kind(run_kind or current_kind)
+        # No yield. A run that *completed* is read per kind (§7 defaults);
+        # one that failed, was cancelled, or was refused said nothing about
+        # the stage — keep ticking so the next tick retries, rather than
+        # stopping the clock on a crash (which would strand a review/test
+        # issue with no Re-tick button, since the cap was never reached).
+        if run.status == AgentRunStatus.COMPLETED:
+            outcome = default_outcome_for_kind(run_kind or current_kind)
+        elif run.status == AgentRunStatus.PAUSED_AWAITING_INPUT:
+            outcome = OUTCOME_WAITING_ON_HUMAN
+        else:
+            outcome = OUTCOME_PROGRESSED
 
     if ticker.pending_entry:
         # Something (a human, a queued hand-off) already owes the next run
@@ -466,7 +513,7 @@ def _on_human_run_requested(issue: Issue, event: TickerEvent) -> TickerDecision:
     ticker = _lock_ticker(issue, create=True)
     decision = TickerDecision(ticker=ticker)
     if event.want_run and _issue_has_active_run(issue):
-        _queue_entry(ticker, free=True)
+        _queue_entry(ticker, free=True, actor=event.actor, trigger=event.trigger)
         decision.queued = True
         decision.reason = "free-entry-queued"
     else:
@@ -495,7 +542,7 @@ def _on_retick(issue: Issue, event: TickerEvent) -> TickerDecision:
     ticker.granted += max(0, int(grant))
     decision = TickerDecision(ticker=ticker, granted=True, reason="granted")
     if event.want_run and _issue_has_active_run(issue):
-        _queue_entry(ticker, free=True)
+        _queue_entry(ticker, free=True, actor=event.actor, trigger=event.trigger)
         decision.queued = True
     else:
         _retime_clock(ticker, issue)
@@ -587,7 +634,7 @@ def re_tick_ticker(issue: Issue, *, actor=None) -> dict:
         )
         if locked is None:
             return {"granted": False, "reason": "no_issue", "ticker": None, "run": None}
-        decision = reconcile(locked, TickerEvent.retick())
+        decision = reconcile(locked, TickerEvent.retick(actor=actor))
     result = {
         "granted": decision.granted,
         "reason": decision.reason,
@@ -1044,10 +1091,13 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
     Idempotent — only the first concurrent terminate event takes effect.
     Returns ``True`` when a transition was applied, ``False`` otherwise.
 
-    Gated on ``disarm_reason == CAP_HIT``: terminal-signal disarms
-    (``completed``/``blocked``) leave the issue in place for the human
-    to act. ``LEFT_TICKING_STATE`` and ``USER_DISABLED`` likewise are
-    not auto-pause causes.
+    Gated on ``disarm_reason == CAP_HIT`` — the timer tick that consumed
+    the last run. Terminal-signal stops leave the issue in place for the
+    human to act, and so does ``POOL_SPENT`` (an agent parked the issue, or
+    a human moved it, on an already-spent pool): the §5.4 comment tells the
+    human to Re-tick, which needs the issue to stay in the bucket.
+    ``LEFT_TICKING_STATE`` and ``USER_DISABLED`` likewise are not
+    auto-pause causes.
 
     Called from the runner Channels consumer after persisting a terminal
     run status.

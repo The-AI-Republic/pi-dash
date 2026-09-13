@@ -217,7 +217,7 @@ def test_patch_with_run_id_header_and_spent_pool_parks(api_key_client, workspace
     ticker = IssueAgentTicker.objects.get(issue=issue)
     assert ticker.enabled is False
     assert ticker.pending_entry is False
-    assert ticker.disarm_reason == "cap_hit"
+    assert ticker.disarm_reason == "pool_spent"
 
 
 @pytest.mark.unit
@@ -236,13 +236,12 @@ def test_patch_without_header_is_a_human_move(api_key_client, workspace, issue, 
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("header", ["not-a-uuid", str(uuid.uuid4())])
-def test_patch_rejects_an_invalid_or_foreign_run_id(api_key_client, workspace, issue, states, active_run, header):
+def test_patch_rejects_a_malformed_run_id(api_key_client, workspace, issue, states, active_run):
     resp = api_key_client.patch(
         _patch_url(workspace, issue),
         {"state": str(states["in_review"].id)},
         format="json",
-        HTTP_X_PI_DASH_RUN_ID=header,
+        HTTP_X_PI_DASH_RUN_ID="not-a-uuid",
     )
     assert resp.status_code == http_status.HTTP_400_BAD_REQUEST
     issue.refresh_from_db()
@@ -250,7 +249,43 @@ def test_patch_rejects_an_invalid_or_foreign_run_id(api_key_client, workspace, i
 
 
 @pytest.mark.unit
-def test_patch_rejects_a_run_that_is_no_longer_active(api_key_client, workspace, issue, states, active_run):
+def test_patch_with_an_unknown_or_foreign_run_id_is_a_plain_request(
+    api_key_client, workspace, issue, states, active_run, create_user
+):
+    """The CLI sends the header on every write for the life of the run —
+    including patches to *other* issues. A run that is not active on this
+    issue is not an agent move on it; the request goes through as a plain
+    (human) one instead of failing."""
+    other = Issue.objects.create(
+        name="Other", workspace=workspace, project=issue.project, state=states["todo"], created_by=create_user
+    )
+    other_run = AgentRun.objects.create(
+        workspace=workspace, created_by=create_user, work_item=other,
+        status=AgentRunStatus.RUNNING, phase_kind="coding-task", prompt="x", started_at=timezone.now(),
+    )
+    IssueAgentTicker.objects.create(issue=issue, used=10, enabled=False, disarm_reason="pool_spent")
+    for header in (str(uuid.uuid4()), str(other_run.id)):
+        resp = api_key_client.patch(
+            _patch_url(workspace, issue),
+            {"priority": "high"},
+            format="json",
+            HTTP_X_PI_DASH_RUN_ID=header,
+        )
+        assert resp.status_code == http_status.HTTP_200_OK, (header, resp.data)
+    # And a state move with a foreign id is a *human* move: free entry queued.
+    resp = api_key_client.patch(
+        _patch_url(workspace, issue),
+        {"state": str(states["in_review"].id)},
+        format="json",
+        HTTP_X_PI_DASH_RUN_ID=str(other_run.id),
+    )
+    assert resp.status_code == http_status.HTTP_200_OK, resp.data
+    ticker = IssueAgentTicker.objects.get(issue=issue)
+    assert ticker.pending_entry_free is True
+
+
+@pytest.mark.unit
+def test_patch_with_a_finished_run_id_is_a_plain_request(api_key_client, workspace, issue, states, active_run):
     AgentRun.objects.filter(pk=active_run.pk).update(status=AgentRunStatus.COMPLETED)
     resp = api_key_client.patch(
         _patch_url(workspace, issue),
@@ -258,4 +293,62 @@ def test_patch_rejects_a_run_that_is_no_longer_active(api_key_client, workspace,
         format="json",
         HTTP_X_PI_DASH_RUN_ID=str(active_run.id),
     )
+    assert resp.status_code == http_status.HTTP_200_OK, resp.data
+
+
+@pytest.mark.unit
+def test_patch_rejects_another_members_run_id(api_key_client, workspace, issue, states, create_user):
+    """Membership is not authority over someone else's run: B cannot stamp
+    their move as A's agent move."""
+    from pi_dash.db.models import User, WorkspaceMember
+
+    other = User.objects.create(email="member-b@example.com", username="member_b")
+    WorkspaceMember.objects.create(workspace=workspace, member=other, role=15)
+    theirs = AgentRun.objects.create(
+        workspace=workspace, created_by=other, work_item=issue,
+        status=AgentRunStatus.RUNNING, phase_kind="coding-task", prompt="x", started_at=timezone.now(),
+    )
+    resp = api_key_client.patch(
+        _patch_url(workspace, issue),
+        {"state": str(states["in_review"].id)},
+        format="json",
+        HTTP_X_PI_DASH_RUN_ID=str(theirs.id),
+    )
     assert resp.status_code == http_status.HTTP_400_BAD_REQUEST
+    assert "not yours" in resp.data["error"]
+
+
+@pytest.mark.unit
+def test_yield_rejects_another_members_run(api_key_client, workspace, issue, create_user):
+    from pi_dash.db.models import User, WorkspaceMember
+
+    other = User.objects.create(email="member-c@example.com", username="member_c")
+    WorkspaceMember.objects.create(workspace=workspace, member=other, role=15)
+    theirs = AgentRun.objects.create(
+        workspace=workspace, created_by=other, work_item=issue,
+        status=AgentRunStatus.RUNNING, phase_kind="coding-task", prompt="x", started_at=timezone.now(),
+    )
+    resp = api_key_client.post(_yield_url(workspace, theirs.id), {"outcome": "done"}, format="json")
+    assert resp.status_code == http_status.HTTP_404_NOT_FOUND
+    theirs.refresh_from_db()
+    assert theirs.done_payload is None
+
+
+@pytest.mark.unit
+def test_yield_allowed_for_the_runner_owner(api_key_client, workspace, issue, create_user):
+    """Tick-started runs are created by the bot; the agent's CLI speaks as
+    the runner owner, who must be able to yield on them."""
+    from pi_dash.orchestration.workpad import get_agent_system_user
+    from pi_dash.runner.models import Pod, Runner, RunnerStatus
+
+    pod = Pod.default_for_project(issue.project)
+    runner = Runner.objects.create(
+        owner=create_user, workspace=workspace, pod=pod, name="r", status=RunnerStatus.ONLINE,
+        last_heartbeat_at=timezone.now(),
+    )
+    run = AgentRun.objects.create(
+        workspace=workspace, created_by=get_agent_system_user(), work_item=issue, runner=runner, pod=pod,
+        status=AgentRunStatus.RUNNING, phase_kind="coding-task", prompt="x", started_at=timezone.now(),
+    )
+    resp = api_key_client.post(_yield_url(workspace, run.id), {"outcome": "progressed"}, format="json")
+    assert resp.status_code == http_status.HTTP_200_OK, resp.data

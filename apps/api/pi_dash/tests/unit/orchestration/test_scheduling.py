@@ -219,7 +219,7 @@ def test_comment_and_run_on_spent_pool_leaves_clock_stopped(seeded, issue, state
     out = scheduling.reset_ticker_after_comment_and_run(issue)
     assert out.used == sched.used
     assert out.enabled is False
-    assert out.disarm_reason == TickerDisarmReason.CAP_HIT
+    assert out.disarm_reason == TickerDisarmReason.POOL_SPENT
 
 
 # ---------------------------------------------------------------------------

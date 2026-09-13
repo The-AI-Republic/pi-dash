@@ -935,14 +935,32 @@ class IssueReTickAPIEndpoint(BaseAPIView):
 RUN_ID_HEADER = "X-Pi-Dash-Run-Id"
 
 
+def run_belongs_to(user, run) -> bool:
+    """May ``user`` speak for ``run``?
+
+    The agent's CLI authenticates as the runner owner (or, for Run AI /
+    Comment & Run, the person who asked), so a run is the caller's when
+    they created it, own the runner it executes on, or own the run itself.
+    Workspace membership alone is not enough — another member must not be
+    able to yield on, or move issues as, someone else's run.
+    """
+    if user is None or run is None:
+        return False
+    if run.created_by_id == user.id or run.owner_id == user.id:
+        return True
+    return run.runner_id is not None and run.runner.owner_id == user.id
+
+
 def resolve_moved_by_run(request, issue):
     """Return ``(run, error)`` for the ``X-Pi-Dash-Run-Id`` header.
 
     ``(None, None)`` when the header is absent — a human (or a client that
-    is not an agent run) made the request. When present it must name an
-    *active* run on this very issue; anything else is ``(None, <error>)``,
-    because a stale or foreign run id would silently turn an agent's move
-    into a free human one.
+    is not an agent run) made the request. The agent's CLI sends the header
+    on *every* write for the life of its run, so a run that is active on a
+    **different** issue (the agent patching a sub-issue), or one that has
+    just been finalized, is not an error: the request is simply not an
+    agent move *on this issue* and is treated as a plain one. Only a
+    malformed id, or a run the caller may not speak for, is refused.
     """
     raw = (request.headers.get(RUN_ID_HEADER) or "").strip()
     if not raw:
@@ -953,11 +971,13 @@ def resolve_moved_by_run(request, issue):
         return None, f"{RUN_ID_HEADER} is not a UUID"
     from pi_dash.runner.models import AgentRun
 
-    run = AgentRun.objects.filter(pk=run_id, work_item_id=issue.pk).first()
+    run = AgentRun.objects.select_related("runner").filter(pk=run_id).first()
     if run is None:
-        return None, f"{RUN_ID_HEADER} does not name a run on this work item"
-    if not run.is_active:
-        return None, f"{RUN_ID_HEADER} names a run that is no longer active"
+        return None, None
+    if not run_belongs_to(request.user, run):
+        return None, f"{RUN_ID_HEADER} names a run that is not yours"
+    if run.work_item_id != issue.pk or not run.is_active:
+        return None, None
     return run, None
 
 
@@ -992,13 +1012,16 @@ class AgentRunYieldAPIEndpoint(BaseAPIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         run = (
-            AgentRun.objects.select_related("workspace", "work_item")
+            AgentRun.objects.select_related("workspace", "work_item", "runner")
             .filter(pk=run_id, workspace__slug=slug)
             .first()
         )
         if run is None or run.work_item_id is None:
             return Response({"error": "run not found"}, status=status.HTTP_404_NOT_FOUND)
         if not is_workspace_member(request.user, run.workspace_id):
+            return Response({"error": "run not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not run_belongs_to(request.user, run):
+            # Membership is not authority over someone else's run.
             return Response({"error": "run not found"}, status=status.HTTP_404_NOT_FOUND)
         if not run.is_active:
             return Response({"error": "run is not active"}, status=status.HTTP_409_CONFLICT)

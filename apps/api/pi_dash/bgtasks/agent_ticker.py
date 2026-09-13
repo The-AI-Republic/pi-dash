@@ -159,6 +159,12 @@ def fire_tick(ticker_id: str) -> bool:
         prev_disarm_reason = ticker.disarm_reason
         prev_pending_entry = ticker.pending_entry
         prev_pending_entry_free = ticker.pending_entry_free
+        prev_pending_entry_actor_id = ticker.pending_entry_actor_id
+        prev_pending_entry_trigger = ticker.pending_entry_trigger
+        # The queued human lever, if any — who asked and how — so the run
+        # is created as that person and labelled with their trigger.
+        claim_actor = ticker.pending_entry_actor if free_claim else None
+        claim_trigger = (ticker.pending_entry_trigger or TRIGGER_RUN_AI) if free_claim else TRIGGER_TICK
 
         # Only machine-started runs spend the pool: a timer tick, or an
         # entry an agent's own move queued. A human's free entry does not.
@@ -167,6 +173,8 @@ def fire_tick(ticker_id: str) -> bool:
         ticker.last_tick_at = now
         ticker.pending_entry = False
         ticker.pending_entry_free = False
+        ticker.pending_entry_actor = None
+        ticker.pending_entry_trigger = ""
         from pi_dash.db.models.issue_agent_ticker import jitter_seconds
         from datetime import timedelta
 
@@ -176,11 +184,24 @@ def fire_tick(ticker_id: str) -> bool:
         cap_hit_now = (
             cap != INFINITE_MAX_TICKS and ticker.used >= cap
         )
-        if cap_hit_now:
+        if cap_hit_now and free_claim:
+            # A free run on an already-spent pool: the clock was stopped
+            # before and stays stopped — but as ``pool_spent``, not
+            # ``cap_hit``, so the deferred auto-pause does not fire on it.
+            ticker.enabled = False
+            ticker.disarm_reason = TickerDisarmReason.POOL_SPENT
+        elif cap_hit_now:
             # Disarm immediately (no more fires); the In Progress → Paused
             # transition is deferred to the run-terminate hook (§4.4.1).
             ticker.enabled = False
             ticker.disarm_reason = TickerDisarmReason.CAP_HIT
+        elif ticker.user_disabled or not getattr(issue.project, "agent_ticking_enabled", True):
+            # A queued human entry fires even on a switched-off clock (the
+            # human asked for this run), but no timer tick may follow it.
+            ticker.enabled = False
+            ticker.disarm_reason = (
+                TickerDisarmReason.USER_DISABLED if ticker.user_disabled else TickerDisarmReason.NONE
+            )
 
         ticker.save(
             update_fields=[
@@ -191,6 +212,8 @@ def fire_tick(ticker_id: str) -> bool:
                 "disarm_reason",
                 "pending_entry",
                 "pending_entry_free",
+                "pending_entry_actor",
+                "pending_entry_trigger",
                 "updated_at",
             ]
         )
@@ -200,12 +223,11 @@ def fire_tick(ticker_id: str) -> bool:
     # via transaction.on_commit inside _create_continuation_run) actually
     # fires.
     # A free claim is a human-started run that had to wait for the issue to
-    # be free (Run AI / Comment & Run / a human move while a run was active);
-    # it renders as one, so per-user overrides apply and it does not count.
-    run = dispatch_continuation_run(
-        issue,
-        triggered_by=TRIGGER_RUN_AI if free_claim else TRIGGER_TICK,
-    )
+    # be free (Run AI / Comment & Run / a human move while a run was active):
+    # it is created as the person who asked, with their trigger, exactly as
+    # if it had dispatched immediately — so per-user overrides, LLM config
+    # and runner eligibility resolve the same way — and it does not count.
+    run = dispatch_continuation_run(issue, triggered_by=claim_trigger, actor=claim_actor)
     if run is None:
         # Dispatch failed post-claim — restore the ticker so the budget
         # isn't wasted and any cap-disarm we just applied is undone.
@@ -229,6 +251,8 @@ def fire_tick(ticker_id: str) -> bool:
                 rollback.disarm_reason = prev_disarm_reason
                 rollback.pending_entry = prev_pending_entry
                 rollback.pending_entry_free = prev_pending_entry_free
+                rollback.pending_entry_actor_id = prev_pending_entry_actor_id
+                rollback.pending_entry_trigger = prev_pending_entry_trigger
                 rollback.save(
                     update_fields=[
                         "used",
@@ -237,6 +261,8 @@ def fire_tick(ticker_id: str) -> bool:
                         "disarm_reason",
                         "pending_entry",
                         "pending_entry_free",
+                        "pending_entry_actor",
+                        "pending_entry_trigger",
                         "updated_at",
                     ]
                 )

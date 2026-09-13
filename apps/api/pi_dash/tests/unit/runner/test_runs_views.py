@@ -1055,8 +1055,9 @@ def test_comment_and_run_prompt_renders_the_pool(db, session_client, workspace, 
 
 @pytest.mark.unit
 def test_comment_and_run_409_leaves_ticker_untouched(db, session_client, workspace, project):
-    """When the dispatch bails (no prior run → 409) the pool must be
-    untouched — a human's request never spends or refunds it."""
+    """When the dispatch bails (no prior run → 409) the ticker must be
+    untouched — neither the pool nor the clock: a click that produced no run
+    must not re-arm a parked issue."""
     from datetime import timedelta
 
     from crum import impersonate
@@ -1099,6 +1100,6 @@ def test_comment_and_run_409_leaves_ticker_untouched(db, session_client, workspa
     assert resp.status_code == status.HTTP_409_CONFLICT
     sched.refresh_from_db()
     assert sched.used == 7
-    # The clock was re-timed by the human's request before dispatch bailed
-    # on "no prior run"; the pool is untouched either way.
-    assert sched.next_run_at != stale
+    # The clock re-time and the dispatch share one transaction: a click
+    # that produced no run leaves the ticker exactly as it was.
+    assert sched.next_run_at == stale

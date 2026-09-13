@@ -182,12 +182,14 @@ def handle_issue_state_transition(
             moved_by_run=moved_by_run,
             resume_parent=resume_parent,
             want_run=dispatch_immediate,
+            actor=actor,
         )
     else:
         event = scheduling.TickerEvent.entered_bucket(
             moved_by_run=moved_by_run,
             resume_parent=resume_parent,
             want_run=dispatch_immediate,
+            actor=actor,
         )
     decision = scheduling.reconcile(issue, event)
 
@@ -370,29 +372,6 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
     if queued_follow_up is not None:
         return ContinuationOutcome(coalesced_into=queued_follow_up, reason="coalesced")
 
-    # A human comment is engagement: one free run (design §5.2). If a run
-    # is in flight, the clock queues the follow-up and fires it as soon as
-    # the issue is free (design §4.5); otherwise re-time the clock and
-    # dispatch now.
-    from pi_dash.orchestration import scheduling
-
-    if is_ticking_state(issue.state):
-        try:
-            decision = scheduling.reconcile(issue, scheduling.TickerEvent.human_run_requested())
-        except Exception:
-            logger.exception(
-                "orchestration.continuation: clock update failed for issue=%s",
-                issue.pk,
-            )
-        else:
-            if decision.queued:
-                return ContinuationOutcome(reason="entry-queued")
-
-    # Don't wake while a run is already in flight; the queued entry (or the
-    # terminate sweep) handles it.
-    if prior.is_active:
-        return ContinuationOutcome(reason="prior-run-active")
-
     pod = _resolve_pod_for_issue(issue)
     if pod is None:
         logger.warning(
@@ -402,13 +381,40 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
         )
         return ContinuationOutcome(reason="no-pod-available")
 
-    return _create_continuation_run(
-        issue=issue,
-        parent=prior,
-        creator=comment.actor,
-        pod=pod,
-        trigger=AgentRunTrigger.COMMENT_AND_RUN,
-    )
+    # A human comment is engagement: one free run (design §5.2). If a run
+    # is in flight, the clock queues the follow-up and fires it as soon as
+    # the issue is free (design §4.5); otherwise re-time the clock and
+    # dispatch now — in one transaction, so a dispatch that produces no run
+    # leaves the clock exactly as it was.
+    from pi_dash.orchestration import scheduling
+
+    with transaction.atomic():
+        if is_ticking_state(issue.state):
+            decision = scheduling.reconcile(
+                issue,
+                scheduling.TickerEvent.human_run_requested(
+                    actor=comment.actor, trigger=AgentRunTrigger.COMMENT_AND_RUN.value
+                ),
+            )
+            if decision.queued:
+                return ContinuationOutcome(reason="entry-queued")
+
+        # Don't wake while a run is already in flight; the queued entry (or
+        # the terminate sweep) handles it.
+        if prior.is_active:
+            transaction.set_rollback(True)
+            return ContinuationOutcome(reason="prior-run-active")
+
+        outcome = _create_continuation_run(
+            issue=issue,
+            parent=prior,
+            creator=comment.actor,
+            pod=pod,
+            trigger=AgentRunTrigger.COMMENT_AND_RUN,
+        )
+        if outcome.created_run is None:
+            transaction.set_rollback(True)
+        return outcome
 
 
 def _create_continuation_run(*, issue: Issue, parent: AgentRun, creator, pod, trigger: str) -> ContinuationOutcome:

@@ -368,12 +368,14 @@ class AgentRunListEndpoint(APIView):
         if not is_workspace_member(request.user, issue.workspace_id):
             return Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        queued = self._human_run_clock(issue)
-        if queued is not None:
-            return queued
         with transaction.atomic():
+            queued = self._human_run_clock(issue, actor=request.user, trigger=scheduling.TRIGGER_RUN_AI)
+            if queued is not None:
+                return queued
             run = scheduling.dispatch_run_ai_run(issue, actor=request.user)
             if run is None:
+                # Undo the clock re-time too: the human's click produced no
+                # run, so the ticker must look exactly as it did before.
                 transaction.set_rollback(True)
         if run is None:
             return Response(
@@ -386,20 +388,24 @@ class AgentRunListEndpoint(APIView):
         )
 
     @staticmethod
-    def _human_run_clock(issue):
+    def _human_run_clock(issue, *, actor, trigger):
         """Tell the issue's clock a human asked for a run (design §5.2 / §4.5).
 
         A human-started run is free and always fires. If a run is already
-        active the clock queues the entry and fires it as soon as the issue
-        is free — return the 202 for that case; otherwise ``None`` and the
-        caller dispatches now.
+        active the clock queues the entry — remembering who asked, so the
+        run that fires later is created as them — and fires it as soon as
+        the issue is free: return the 202 for that case. Otherwise ``None``
+        and the caller dispatches now. Callers wrap this and the dispatch in
+        one transaction so a failed dispatch rolls the clock back as well.
         """
         from pi_dash.orchestration import scheduling
         from pi_dash.orchestration.agent_phases import is_ticking_state
 
         if not is_ticking_state(issue.state):
             return None
-        decision = scheduling.reconcile(issue, scheduling.TickerEvent.human_run_requested())
+        decision = scheduling.reconcile(
+            issue, scheduling.TickerEvent.human_run_requested(actor=actor, trigger=trigger)
+        )
         if decision.queued:
             return Response(
                 {
@@ -434,10 +440,10 @@ class AgentRunListEndpoint(APIView):
         if not is_workspace_member(request.user, issue.workspace_id):
             return Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        queued = self._human_run_clock(issue)
-        if queued is not None:
-            return queued
         with transaction.atomic():
+            queued = self._human_run_clock(issue, actor=request.user, trigger=scheduling.TRIGGER_COMMENT_AND_RUN)
+            if queued is not None:
+                return queued
             run = scheduling.dispatch_continuation_run(
                 issue,
                 triggered_by=scheduling.TRIGGER_COMMENT_AND_RUN,

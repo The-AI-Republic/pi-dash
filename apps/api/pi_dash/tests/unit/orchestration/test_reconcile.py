@@ -154,7 +154,9 @@ def test_human_move_into_a_spent_pool_still_fires_but_keeps_the_clock_stopped(
     t = decision.ticker
     assert t.used == 10
     assert t.enabled is False
-    assert t.disarm_reason == TickerDisarmReason.CAP_HIT
+    # POOL_SPENT, not CAP_HIT: the human's free run must not end in an
+    # auto-Pause that hides the Re-tick button.
+    assert t.disarm_reason == TickerDisarmReason.POOL_SPENT
 
 
 @pytest.mark.unit
@@ -184,7 +186,7 @@ def test_agent_move_with_pool_spent_parks_the_issue(seeded, issue, states, runne
     assert decision.dispatch_now is False
     t = decision.ticker
     assert t.enabled is False
-    assert t.disarm_reason == TickerDisarmReason.CAP_HIT
+    assert t.disarm_reason == TickerDisarmReason.POOL_SPENT
     assert t.pending_entry is False
 
 
@@ -458,8 +460,15 @@ def test_agent_backward_move_with_pool_spent_parks(seeded, issue, states, runner
     assert outcome.created_run is None
     t = IssueAgentTicker.objects.get(issue=issue)
     assert t.enabled is False
-    assert t.disarm_reason == TickerDisarmReason.CAP_HIT
+    assert t.disarm_reason == TickerDisarmReason.POOL_SPENT
     assert AgentRun.objects.filter(work_item=issue).count() == 1
+    # And when the moving run ends, the parked issue is NOT auto-paused —
+    # the §5.4 comment told the human to Re-tick it from here.
+    AgentRun.objects.filter(pk=run.pk).update(status=AgentRunStatus.COMPLETED)
+    run.refresh_from_db()
+    assert scheduling.maybe_apply_deferred_pause(run) is False
+    issue.refresh_from_db()
+    assert issue.state == states["in_progress"]
 
 
 @pytest.mark.unit
@@ -551,3 +560,104 @@ def test_outcome_normalization():
     assert n("success") is None
     assert n(None) is None
     assert n(3) is None
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: failed runs, paused runs, queued actors, switched-off clocks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status", [AgentRunStatus.FAILED, AgentRunStatus.CANCELLED, AgentRunStatus.REFUSED])
+def test_a_crashed_review_run_keeps_the_clock_ticking(seeded, issue, states, runner_for_workspace, status):
+    """A run that failed said nothing about the stage: the next tick
+    retries, instead of a per-kind 'done' stranding the issue with no
+    Re-tick button."""
+    _move(issue, states, "in_review")
+    _ticker(issue, used=3, enabled=True, next_run_at=timezone.now())
+    run = _run(issue, runner_for_workspace, status=status, phase_kind="review", done_payload=None)
+    decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
+    assert decision.reason == "progressed:keep-ticking"
+    assert decision.ticker.enabled is True
+
+
+@pytest.mark.unit
+def test_a_paused_run_without_a_yield_waits_on_the_human(seeded, issue, states, runner_for_workspace):
+    _move(issue, states, "in_progress")
+    _ticker(issue, enabled=True, next_run_at=timezone.now())
+    run = _run(
+        issue, runner_for_workspace, status=AgentRunStatus.PAUSED_AWAITING_INPUT,
+        done_payload={"autonomy": {"question_for_human": "which DB?"}},
+    )
+    decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
+    assert decision.reason == "waiting_on_human:stopped"
+
+
+@pytest.mark.unit
+def test_a_yield_survives_a_crash(seeded, issue, states, runner_for_workspace):
+    """The agent yielded, then the process died: honour the yield."""
+    _move(issue, states, "in_review")
+    _ticker(issue, enabled=True, next_run_at=timezone.now())
+    run = _run(
+        issue, runner_for_workspace, status=AgentRunStatus.FAILED, phase_kind="review",
+        done_payload={"status": "done", "yielded_at": "2026-09-13T00:00:00Z"},
+    )
+    assert scheduling.reconcile(issue, TickerEvent.run_ended(run)).reason == "done:stopped"
+
+
+@pytest.mark.unit
+def test_queued_human_entry_remembers_who_asked(seeded, issue, states, runner_for_workspace, create_user):
+    _move(issue, states, "in_progress")
+    _run(issue, runner_for_workspace)
+    _ticker(issue, used=4)
+    decision = scheduling.reconcile(
+        issue, TickerEvent.human_run_requested(actor=create_user, trigger="comment_and_run")
+    )
+    assert decision.queued is True
+    t = decision.ticker
+    assert t.pending_entry_actor_id == create_user.id
+    assert t.pending_entry_trigger == "comment_and_run"
+
+
+@pytest.mark.unit
+def test_agent_queued_entry_carries_no_actor(seeded, issue, states, runner_for_workspace):
+    _move(issue, states, "in_review")
+    run = _run(issue, runner_for_workspace)
+    _ticker(issue, used=3)
+    decision = scheduling.reconcile(issue, TickerEvent.moved_stage(moved_by_run=run))
+    t = decision.ticker
+    assert t.pending_entry_actor_id is None
+    assert t.pending_entry_trigger == ""
+
+
+@pytest.mark.unit
+def test_human_lever_on_a_switched_off_clock_queues_but_leaves_it_off_afterwards(
+    seeded, issue, states, runner_for_workspace, create_user
+):
+    """A human asked for *this* run, so it fires even though automatic
+    ticking is off; ``fire_tick`` then re-applies the switch so no timer
+    tick follows."""
+    from pi_dash.bgtasks.agent_ticker import fire_tick
+
+    _move(issue, states, "in_progress")
+    active = _run(issue, runner_for_workspace)
+    _ticker(issue, used=2, user_disabled=True, enabled=False, disarm_reason=TickerDisarmReason.USER_DISABLED)
+    decision = scheduling.reconcile(issue, TickerEvent.human_run_requested(actor=create_user))
+    assert decision.queued is True
+    assert decision.ticker.enabled is True  # the scanner must see it
+
+    AgentRun.objects.filter(pk=active.pk).update(status=AgentRunStatus.COMPLETED)
+    with mock.patch("pi_dash.orchestration.scheduling.dispatch_continuation_run") as dispatch:
+        dispatch.return_value = mock.Mock(pk=uuid_for_test())
+        assert fire_tick(str(decision.ticker.id)) is True
+    t = IssueAgentTicker.objects.get(issue=issue)
+    assert t.used == 2
+    assert t.enabled is False
+    assert t.disarm_reason == TickerDisarmReason.USER_DISABLED
+    assert t.pending_entry is False
+
+
+def uuid_for_test():
+    import uuid
+
+    return uuid.uuid4()

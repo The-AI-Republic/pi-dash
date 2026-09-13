@@ -328,7 +328,7 @@ function getTickerOnlyView(ticker: TIssueAgentTicker, now: number, t: Translatio
     };
   }
 
-  if (ticker.disarm_reason === "cap_hit") {
+  if (ticker.disarm_reason === "cap_hit" || ticker.disarm_reason === "pool_spent") {
     return {
       title: t("AI agent run limit reached"),
       detail: formatTickBudget(ticker, t),
