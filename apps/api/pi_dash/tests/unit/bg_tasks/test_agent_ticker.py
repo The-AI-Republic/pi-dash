@@ -17,6 +17,7 @@ from pi_dash.bgtasks.agent_ticker import fire_tick, scan_due_tickers
 from pi_dash.db.models import Issue, Project, State
 from pi_dash.orchestration import scheduling
 from pi_dash.prompting.seed import seed_default_template
+from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
 from pi_dash.runner.models import AgentRun, AgentRunStatus
 
 
@@ -122,16 +123,33 @@ def _make_prior_run(issue, runner):
     )
 
 
-def _make_due_schedule(issue, *, tick_count=0, max_ticks=None):
+def _set_pool(project, pool):
+    project.agent_default_max_ticks = pool
+    project.save(update_fields=["agent_default_max_ticks"])
+
+
+def _make_due_schedule(issue, *, used=0, pool=None):
+    if pool is not None:
+        _set_pool(issue.project, pool)
     sched = scheduling.arm_ticker(issue)
     sched.next_run_at = timezone.now() - timedelta(seconds=1)
-    sched.tick_count = tick_count
-    if max_ticks is not None:
-        sched.max_ticks = max_ticks
-    sched.save(
-        update_fields=["next_run_at", "tick_count", "max_ticks", "updated_at"]
-    )
+    sched.used = used
+    sched.save(update_fields=["next_run_at", "used", "updated_at"])
     return sched
+
+
+def _make_issue_in(states, key, project, workspace, create_user, name):
+    with impersonate(create_user):
+        i = Issue.objects.create(
+            name=name,
+            workspace=workspace,
+            project=project,
+            state=states["todo"],
+            created_by=create_user,
+        )
+    Issue.all_objects.filter(pk=i.pk).update(state=states[key])
+    i.refresh_from_db()
+    return i
 
 
 # ---------------------------------------------------------------------------
@@ -170,185 +188,70 @@ def test_scan_picks_up_only_due_enabled_under_cap_rows(
 
 
 @pytest.mark.unit
-def test_scan_uses_review_phase_cap_for_in_review_rows(
+def test_scan_measures_every_stage_against_the_one_pool(
     seeded, project, states, workspace, create_user
 ):
-    """The scanner's effective-cap annotation is phase-aware via
-    ``Case/When`` over ``state.group`` (design §7.5). A ticker on an In
-    Review issue must be filtered against the review-phase cap pair,
-    not the In Progress pair — otherwise an In Review ticker at
-    ``tick_count=10`` would be admitted under the impl cap (24) when
-    the review cap (8) should have already disarmed it.
+    """One pool per issue: an In Review row and an In Test row are admitted
+    or filtered by ``used < pool + granted`` exactly like an In Progress
+    row — there is no per-stage cap for the scan to pick."""
+    _set_pool(project, 10)
+    review_issue = _make_issue_in(states, "in_review", project, workspace, create_user, "Review")
+    test_issue = _make_issue_in(states, "in_test", project, workspace, create_user, "Test")
+    for issue_, used in ((review_issue, 10), (test_issue, 9)):
+        sched = scheduling.arm_ticker(issue_)
+        sched.next_run_at = timezone.now() - timedelta(seconds=1)
+        sched.used = used
+        sched.save(update_fields=["next_run_at", "used", "updated_at"])
 
-    This test pins both project caps explicitly to keep the assertion
-    independent of any future default tweaks: review_max_ticks=8 vs
-    max_ticks=24.
-    """
-    project.agent_default_max_ticks = 24
-    project.agent_review_default_max_ticks = 8
-    project.save(
-        update_fields=[
-            "agent_default_max_ticks",
-            "agent_review_default_max_ticks",
-        ]
-    )
-
-    # In Review issue at tick_count=10. Above review cap (8), below
-    # impl cap (24). Must be filtered out — the only way the scanner
-    # gets this right is if the Case/When picks the review pair.
-    with impersonate(create_user):
-        review_issue = Issue.objects.create(
-            name="ReviewTask",
-            workspace=workspace,
-            project=project,
-            state=states["todo"],
-            created_by=create_user,
-        )
-    Issue.all_objects.filter(pk=review_issue.pk).update(state=states["in_review"])
-    review_issue.refresh_from_db()
-    sched = scheduling.arm_ticker(review_issue)
-    sched.next_run_at = timezone.now() - timedelta(seconds=1)
-    sched.tick_count = 10
-    sched.save(update_fields=["next_run_at", "tick_count", "updated_at"])
-
-    with mock.patch(
-        "pi_dash.bgtasks.agent_ticker.fire_tick.delay"
-    ) as fire:
+    with mock.patch("pi_dash.bgtasks.agent_ticker.fire_tick.delay") as fire:
         count = scan_due_tickers()
-    assert count == 0
-    assert fire.call_count == 0
+    # review at 10/10 filtered; test at 9/10 admitted
+    assert count == 1
+    fired_ids = {call.args[0] for call in fire.call_args_list}
+    assert fired_ids == {str(IssueAgentTicker.objects.get(issue=test_issue).id)}
 
 
 @pytest.mark.unit
-def test_scan_admits_in_review_row_under_review_phase_cap(
-    seeded, project, states, workspace, create_user
+def test_scan_counts_retick_grants_toward_the_cap(
+    seeded, issue, project
 ):
-    """Inverse of the above: an In Review row whose ``tick_count`` is
-    below the review cap (8) is admitted normally — confirms the
-    Case/When defaults don't accidentally exclude all review rows.
-    """
-    project.agent_default_max_ticks = 24
-    project.agent_review_default_max_ticks = 8
-    project.save(
-        update_fields=[
-            "agent_default_max_ticks",
-            "agent_review_default_max_ticks",
-        ]
-    )
-
-    with impersonate(create_user):
-        review_issue = Issue.objects.create(
-            name="ReviewTask2",
-            workspace=workspace,
-            project=project,
-            state=states["todo"],
-            created_by=create_user,
-        )
-    Issue.all_objects.filter(pk=review_issue.pk).update(state=states["in_review"])
-    review_issue.refresh_from_db()
-    sched = scheduling.arm_ticker(review_issue)
-    sched.next_run_at = timezone.now() - timedelta(seconds=1)
-    sched.tick_count = 5  # < 8
-    sched.save(update_fields=["next_run_at", "tick_count", "updated_at"])
-
-    with mock.patch(
-        "pi_dash.bgtasks.agent_ticker.fire_tick.delay"
-    ) as fire:
-        count = scan_due_tickers()
-    assert count == 1
+    _set_pool(project, 10)
+    sched = _make_due_schedule(issue, used=10)
+    sched.granted = 3
+    sched.save(update_fields=["granted"])
+    with mock.patch("pi_dash.bgtasks.agent_ticker.fire_tick.delay") as fire:
+        assert scan_due_tickers() == 1
     assert fire.call_count == 1
 
 
 @pytest.mark.unit
-def test_scan_uses_test_phase_cap_for_in_test_rows(
-    seeded, project, states, workspace, create_user
+def test_scan_admits_a_pending_entry_on_a_spent_pool(
+    seeded, issue, project
 ):
-    """The scanner's effective-cap ``Case/When`` must resolve the **test**
-    pair for In Test rows (PDASHOSS01-80).
-
-    The three caps are set apart (impl 24, review 8, test 6) so the
-    assertion pins the test pair specifically: at ``tick_count=7`` the row
-    is over the test cap but under both of the others, so it is filtered
-    out only if the SQL annotation picked the right pair.
-    """
-    project.agent_default_max_ticks = 24
-    project.agent_review_default_max_ticks = 8
-    project.agent_test_default_max_ticks = 6
-    project.save(
-        update_fields=[
-            "agent_default_max_ticks",
-            "agent_review_default_max_ticks",
-            "agent_test_default_max_ticks",
-        ]
-    )
-
-    with impersonate(create_user):
-        test_issue = Issue.objects.create(
-            name="TestTask",
-            workspace=workspace,
-            project=project,
-            state=states["todo"],
-            created_by=create_user,
-        )
-    Issue.all_objects.filter(pk=test_issue.pk).update(state=states["in_test"])
-    test_issue.refresh_from_db()
-    sched = scheduling.arm_ticker(test_issue)
-    sched.next_run_at = timezone.now() - timedelta(seconds=1)
-    sched.tick_count = 7
-    sched.save(update_fields=["next_run_at", "tick_count", "updated_at"])
-
-    with mock.patch(
-        "pi_dash.bgtasks.agent_ticker.fire_tick.delay"
-    ) as fire:
-        count = scan_due_tickers()
-    assert count == 0
-    assert fire.call_count == 0
-
-
-@pytest.mark.unit
-def test_scan_admits_in_test_row_under_test_phase_cap(
-    seeded, project, states, workspace, create_user
-):
-    """Inverse: an In Test row below the test cap (6) is admitted."""
-    project.agent_default_max_ticks = 24
-    project.agent_review_default_max_ticks = 8
-    project.agent_test_default_max_ticks = 6
-    project.save(
-        update_fields=[
-            "agent_default_max_ticks",
-            "agent_review_default_max_ticks",
-            "agent_test_default_max_ticks",
-        ]
-    )
-
-    with impersonate(create_user):
-        test_issue = Issue.objects.create(
-            name="TestTask2",
-            workspace=workspace,
-            project=project,
-            state=states["todo"],
-            created_by=create_user,
-        )
-    Issue.all_objects.filter(pk=test_issue.pk).update(state=states["in_test"])
-    test_issue.refresh_from_db()
-    sched = scheduling.arm_ticker(test_issue)
-    sched.next_run_at = timezone.now() - timedelta(seconds=1)
-    sched.tick_count = 5  # < 6
-    sched.save(update_fields=["next_run_at", "tick_count", "updated_at"])
-
-    with mock.patch(
-        "pi_dash.bgtasks.agent_ticker.fire_tick.delay"
-    ) as fire:
-        count = scan_due_tickers()
-    assert count == 1
+    """A human's free entry run must fire even when the pool is spent
+    (design §4.5 / §5.2); the scan admits pending rows regardless of cap."""
+    _set_pool(project, 10)
+    sched = _make_due_schedule(issue, used=10)
+    sched.pending_entry = True
+    sched.pending_entry_free = True
+    sched.save(update_fields=["pending_entry", "pending_entry_free"])
+    with mock.patch("pi_dash.bgtasks.agent_ticker.fire_tick.delay") as fire:
+        assert scan_due_tickers() == 1
     assert fire.call_count == 1
 
 
 @pytest.mark.unit
-def test_scan_cap_annotation_covers_every_ticking_phase():
-    """The SQL cap annotation is generated from the phase registry, so a
-    phase added without its ``CADENCE_FIELDS`` entry fails here rather than
-    silently resolving against the implementation pair at runtime."""
+def test_scan_admits_infinite_pool(seeded, issue, project):
+    _set_pool(project, -1)
+    _make_due_schedule(issue, used=500)
+    with mock.patch("pi_dash.bgtasks.agent_ticker.fire_tick.delay") as fire:
+        assert scan_due_tickers() == 1
+    assert fire.call_count == 1
+
+
+@pytest.mark.unit
+def test_cadence_registry_covers_every_ticking_phase():
+    """Every phase resolves an interval column; budget is not per phase."""
     from pi_dash.orchestration.agent_phases import (
         PHASES,
         cadence_fields_by_group,
@@ -356,10 +259,8 @@ def test_scan_cap_annotation_covers_every_ticking_phase():
 
     by_group = cadence_fields_by_group()
     assert set(by_group) == set(PHASES)
-    # Each phase must own a distinct column pair — sharing one lets a cap
-    # grant in one phase leak into another's budget.
-    pairs = [f.ticker_max_ticks for f in by_group.values()]
-    assert len(set(pairs)) == len(pairs)
+    columns = [f.project_interval for f in by_group.values()]
+    assert len(set(columns)) == len(columns)
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +279,7 @@ def test_fire_tick_increments_tick_count_and_dispatches(
     assert fired is True
 
     sched.refresh_from_db()
-    assert sched.tick_count == 1
+    assert sched.used == 1
     assert sched.next_run_at > timezone.now()
     assert sched.last_tick_at is not None
     assert sched.enabled is True
@@ -389,8 +290,10 @@ def test_fire_tick_increments_tick_count_and_dispatches(
     # the agent knows a scheduled tick (not a human) woke it.
     run = runs.get()
     assert run.trigger == "tick"
+    assert run.phase_kind == "coding-task"
     assert "automatically by the issue's ticker" in run.prompt
-    assert "Ticking schedule" in run.prompt
+    assert "Runs used on this issue" in run.prompt
+    assert "1 of 10" in run.prompt
 
 
 @pytest.mark.unit
@@ -409,10 +312,13 @@ def test_fire_tick_dispatches_for_in_test_issue(
     assert fired is True
 
     sched.refresh_from_db()
-    assert sched.tick_count == 1
+    assert sched.used == 1
     runs = AgentRun.objects.filter(work_item=issue, parent_run__isnull=False)
     assert runs.count() == 1
-    assert runs.get().trigger == "tick"
+    run = runs.get()
+    assert run.trigger == "tick"
+    # The prompt kind is resolved from the state *at claim time*.
+    assert run.phase_kind == "test"
 
 
 @pytest.mark.unit
@@ -428,7 +334,7 @@ def test_fire_tick_skips_when_already_advanced(seeded, issue, runner_for_workspa
     fired = fire_tick(str(sched.id))
     assert fired is False
     sched.refresh_from_db()
-    assert sched.tick_count == 0
+    assert sched.used == 0
 
 
 @pytest.mark.unit
@@ -438,12 +344,12 @@ def test_fire_tick_disarms_on_cap_hit(
     from pi_dash.db.models.issue_agent_ticker import TickerDisarmReason
 
     _make_prior_run(issue, runner_for_workspace)
-    sched = _make_due_schedule(issue, tick_count=23, max_ticks=24)
+    sched = _make_due_schedule(issue, used=9, pool=10)
     fired = fire_tick(str(sched.id))
     assert fired is True
 
     sched.refresh_from_db()
-    assert sched.tick_count == 24
+    assert sched.used == 10
     assert sched.enabled is False
     # Cap-hit disarm must persist the reason so ``maybe_apply_deferred_pause``
     # can distinguish it from terminal-signal disarms (PR A §4.5 / §6.3).
@@ -457,7 +363,7 @@ def test_fire_tick_does_not_auto_transition_state_immediately(
     """On cap hit, ``fire_tick`` only sets ``enabled = False``. The In
     Progress → Paused transition is deferred to the run-terminate hook."""
     _make_prior_run(issue, runner_for_workspace)
-    sched = _make_due_schedule(issue, tick_count=23, max_ticks=24)
+    sched = _make_due_schedule(issue, used=9, pool=10)
     fire_tick(str(sched.id))
     issue.refresh_from_db()
     assert issue.state == states["in_progress"]
@@ -475,7 +381,7 @@ def test_fire_tick_skips_when_state_not_in_progress(
     assert fired is False
 
     sched.refresh_from_db()
-    assert sched.tick_count == 0
+    assert sched.used == 0
 
 
 @pytest.mark.unit
@@ -498,7 +404,9 @@ def test_fire_tick_skips_when_active_run_exists(
     fired = fire_tick(str(sched.id))
     assert fired is False
     sched.refresh_from_db()
-    assert sched.tick_count == 0
+    assert sched.used == 0
+    # The pending-entry queue survives the skip: the scanner retries.
+    assert sched.next_run_at <= timezone.now()
 
 
 @pytest.mark.unit
@@ -510,4 +418,100 @@ def test_fire_tick_skips_disabled_schedule(seeded, issue, runner_for_workspace):
     fired = fire_tick(str(sched.id))
     assert fired is False
     sched.refresh_from_db()
-    assert sched.tick_count == 0
+    assert sched.used == 0
+
+
+# ---------------------------------------------------------------------------
+# The entry-run queue (design §4.5) and free claims (§5.2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_fire_tick_free_pending_entry_does_not_spend_the_pool(
+    seeded, issue, runner_for_workspace
+):
+    """A human-started run that had to wait for the issue to be free is
+    claimed by ``fire_tick`` but must not count, and renders as a human
+    trigger."""
+    _make_prior_run(issue, runner_for_workspace)
+    sched = _make_due_schedule(issue, used=4)
+    sched.pending_entry = True
+    sched.pending_entry_free = True
+    sched.save(update_fields=["pending_entry", "pending_entry_free"])
+
+    assert fire_tick(str(sched.id)) is True
+    sched.refresh_from_db()
+    assert sched.used == 4
+    assert sched.pending_entry is False
+    assert sched.pending_entry_free is False
+    assert sched.enabled is True
+    run = AgentRun.objects.filter(work_item=issue, parent_run__isnull=False).get()
+    assert run.trigger == "run_ai"
+
+
+@pytest.mark.unit
+def test_fire_tick_free_pending_entry_fires_on_a_spent_pool_then_stops(
+    seeded, issue, runner_for_workspace
+):
+    """Free runs fire even when the pool is spent; afterwards the clock is
+    stopped again with ``cap_hit`` so no timer tick follows."""
+    from pi_dash.db.models.issue_agent_ticker import TickerDisarmReason
+
+    _make_prior_run(issue, runner_for_workspace)
+    sched = _make_due_schedule(issue, used=10, pool=10)
+    sched.pending_entry = True
+    sched.pending_entry_free = True
+    sched.save(update_fields=["pending_entry", "pending_entry_free"])
+
+    assert fire_tick(str(sched.id)) is True
+    sched.refresh_from_db()
+    assert sched.used == 10
+    assert sched.enabled is False
+    assert sched.disarm_reason == TickerDisarmReason.CAP_HIT
+    assert AgentRun.objects.filter(work_item=issue, parent_run__isnull=False).count() == 1
+
+
+@pytest.mark.unit
+def test_fire_tick_agent_queued_entry_spends_the_pool(
+    seeded, issue, runner_for_workspace
+):
+    """The entry run an agent's own move queued is machine-started: it
+    counts, and renders as a tick."""
+    _make_prior_run(issue, runner_for_workspace)
+    sched = _make_due_schedule(issue, used=4)
+    sched.pending_entry = True
+    sched.pending_entry_free = False
+    sched.save(update_fields=["pending_entry", "pending_entry_free"])
+
+    assert fire_tick(str(sched.id)) is True
+    sched.refresh_from_db()
+    assert sched.used == 5
+    assert sched.pending_entry is False
+    run = AgentRun.objects.filter(work_item=issue, parent_run__isnull=False).get()
+    assert run.trigger == "tick"
+
+
+@pytest.mark.unit
+def test_fire_tick_rolls_back_pending_flags_when_dispatch_fails(
+    seeded, issue, runner_for_workspace
+):
+    """A claim whose dispatch returns None restores the queue so the entry
+    is not lost."""
+    from pi_dash.bgtasks import agent_ticker as ticker_mod
+
+    _make_prior_run(issue, runner_for_workspace)
+    sched = _make_due_schedule(issue, used=4)
+    sched.pending_entry = True
+    sched.pending_entry_free = True
+    sched.save(update_fields=["pending_entry", "pending_entry_free"])
+
+    with mock.patch.object(
+        ticker_mod, "fire_tick", wraps=ticker_mod.fire_tick
+    ), mock.patch(
+        "pi_dash.orchestration.scheduling.dispatch_continuation_run", return_value=None
+    ):
+        assert fire_tick(str(sched.id)) is False
+    sched.refresh_from_db()
+    assert sched.used == 4
+    assert sched.pending_entry is True
+    assert sched.pending_entry_free is True
