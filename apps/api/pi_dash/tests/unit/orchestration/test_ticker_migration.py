@@ -68,20 +68,22 @@ def test_projects_on_the_old_default_move_to_the_pool(project):
 
 
 @pytest.mark.unit
-def test_rows_over_the_new_pool_are_stamped_cap_hit(issue, project):
+def test_rows_over_the_new_pool_are_stamped_pool_spent(issue, project):
     Project.objects.filter(pk=project.pk).update(agent_default_max_ticks=10)
     over = IssueAgentTicker.objects.create(issue=issue, used=15, granted=0, enabled=True, next_run_at=timezone.now())
-    migration.stamp_cap_hit_on_rows_over_the_new_pool(apps, None)
+    migration.stamp_pool_spent_on_rows_over_the_new_pool(apps, None)
     over.refresh_from_db()
     assert over.enabled is False
-    assert over.disarm_reason == "cap_hit"
+    # pool_spent, never cap_hit: cap_hit would auto-Pause a live In Progress
+    # issue at its next run end and hide the Re-tick button.
+    assert over.disarm_reason == "pool_spent"
 
 
 @pytest.mark.unit
 def test_rows_saved_by_a_grant_stay_armed(issue, project):
     Project.objects.filter(pk=project.pk).update(agent_default_max_ticks=10)
     ok = IssueAgentTicker.objects.create(issue=issue, used=15, granted=24, enabled=True, next_run_at=timezone.now())
-    migration.stamp_cap_hit_on_rows_over_the_new_pool(apps, None)
+    migration.stamp_pool_spent_on_rows_over_the_new_pool(apps, None)
     ok.refresh_from_db()
     assert ok.enabled is True
 
@@ -90,6 +92,6 @@ def test_rows_saved_by_a_grant_stay_armed(issue, project):
 def test_infinite_pool_is_never_stamped(issue, project):
     Project.objects.filter(pk=project.pk).update(agent_default_max_ticks=-1)
     t = IssueAgentTicker.objects.create(issue=issue, used=500, enabled=True, next_run_at=timezone.now())
-    migration.stamp_cap_hit_on_rows_over_the_new_pool(apps, None)
+    migration.stamp_pool_spent_on_rows_over_the_new_pool(apps, None)
     t.refresh_from_db()
     assert t.enabled is True

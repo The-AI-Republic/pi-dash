@@ -553,7 +553,12 @@ def test_outcome_normalization():
     assert n("done") == "done"
     assert n(" DONE ") == "done"
     assert n("completed") == "done"
-    assert n("noop") == "done"
+    # "nothing changed" follows the kind: an implementation run keeps
+    # ticking (CI may still be running); a satisfied review / test stops.
+    assert n("noop") == "progressed"
+    assert n("noop", "coding-task") == "progressed"
+    assert n("noop", "review") == "done"
+    assert n("noop", "test") == "done"
     assert n("paused") == "waiting_on_human"
     assert n("blocked") == "blocked"
     assert n("progressed") == "progressed"
@@ -661,3 +666,65 @@ def uuid_for_test():
     import uuid
 
     return uuid.uuid4()
+
+
+@pytest.mark.unit
+def test_cloud_noop_on_an_in_progress_run_keeps_ticking(seeded, issue, states, runner_for_workspace):
+    _move(issue, states, "in_progress")
+    _ticker(issue, enabled=True, next_run_at=timezone.now())
+    run = _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED, phase_kind="coding-task",
+               done_payload={"status": "noop"})
+    assert scheduling.reconcile(issue, TickerEvent.run_ended(run)).reason == "progressed:keep-ticking"
+
+
+@pytest.mark.unit
+def test_retick_is_honoured_from_paused(seeded, issue, states):
+    _move(issue, states, "paused")
+    _ticker(issue, used=10, enabled=False, disarm_reason=TickerDisarmReason.CAP_HIT)
+    decision = scheduling.reconcile(issue, TickerEvent.retick())
+    assert decision.granted is True
+    assert decision.reason == "granted-from-paused"
+    assert decision.ticker.granted == 3
+
+
+@pytest.mark.unit
+def test_queued_entry_into_test_starts_a_fresh_session(seeded, issue, states, runner_for_workspace, create_user):
+    """A queued entry is parented like a transition dispatch: review → test
+    is a fresh session, so the test prompt does not present the review
+    run's yield as the 'authoritative implementation output'."""
+    from pi_dash.bgtasks.agent_ticker import fire_tick
+
+    _move(issue, states, "in_progress")
+    impl = _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED, phase_kind="coding-task",
+                done_payload={"conclusion": "success", "result": "PR opened"})
+    _move(issue, states, "in_review")
+    review = _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED, phase_kind="review",
+                  done_payload={"status": "done", "note": "approved", "yielded_at": "x"})
+    _move(issue, states, "in_test")
+    t = _ticker(issue, used=2, enabled=True, next_run_at=timezone.now(), pending_entry=True,
+                resume_parent_run=impl)
+    assert fire_tick(str(t.id)) is True
+    test_run = AgentRun.objects.filter(work_item=issue).order_by("-created_at").first()
+    assert test_run.phase_kind == "test"
+    assert test_run.parent_run_id is None
+    assert "PR opened" in test_run.prompt
+    assert "approved" not in test_run.prompt.split("Latest implementation run output")[1][:400]
+    assert review.id != test_run.id
+
+
+@pytest.mark.unit
+def test_queued_hand_back_parents_off_the_implementation_run(seeded, issue, states, runner_for_workspace):
+    from pi_dash.bgtasks.agent_ticker import fire_tick
+
+    _move(issue, states, "in_progress")
+    impl = _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED, phase_kind="coding-task")
+    _move(issue, states, "in_review")
+    _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED, phase_kind="review",
+         done_payload={"status": "done", "yielded_at": "x"})
+    _move(issue, states, "in_progress")
+    t = _ticker(issue, used=2, enabled=True, next_run_at=timezone.now(), pending_entry=True,
+                resume_parent_run=impl)
+    assert fire_tick(str(t.id)) is True
+    back = AgentRun.objects.filter(work_item=issue).order_by("-created_at").first()
+    assert back.phase_kind == "coding-task"
+    assert back.parent_run_id == impl.id

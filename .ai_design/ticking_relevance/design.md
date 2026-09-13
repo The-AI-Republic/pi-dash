@@ -32,6 +32,26 @@
 > transaction, so a click that produced no run leaves the ticker untouched;
 > (10) migration `0163` folds prior Re-tick grants into `granted` and stamps
 > `cap_hit` on rows already over the new pool.
+>
+> **Second review pass:** (11) that migration stamp is `pool_spent`, not
+> `cap_hit` (which would auto-Pause live issues on deploy); (12) a state
+> move on the external API with no `X-Pi-Dash-Run-Id` is still an agent
+> move when the caller owns a run that is active on the issue — an older
+> `pidash` binary sends no header and must not earn free runs; (13) the
+> legacy `noop` status follows the per-kind default (In Progress keeps
+> ticking, review / test stop); (14) the assistant's `update_issue` tool
+> lets the signal update the clock only and dispatches once itself; (15)
+> `pidash issue re-tick` from inside an agent run is refused (403) and the
+> CLI docs list it under "Not for you"; (16) Re-tick is honoured from the
+> Paused state the cap-hit auto-pause parks issues in — it grants, moves the
+> issue back to In Progress as a human move and fires; (17) the prompt's
+> "last run" flag was off by one and is folded into the spent branch;
+> (18) `fire_tick`'s cap bail on a queued entry parks as `pool_spent`;
+> (19) queued entries are parented by the same stage rule as a transition
+> dispatch (`parent_for_next_run`: review / test start fresh, a hand-back
+> parents off the implementation run); (20) Re-tick's grant, clock re-time
+> and dispatch share one transaction and report `granted: false` when no
+> run could be started.
 > Builds on `.ai_design/issue_ticking_system/`,
 > `.ai_design/create_review_state/`, `.ai_design/create_test_state/` and
 > `.ai_design/ticking_optimization/` (fresh session per run, workpad as

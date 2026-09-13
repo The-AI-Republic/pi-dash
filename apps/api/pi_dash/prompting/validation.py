@@ -125,7 +125,6 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
                 "cap": 10,
                 "remaining": 5,
                 "spent": False,
-                "last_run": False,
                 "clock_live": True,
                 "interval_seconds": 43200,
                 "interval_human": "12 hours",

@@ -110,13 +110,28 @@ def fire_tick(ticker_id: str) -> bool:
         free_claim = ticker.pending_entry and ticker.pending_entry_free
         cap = ticker.effective_max_ticks()
         if not free_claim and cap != INFINITE_MAX_TICKS and ticker.used >= cap:
-            # Already at cap — disarm and bail.
+            # Already at cap — disarm and bail. A queued (counting) entry
+            # that finds the pool spent — the project pool was lowered
+            # after it was queued — consumed nothing, so it parks as
+            # ``pool_spent`` rather than the auto-pausing ``cap_hit``.
             ticker.enabled = False
-            ticker.disarm_reason = TickerDisarmReason.CAP_HIT
+            ticker.disarm_reason = (
+                TickerDisarmReason.POOL_SPENT if ticker.pending_entry else TickerDisarmReason.CAP_HIT
+            )
             ticker.pending_entry = False
             ticker.pending_entry_free = False
+            ticker.pending_entry_actor = None
+            ticker.pending_entry_trigger = ""
             ticker.save(
-                update_fields=["enabled", "disarm_reason", "pending_entry", "pending_entry_free", "updated_at"]
+                update_fields=[
+                    "enabled",
+                    "disarm_reason",
+                    "pending_entry",
+                    "pending_entry_free",
+                    "pending_entry_actor",
+                    "pending_entry_trigger",
+                    "updated_at",
+                ]
             )
             return False
 

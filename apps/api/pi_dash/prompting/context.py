@@ -195,8 +195,9 @@ def _tick_context(issue: Issue) -> Optional[Dict[str, Any]]:
         "count": ticker.used,
         "cap": None if unlimited else cap,
         "remaining": remaining,
+        # ``used`` already counts this run when the ticker started it, so
+        # ``remaining == 0`` means "no machine-started run follows this one".
         "spent": (not unlimited) and remaining == 0,
-        "last_run": (not unlimited) and remaining == 1,
         "clock_live": bool(ticker.enabled),
         "interval_seconds": interval,
         "interval_human": _humanize_interval(interval),

@@ -106,6 +106,53 @@ def _latest_prior_run(issue: Issue) -> Optional[AgentRun]:
     return AgentRun.objects.filter(work_item=issue).order_by("-created_at").first()
 
 
+def parent_for_next_run(issue: Issue, state: Optional[State] = None, *, cross_stage: Optional[bool] = None):
+    """``(parent, fresh_session)`` for a run created on ``issue`` *now*.
+
+    ``state`` is the stage the run is for; defaults to ``issue.state`` (the
+    transition handler passes ``to_state``, since the instance it is handed
+    may still carry the previous state). ``cross_stage`` says whether the
+    latest run served a different stage; the handler knows it from the
+    transition, other callers derive it from the latest run's stamped
+    ``phase_kind``.
+
+    Shared by the transition dispatch, the ticker's queued entries and Run AI
+    so every path parents the same way (design §4.4):
+
+    - same stage as the latest run → continue from it;
+    - entering a stage whose ``fresh_session_on_entry`` is set (review,
+      test) → no parent, fresh session, so the stage prompt is the system
+      prompt;
+    - a hand-back into In Progress → the implementation run captured on the
+      way out (``ticker.resume_parent_run``), never the review / test run
+      that sent it back; none captured → fresh session.
+    """
+    from pi_dash.prompting.recipes import KIND_CODING_TASK
+
+    from pi_dash.orchestration.agent_phases import template_name_for
+    from pi_dash.prompting.recipes import kind_for
+
+    latest = _latest_prior_run(issue)
+    if latest is None:
+        return None, True
+    if state is None:
+        state = getattr(issue, "state", None)
+    cfg = phase_config_for(state)
+    if cfg is None:
+        return latest, False
+    if cross_stage is None:
+        latest_kind = getattr(latest, "phase_kind", "") or KIND_CODING_TASK
+        cross_stage = latest_kind != kind_for(template_name_for(state))
+    if not cross_stage:
+        return latest, False
+    if cfg.fresh_session_on_entry:
+        return None, True
+    ticker = getattr(issue, "agent_ticker", None)
+    if ticker is not None and ticker.resume_parent_run_id is not None:
+        return ticker.resume_parent_run, False
+    return None, True
+
+
 def _phase_kind_for_issue(issue: Issue) -> str:
     """The prompt kind a run created for ``issue`` *now* will render.
 
@@ -213,34 +260,9 @@ def handle_issue_state_transition(
         )
         return TransitionOutcome(reason="active-run-exists")
 
-    # Parent resolution for the dispatched run depends on the shape of the
-    # move:
-    #
-    # - Cross-stage entry into a phase whose ``fresh_session_on_entry``
-    #   is True (review, test): dispatch with parent_run=None and
-    #   pinned_runner_id cleared so the phase's prompt lands as the
-    #   system prompt of a brand-new session.
-    # - Cross-stage entry into In Progress (a hand-back): parent off
-    #   ``ticker.resume_parent_run`` (the implementation run captured on
-    #   the way out) rather than off the review/test run.
-    # - Same-stage or first-time entry: parent = _latest_prior_run(issue).
-    fresh_session = False
-    parent = _latest_prior_run(issue)
-    to_cfg = phase_config_for(to_state)
-    if cross_stage and to_cfg is not None:
-        if to_cfg.fresh_session_on_entry:
-            fresh_session = True
-            parent = None
-        else:
-            ticker = decision.ticker
-            if ticker is not None and ticker.resume_parent_run_id is not None:
-                parent = ticker.resume_parent_run
-            else:
-                # No implementation lineage captured (e.g. Todo → In Review
-                # → In Progress): the latest prior run is a review run —
-                # wrong parent for an impl-phase dispatch. Fresh session.
-                fresh_session = True
-                parent = None
+    # Parent + session shape follow the shared stage rule (``parent_for_next_run``)
+    # so a dispatch-now entry and a queued entry are built the same way.
+    parent, fresh_session = parent_for_next_run(issue, to_state, cross_stage=cross_stage)
 
     creator = actor or _resolve_fallback_creator(issue)
     if creator is None:

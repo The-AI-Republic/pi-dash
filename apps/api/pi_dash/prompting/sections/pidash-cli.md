@@ -64,6 +64,8 @@ The workpad is your durable per-issue scratchpad — a single markdown document 
 
 ### Not for you
 
+- `pidash issue re-tick` — adds runs to the issue's budget. That is a **human** decision; the agent reports a spent pool and stops (see "Task lifecycle"). Pi Dash refuses a re-tick that comes from inside an agent run.
+
 The remaining `pidash` subcommands (`configure`, `install`, `uninstall`, `start`, `stop`, `restart`, `status`, `tui`, `doctor`, `remove`, `rotate`) manage the runner daemon itself — they are run by the human operator before your session starts. Do not invoke them. If any of them appears necessary, your run is blocked: follow "Blocking the run".
 
 ### Typical recipes

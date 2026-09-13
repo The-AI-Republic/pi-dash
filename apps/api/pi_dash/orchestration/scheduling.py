@@ -89,10 +89,11 @@ RUN_OUTCOMES = frozenset(
 #: Outcomes that stop the clock for the stage the run was rendered for.
 STOPPING_OUTCOMES = frozenset({OUTCOME_DONE, OUTCOME_BLOCKED, OUTCOME_WAITING_ON_HUMAN})
 #: Legacy done-payload statuses from the Cloud Agent structured result and
-#: the pre-yield fence, mapped onto the §7 vocabulary.
+#: the pre-yield fence, mapped onto the §7 vocabulary. ``noop`` is per kind
+#: (see :func:`normalize_outcome`): "nothing changed" keeps an In Progress
+#: clock ticking and stops a review / test one.
 _LEGACY_OUTCOME_ALIASES = {
     "completed": OUTCOME_DONE,
-    "noop": OUTCOME_DONE,
     "paused": OUTCOME_WAITING_ON_HUMAN,
 }
 
@@ -200,6 +201,11 @@ class TickerDecision:
     #: A Re-tick that granted budget.
     granted: bool = False
     reason: str = ""
+
+
+def is_paused_state(state) -> bool:
+    """The project's auto-pause parking state (``PAUSED_STATE_NAME``)."""
+    return state is not None and getattr(state, "name", None) == PAUSED_STATE_NAME
 
 
 def _project_ticking_enabled(issue: Issue) -> bool:
@@ -325,18 +331,23 @@ def _retime_clock(ticker: IssueAgentTicker, issue: Issue) -> None:
     ticker.next_run_at = _compute_next_run_at(ticker.effective_interval_seconds())
 
 
-def normalize_outcome(value) -> Optional[str]:
+def normalize_outcome(value, phase_kind: str = "") -> Optional[str]:
     """Map a done-payload ``status`` onto the §7 outcome vocabulary.
 
     Returns ``None`` for anything unrecognised (a bridge's
     ``{"conclusion": …}`` payload has no status at all), which the
-    ``RUN_ENDED`` handler treats as "the run did not yield".
+    ``RUN_ENDED`` handler treats as "the run did not yield". The legacy
+    ``noop`` ("nothing changed") follows the per-kind default: an In
+    Progress run that found nothing to do must keep ticking (CI may still
+    be running), while a review / test that found nothing new is satisfied.
     """
     if not isinstance(value, str):
         return None
     value = value.strip().lower()
     if value in RUN_OUTCOMES:
         return value
+    if value == "noop":
+        return default_outcome_for_kind(phase_kind or "")
     return _LEGACY_OUTCOME_ALIASES.get(value)
 
 
@@ -344,7 +355,7 @@ def outcome_for_run(run: AgentRun) -> Optional[str]:
     payload = run.done_payload or {}
     if not isinstance(payload, dict):
         return None
-    return normalize_outcome(payload.get("status"))
+    return normalize_outcome(payload.get("status"), getattr(run, "phase_kind", "") or "")
 
 
 def default_outcome_for_kind(phase_kind: str) -> str:
@@ -533,7 +544,8 @@ def _on_retick(issue: Issue, event: TickerEvent) -> TickerDecision:
     ticker = _lock_ticker(issue, create=False)
     if ticker is None:
         return TickerDecision(reason="no_ticker")
-    if not is_ticking_state(issue.state):
+    paused = is_paused_state(issue.state)
+    if not is_ticking_state(issue.state) and not paused:
         return TickerDecision(ticker=ticker, reason="not_ticking_state")
     if not ticker.cap_reached():
         return TickerDecision(ticker=ticker, reason="budget_not_exhausted")
@@ -541,6 +553,13 @@ def _on_retick(issue: Issue, event: TickerEvent) -> TickerDecision:
     grant = getattr(issue.project, "agent_retick_grant", DEFAULT_RETICK_GRANT)
     ticker.granted += max(0, int(grant))
     decision = TickerDecision(ticker=ticker, granted=True, reason="granted")
+    if paused:
+        # The cap-hit auto-pause parked the issue outside the bucket. The
+        # grant lands here; ``re_tick_ticker`` moves the issue back to In
+        # Progress as a human move, which arms the clock and fires the run.
+        decision.reason = "granted-from-paused"
+        _save_clock(ticker)
+        return decision
     if event.want_run and _issue_has_active_run(issue):
         _queue_entry(ticker, free=True, actor=event.actor, trigger=event.trigger)
         decision.queued = True
@@ -624,7 +643,11 @@ def re_tick_ticker(issue: Issue, *, actor=None) -> dict:
     Returns ``{"granted": bool, "reason": str, "ticker": IssueAgentTicker|None,
     "run": AgentRun|None}``.
     """
-    # Re-fetch under a lock so the stage guard sees committed state.
+    from pi_dash.orchestration import service as orchestration_service
+
+    # Grant, clock re-time and dispatch share one transaction: a Re-tick that
+    # produced no run (no pod, no creator, a preflight bounce) is reported
+    # as not granted and leaves the ticker exactly as it was.
     with transaction.atomic():
         locked = (
             Issue.all_objects.select_for_update(of=("self",))
@@ -635,21 +658,62 @@ def re_tick_ticker(issue: Issue, *, actor=None) -> dict:
         if locked is None:
             return {"granted": False, "reason": "no_issue", "ticker": None, "run": None}
         decision = reconcile(locked, TickerEvent.retick(actor=actor))
-    result = {
-        "granted": decision.granted,
-        "reason": decision.reason,
-        "ticker": decision.ticker,
-        "run": None,
-    }
-    if decision.granted and decision.dispatch_now:
-        creator = actor
-        if creator is None:
-            from pi_dash.orchestration import service as orchestration_service
+        result = {
+            "granted": decision.granted,
+            "reason": decision.reason,
+            "ticker": decision.ticker,
+            "run": None,
+        }
+        if not decision.granted:
+            return result
 
-            creator = orchestration_service._resolve_fallback_creator(locked)
-        if creator is not None:
-            result["run"] = dispatch_run_ai_run(locked, actor=creator)
+        creator = actor if actor is not None else orchestration_service._resolve_fallback_creator(locked)
+        if decision.reason == "granted-from-paused":
+            # Bring the issue back into the bucket as a human move (free
+            # entry, clock armed on the fresh budget). The signal only
+            # updates the clock; we dispatch below so the run carries
+            # ``actor``.
+            target = _in_progress_state_for(locked)
+            if target is None:
+                transaction.set_rollback(True)
+                return {"granted": False, "reason": "no_in_progress_state", "ticker": decision.ticker, "run": None}
+            from pi_dash.orchestration.signals import _DISPATCH_IMMEDIATE_ATTR
+
+            setattr(locked, _DISPATCH_IMMEDIATE_ATTR, False)
+            locked.state = target
+            if hasattr(locked, "updated_by") and creator is not None:
+                locked.updated_by = creator
+            locked.save(update_fields=["state", "updated_at"])
+            decision.dispatch_now = True
+
+        if decision.dispatch_now:
+            run = dispatch_run_ai_run(locked, actor=creator) if creator is not None else None
+            if run is None:
+                transaction.set_rollback(True)
+                return {"granted": False, "reason": "dispatch-failed", "ticker": decision.ticker, "run": None}
+            result["run"] = run
+            result["ticker"] = IssueAgentTicker.objects.filter(issue=locked).first()
     return result
+
+
+def _in_progress_state_for(issue: Issue):
+    """The project's registered In Progress state, if it has one."""
+    from pi_dash.db.models.state import State, StateGroup
+    from pi_dash.orchestration.agent_phases import PHASES
+
+    cfg = PHASES.get(StateGroup.STARTED.value)
+    if cfg is None:
+        return None
+    return (
+        State.all_state_objects.filter(
+            project_id=issue.project_id,
+            group=StateGroup.STARTED.value,
+            name=cfg.state_name,
+            deleted_at__isnull=True,
+        )
+        .order_by("sequence")
+        .first()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -947,14 +1011,18 @@ def dispatch_continuation_run(
         )
         return None
 
-    parent = orchestration_service._latest_prior_run(issue)
-    if parent is None:
+    if orchestration_service._latest_prior_run(issue) is None:
         logger.info(
             "agent_ticker: skip dispatch issue=%s reason=no-prior-run triggered_by=%s",
             issue.pk,
             triggered_by,
         )
         return None
+    # The parent follows the same stage rules as a transition dispatch: a
+    # queued entry into review / test starts a fresh session; a hand-back
+    # into In Progress parents off the implementation lineage, not the
+    # review run that sent it back.
+    parent, fresh_session = orchestration_service.parent_for_next_run(issue)
 
     creator = _resolve_creator_for_trigger(issue, triggered_by=triggered_by, actor=actor)
     if creator is None:
@@ -989,13 +1057,23 @@ def dispatch_continuation_run(
     if not preflight_eligibility_or_bounce(issue, run_creator=creator, pod=pod, triggered_by=triggered_by):
         return None
 
-    outcome = orchestration_service._create_continuation_run(
-        issue=issue,
-        parent=parent,
-        creator=creator,
-        pod=pod,
-        trigger=triggered_by,
-    )
+    if fresh_session or parent is None:
+        outcome = orchestration_service._create_and_dispatch_run(
+            issue=issue,
+            parent=None,
+            creator=creator,
+            pod=pod,
+            fresh_session=True,
+            trigger=triggered_by,
+        )
+    else:
+        outcome = orchestration_service._create_continuation_run(
+            issue=issue,
+            parent=parent,
+            creator=creator,
+            pod=pod,
+            trigger=triggered_by,
+        )
     return outcome.created_run
 
 
@@ -1057,8 +1135,8 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
     if not preflight_eligibility_or_bounce(issue, run_creator=creator, pod=pod, triggered_by=TRIGGER_RUN_AI):
         return None
 
-    parent = orchestration_service._latest_prior_run(issue)
-    if parent is not None:
+    parent, fresh_session = orchestration_service.parent_for_next_run(issue)
+    if parent is not None and not fresh_session:
         outcome = orchestration_service._create_continuation_run(
             issue=issue,
             parent=parent,
@@ -1072,6 +1150,7 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
             parent=None,
             creator=creator,
             pod=pod,
+            fresh_session=fresh_session,
             trigger=TRIGGER_RUN_AI,
         )
     return outcome.created_run
@@ -1230,6 +1309,7 @@ __all__ = [
     "default_outcome_for_kind",
     "disarm_ticker",
     "dispatch_continuation_run",
+    "is_paused_state",
     "dispatch_run_ai_run",
     "maybe_apply_deferred_pause",
     "maybe_disarm_on_terminal_signal",

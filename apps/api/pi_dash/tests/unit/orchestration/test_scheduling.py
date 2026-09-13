@@ -464,7 +464,7 @@ def test_re_tick_in_test_grants_to_the_shared_pool(
     sched.used = 3  # exhausted
     sched.save(update_fields=["used"])
 
-    with mock.patch.object(scheduling, "dispatch_run_ai_run", return_value=None):
+    with mock.patch.object(scheduling, "dispatch_run_ai_run", return_value=mock.Mock(name="run")):
         result = scheduling.re_tick_ticker(issue)
     assert result["granted"] is True
 
@@ -580,26 +580,44 @@ def test_disarm_on_terminal_signal_blocked(
 
 
 @pytest.mark.unit
-def test_disarm_on_terminal_signal_legacy_noop_is_done(
+def test_disarm_on_terminal_signal_legacy_noop_follows_the_kind(
     seeded, issue, states, runner_for_workspace, create_user
 ):
-    """The legacy ``noop`` status means "nothing changed, the stage is
-    still satisfied" — under the §7 vocabulary that is ``done`` (stay),
-    which stops the clock instead of ticking to the cap saying "no
-    change"."""
+    """The legacy ``noop`` status means "nothing changed". For an
+    implementation run that must keep ticking (CI may still be running);
+    for a review run the stage is satisfied and the clock stops instead of
+    ticking to the cap saying "no change"."""
     _to_in_progress(issue, states)
     sched = scheduling.arm_ticker(issue)
-    run = AgentRun.objects.create(
+    impl = AgentRun.objects.create(
         workspace=issue.workspace,
         created_by=create_user,
         pod=runner_for_workspace.pod,
         work_item=issue,
         status=AgentRunStatus.COMPLETED,
+        phase_kind="coding-task",
         done_payload={"status": "noop"},
         prompt="x",
     )
-    applied = scheduling.maybe_disarm_on_terminal_signal(run)
-    assert applied is True
+    assert scheduling.maybe_disarm_on_terminal_signal(impl) is False
+    sched.refresh_from_db()
+    assert sched.enabled is True
+
+    with impersonate(issue.created_by):
+        in_review = State.objects.create(name="In Review", project=issue.project, group="review")
+    Issue.all_objects.filter(pk=issue.pk).update(state=in_review)
+    issue.refresh_from_db()
+    review = AgentRun.objects.create(
+        workspace=issue.workspace,
+        created_by=create_user,
+        pod=runner_for_workspace.pod,
+        work_item=issue,
+        status=AgentRunStatus.COMPLETED,
+        phase_kind="review",
+        done_payload={"status": "noop"},
+        prompt="x",
+    )
+    assert scheduling.maybe_disarm_on_terminal_signal(review) is True
     sched.refresh_from_db()
     assert sched.enabled is False
     assert sched.disarm_reason == TickerDisarmReason.TERMINAL_SIGNAL
@@ -752,10 +770,52 @@ def _exhaust(sched, cap):
 
 @pytest.fixture
 def no_retick_dispatch(monkeypatch):
-    """Re-tick fires a run now; these tests only care about the budget."""
-    fake = mock.Mock(return_value=None)
+    """Re-tick fires a run now; these tests only care about the budget, so
+    the dispatch is stubbed to succeed (a ``None`` would roll the grant back)."""
+    fake = mock.Mock(return_value=mock.Mock(name="run"))
     monkeypatch.setattr(scheduling, "dispatch_run_ai_run", fake)
     return fake
+
+
+@pytest.mark.unit
+def test_re_tick_rolls_back_when_no_run_could_be_dispatched(seeded, issue, states, monkeypatch):
+    """A Re-tick that produced no run (no pod / preflight bounce) is not a
+    grant: the pool and the clock look exactly as before, and the API says
+    so instead of promising a run that is not coming."""
+    monkeypatch.setattr(scheduling, "dispatch_run_ai_run", mock.Mock(return_value=None))
+    _to_in_progress(issue, states)
+    sched = scheduling.arm_ticker(issue)
+    _exhaust(sched, sched.effective_max_ticks())
+    result = scheduling.re_tick_ticker(issue)
+    assert result["granted"] is False
+    assert result["reason"] == "dispatch-failed"
+    sched.refresh_from_db()
+    assert sched.granted == 0
+    assert sched.enabled is False
+
+
+@pytest.mark.unit
+def test_re_tick_from_paused_moves_the_issue_back_and_fires(seeded, issue, states, create_user, monkeypatch):
+    """The cap-hit auto-pause parks the issue on Paused, outside the bucket;
+    Re-tick must still be honoured from there — grant, move back to In
+    Progress as a human move, fire."""
+    fake = mock.Mock(return_value=mock.Mock(name="run"))
+    monkeypatch.setattr(scheduling, "dispatch_run_ai_run", fake)
+    _to_in_progress(issue, states)
+    sched = scheduling.arm_ticker(issue)
+    _exhaust(sched, sched.effective_max_ticks())
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["paused"])
+    issue.refresh_from_db()
+
+    result = scheduling.re_tick_ticker(issue, actor=create_user)
+    assert result["granted"] is True
+    issue.refresh_from_db()
+    assert issue.state == states["in_progress"]
+    sched.refresh_from_db()
+    assert sched.granted == issue.project.agent_retick_grant
+    assert sched.enabled is True
+    assert sched.cap_reached() is False
+    fake.assert_called_once()
 
 
 @pytest.mark.unit

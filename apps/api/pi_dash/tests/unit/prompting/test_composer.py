@@ -428,29 +428,29 @@ def test_lifecycle_warns_when_the_pool_is_spent():
         "cap": 10,
         "remaining": 0,
         "spent": True,
-        "last_run": False,
         "clock_live": False,
     }
     out = compose("review", workspace=None, project=None, user=None, context=ctx).text
-    assert "The pool is spent." in out
-    assert "No agent run will follow any state move you make" in out
+    assert "The pool is spent" in out
+    assert "No agent run will follow this one" in out
     assert "Re-tick" in out
 
 
 @pytest.mark.unit
-def test_lifecycle_warns_on_the_last_run():
-    ctx = _ctx("coding-task")
-    ctx["tick"] = {
-        **ctx["tick"],
-        "count": 9,
-        "cap": 10,
-        "remaining": 1,
-        "spent": False,
-        "last_run": True,
-        "clock_live": True,
-    }
-    out = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
-    assert "This is the last run in the pool." in out
+def test_lifecycle_spent_branch_covers_the_last_run(kind="coding-task"):
+    ctx = _ctx(kind)
+    ctx["tick"] = {**ctx["tick"], "count": 10, "cap": 10, "remaining": 0, "spent": True, "clock_live": False}
+    out = compose(kind, workspace=None, project=None, user=None, context=ctx).text
+    assert "this is the last run" in out
+    assert "Never press Re-tick yourself" in out
+    assert "from Paused" in out
+
+
+@pytest.mark.unit
+def test_cli_docs_put_re_tick_out_of_the_agents_hands():
+    out = compose("coding-task", workspace=None, project=None, user=None, context=_ctx("coding-task")).text
+    assert "`pidash issue re-tick`" in out
+    assert "refuses a re-tick that comes from inside an agent run" in out
 
 
 @pytest.mark.unit

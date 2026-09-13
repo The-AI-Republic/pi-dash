@@ -85,11 +85,13 @@ def move_projects_to_new_pool_default(apps, schema_editor):
     )
 
 
-def stamp_cap_hit_on_rows_over_the_new_pool(apps, schema_editor):
+def stamp_pool_spent_on_rows_over_the_new_pool(apps, schema_editor):
     """An armed ticker whose ``used`` already meets the (smaller) pool must
     not keep advertising a live clock: the scanner would never admit it, so
-    ``fire_tick`` would never write ``cap_hit`` and the card would show a
-    countdown forever. Stamp it now so Re-tick is offered."""
+    ``fire_tick`` would never stop it and the card would show a countdown
+    forever. Stamp it ``pool_spent`` — *not* ``cap_hit``, which is the one
+    reason that auto-Pauses an In Progress issue at its next run end — so the
+    issue stays in the bucket with Re-tick offered."""
     IssueAgentTicker = apps.get_model("db", "IssueAgentTicker")
     for ticker in IssueAgentTicker.objects.filter(enabled=True).select_related("issue__project").iterator():
         pool = ticker.issue.project.agent_default_max_ticks
@@ -97,7 +99,7 @@ def stamp_cap_hit_on_rows_over_the_new_pool(apps, schema_editor):
             continue
         if ticker.used >= pool + ticker.granted:
             ticker.enabled = False
-            ticker.disarm_reason = "cap_hit"
+            ticker.disarm_reason = "pool_spent"
             ticker.save(update_fields=["enabled", "disarm_reason"])
 
 
@@ -190,5 +192,5 @@ class Migration(migrations.Migration):
         migrations.RemoveField(model_name="project", name="agent_review_default_max_ticks"),
         migrations.RemoveField(model_name="project", name="agent_test_default_max_ticks"),
         # Only after the pool default is in place.
-        migrations.RunPython(stamp_cap_hit_on_rows_over_the_new_pool, noop),
+        migrations.RunPython(stamp_pool_spent_on_rows_over_the_new_pool, noop),
     ]

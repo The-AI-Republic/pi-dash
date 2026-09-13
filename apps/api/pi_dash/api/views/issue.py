@@ -912,6 +912,9 @@ class IssueReTickAPIEndpoint(BaseAPIView):
         )
         if issue is None:
             return Response({"error": "Work item not found"}, status=status.HTTP_404_NOT_FOUND)
+        refused = _refuse_agent_retick(request, issue)
+        if refused is not None:
+            return refused
 
         result = scheduling.re_tick_ticker(issue, actor=request.user)
         ticker = result["ticker"]
@@ -962,14 +965,21 @@ def resolve_moved_by_run(request, issue):
     agent move *on this issue* and is treated as a plain one. Only a
     malformed id, or a run the caller may not speak for, is refused.
     """
+    from pi_dash.runner.models import AgentRun
+
     raw = (request.headers.get(RUN_ID_HEADER) or "").strip()
     if not raw:
-        return None, None
+        # No header. An older ``pidash`` binary (pre ``PIDASH_RUN_ID``) sends
+        # none, yet its moves must still be agent moves — otherwise a mixed
+        # fleet gets free, uncounted entries on every stage move. This is
+        # the external (API-key) surface the agent's CLI uses; a run that is
+        # active on this issue and belongs to the caller is that agent.
+        inferred = _active_run_of_caller(request.user, issue)
+        return inferred, None
     try:
         run_id = uuid.UUID(raw)
     except (ValueError, TypeError):
         return None, f"{RUN_ID_HEADER} is not a UUID"
-    from pi_dash.runner.models import AgentRun
 
     run = AgentRun.objects.select_related("runner").filter(pk=run_id).first()
     if run is None:
@@ -979,6 +989,38 @@ def resolve_moved_by_run(request, issue):
     if run.work_item_id != issue.pk or not run.is_active:
         return None, None
     return run, None
+
+
+def _active_run_of_caller(user, issue):
+    """The active run on ``issue`` the caller may speak for, if any."""
+    from pi_dash.runner.models import AgentRun
+
+    for run in AgentRun.objects.select_related("runner").filter(work_item_id=issue.pk).order_by("-created_at")[:5]:
+        if run.is_active and run_belongs_to(user, run):
+            return run
+    return None
+
+
+def _refuse_agent_retick(request, issue):
+    """Re-tick is a human lever. A request that carries an active run of
+    this issue (the agent's CLI header) is refused — otherwise an agent could
+    grant itself budget and make the pool meaningless."""
+    raw = (request.headers.get(RUN_ID_HEADER) or "").strip()
+    if not raw:
+        return None
+    try:
+        run_id = uuid.UUID(raw)
+    except (ValueError, TypeError):
+        return None
+    from pi_dash.runner.models import AgentRun
+
+    run = AgentRun.objects.filter(pk=run_id, work_item_id=issue.pk).first()
+    if run is not None and run.is_active:
+        return Response(
+            {"error": "re-tick is a human action; it cannot be requested from inside an agent run"},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    return None
 
 
 class AgentRunYieldAPIEndpoint(BaseAPIView):

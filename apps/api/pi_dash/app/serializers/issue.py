@@ -1265,8 +1265,11 @@ class IssueDetailSerializer(IssueSerializer):
         # server would no-op (e.g. a cap-hit issue already auto-paused out
         # of a ticking state).
         from pi_dash.orchestration.agent_phases import is_ticking_state
+        from pi_dash.orchestration.scheduling import is_paused_state
 
-        can_re_tick = is_ticking_state(obj.state) and ticker.cap_reached()
+        # Re-tick is offered wherever the grant is honoured: in the bucket,
+        # and on the Paused state the cap-hit auto-pause parks issues in.
+        can_re_tick = (is_ticking_state(obj.state) or is_paused_state(obj.state)) and ticker.cap_reached()
         return {
             "enabled": ticker.enabled,
             "user_disabled": ticker.user_disabled,

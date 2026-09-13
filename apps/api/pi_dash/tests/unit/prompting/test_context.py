@@ -440,7 +440,6 @@ def test_context_tick_populated_from_ticker(issue, run, project):
         "cap": 10,
         "remaining": 5,
         "spent": False,
-        "last_run": False,
         "clock_live": True,
         "interval_seconds": 7200,
         "interval_human": "2 hours",
@@ -489,21 +488,24 @@ def test_context_tick_renders_when_ticker_stopped(issue, run):
 
 
 @pytest.mark.unit
-def test_context_tick_flags_spent_and_last_run(issue, run, project):
+def test_context_tick_spent_means_no_run_follows_this_one(issue, run, project):
+    """``used`` already counts the run being rendered when the ticker
+    started it, so ``remaining == 0`` is exactly "no machine-started run
+    follows" — there is no separate "last run" case to flag."""
     from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
 
     project.agent_default_max_ticks = 10
     project.save(update_fields=["agent_default_max_ticks"])
     ticker = IssueAgentTicker.objects.create(issue=issue, used=9)
     ctx = build_context(issue, run)
-    assert ctx["tick"]["last_run"] is True
     assert ctx["tick"]["spent"] is False
+    assert ctx["tick"]["remaining"] == 1
+    assert "last_run" not in ctx["tick"]
     ticker.used = 10
     ticker.save(update_fields=["used"])
     issue.refresh_from_db()
     ctx = build_context(issue, run)
     assert ctx["tick"]["spent"] is True
-    assert ctx["tick"]["last_run"] is False
     assert ctx["tick"]["remaining"] == 0
 
 

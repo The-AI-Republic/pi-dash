@@ -313,12 +313,15 @@ def test_fire_tick_dispatches_for_in_test_issue(
 
     sched.refresh_from_db()
     assert sched.used == 1
-    runs = AgentRun.objects.filter(work_item=issue, parent_run__isnull=False)
+    runs = AgentRun.objects.filter(work_item=issue).exclude(prompt="prior work")
     assert runs.count() == 1
     run = runs.get()
     assert run.trigger == "tick"
-    # The prompt kind is resolved from the state *at claim time*.
+    # The prompt kind is resolved from the state *at claim time* — and
+    # because the prior run was an implementation run, the test entry is a
+    # fresh session (no parent), exactly like a transition dispatch.
     assert run.phase_kind == "test"
+    assert run.parent_run_id is None
 
 
 @pytest.mark.unit
@@ -539,3 +542,23 @@ def test_fire_tick_rolls_back_pending_flags_when_dispatch_fails(
     assert sched.used == 4
     assert sched.pending_entry is True
     assert sched.pending_entry_free is True
+
+
+@pytest.mark.unit
+def test_fire_tick_bail_on_a_queued_entry_parks_as_pool_spent(seeded, issue, runner_for_workspace):
+    """The pool was lowered after an agent's move queued a counting entry:
+    the entry consumed nothing, so the clock stops as pool_spent — not the
+    auto-pausing cap_hit — and the issue stays where Re-tick can reach it."""
+    from pi_dash.db.models.issue_agent_ticker import TickerDisarmReason
+
+    _make_prior_run(issue, runner_for_workspace)
+    sched = _make_due_schedule(issue, used=8, pool=8)
+    sched.pending_entry = True
+    sched.pending_entry_free = False
+    sched.save(update_fields=["pending_entry", "pending_entry_free"])
+    assert fire_tick(str(sched.id)) is False
+    sched.refresh_from_db()
+    assert sched.used == 8
+    assert sched.enabled is False
+    assert sched.disarm_reason == TickerDisarmReason.POOL_SPENT
+    assert sched.pending_entry is False

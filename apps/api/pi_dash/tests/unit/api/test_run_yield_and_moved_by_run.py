@@ -221,10 +221,19 @@ def test_patch_with_run_id_header_and_spent_pool_parks(api_key_client, workspace
 
 
 @pytest.mark.unit
-def test_patch_without_header_is_a_human_move(api_key_client, workspace, issue, states, active_run):
-    """Same request, no header: a human move — free, and because a run is
-    active it is queued as a free entry."""
-    IssueAgentTicker.objects.create(issue=issue, used=10, enabled=False, disarm_reason="cap_hit")
+def test_patch_without_header_is_a_human_move(api_key_client, workspace, issue, states):
+    """No header and no active run of the caller's on this issue: a human
+    move — free, and because someone else's run is active it is queued as
+    a free entry."""
+    from pi_dash.db.models import User, WorkspaceMember
+
+    other = User.objects.create(email="member-d@example.com", username="member_d")
+    WorkspaceMember.objects.create(workspace=workspace, member=other, role=15)
+    AgentRun.objects.create(
+        workspace=workspace, created_by=other, work_item=issue,
+        status=AgentRunStatus.RUNNING, phase_kind="coding-task", prompt="x", started_at=timezone.now(),
+    )
+    IssueAgentTicker.objects.create(issue=issue, used=10, enabled=False, disarm_reason="pool_spent")
     resp = api_key_client.patch(
         _patch_url(workspace, issue), {"state": str(states["in_review"].id)}, format="json"
     )
@@ -233,6 +242,34 @@ def test_patch_without_header_is_a_human_move(api_key_client, workspace, issue, 
     assert ticker.pending_entry is True
     assert ticker.pending_entry_free is True
     assert ticker.used == 10
+
+
+@pytest.mark.unit
+def test_patch_without_header_from_the_callers_own_active_run_is_an_agent_move(
+    api_key_client, workspace, issue, states, active_run
+):
+    """An older ``pidash`` binary sends no header. Its moves must still be
+    agent moves: the caller owns the run that is active on this issue, so
+    the server infers it — a counted entry, and parking on a spent pool —
+    rather than handing out free runs to a mixed fleet."""
+    IssueAgentTicker.objects.create(issue=issue, used=2, enabled=True, next_run_at=timezone.now())
+    resp = api_key_client.patch(
+        _patch_url(workspace, issue), {"state": str(states["in_review"].id)}, format="json"
+    )
+    assert resp.status_code == http_status.HTTP_200_OK, resp.data
+    ticker = IssueAgentTicker.objects.get(issue=issue)
+    assert ticker.pending_entry is True
+    assert ticker.pending_entry_free is False
+
+
+@pytest.mark.unit
+def test_agent_cannot_re_tick_its_own_issue(api_key_client, workspace, issue, active_run):
+    IssueAgentTicker.objects.create(issue=issue, used=10, enabled=False, disarm_reason="pool_spent")
+    url = f"/api/v1/workspaces/{workspace.slug}/projects/{issue.project_id}/work-items/{issue.id}/re-tick/"
+    resp = api_key_client.post(url, {}, format="json", HTTP_X_PI_DASH_RUN_ID=str(active_run.id))
+    assert resp.status_code == http_status.HTTP_403_FORBIDDEN
+    ticker = IssueAgentTicker.objects.get(issue=issue)
+    assert ticker.granted == 0
 
 
 @pytest.mark.unit
