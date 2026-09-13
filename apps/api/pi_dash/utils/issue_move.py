@@ -278,9 +278,8 @@ def move_work_item_to_project(*, slug, project_id, pk, target_ref, actor, origin
             for inert_run in inert_runs:
                 inert_run.status = AgentRunStatus.CANCELLED
                 inert_run.ended_at = now
-                inert_run.queue_position = None
                 inert_run.save(
-                    update_fields=["status", "ended_at", "queue_position"]
+                    update_fields=["status", "ended_at"]
                 )
                 if inert_run.pod_id:
                     source_pods_to_drain.add(inert_run.pod_id)
@@ -298,8 +297,7 @@ def move_work_item_to_project(*, slug, project_id, pk, target_ref, actor, origin
                 }
                 handoff_parent.status = AgentRunStatus.CANCEL_REQUESTED
                 handoff_parent.run_config = run_config
-                handoff_parent.queue_position = None
-                handoff_parent.save(update_fields=["status", "run_config", "queue_position"])
+                handoff_parent.save(update_fields=["status", "run_config"])
                 cancel_after_commit = (
                     handoff_parent.runner_id,
                     handoff_parent.id,

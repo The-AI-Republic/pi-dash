@@ -261,9 +261,6 @@ def apply_run_resume_unavailable(
     run.runner = None
     run.pinned_runner = None
     run.assigned_at = None
-    # The run is no longer in any daemon's local worktree queue — drop a
-    # stale WAITING_FOR_WORKTREE position along with the assignment.
-    run.queue_position = None
     if run.parent_run is not None and run.parent_run.thread_id:
         run.parent_run.thread_id = ""
         run.parent_run.save(update_fields=["thread_id"])
@@ -273,7 +270,6 @@ def apply_run_resume_unavailable(
             "runner",
             "pinned_runner",
             "assigned_at",
-            "queue_position",
         ]
     )
 
@@ -414,9 +410,6 @@ def finalize_run_terminal(
     updates: Dict[str, Any] = {
         "status": new_status,
         "ended_at": timezone.now(),
-        # Belt-and-braces: a terminal run is out of every queue, so a stale
-        # WAITING_FOR_WORKTREE position must not survive on the closed row.
-        "queue_position": None,
     }
     if new_status == AgentRunStatus.COMPLETED:
         updates["done_payload"] = done_payload
