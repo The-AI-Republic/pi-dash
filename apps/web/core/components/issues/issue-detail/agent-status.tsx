@@ -94,8 +94,11 @@ function formatRunDone(count: number, t: TranslationFn): string {
 
 function formatTickBudget(ticker: TIssueAgentTicker | null | undefined, t: TranslationFn): string | null {
   if (!ticker) return null;
-  if (ticker.max_ticks === -1) return t("Tick {count}, no cap", { count: ticker.tick_count });
-  return t("Tick {count} of {max}", { count: ticker.tick_count, max: ticker.max_ticks });
+  // One pool per issue, spent in any stage; ``used`` falls back to the
+  // pre-pool ``tick_count`` spelling for older payloads.
+  const used = ticker.used ?? ticker.tick_count;
+  if (ticker.max_ticks === -1) return t("{count} runs used, no cap", { count: used });
+  return t("{count} of {max} runs used", { count: used, max: ticker.max_ticks });
 }
 
 function getPayloadString(payload: Record<string, unknown> | null | undefined, key: string): string | null {
@@ -325,7 +328,7 @@ function getTickerOnlyView(ticker: TIssueAgentTicker, now: number, t: Translatio
     };
   }
 
-  if (ticker.disarm_reason === "cap_hit") {
+  if (ticker.disarm_reason === "cap_hit" || ticker.disarm_reason === "pool_spent") {
     return {
       title: t("AI agent run limit reached"),
       detail: formatTickBudget(ticker, t),
@@ -415,7 +418,9 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
   if (!view) return null;
 
   const Icon = view.icon;
-  const nextTick = formatUntil(ticker?.next_run_at, now, t);
+  // A queued entry (design §4.5) is due now and starts the moment the
+  // active run ends — say so instead of "due now".
+  const nextTick = ticker?.pending_entry ? t("queued") : formatUntil(ticker?.next_run_at, now, t);
   const tickBudget = formatTickBudget(ticker, t);
 
   return (
@@ -480,7 +485,7 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
             <span className="text-body-xs-medium">{t("Re-tick")}</span>
           </Button>
           <p className="text-caption-sm-regular text-tertiary">
-            {t("Grant a fresh ticking budget so the AI agent resumes on its schedule.")}
+            {t("Add more runs to this issue's budget and start the AI agent now.")}
           </p>
         </div>
       )}

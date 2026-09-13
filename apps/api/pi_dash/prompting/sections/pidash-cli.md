@@ -15,6 +15,7 @@ The CLI reads the following from the process environment — never pass them as 
 - `PIDASH_WORKSPACE_SLUG` — the workspace the issue lives in.
 - `PIDASH_TOKEN` — session-scoped credential. Treat it like any other secret.
 {% if run.kind != "scheduler" %}- `PIDASH_ISSUE_IDENTIFIER` — the current issue identifier (`{{ issue.identifier }}`). When set, `pidash state list` defaults to this issue's project so you can call it with no args.
+- `PIDASH_RUN_ID` — this agent run (`{{ run.id }}`). The CLI sends it with every write so Pi Dash knows a state move or an outcome report came from *this run* rather than from a human. Never unset or override it.
 {% else %}- `PIDASH_PROJECT` — the project (`{{ project.identifier }}`) this scheduled run is scoped to. There is no single current issue — you operate across the project. Pass `--project {{ project.identifier }}` explicitly to commands that need it.
 {% endif %}
 ### Output contract
@@ -53,11 +54,17 @@ The workpad is your durable per-issue scratchpad — a single markdown document 
 
 - `pidash state list{% if run.kind == "scheduler" %} --project {{ project.identifier }}{% endif %}` — list the states available in {% if run.kind == "scheduler" %}this project{% else %}this issue's project{% endif %} with `name`, `group` (`backlog | unstarted | started | review | test | completed | cancelled`), and `description`.{% if run.kind != "scheduler" %} Uses `PIDASH_ISSUE_IDENTIFIER` by default; pass `pidash state list <issue-identifier>` or `pidash state list <project-uuid>` to override. Already rendered below under "Available states"; only call again if something looks stale.{% endif %}
 
-#### Debugging
+{% if run.kind != "scheduler" %}#### Run outcome
+
+- `pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--note "<one line>"]` — report this run's outcome to the ticking clock. Call it once, as your **last** `pidash` command, after any state move. See "Ending the run" for what each outcome means. Without it the clock guesses.
+
+{% endif %}#### Debugging
 
 - `pidash workspace me` — print the authenticated user. For sanity-checking credentials only; you should not need this in normal flow.
 
 ### Not for you
+
+- `pidash issue re-tick` — adds runs to the issue's budget. That is a **human** decision; the agent reports a spent pool and stops (see "Task lifecycle"). Pi Dash refuses a re-tick that comes from inside an agent run.
 
 The remaining `pidash` subcommands (`configure`, `install`, `uninstall`, `start`, `stop`, `restart`, `status`, `tui`, `doctor`, `remove`, `rotate`) manage the runner daemon itself — they are run by the human operator before your session starts. Do not invoke them. If any of them appears necessary, your run is blocked: follow "Blocking the run".
 
@@ -78,15 +85,24 @@ pidash comment add {{ issue.identifier }} --body-file ./.pidash-blocked.md --as-
 pidash issue patch {{ issue.identifier }} --state "Blocked"
 ```
 
-{% if run.kind == "coding-task" %}End a successful run (workpad already written via `pidash workpad update`) — whether you opened a PR or finished a `noncode` task (investigation, status check, comment-only response), move to the `review` group. The runner never moves an issue to `completed`/Done; a human closes it:
+{% if run.kind == "coding-task" %}End a successful run (workpad already written via `pidash workpad update`) — whether you opened a PR or finished a `noncode` task (investigation, status check, comment-only response), move to the `review` group and report the outcome. The runner never moves an issue to `completed`/Done; a human closes it:
 
 ```sh
 pidash issue patch {{ issue.identifier }} --state "In Review"
+pidash run yield --outcome done
 ```
-{% else %}End a successful review pass (workpad already written via `pidash workpad update`) — an **approved** review posts its summary and leaves the issue In Review; the runner never moves it to `completed`/Done (see "Review cycle" and "Available states"). If the issue is not already In Review, move it there; otherwise leave it in place:
+{% elif run.kind == "review" %}End a review pass (workpad `### Path to done` already written) — **approved** moves the issue on to In Test; **changes needed** sends it back to In Progress with the open items listed; the runner never moves it to `completed`/Done (see "Review cycle" and "Available states"):
 
 ```sh
-pidash issue patch {{ issue.identifier }} --state "In Review"
+pidash issue patch {{ issue.identifier }} --state "In Test"      # approved
+pidash issue patch {{ issue.identifier }} --state "In Progress"  # changes needed
+pidash run yield --outcome done
+```
+{% else %}End a test pass (workpad `### Path to done` already written) — a **pass** leaves the issue In Test for a human to close; **defects** send it back to In Progress with the open items listed (see "Test cycle" and "Available states"):
+
+```sh
+pidash issue patch {{ issue.identifier }} --state "In Progress"  # defects only
+pidash run yield --outcome done
 ```
 {% endif %}{% else %}File a finding as a new issue under this project:
 

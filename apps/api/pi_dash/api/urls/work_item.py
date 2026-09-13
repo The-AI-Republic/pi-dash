@@ -13,6 +13,7 @@ from pi_dash.api.views import (
     IssueDetailAPIEndpoint,
     IssueMoveAPIEndpoint,
     IssueReTickAPIEndpoint,
+    AgentRunYieldAPIEndpoint,
     IssueLinkListCreateAPIEndpoint,
     IssueLinkDetailAPIEndpoint,
     IssueCommentListCreateAPIEndpoint,
@@ -128,6 +129,11 @@ new_url_patterns = [
         "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:pk>/re-tick/",
         IssueReTickAPIEndpoint.as_view(http_method_names=["post"]),
         name="work-item-re-tick",
+    ),
+    path(
+        "workspaces/<str:slug>/agent-runs/<uuid:run_id>/yield/",
+        AgentRunYieldAPIEndpoint.as_view(http_method_names=["post"]),
+        name="agent-run-yield",
     ),
     path(
         "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/links/",

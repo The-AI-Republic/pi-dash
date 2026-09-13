@@ -106,6 +106,66 @@ def _latest_prior_run(issue: Issue) -> Optional[AgentRun]:
     return AgentRun.objects.filter(work_item=issue).order_by("-created_at").first()
 
 
+def parent_for_next_run(issue: Issue, state: Optional[State] = None, *, cross_stage: Optional[bool] = None):
+    """``(parent, fresh_session)`` for a run created on ``issue`` *now*.
+
+    ``state`` is the stage the run is for; defaults to ``issue.state`` (the
+    transition handler passes ``to_state``, since the instance it is handed
+    may still carry the previous state). ``cross_stage`` says whether the
+    latest run served a different stage; the handler knows it from the
+    transition, other callers derive it from the latest run's stamped
+    ``phase_kind``.
+
+    Shared by the transition dispatch, the ticker's queued entries and Run AI
+    so every path parents the same way (design §4.4):
+
+    - same stage as the latest run → continue from it;
+    - entering a stage whose ``fresh_session_on_entry`` is set (review,
+      test) → no parent, fresh session, so the stage prompt is the system
+      prompt;
+    - a hand-back into In Progress → the implementation run captured on the
+      way out (``ticker.resume_parent_run``), never the review / test run
+      that sent it back; none captured → fresh session.
+    """
+    from pi_dash.prompting.recipes import KIND_CODING_TASK
+
+    from pi_dash.orchestration.agent_phases import template_name_for
+    from pi_dash.prompting.recipes import kind_for
+
+    latest = _latest_prior_run(issue)
+    if latest is None:
+        return None, True
+    if state is None:
+        state = getattr(issue, "state", None)
+    cfg = phase_config_for(state)
+    if cfg is None:
+        return latest, False
+    if cross_stage is None:
+        latest_kind = getattr(latest, "phase_kind", "") or KIND_CODING_TASK
+        cross_stage = latest_kind != kind_for(template_name_for(state))
+    if not cross_stage:
+        return latest, False
+    if cfg.fresh_session_on_entry:
+        return None, True
+    ticker = getattr(issue, "agent_ticker", None)
+    if ticker is not None and ticker.resume_parent_run_id is not None:
+        return ticker.resume_parent_run, False
+    return None, True
+
+
+def _phase_kind_for_issue(issue: Issue) -> str:
+    """The prompt kind a run created for ``issue`` *now* will render.
+
+    Stamped on ``AgentRun.phase_kind`` so the clock's outcome guard can tell
+    whether a finished run still speaks for the issue's current stage
+    (``.ai_design/ticking_relevance/design.md`` §7).
+    """
+    from pi_dash.orchestration.agent_phases import template_name_for
+    from pi_dash.prompting.recipes import kind_for
+
+    return kind_for(template_name_for(getattr(issue, "state", None)))
+
+
 def _is_delegation_trigger(to_state: Optional[State]) -> bool:
     """A state transition triggers a run when ``to_state`` is one of the
     registered ticking states (see ``orchestration.agent_phases.PHASES``).
@@ -123,61 +183,76 @@ def handle_issue_state_transition(
     actor=None,
     *,
     dispatch_immediate: bool = True,
+    moved_by_run: Optional[AgentRun] = None,
 ) -> TransitionOutcome:
     """React to an issue state change.
 
-    Creates an ``AgentRun`` (and dispatches it to the runner) when the
-    transition matches the MVP trigger rule (``Todo -> In Progress``) and the
-    single-active-run guardrail allows it.
+    Classifies the move against the ticking bucket (In Progress / In Review
+    / In Test — ``.ai_design/ticking_relevance/design.md`` §4.0), sends the
+    matching event to the one clock (``scheduling.reconcile``), and creates
+    the entry run when the clock says the issue is free:
 
-    Also arms/disarms the per-issue ticker:
-
-    - Entering the literal "In Progress" state arms the ticker (or
-      re-arms it on Paused → In Progress).
-    - Leaving the Started group disarms the ticker.
+    - **Enters the bucket** or **moves between rooms**: a *human* move fires
+      one free entry run now (or queues it on the clock if a run is
+      active); an *agent* move (``moved_by_run`` set — the run patched the
+      state from inside itself, design §5.6) queues the entry on the
+      clock, where it counts against the pool, or fires nothing when the
+      pool is spent.
+    - **Leaves the bucket**: the clock goes dormant; the pool is kept.
 
     ``dispatch_immediate=False`` lets a caller (e.g., the Comment & Run
-    flow re-opening a Paused issue) arm the ticker without firing the
-    state-transition's own immediate dispatch — the caller will dispatch
-    its own run.
+    flow re-opening a Paused issue) update the clock without firing the
+    transition's own entry run — the caller will dispatch its own run.
     """
-    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
     from pi_dash.orchestration import scheduling
 
-    # Detect cross-phase transition (both states are ticking but in
-    # different groups). On started → review, capture the latest impl
-    # run as the resume parent so the reverse transition can restore
-    # that exact session. We read **before** the disarm/re-arm below so
-    # the captured run is genuinely the latest pre-review; we persist it
-    # after arming so upgraded issues that do not yet have a ticker row
-    # still get a resume target.
-    cross_phase = is_ticking_state(from_state) and is_ticking_state(to_state) and from_state.group != to_state.group
+    from_ticking = is_ticking_state(from_state)
+    to_ticking = is_ticking_state(to_state)
+    cross_stage = from_ticking and to_ticking and from_state.group != to_state.group
+
+    # Leaving In Progress (to any room): remember the latest implementation
+    # run so a later hand-back can parent off the implementation lineage
+    # rather than off a review/test run. Read *before* the clock update.
     resume_parent = None
-    if cross_phase and from_state.group == StateGroup.STARTED.value:
+    if cross_stage and from_state.group == StateGroup.STARTED.value:
         resume_parent = _latest_prior_run(issue)
 
-    # Disarm when leaving a ticking state into anything that isn't the
-    # *same* ticking state. Inter-phase transitions (e.g., In Progress
-    # → In Review) intentionally disarm-then-re-arm so the ticker row's
-    # runtime fields land on the new phase's defaults.
-    if is_ticking_state(from_state) and (not is_ticking_state(to_state) or from_state.group != to_state.group):
-        scheduling.disarm_ticker(issue)
+    if from_ticking and not to_ticking:
+        scheduling.reconcile(issue, scheduling.TickerEvent.left_bucket())
+        return TransitionOutcome(reason="not-a-trigger-state")
 
     if not _is_delegation_trigger(to_state):
         return TransitionOutcome(reason="not-a-trigger-state")
 
-    # Arming is independent of whether the immediate dispatch is fired by
-    # this handler or by the caller — the ticker is the steady-state tick
-    # source either way.
-    scheduling.arm_ticker(issue, dispatch_immediate=dispatch_immediate)
-    if resume_parent is not None:
-        IssueAgentTicker.objects.filter(issue=issue).update(resume_parent_run=resume_parent)
+    if from_ticking:
+        event = scheduling.TickerEvent.moved_stage(
+            moved_by_run=moved_by_run,
+            resume_parent=resume_parent,
+            want_run=dispatch_immediate,
+            actor=actor,
+        )
+    else:
+        event = scheduling.TickerEvent.entered_bucket(
+            moved_by_run=moved_by_run,
+            resume_parent=resume_parent,
+            want_run=dispatch_immediate,
+            actor=actor,
+        )
+    decision = scheduling.reconcile(issue, event)
 
     if not dispatch_immediate:
         return TransitionOutcome(reason="dispatch-deferred-to-caller")
+    if decision.parked:
+        return TransitionOutcome(reason="pool-spent")
+    if decision.queued:
+        return TransitionOutcome(reason="entry-queued")
+    if not decision.dispatch_now:
+        return TransitionOutcome(reason=decision.reason or "no-dispatch")
 
     existing_active = _active_run_for(issue)
     if existing_active is not None:
+        # Raced with a run created between reconcile's check and here; the
+        # clock is armed, so the next tick covers it.
         logger.info(
             "orchestration: skip run creation for issue %s — active run %s",
             issue.id,
@@ -185,43 +260,9 @@ def handle_issue_state_transition(
         )
         return TransitionOutcome(reason="active-run-exists")
 
-    # Parent resolution for the dispatched run depends on the phase
-    # transition shape:
-    #
-    # - Cross-phase entry into a phase whose ``fresh_session_on_entry``
-    #   is True (today: review): dispatch with parent_run=None and
-    #   pinned_runner_id cleared. The new phase's prompt template lands
-    #   as the actual system prompt rather than as a user-turn message
-    #   on a resumed session.
-    # - Cross-phase entry into a phase whose ``fresh_session_on_entry``
-    #   is False (today: started, e.g., review → In Progress
-    #   hand-back): use ``ticker.resume_parent_run`` (the impl run we
-    #   stashed on the forward transition) as the parent so the agent
-    #   resumes the original implementation thread instead of
-    #   parenting off a review run.
-    # - Same-phase or first-time entry: today's behavior — parent =
-    #   _latest_prior_run(issue).
-    fresh_session = False
-    parent = _latest_prior_run(issue)
-    to_cfg = phase_config_for(to_state)
-    if cross_phase and to_cfg is not None:
-        if to_cfg.fresh_session_on_entry:
-            fresh_session = True
-            parent = None
-        else:
-            ticker = IssueAgentTicker.objects.filter(issue=issue).first()
-            if ticker is not None and ticker.resume_parent_run_id is not None:
-                parent = ticker.resume_parent_run
-            else:
-                # No resume target captured. This happens when the
-                # forward path skipped the impl phase (e.g.,
-                # Todo → In Review → In Progress): there's no
-                # implementation session to resume, and the latest
-                # prior run is a review run — wrong parent for an
-                # impl-phase dispatch. Fall back to a fresh session
-                # rather than parenting off the review run.
-                fresh_session = True
-                parent = None
+    # Parent + session shape follow the shared stage rule (``parent_for_next_run``)
+    # so a dispatch-now entry and a queued entry are built the same way.
+    parent, fresh_session = parent_for_next_run(issue, to_state, cross_stage=cross_stage)
 
     creator = actor or _resolve_fallback_creator(issue)
     if creator is None:
@@ -339,27 +380,6 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
         )
         return ContinuationOutcome(reason="state-not-eligible")
 
-    # Re-arm on human comment. Comment is engagement; engagement
-    # restarts automatic ticking (see design §4.6). Honors
-    # ``user_disabled`` via ``arm_ticker``. Done before any of the
-    # coalesce / active-run / no-pod early returns so the ticker
-    # restarts even when this specific comment doesn't dispatch a
-    # new run (the existing run / queued follow-up will pick up the
-    # comment, and the next tick happens automatically). The
-    # no-prior-run case also re-arms — ``fire_tick`` will still skip
-    # those ticks via its own no-prior-run guard, so the ticker row
-    # is harmless until something else creates a run.
-    from pi_dash.orchestration import scheduling
-
-    if is_ticking_state(issue.state):
-        try:
-            scheduling.arm_ticker(issue, dispatch_immediate=False)
-        except Exception:
-            logger.exception(
-                "orchestration.continuation: re-arm failed for issue=%s",
-                issue.pk,
-            )
-
     prior = _latest_prior_run(issue)
     if prior is None:
         logger.info("orchestration.continuation: skip issue=%s reason=no-prior-run", issue.pk)
@@ -374,10 +394,6 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
     if queued_follow_up is not None:
         return ContinuationOutcome(coalesced_into=queued_follow_up, reason="coalesced")
 
-    # Don't wake while a run is already in flight; terminate sweep handles it.
-    if prior.is_active:
-        return ContinuationOutcome(reason="prior-run-active")
-
     pod = _resolve_pod_for_issue(issue)
     if pod is None:
         logger.warning(
@@ -387,13 +403,40 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
         )
         return ContinuationOutcome(reason="no-pod-available")
 
-    return _create_continuation_run(
-        issue=issue,
-        parent=prior,
-        creator=comment.actor,
-        pod=pod,
-        trigger=AgentRunTrigger.COMMENT_AND_RUN,
-    )
+    # A human comment is engagement: one free run (design §5.2). If a run
+    # is in flight, the clock queues the follow-up and fires it as soon as
+    # the issue is free (design §4.5); otherwise re-time the clock and
+    # dispatch now — in one transaction, so a dispatch that produces no run
+    # leaves the clock exactly as it was.
+    from pi_dash.orchestration import scheduling
+
+    with transaction.atomic():
+        if is_ticking_state(issue.state):
+            decision = scheduling.reconcile(
+                issue,
+                scheduling.TickerEvent.human_run_requested(
+                    actor=comment.actor, trigger=AgentRunTrigger.COMMENT_AND_RUN.value
+                ),
+            )
+            if decision.queued:
+                return ContinuationOutcome(reason="entry-queued")
+
+        # Don't wake while a run is already in flight; the queued entry (or
+        # the terminate sweep) handles it.
+        if prior.is_active:
+            transaction.set_rollback(True)
+            return ContinuationOutcome(reason="prior-run-active")
+
+        outcome = _create_continuation_run(
+            issue=issue,
+            parent=prior,
+            creator=comment.actor,
+            pod=pod,
+            trigger=AgentRunTrigger.COMMENT_AND_RUN,
+        )
+        if outcome.created_run is None:
+            transaction.set_rollback(True)
+        return outcome
 
 
 def _create_continuation_run(*, issue: Issue, parent: AgentRun, creator, pod, trigger: str) -> ContinuationOutcome:
@@ -440,6 +483,7 @@ def _create_continuation_run(*, issue: Issue, parent: AgentRun, creator, pod, tr
             pinned_runner=pinned_runner,
             status=AgentRunStatus.QUEUED,
             trigger=trigger,
+            phase_kind=_phase_kind_for_issue(issue),
             prompt="",
             run_config={
                 "repo_url": (issue.project.repo_url or None),
@@ -746,6 +790,7 @@ def _create_and_dispatch_run(
             pinned_runner=pinned_runner,
             status=AgentRunStatus.QUEUED,
             trigger=trigger,
+            phase_kind=_phase_kind_for_issue(issue),
             prompt="",  # populated below before dispatch
             run_config=_run_config_for_issue(issue),
             **execution,

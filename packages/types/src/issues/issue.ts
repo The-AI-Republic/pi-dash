@@ -112,16 +112,26 @@ type IssueRelation = {
 export type TIssueAgentTicker = {
   enabled: boolean;
   user_disabled: boolean;
+  /** Machine-started runs used from this issue's pool (any stage, for the
+   * life of the issue). ``tick_count`` is the pre-pool spelling. */
+  used: number;
   tick_count: number;
+  /** Extra runs a human added with Re-tick. */
+  granted?: number;
+  /** Pool cap: project default + ``granted``; -1 means no cap. */
   max_ticks: number;
+  /** Runs left in the pool; null when there is no cap. */
+  remaining?: number | null;
   interval_seconds: number;
+  /** An entry run is owed and starts as soon as the active run ends. */
+  pending_entry?: boolean;
   next_run_at: string | null;
   last_tick_at: string | null;
-  disarm_reason?: "" | "left_ticking_state" | "cap_hit" | "terminal_signal" | "user_disabled";
+  disarm_reason?: "" | "left_ticking_state" | "cap_hit" | "pool_spent" | "terminal_signal" | "user_disabled";
   /** True only when re-ticking would actually do something: the issue is
-   * still in a ticking state (In Progress / In Review) AND its current tick
-   * budget is exhausted. Gates the "re-tick" button so it never appears
-   * when the server would no-op. */
+   * still in a ticking state (In Progress / In Review / In Test) AND its
+   * pool is spent. Gates the "re-tick" button so it never appears when the
+   * server would no-op. */
   can_re_tick?: boolean;
 };
 

@@ -162,28 +162,26 @@ def _humanize_interval(seconds: int) -> str:
 
 
 def _tick_context(issue: Issue) -> Optional[Dict[str, Any]]:
-    """Surface the issue's ticking schedule, or ``None`` when it isn't live.
+    """Surface the issue's budget pool and clock for the prompt.
 
-    Lets the prompt tell the agent it is being re-invoked on a cadence and
-    how much tick budget remains before the cap-hit auto-pause. ``cap`` /
-    ``remaining`` are ``None`` for an infinite (``-1``) cap so templates can
-    branch with ``{% if tick.cap is not none %}``.
+    One pool per issue (``.ai_design/ticking_relevance/design.md`` §5.3):
+    the agent is told how many machine-started runs the issue has used and
+    how many remain **including when the clock is stopped** — that is
+    exactly the spent-pool case the budget line exists to warn about.
+    ``cap`` / ``remaining`` are ``None`` for an infinite (``-1``) pool so
+    templates can branch with ``{% if tick.cap is not none %}``.
 
-    Returns ``None`` — so the templates' "Pi Dash automatically re-invokes
-    the agent" block does not render — when no ticker row exists, when the
-    ticker is disarmed (cap hit, user disabled, left the ticking state:
-    promising automatic re-invocation would be false and invites the agent
-    to defer work to a tick that never fires), or when the configured
-    cadence is nonsense (the project-default interval/cap fields are
-    API-writable with no validation; "every 0 hours" or "of -2 ticks"
-    must not reach a prompt).
+    Returns ``None`` only when no ticker row exists (the issue has never
+    entered the ticking bucket) or when the configured cadence is nonsense
+    (the project fields are API-writable with no validation; "every 0
+    hours" or "of -2 runs" must not reach a prompt).
     """
     from pi_dash.db.models.issue_agent_ticker import INFINITE_MAX_TICKS
 
     # Reverse OneToOne — RelatedObjectDoesNotExist subclasses AttributeError,
     # so getattr's default covers issues that never armed a ticker.
     ticker = getattr(issue, "agent_ticker", None)
-    if ticker is None or not ticker.enabled:
+    if ticker is None:
         return None
     cap = ticker.effective_max_ticks()
     interval = ticker.effective_interval_seconds()
@@ -192,10 +190,15 @@ def _tick_context(issue: Issue) -> Optional[Dict[str, Any]]:
     if cap != INFINITE_MAX_TICKS and cap < 0:
         return None
     unlimited = cap == INFINITE_MAX_TICKS
+    remaining = None if unlimited else max(0, cap - ticker.used)
     return {
-        "count": ticker.tick_count,
+        "count": ticker.used,
         "cap": None if unlimited else cap,
-        "remaining": None if unlimited else max(0, cap - ticker.tick_count),
+        "remaining": remaining,
+        # ``used`` already counts this run when the ticker started it, so
+        # ``remaining == 0`` means "no machine-started run follows this one".
+        "spent": (not unlimited) and remaining == 0,
+        "clock_live": bool(ticker.enabled),
         "interval_seconds": interval,
         "interval_human": _humanize_interval(interval),
     }

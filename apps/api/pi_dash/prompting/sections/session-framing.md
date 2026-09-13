@@ -15,7 +15,7 @@ The agent executes general tasks, including coding and non-coding work. A Git re
 ## Why this run started
 
 {% if run.trigger == "tick" %}
-This run was fired **automatically by the issue's ticker** — a scheduled re-invocation, not a human action. Treat it as a checkpoint on work already in flight: re-read the workpad and the comment thread, work out what (if anything) changed since the prior run, and continue the plan from there. The comment thread inlined in this prompt was captured when this run was created — a human comment may have arrived since, so check `pidash comment list` for anything newer before concluding nothing changed; if a newer human comment exists, treat this run as comment-triggered and address it. If nothing has changed and no plan item is actionable, do **not** redo or re-validate work already recorded as done — confirm the workpad is accurate and exit promptly{% if run.kind == "review" %} (emit `noop`){% endif %}. Spending a tick on "nothing to do" is fine; repeating finished work is not.
+This run was fired **automatically by the issue's ticker** — a scheduled re-invocation, not a human action. Treat it as a checkpoint on work already in flight: re-read the workpad and the comment thread, work out what (if anything) changed since the prior run, and continue the plan from there. The comment thread inlined in this prompt was captured when this run was created — a human comment may have arrived since, so check `pidash comment list` for anything newer before concluding nothing changed; if a newer human comment exists, treat this run as comment-triggered and address it. If nothing has changed and no plan item is actionable, do **not** redo or re-validate work already recorded as done — confirm the workpad is accurate, report `pidash run yield --outcome done` (review / test — the stage is still satisfied) or `--outcome progressed` (In Progress), and exit promptly. Spending a tick on "nothing to do" is fine; repeating finished work is not.
 {% elif run.trigger == "comment_and_run" %}
 This run was triggered by **a new human comment** on the issue. The latest human comment(s) are the reason you are here — read the comment thread first and address them before resuming the broader plan.
 {% elif run.trigger == "run_ai" %}
@@ -26,7 +26,7 @@ This run started because the issue **just entered its current state**. This is t
 Work out where things stand from the workpad and the comment thread, then continue the plan.
 {% endif %}
 {% if tick %}
-Ticking schedule: while this issue stays in its current state, Pi Dash automatically re-invokes the agent about every {{ tick.interval_human }}. This issue has used {{ tick.count }}{% if tick.cap is not none %} of {{ tick.cap }}{% endif %} ticks{% if tick.remaining is not none %} ({{ tick.remaining }} remaining before the issue auto-pauses for human attention){% endif %}. Every run — tick or otherwise — is a fresh session like this one: anything not written to the workpad, the comments, or the repo is lost between runs.
+Budget: this issue has used {{ tick.count }}{% if tick.cap is not none %} of {{ tick.cap }}{% endif %} agent runs{% if tick.remaining is not none %} ({{ tick.remaining }} remaining){% endif %} — one pool for the life of the issue, across all three stages; see "Task lifecycle" for what that means for this run. Every run — tick or otherwise — is a fresh session like this one: anything not written to the workpad, the comments, or the repo is lost between runs.
 {% endif %}
 {% endif %}
 ## Tool prerequisites

@@ -44,6 +44,7 @@ fn non_service_commands_still_present() {
         "comment",
         "state",
         "workpad",
+        "run",
         "workspace",
         "update",
     ] {

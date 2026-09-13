@@ -599,9 +599,9 @@ def test_comment_and_run_creates_continuation_with_parent_link(db, session_clien
 
 
 @pytest.mark.unit
-def test_comment_and_run_resets_schedule(db, session_client, workspace, project):
-    """The endpoint must reset ``tick_count`` and bump ``next_run_at`` —
-    that's what makes Comment & Run a fresh budget grant per §4.6 step 4."""
+def test_comment_and_run_is_free_and_retimes_schedule(db, session_client, workspace, project):
+    """Comment & Run is a human-started run: it never touches the pool
+    counter, and it re-times ``next_run_at`` toward NOW + interval."""
     from datetime import timedelta
 
     from django.utils import timezone
@@ -610,10 +610,10 @@ def test_comment_and_run_resets_schedule(db, session_client, workspace, project)
 
     issue, _ = _make_in_progress_issue_with_paused_run(workspace)
     sched = IssueAgentTicker.objects.get(issue=issue)
-    sched.tick_count = 7
+    sched.used = 7
     stale = timezone.now() + timedelta(hours=2)
     sched.next_run_at = stale
-    sched.save(update_fields=["tick_count", "next_run_at"])
+    sched.save(update_fields=["used", "next_run_at"])
 
     resp = session_client.post(
         "/api/runners/runs/",
@@ -626,7 +626,7 @@ def test_comment_and_run_resets_schedule(db, session_client, workspace, project)
     )
     assert resp.status_code == status.HTTP_201_CREATED
     sched.refresh_from_db()
-    assert sched.tick_count == 0
+    assert sched.used == 7
     # next_run_at moved off the stale future timestamp toward NOW + interval.
     assert sched.next_run_at != stale
 
@@ -832,9 +832,12 @@ def test_run_ai_requires_work_item(db, session_client, workspace, project):
 
 
 @pytest.mark.unit
-def test_run_ai_returns_409_when_active_run_exists(db, session_client, workspace, project):
-    """Single-active-run guardrail applies: a Run AI click while an
-    active run exists is a 409, not a duplicate dispatch."""
+def test_run_ai_queues_when_active_run_exists(db, session_client, workspace, project):
+    """Single-active-run guardrail still holds — no duplicate dispatch — but a
+    Run AI click while a run is active is not refused any more: the clock
+    queues a free entry run that fires as soon as the issue is free
+    (design §4.5), and the endpoint says so with a 202."""
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
     from pi_dash.prompting.seed import seed_default_template
 
     seed_default_template()
@@ -852,7 +855,12 @@ def test_run_ai_returns_409_when_active_run_exists(db, session_client, workspace
         },
         format="json",
     )
-    assert resp.status_code == status.HTTP_409_CONFLICT
+    assert resp.status_code == status.HTTP_202_ACCEPTED
+    assert resp.data["queued"] is True
+    assert AgentRun.objects.filter(work_item=issue).count() == 1
+    ticker = IssueAgentTicker.objects.get(issue=issue)
+    assert ticker.pending_entry is True
+    assert ticker.pending_entry_free is True
 
 
 @pytest.mark.unit
@@ -1017,18 +1025,17 @@ def test_no_skip_header_creates_run_on_state_change(db, session_client, workspac
 
 
 @pytest.mark.unit
-def test_comment_and_run_prompt_renders_post_reset_budget(db, session_client, workspace, project):
-    """The ticker reset must land BEFORE the prompt renders — otherwise the
-    prompt bakes in the stale pre-reset count ("used 7 of 24 ticks") that
-    this very request refunds."""
+def test_comment_and_run_prompt_renders_the_pool(db, session_client, workspace, project):
+    """The prompt shows the pool as it is — a human-started run neither
+    spends nor refunds it."""
     from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
     from pi_dash.prompting.seed import seed_default_template
 
     seed_default_template()
     issue, _ = _make_in_progress_issue_with_paused_run(workspace)
     sched = IssueAgentTicker.objects.get(issue=issue)
-    sched.tick_count = 7
-    sched.save(update_fields=["tick_count"])
+    sched.used = 7
+    sched.save(update_fields=["used"])
 
     resp = session_client.post(
         "/api/runners/runs/",
@@ -1041,15 +1048,16 @@ def test_comment_and_run_prompt_renders_post_reset_budget(db, session_client, wo
     )
     assert resp.status_code == status.HTTP_201_CREATED
     run = AgentRun.objects.get(pk=resp.data["id"])
-    assert "used 0 of" in run.prompt
-    assert "used 7 of" not in run.prompt
+    assert "used 7 of" in run.prompt
+    assert run.trigger == "comment_and_run"
+    assert run.phase_kind == "coding-task"
 
 
 @pytest.mark.unit
 def test_comment_and_run_409_leaves_ticker_untouched(db, session_client, workspace, project):
-    """When the dispatch bails (no prior run → 409) the pre-dispatch ticker
-    reset must roll back: the user didn't trigger a new invocation, so the
-    cap budget must not be refunded nor the next-tick clock pushed out."""
+    """When the dispatch bails (no prior run → 409) the ticker must be
+    untouched — neither the pool nor the clock: a click that produced no run
+    must not re-arm a parked issue."""
     from datetime import timedelta
 
     from crum import impersonate
@@ -1076,9 +1084,9 @@ def test_comment_and_run_409_leaves_ticker_untouched(db, session_client, workspa
     AgentRun.objects.filter(work_item=issue).delete()
     sched = IssueAgentTicker.objects.get(issue=issue)
     stale = timezone.now() + timedelta(hours=2)
-    sched.tick_count = 7
+    sched.used = 7
     sched.next_run_at = stale
-    sched.save(update_fields=["tick_count", "next_run_at"])
+    sched.save(update_fields=["used", "next_run_at"])
 
     resp = session_client.post(
         "/api/runners/runs/",
@@ -1091,5 +1099,7 @@ def test_comment_and_run_409_leaves_ticker_untouched(db, session_client, workspa
     )
     assert resp.status_code == status.HTTP_409_CONFLICT
     sched.refresh_from_db()
-    assert sched.tick_count == 7
+    assert sched.used == 7
+    # The clock re-time and the dispatch share one transaction: a click
+    # that produced no run leaves the ticker exactly as it was.
     assert sched.next_run_at == stale

@@ -20,6 +20,7 @@ from .issue import (
     IssueDetailAPIEndpoint,
     IssueMoveAPIEndpoint,
     IssueReTickAPIEndpoint,
+    AgentRunYieldAPIEndpoint,
     LabelListCreateAPIEndpoint,
     LabelDetailAPIEndpoint,
     IssueLinkListCreateAPIEndpoint,
