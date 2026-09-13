@@ -26,8 +26,7 @@ import logging
 
 from celery import shared_task
 from django.db import transaction
-from django.db.models import Case, F, Q, When
-from django.db.models.functions import Coalesce
+from django.db.models import F, Q
 from django.utils import timezone
 
 from pi_dash.db.models.issue_agent_ticker import (
@@ -35,12 +34,7 @@ from pi_dash.db.models.issue_agent_ticker import (
     IssueAgentTicker,
     TickerDisarmReason,
 )
-from pi_dash.orchestration.agent_phases import (
-    CADENCE_FIELDS,
-    DEFAULT_CADENCE_KEY,
-    cadence_fields_by_group,
-    is_ticking_state,
-)
+from pi_dash.orchestration.agent_phases import is_ticking_state
 
 logger = logging.getLogger("pi_dash.worker")
 
@@ -53,44 +47,20 @@ def scan_due_tickers() -> int:
     Returns the number of fan-outs (mostly for logging / tests).
     """
     now = timezone.now()
-    # Effective cap = the phase's own override if set, else the phase's
-    # own project default. This is the SQL mirror of
-    # ``IssueAgentTicker.effective_max_ticks``, so both are generated
-    # from the same phase registry rather than hand-written per phase.
-    # One ``When`` per ticking group; states outside the registry fall
-    # through to the implementation pair. This branches on the group
-    # alone — unlike the Python resolver it cannot also check the state
-    # *name*, so a custom state inside a ticking group may be admitted
-    # here against the wrong pair; ``fire_tick`` re-checks
-    # ``is_ticking_state`` under the row lock and drops it, so the scan
-    # only ever over-admits. ``-1`` means infinite — admit
-    # unconditionally. See ``.ai_design/create_review_state/design.md``
-    # §7.5.
-    by_group = cadence_fields_by_group()
-    default_fields = CADENCE_FIELDS[DEFAULT_CADENCE_KEY]
-    effective_cap = Case(
-        *[
-            When(
-                issue__state__group=group,
-                then=Coalesce(
-                    F(fields.ticker_max_ticks),
-                    F(f"issue__project__{fields.project_max_ticks}"),
-                ),
-            )
-            for group, fields in by_group.items()
-        ],
-        default=Coalesce(
-            F(default_fields.ticker_max_ticks),
-            F(f"issue__project__{default_fields.project_max_ticks}"),
-        ),
-    )
+    # One pool per issue: cap = project pool + Re-tick grants; ``-1`` means
+    # infinite. A row owing a *pending entry* (design §4.5) is admitted
+    # regardless of cap — a human's free run must fire even on a spent
+    # pool; ``fire_tick`` re-evaluates the cap after the claim.
     due_ids = list(
         IssueAgentTicker.objects.filter(
             enabled=True,
             next_run_at__lte=now,
         )
-        .annotate(_cap=effective_cap)
-        .filter(Q(_cap=INFINITE_MAX_TICKS) | Q(tick_count__lt=F("_cap")))
+        .filter(
+            Q(pending_entry=True)
+            | Q(issue__project__agent_default_max_ticks=INFINITE_MAX_TICKS)
+            | Q(used__lt=F("issue__project__agent_default_max_ticks") + F("granted"))
+        )
         .order_by("next_run_at")
         .values_list("id", flat=True)
     )
@@ -110,6 +80,7 @@ def fire_tick(ticker_id: str) -> bool:
     state, run already in flight, etc.).
     """
     from pi_dash.orchestration.scheduling import (
+        TRIGGER_RUN_AI,
         TRIGGER_TICK,
         dispatch_continuation_run,
     )
@@ -132,13 +103,20 @@ def fire_tick(ticker_id: str) -> bool:
         if ticker.next_run_at is None or ticker.next_run_at > now:
             return False
 
+        # A pending entry (design §4.5) fires even on a spent pool when it
+        # is free (human-started); an agent-queued entry on a spent pool
+        # cannot exist (reconcile parks the issue instead), so the cap
+        # check below only ever stops timer ticks.
+        free_claim = ticker.pending_entry and ticker.pending_entry_free
         cap = ticker.effective_max_ticks()
-        if cap != INFINITE_MAX_TICKS and ticker.tick_count >= cap:
+        if not free_claim and cap != INFINITE_MAX_TICKS and ticker.used >= cap:
             # Already at cap — disarm and bail.
             ticker.enabled = False
             ticker.disarm_reason = TickerDisarmReason.CAP_HIT
+            ticker.pending_entry = False
+            ticker.pending_entry_free = False
             ticker.save(
-                update_fields=["enabled", "disarm_reason", "updated_at"]
+                update_fields=["enabled", "disarm_reason", "pending_entry", "pending_entry_free", "updated_at"]
             )
             return False
 
@@ -175,13 +153,20 @@ def fire_tick(ticker_id: str) -> bool:
         # dispatch's own re-check). Without rollback the tick budget is
         # silently burned and the ticker may auto-disarm at cap on a
         # tick that never produced a run.
-        prev_tick_count = ticker.tick_count
+        prev_used = ticker.used
         prev_next_run_at = ticker.next_run_at
         prev_enabled = ticker.enabled
         prev_disarm_reason = ticker.disarm_reason
+        prev_pending_entry = ticker.pending_entry
+        prev_pending_entry_free = ticker.pending_entry_free
 
-        ticker.tick_count = ticker.tick_count + 1
+        # Only machine-started runs spend the pool: a timer tick, or an
+        # entry an agent's own move queued. A human's free entry does not.
+        if not free_claim:
+            ticker.used = ticker.used + 1
         ticker.last_tick_at = now
+        ticker.pending_entry = False
+        ticker.pending_entry_free = False
         from pi_dash.db.models.issue_agent_ticker import jitter_seconds
         from datetime import timedelta
 
@@ -189,7 +174,7 @@ def fire_tick(ticker_id: str) -> bool:
         ticker.next_run_at = now + timedelta(seconds=interval + jitter_seconds(interval))
 
         cap_hit_now = (
-            cap != INFINITE_MAX_TICKS and ticker.tick_count >= cap
+            cap != INFINITE_MAX_TICKS and ticker.used >= cap
         )
         if cap_hit_now:
             # Disarm immediately (no more fires); the In Progress → Paused
@@ -199,11 +184,13 @@ def fire_tick(ticker_id: str) -> bool:
 
         ticker.save(
             update_fields=[
-                "tick_count",
+                "used",
                 "last_tick_at",
                 "next_run_at",
                 "enabled",
                 "disarm_reason",
+                "pending_entry",
+                "pending_entry_free",
                 "updated_at",
             ]
         )
@@ -212,7 +199,13 @@ def fire_tick(ticker_id: str) -> bool:
     # other tx-bounded readers and so drain_pod_by_id (which is scheduled
     # via transaction.on_commit inside _create_continuation_run) actually
     # fires.
-    run = dispatch_continuation_run(issue, triggered_by=TRIGGER_TICK)
+    # A free claim is a human-started run that had to wait for the issue to
+    # be free (Run AI / Comment & Run / a human move while a run was active);
+    # it renders as one, so per-user overrides apply and it does not count.
+    run = dispatch_continuation_run(
+        issue,
+        triggered_by=TRIGGER_RUN_AI if free_claim else TRIGGER_TICK,
+    )
     if run is None:
         # Dispatch failed post-claim — restore the ticker so the budget
         # isn't wasted and any cap-disarm we just applied is undone.
@@ -225,7 +218,7 @@ def fire_tick(ticker_id: str) -> bool:
                 .first()
             )
             if rollback is not None:
-                rollback.tick_count = prev_tick_count
+                rollback.used = prev_used
                 rollback.next_run_at = prev_next_run_at
                 rollback.enabled = prev_enabled
                 # Restore the captured pre-claim reason. fire_tick only
@@ -234,12 +227,16 @@ def fire_tick(ticker_id: str) -> bool:
                 # consistent with the other prev_* fields and survives
                 # any future weakening of that early-return invariant.
                 rollback.disarm_reason = prev_disarm_reason
+                rollback.pending_entry = prev_pending_entry
+                rollback.pending_entry_free = prev_pending_entry_free
                 rollback.save(
                     update_fields=[
-                        "tick_count",
+                        "used",
                         "next_run_at",
                         "enabled",
                         "disarm_reason",
+                        "pending_entry",
+                        "pending_entry_free",
                         "updated_at",
                     ]
                 )
@@ -249,10 +246,11 @@ def fire_tick(ticker_id: str) -> bool:
         )
         return False
     logger.info(
-        "agent_ticker.fire_tick: dispatched run=%s issue=%s tick_count=%d cap_hit=%s",
+        "agent_ticker.fire_tick: dispatched run=%s issue=%s used=%d free=%s cap_hit=%s",
         run.pk,
         issue.pk,
-        ticker.tick_count,
+        ticker.used,
+        free_claim,
         cap_hit_now,
     )
     return True

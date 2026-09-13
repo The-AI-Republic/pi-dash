@@ -1270,12 +1270,20 @@ class IssueDetailSerializer(IssueSerializer):
         return {
             "enabled": ticker.enabled,
             "user_disabled": ticker.user_disabled,
-            "tick_count": ticker.tick_count,
+            # One pool per issue: ``used`` of ``max_ticks`` (project pool +
+            # Re-tick grants). ``tick_count`` is the pre-pool spelling.
+            "used": ticker.used,
+            "tick_count": ticker.used,
+            "granted": ticker.granted,
             "max_ticks": ticker.effective_max_ticks(),
+            "remaining": ticker.remaining(),
             "interval_seconds": ticker.effective_interval_seconds(),
             "next_run_at": ticker.next_run_at.isoformat() if ticker.next_run_at else None,
             "last_tick_at": ticker.last_tick_at.isoformat() if ticker.last_tick_at else None,
             "disarm_reason": ticker.disarm_reason,
+            # An entry run is owed and fires as soon as the issue is free
+            # (design §4.5) — the card shows "next run queued".
+            "pending_entry": ticker.pending_entry,
             "can_re_tick": can_re_tick,
         }
 

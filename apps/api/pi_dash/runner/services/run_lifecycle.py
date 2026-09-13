@@ -123,12 +123,11 @@ def _apply_post_run_orchestration(run: AgentRun) -> None:
     "post-run" rather than "terminal" — paused runs are not terminal
     but still need the same hooks.
 
-    Order matters: terminal-disarm must run before deferred-pause so the
-    deferred-pause hook sees the latest disarm reason. Both helpers are
-    idempotent and safe to call on paused runs — the payload-status
-    gate inside ``maybe_disarm_on_terminal_signal`` only fires on
-    completed/blocked, and the CAP_HIT gate inside
-    ``maybe_apply_deferred_pause`` skips terminal-signal disarms.
+    Order matters: the run's outcome (``RUN_ENDED`` → ``reconcile``) must
+    be applied before the deferred pause so that hook sees the latest
+    disarm reason. Both are idempotent: ``reconcile`` ignores a run whose
+    stage the issue has already left (design §7 guard), and the CAP_HIT
+    gate inside ``maybe_apply_deferred_pause`` skips terminal-signal stops.
 
     Each side-effect is wrapped in its own try/except so a failure in one
     does not block the other or the surrounding drain.
@@ -141,11 +140,34 @@ def _apply_post_run_orchestration(run: AgentRun) -> None:
     try:
         maybe_disarm_on_terminal_signal(run)
     except Exception:
-        logger.exception("orchestration.error: terminal-disarm failed for run %s", run.pk)
+        logger.exception("orchestration.error: run-ended reconcile failed for run %s", run.pk)
     try:
         maybe_apply_deferred_pause(run)
     except Exception:
         logger.exception("orchestration.error: deferred-pause failed for run %s", run.pk)
+    # A queued entry run (design §4.5) is due *now*; don't make it wait for
+    # the scanner's next pass.
+    try:
+        _fire_pending_entry(run)
+    except Exception:
+        logger.exception("orchestration.error: pending-entry fire failed for run %s", run.pk)
+
+
+def _fire_pending_entry(run: AgentRun) -> None:
+    """Sub-minute pickup for an entry run the clock is holding (design §4.5)."""
+    if run.work_item_id is None:
+        return
+    from pi_dash.bgtasks.agent_ticker import fire_tick
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    ticker_id = (
+        IssueAgentTicker.objects.filter(issue_id=run.work_item_id, enabled=True, pending_entry=True)
+        .values_list("id", flat=True)
+        .first()
+    )
+    if ticker_id is None:
+        return
+    transaction.on_commit(lambda: fire_tick.delay(str(ticker_id)))
 
 
 def apply_run_paused(

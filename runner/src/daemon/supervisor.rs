@@ -2669,6 +2669,24 @@ impl AssignWorker {
         repo_url: Option<String>,
         expected_codex_model: Option<String>,
     ) -> Result<()> {
+        // Scope the run id over everything this run does so every agent
+        // subprocess the bridges spawn (and re-spawn per turn) inherits
+        // `PIDASH_RUN_ID` — see `util::shell::RUN_ENV`.
+        crate::util::shell::RUN_ENV
+            .scope(
+                crate::util::shell::RunEnv { run_id },
+                self.handle_assign_inner(run_id, prompt, repo_url, expected_codex_model),
+            )
+            .await
+    }
+
+    async fn handle_assign_inner(
+        &mut self,
+        run_id: uuid::Uuid,
+        prompt: String,
+        repo_url: Option<String>,
+        expected_codex_model: Option<String>,
+    ) -> Result<()> {
         // Resolve the directory the agent runs in: this runner's single,
         // exclusive `workspace.working_dir`. Clone-bootstrap it once if a repo
         // url is provided (`resolve` tolerates a non-git task folder too).

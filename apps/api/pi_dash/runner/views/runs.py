@@ -368,16 +368,10 @@ class AgentRunListEndpoint(APIView):
         if not is_workspace_member(request.user, issue.workspace_id):
             return Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        queued = self._human_run_clock(issue)
+        if queued is not None:
+            return queued
         with transaction.atomic():
-            # Run AI is explicit human re-engagement — mirror the Comment
-            # & Run reset so the next automatic tick budget restarts
-            # cleanly. Reset BEFORE dispatch: the prompt renders the tick
-            # budget at dispatch time, so resetting after would bake the
-            # stale pre-reset count ("23 of 24 used") into a prompt whose
-            # budget this same request just refunded. The rollback below
-            # keeps the reset conditional on a run actually committing
-            # (active-run-exists / no-pod return None).
-            scheduling.reset_ticker_after_comment_and_run(issue)
             run = scheduling.dispatch_run_ai_run(issue, actor=request.user)
             if run is None:
                 transaction.set_rollback(True)
@@ -390,6 +384,32 @@ class AgentRunListEndpoint(APIView):
             AgentRunSerializer(run).data,
             status=status.HTTP_201_CREATED,
         )
+
+    @staticmethod
+    def _human_run_clock(issue):
+        """Tell the issue's clock a human asked for a run (design §5.2 / §4.5).
+
+        A human-started run is free and always fires. If a run is already
+        active the clock queues the entry and fires it as soon as the issue
+        is free — return the 202 for that case; otherwise ``None`` and the
+        caller dispatches now.
+        """
+        from pi_dash.orchestration import scheduling
+        from pi_dash.orchestration.agent_phases import is_ticking_state
+
+        if not is_ticking_state(issue.state):
+            return None
+        decision = scheduling.reconcile(issue, scheduling.TickerEvent.human_run_requested())
+        if decision.queued:
+            return Response(
+                {
+                    "queued": True,
+                    "reason": decision.reason,
+                    "detail": "a run is active on this work item; the next run is queued and starts when it ends",
+                },
+                status=status.HTTP_202_ACCEPTED,
+            )
+        return None
 
     def _post_comment_and_run(self, request):
         """Dispatch a follow-up run for an issue (Comment & Run button).
@@ -414,18 +434,10 @@ class AgentRunListEndpoint(APIView):
         if not is_workspace_member(request.user, issue.workspace_id):
             return Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        queued = self._human_run_clock(issue)
+        if queued is not None:
+            return queued
         with transaction.atomic():
-            # Reset BEFORE dispatch: the prompt renders the tick budget at
-            # dispatch time, so resetting after would bake the stale
-            # pre-reset count into the prompt this same request refunds.
-            # The reset must still only stick when the dispatch actually
-            # commits a run — otherwise (active-run-exists / no-prior-run
-            # / no-pod, all of which return None) the user's existing
-            # tick_count and next_run_at must stay intact: they didn't
-            # trigger a new invocation, so the cap budget shouldn't be
-            # refunded and the next-tick clock shouldn't be pushed out.
-            # Hence the rollback instead of a conditional reset.
-            scheduling.reset_ticker_after_comment_and_run(issue)
             run = scheduling.dispatch_continuation_run(
                 issue,
                 triggered_by=scheduling.TRIGGER_COMMENT_AND_RUN,
@@ -449,12 +461,12 @@ class AgentRunListEndpoint(APIView):
 
 
 class AgentReTickEndpoint(APIView):
-    """Re-grant a fresh tick budget to an exhausted issue ticker.
+    """Re-grant budget to an issue whose pool is spent, and start a run now.
 
     Manual "re-ticking" from the issue detail AgentRun card. Body must
-    include ``work_item`` (issue id). Grants an extra phase-sized budget
-    and re-arms the ticker **only** when the issue is still in a ticking
-    state and the current budget is exhausted; otherwise it is a no-op.
+    include ``work_item`` (issue id). Adds the project's Re-tick grant to
+    the pool and fires a run **only** when the issue is still in a ticking
+    state and the pool is exhausted; otherwise it is a no-op.
     See ``scheduling.re_tick_ticker`` for the exact rules.
     """
 
@@ -488,16 +500,19 @@ class AgentReTickEndpoint(APIView):
         if not is_workspace_member(request.user, issue.workspace_id):
             return Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        result = scheduling.re_tick_ticker(issue)
+        result = scheduling.re_tick_ticker(issue, actor=request.user)
         ticker = result["ticker"]
         payload = {
             "granted": result["granted"],
             "reason": result["reason"],
+            "run_id": str(result["run"].id) if result.get("run") is not None else None,
         }
         if ticker is not None:
-            payload["tick_count"] = ticker.tick_count
+            payload["used"] = ticker.used
+            payload["tick_count"] = ticker.used
             payload["max_ticks"] = ticker.effective_max_ticks()
             payload["enabled"] = ticker.enabled
+            payload["pending_entry"] = ticker.pending_entry
             payload["next_run_at"] = ticker.next_run_at.isoformat() if ticker.next_run_at else None
         return Response(payload, status=status.HTTP_200_OK)
 
