@@ -82,16 +82,21 @@ pidash runner add --project <PROJECT> [--name <NAME>] [--workspace <SLUG>]
                   [--pod <POD>] [--working-dir <PATH>] [--agent codex|claude-code]
 ```
 
-| Flag                | Purpose                                                            |
-| ------------------- | ------------------------------------------------------------------ |
-| `--project <P>`     | Project identifier (slug or UUID). **Required.**                   |
-| `--name <N>`        | Human-friendly runner name. Auto-generated if omitted.             |
-| `--workspace <S>`   | Workspace slug. Required if you belong to multiple workspaces.     |
-| `--pod <P>`         | Pod within the project. Defaults to project's default pod.         |
-| `--working-dir <P>` | Local working dir for clones. Defaults to a path under `data_dir`. |
-| `--agent <K>`       | `codex` (default) or `claude-code`.                                |
+| Flag                     | Purpose                                                                                                                |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| `--project <P>`          | Project identifier (slug or UUID). **Required.**                                                                       |
+| `--name <N>`             | Human-friendly runner name. Auto-generated if omitted.                                                                 |
+| `--workspace <S>`        | Workspace slug. Required if you belong to multiple workspaces.                                                         |
+| `--pod <P>`              | Pod within the project. Defaults to project's default pod.                                                             |
+| `--working-dir <P>`      | Local working dir for clones. Defaults to a path under `data_dir`.                                                     |
+| `--agent <K>`            | Which agent CLI the runner drives: `codex` (default), `claude-code`, `cursor-agent`, `open-claw`, `grok`, `muse-code`. |
+| `--model <M>`            | Default LLM model for the agent. Omit to use the agent's own default.                                                  |
+| `--reasoning-effort <T>` | Codex reasoning tier (`low`/`medium`/`high`/`xhigh`). `--agent codex` only.                                            |
+| `--skip-agent-install`   | Don't auto-install the agent CLI if it's missing; you'll install it yourself.                                          |
 
 On the first runner: installs the OS service (systemd user unit / launchd agent / Windows scheduled task) and starts the daemon.
+
+If the selected agent's CLI isn't installed, `runner add` installs it by invoking the vendor's own official install script (never a bundled binary), records the installed binary's absolute path in the runner config, and prints the one login step still needed. On any install failure it falls back to opening the vendor's install page. Pass `--skip-agent-install` to opt out. See the [runner README](../../runner/README.md#agent-cli-auto-install) for details.
 
 ### `pidash runner list`
 

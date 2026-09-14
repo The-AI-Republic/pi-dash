@@ -108,6 +108,12 @@ pub struct AddArgs {
     /// Only applies when `--agent codex`; ignored for other agents.
     #[arg(long)]
     pub reasoning_effort: Option<String>,
+
+    /// Don't auto-install the selected agent's CLI when it's missing. Use this
+    /// if you manage agent installs yourself. The runner is still registered;
+    /// `pidash doctor` reports the agent as missing until you install it.
+    #[arg(long)]
+    pub skip_agent_install: bool,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -309,14 +315,19 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         }
     }
 
-    // Nudge the operator to install the agent CLI — done LAST, after login +
-    // enrollment + service setup have all succeeded. Opening the install page
-    // up front fought the device-login browser tab (and made the operator wait
-    // out the countdown before auth even started); deferring it means the page
-    // opens cleanly once the runner is actually registered. Non-fatal: the
-    // binary only has to exist by the time the daemon picks up a run, and
-    // `pidash doctor` re-checks it.
-    remind_if_agent_missing(args.agent).await;
+    // Install the agent CLI if it's missing — done LAST, after login +
+    // enrollment + service setup have all succeeded. Running it up front fought
+    // the device-login browser tab; deferring it means the install runs cleanly
+    // once the runner is actually registered. Non-fatal: the binary only has to
+    // exist by the time the daemon picks up a run, and `pidash doctor` re-checks
+    // it. On failure this falls back to opening the vendor's install page.
+    crate::cli::agent_install::ensure_agent_installed(
+        paths,
+        applied.runner.runner_id,
+        args.agent,
+        args.skip_agent_install,
+    )
+    .await;
 
     Ok(applied.runner)
 }
@@ -359,58 +370,6 @@ fn hostname_or_unknown() -> String {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown-host".to_string())
-}
-
-/// When Pi Dash can't run the selected agent's CLI on this dev machine,
-/// remind the operator how to install it and open the agent's official
-/// install page in their browser.
-///
-/// Non-fatal by design: `pidash runner add` still registers the runner.
-/// The agent binary only has to exist by the time the daemon spawns a run,
-/// and `pidash doctor` re-checks it — so we nudge rather than block. The
-/// presence probe goes through the same platform spawn helper the daemon uses
-/// (see [`crate::util::shell::binary_runs_version`]) so this reminder matches
-/// whether a real run can launch the agent.
-///
-/// The browser is only opened when attached to a terminal; in CI / piped
-/// invocations we just print the URL (spawning a browser there is noise and
-/// usually fails silently anyway). Both `add` call sites are CLI flows
-/// (`pidash runner add` and `pidash auth login`'s onboarding prompt); the
-/// TUI add-runner modal uses a different path, so printing here is safe.
-async fn remind_if_agent_missing(agent: AgentKind) {
-    let binary = agent.default_binary();
-    if crate::util::shell::binary_runs_version(binary).await {
-        return;
-    }
-
-    let name = agent.display_name();
-    let url = agent.install_page_url();
-    println!();
-    println!("⚠ Pi Dash could not run the {name} CLI (`{binary}`) on this machine.");
-    println!(
-        "  This runner drives {name}, so its runs will fail until `{binary}` is installed and runnable on PATH."
-    );
-    println!("  Install it from: {url}");
-
-    if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
-        use std::io::Write;
-        // Give the operator a few seconds to read the warning before the
-        // browser grabs window focus. Counts down in place; Ctrl-C during the
-        // wait still aborts `runner add`.
-        const COUNTDOWN_SECS: u32 = 5;
-        print!("  Opening the install page in your browser in ");
-        let _ = std::io::stdout().flush();
-        for n in (1..=COUNTDOWN_SECS).rev() {
-            print!("{n}… ");
-            let _ = std::io::stdout().flush();
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
-        println!();
-        match crate::util::browser::open_url(url) {
-            Ok(()) => println!("  (Opened the install page in your default browser.)"),
-            Err(_) => println!("  (Open the link above to install, then re-run if needed.)"),
-        }
-    }
 }
 
 pub fn list(paths: &Paths) -> Result<()> {
