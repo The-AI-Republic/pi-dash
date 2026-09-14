@@ -69,7 +69,7 @@ def _parse_cron_field(spec: str, *, lo: int, hi: int) -> _CronField:
     ``N-M/K``, and comma-separated lists thereof."""
     spec = spec.strip()
     if not spec:
-        raise CronConversionError(f"empty cron field")
+        raise CronConversionError("empty cron field")
     if spec == "*":
         return _CronField(values=None)
 

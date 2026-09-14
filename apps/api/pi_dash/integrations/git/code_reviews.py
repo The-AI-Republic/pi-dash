@@ -8,7 +8,6 @@ from django.db import IntegrityError
 
 from pi_dash.db.models import (
     GitCodeReviewLink,
-    GitProviderAccount,
     GitRepository,
     GitRepositoryBinding,
     GithubPullRequestLink,

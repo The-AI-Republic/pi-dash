@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-import pytest
 
 from pi_dash.assistant import ssrf
 from pi_dash.assistant.serializers import UserLLMConfigSerializer

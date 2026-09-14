@@ -12,7 +12,6 @@ from __future__ import annotations
 from unittest import mock
 
 import pytest
-from django.db import IntegrityError
 
 from pi_dash.db.models import Scheduler
 from pi_dash.scheduler.builtins import (
