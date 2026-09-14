@@ -29,6 +29,10 @@ pub struct ProjectRow {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    /// Bound git remote for the project, if any. Lets an agent match a local
+    /// checkout to a project. Empty when the project has no repository bound.
+    #[serde(default)]
+    pub repo_url: String,
     #[serde(default)]
     pub is_default: bool,
 }

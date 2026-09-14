@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use directories::ProjectDirs;
+use directories::{BaseDirs, ProjectDirs};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -12,6 +12,13 @@ pub struct Paths {
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
     pub runtime_dir: PathBuf,
+    /// Directory holding the machine-level `context.md` (all projects in every
+    /// bound workspace). Follows `PIDASH_CONFIG_DIR` / `--config-dir` when an
+    /// override is set, otherwise `~/.pidash`. A hardcoded `~/.pidash` would be
+    /// a second, non-overridable location; the desktop app and CI both run
+    /// isolated installs that pass an override and must not write into the real
+    /// home directory.
+    pub machine_context_dir: PathBuf,
 }
 
 /// Per-instance filesystem paths under `data_dir/runners/<runner_id>/`. Each
@@ -31,7 +38,19 @@ impl Paths {
     ) -> Result<Self> {
         let dirs = ProjectDirs::from(QUALIFIER, ORG, APP)
             .context("unable to resolve XDG project directories")?;
-        let config_dir = config_override.unwrap_or_else(|| dirs.config_dir().to_path_buf());
+        let config_dir = config_override
+            .clone()
+            .unwrap_or_else(|| dirs.config_dir().to_path_buf());
+        // Machine-context location (D1): an explicit override wins so isolated
+        // installs (desktop, CI) stay self-contained; otherwise the real home
+        // directory's `.pidash`; and if the home directory can't be resolved,
+        // fall back to the config directory rather than an unwritable path.
+        let machine_context_dir = match config_override {
+            Some(dir) => dir,
+            None => BaseDirs::new()
+                .map(|base| base.home_dir().join(".pidash"))
+                .unwrap_or_else(|| config_dir.clone()),
+        };
         // An isolated daemon must also get an isolated PID and IPC socket.
         // Otherwise the desktop and a personal installation claim the same
         // XDG runtime path even though their configuration and data differ.
@@ -48,11 +67,19 @@ impl Paths {
             config_dir,
             data_dir,
             runtime_dir,
+            machine_context_dir,
         })
     }
 
     pub fn config_path(&self) -> PathBuf {
         self.config_dir.join("config.toml")
+    }
+
+    /// Machine-level `context.md`: the workspace-wide lookup table listing every
+    /// project in every bound workspace. See `machine_context_dir` for the
+    /// location rule.
+    pub fn machine_context_path(&self) -> PathBuf {
+        self.machine_context_dir.join("context.md")
     }
 
     pub fn credentials_path(&self) -> PathBuf {
@@ -175,7 +202,32 @@ mod tests {
             config_dir: base.join("config"),
             data_dir: base.join("data"),
             runtime_dir: base.join("runtime"),
+            machine_context_dir: base.join("config"),
         }
+    }
+
+    #[test]
+    fn machine_context_dir_follows_config_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let override_dir = tmp.path().join("isolated-config");
+        let paths = Paths::resolve(Some(override_dir.clone()), None).unwrap();
+        assert_eq!(paths.machine_context_dir, override_dir);
+        assert_eq!(
+            paths.machine_context_path(),
+            override_dir.join("context.md")
+        );
+    }
+
+    #[test]
+    fn machine_context_dir_defaults_to_home_pidash() {
+        // No override: the machine file lives in the real home directory's
+        // `.pidash`, not the XDG config dir.
+        let paths = Paths::resolve(None, None).unwrap();
+        let expected = BaseDirs::new()
+            .map(|base| base.home_dir().join(".pidash"))
+            .unwrap_or_else(|| paths.config_dir.clone());
+        assert_eq!(paths.machine_context_dir, expected);
+        assert_eq!(paths.machine_context_path(), expected.join("context.md"));
     }
 
     #[test]
