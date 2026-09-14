@@ -31,6 +31,13 @@ type Props = {
   onClose: () => void;
   workspaceId: string;
   workspaceSlug: string;
+  /**
+   * Route project UUID when the modal is opened from the project-scoped
+   * AI Workers page (/<workspace>/projects/<projectId>/runners). When set,
+   * the Project field is prefilled with the matching project and locked;
+   * left undefined on the workspace-wide page for today's pick-a-project flow.
+   */
+  projectId?: string;
 };
 
 // Mirrors the runner CLI's ``--agent`` value-enum (kebab-case). Keep in
@@ -93,7 +100,11 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 const machineDisplayLabel = (machine: IDevMachine): string => machine.label || machine.host_label || machine.id;
 
 export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
-  const { isOpen, onClose, workspaceId, workspaceSlug } = props;
+  const { isOpen, onClose, workspaceId, workspaceSlug, projectId } = props;
+  // Lock the Project picker when the modal is scoped to a route project —
+  // creating a runner for a different project from inside a project page is
+  // confusing; the workspace-wide page covers the cross-project case.
+  const projectLocked = Boolean(projectId);
   const { t } = useTranslation();
   const [origin, setOrigin] = useState(() => (typeof window !== "undefined" ? window.location.origin : ""));
 
@@ -124,6 +135,9 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   // One-shot per open: auto-select the first connected machine once the
   // machine list arrives, unless the user already touched the picker.
   const autoSelectedMachine = useRef(false);
+  // One-shot per open: prefill the project field from the route projectId
+  // once the projects list arrives (project-scoped page only).
+  const prefilledProject = useRef(false);
 
   // Reset everything on close→open. State persists between consecutive
   // opens otherwise (RHF + local command state would carry the stale
@@ -135,6 +149,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
     }
     pollCancelled.current = false;
     autoSelectedMachine.current = false;
+    prefilledProject.current = false;
     setRunnerCommand(null);
     setRemoteCreate(null);
     setLastSubmitted(null);
@@ -182,6 +197,19 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   );
   const selectedProject = watch("projectIdentifier");
   const selectedPodName = watch("podName");
+
+  // Prefill the project field from the route projectId once the projects
+  // list arrives (project-scoped page). One-shot per open — the reset effect
+  // clears the ref so the prefill re-applies each time the modal reopens.
+  // The form stores the project *identifier* (e.g. PDASHOSS01), resolved from
+  // the projects-lite list by matching on the route UUID.
+  useEffect(() => {
+    if (prefilledProject.current || !isOpen || !projectId) return;
+    const match = projects?.find((p) => p.id === projectId);
+    if (!match) return;
+    prefilledProject.current = true;
+    setValue("projectIdentifier", match.identifier, { shouldValidate: true });
+  }, [isOpen, projectId, projects, setValue]);
   const { data: pods, error: podsError } = useSWR<IPod[]>(isOpen && workspaceId ? ["pods", workspaceId] : null, () =>
     podService.list(workspaceId)
   );
@@ -453,7 +481,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                   input
                   maxHeight="lg"
                   placement="bottom-start"
-                  disabled={!projects || projects.length === 0}
+                  disabled={projectLocked || !projects || projects.length === 0}
                 >
                   <>
                     {(projects ?? []).map((p) => (
