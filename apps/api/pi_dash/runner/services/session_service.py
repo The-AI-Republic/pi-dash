@@ -248,7 +248,6 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
         AgentRun.objects.filter(id__in=stopped_cancel_ids).update(
             status=AgentRunStatus.CANCELLED,
             ended_at=now,
-            queue_position=None,
         )
         stale = stale.exclude(id__in=stopped_cancel_ids)
 
