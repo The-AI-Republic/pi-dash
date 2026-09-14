@@ -89,6 +89,28 @@ fn legacy_connect_command_exists_but_is_hidden() {
 }
 
 #[test]
+fn workpad_update_has_keep_flag() {
+    // `workpad update` deletes the --body-file on a successful upload; --keep
+    // opts out. Assert the flag is registered so callers can rely on it.
+    let cmd = Cli::command();
+    let workpad = cmd
+        .find_subcommand("workpad")
+        .expect("`workpad` subcommand should be registered");
+    let update = workpad
+        .find_subcommand("update")
+        .expect("`workpad update` subcommand should be registered");
+    let keep = update
+        .get_arguments()
+        .find(|a| a.get_id() == "keep")
+        .expect("`workpad update` must expose a `--keep` flag");
+    assert_eq!(
+        keep.get_long(),
+        Some("keep"),
+        "the keep argument must be spelled `--keep`",
+    );
+}
+
+#[test]
 fn binary_help_omits_hidden_commands() {
     // Render long help the way clap would print it on `pidash --help`, then
     // scan for hidden commands. Hidden subcommands are excluded from both
