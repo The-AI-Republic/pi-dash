@@ -36,12 +36,12 @@ tokio = { version = "1", features = [
     "time",
     "fs",
 ] }
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
-    "rustls-tls",
+    "rustls-tls-native-roots",
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
