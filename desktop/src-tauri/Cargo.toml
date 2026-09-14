@@ -26,6 +26,7 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 # Only for SIGTERM on the bundled daemon: killing it outright would turn a
