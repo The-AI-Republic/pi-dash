@@ -209,6 +209,34 @@ def test_engine_version_is_length_capped(bundled_runner):
     assert len(bundled_runner.dev_metadata["codex_version"]) <= 64
 
 
+def test_apply_hello_emits_engine_version_log_event(bundled_runner, caplog):
+    """Design §15.1: a ``managed_runner.engine_version`` structured event is
+    logged at session open so support can see which bundled build reported in."""
+    import logging
+
+    from pi_dash.runner.services.session_service import apply_hello
+
+    with caplog.at_level(logging.INFO, logger="pi_dash.runner.services.session_service"):
+        apply_hello(bundled_runner, {"os": "linux", "engine_version": "codex 1.2.3"})
+
+    events = [r.getMessage() for r in caplog.records if "managed_runner.engine_version" in r.getMessage()]
+    assert len(events) == 1
+    assert f"runner={bundled_runner.id}" in events[0]
+    assert "version=codex 1.2.3" in events[0]
+
+
+def test_apply_hello_omits_engine_version_log_when_not_reported(bundled_runner, caplog):
+    """A daemon that never sends ``engine_version`` produces no log noise."""
+    import logging
+
+    from pi_dash.runner.services.session_service import apply_hello
+
+    with caplog.at_level(logging.INFO, logger="pi_dash.runner.services.session_service"):
+        apply_hello(bundled_runner, {"os": "linux", "version": "0.1.21"})
+
+    assert not [r for r in caplog.records if "managed_runner.engine_version" in r.getMessage()]
+
+
 def test_apply_hello_persists_agent_kind_capability(bundled_runner):
     """The daemon reports the ``AgentKind`` it drives; we persist it as an
     ``agent:<kind>`` capability so diagnostics can identify the agent exactly."""
