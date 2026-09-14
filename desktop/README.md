@@ -133,18 +133,32 @@ exchange appears to succeed and every subsequent API call is unauthenticated.
 
 The bundled SPA loads from `tauri://localhost` (Linux/macOS) or
 `http://tauri.localhost` (Windows; Tauri's `useHttpsScheme` is off) and makes
-credentialed XHRs to `VITE_API_BASE_URL`. The server's CORS and CSRF
-allowlists must include those origins (for the community server, add them to
-`CORS_ALLOWED_ORIGINS`).
+credentialed requests to `VITE_API_BASE_URL`. Because that origin differs from
+the API origin, a self-hosted server must allow it. Add all three forms —
+`tauri://localhost`, `http://tauri.localhost`, `https://tauri.localhost` — to
+`CORS_ALLOWED_ORIGINS`. The community server derives `CSRF_TRUSTED_ORIGINS`
+from that same list (`settings/common.py`), so one setting covers both the
+CORS check on XHRs and the CSRF origin check on any cross-origin form `POST`;
+listing the origins there is what a self-hoster actually needs.
 
-Signing in from the desktop requires a server that implements the desktop
-sign-in hand-off: the identity provider redirects to
-`pidash://auth/callback?code=…&state=…`, and `main.rs` navigates the webview
-to `PI_DASH_URL/api/auth/desktop-exchange/?code=…&state=…`, which must set the
-session cookies and mark the session as a desktop session (see
-`apps/api/pi_dash/ee/authentication/desktop.py`). The community server does
-not implement this yet, so the plain build shows a sign-in card that points
-users at the web app.
+There are two separate sign-in mechanisms; don't conflate "no external-browser
+hand-off" with "cannot sign in":
+
+- **External-browser hand-off (OIDC / cloud edition).** OIDC and other external
+  identity providers cannot run inside a webview, so the IdP redirects to
+  `pidash://auth/callback?code=…&state=…`, and `main.rs` navigates the webview
+  to `PI_DASH_URL/api/auth/desktop-exchange/?code=…&state=…`, which sets the
+  session cookies and marks the session as a desktop session (see
+  `apps/api/pi_dash/ee/authentication/desktop.py`). This exists only because the
+  IdP lives outside the app; it is a cloud-edition constraint, not a
+  prerequisite for signing in at all.
+- **Direct email-first sign-in (OSS).** OSS auth is email-first against
+  `/auth/get-csrf-token/` plus a Django session cookie, so a self-hosted server
+  can authenticate the desktop directly without any browser hand-off — it needs
+  the CORS/CSRF origins above, not the OIDC exchange. The community build
+  currently still ships a sign-in card that points users at the web app;
+  presenting the OSS web sign-in form in the desktop window instead is in
+  progress.
 
 The bundled agent additionally needs the server to offer a model lane for the
 desktop engine (`agent_model_profile_for_user` in
