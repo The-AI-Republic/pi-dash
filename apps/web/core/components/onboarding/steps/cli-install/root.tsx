@@ -163,8 +163,8 @@ export function CliInstallStep({ handleStepChange }: Props) {
   return (
     <div className="flex flex-col gap-10">
       <CommonOnboardingHeader
-        title="Install the Pi Dash CLI."
-        description="Run this on the machine where your coding agent will execute work."
+        title="Connect your AI agents with Pi Dash"
+        description="The Pi Dash CLI connects your AI agents to Pi Dash so you can delegate tasks to them. Install it on the machine where your coding agent will execute work."
       />
 
       <div className="flex gap-2 text-warning-primary">
