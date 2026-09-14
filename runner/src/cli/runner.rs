@@ -338,6 +338,7 @@ async fn ensure_cli_token(
             url: cloud_url.map(|u| u.trim_end_matches('/').to_string()),
             no_browser: !std::io::stderr().is_terminal() && !std::io::stdin().is_terminal(),
             workspace: workspace.map(str::to_string),
+            force: false,
         },
         paths,
     )
