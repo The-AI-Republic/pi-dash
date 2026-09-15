@@ -304,6 +304,21 @@ impl IpcServer {
                     })?;
                 Ok(Response::Ack)
             }
+            // Local chat (PDASHOSS01-159, IPC v4). The wire protocol
+            // lands ahead of the daemon-side chat runtime (slice 1b), so
+            // this daemon knows the message types but cannot yet service
+            // them. Answer with a clear `501` rather than a serde-level
+            // failure, matching the forward-compat contract documented
+            // on `IPC_VERSION`. The desktop transport keys off this code
+            // to fall back to "engine chat unavailable on this build".
+            Request::ChatWarm { .. }
+            | Request::ChatSend { .. }
+            | Request::ChatCancel { .. }
+            | Request::ChatClose { .. }
+            | Request::ChatDecide { .. } => Ok(Response::Error(RpcError {
+                code: 501,
+                message: "local chat not implemented on this daemon".to_string(),
+            })),
         }
     }
 
