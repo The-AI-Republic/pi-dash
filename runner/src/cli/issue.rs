@@ -61,6 +61,16 @@ pub enum IssueCommand {
         /// Project-scoped identifier, e.g. `ENG-42`.
         identifier: String,
     },
+    /// Start an agent run on a work item, identical to clicking "Run AI" in
+    /// the web app (same prompt, ticker reset, and runner pinning). Use it to
+    /// kick an agent that has stalled or not picked up a reply. Prints the
+    /// dispatched run as JSON. Exits non-zero when no run could be dispatched
+    /// (a 409 whose body carries a machine-readable `reason`:
+    /// `active_run_exists` | `no_pod` | `no_eligible_runner`).
+    RunAi {
+        /// Project-scoped identifier, e.g. `ENG-42`.
+        identifier: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -199,6 +209,7 @@ pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
         IssueCommand::AttachReview(a) => cmd_attach_review(&client, a).await,
         IssueCommand::AttachPr(a) => cmd_attach_review(&client, a).await,
         IssueCommand::ReTick { identifier } => cmd_re_tick(&client, &identifier).await,
+        IssueCommand::RunAi { identifier } => cmd_run_ai(&client, &identifier).await,
     };
     match result {
         Ok(()) => 0,
@@ -556,9 +567,31 @@ async fn cmd_re_tick(client: &ApiClient, identifier: &str) -> Result<(), CliErro
     Ok(())
 }
 
+/// Build the token-API path for `POST .../work-items/<id>/run-ai/`.
+fn run_ai_path(workspace_slug: &str, project_id: &str, issue_id: &str) -> String {
+    format!("workspaces/{workspace_slug}/projects/{project_id}/work-items/{issue_id}/run-ai/")
+}
+
+async fn cmd_run_ai(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
+    let issue = resolve_issue(client, identifier).await?;
+    let path = run_ai_path(&client.env.workspace_slug, &issue.project_id, &issue.id);
+    // 201 returns the dispatched run; a 409 (nothing dispatched — active run,
+    // no pod, no eligible runner) or a 403 (requested from inside the issue's
+    // own active agent run) is surfaced by `client.post` as a `CliError` whose
+    // detail carries the response body — including the machine-readable
+    // `reason` — and `?` propagates it to a non-zero exit via `report_error`.
+    let resp = client.post(&path, &serde_json::json!({})).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn percent_encode_value_passes_unreserved() {
@@ -732,5 +765,35 @@ mod tests {
         };
         let params = build_search_params(&args).expect("valid args");
         assert!(params.iter().all(|(k, _)| *k != "project"));
+    }
+
+    #[derive(Debug, clap::Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        issue: IssueArgs,
+    }
+
+    #[test]
+    fn run_ai_parses_positional_identifier() {
+        let parsed = TestCli::try_parse_from(["pidash", "run-ai", "ENG-42"]).expect("parse run-ai");
+        match parsed.issue.command {
+            IssueCommand::RunAi { identifier } => assert_eq!(identifier, "ENG-42"),
+            other => panic!("expected run-ai, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_ai_requires_an_identifier() {
+        // A missing positional identifier is a clap parse error, not a
+        // silent workspace-wide call.
+        assert!(TestCli::try_parse_from(["pidash", "run-ai"]).is_err());
+    }
+
+    #[test]
+    fn run_ai_path_targets_the_work_item_run_ai_route() {
+        assert_eq!(
+            run_ai_path("eng", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"),
+            "workspaces/eng/projects/11111111-1111-1111-1111-111111111111/work-items/22222222-2222-2222-2222-222222222222/run-ai/"
+        );
     }
 }
