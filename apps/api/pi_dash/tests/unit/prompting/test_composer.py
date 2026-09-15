@@ -405,7 +405,7 @@ def test_session_framing_renders_tick_guidance_and_schedule():
     assert "(5 remaining)" in out
     # The lifecycle section carries the budget line and the pool rules.
     assert "Runs used on this issue: **5 of 10** (5 remaining)" in out
-    assert "about every 12 hours" in out
+    assert "about every 3 hours" in out
 
 
 @pytest.mark.unit
