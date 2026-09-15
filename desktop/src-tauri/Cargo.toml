@@ -30,7 +30,7 @@ tauri-plugin-updater = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [target.'cfg(unix)'.dependencies]
 # Only for SIGTERM on the bundled daemon: killing it outright would turn a
@@ -39,6 +39,8 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# Timestamps for the chat frame variants in `chat`'s hermetic stream tests.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Drives the hermetic StatusGet round-trip test in `ipc` against a stub
 # Unix-socket server. Production callers get their runtime from Tauri.
 tokio = { version = "1", features = [
