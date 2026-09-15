@@ -608,3 +608,81 @@ def test_coding_task_parent_no_branch_routes_through_readiness_not_autofallback(
     assert "Do not treat this as an automatic fall-back to the project base" in body
     # The dependency case routes into the existing blocking flow by reference.
     assert 'Treat it as a blocker — follow "Blocking the run" instead of creating a branch' in body
+
+
+# ----------------------------------------------------------------------
+# Multi-part plan: finish a multi-part issue in one run (PDASHOSS01-168)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_coding_task_split_gate_offers_multipart_plan():
+    """A large-but-clear issue must have a *Proceed with a multi-part plan*
+    outcome that separates size from ambiguity, rather than being forced to
+    block. The analyze-and-scope split gate used to allow Proceed only when the
+    work "fits one reasonable unit of delivery", so any big issue cost a run and
+    a human round-trip before any code (PDASHOSS01-168)."""
+    body = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_ctx()
+    ).text
+
+    # The new, non-blocking outcome exists and is keyed on clarity, not size.
+    assert "Proceed with a multi-part plan" in body
+    assert "larger than one PR, but the requirements and design are clear" in body
+    # Size and ambiguity are explicitly separated.
+    assert "Size is a different axis from ambiguity." in body
+    # Clarify is reserved for an open decision, not for a large-but-clear issue.
+    assert "a real product, UX, scope, or interface decision is unanswered" in body
+    # Split is reserved for genuinely separate deliverables in different issues.
+    assert "independent deliverables that belong in **different issues**" in body
+
+
+@pytest.mark.unit
+def test_coding_task_softens_splitting_bias():
+    """Once a plan is recorded or approved, the prompt must tell the agent not
+    to keep slicing the work into ever-smaller pieces on its own — the old
+    cost-comparison wording biased toward smaller pieces (slice 1 -> 1a/1b),
+    PDASHOSS01-168."""
+    body = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_ctx()
+    ).text
+
+    assert "don't split its parts further unless a new product or design decision actually surfaces" in body
+
+
+@pytest.mark.unit
+def test_coding_task_keeps_building_parts_after_a_pr():
+    """After a part's PR is open with parts remaining, the implementation
+    section must tell the agent to continue in the same run and must forbid
+    advancing the stage / yielding done on a partial implementation
+    (PDASHOSS01-168)."""
+    body = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_ctx()
+    ).text
+
+    # Steps 5-6 loop over the plan's parts within one run.
+    assert "you do **not** stop after the first" in body
+    assert "go back to step 5 for the next part" in body
+    # A partial implementation must not advance to In Review / yield done.
+    assert "do not yield `done` while parts are still unbuilt" in body
+    assert "a partial implementation must not move the issue to In Review" in body
+
+
+@pytest.mark.unit
+def test_coding_task_advances_stage_only_when_all_parts_done():
+    """The issue moves to In Review only when every planned part is built; the
+    In Progress exit condition and the ending routing both carry the
+    all-parts-done gate (PDASHOSS01-168)."""
+    body = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_ctx()
+    ).text
+
+    # task-lifecycle exit condition now requires every part built.
+    assert "Multi-part issues stay In Progress until the whole issue is done." in body
+    # While parts remain the run reports progressed (or waiting_on_external),
+    # not done, and stays In Progress.
+    assert "the issue **stays In Progress**" in body
+    assert "Plan parts still remain" in body
+    # The whole-issue testing hand-off is posted once, listing every PR.
+    assert "Hand off to testing — once, for the whole issue, when every plan part is built." in body
+    assert "list every PR" in body

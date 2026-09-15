@@ -20,10 +20,12 @@ Each run is a fresh session. The **workpad** (its `### Path to done` block in pa
 
 | Stage | Finished when | Next state chosen by the run |
 |---|---|---|
-| In Progress | the change is made and validated; a PR is open (or the non-code answer is posted); acceptance criteria are written to the workpad | → In Review |
+| In Progress | **every** planned part is built and validated — a PR is open for each part (or the non-code answer is posted); acceptance criteria are written to the workpad | → In Review |
 | In Review | no unresolved findings against the work product | → In Test (clean) · → In Progress (real defects, listed as open items) · stay In Review (waiting on a human reviewer / nothing changed) |
 | In Test | every acceptance criterion is verified from the user's side | stay In Test (pass — a human closes it) · → In Progress (defects, listed as open items) |
 | Done / Cancelled | — | **a human decides.** You never move an issue to a `completed` or `cancelled` state. |
+
+**Multi-part issues stay In Progress until the whole issue is done.** When a run records a multi-part plan in the workpad, opening a PR for one part does **not** finish the In Progress stage. The issue moves to In Review only when every planned part is built and the acceptance criteria are covered; until then a run delivers as many parts as it can and reports `progressed` (or `waiting_on_external` when only a merge is left). This keeps a partial implementation from firing a review run that could only report "not done".
 
 **Blocked** is reserved for "I need a human": missing auth or access, or a decision only a human can make. A bug in the code is **not** a reason to go to Blocked — it goes back to In Progress with the defects listed. A spent budget (below) is not a reason either — the issue goes to its truthful state and your comment says no run will follow.
 

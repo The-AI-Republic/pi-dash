@@ -5,9 +5,9 @@ customizable: overridable
 ---
 ## Step 0.5 — Analyze & scope (read, think, decide)
 
-Before any workpad setup or git work, build your own understanding of the task and decide whether you can responsibly execute it. The output of this step is a decision (`proceed` / `clarify` / `split`) and the analysis content you will record in the workpad in Step 1.
+Before any workpad setup or git work, build your own understanding of the task and decide whether you can responsibly execute it. The output of this step is a decision (`proceed`, `proceed with a multi-part plan`, `clarify`, or `split`) and the analysis content you will record in the workpad in Step 1.
 
-Treat ambiguity as a real signal, not a hurdle to power through. The cost of one round-trip clarification — you ask via comment, the human answers, the next continuation run picks up the answer automatically — is much smaller than the cost of a wrong-direction PR that has to be unwound.
+Treat genuine ambiguity — an unanswered product, UX, scope, or interface question — as a real signal, not a hurdle to power through. When the *direction* is unclear, the cost of one round-trip clarification — you ask via comment, the human answers, the next continuation run picks up the answer automatically — is much smaller than the cost of a wrong-direction PR that has to be unwound. **Size is a different axis from ambiguity.** A large but well-specified issue is not a reason to stop and ask, and it is not a reason to keep slicing the work into ever-smaller pieces on your own — plan it and build it (see the multi-part outcome below). Once a plan is recorded in the workpad, or a human has approved one, build to that plan: don't split its parts further unless a new product or design decision actually surfaces.
 
 1. **Read the issue thoroughly.** The title, description, and full comment thread (chronological, including the agent's own prior comments) are already shown in this prompt context above. Read them in order — human comments often refine, narrow, or change scope after the original description was written, so weight the most recent human comments heavily. If a comment may have been posted after this run started and you need to be sure you're not missing it, refresh with `pidash comment list {{ issue.identifier }}` — otherwise the in-prompt snapshot is authoritative.
 
@@ -37,14 +37,19 @@ Treat ambiguity as a real signal, not a hurdle to power through. The cost of one
    - **Risks / assumptions** — anything material to scope, downstream impact, or rework risk.
    - **Autonomy assessment** — `score`, `type`, `safe_to_continue`, per the "Autonomy / escalation model" section.
 
-6. **Decision gate. Choose exactly one path:**
+6. **Decision gate. Separate two independent questions — *is the direction clear?* and *does the work fit one PR or many?* — then choose exactly one path:**
 
-   - **Proceed** — only if all of the following hold: acceptance criteria are present (extracted from the issue, or sensible defaults documented as assumptions); the work fits one reasonable unit of delivery (one PR for `code_change`, one coherent set of actions/comments for `noncode`); your autonomy assessment is `safe_to_continue=true`. Continue to Step 1.
+   - **Proceed** — the direction is clear, acceptance criteria are present (extracted from the issue, or sensible defaults documented as assumptions), the work fits one reasonable unit of delivery (one PR for `code_change`, one coherent set of actions/comments for `noncode`), and your autonomy assessment is `safe_to_continue=true`. Continue to Step 1.
      - If `task_type == noncode`, skip the git sync, branch creation, commit/push, and PR-opening sub-steps in Steps 1 and 2 — go directly from workpad setup to executing the task to the final comment.
 
-   - **Ask for clarification** — if the description leaves a meaningful product, UX, scope, or interface question unanswered. Post a comment to the human via `pidash comment add {{ issue.identifier }} --body-file <path>` and follow "Blocking the run". **Do not create a branch.** A future continuation run, triggered when the human replies, will re-enter this step with the new context.
+   - **Proceed with a multi-part plan** — the issue is **larger than one PR, but the requirements and design are clear**: it describes several code changes with no open product, UX, or architecture decision between them. This is the default for a big-but-unambiguous issue — do **not** block, and do **not** ask a human to split it. Instead:
+     - Record the parts, their order, and their dependencies in the workpad `### Plan`.
+     - Post one short comment stating the plan (the parts and the order you'll build them) so the human can redirect if they want. This is a heads-up, not a question — you do **not** wait for a reply.
+     - Start building in the **same run**, following the loop in "Implementation & validation": one PR per part for reviewability, stacked on the previous branch when a part depends on it, otherwise branched from the base. Continue to Step 1.
 
-   - **Propose a split** — if the work is too large to land as one reasonable PR, or genuinely covers multiple independent concerns. Post a comment to the human suggesting how you'd break it up and your reasoning. **Do not create child issues yourself** — leave triage to the human. Then follow "Blocking the run". **Do not create a branch.**
+   - **Ask for clarification** — the **direction** is unclear: a real product, UX, scope, or interface decision is unanswered. This is about an open *decision*, not about size — a large issue whose requirements are clear is a multi-part plan, not a clarification. Post a comment to the human via `pidash comment add {{ issue.identifier }} --body-file <path>` and follow "Blocking the run". **Do not create a branch.** A future continuation run, triggered when the human replies, will re-enter this step with the new context.
+
+   - **Propose a split** — only for work that is **genuinely separate**: independent deliverables that belong in **different issues**, not parts of one feature that a multi-part plan would cover. Post a comment to the human suggesting how you'd break it up and your reasoning. **Do not create child issues yourself** — leave triage to the human. Then follow "Blocking the run". **Do not create a branch.**
 
 If you choose `clarify` or `split`, the workpad you write as part of "Blocking the run" must include the `### Analysis` content from step 5; the analysis is the record of *why* you blocked. The workpad is for you, not the human — the question or split proposal belongs in the comment, written as described in step 7 below.
 
@@ -62,6 +67,10 @@ If you choose `clarify` or `split`, the workpad you write as part of "Blocking t
 
    > Picking this one up. Before I start: the current `apps/web/app/routes/_index.tsx` landing page uses the marketing layout with the hero + three feature cards — am I replacing that entire page, or just swapping the hero block? And is there a Figma / brief somewhere for the new content, or should I draft something from the existing voice in `apps/web/app/components/marketing/`?
 
-   Example (split proposal):
+   Example (multi-part plan — big but clear, so you build it, not ask):
 
-   > This one's bigger than a single PR — happy to do it, but I'd split it into three so each is reviewable independently: (1) extract the existing hero into its own component, (2) add the new landing layout behind a feature flag, (3) wire copy + analytics. Want me to file (2) and (3) as separate issues so we can prioritize them, or land it as one large PR?
+   > Picking this up. It's bigger than one PR but the shape is clear, so I'm going to plan it as three stacked parts and start now: (1) extract the existing hero into its own component, (2) add the new landing layout behind a feature flag, (3) wire copy + analytics. I'll open a PR for each and keep them stacked so they're reviewable independently. Shout if you'd rather I sequence them differently.
+
+   Example (split proposal — genuinely separate concerns):
+
+   > While reading this I found it's really two unrelated jobs: the checkout bug in `apps/web/app/routes/checkout.tsx` that the ticket describes, and a schema migration on `orders` that it also asks for but that other teams depend on. I'll land the checkout fix here. Do you want the migration as its own issue so it can be scheduled and reviewed separately, rather than riding along on this one?
