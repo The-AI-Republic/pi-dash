@@ -32,7 +32,6 @@ def project_with_policy(db, workspace, create_user):
             created_by=create_user,
             agent_default_interval_seconds=10800,
             agent_default_max_ticks=10,
-            agent_retick_grant=3,
             agent_review_default_interval_seconds=5400,
             agent_test_default_interval_seconds=7200,
         )
@@ -172,10 +171,11 @@ def test_project_policy_schema_defaults(db, workspace, create_user):
             created_by=create_user,
         )
     assert project.agent_default_max_ticks == 10
-    assert project.agent_retick_grant == 3
     assert project.agent_default_interval_seconds == 43200
     assert project.agent_review_default_interval_seconds == 28800
     assert project.agent_test_default_interval_seconds == 43200
+    # The Re-tick grant is the pool now — the separate knob is gone.
+    assert not hasattr(project, "agent_retick_grant")
     assert not hasattr(project, "agent_review_default_max_ticks")
     assert not hasattr(project, "agent_test_default_max_ticks")
 
