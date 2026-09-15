@@ -420,9 +420,14 @@ pub async fn managed_sign_out<R: Runtime>(
 ) -> Result<(), String> {
     stop_daemon(&app, 5);
     let paths = ManagedPaths::resolve(&app)?;
-    if let Some(request) = clear_chat_history {
-        crate::chat_history::clear_account_history(&paths, &request.account)?;
-    }
+    // Destroying the credentials is the security-critical half of sign-out and
+    // must not be skipped because an optional history wipe failed (e.g. a busy
+    // file on Windows). Run the wipe first but hold its result until *after*
+    // the credentials are gone, then surface it.
+    let history_result = match clear_chat_history {
+        Some(request) => crate::chat_history::clear_account_history(&paths, &request.account),
+        None => Ok(()),
+    };
     let _ = std::fs::remove_file(&paths.model_token_file);
     let _ = std::fs::remove_file(paths.config_dir.join("credentials.toml"));
     let _ = std::fs::remove_file(paths.config_dir.join("config.toml"));
@@ -440,7 +445,8 @@ pub async fn managed_sign_out<R: Runtime>(
             }
         }
     }
-    Ok(())
+    // Credentials are now gone regardless; surface any history-wipe failure.
+    history_result
 }
 
 /// Whether the bundled binaries are present and runnable.
