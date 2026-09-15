@@ -2,11 +2,8 @@ pub mod client;
 pub mod protocol;
 pub mod server;
 
+// The Windows named-pipe derivation moved to `pidash-ipc` alongside the
+// transport client; the IPC *server* (still in the runner) needs the
+// identical derivation, so re-export it under its original path.
 #[cfg(windows)]
-pub(crate) fn windows_pipe_name(path: &std::path::Path) -> String {
-    let id = uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_OID,
-        path.to_string_lossy().as_bytes(),
-    );
-    format!(r"\\.\pipe\pidash-{id}")
-}
+pub(crate) use pidash_ipc::windows_pipe_name;
