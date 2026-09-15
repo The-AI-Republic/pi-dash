@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod chat;
+mod chat_history;
 mod ipc;
 mod managed_runner;
 mod pidash_cli;
@@ -402,6 +403,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             managed_runner::managed_stop_daemon,
             managed_runner::managed_sign_out,
             managed_runner::managed_doctor,
+            // Direct local chat history: stored on this machine only, per
+            // account, never relayed to or stored by the Pi Dash server.
+            chat_history::chat_create_session,
+            chat_history::chat_list_sessions,
+            chat_history::chat_get_session,
+            chat_history::chat_list_events,
+            chat_history::chat_append_event,
+            chat_history::chat_set_thread_id,
+            chat_history::chat_rename_session,
+            chat_history::chat_delete_session,
+            chat_history::chat_clear_history,
+            chat_history::chat_working_dir,
         ])
         // Fallback for the navigation policy below: if a server-host page
         // does get through (e.g. a redirect the policy hook didn't see),
