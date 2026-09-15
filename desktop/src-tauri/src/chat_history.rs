@@ -430,6 +430,14 @@ fn open(paths: &ManagedPaths, account: &str) -> Result<Connection, String> {
     conn.busy_timeout(std::time::Duration::from_secs(5))
         .map_err(sql_err)?;
     migrate(&conn)?;
+    // The WAL/SHM sidecars hold recently-written chat content but are created by
+    // SQLite with the default umask (typically 0644). Lock them to the owner
+    // like the main DB so chat history isn't world-readable on a shared host.
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = db_path.clone().into_os_string();
+        sidecar.push(suffix);
+        restrict_file(Path::new(&sidecar));
+    }
     Ok(conn)
 }
 
@@ -488,10 +496,17 @@ fn resolve_chat_working_dir(
     workspace: &str,
     project: &str,
 ) -> Result<PathBuf, String> {
-    let mut dir = account_dir(paths, account)?.join("workdirs");
+    let account_base = account_dir(paths, account)?;
+    let mut dir = account_base.join("workdirs");
     dir.push(safe_component(workspace)?);
     dir.push(safe_component(project)?);
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    // Lock the account root to the owner so no other local user can traverse
+    // into a chat working copy. `open` also does this, but the UI may ask for
+    // the working directory (chat header) before the DB is ever opened, which
+    // would otherwise leave the tree world-traversable at the default umask.
+    restrict_dir(&account_base);
+    restrict_dir(&dir);
     Ok(dir)
 }
 
@@ -705,6 +720,31 @@ mod tests {
             |r| r.get(0),
         )
         .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn history_files_and_working_dirs_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let paths = paths(root.path());
+        let base = account_dir(&paths, "user-perms").unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        // Resolving the working dir (e.g. for the chat header) must lock the
+        // account root even before the DB is ever opened.
+        let workdir = resolve_chat_working_dir(&paths, "user-perms", "acme", "web").unwrap();
+        assert_eq!(mode(&base), 0o700, "account dir must be 0700 after resolve");
+        assert!(workdir.starts_with(&base), "working dir under the account root");
+
+        // Open + write so the WAL sidecar exists while the connection is live.
+        let conn = open(&paths, "user-perms").unwrap();
+        conn.execute_batch("INSERT INTO sessions (id, created_at, updated_at) VALUES ('x', 0, 0)")
+            .unwrap();
+        assert_eq!(mode(&base.join("history.db")), 0o600, "db must be 0600");
+        let wal = base.join("history.db-wal");
+        assert!(wal.exists(), "WAL sidecar should exist while the DB is open");
+        assert_eq!(mode(&wal), 0o600, "WAL sidecar must not be world-readable");
     }
 
     #[test]
