@@ -69,6 +69,10 @@ pub struct ManagedPaths {
     pub runtime_dir: PathBuf,
     pub model_token_file: PathBuf,
     pub workdirs: PathBuf,
+    /// Root of the per-account local chat history tree (see `chat_history`).
+    /// Deliberately a sibling of `workdirs`, never a child, so a local chat's
+    /// working copy can never be the same path as a managed run's.
+    pub chat_dir: PathBuf,
     pub engine: PathBuf,
     pub runner: PathBuf,
     pub bin_dir: PathBuf,
@@ -103,11 +107,32 @@ impl ManagedPaths {
             runtime_dir: root.join("runtime"),
             model_token_file: root.join("runtime/model.token"),
             workdirs: root.join("workdirs"),
+            chat_dir: root.join("chat"),
             engine: bin_dir.join(ENGINE_BIN),
             runner: bin_dir.join(RUNNER_BIN),
             bin_dir,
             root,
         })
+    }
+
+    /// Build a `ManagedPaths` rooted at an arbitrary directory, for tests that
+    /// exercise the on-disk layout without a Tauri `AppHandle`.
+    #[cfg(test)]
+    pub fn for_test_root(root: PathBuf) -> Self {
+        let bin_dir = root.join("bin");
+        Self {
+            config_dir: root.join("pidash"),
+            data_dir: root.join("pidash/data"),
+            codex_home: root.join("codex-home"),
+            runtime_dir: root.join("runtime"),
+            model_token_file: root.join("runtime/model.token"),
+            workdirs: root.join("workdirs"),
+            chat_dir: root.join("chat"),
+            engine: bin_dir.join(ENGINE_BIN),
+            runner: bin_dir.join(RUNNER_BIN),
+            bin_dir,
+            root,
+        }
     }
 
     /// Create every directory the daemon and engine expect to exist.
@@ -366,15 +391,43 @@ pub async fn managed_stop_daemon<R: Runtime>(
     Ok(())
 }
 
+/// What sign-out should do with the signed-out account's local chat history.
+///
+/// Absent (the default, and what the overlay sends today) means keep it: the
+/// approved behaviour is that history stays on disk, scoped to the account, and
+/// is hidden until that same account signs in again. Present means the user
+/// opted into "clear history on sign-out", so we wipe that one account's tree.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ClearChatHistory {
+    pub account: String,
+}
+
 /// Sign-out teardown: stop the daemon and destroy every local credential.
 ///
 /// After this the bundled binaries are inert — the engine has no model
 /// credential and the daemon has no machine token — which is what makes
 /// "signed out" mean something for a binary the user could still execute.
+///
+/// Chat history is deliberately **not** removed here by default: it belongs to
+/// the account and is kept, hidden, until that account signs in again. The only
+/// time sign-out touches it is when the user asked to clear history on sign-out
+/// (`clear_chat_history` is `Some`), which is the explicit wiring point for that
+/// decision.
 #[tauri::command]
-pub async fn managed_sign_out<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+pub async fn managed_sign_out<R: Runtime>(
+    app: AppHandle<R>,
+    clear_chat_history: Option<ClearChatHistory>,
+) -> Result<(), String> {
     stop_daemon(&app, 5);
     let paths = ManagedPaths::resolve(&app)?;
+    // Destroying the credentials is the security-critical half of sign-out and
+    // must not be skipped because an optional history wipe failed (e.g. a busy
+    // file on Windows). Run the wipe first but hold its result until *after*
+    // the credentials are gone, then surface it.
+    let history_result = match clear_chat_history {
+        Some(request) => crate::chat_history::clear_account_history(&paths, &request.account),
+        None => Ok(()),
+    };
     let _ = std::fs::remove_file(&paths.model_token_file);
     let _ = std::fs::remove_file(paths.config_dir.join("credentials.toml"));
     let _ = std::fs::remove_file(paths.config_dir.join("config.toml"));
@@ -392,7 +445,8 @@ pub async fn managed_sign_out<R: Runtime>(app: AppHandle<R>) -> Result<(), Strin
             }
         }
     }
-    Ok(())
+    // Credentials are now gone regardless; surface any history-wipe failure.
+    history_result
 }
 
 /// Whether the bundled binaries are present and runnable.

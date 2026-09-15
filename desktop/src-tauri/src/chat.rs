@@ -158,6 +158,10 @@ async fn call_once(socket: &Path, req: Request) -> Result<(), String> {
         .map_err(|e| format!("chat request failed: {e}"))?
     {
         Response::Ack => Ok(()),
+        // `handle_close` emits `ChatClosed` on the connection *before* the
+        // dispatch layer writes the terminal `Ack`; `call` reads only that first
+        // frame, so `ChatClosed` is the success signal for a close round-trip.
+        Response::ChatClosed { .. } => Ok(()),
         Response::Error(err) => Err(format!("daemon error {}: {}", err.code, err.message)),
         other => Err(format!("unexpected response: {other:?}")),
     }
@@ -466,6 +470,32 @@ mod tests {
         call_once(
             &socket,
             Request::ChatCancel {
+                chat_session_id: Uuid::nil(),
+                runner: None,
+                reason: None,
+            },
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+    }
+
+    /// A `ChatClose` round-trip succeeds: `handle_close` emits `ChatClosed`
+    /// (which `call` reads as the first frame) before the terminal `Ack`, so
+    /// `ChatClosed` must be treated as success rather than an unexpected frame.
+    #[tokio::test]
+    async fn call_once_accepts_chat_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (socket, server) = write_frames(
+            dir.path(),
+            vec![Response::ChatClosed {
+                chat_session_id: Uuid::nil(),
+                closed_at: chrono_now(),
+            }],
+        );
+        call_once(
+            &socket,
+            Request::ChatClose {
                 chat_session_id: Uuid::nil(),
                 runner: None,
                 reason: None,

@@ -10,6 +10,7 @@ import { useMatches } from "react-router";
 import { useUser } from "@/hooks/store/user";
 import { useProject } from "@/hooks/store/use-project";
 import { connectAgentProject, isDesktop, refreshAgentRuntime, resumeAgentRuntime } from "@/services/agent-runtime";
+import { registerLocalChatTransport } from "@/services/local-chat-transport";
 
 export const AgentRuntime = observer(function AgentRuntime() {
   const { data: user } = useUser();
@@ -42,6 +43,11 @@ export const AgentRuntime = observer(function AgentRuntime() {
   useEffect(() => {
     if (!isDesktop() || !user?.id) return;
     resumeAgentRuntime(user.id);
+    // Point the shared chat UI at the bundled engine (local Tauri IPC) instead
+    // of the cloud chat relay. Idempotent and account-agnostic — the transport
+    // reads the current account per call — so a single registration survives
+    // account switches.
+    registerLocalChatTransport();
     const refresh = () => {
       void refreshAgentRuntime().catch((error: unknown) => {
         setMessage(String(error instanceof Error ? error.message : error));

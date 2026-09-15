@@ -722,11 +722,20 @@ fn resolve_chat_workspace(config: &RunnerConfig, cwd: Option<&str>) -> Result<Pa
     let workspace_path = config.workspace.working_dir.clone();
     std::fs::create_dir_all(&workspace_path)?;
     if let Some(cwd) = cwd.filter(|s| !s.is_empty()) {
-        let requested = PathBuf::from(cwd);
-        let requested = if requested.is_absolute() {
-            requested
+        let requested_rel = PathBuf::from(cwd);
+        // A lexical `starts_with` check treats `<workspace>/../evil` as inside
+        // the workspace (the `..` is not normalised away), so a `..` component
+        // must be refused outright rather than resolved.
+        if requested_rel
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            anyhow::bail!("chat cwd must not contain `..`");
+        }
+        let requested = if requested_rel.is_absolute() {
+            requested_rel
         } else {
-            workspace_path.join(requested)
+            workspace_path.join(requested_rel)
         };
         if !requested.starts_with(&workspace_path) {
             anyhow::bail!("chat cwd is outside runner workspace");
@@ -1052,5 +1061,9 @@ mod tests {
         // A relative subdir under the workspace is accepted and stays under it.
         let ok = resolve_chat_workspace(&cfg, Some("sub")).unwrap();
         assert!(ok.starts_with(&cfg.workspace.working_dir));
+        // `..` traversal must be refused: a lexical `starts_with` check would
+        // otherwise accept `<workspace>/../escape`, which resolves outside.
+        assert!(resolve_chat_workspace(&cfg, Some("../escape")).is_err());
+        assert!(resolve_chat_workspace(&cfg, Some("sub/../../escape")).is_err());
     }
 }
