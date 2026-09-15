@@ -1001,10 +1001,17 @@ def _active_run_of_caller(user, issue):
     return None
 
 
-def _refuse_agent_retick(request, issue):
-    """Re-tick is a human lever. A request that carries an active run of
-    this issue (the agent's CLI header) is refused — otherwise an agent could
-    grant itself budget and make the pool meaningless."""
+def _refuse_agent_action(request, issue, *, action):
+    """Refuse a human-only lever requested from inside an agent run.
+
+    Re-tick and Run AI are both human levers on the ticking budget: a
+    request that carries an active run of *this* issue in ``X-Pi-Dash-Run-Id``
+    (the agent's CLI header) is refused with 403 — otherwise an agent could
+    grant itself budget or restart itself indefinitely, bypassing the pool.
+    A header naming a run on a different issue, a finished run, or an unknown
+    id is not this issue's agent and is allowed through. ``action`` is the
+    human-readable lever name used in the error message.
+    """
     raw = (request.headers.get(RUN_ID_HEADER) or "").strip()
     if not raw:
         return None
@@ -1017,10 +1024,103 @@ def _refuse_agent_retick(request, issue):
     run = AgentRun.objects.filter(pk=run_id, work_item_id=issue.pk).first()
     if run is not None and run.is_active:
         return Response(
-            {"error": "re-tick is a human action; it cannot be requested from inside an agent run"},
+            {"error": f"{action} is a human action; it cannot be requested from inside an agent run"},
             status=status.HTTP_403_FORBIDDEN,
         )
     return None
+
+
+def _refuse_agent_retick(request, issue):
+    """Backwards-compatible alias — see :func:`_refuse_agent_action`."""
+    return _refuse_agent_action(request, issue, action="re-tick")
+
+
+# Human-readable message for each machine-readable Run AI refusal reason.
+_RUN_AI_REASON_MESSAGES = {
+    "active_run_exists": "the work item already has an active or queued run",
+    "no_pod": "no pod is available to run this work item",
+    "no_eligible_runner": "no eligible runner or execution principal is available for this work item",
+}
+
+
+class IssueRunAiAPIEndpoint(BaseAPIView):
+    """Token-facing sibling of the web "Run AI" button.
+
+    Dispatches an agent run identical to clicking Run AI in the web app —
+    same templated prompt, ticker re-time, and runner pinning — via
+    ``scheduling.run_ai_for_human``, which shares
+    ``dispatch_run_ai_run_with_reason`` with ``_post_run_ai`` so the two
+    surfaces cannot drift. Lets an operator (or an MCP tool) kick a stalled
+    agent from a terminal instead of opening the browser.
+
+    Responses:
+    - 201 with ``{id, status, executor}`` when a run was dispatched.
+    - 409 with a machine-readable ``reason`` (``active_run_exists`` |
+      ``no_pod`` | ``no_eligible_runner``) when nothing was created; the
+      ticker re-time is rolled back so the clock is untouched.
+    - 403 when ``X-Pi-Dash-Run-Id`` names an active run on this issue — an
+      agent cannot restart itself and bypass the ticking budget (mirrors
+      re-tick's ``_refuse_agent_action``).
+    """
+
+    model = Issue
+    permission_classes = [ProjectEntityPermission]
+
+    @extend_schema(
+        operation_id="run_ai_work_item",
+        summary="Run AI on a work item",
+        description=(
+            "Start an agent run on a work item, identical to the web \"Run AI\" button "
+            "(same prompt, ticker reset, and runner pinning). Returns 201 with the run "
+            "when dispatched, 409 with a machine-readable `reason` when nothing could be "
+            "dispatched, or 403 when requested from inside an active agent run on the "
+            "same work item."
+        ),
+        tags=["Work Items"],
+        request=None,
+        parameters=[
+            WORKSPACE_SLUG_PARAMETER,
+            PROJECT_ID_PARAMETER,
+            ISSUE_ID_PARAMETER,
+        ],
+        responses={
+            201: OpenApiResponse(description="Run dispatched"),
+            403: FORBIDDEN_RESPONSE,
+            404: WORK_ITEM_NOT_FOUND_RESPONSE,
+            409: OpenApiResponse(description="No run could be dispatched (see `reason`)"),
+        },
+    )
+    def post(self, request, slug, project_id, pk):
+        from pi_dash.orchestration import scheduling
+
+        issue = (
+            Issue.objects.select_related("project", "workspace", "state")
+            .filter(workspace__slug=slug, project_id=project_id, pk=pk)
+            .first()
+        )
+        if issue is None:
+            return Response({"error": "Work item not found"}, status=status.HTTP_404_NOT_FOUND)
+        refused = _refuse_agent_action(request, issue, action="Run AI")
+        if refused is not None:
+            return refused
+
+        run, reason = scheduling.run_ai_for_human(issue, actor=request.user)
+        if run is None:
+            return Response(
+                {
+                    "error": _RUN_AI_REASON_MESSAGES.get(reason, "could not dispatch a run"),
+                    "reason": reason,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response(
+            {
+                "id": str(run.id),
+                "status": run.status,
+                "executor": run.executor_kind,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class AgentRunYieldAPIEndpoint(BaseAPIView):
