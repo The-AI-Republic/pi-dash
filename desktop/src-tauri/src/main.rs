@@ -4,6 +4,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod chat;
 mod ipc;
 mod managed_runner;
 mod pidash_cli;
@@ -375,10 +376,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .manage(ZoomState(Mutex::new(1.0)))
         .manage(AppConfig { target_url, bundle_root })
         .manage(managed_runner::DaemonState::default())
+        .manage(chat::ChatState::default())
         .invoke_handler(tauri::generate_handler![
             open_in_browser,
             pidash_cli::detect_pidash_cli,
             pidash_cli::install_pidash_cli,
+            // Direct local chat with the built-in engine (PDASHOSS01-159):
+            // these reach the daemon over its IPC socket and stream Chat*
+            // frames back to the webview as `chat://frame` events — never via
+            // the Pi Dash cloud chat relay.
+            chat::chat_warm,
+            chat::chat_send,
+            chat::chat_cancel,
+            chat::chat_close,
+            chat::chat_decide,
             // Built-in agent engine: the overlay JS holds the session and
             // makes the authenticated calls, then hands the results to these
             // commands, which own the local files and the daemon process.
