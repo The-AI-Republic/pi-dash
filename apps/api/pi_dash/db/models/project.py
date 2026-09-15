@@ -153,7 +153,7 @@ class Project(BaseModel):
     # ``agent_ticking_enabled`` gates the project globally; every stage
     # respects it.
     agent_default_interval_seconds = models.IntegerField(default=43200)  # In Progress, 12 h
-    agent_default_max_ticks = models.IntegerField(default=10)            # pool per issue, any stage; also the Re-tick grant size
+    agent_default_max_ticks = models.IntegerField(default=10)            # pool per issue; also Re-tick grant size
     agent_review_default_interval_seconds = models.IntegerField(default=28800)  # In Review, 8 h
     agent_test_default_interval_seconds = models.IntegerField(default=43200)    # In Test, 12 h
     agent_ticking_enabled = models.BooleanField(default=True)
