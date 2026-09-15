@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::dto::{
-    ApprovalDecision, ApprovalRecord, ObservabilitySnapshot, RunSummary, RunnerStatus,
+    ApprovalDecision, ApprovalKind, ApprovalRecord, ObservabilitySnapshot, RunSummary, RunnerStatus,
 };
 
 /// IPC wire version. Bumped on incompatible shape changes between
@@ -26,7 +26,21 @@ use crate::dto::{
 /// daemons reject the variant with an `unknown method` error; the CLI
 /// catches that and falls back to direct config mutation, so mixed
 /// daemon/CLI pairs during dev stay safe.
-pub const IPC_VERSION: u32 = 3;
+///
+/// v4 added the local-chat message types for PDASHOSS01-159 (the
+/// desktop's direct chat with the built-in agent engine, no cloud
+/// relay): the `Chat{Warm,Send,Cancel,Close,Decide}` requests and the
+/// `Chat{Started,MessageStarted,Event,ApprovalRequest,MessageCompleted,
+/// Failed,Closed}` streamed responses. They deliberately mirror the
+/// cloud `ServerMsg::Chat*` / `ClientMsg::Chat*` frames
+/// (`runner/src/cloud/protocol.rs`) so the daemon can drive the same
+/// chat runtime and translate its events onto this local IPC socket
+/// instead of the cloud session. Older daemons reject the new methods
+/// with an `unknown method` error, and a daemon that carries the wire
+/// types but not the handler yet answers with a `501` error — either
+/// way a version mismatch surfaces cleanly rather than as a confusing
+/// serde failure.
+pub const IPC_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
@@ -110,6 +124,85 @@ pub enum Request {
     /// its in-memory copy and re-creating the data dir, until the
     /// operator manually restarted the service.
     RunnerRemoveLocal { runner: String },
+
+    // ---- Local chat (PDASHOSS01-159, IPC v4) ------------------------
+    //
+    // These drive the built-in agent engine directly from the desktop
+    // host, with events streamed back over this same IPC connection
+    // rather than relayed through the Pi Dash cloud. Each mirrors the
+    // cloud `ServerMsg::Chat*` frame it is named after so the daemon
+    // handler can reuse the existing chat runtime. Like every other
+    // per-runner request they carry an optional `runner` selector
+    // (required only when the daemon hosts more than one runner).
+    /// Warm a local chat session's engine without submitting a turn.
+    /// Streams `ChatEvent` frames (`kind: "chat_warmed"` /
+    /// `"chat_warm_failed"`) then a terminal `Ack`. Mirrors `ChatWarm`.
+    ChatWarm {
+        chat_session_id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runner: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_thread_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_session_id: Option<String>,
+    },
+    /// Submit a user turn to a local chat session. The connection then
+    /// streams that turn's `ChatStarted` / `ChatMessageStarted` /
+    /// `ChatEvent` / `ChatApprovalRequest` frames until a terminal
+    /// `ChatMessageCompleted` or `ChatFailed`, then `Ack`. Approvals are
+    /// answered out-of-band on a second connection via `ChatDecide`,
+    /// because this connection is busy streaming the turn. Mirrors
+    /// `ChatUserMessage`.
+    ChatSend {
+        chat_session_id: Uuid,
+        message_id: Uuid,
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runner: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_thread_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_session_id: Option<String>,
+    },
+    /// Interrupt the in-flight turn of a local chat session (the
+    /// engine's `turn/interrupt`). Mirrors `ChatCancel`.
+    ChatCancel {
+        chat_session_id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runner: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// Close a local chat session, releasing its engine runtime. Mirrors
+    /// `ChatClose`.
+    ChatClose {
+        chat_session_id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runner: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// Answer a pending chat approval. `local_approval_id` is the id
+    /// surfaced in a `ChatApprovalRequest`; the decision routes into the
+    /// runner's shared approval router as `DecisionSource::Local`,
+    /// unblocking the turn. Mirrors `ChatDecide` (minus the cloud-only
+    /// `approval_id`/`decided_by` bookkeeping — the local surface keys
+    /// approvals on `local_approval_id`).
+    ChatDecide {
+        chat_session_id: Uuid,
+        local_approval_id: String,
+        decision: ApprovalDecision,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runner: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +220,65 @@ pub enum Response {
     Ack,
     Error(RpcError),
     StatusDelta(StatusSnapshot),
+
+    // ---- Local chat stream frames (PDASHOSS01-159, IPC v4) ----------
+    //
+    // Streamed one-per-line on the `ChatWarm` / `ChatSend` connection,
+    // ahead of the terminal `Ack`. Each mirrors the cloud
+    // `ClientMsg::Chat*` frame of the same name so the daemon handler is
+    // a straight translation of the existing chat runtime's output onto
+    // this local socket.
+    ChatStarted {
+        chat_session_id: Uuid,
+        local_thread_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_session_id: Option<String>,
+        started_at: DateTime<Utc>,
+    },
+    ChatMessageStarted {
+        chat_session_id: Uuid,
+        message_id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        started_at: DateTime<Utc>,
+    },
+    ChatEvent {
+        chat_session_id: Uuid,
+        bridge_seq: u64,
+        kind: String,
+        payload: serde_json::Value,
+    },
+    ChatApprovalRequest {
+        chat_session_id: Uuid,
+        local_approval_id: String,
+        kind: ApprovalKind,
+        payload: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_at: Option<DateTime<Utc>>,
+    },
+    ChatMessageCompleted {
+        chat_session_id: Uuid,
+        message_id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_message: Option<String>,
+        status: String,
+        completed_at: DateTime<Utc>,
+    },
+    ChatFailed {
+        chat_session_id: Uuid,
+        code: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        failed_at: DateTime<Utc>,
+    },
+    ChatClosed {
+        chat_session_id: Uuid,
+        closed_at: DateTime<Utc>,
+    },
 }
 
 /// Connection-level state shared across every runner the daemon hosts.
@@ -618,5 +770,190 @@ mod tests {
         assert!(snap.runner_by_name("a").is_some());
         assert!(snap.runner_by_name("b").is_some());
         assert!(snap.runner_by_name("c").is_none());
+    }
+
+    // ---- Local chat (IPC v4, PDASHOSS01-159) ------------------------
+
+    #[test]
+    fn ipc_version_is_four_for_local_chat() {
+        // The local-chat message types are the first real wire change
+        // since the shared-crate extraction. Guard the bump so a stray
+        // edit that reverts it is caught here.
+        assert_eq!(IPC_VERSION, 4);
+    }
+
+    #[test]
+    fn chat_send_request_roundtrips_with_all_fields() {
+        let session = Uuid::new_v4();
+        let msg = Uuid::new_v4();
+        let req = Request::ChatSend {
+            chat_session_id: session,
+            message_id: msg,
+            content: "hello engine".into(),
+            runner: Some("laptop-main".into()),
+            cwd: Some("/work/repo".into()),
+            model: Some("gpt-5.1-codex".into()),
+            local_thread_id: Some("thread-abc".into()),
+            local_session_id: Some("session-xyz".into()),
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        let back: Request = serde_json::from_str(&s).unwrap();
+        match back {
+            Request::ChatSend {
+                chat_session_id,
+                message_id,
+                content,
+                runner,
+                cwd,
+                model,
+                local_thread_id,
+                local_session_id,
+            } => {
+                assert_eq!(chat_session_id, session);
+                assert_eq!(message_id, msg);
+                assert_eq!(content, "hello engine");
+                assert_eq!(runner.as_deref(), Some("laptop-main"));
+                assert_eq!(cwd.as_deref(), Some("/work/repo"));
+                assert_eq!(model.as_deref(), Some("gpt-5.1-codex"));
+                assert_eq!(local_thread_id.as_deref(), Some("thread-abc"));
+                assert_eq!(local_session_id.as_deref(), Some("session-xyz"));
+            }
+            other => panic!("expected ChatSend, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_send_request_omits_absent_optionals_on_the_wire() {
+        let req = Request::ChatSend {
+            chat_session_id: Uuid::new_v4(),
+            message_id: Uuid::new_v4(),
+            content: "hi".into(),
+            runner: None,
+            cwd: None,
+            model: None,
+            local_thread_id: None,
+            local_session_id: None,
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        // `skip_serializing_if = Option::is_none` keeps absent selectors
+        // off the wire (and keeps older daemons from tripping on them).
+        for field in ["runner", "cwd", "model", "local_thread_id", "local_session_id"] {
+            assert!(!s.contains(field), "unexpected {field} in {s}");
+        }
+        // Required fields are still present.
+        assert!(s.contains("chat_session_id"));
+        assert!(s.contains("\"content\":\"hi\""));
+    }
+
+    #[test]
+    fn chat_decide_request_roundtrips() {
+        let req = Request::ChatDecide {
+            chat_session_id: Uuid::new_v4(),
+            local_approval_id: "appr-1".into(),
+            decision: ApprovalDecision::AcceptForSession,
+            runner: None,
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        let back: Request = serde_json::from_str(&s).unwrap();
+        match back {
+            Request::ChatDecide {
+                local_approval_id,
+                decision,
+                runner,
+                ..
+            } => {
+                assert_eq!(local_approval_id, "appr-1");
+                assert_eq!(decision, ApprovalDecision::AcceptForSession);
+                assert!(runner.is_none());
+            }
+            other => panic!("expected ChatDecide, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_stream_responses_roundtrip() {
+        let session = Uuid::new_v4();
+        let frames = vec![
+            Response::ChatStarted {
+                chat_session_id: session,
+                local_thread_id: "thread-1".into(),
+                local_session_id: Some("sess-1".into()),
+                started_at: Utc::now(),
+            },
+            Response::ChatMessageStarted {
+                chat_session_id: session,
+                message_id: Uuid::new_v4(),
+                turn_id: Some("turn-1".into()),
+                started_at: Utc::now(),
+            },
+            Response::ChatEvent {
+                chat_session_id: session,
+                bridge_seq: 7,
+                kind: "assistant_delta".into(),
+                payload: serde_json::json!({ "text": "partial" }),
+            },
+            Response::ChatApprovalRequest {
+                chat_session_id: session,
+                local_approval_id: "appr-2".into(),
+                kind: ApprovalKind::CommandExecution,
+                payload: serde_json::json!({ "command": "rm -rf build" }),
+                reason: Some("destructive".into()),
+                expires_at: Some(Utc::now()),
+            },
+            Response::ChatMessageCompleted {
+                chat_session_id: session,
+                message_id: Uuid::new_v4(),
+                turn_id: Some("turn-1".into()),
+                assistant_message: Some("done".into()),
+                status: "completed".into(),
+                completed_at: Utc::now(),
+            },
+            Response::ChatFailed {
+                chat_session_id: session,
+                code: "engine_crash".into(),
+                detail: Some("exited 1".into()),
+                failed_at: Utc::now(),
+            },
+            Response::ChatClosed {
+                chat_session_id: session,
+                closed_at: Utc::now(),
+            },
+        ];
+        // Every frame survives a newline-delimited JSON round trip, and
+        // its discriminant is preserved (the `result` tag matches).
+        for frame in frames {
+            let s = serde_json::to_string(&frame).unwrap();
+            let back: Response = serde_json::from_str(&s).unwrap();
+            assert_eq!(
+                std::mem::discriminant(&frame),
+                std::mem::discriminant(&back),
+                "frame changed variant on round trip: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_event_frame_carries_kind_and_payload() {
+        let frame = Response::ChatEvent {
+            chat_session_id: Uuid::new_v4(),
+            bridge_seq: 3,
+            kind: "raw".into(),
+            payload: serde_json::json!({ "method": "item/started" }),
+        };
+        let s = serde_json::to_string(&frame).unwrap();
+        let back: Response = serde_json::from_str(&s).unwrap();
+        match back {
+            Response::ChatEvent {
+                bridge_seq,
+                kind,
+                payload,
+                ..
+            } => {
+                assert_eq!(bridge_seq, 3);
+                assert_eq!(kind, "raw");
+                assert_eq!(payload["method"], "item/started");
+            }
+            other => panic!("expected ChatEvent, got {other:?}"),
+        }
     }
 }
