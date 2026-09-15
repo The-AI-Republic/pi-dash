@@ -84,6 +84,12 @@ pub struct CreateArgs {
     /// Initial state — exact state name (case-insensitive) or a state UUID.
     #[arg(long)]
     pub state: Option<String>,
+
+    /// Parent issue — a `<PROJ>-<num>` identifier (or a parent issue UUID).
+    /// Files this issue as a child of the parent so the agent can split
+    /// oversized work into task-level child issues.
+    #[arg(long)]
+    pub parent: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -103,6 +109,12 @@ pub struct ListArgs {
     /// Order-by field, e.g. `-created_at` (default), `priority`, `state__name`.
     #[arg(long)]
     pub order_by: Option<String>,
+
+    /// List only children of this parent — a `<PROJ>-<num>` identifier (or a
+    /// parent issue UUID). Lets a later run find the children an earlier run
+    /// created so it never files duplicates.
+    #[arg(long)]
+    pub parent: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -125,6 +137,12 @@ pub struct PatchArgs {
     /// Priority: `none|low|medium|high|urgent`.
     #[arg(long)]
     pub priority: Option<String>,
+
+    /// Parent issue — a `<PROJ>-<num>` identifier (or a parent issue UUID).
+    /// Re-parents this issue under the given parent (e.g. to attach an existing
+    /// issue to a tracking parent).
+    #[arg(long)]
+    pub parent: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -226,31 +244,20 @@ async fn cmd_create(
 
     let project_ref = resolve_create_project(client, paths, args.project.as_deref()).await?;
 
-    let mut body: Map<String, Value> = Map::new();
-    body.insert("name".into(), Value::String(args.title));
-    if let Some(desc) = args.description {
-        // Issue descriptions are stored as rich text: the API's serializer is a
-        // ModelSerializer over the `Issue` model, whose only description column
-        // is `description_html` (it has no plain `description` field). Sending a
-        // bare `description` key was silently dropped, so CLI-created issues had
-        // an empty body. Convert the plain-text/markdown input to minimal HTML
-        // and send it under the key the server actually persists.
-        body.insert(
-            "description_html".into(),
-            Value::String(description_to_html(&desc)),
-        );
-    }
-    if let Some(prio) = args.priority {
-        body.insert("priority".into(), Value::String(prio));
-    }
-    if let Some(state) = args.state {
-        let uuid = if looks_like_uuid(&state) {
-            state
-        } else {
-            resolve_state_name(client, &project_ref, &state).await?
-        };
-        body.insert("state".into(), Value::String(uuid));
-    }
+    let state_uuid = match args.state {
+        Some(state) if looks_like_uuid(&state) => Some(state),
+        Some(state) => Some(resolve_state_name(client, &project_ref, &state).await?),
+        None => None,
+    };
+    let parent_uuid = resolve_parent_id(client, args.parent.as_deref()).await?;
+
+    let body = build_create_body(
+        args.title,
+        args.description,
+        args.priority,
+        state_uuid,
+        parent_uuid,
+    );
 
     let path = format!(
         "workspaces/{}/projects/{}/work-items/",
@@ -262,6 +269,61 @@ async fn cmd_create(
         serde_json::to_string(&resp).expect("serialize JSON value")
     );
     Ok(())
+}
+
+/// Resolve a `--parent` value to the parent issue's UUID. Accepts either a
+/// `<PROJ>-<num>` identifier (resolved via the by-identifier GET) or a UUID
+/// pasted straight through. Returns `None` when no parent was supplied.
+async fn resolve_parent_id(
+    client: &ApiClient,
+    parent: Option<&str>,
+) -> Result<Option<String>, CliError> {
+    let Some(parent) = parent.map(str::trim).filter(|p| !p.is_empty()) else {
+        return Ok(None);
+    };
+    if looks_like_uuid(parent) {
+        return Ok(Some(parent.to_string()));
+    }
+    Ok(Some(resolve_issue(client, parent).await?.id))
+}
+
+/// Assemble the create-work-item request body from already-resolved parts.
+///
+/// Pulled out of `cmd_create` so the wire contract is testable without a
+/// network round-trip: `description` is rendered to the `description_html`
+/// key the server actually persists (see `description_to_html`), and
+/// `state`/`parent` carry pre-resolved UUIDs.
+fn build_create_body(
+    title: String,
+    description: Option<String>,
+    priority: Option<String>,
+    state_uuid: Option<String>,
+    parent_uuid: Option<String>,
+) -> Map<String, Value> {
+    let mut body: Map<String, Value> = Map::new();
+    body.insert("name".into(), Value::String(title));
+    if let Some(desc) = description {
+        // Issue descriptions are stored as rich text: the API's serializer is a
+        // ModelSerializer over the `Issue` model, whose only description column
+        // is `description_html` (it has no plain `description` field). Sending a
+        // bare `description` key was silently dropped, so CLI-created issues had
+        // an empty body. Convert the plain-text/markdown input to minimal HTML
+        // and send it under the key the server actually persists.
+        body.insert(
+            "description_html".into(),
+            Value::String(description_to_html(&desc)),
+        );
+    }
+    if let Some(prio) = priority {
+        body.insert("priority".into(), Value::String(prio));
+    }
+    if let Some(state) = state_uuid {
+        body.insert("state".into(), Value::String(state));
+    }
+    if let Some(parent) = parent_uuid {
+        body.insert("parent".into(), Value::String(parent));
+    }
+    body
 }
 
 async fn resolve_create_project(
@@ -293,13 +355,15 @@ async fn resolve_create_project(
     ))
 }
 
-async fn cmd_list(client: &ApiClient, args: ListArgs) -> Result<(), CliError> {
-    if args.project.trim().is_empty() {
-        return Err(CliError::new(EXIT_INVALID, "--project must not be empty"));
-    }
-    let project_ref = args.project.as_str();
-
-    let mut params: Vec<(&str, String)> = Vec::new();
+/// Assemble the ordered query params for `pidash issue list` from the parsed
+/// args and an already-resolved parent UUID.
+///
+/// Pulled out of `cmd_list` so the URL contract is testable without a network
+/// round-trip: the order is preserved by `build_query_string`, and `parent`
+/// carries the parent's UUID (resolved from a `<PROJ>-<num>` identifier by the
+/// caller) because the server filters children by UUID.
+fn build_list_params(args: &ListArgs, parent_uuid: Option<String>) -> Vec<(&'static str, String)> {
+    let mut params: Vec<(&'static str, String)> = Vec::new();
     if let Some(c) = args.cursor.as_ref() {
         params.push(("cursor", c.clone()));
     }
@@ -309,6 +373,22 @@ async fn cmd_list(client: &ApiClient, args: ListArgs) -> Result<(), CliError> {
     if let Some(o) = args.order_by.as_ref() {
         params.push(("order_by", o.clone()));
     }
+    if let Some(parent) = parent_uuid {
+        params.push(("parent", parent));
+    }
+    params
+}
+
+async fn cmd_list(client: &ApiClient, args: ListArgs) -> Result<(), CliError> {
+    if args.project.trim().is_empty() {
+        return Err(CliError::new(EXIT_INVALID, "--project must not be empty"));
+    }
+    let project_ref = args.project.clone();
+
+    // Resolve `--parent` to a UUID before assembling the query — the server
+    // filters children by the parent's UUID, not its `<PROJ>-<num>` identifier.
+    let parent_uuid = resolve_parent_id(client, args.parent.as_deref()).await?;
+    let params = build_list_params(&args, parent_uuid);
     let query = build_query_string(&params);
 
     let path = format!(
@@ -391,44 +471,70 @@ fn html_escape(s: &str) -> String {
     out
 }
 
-async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> {
+/// Assemble the patch-work-item request body from already-resolved parts.
+///
+/// Pulled out of `cmd_patch` so the wire contract is testable without a
+/// network round-trip. Only the keys the caller supplied are set (PATCH is a
+/// partial update); `description` renders to `description_html`, and
+/// `state`/`parent` carry pre-resolved UUIDs.
+fn build_patch_body(
+    title: Option<String>,
+    description: Option<String>,
+    priority: Option<String>,
+    state_uuid: Option<String>,
+    parent_uuid: Option<String>,
+) -> Map<String, Value> {
     let mut body: Map<String, Value> = Map::new();
-
-    if let Some(ref title) = args.title {
-        body.insert("name".into(), Value::String(title.clone()));
+    if let Some(title) = title {
+        body.insert("name".into(), Value::String(title));
     }
-    if let Some(ref desc) = args.description {
-        // Same rich-text contract as `cmd_create`: the server stores the body in
-        // `description_html`, and the PATCH view keys the description-version
-        // bookkeeping off `request.data.get("description_html")`. Convert the
-        // plain-text/markdown input and send it under that key; the model
-        // re-derives `description_stripped` and the serializer re-sanitizes the
-        // HTML on save.
+    if let Some(desc) = description {
+        // Same rich-text contract as `build_create_body`: the server stores the
+        // body in `description_html`, and the PATCH view keys the
+        // description-version bookkeeping off `request.data.get("description_html")`.
+        // Convert the plain-text/markdown input and send it under that key; the
+        // model re-derives `description_stripped` and the serializer re-sanitizes
+        // the HTML on save.
         body.insert(
             "description_html".into(),
-            Value::String(description_to_html(desc)),
+            Value::String(description_to_html(&desc)),
         );
     }
-    if let Some(ref prio) = args.priority {
-        body.insert("priority".into(), Value::String(prio.clone()));
+    if let Some(prio) = priority {
+        body.insert("priority".into(), Value::String(prio));
     }
+    if let Some(state) = state_uuid {
+        body.insert("state".into(), Value::String(state));
+    }
+    if let Some(parent) = parent_uuid {
+        body.insert("parent".into(), Value::String(parent));
+    }
+    body
+}
 
+async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> {
     // Resolve issue first — we always need project_id for the mutating PATCH URL.
     let issue = resolve_issue(client, &args.identifier).await?;
 
-    if let Some(ref state) = args.state {
-        let uuid = if looks_like_uuid(state) {
-            state.clone()
-        } else {
-            resolve_state_name(client, &issue.project_id, state).await?
-        };
-        body.insert("state".into(), Value::String(uuid));
-    }
+    let state_uuid = match args.state {
+        Some(ref state) if looks_like_uuid(state) => Some(state.clone()),
+        Some(ref state) => Some(resolve_state_name(client, &issue.project_id, state).await?),
+        None => None,
+    };
+    let parent_uuid = resolve_parent_id(client, args.parent.as_deref()).await?;
+
+    let body = build_patch_body(
+        args.title,
+        args.description,
+        args.priority,
+        state_uuid,
+        parent_uuid,
+    );
 
     if body.is_empty() {
         return Err(CliError::new(
             EXIT_INVALID,
-            "at least one of --state/--title/--description/--priority is required",
+            "at least one of --state/--title/--description/--priority/--parent is required",
         ));
     }
 
@@ -646,6 +752,89 @@ mod tests {
             limit: None,
             sort: None,
         }
+    }
+
+    fn list_args(parent: Option<&str>) -> ListArgs {
+        ListArgs {
+            project: "ENG".to_string(),
+            cursor: None,
+            per_page: None,
+            order_by: None,
+            parent: parent.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn build_create_body_sets_name_and_resolved_parent() {
+        // Parent carries the already-resolved UUID (the server filters/links by
+        // UUID, not by the `PROJ-1` identifier the operator typed).
+        let body = build_create_body(
+            "Child task".to_string(),
+            None,
+            None,
+            None,
+            Some("11111111-1111-1111-1111-111111111111".to_string()),
+        );
+        assert_eq!(body.get("name").and_then(Value::as_str), Some("Child task"));
+        assert_eq!(
+            body.get("parent").and_then(Value::as_str),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+    }
+
+    #[test]
+    fn build_create_body_omits_parent_when_none() {
+        let body = build_create_body("t".to_string(), None, None, None, None);
+        assert!(!body.contains_key("parent"));
+    }
+
+    #[test]
+    fn build_patch_body_sets_only_supplied_fields_including_parent() {
+        let body = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            Some("22222222-2222-2222-2222-222222222222".to_string()),
+        );
+        // A parent-only re-parent must not carry name/description/priority/state.
+        assert_eq!(body.keys().collect::<Vec<_>>(), vec!["parent"]);
+        assert_eq!(
+            body.get("parent").and_then(Value::as_str),
+            Some("22222222-2222-2222-2222-222222222222")
+        );
+    }
+
+    #[test]
+    fn build_patch_body_empty_when_nothing_supplied() {
+        // Drives the "at least one flag is required" guard in cmd_patch.
+        assert!(build_patch_body(None, None, None, None, None).is_empty());
+    }
+
+    #[test]
+    fn build_list_params_includes_resolved_parent() {
+        let params = build_list_params(
+            &list_args(Some("ENG-1")),
+            Some("33333333-3333-3333-3333-333333333333".to_string()),
+        );
+        assert_eq!(
+            params,
+            vec![(
+                "parent",
+                "33333333-3333-3333-3333-333333333333".to_string()
+            )]
+        );
+        // End-to-end: the UUID lands on the `parent` query key.
+        assert_eq!(
+            build_query_string(&params),
+            "?parent=33333333-3333-3333-3333-333333333333"
+        );
+    }
+
+    #[test]
+    fn build_list_params_omits_parent_when_none() {
+        let params = build_list_params(&list_args(None), None);
+        assert!(params.iter().all(|(k, _)| *k != "parent"));
     }
 
     #[test]
