@@ -377,4 +377,105 @@ describe("LocalChatTransport.subscribeChatEvents", () => {
     });
     unsubscribe();
   });
+
+  it("falls back to accumulated deltas when a completed frame carries no assistant_message", async () => {
+    // H2: the engine streamed a reply but its done payload didn't echo the text
+    // under a key the daemon recognises, so `assistant_message` is empty. The
+    // transport must persist the accumulated `assistant_delta` text instead, so
+    // the reply survives the page's refetch-on-turn_completed rather than
+    // vanishing from both the UI and history.
+    const ctx = makeBridge();
+    const transport = new LocalChatTransport(ctx.bridge);
+    const onEvent = vi.fn();
+    const unsubscribe = transport.subscribeChatEvents(SESSION, 0, onEvent, vi.fn());
+    await Promise.resolve();
+
+    emit(ctx.listeners, "chat://frame", {
+      result: "chat_message_started",
+      data: { chat_session_id: SESSION, message_id: "m9", started_at: "2026-09-15T00:00:00Z" },
+    });
+    emit(ctx.listeners, "chat://frame", {
+      result: "chat_event",
+      data: {
+        chat_session_id: SESSION,
+        bridge_seq: 1,
+        kind: "assistant_delta",
+        payload: { params: { delta: "Hello " } },
+      },
+    });
+    emit(ctx.listeners, "chat://frame", {
+      result: "chat_event",
+      data: {
+        chat_session_id: SESSION,
+        bridge_seq: 2,
+        kind: "assistant_delta",
+        payload: { params: { delta: "world" } },
+      },
+    });
+    emit(ctx.listeners, "chat://frame", {
+      result: "chat_message_completed",
+      data: {
+        chat_session_id: SESSION,
+        message_id: "m9",
+        // No assistant_message — the fallback must supply the text.
+        status: "completed",
+        completed_at: "2026-09-15T00:00:01Z",
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve));
+
+    expect(ctx.invoke).toHaveBeenCalledWith("chat_append_event", {
+      account: "acct-1",
+      sessionId: SESSION,
+      event: { role: "assistant", content: "Hello world" },
+    });
+    // turn_completed is only dispatched after the reply is persisted, so the
+    // page's refetch finds it in history.
+    const completedCall = onEvent.mock.calls.find((c) => c[0].kind === "turn_completed");
+    expect(completedCall).toBeDefined();
+    const appendIndex = ctx.invoke.mock.calls.findIndex((c) => c[0] === "chat_append_event");
+    expect(appendIndex).toBeGreaterThanOrEqual(0);
+    unsubscribe();
+  });
+
+  it("resets the delta accumulator between turns", async () => {
+    // The accumulator must not bleed one turn's deltas into the next turn's
+    // fallback — chat_message_started clears it.
+    const ctx = makeBridge();
+    const transport = new LocalChatTransport(ctx.bridge);
+    const unsubscribe = transport.subscribeChatEvents(SESSION, 0, vi.fn(), vi.fn());
+    await Promise.resolve();
+
+    const started = (id: string) => ({
+      result: "chat_message_started",
+      data: { chat_session_id: SESSION, message_id: id, started_at: "2026-09-15T00:00:00Z" },
+    });
+    const delta = (seq: number, text: string) => ({
+      result: "chat_event",
+      data: {
+        chat_session_id: SESSION,
+        bridge_seq: seq,
+        kind: "assistant_delta",
+        payload: { params: { delta: text } },
+      },
+    });
+    const completed = (id: string) => ({
+      result: "chat_message_completed",
+      data: { chat_session_id: SESSION, message_id: id, status: "completed", completed_at: "2026-09-15T00:00:01Z" },
+    });
+
+    emit(ctx.listeners, "chat://frame", started("m1"));
+    emit(ctx.listeners, "chat://frame", delta(1, "first"));
+    emit(ctx.listeners, "chat://frame", completed("m1"));
+    emit(ctx.listeners, "chat://frame", started("m2"));
+    emit(ctx.listeners, "chat://frame", delta(2, "second"));
+    emit(ctx.listeners, "chat://frame", completed("m2"));
+    await new Promise((resolve) => setTimeout(resolve));
+
+    const appended = ctx.invoke.mock.calls
+      .filter((c) => c[0] === "chat_append_event")
+      .map((c) => (c[1] as { event: { content: string } }).event.content);
+    expect(appended).toEqual(["first", "second"]);
+    unsubscribe();
+  });
 });

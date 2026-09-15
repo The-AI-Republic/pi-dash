@@ -151,6 +151,24 @@ function frameSessionId(frame: ChatFrame): string {
 }
 
 /**
+ * Pull the assistant text out of an `assistant_delta` frame payload. The daemon
+ * wraps engine frames as `{ method, params }`; the text lives on `params.delta`
+ * (a string, or `{ text }`) or `params.text`. Mirrors the runner-side
+ * `assistant_delta_text` (runner/src/ipc/chat.rs) so the accumulated fallback
+ * matches what streamed to the UI.
+ */
+function assistantDeltaText(payload: Record<string, unknown>): string {
+  const params = (payload?.params as Record<string, unknown>) ?? payload ?? {};
+  const delta = (params as Record<string, unknown>).delta;
+  if (typeof delta === "string") return delta;
+  if (delta && typeof (delta as Record<string, unknown>).text === "string") {
+    return (delta as Record<string, unknown>).text as string;
+  }
+  const text = (params as Record<string, unknown>).text;
+  return typeof text === "string" ? text : "";
+}
+
+/**
  * Access to the native host, injectable so the transport can be unit-tested
  * with `invoke` and the event channel mocked. The production factory
  * ([`tauriBridge`]) reads `window.__TAURI__`.
@@ -445,6 +463,10 @@ export class LocalChatTransport implements ChatTransport {
   ): ChatEventUnsubscribe {
     const account = this.account();
     const translator = new ChatFrameTranslator(sessionId);
+    // Accumulate streamed assistant text per turn so a completed frame whose
+    // `assistant_message` is empty (the engine's done payload didn't carry text
+    // under a key the daemon recognises) can still be persisted from the deltas.
+    let assistantAccum = "";
     let cancelled = false;
     const unlisteners: Array<() => void> = [];
     const track = (promise: Promise<() => void>) => {
@@ -454,8 +476,26 @@ export class LocalChatTransport implements ChatTransport {
     track(
       this.bridge.listen<ChatFrame>(CHAT_FRAME_EVENT, (frame) => {
         if (frameSessionId(frame) !== sessionId) return;
+        if (frame.result === "chat_message_started") {
+          assistantAccum = "";
+        } else if (frame.result === "chat_event" && frame.data.kind === "assistant_delta") {
+          assistantAccum += assistantDeltaText(frame.data.payload);
+        }
+        if (frame.result === "chat_message_completed") {
+          // Persist the assistant reply (falling back to the accumulated
+          // deltas) *before* dispatching `turn_completed`, because the page
+          // refetches history on that event and replaces the streamed reply
+          // with it — if the reply isn't in history yet it vanishes.
+          const accum = assistantAccum;
+          void (async () => {
+            await this.persistFromFrame(account, sessionId, frame, accum).catch(() => {});
+            const event = translator.translate(frame);
+            if (event) onEvent(event);
+          })();
+          return;
+        }
         // Persist the durable parts of the turn as they stream.
-        void this.persistFromFrame(account, sessionId, frame).catch(() => {});
+        void this.persistFromFrame(account, sessionId, frame, "").catch(() => {});
         const event = translator.translate(frame);
         if (event) onEvent(event);
       })
@@ -476,21 +516,31 @@ export class LocalChatTransport implements ChatTransport {
   /**
    * Write the durable parts of a streamed turn to local history: the engine
    * thread id (for resume) when the thread starts, and the assistant's message
-   * text when the turn completes.
+   * text when the turn completes. The completed frame's `assistant_message` is
+   * used when present, else `fallbackAssistant` (the accumulated deltas) — so a
+   * reply the engine streamed but didn't echo in its done payload is never lost.
    */
-  private async persistFromFrame(account: string, sessionId: string, frame: ChatFrame): Promise<void> {
+  private async persistFromFrame(
+    account: string,
+    sessionId: string,
+    frame: ChatFrame,
+    fallbackAssistant: string
+  ): Promise<void> {
     if (frame.result === "chat_started" && frame.data.local_thread_id) {
       await this.bridge.invoke<void>("chat_set_thread_id", {
         account,
         sessionId,
         engineThreadId: frame.data.local_thread_id,
       });
-    } else if (frame.result === "chat_message_completed" && frame.data.assistant_message) {
-      await this.bridge.invoke<StoredEvent>("chat_append_event", {
-        account,
-        sessionId,
-        event: { role: "assistant", content: frame.data.assistant_message },
-      });
+    } else if (frame.result === "chat_message_completed") {
+      const content = frame.data.assistant_message?.trim() ? frame.data.assistant_message : fallbackAssistant;
+      if (content) {
+        await this.bridge.invoke<StoredEvent>("chat_append_event", {
+          account,
+          sessionId,
+          event: { role: "assistant", content },
+        });
+      }
     }
   }
 }
