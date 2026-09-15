@@ -1,50 +1,15 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify, broadcast};
-use uuid::Uuid;
 
-use crate::cloud::protocol::{ApprovalDecision, ApprovalKind};
+use crate::cloud::protocol::ApprovalDecision;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DecisionSource {
-    Local,
-    Cloud,
-    Policy,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApprovalRecord {
-    pub approval_id: String,
-    /// Runner this approval belongs to. Stamped at `open()` time so
-    /// the TUI can route a `Decide` to the right instance even if the
-    /// user changes the runner picker between selection and decision.
-    /// Defaulted to nil for back-compat with records minted before the
-    /// field landed.
-    #[serde(default)]
-    pub runner_id: Uuid,
-    pub run_id: Uuid,
-    pub kind: ApprovalKind,
-    pub payload: serde_json::Value,
-    pub reason: Option<String>,
-    pub requested_at: DateTime<Utc>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub status: ApprovalStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalStatus {
-    Pending,
-    Resolved {
-        decision: ApprovalDecision,
-        source: DecisionSource,
-        decided_at: DateTime<Utc>,
-    },
-    Expired,
-}
+// `ApprovalRecord`, `ApprovalStatus` and `DecisionSource` moved to the shared
+// `pidash-ipc` crate (PDASHOSS01-158); re-exported here so every
+// `approval::router::{ApprovalRecord, ApprovalStatus, DecisionSource}` call
+// site is unchanged.
+pub use pidash_ipc::dto::{ApprovalRecord, ApprovalStatus, DecisionSource};
 
 #[derive(Clone)]
 pub struct ApprovalRouter {
@@ -181,6 +146,8 @@ impl Default for ApprovalRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cloud::protocol::ApprovalKind;
+    use uuid::Uuid;
 
     fn rec() -> ApprovalRecord {
         ApprovalRecord {

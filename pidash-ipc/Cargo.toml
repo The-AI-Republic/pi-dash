@@ -1,0 +1,29 @@
+[package]
+name = "pidash-ipc"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Shared desktop ↔ daemon IPC protocol, transport client, and wire DTOs for Pi Dash"
+repository = "https://github.com/The-AI-Republic/pi-dash"
+license = "AGPL-3.0-only"
+publish = false
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+chrono = { version = "0.4", default-features = false, features = [
+    "clock",
+    "serde",
+] }
+tokio = { version = "1", features = ["io-util", "net"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = [
+    "io-util",
+    "net",
+    "macros",
+    "rt-multi-thread",
+    "time",
+] }

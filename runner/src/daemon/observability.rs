@@ -3,19 +3,12 @@
 //! presentation-only; the cloud watchdog and the web UI consume these as
 //! descriptive scalars (`.ai_design/runner_agent_bridge/design.md` §4.1).
 
-use serde::{Deserialize, Serialize};
-
 use crate::agent::BridgeEvent;
 
-/// Streaming token usage parsed opportunistically from a Codex
-/// `codex/event/token_count` Raw frame. Claude does not emit equivalent
-/// streaming counts during a run, so this is left `None` for Claude.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenUsage {
-    pub input: u64,
-    pub output: u64,
-    pub total: u64,
-}
+// `TokenUsage` moved to the shared `pidash-ipc` crate (PDASHOSS01-158) as a
+// field of the `ObservabilitySnapshot` wire type; re-exported here so every
+// `daemon::observability::TokenUsage` call site is unchanged.
+pub use pidash_ipc::dto::TokenUsage;
 
 /// Maximum length for `last_event_kind` — matches the cloud's
 /// `RunnerLiveState.last_event_kind` column.
