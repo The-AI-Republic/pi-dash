@@ -40,7 +40,13 @@ function makeBridge(overrides: Partial<Record<string, unknown>> = {}) {
     return () => delete listeners[event];
   });
   const ensureRuntime = vi.fn(async () => {});
-  const bridge: TauriBridge = { invoke, listen, getAccount: () => "acct-1", ensureRuntime };
+  const bridge: TauriBridge = {
+    invoke,
+    listen,
+    getAccount: () => "acct-1",
+    ensureRuntime,
+    workspaceSlug: () => "acme",
+  };
   return { bridge, invoke, listen, listeners, ensureRuntime };
 }
 
@@ -361,6 +367,24 @@ describe("LocalChatTransport verbs", () => {
 
     expect(ctx.ensureRuntime).toHaveBeenCalledTimes(2);
     expect(order).toEqual(["ensureRuntime", "chat_warm", "ensureRuntime", "chat_send"]);
+  });
+
+  it("carries the workspace slug — the daemon's socket lives in that workspace's tree", async () => {
+    // The daemon runs per workspace with its data dir re-rooted under
+    // `managed/pidash/<workspace>/data`, so its control socket is
+    // `<that>/runtime/pidash.sock`. Without the slug the host resolved the
+    // shared `managed/runtime/` instead and every send failed with
+    // "connecting to managed daemon" while the daemon was up.
+    await transport.warmChatSession(SESSION);
+    await transport.cancelChat(SESSION);
+    const chatCalls = ctx.invoke.mock.calls.filter(([command]) => String(command).startsWith("chat_"));
+    const commandCalls = chatCalls.filter(([command]) =>
+      ["chat_warm", "chat_send", "chat_cancel", "chat_close", "chat_decide"].includes(String(command))
+    );
+    expect(commandCalls.length).toBeGreaterThan(0);
+    for (const [command, args] of commandCalls) {
+      expect((args as Record<string, unknown>).workspace, `${command} must carry the workspace`).toBe("acme");
+    }
   });
 
   it("never sends a runner selector — the stored id is not a daemon runner name", async () => {

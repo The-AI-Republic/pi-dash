@@ -186,6 +186,12 @@ export interface TauriBridge {
    * talk to, and the send fails at "connecting to managed daemon".
    */
   ensureRuntime(): Promise<void>;
+  /**
+   * Workspace slug. The daemon runs per workspace and binds its control
+   * socket under that workspace's data dir, so every chat command carries the
+   * slug — without it the host resolves a socket nothing is listening on.
+   */
+  workspaceSlug(): string;
 }
 
 /**
@@ -397,6 +403,7 @@ export class LocalChatTransport implements ChatTransport {
     // Streaming happens over `chat://frame`; the command returns once the turn
     // has been submitted.
     await this.bridge.invoke<void>("chat_send", {
+      workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
       messageId: crypto.randomUUID(),
       content,
@@ -414,6 +421,7 @@ export class LocalChatTransport implements ChatTransport {
     });
     await this.bridge.ensureRuntime();
     await this.bridge.invoke<void>("chat_warm", {
+      workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
       cwd: session?.working_dir,
       localThreadId: session?.engine_thread_id ?? undefined,
@@ -425,6 +433,7 @@ export class LocalChatTransport implements ChatTransport {
     // No session lookup: cancel carries only the session id now that the
     // runner selector is gone, and the daemon resolves its own runner.
     await this.bridge.invoke<void>("chat_cancel", {
+      workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
       reason,
     });
@@ -438,6 +447,7 @@ export class LocalChatTransport implements ChatTransport {
       sessionId,
     });
     await this.bridge.invoke<void>("chat_close", {
+      workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
     });
     // Slice-3 has no closed state; return the session as-is so the UI keeps the
@@ -455,6 +465,7 @@ export class LocalChatTransport implements ChatTransport {
    */
   async decideChatApproval(sessionId: string, localApprovalId: string, decision: TApprovalDecision): Promise<void> {
     await this.bridge.invoke<void>("chat_decide", {
+      workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
       localApprovalId,
       decision,
@@ -570,8 +581,18 @@ function tauriBridge(): TauriBridge {
     // (`/:workspaceSlug/...`); the chat page has no other handle on it, and
     // enrolment is keyed by slug rather than by the workspace id the chat
     // session stores.
-    ensureRuntime: () => ensureChatRuntime(decodeURIComponent(window.location.pathname.split("/")[1] ?? "")),
+    ensureRuntime: () => ensureChatRuntime(workspaceSlugFromLocation()),
+    workspaceSlug: workspaceSlugFromLocation,
   };
+}
+
+/**
+ * The workspace slug is the first path segment of every in-app route
+ * (`/:workspaceSlug/...`). The chat session stores the workspace *id*, which
+ * is not what the daemon's per-workspace tree is keyed by.
+ */
+function workspaceSlugFromLocation(): string {
+  return decodeURIComponent(window.location.pathname.split("/")[1] ?? "");
 }
 
 /** A synthetic runner so the shared chat page renders the built-in engine. */

@@ -89,7 +89,7 @@ pub struct ManagedPaths {
 }
 
 impl ManagedPaths {
-    fn for_workspace<R: Runtime>(app: &AppHandle<R>, workspace: &str) -> Result<Self, String> {
+    pub(crate) fn for_workspace<R: Runtime>(app: &AppHandle<R>, workspace: &str) -> Result<Self, String> {
         if !valid_component(workspace) {
             return Err("Invalid workspace slug".into());
         }
@@ -97,6 +97,19 @@ impl ManagedPaths {
         paths.config_dir = paths.config_dir.join(workspace);
         paths.data_dir = paths.config_dir.join("data");
         Ok(paths)
+    }
+
+    /// Where the daemon for *this* tree binds its control socket.
+    ///
+    /// Not `runtime_dir`. The daemon is started per workspace with
+    /// `PIDASH_DATA_DIR` pointing at the re-rooted `data_dir`, and the runner
+    /// derives its runtime dir as `<data_dir>/runtime` whenever that override
+    /// is present (`runner/src/util/paths.rs`). `runtime_dir` here is the
+    /// *shared* tree that holds the model token, which no daemon binds under —
+    /// reaching for it is how the chat transport ended up looking for a socket
+    /// nothing was listening on.
+    pub(crate) fn daemon_runtime_dir(&self) -> PathBuf {
+        self.data_dir.join("runtime")
     }
 
     pub fn resolve<R: Runtime>(app: &AppHandle<R>) -> Result<Self, String> {
