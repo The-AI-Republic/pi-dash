@@ -501,7 +501,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     .filter((row): row is { event: IAgentChatEvent; label: string } => row.label !== null)
     // A started/completed pair for the same command reads as a duplicate;
     // keep the latest wording only.
-    .filter((row, index, rows) => index === rows.length - 1 || rows[index + 1].label !== row.label)
+    .filter((row, index, labelled) => index === labelled.length - 1 || labelled[index + 1].label !== row.label)
     .slice(-6)
     .map(({ event, label }) => (
       <div key={event.seq} className="rounded border border-subtle bg-surface-1 px-3 py-2 text-11 text-secondary">
