@@ -235,10 +235,8 @@ fn kill_child(child: &mut Child) -> std::io::Result<()> {
 /// Where the standalone CLI goes, matching the official installer's
 /// destination so the two never fight over different copies.
 pub(crate) fn cli_install_dir(home: &Path, local_app_data: Option<&Path>) -> PathBuf {
-    if cfg!(windows) {
-        if let Some(base) = local_app_data {
-            return base.join("Programs").join("pidash");
-        }
+    if let Some(base) = local_app_data.filter(|_| cfg!(windows)) {
+        return base.join("Programs").join("pidash");
     }
     home.join(".local").join("bin")
 }
