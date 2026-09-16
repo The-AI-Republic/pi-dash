@@ -50,7 +50,7 @@
 //!     chronology across the two pipes — that would need a single combined
 //!     stream upstream.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -227,6 +227,152 @@ fn kill_child(child: &mut Child) -> std::io::Result<()> {
     child.kill()
 }
 
+
+// ---------------------------------------------------------------------------
+// Installing from the bundle
+// ---------------------------------------------------------------------------
+
+/// Where the standalone CLI goes, matching the official installer's
+/// destination so the two never fight over different copies.
+pub(crate) fn cli_install_dir(home: &Path, local_app_data: Option<&Path>) -> PathBuf {
+    if cfg!(windows) {
+        if let Some(base) = local_app_data {
+            return base.join("Programs").join("pidash");
+        }
+    }
+    home.join(".local").join("bin")
+}
+
+/// The line appended to a shell profile so `~/.local/bin` is on PATH.
+///
+/// Guarded by its own `case` test so re-running is a no-op even if the user
+/// already has the directory on PATH by other means, and idempotent on the
+/// file because [`ensure_on_path`] refuses to append it twice.
+pub(crate) fn path_snippet(dir: &Path) -> String {
+    format!(
+        "\n# Added by Pi Dash Desktop — makes the bundled `pidash` CLI available.\ncase \":$PATH:\" in\n  *\":{dir}:\"*) ;;\n  *) export PATH=\"{dir}:$PATH\" ;;\nesac\n",
+        dir = dir.display()
+    )
+}
+
+/// True when `dir` is already listed in `path_var`.
+pub(crate) fn already_on_path(path_var: &str, dir: &Path) -> bool {
+    let target = dir.to_string_lossy();
+    path_var.split(':').any(|entry| entry == target)
+}
+
+/// The `pidash` the app ships, inside its own bundle. This is the same program
+/// the standalone installer downloads — the app runs it as its managed daemon
+/// (`pidash __run`) — so a machine with the desktop app already has the CLI's
+/// bytes on disk; what it lacks is a copy on PATH that the user owns.
+fn bundled_cli<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    let name = if cfg!(windows) { "pidash.exe" } else { "pidash" };
+    let path = tauri::Manager::path(app).resource_dir().ok()?.join("bin").join(name);
+    path.is_file().then_some(path)
+}
+
+/// Copy the bundled CLI to `dest_dir`, atomically, and make it executable.
+fn copy_bundled_cli(bundled: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dest_dir)
+        .map_err(|e| format!("creating {}: {e}", dest_dir.display()))?;
+    let name = bundled.file_name().ok_or("bundled CLI has no file name")?;
+    let dest = dest_dir.join(name);
+    // Write beside the target then rename: replacing a running binary in place
+    // fails with ETXTBSY, and a half-copied `pidash` on PATH is worse than none.
+    let staging = dest_dir.join(format!(".{}.pidash-install", name.to_string_lossy()));
+    std::fs::copy(bundled, &staging)
+        .map_err(|e| format!("copying {} → {}: {e}", bundled.display(), staging.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("making {} executable: {e}", staging.display()))?;
+    }
+    std::fs::rename(&staging, &dest).map_err(|e| {
+        let _ = std::fs::remove_file(&staging);
+        format!("installing {}: {e}", dest.display())
+    })?;
+    Ok(dest)
+}
+
+/// Put `dir` on the user's PATH for future shells, if it isn't already.
+///
+/// Unix only, and deliberately conservative: it appends one guarded block to
+/// the profiles that exist, and never rewrites what is already there. Windows
+/// PATH lives in the registry and the official installer owns that; the
+/// bundled path falls back to the downloader there.
+#[cfg(unix)]
+fn ensure_on_path(dir: &Path, home: &Path) -> Vec<String> {
+    let mut notes = Vec::new();
+    if already_on_path(&std::env::var("PATH").unwrap_or_default(), dir) {
+        return notes;
+    }
+    let snippet = path_snippet(dir);
+    let marker = "Added by Pi Dash Desktop";
+    for profile in [".profile", ".zshrc", ".bashrc"] {
+        let path = home.join(profile);
+        if !path.exists() {
+            continue;
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(existing) if existing.contains(marker) => continue,
+            Ok(_) => {}
+            Err(e) => {
+                notes.push(format!("could not read {}: {e}", path.display()));
+                continue;
+            }
+        }
+        match std::fs::OpenOptions::new().append(true).open(&path) {
+            Ok(mut file) => {
+                use std::io::Write as _;
+                if let Err(e) = file.write_all(snippet.as_bytes()) {
+                    notes.push(format!("could not update {}: {e}", path.display()));
+                } else {
+                    notes.push(format!("added {} to PATH in {}", dir.display(), path.display()));
+                }
+            }
+            Err(e) => notes.push(format!("could not open {}: {e}", path.display())),
+        }
+    }
+    if notes.is_empty() {
+        notes.push(format!(
+            "{} is not on PATH; add it to your shell profile to use `pidash` in a terminal",
+            dir.display()
+        ));
+    }
+    notes
+}
+
+#[cfg(not(unix))]
+fn ensure_on_path(_dir: &Path, _home: &Path) -> Vec<String> {
+    Vec::new()
+}
+
+/// Install the CLI from the app's own bundle. `Ok(None)` means there was no
+/// bundled binary to install from and the caller should fall back to the
+/// network installer.
+fn install_from_bundle<R: Runtime>(app: &AppHandle<R>) -> Result<Option<PathBuf>, String> {
+    let Some(bundled) = bundled_cli(app) else {
+        return Ok(None);
+    };
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Ok(None);
+    };
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let dest_dir = cli_install_dir(&home, local_app_data.as_deref());
+    let log = |line: String| {
+        let _ = app.emit("pidash-install-log", serde_json::json!({ "line": line }));
+    };
+    log(format!("Installing the bundled pidash CLI into {}", dest_dir.display()));
+    let installed = copy_bundled_cli(&bundled, &dest_dir)?;
+    log(format!("Installed {}", installed.display()));
+    for note in ensure_on_path(&dest_dir, &home) {
+        log(note);
+    }
+    log("Run `pidash auth login`, then `pidash runner add`, to connect your own agent.".to_string());
+    Ok(Some(installed))
+}
+
 /// Find `pidash` by name on PATH. Returns the absolute path resolved by
 /// the OS's resolver. Used as a fallback after [`known_install_paths`]
 /// to cover users who installed via brew / winget / a custom path.
@@ -394,6 +540,25 @@ pub async fn install_pidash_cli<R: Runtime>(app: AppHandle<R>) -> Result<(), Str
     let Some(_guard) = InstallInProgressGuard::acquire() else {
         return Err(INSTALL_BUSY_MESSAGE.to_string());
     };
+
+    // The app already ships this exact program — it runs it as the managed
+    // daemon — so install from the bundle rather than downloading a second
+    // copy. Offline, instant, and the bytes are the ones this app was tested
+    // with. Falls through to the network installer when there is no bundle to
+    // copy from (a dev build, or Windows, whose PATH the official installer
+    // owns).
+    let bundle_app = app.clone();
+    match tauri::async_runtime::spawn_blocking(move || install_from_bundle(&bundle_app)).await {
+        Ok(Ok(Some(_))) => return Ok(()),
+        Ok(Ok(None)) => {}
+        Ok(Err(e)) => {
+            let _ = app.emit(
+                "pidash-install-log",
+                serde_json::json!({ "line": format!("bundled install failed ({e}); downloading instead") }),
+            );
+        }
+        Err(e) => return Err(format!("install task panicked: {e}")),
+    }
 
     let (program, args) = installer_command();
 
@@ -589,6 +754,82 @@ fn run_installer<R: Runtime>(
         ));
     }
     Ok(())
+}
+
+
+#[cfg(test)]
+mod bundle_install_tests {
+    use super::*;
+
+    #[test]
+    fn install_dir_matches_the_official_installer() {
+        let home = PathBuf::from("/home/dev");
+        if cfg!(windows) {
+            let lad = PathBuf::from("C:\\Users\\dev\\AppData\\Local");
+            assert_eq!(
+                cli_install_dir(&home, Some(&lad)),
+                lad.join("Programs").join("pidash")
+            );
+        } else {
+            assert_eq!(cli_install_dir(&home, None), home.join(".local").join("bin"));
+        }
+    }
+
+    #[test]
+    fn already_on_path_matches_whole_entries_only() {
+        let dir = PathBuf::from("/home/dev/.local/bin");
+        assert!(already_on_path("/usr/bin:/home/dev/.local/bin:/bin", &dir));
+        assert!(!already_on_path("/usr/bin:/bin", &dir));
+        // A prefix of another entry is not a match.
+        assert!(!already_on_path("/home/dev/.local/bin2:/bin", &dir));
+    }
+
+    #[test]
+    fn path_snippet_is_self_guarding() {
+        let snippet = path_snippet(Path::new("/home/dev/.local/bin"));
+        // Sourcing it twice must not duplicate the entry, so it tests PATH
+        // before exporting.
+        assert!(snippet.contains("case \":$PATH:\""));
+        assert!(snippet.contains("/home/dev/.local/bin"));
+        assert!(snippet.contains("Added by Pi Dash Desktop"));
+    }
+
+    #[test]
+    fn copy_is_atomic_and_executable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("pidash");
+        std::fs::write(&src, b"#!/bin/sh\necho hi\n").unwrap();
+        let dest_dir = tmp.path().join("bin");
+        let installed = copy_bundled_cli(&src, &dest_dir).unwrap();
+        assert_eq!(installed, dest_dir.join("pidash"));
+        assert_eq!(std::fs::read(&installed).unwrap(), b"#!/bin/sh\necho hi\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&installed).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "installed CLI must be executable");
+        }
+        // No staging file left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(&dest_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "staging file left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn copy_replaces_an_existing_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("pidash");
+        std::fs::write(&src, b"new").unwrap();
+        let dest_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        std::fs::write(dest_dir.join("pidash"), b"old").unwrap();
+        let installed = copy_bundled_cli(&src, &dest_dir).unwrap();
+        assert_eq!(std::fs::read(&installed).unwrap(), b"new");
+    }
 }
 
 #[cfg(test)]
