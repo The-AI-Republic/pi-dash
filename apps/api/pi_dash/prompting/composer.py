@@ -291,6 +291,7 @@ def compose(
     user,
     context: Dict[str, Any],
     draft_overrides: Optional[Dict[str, str]] = None,
+    executor_kind: Optional[str] = None,
 ) -> ComposedPrompt:
     """Resolve, assemble, and render the recipe for ``kind``.
 
@@ -301,7 +302,7 @@ def compose(
     the resolved one before assembly, so a preview can render a draft the admin
     hasn't committed yet. Keys outside this recipe are ignored.
     """
-    recipe = recipes.recipe_for(kind)
+    recipe = recipes.recipe_for(kind, executor_kind=executor_kind)
     override_index = load_override_index(workspace, user)
     resolved = [
         resolve_section(key, workspace=workspace, project=project, user=user, override_index=override_index)
@@ -403,7 +404,12 @@ def build_first_turn(issue, run) -> str:
         }
     else:
         composed = compose(
-            kind, workspace=issue.workspace, project=issue.project, user=_user_for_run(run), context=context
+            kind,
+            workspace=issue.workspace,
+            project=issue.project,
+            user=_user_for_run(run),
+            context=context,
+            executor_kind=getattr(run, "executor_kind", None),
         )
         run.prompt_manifest = composed.manifest_dicts
     return composed.text
@@ -438,13 +444,24 @@ def build_scheduler_turn(binding, run) -> str:
             "sections": composed.manifest_dicts,
         }
     else:
-        composed = compose(recipes.KIND_SCHEDULER, workspace=workspace, project=project, user=None, context=context)
+        composed = compose(
+            recipes.KIND_SCHEDULER,
+            workspace=workspace,
+            project=project,
+            user=None,
+            context=context,
+            executor_kind=getattr(run, "executor_kind", None),
+        )
         run.prompt_manifest = composed.manifest_dicts
     return composed.text
 
 
 def build_direct_turn(raw_prompt: str, run, issue=None) -> str:
     """Wrap Cloud direct input as inert task data; preserve local raw prompts."""
+    # Local import: ``context`` pulls in Django models, and importing it at
+    # module scope would drag them into every importer of this module.
+    from pi_dash.prompting.context import extra_toolsets_vars
+
     if getattr(run, "executor_kind", "local_runner") != "cloud_agent":
         run.prompt_manifest = None
         return raw_prompt
@@ -476,6 +493,7 @@ def build_direct_turn(raw_prompt: str, run, issue=None) -> str:
             },
             "available_tools": run.tool_plan.get("tools", []),
             "unavailable_capabilities": run.tool_plan.get("unavailable_capabilities", []),
+            **extra_toolsets_vars(run),
             "limits": run.tool_plan.get("limits", {}),
         }
     composed = compose_cloud(recipes.KIND_DIRECT, workspace=workspace, project=project, context=context)

@@ -9,6 +9,7 @@ import logging
 import secrets
 
 # Django imports
+from django.db import transaction
 from django.db.models import Case, Count, IntegerField, Q, When
 from django.contrib.auth import logout
 from django.utils import timezone
@@ -327,7 +328,15 @@ class UserEndpoint(BaseViewSet):
             "workspace_create": False,
             "workspace_invite": False,
         }
-        profile.save()
+        profile.save(
+            update_fields=[
+                "last_workspace_id",
+                "is_tour_completed",
+                "is_onboarded",
+                "onboarding_step",
+                "updated_at",
+            ]
+        )
 
         # Reset password
         user.is_password_autoset = True
@@ -365,7 +374,10 @@ class UpdateUserOnBoardedEndpoint(BaseAPIView):
     def patch(self, request):
         profile = Profile.objects.get(user_id=request.user.id)
         profile.is_onboarded = request.data.get("is_onboarded", False)
-        profile.save()
+        # Restrict the UPDATE to fields this endpoint owns. A full-row save of
+        # a stale instance can overwrite a concurrently committed namespaced
+        # settings bag even though the settings endpoint itself uses a lock.
+        profile.save(update_fields=["is_onboarded", "updated_at"])
         return Response({"message": "Updated successfully"}, status=status.HTTP_200_OK)
 
 
@@ -373,7 +385,7 @@ class UpdateUserTourCompletedEndpoint(BaseAPIView):
     def patch(self, request):
         profile = Profile.objects.get(user_id=request.user.id)
         profile.is_tour_completed = request.data.get("is_tour_completed", False)
-        profile.save()
+        profile.save(update_fields=["is_tour_completed", "updated_at"])
         return Response({"message": "Updated successfully"}, status=status.HTTP_200_OK)
 
 
@@ -417,9 +429,34 @@ class ProfileEndpoint(BaseAPIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def patch(self, request):
-        profile = Profile.objects.get(user=request.user)
-        serializer = ProfileSerializer(profile, data=request.data, partial=True)
-        if serializer.is_valid():
+        from pi_dash.ee.settings import user_settings
+
+        # ``settings`` is a namespaced bag whose recognised contents only the
+        # running build declares (CE declares none), so it is read-only on the
+        # serializer and written here instead: validated against that
+        # declaration, then merged per namespace so a client patching one
+        # namespace cannot drop another's values.
+        settings_patch = None
+        if "settings" in request.data:
+            try:
+                settings_patch = user_settings.validate_settings_patch(request.data["settings"])
+            except ValueError as exc:
+                return Response({"settings": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
+
+        # The whole read-modify-write runs under one row lock, and the merge
+        # happens *before* the save rather than after it. ``serializer.save()``
+        # issues a full-row UPDATE — ``settings`` included, since the instance
+        # carries it whether or not the serializer may write it — so a profile
+        # read outside the lock writes back the bag as it looked at read time
+        # and silently drops any namespace another request committed in
+        # between. Merging after that save cannot repair it: the clobbering
+        # write has already landed.
+        with transaction.atomic():
+            profile = Profile.objects.select_for_update().get(user=request.user)
+            serializer = ProfileSerializer(profile, data=request.data, partial=True)
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            if settings_patch is not None:
+                profile.settings = user_settings.merge_settings(profile.settings, settings_patch)
             serializer.save()
-            return Response(serializer.data, status=status.HTTP_200_OK)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializer.data, status=status.HTTP_200_OK)

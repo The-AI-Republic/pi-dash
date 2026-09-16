@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 
-export type TAssistantMessageRole = "user" | "assistant" | "tool_call" | "tool_result" | "error";
+// "notice" is a client-synthesized role (never persisted) used to render
+// inline, non-fatal notices in the thread — e.g. a tool_servers_skipped event.
+export type TAssistantMessageRole = "user" | "assistant" | "tool_call" | "tool_result" | "error" | "notice";
 export type TAssistantMessageStatus = "streaming" | "completed" | "failed" | "cancelled";
 export type TAssistantProviderKind = "openai_compatible" | "anthropic";
 
@@ -35,6 +37,21 @@ export interface IAssistantMessage {
   completed_at: string | null;
 }
 
+/** One MCP tool server that was dropped from a run, with a machine-readable reason. */
+export interface IAssistantSkippedServer {
+  name: string;
+  reason: string;
+}
+
+/**
+ * Payload of the `tool_servers_skipped` SSE event: the servers a run could not
+ * use, so the UI can tell the user a capability was unavailable instead of
+ * silently losing it.
+ */
+export interface IToolServersSkippedPayload {
+  servers: IAssistantSkippedServer[];
+}
+
 export interface IAssistantEvent {
   id?: number;
   thread: string;
@@ -63,4 +80,33 @@ export interface IUserLLMConfigInput {
   base_url?: string;
   model_name: string;
   api_key?: string;
+}
+
+export interface IAssistantMCPServer {
+  id: string;
+  name: string;
+  url: string;
+  has_auth_header: boolean;
+  /** Slugified name; namespaces this server's tool names inside a run. */
+  tool_prefix: string;
+  /**
+   * The prefix this server's tools actually get. Differs from `tool_prefix`
+   * when two servers slugify alike and a run disambiguates them with a
+   * counter. Null for a disabled server, which claims no prefix.
+   */
+  effective_tool_prefix: string | null;
+  is_enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IAssistantMCPServerInput {
+  name: string;
+  url: string;
+  /**
+   * Full Authorization header value (e.g. "Bearer …"). Write-only: the API
+   * never echoes it back, only `has_auth_header`. Send "" to clear it.
+   */
+  auth_header?: string;
+  is_enabled?: boolean;
 }

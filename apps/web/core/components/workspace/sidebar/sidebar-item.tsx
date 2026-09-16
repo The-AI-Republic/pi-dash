@@ -27,12 +27,15 @@ type Props = {
   item: IWorkspaceSidebarNavigationItem;
   additionalRender?: (itemKey: string, workspaceSlug: string) => ReactNode;
   additionalStaticItems?: string[];
+  /** Overrides the key-based icon lookup, for items the helper cannot know about. */
+  icon?: ReactNode;
 };
 
 export const SidebarItemBase = observer(function SidebarItemBase({
   item,
   additionalRender,
   additionalStaticItems,
+  icon: iconOverride,
 }: Props) {
   const { t } = useTranslation();
   const pathname = usePathname();
@@ -70,7 +73,7 @@ export const SidebarItemBase = observer(function SidebarItemBase({
 
   const itemHref =
     item.key === "your_work" && data?.id ? joinUrlPath(slug, item.href, data?.id) : joinUrlPath(slug, item.href);
-  const icon = getSidebarNavigationItemIcon(item.key);
+  const icon = iconOverride ?? getSidebarNavigationItemIcon(item.key);
   const tooltipContent = item.tooltipTranslationKey ? t(item.tooltipTranslationKey) : null;
 
   const link = (

@@ -2,9 +2,23 @@
 
 Local daemon + TUI (`pidash` binary) that connects a developer machine to the Pi Dash cloud and drives `codex app-server` for assigned tasks.
 
+## Developer-owned agent packages
+
+OSS exposes an optional [agent package seam](docs/agent-packages.md) for
+developers who supply their own executable or protocol adapter:
+
+```bash
+pidash runner use-package my-runner --manifest /path/to/agent-package.toml
+```
+
+The manifest selects an existing bridge protocol and a local executable. OSS
+does not bundle, download, install, authenticate, or update the agent package.
+The developer owns those responsibilities and restarts the owning daemon when
+idle. Ordinary task folders do not require Git.
+
 ## Install
 
-Prebuilt binaries for macOS (arm64, x86_64), Linux (arm64, x86_64), and Windows (x86_64) are published to GitHub Releases. The one-liners below download the installer, verify checksums, drop `pidash` into the standard install path, and immediately start the device-code login so the host is registered with your Pi Dash cloud before you leave the terminal.
+Prebuilt binaries for macOS (arm64, x86_64), Linux (arm64, x86_64 — glibc and musl), and Windows (x86_64) are published to GitHub Releases. The one-liners below download the installer, verify checksums, drop `pidash` into the standard install path, and immediately start the device-code login so the host is registered with your Pi Dash cloud before you leave the terminal.
 
 **macOS and Linux:**
 
@@ -18,6 +32,24 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 ```powershell
 irm https://github.com/The-AI-Republic/pi-dash/releases/latest/download/install.ps1 | iex
 ```
+
+**Windows (Command Prompt):**
+
+```bat
+powershell -c "irm https://github.com/The-AI-Republic/pi-dash/releases/latest/download/install.ps1 | iex"
+```
+
+### Platform notes
+
+| Environment               | Behaviour                                                                                                                                                                                                      |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS arm64 / x86_64      | Native builds.                                                                                                                                                                                                 |
+| Linux x86_64 / arm64      | Native glibc builds; the installer falls back to the static musl build on older distros (Ubuntu 20.04, Debian 11, RHEL 8, Amazon Linux 2).                                                                     |
+| Alpine / musl             | Served by the same musl builds.                                                                                                                                                                                |
+| Windows x86_64            | Native build.                                                                                                                                                                                                  |
+| Windows arm64             | No native build; the installer serves the x86_64 build, which runs under Windows-on-ARM emulation.                                                                                                             |
+| Git Bash / MSYS2 / Cygwin | Supported — the cargo-dist installer maps `MINGW*`/`MSYS*`/`CYGWIN*` to the Windows target and unpacks the Windows build; `install.sh` accepts the resulting `pidash.exe`.                                     |
+| WSL                       | Installs the **Linux** build, which can only drive agents inside the WSL distro. `install.sh` warns about this. If your coding agents are installed on the Windows side, use the PowerShell one-liner instead. |
 
 The installer will prompt for your Pi Dash cloud URL, walk you through device-code approval in the browser, and offer to register this host as a runner — for the typical dev-laptop case, that's the entire setup.
 
@@ -71,14 +103,14 @@ Or on Windows, download and run the MSI installer:
 
 <https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-x86_64-pc-windows-msvc.msi>
 
-The MSI is a standard double-click Windows Installer — it drops `pidash.exe` and exits. It does **not** automatically launch the auth flow (MSI typically runs elevated as the Windows Installer service, and many MSI invocations are silent for IT/Group Policy deploys, so spawning a terminal from it would be wrong). To finish setup after the MSI closes:
+The MSI is a standard double-click Windows Installer. Its final screen carries a **"Sign in to Pi Dash now"** checkbox: leave it ticked and clicking Finish opens a console window running `pidash auth login`, so an interactive install finishes setup in one sitting like every other install path.
 
-```powershell
-# Open PowerShell and run:
-pidash
-```
+Two properties of that flow are deliberate:
 
-With no config yet, bare `pidash` drops into `auth login` and walks you through the same device-code flow as the `install.ps1` one-liner. (A discoverable Start Menu shortcut for this step is tracked as a follow-up.)
+- **Silent installs spawn nothing.** `msiexec /qn` (Group Policy, Intune, SCCM) skips the installer UI entirely, so the checkbox never runs. Unattended IT deploys are unaffected.
+- **Sign-in runs as the installing user, not SYSTEM.** The package is per-machine and its execute sequence runs elevated, but the ExitDialog runs unelevated — which matters, because `auth login` writes the CLI token and workspace binding into the current user's profile.
+
+For silent installs, or if you clear the checkbox, sign in from a terminal: bare `pidash` with no config drops straight into `auth login`, as does `pidash auth login`. (A discoverable Start Menu shortcut for this step is tracked as a follow-up.)
 
 Windows release assets also include a `pidash-x86_64-pc-windows-msvc.zip` archive with `pidash.exe` for advanced/manual installs.
 
@@ -110,6 +142,19 @@ pidash auth logout               # revoke the CLI token server-side
 pidash runner add --project X    # add another runner
 pidash runner list / remove      # manage runners
 ```
+
+## Task folders and Git
+
+Direct-mode runners can execute coding and non-coding tasks in an ordinary
+working directory. No Git repository or project repository URL is required;
+existing files are preserved, and the runner does not initialize Git for you.
+This applies to user-connected agents and the built-in desktop agent alike.
+
+When a repository URL is supplied, the runner still clones into an empty
+directory or reuses an existing repository. It refuses to clone over files in
+a non-repository directory. Branch checkout only applies to repositories.
+Explicit worktree pools remain Git-based; use a direct working directory for
+repo-free tasks.
 
 ## Auto-update
 

@@ -12,12 +12,38 @@ from django.db import transaction
 import re
 
 # Module imports
+from pi_dash.core.agent_execution import AgentExecutorKind
 from pi_dash.db.models import Project, ProjectIdentifier, WorkspaceMember, State, Estimate
 
 from pi_dash.utils.content_validator import (
     validate_html_content,
 )
 from .base import BaseSerializer
+
+
+def _validate_default_agent_executor(data) -> None:
+    """Refuse a project default that could never dispatch on this instance.
+
+    Project-level policy only: whether a *particular* member can run on their
+    own desktop is a per-viewer question, and a project owner may legitimately
+    set ``managed_runner`` as the default before anyone has installed the app.
+    """
+    executor = data.get("default_agent_executor")
+    if executor == AgentExecutorKind.CLOUD_AGENT:
+        from pi_dash.core.agent_execution import cloud_agent_is_configured
+
+        if not cloud_agent_is_configured():
+            from pi_dash.cloud_agent.api import CloudAgentUnavailableAPI
+
+            raise CloudAgentUnavailableAPI()
+    elif executor == AgentExecutorKind.MANAGED_RUNNER:
+        from pi_dash.core.agent_execution import managed_runner_is_enabled
+
+        if not managed_runner_is_enabled():
+            raise serializers.ValidationError(
+                {"default_agent_executor": "Pi Dash Agent is not enabled on this instance"}
+            )
+
 
 
 class ProjectCreateSerializer(BaseSerializer):
@@ -111,13 +137,7 @@ class ProjectCreateSerializer(BaseSerializer):
         ]
 
     def validate(self, data):
-        if data.get("default_agent_executor") == "cloud_agent":
-            from pi_dash.core.agent_execution import cloud_agent_is_configured
-
-            if not cloud_agent_is_configured():
-                from pi_dash.cloud_agent.api import CloudAgentUnavailableAPI
-
-                raise CloudAgentUnavailableAPI()
+        _validate_default_agent_executor(data)
         project_name = data.get("name", None)
         project_identifier = data.get("identifier", None)
 
@@ -261,13 +281,7 @@ class ProjectSerializer(BaseSerializer):
         ]
 
     def validate(self, data):
-        if data.get("default_agent_executor") == "cloud_agent":
-            from pi_dash.core.agent_execution import cloud_agent_is_configured
-
-            if not cloud_agent_is_configured():
-                from pi_dash.cloud_agent.api import CloudAgentUnavailableAPI
-
-                raise CloudAgentUnavailableAPI()
+        _validate_default_agent_executor(data)
         project_name = data.get("name", None)
         project_identifier = data.get("identifier", None)
 

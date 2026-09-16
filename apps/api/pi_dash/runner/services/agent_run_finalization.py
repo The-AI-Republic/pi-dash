@@ -20,7 +20,32 @@ TERMINAL_STATUSES = {
 }
 
 
-def finalize_agent_run(run_id, new_status, *, updates=None, expected_runner_id=None) -> bool:
+#: Keys ``pidash run yield`` writes on ``done_payload`` (see
+#: ``AgentRunYieldAPIEndpoint``). A bridge's own terminal payload
+#: (``{"conclusion": …}``) arrives *after* the yield and must not erase it —
+#: the ticker reads ``status`` from here to decide whether to tick again.
+YIELD_KEYS = ("status", "note", "yielded_at")
+
+
+def merge_done_payload(existing, incoming):
+    """Combine a run's already-stored ``done_payload`` with a new one.
+
+    The incoming payload wins on every key except the yield keys, which
+    survive from ``existing`` when the run yielded (``yielded_at`` set) and
+    the incoming payload does not carry a ``status`` of its own. A Cloud
+    Agent result sets ``status`` itself and is left alone.
+    """
+    if not isinstance(existing, dict) or not existing.get("yielded_at"):
+        return incoming
+    merged = dict(incoming) if isinstance(incoming, dict) else {}
+    if "status" not in merged:
+        for key in YIELD_KEYS:
+            if key in existing:
+                merged[key] = existing[key]
+    return merged
+
+
+def finalize_agent_run(run_id, new_status, *, updates=None, expected_runner_id=None, expected_status=None) -> bool:
     """First-writer-wins terminal transition for either executor."""
     if new_status not in TERMINAL_STATUSES:
         raise ValueError("new_status must be terminal")
@@ -36,9 +61,13 @@ def finalize_agent_run(run_id, new_status, *, updates=None, expected_runner_id=N
         qs = AgentRun.objects.select_for_update().filter(pk=run_id).exclude(status__in=TERMINAL_STATUSES)
         if expected_runner_id is not None:
             qs = qs.filter(runner_id=expected_runner_id)
+        if expected_status is not None:
+            qs = qs.filter(status=expected_status)
         run = qs.first()
         if run is None:
             return False
+        if "done_payload" in values:
+            values["done_payload"] = merge_done_payload(run.done_payload, values["done_payload"])
         AgentRun.objects.filter(pk=run.pk).update(**values)
         if (
             run.executor_kind == AgentExecutorKind.CLOUD_AGENT

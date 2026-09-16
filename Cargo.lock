@@ -1382,7 +1382,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pidash"
-version = "0.1.21"
+version = "0.1.23"
 dependencies = [
  "anyhow",
  "axoupdater",
@@ -1395,6 +1395,7 @@ dependencies = [
  "futures-util",
  "http",
  "nix 0.29.0",
+ "pidash-ipc",
  "rand 0.8.6",
  "ratatui",
  "reqwest 0.12.28",
@@ -1409,6 +1410,18 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "pidash-ipc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
  "uuid",
 ]
 

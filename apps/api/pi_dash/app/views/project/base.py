@@ -131,10 +131,14 @@ class ProjectViewSet(BaseViewSet):
                 order_by=request.GET.get("order_by", "-created_at"),
                 request=request,
                 queryset=(projects),
-                on_results=lambda projects: ProjectListSerializer(projects, many=True).data,
+                on_results=lambda projects: ProjectListSerializer(
+                    projects, many=True, context={"request": request}
+                ).data,
             )
 
-        projects = ProjectListSerializer(projects, many=True, fields=fields if fields else None).data
+        projects = ProjectListSerializer(
+            projects, many=True, fields=fields if fields else None, context={"request": request}
+        ).data
         return Response(projects, status=status.HTTP_200_OK)
 
     @allow_permission(allowed_roles=[ROLE.ADMIN, ROLE.MEMBER, ROLE.GUEST], level="WORKSPACE")
@@ -247,7 +251,7 @@ class ProjectViewSet(BaseViewSet):
             user_id=request.user.id,
         )
 
-        serializer = ProjectListSerializer(project)
+        serializer = ProjectListSerializer(project, context={"request": request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER], level="WORKSPACE")
@@ -303,7 +307,7 @@ class ProjectViewSet(BaseViewSet):
                 origin=base_host(request=request, is_app=True),
             )
 
-            serializer = ProjectListSerializer(project)
+            serializer = ProjectListSerializer(project, context={"request": request})
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -371,7 +375,7 @@ class ProjectViewSet(BaseViewSet):
                 slug=slug,
                 origin=base_host(request=request, is_app=True),
             )
-            serializer = ProjectListSerializer(project)
+            serializer = ProjectListSerializer(project, context={"request": request})
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

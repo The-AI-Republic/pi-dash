@@ -1,0 +1,58 @@
+[package]
+name = "pi-dash-desktop"
+version = "0.3.0"
+description = "Pi Dash desktop app (Tauri v2)"
+edition = "2024"
+rust-version = "1.93"
+publish = false
+repository = "https://github.com/The-AI-Republic/pi-dash"
+license = "AGPL-3.0-only"
+
+[[bin]]
+name = "pi-dash-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+url = "2"
+
+[dependencies]
+# The shared desktop ↔ daemon IPC protocol + transport client (PDASHOSS01-158).
+# The desktop depends on this lightweight crate — NOT the whole runner — which
+# is what the workspace `exclude = ["desktop"]` split protects. It is also the
+# foundation the direct-chat client (PDASHOSS01-159) builds on.
+pidash-ipc = { path = "../../pidash-ipc" }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-opener = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+[target.'cfg(unix)'.dependencies]
+# Only for SIGTERM on the bundled daemon: killing it outright would turn a
+# normal window close into a failed run in the user's history.
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+# Timestamps for the chat frame variants in `chat`'s hermetic stream tests.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Drives the hermetic StatusGet round-trip test in `ipc` against a stub
+# Unix-socket server. Production callers get their runtime from Tauri.
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "time",
+] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

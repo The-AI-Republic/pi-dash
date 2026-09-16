@@ -112,13 +112,22 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
             },
             "available_tools": [],
             "unavailable_capabilities": [],
+            # Populated means every optional branch renders: this run carries
+            # deployment-provided toolsets, so the section's extra-tools block and
+            # its schema-fetch instruction are both exercised. With both samples
+            # False the block never rendered here and a broken override inside it
+            # saved cleanly, then failed at run time under StrictUndefined.
+            "extra_toolsets": True,
+            "extra_toolsets_schema_tool": "sample_get_tool_schema",
             "limits": {},
             "tick": {
                 "count": 5,
-                "cap": 24,
-                "remaining": 19,
-                "interval_seconds": 10800,
-                "interval_human": "3 hours",
+                "cap": 10,
+                "remaining": 5,
+                "spent": False,
+                "clock_live": True,
+                "interval_seconds": 43200,
+                "interval_human": "12 hours",
             },
             "comments_section": "### Comment 1 — Human: Sample at 2026-01-01\n\nHello.",
             "parent_done_payload": '{\n  "pr_url": "https://example.com/pr/1"\n}',
@@ -165,6 +174,8 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
         },
         "available_tools": [],
         "unavailable_capabilities": [],
+        "extra_toolsets": False,
+        "extra_toolsets_schema_tool": "",
         "limits": {},
         "tick": None,
         "comments_section": "(no comments on this issue yet)",
@@ -198,6 +209,13 @@ def _scheduler_sample(*, populated: bool) -> Dict[str, Any]:
             },
             "available_tools": [],
             "unavailable_capabilities": [],
+            # Populated means every optional branch renders: this run carries
+            # deployment-provided toolsets, so the section's extra-tools block and
+            # its schema-fetch instruction are both exercised. With both samples
+            # False the block never rendered here and a broken override inside it
+            # saved cleanly, then failed at run time under StrictUndefined.
+            "extra_toolsets": True,
+            "extra_toolsets_schema_tool": "sample_get_tool_schema",
             "limits": {},
             "scheduler_task_body": "Audit the codebase for TODOs.",
         }
@@ -214,6 +232,8 @@ def _scheduler_sample(*, populated: bool) -> Dict[str, Any]:
         },
         "available_tools": [],
         "unavailable_capabilities": [],
+        "extra_toolsets": False,
+        "extra_toolsets_schema_tool": "",
         "limits": {},
         "scheduler_task_body": "",
     }
@@ -229,6 +249,9 @@ def sample_contexts(kind: str) -> List[Dict[str, Any]]:
 def kinds_for_section(section_key: str) -> List[str]:
     """All recipe kinds whose ordered section list contains ``section_key``."""
     kinds = [k for k, keys in recipes.RECIPES.items() if section_key in keys]
+    for kind, keys in recipes.MANAGED_RECIPES.items():
+        if section_key in keys and kind not in kinds:
+            kinds.append(kind)
     for kind, keys in recipes.CLOUD_RECIPES.items():
         if section_key in keys and kind not in kinds:
             kinds.append(kind)

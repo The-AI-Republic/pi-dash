@@ -47,29 +47,28 @@ All cycles share this shape:
 6. Post a summary back to the pidash issue as a comment: confirmed issues
    found, what you fixed automatically, what still needs human action.
 
-## Step 3 — Emit a done-signal
+## Step 3 — Decide where the task goes next
 
-The review pass concludes by matching the outcome (see "Available states"
-and "Ending the run"):
+The review pass concludes with the next-state decision from "Task
+lifecycle" (match the target `group` first in "Available states", then the
+name), then the outcome report from "Ending the run":
 
-- **approved** — review satisfied. Post your summary comment and **leave
-  the issue In Review**. Do **not** move it to a `completed`/Done state:
-  the runner never promotes an issue to Done — a human closes it once
-  they've seen the review, or a separate supporting process does. (Review
-  ticking is bounded; once it's exhausted the issue simply stays In Review.
-  If a later tick finds nothing has changed, emit a **noop** and exit
-  without moving state — see the noop rule below: update the workpad if
-  needed, but do **not** post a thread comment.)
-- **changes needed** — real issues found that you could not auto-fix and
-  that need human attention. Follow "Blocking the run" (post the summary
-  comment, move to "Blocked" if the project has that state).
-- **clarification** — a clarifying question for the human. Follow
-  "Blocking the run".
-- **noop** — nothing has changed since your last review pass. Update the
-  workpad if there is anything new to record, then exit without moving
-  state. **Do not post a thread comment.** A tick that found nothing to do
-  is not worth a comment — "Review tick (N/M) — noop, nothing changed"
-  clutters the human's thread with noise and buries the comments that
-  matter. Comment only when you have something a human actually needs to
-  see (a finding, a question, a result); silence is the correct signal for
-  "nothing changed."
+- **approved** — no unresolved findings. Post your summary comment and
+  move the issue to **In Test** (the `test` group) so the change gets
+  exercised from the user's side. If the project has no `test` state,
+  leave the issue In Review. Never move it to `completed`/Done — a human
+  closes it. Yield `done`.
+- **changes needed** — real defects you could not auto-fix. List them as
+  open items in the workpad `### Path to done` block, post the summary
+  comment, and move the issue **back to In Progress** (the `started`
+  group) so the next run fixes them. Do not use Blocked for a bug. Yield
+  `done`.
+- **clarification** — a question only a human can answer. Follow
+  "Blocking the run". Yield `waiting_on_human`.
+- **waiting on a human reviewer / nothing changed** — the PR is waiting on
+  a person, or nothing has changed since your last pass. Comment only if
+  you have something a human actually needs to see (a finding, a question,
+  a result); do **not** post a bare "review tick (N/M) — noop, nothing
+  changed" comment — silence is the correct signal for "nothing changed,"
+  and such comments only bury the ones that matter. Leave the issue In
+  Review and yield `done` — the clock stops until a human acts.

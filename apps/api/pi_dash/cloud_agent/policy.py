@@ -2,7 +2,11 @@
 
 from django.conf import settings
 
-from pi_dash.core.agent_execution import AgentExecutorKind, cloud_agent_is_configured
+from pi_dash.core.agent_execution import (
+    AgentExecutorKind,
+    cloud_agent_is_configured,
+    managed_runner_is_enabled,
+)
 
 READ_TOOLS = (
     "pidash_get_current_issue",
@@ -40,6 +44,15 @@ def resolve_executor_kind(*, project, requested=None) -> str:
         raise ValueError("unknown agent executor")
     if value == AgentExecutorKind.CLOUD_AGENT and not cloud_agent_is_configured():
         raise CloudAgentUnavailable("Pi Dash Cloud Agent is not currently available")
+    if value == AgentExecutorKind.MANAGED_RUNNER and not managed_runner_is_enabled():
+        # Instance-level only. Whether *this* viewer's desktop can take the run
+        # is a per-viewer question answered in ``execution_fields``.
+        from pi_dash.managed_runner.errors import ManagedRunnerReason, ManagedRunnerUnavailable
+
+        raise ManagedRunnerUnavailable(
+            ManagedRunnerReason.DISABLED,
+            "Pi Dash Agent is not enabled on this instance",
+        )
     return value
 
 
@@ -65,7 +78,13 @@ def github_available_for_project(project) -> bool:
     ).exists()
 
 
-def build_tool_plan(*, run_kind: str, has_issue: bool, required_capabilities=(), project=None) -> dict:
+def build_tool_plan(
+    *, run_kind: str, has_issue: bool, required_capabilities=(), project=None, creator=None
+) -> dict:
+    # Local import: the ee seam is overlayable, and importing it at module
+    # scope would bind CE's version before an overlay could replace it.
+    from pi_dash.ee.cloud_agent.toolsets import extra_toolsets_enabled_for
+
     disabled = set(getattr(settings, "CLOUD_AGENT_DISABLED_TOOLS", ()))
     tools = set(READ_TOOLS)
     if not has_issue:
@@ -112,6 +131,15 @@ def build_tool_plan(*, run_kind: str, has_issue: bool, required_capabilities=(),
             "wall_seconds": settings.CLOUD_AGENT_EXECUTION_TIMEOUT_SECONDS,
         },
         "unavailable_capabilities": ["filesystem", "shell", "worktree"],
+        # Whether this run may use deployment-provided toolsets whose tool
+        # names are not knowable at plan time (see
+        # ``pi_dash.ee.cloud_agent.toolsets``). A sibling of ``tools``, never a
+        # member of it: those names must never reach ``tools`` or
+        # ``required_tools``, or an external change — a user uninstalling
+        # something — would start failing runs on unrelated work items.
+        # Snapshotted here so the run executes under the policy it was
+        # admitted with. CE always False.
+        "extra_toolsets": bool(creator is not None and extra_toolsets_enabled_for(creator)),
     }
 
 

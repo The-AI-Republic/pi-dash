@@ -12,13 +12,12 @@ that previously lived in ``orchestration/service.py``,
 
 See ``.ai_design/create_review_state/design.md`` §3 for the full design.
 
-Cadence *values* (interval / max_ticks) are intentionally **not** on
-``PhaseConfig``. They stay centrally managed on ``Project`` (with
-per-issue overrides on ``IssueAgentTicker``) so an operator can retune a
+Cadence *values* (intervals) are intentionally **not** on ``PhaseConfig``.
+They stay centrally managed on ``Project`` so an operator can retune a
 phase's rhythm without a code deploy. What ``PhaseConfig`` carries is the
-``cadence_key`` — which *column pair* a phase resolves through, via
-``CADENCE_FIELDS``. Each ticking phase owns an independent pair, so
-phases never read or write each other's budget.
+``cadence_key`` — which interval column a phase resolves through, via
+``CADENCE_FIELDS``. Budget is *not* per phase: one pool per issue, spent
+in any stage (``.ai_design/ticking_relevance/design.md`` §5).
 """
 
 from __future__ import annotations
@@ -32,58 +31,40 @@ from pi_dash.prompting.recipes import KIND_CODING_TASK
 
 @dataclass(frozen=True)
 class CadenceFields:
-    """Which ticker/project columns hold one phase's cadence.
+    """Which project column holds one phase's *interval*.
 
-    Every ticking phase owns an independent field pair — a per-issue
-    override on ``IssueAgentTicker`` and a project-level default on
-    ``Project``. Phases are siblings: a phase reads and writes only its
-    own pair, so a cap grant or interval tweak made in one phase can
-    never leak into another. Resolving through this table (rather than
-    an ``if group == ...`` chain at each call site) means adding or
-    retuning a phase is a change to this one dict.
+    Cadence is rhythm, not budget: each stage keeps its own interval (a
+    test cycle is a slower loop than a review pass) but the **budget is one
+    pool per issue** (``Project.agent_default_max_ticks`` +
+    ``IssueAgentTicker.granted``), so there is no per-phase cap column any
+    more. See ``.ai_design/ticking_relevance/design.md`` §5 / §9.
     """
 
-    ticker_interval: str
-    ticker_max_ticks: str
     project_interval: str
-    project_max_ticks: str
     default_interval: int
-    default_max_ticks: int
 
 
-#: Cadence key → the columns that phase resolves through. Keys are
+#: Cadence key → the project interval column that phase reads. Keys are
 #: opaque labels referenced by ``PhaseConfig.cadence_key``; they are
 #: deliberately *not* state-group values, so a future phase can share a
-#: pair (or a group can be renamed) without touching the schema.
+#: column (or a group can be renamed) without touching the schema.
 CADENCE_FIELDS: dict[str, CadenceFields] = {
     "impl": CadenceFields(
-        ticker_interval="interval_seconds",
-        ticker_max_ticks="max_ticks",
         project_interval="agent_default_interval_seconds",
-        project_max_ticks="agent_default_max_ticks",
         default_interval=43200,  # 12 h
-        default_max_ticks=24,  # 3 days
     ),
     "review": CadenceFields(
-        ticker_interval="review_interval_seconds",
-        ticker_max_ticks="review_max_ticks",
         project_interval="agent_review_default_interval_seconds",
-        project_max_ticks="agent_review_default_max_ticks",
         default_interval=28800,  # 8 h
-        default_max_ticks=4,  # 32 h window
     ),
     "test": CadenceFields(
-        ticker_interval="test_interval_seconds",
-        ticker_max_ticks="test_max_ticks",
         project_interval="agent_test_default_interval_seconds",
-        project_max_ticks="agent_test_default_max_ticks",
         default_interval=43200,  # 12 h
-        default_max_ticks=3,  # 36 h window
     ),
 }
 
 #: Phases that are not registered ticking states (or states outside the
-#: registry entirely) fall back to the implementation pair — the
+#: registry entirely) fall back to the implementation interval — the
 #: pre-phase-split behavior.
 DEFAULT_CADENCE_KEY = "impl"
 
@@ -101,8 +82,8 @@ class PhaseConfig:
             The ``PromptTemplate.name`` to render on the phase's first
             run.
         cadence_key:
-            Key into :data:`CADENCE_FIELDS` naming the override/default
-            column pair this phase's interval and cap resolve through.
+            Key into :data:`CADENCE_FIELDS` naming the project column this
+            phase's interval resolves through.
         fresh_session_on_entry:
             When ``True``, entering this phase from a *different* ticking
             phase forces ``parent_run=None`` and clears
@@ -148,8 +129,7 @@ PHASES: dict[str, PhaseConfig] = {
     StateGroup.TEST.value: PhaseConfig(
         state_name="In Test",
         template_name="test",
-        # In Test is a sibling of In Review, not a variant of it: its own
-        # cadence pair, its own budget. The two never share a column.
+        # In Test keeps its own rhythm (12 h); budget is the issue's pool.
         cadence_key="test",
         # The `test` system prompt must land as the actual system prompt
         # of a fresh session, not a user-turn message on a resumed
@@ -230,16 +210,15 @@ def auto_pauses_on_cap(state) -> bool:
 
 
 def cadence_fields_by_group() -> dict[str, CadenceFields]:
-    """Return ``state group -> CadenceFields`` for every ticking phase.
-
-    For callers that must branch on the group in SQL (the due-ticker
-    scan annotates the effective cap in the database) and therefore
-    cannot go through :func:`cadence_fields_for`, which needs a loaded
-    ``State``.
-    """
+    """Return ``state group -> CadenceFields`` for every ticking phase."""
     return {
         group: CADENCE_FIELDS[cfg.cadence_key] for group, cfg in PHASES.items()
     }
+
+
+def ticking_state_names_by_group() -> dict[str, str]:
+    """Return ``state group -> the literal state name that ticks``."""
+    return {group: cfg.state_name for group, cfg in PHASES.items()}
 
 
 __all__ = [
@@ -254,4 +233,5 @@ __all__ = [
     "is_ticking_state",
     "phase_config_for",
     "template_name_for",
+    "ticking_state_names_by_group",
 ]

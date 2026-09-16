@@ -115,6 +115,16 @@ pub async fn uninstall(_: &Paths) -> Result<()> {
     Ok(())
 }
 
+/// Self-heal for `pidash restart`: rewrite the unit when it's gone.
+///
+/// `write_unit` already runs `daemon-reload`, so a unit rewritten here is
+/// visible to the manager by the time the caller reaches `enable_and_start`
+/// — which matters, because that step runs `systemctl --user enable`, and
+/// enable is what fails with "Unit file pidash.service does not exist."
+pub(crate) async fn rewrite_unit_if_missing(paths: &Paths) -> Result<bool> {
+    super::rewrite_unit_if_absent(&unit_path()?, || write_unit(paths)).await
+}
+
 pub async fn start() -> Result<()> {
     run_systemctl(&["start", UNIT_NAME]).await
 }

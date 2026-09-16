@@ -43,6 +43,7 @@ class IssueExportSerializer(IssueSerializer):
             "name",
             "state_name",
             "priority",
+            "complexity_score",
             "assignees",
             "subscribers",
             "created_by_name",

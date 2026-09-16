@@ -4,6 +4,7 @@
  * See the LICENSE file for details.
  */
 
+export { APIService } from "./api.service";
 export * from "./ai";
 export * from "./assistant";
 export * from "./auto-pm";

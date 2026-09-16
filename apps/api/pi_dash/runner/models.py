@@ -9,7 +9,7 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
-from pi_dash.core.agent_execution import AgentExecutorKind
+from pi_dash.core.agent_execution import MACHINE_EXECUTORS, AgentExecutorKind
 
 _logger = logging.getLogger(__name__)
 
@@ -184,6 +184,23 @@ class Visibility(models.IntegerChoices):
     PRIVATE = 0, "Private"
 
 
+class RunnerProvisioning(models.TextChoices):
+    """Who installed and controls this machine's daemon.
+
+    ``MANUAL`` is a user who ran ``pidash auth login`` / ``pidash runner add``
+    themselves. ``DESKTOP_BUNDLED`` is a runner the Pi Dash desktop app
+    provisioned from its own bundled binaries; Pi Dash owns its install,
+    version, config and lifecycle, and it only ever serves runs pinned to it
+    (``.ai_design/managed_runner/design.md`` §7.2).
+
+    This is a column rather than a ``dev_metadata`` key because dispatch,
+    availability and quota queries filter on it.
+    """
+
+    MANUAL = "manual", "Enrolled by the user"
+    DESKTOP_BUNDLED = "desktop_bundled", "Provisioned by Pi Dash Desktop"
+
+
 class AgentRunStatus(models.TextChoices):
     QUEUED = "queued", "Queued"
     ASSIGNED = "assigned", "Assigned"
@@ -323,6 +340,14 @@ class DevMachine(models.Model):
         default=Visibility.PRIVATE,
         db_index=True,
     )
+    # Set once at enrollment from the endpoint that created it; never from a
+    # request body. Runners created on this machine inherit it.
+    provisioning = models.CharField(
+        max_length=24,
+        choices=RunnerProvisioning.choices,
+        default=RunnerProvisioning.MANUAL,
+        db_index=True,
+    )
     last_seen_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -384,6 +409,15 @@ class Runner(models.Model):
     name = models.CharField(max_length=128)
     # Free-form host hint reported at enrollment time; surfaced in the UI.
     host_label = models.CharField(max_length=255, blank=True, default="")
+    # Derived server-side from the enrolling DevMachine; immutable thereafter.
+    # ``desktop_bundled`` runners are excluded from unpinned matching, from
+    # "a local runner is available", and from ``MAX_PER_USER``.
+    provisioning = models.CharField(
+        max_length=24,
+        choices=RunnerProvisioning.choices,
+        default=RunnerProvisioning.MANUAL,
+        db_index=True,
+    )
     visibility = models.PositiveSmallIntegerField(
         choices=Visibility.choices,
         default=Visibility.PRIVATE,
@@ -935,6 +969,14 @@ class AgentRun(models.Model):
     # {section_key, source, version, line_start, line_end}. Lets "why did this
     # run behave differently" be answered by diffing manifests (design §7.1).
     prompt_manifest = models.JSONField(null=True, blank=True)
+    # The prompt *kind* (recipe) this run was rendered for — ``coding-task``
+    # / ``review`` / ``test`` / ``scheduler`` / ``direct``. Stamped at
+    # creation. ``prompt_manifest`` carries the kind only for Cloud Agent
+    # runs (a ``{"v": 2, "kind": …}`` dict); for local runs it is a bare
+    # list, so the ticker's outcome guard (design §7) reads this instead:
+    # a ``done`` reported by a run whose stage the issue has already left
+    # must not touch the clock.
+    phase_kind = models.CharField(max_length=32, blank=True, default="", db_index=True)
     run_config = models.JSONField(default=dict, blank=True)
     required_capabilities = models.JSONField(default=list, blank=True)
     thread_id = models.CharField(max_length=128, blank=True, default="")
@@ -994,7 +1036,7 @@ class AgentRun(models.Model):
         constraints = [
             models.CheckConstraint(
                 check=(
-                    models.Q(executor_kind=AgentExecutorKind.LOCAL_RUNNER)
+                    models.Q(executor_kind__in=list(MACHINE_EXECUTORS))
                     | models.Q(
                         executor_kind=AgentExecutorKind.CLOUD_AGENT,
                         runner__isnull=True,

@@ -261,7 +261,9 @@ pidash context init --project <PROJECT> [--workspace <PATH>]
 
 ### `pidash issue get <IDENTIFIER>`
 
-Fetch one work item. Prints full JSON.
+Fetch one work item. Prints full JSON. The payload includes an absolute `url`
+pointing at the issue in the web UI, built from the deployment's `WEB_URL` (or
+`APP_BASE_URL`); the field is omitted when neither is configured.
 
 ```
 pidash issue get ENG-42

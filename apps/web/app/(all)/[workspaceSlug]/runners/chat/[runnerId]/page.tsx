@@ -10,7 +10,7 @@ import { X } from "lucide-react";
 import { useParams, useSearchParams } from "react-router";
 import useSWR from "swr";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
-import { RunnerService, getRunnerDetail } from "@pi-dash/services";
+import { getChatTransport, getRunnerDetail } from "@pi-dash/services";
 import type { IAgentChatEvent, IAgentChatMessage, IAgentChatSession, IRunner } from "@pi-dash/types";
 import { Badge, Button } from "@pi-dash/ui";
 import { calculateTimeAgo, renderFormattedDate } from "@pi-dash/utils";
@@ -20,8 +20,6 @@ import { type ChatHistoryItem, ChatHistoryPanel } from "@/components/chat/histor
 import { ChatMessage } from "@/components/chat/message";
 import { useAgentChatEvents } from "@/components/runners/chat/use-agent-chat-events";
 import { useWorkspace } from "@/hooks/store/use-workspace";
-
-const service = new RunnerService();
 
 function assistantDeltaText(payload: Record<string, unknown>): string {
   const params = payload.params;
@@ -83,9 +81,9 @@ function disabledReason(runner?: IRunner, session?: IAgentChatSession | null): s
   if (runner.status === "offline") return "Runner offline";
   if (runner.status === "revoked") return "Runner revoked";
   // "busy" no longer blocks chat: the runner serves chat concurrently with an
-  // issue run in a dedicated worktree, and "busy" is also reported while a chat
-  // turn is in flight. The mid-turn case is covered by the active_message check
-  // below. See design make_chat_issue_parallel_working §3.4.
+  // issue run, and "busy" is also reported while a chat turn is in flight. The
+  // mid-turn case is covered by the active_message check below.
+  // See design make_chat_issue_parallel_working §3.4.
   if (session?.status === "closed") return "Session closed";
   if (session?.active_message_id || session?.active_turn_id) return "Response in progress";
   return null;
@@ -108,6 +106,12 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   const requestedSessionId = searchParams.get("sessionId");
   const { currentWorkspace } = useWorkspace();
   const workspaceId = currentWorkspace?.id;
+  // The active chat transport: cloud HTTP+SSE by default, or a local
+  // Tauri-IPC transport when a desktop build has registered one. Resolved
+  // once on mount — overrides are registered before the first UI mount
+  // (a mid-session swap needs an explicit SWR `mutate`, per the seam's
+  // contract) — so the reference is stable and effects can depend on it.
+  const transport = useMemo(() => getChatTransport(), []);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [creatingChat, setCreatingChat] = useState(false);
@@ -130,7 +134,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   );
   const { data: sessions, mutate: mutateSessions } = useSWR<IAgentChatSession[]>(
     workspaceId && runnerId ? ["runner-chat-sessions", workspaceId, runnerId] : null,
-    () => service.listChatSessions(workspaceId!, runnerId)
+    () => transport.listChatSessions(workspaceId!, runnerId)
   );
 
   const session = useMemo(() => {
@@ -186,7 +190,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     let cancelled = false;
     async function warmSelectedRunner() {
       // A "busy" runner (running an issue and/or already chatting) can still be
-      // warmed: chat runs concurrently in a dedicated worktree. Only offline /
+      // warmed: chat runs concurrently with issue work. Only offline /
       // revoked runners can't serve chat (the server also rejects those). Not
       // warming a busy runner would skip the warm step that seeds
       // local_thread_id/local_session_id and break revive continuity.
@@ -196,7 +200,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
         if (warmSessionRef.current === session.id) return;
         warmSessionRef.current = session.id;
         try {
-          await service.warmChatSession(session.id);
+          await transport.warmChatSession(session.id);
         } catch {
           return;
         }
@@ -211,7 +215,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
       if (createWarmKeyRef.current === key) return;
       createWarmKeyRef.current = key;
       try {
-        const created = await service.createChatSession({
+        const created = await transport.createChatSession({
           workspace: workspaceId,
           runner: runnerId,
         });
@@ -224,7 +228,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
             ? currentSessions
             : [created, ...currentSessions];
         }, false);
-        await service.warmChatSession(created.id);
+        await transport.warmChatSession(created.id);
         mutateSessions();
       } catch {
         return;
@@ -234,11 +238,21 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [mutateSessions, pendingSessionId, requestedSessionId, runner, runnerId, session, sessions, workspaceId]);
+  }, [
+    mutateSessions,
+    pendingSessionId,
+    requestedSessionId,
+    runner,
+    runnerId,
+    session,
+    sessions,
+    transport,
+    workspaceId,
+  ]);
 
   const { data: messages, mutate: mutateMessages } = useSWR<IAgentChatMessage[]>(
     session?.id ? ["runner-chat-messages", session.id] : null,
-    () => service.listChatMessages(session!.id)
+    () => transport.listChatMessages(session!.id)
   );
 
   useEffect(() => {
@@ -282,7 +296,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
       }
       precreatedSessionRef.current = null;
     }
-    const created = await service.createChatSession({
+    const created = await transport.createChatSession({
       workspace: workspaceId!,
       runner: runnerId!,
     });
@@ -301,7 +315,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     setDraft("");
     try {
       const target = await ensureSession();
-      await service.sendChatMessage(target.id, content);
+      await transport.sendChatMessage(target.id, content);
       mutateMessages();
       mutateSessions();
     } catch (e: unknown) {
@@ -319,13 +333,13 @@ const RunnerChatPage = observer(function RunnerChatPage() {
 
   async function stop() {
     if (!session) return;
-    await service.cancelChat(session.id, "user_cancelled");
+    await transport.cancelChat(session.id, "user_cancelled");
     mutateSessions();
   }
 
   async function close() {
     if (!session) return;
-    await service.closeChat(session.id);
+    await transport.closeChat(session.id);
     mutateSessions();
   }
 
@@ -345,7 +359,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     if (!workspaceId || !runnerId || creatingChat) return;
     setCreatingChat(true);
     try {
-      const created = await service.createChatSession({ workspace: workspaceId, runner: runnerId });
+      const created = await transport.createChatSession({ workspace: workspaceId, runner: runnerId });
       precreatedSessionRef.current = created;
       warmSessionRef.current = created.id;
       // Select before mutating so no render can resolve (and re-warm) the old
@@ -356,7 +370,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
         return currentSessions.some((item) => item.id === created.id) ? currentSessions : [created, ...currentSessions];
       }, false);
       // Warm in the background; the session is usable without waiting for it.
-      service.warmChatSession(created.id).catch(() => {});
+      transport.warmChatSession(created.id).catch(() => {});
       selectSession(created.id);
     } catch (e: unknown) {
       const err = e as { error?: string } | null;
@@ -417,7 +431,12 @@ const RunnerChatPage = observer(function RunnerChatPage() {
             <div className="flex h-12 shrink-0 items-center justify-between border-b border-subtle">
               <div className="min-w-0">
                 <div className="text-15 truncate font-semibold text-primary">{runner?.name ?? "Runner"}</div>
-                <div className="text-12 text-secondary">{runner?.pod_detail?.name ?? runner?.status ?? ""}</div>
+                {/* Working directory the chat operates in, when the session
+                    reports one (the desktop built-in agent runs in its own
+                    working copy). Falls back to pod/status for cloud runners. */}
+                <div className="truncate text-12 text-secondary" title={session?.cwd || undefined}>
+                  {session?.cwd || runner?.pod_detail?.name || runner?.status || ""}
+                </div>
               </div>
               <div className="flex items-center gap-2">
                 {runner && (

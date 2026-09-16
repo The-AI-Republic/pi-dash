@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 from pi_dash.prompting import recipes
@@ -38,6 +40,20 @@ def test_compose_coding_task_renders_no_leftover_jinja():
     )
     assert "{%" not in out.text and "{{" not in out.text
     assert "orchestrates AI agents" in out.text  # stable intro phrase
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("executor", ["local_runner", "managed_runner"])
+def test_repo_free_task_prompt_does_not_require_git(executor):
+    ctx = _ctx()
+    ctx["repo"]["url"] = ""
+    out = compose(
+        "coding-task", workspace=None, project=None, user=None,
+        context=ctx, executor_kind=executor,
+    ).text
+    assert "A Git repository is optional" in out
+    assert "ordinary folder, not a Git repository" in out
+    assert "Do not initialize a repository" in out
 
 
 @pytest.mark.unit
@@ -362,12 +378,15 @@ def test_review_kind_approved_stays_in_review_not_done():
     out = compose("review", workspace=None, project=None, user=None, context=_ctx("review"))
     body = out.text
 
-    # The review success path routes to In Review...
-    assert '--state "In Review"' in body
+    # An approved review hands the task on to In Test; defects go back to
+    # In Progress with open items...
+    assert '--state "In Test"' in body
+    assert '--state "In Progress"' in body
     # ...and never to Done.
     assert '--state "Done"' not in body
-    # The approved outcome explicitly leaves the issue In Review.
-    assert "leave the issue In Review" in body or "leaves the issue In Review" in body
+    # The lifecycle is shared and the run reports its outcome.
+    assert "Task lifecycle" in body
+    assert "pidash run yield --outcome" in body
 
 
 # ----------------------------------------------------------------------
@@ -382,19 +401,89 @@ def test_session_framing_renders_tick_guidance_and_schedule():
         "coding-task", workspace=None, project=None, user=None, context=ctx
     ).text
     assert "automatically by the issue's ticker" in out
-    assert "about every 3 hours" in out
-    assert "used 5 of 24 ticks" in out
-    assert "19 remaining before the issue auto-pauses" in out
+    assert "used 5 of 10 agent runs" in out
+    assert "(5 remaining)" in out
+    # The lifecycle section carries the budget line and the pool rules.
+    assert "Runs used on this issue: **5 of 10** (5 remaining)" in out
+    assert "about every 12 hours" in out
 
 
 @pytest.mark.unit
-def test_session_framing_review_tick_adds_noop_hint():
+def test_session_framing_review_tick_reports_done_not_noop():
     ctx = _ctx("review")
     out = compose(
         "review", workspace=None, project=None, user=None, context=ctx
     ).text
     assert "automatically by the issue's ticker" in out
-    assert "emit `noop`" in out  # review-specific done-signal nudge
+    assert "emit `noop`" not in out
+    assert "pidash run yield --outcome done" in out
+
+
+@pytest.mark.unit
+def test_lifecycle_warns_when_the_pool_is_spent():
+    ctx = _ctx("review")
+    ctx["tick"] = {
+        **ctx["tick"],
+        "count": 10,
+        "cap": 10,
+        "remaining": 0,
+        "spent": True,
+        "clock_live": False,
+    }
+    out = compose("review", workspace=None, project=None, user=None, context=ctx).text
+    assert "The pool is spent" in out
+    assert "No agent run will follow this one" in out
+    assert "Re-tick" in out
+
+
+@pytest.mark.unit
+def test_lifecycle_spent_branch_covers_the_last_run(kind="coding-task"):
+    ctx = _ctx(kind)
+    ctx["tick"] = {**ctx["tick"], "count": 10, "cap": 10, "remaining": 0, "spent": True, "clock_live": False}
+    out = compose(kind, workspace=None, project=None, user=None, context=ctx).text
+    assert "this is the last run" in out
+    assert "Never press Re-tick yourself" in out
+    assert "from Paused" in out
+
+
+@pytest.mark.unit
+def test_cli_docs_put_re_tick_out_of_the_agents_hands():
+    out = compose("coding-task", workspace=None, project=None, user=None, context=_ctx("coding-task")).text
+    assert "`pidash issue re-tick`" in out
+    assert "refuses a re-tick that comes from inside an agent run" in out
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["review", "test"])
+def test_review_and_test_get_lifecycle_workpad_repo_and_blocking(kind):
+    """The sections review/test cross-reference must actually be in their
+    prompt: no dangling "Blocking the run", the inlined workpad, the repo /
+    PR block, and the shared lifecycle."""
+    ctx = _ctx(kind)
+    out = compose(kind, workspace=None, project=None, user=None, context=ctx).text
+    assert "## Blocking the run" in out
+    assert "## Task lifecycle" in out
+    assert "## Workpad — read first, write last" in out
+    assert ctx["workpad_body"] in out
+    assert "Repository:" in out
+    assert "### Path to done" in out
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["review", "test"])
+def test_review_and_test_do_not_get_the_implementation_workpad_checklist(kind):
+    ctx = _ctx(kind)
+    out = compose(kind, workspace=None, project=None, user=None, context=ctx).text
+    assert "`### Progress Checkpoints` match what is actually true" not in out
+    assert "carried forward **unchanged**" in out
+    assert '"Analyze & scope" for tone' not in out
+
+
+@pytest.mark.unit
+def test_test_kind_defects_go_back_to_in_progress_not_blocked():
+    out = compose("test", workspace=None, project=None, user=None, context=_ctx("test")).text
+    assert "back to In Progress" in out
+    assert "Blocked for a bug" in out
 
 
 @pytest.mark.unit
@@ -419,3 +508,103 @@ def test_session_framing_omits_trigger_block_for_scheduler():
     ).text
     assert "Why this run started" not in out
     assert "Ticking schedule" not in out
+
+
+# ----------------------------------------------------------------------
+# Ancestor-chain required reading + parent-readiness (PDASHOSS01-97)
+# ----------------------------------------------------------------------
+
+REQUIRED_READING_DIRECTIVE = "The ancestor chain is required reading before you implement."
+
+
+def _coding_ctx_chain(depth: int) -> dict:
+    """A populated coding-task context whose ancestor chain has ``depth``
+    issues (current + ancestors).
+
+    ``depth == 1`` is parentless (``parent``/``lineage`` both None). ``depth
+    == 2`` has a direct parent only — ``build_context`` leaves ``lineage``
+    None for a 2-chain. ``depth >= 3`` additionally carries a multi-level
+    ``lineage`` (grandparent+), current-first up to the root.
+    """
+    if depth < 1:
+        raise ValueError("depth must be >= 1")
+    if depth == 1:
+        ctx = copy.deepcopy(sample_contexts("coding-task")[1])  # minimal: parentless
+        assert ctx["parent"] is None and ctx["lineage"] is None
+        return ctx
+    ctx = copy.deepcopy(sample_contexts("coding-task")[0])  # populated: has a parent
+    if depth == 2:
+        ctx["lineage"] = None
+        return ctx
+    lineage = [
+        {"identifier": "SAMPLE-1", "title": "Sample issue title"},
+        {"identifier": "SAMPLE-0", "title": "Parent issue"},
+    ]
+    for i in range(depth - 3):
+        lineage.append({"identifier": f"SAMPLE-mid{i}", "title": f"Ancestor {i}"})
+    lineage.append({"identifier": "SAMPLE-root", "title": "Root issue"})
+    ctx["lineage"] = lineage
+    return ctx
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("depth", [2, 3, 4, 6])
+def test_coding_task_requires_ancestor_reading_when_parent(depth):
+    """When the issue has a parent (chain length >= 2), the assembled coding
+    prompt must direct the agent to read the ancestor chain before it
+    implements — required, not optional (PDASHOSS01-97). Holds whether the
+    chain is just the parent (len 2, lineage None) or a multi-level lineage
+    (len 3, 4, ...)."""
+    ctx = _coding_ctx_chain(depth)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert REQUIRED_READING_DIRECTIVE in body
+    # analyze-and-scope step 2 walks the chain and assesses readiness.
+    assert "Walk the ancestor chain to the root" in body
+    assert "ready to implement against" in body
+    # The old optional wording is gone.
+    assert "To learn about any ancestor" not in body
+
+
+@pytest.mark.unit
+def test_coding_task_no_ancestor_directive_when_parentless():
+    """A parentless issue gets no ancestor-chain directive — there is no chain
+    to walk (PDASHOSS01-97)."""
+    ctx = _coding_ctx_chain(1)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert REQUIRED_READING_DIRECTIVE not in body
+    assert "Walk the ancestor chain to the root" not in body
+
+
+@pytest.mark.unit
+def test_coding_task_ancestor_directive_adapts_to_chain_depth():
+    """For a 2-chain the directive says the chain is just the parent; for a
+    3+-chain it names walking up to the root and surfaces the root id."""
+    body2 = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_coding_ctx_chain(2)
+    ).text
+    body3 = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_coding_ctx_chain(3)
+    ).text
+
+    assert "the chain here is just the parent" in body2
+    assert "up to the root issue" not in body2  # no multi-level lineage for a 2-chain
+    assert "up to the root issue" in body3
+    assert "SAMPLE-root" in body3  # root id surfaced so the agent can walk to it
+
+
+@pytest.mark.unit
+def test_coding_task_parent_no_branch_routes_through_readiness_not_autofallback():
+    """workpad-setup must route the 'parent has no implementation branch' case
+    through the readiness judgment (research/design parent -> project base;
+    in-progress implementation dependency -> block) rather than an automatic
+    fall-back to the project base (PDASHOSS01-97)."""
+    ctx = _coding_ctx_chain(2)
+    ctx["repo"]["work_branch"] = None  # this issue has no branch yet -> resolve a base
+    ctx["parent"]["work_branch"] = None  # parent has no implementation branch yet
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert "Do not treat this as an automatic fall-back to the project base" in body
+    # The dependency case routes into the existing blocking flow by reference.
+    assert 'Treat it as a blocker — follow "Blocking the run" instead of creating a branch' in body

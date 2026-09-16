@@ -24,6 +24,7 @@ struct RecordedRequest {
     method: String,
     path: String,
     api_key: Option<String>,
+    run_id: Option<String>,
     #[allow(dead_code)]
     body: String,
 }
@@ -115,11 +116,16 @@ async fn handle_conn(
     let path = parts.next().unwrap_or("").to_string();
 
     let mut api_key = None;
+    let mut run_id = None;
     for line in lines {
         if let Some(rest) = line.strip_prefix("X-Api-Key: ") {
             api_key = Some(rest.to_string());
         } else if let Some(rest) = line.strip_prefix("x-api-key: ") {
             api_key = Some(rest.to_string());
+        } else if let Some(rest) = line.strip_prefix("X-Pi-Dash-Run-Id: ") {
+            run_id = Some(rest.to_string());
+        } else if let Some(rest) = line.strip_prefix("x-pi-dash-run-id: ") {
+            run_id = Some(rest.to_string());
         }
     }
 
@@ -127,6 +133,7 @@ async fn handle_conn(
         method,
         path,
         api_key,
+        run_id,
         body,
     };
     recorded.lock().unwrap().push(req.clone());
@@ -170,6 +177,17 @@ fn client(fake: &Fake) -> ApiClient {
         api_url: format!("http://{}", fake.addr),
         workspace_slug: "acme".into(),
         token: "test-token".into(),
+        run_id: None,
+    };
+    ApiClient::new(env).unwrap()
+}
+
+fn client_for_run(fake: &Fake, run_id: &str) -> ApiClient {
+    let env = CliEnv {
+        api_url: format!("http://{}", fake.addr),
+        workspace_slug: "acme".into(),
+        token: "test-token".into(),
+        run_id: Some(run_id.to_string()),
     };
     ApiClient::new(env).unwrap()
 }
@@ -360,4 +378,96 @@ async fn http_500_maps_to_exit_server() {
     let client = client(&fake);
     let err = client.get("users/me/").await.expect_err("500");
     assert_eq!(err.exit_code, EXIT_SERVER);
+}
+
+// ---------------------------------------------------------------------------
+// Run identity: every write from inside an agent run carries X-Pi-Dash-Run-Id
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn writes_carry_the_run_id_header_reads_do_not() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok("{}"))).await;
+    let run_id = "123e4567-e89b-12d3-a456-426614174000";
+    let client = client_for_run(&fake, run_id);
+
+    client.get("users/me/").await.expect("get");
+    client
+        .patch("workspaces/acme/projects/p/work-items/i/", &serde_json::json!({"state": "s"}))
+        .await
+        .expect("patch");
+    client
+        .post("workspaces/acme/projects/p/work-items/i/comments/", &serde_json::json!({"comment_html": "x"}))
+        .await
+        .expect("post");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 3);
+    assert_eq!(recorded[0].method, "GET");
+    assert_eq!(recorded[0].run_id, None, "reads are attributed to nobody");
+    assert_eq!(recorded[1].method, "PATCH");
+    assert_eq!(recorded[1].run_id.as_deref(), Some(run_id));
+    assert_eq!(recorded[2].method, "POST");
+    assert_eq!(recorded[2].run_id.as_deref(), Some(run_id));
+}
+
+#[tokio::test]
+async fn writes_without_a_run_id_send_no_header() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok("{}"))).await;
+    let client = client(&fake);
+    client
+        .patch("workspaces/acme/projects/p/work-items/i/", &serde_json::json!({"state": "s"}))
+        .await
+        .expect("patch");
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded[0].run_id, None, "operator use must look like a human move");
+}
+
+#[tokio::test]
+async fn run_yield_posts_outcome_to_the_run_yield_route() {
+    let fake = start_fake(Box::new(|req| {
+        assert_eq!(req.method, "POST");
+        CannedResponse::ok(r#"{"ok":true,"outcome":"done"}"#)
+    }))
+    .await;
+    let run_id = "123e4567-e89b-12d3-a456-426614174000";
+    let client = client_for_run(&fake, run_id);
+    pidash::cli::run_cmd::cmd_yield(
+        &client,
+        pidash::cli::run_cmd::YieldArgs {
+            outcome: pidash::cli::run_cmd::Outcome::Done,
+            note: Some("  approved  ".into()),
+            run_id: None,
+        },
+    )
+    .await
+    .expect("yield");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0].path,
+        format!("/api/v1/workspaces/acme/agent-runs/{run_id}/yield/")
+    );
+    assert_eq!(recorded[0].run_id.as_deref(), Some(run_id));
+    let body: serde_json::Value = serde_json::from_str(&recorded[0].body).unwrap();
+    assert_eq!(body["outcome"], "done");
+    assert_eq!(body["note"], "approved");
+}
+
+#[tokio::test]
+async fn run_yield_without_a_run_id_fails_before_any_request() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok("{}"))).await;
+    let client = client(&fake);
+    let err = pidash::cli::run_cmd::cmd_yield(
+        &client,
+        pidash::cli::run_cmd::YieldArgs {
+            outcome: pidash::cli::run_cmd::Outcome::Progressed,
+            note: None,
+            run_id: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.exit_code, EXIT_INVALID);
+    assert!(fake.recorded.lock().unwrap().is_empty());
 }

@@ -28,7 +28,6 @@ use crate::history::jsonl::{HistoryEntry, HistoryWriter};
 use crate::ipc::protocol::{CurrentRunSummary, version_lt};
 use crate::ipc::server::IpcServer;
 use crate::util::paths::{Paths, RunnerPaths};
-use crate::workspace::pool::{LeaseKind, LeaseRequest, PoolHandle};
 
 pub struct Supervisor {
     pub config: Config,
@@ -109,28 +108,6 @@ impl Supervisor {
             instances.push(inst);
         }
 
-        // Worktree pools — one per `[[workdir]]`. Built once at startup; each
-        // runner that references a work dir leases desks from the matching
-        // pool instead of running the agent directly in its `working_dir`.
-        // Runners with no `workdir` reference (legacy) get no pool and keep
-        // the single-dir behavior. See `.ai_design/worktree_pooling/`.
-        let worktrees_base = paths.data_dir.join("worktrees");
-        let mut pools: HashMap<String, PoolHandle> = HashMap::new();
-        for wd in &config.workdirs {
-            match crate::workspace::pool::spawn(wd.clone(), &worktrees_base).await {
-                Ok(handle) => {
-                    pools.insert(wd.name.clone(), handle);
-                }
-                Err(e) => {
-                    // A pool that can't even be constructed is a hard config
-                    // problem; surface it but keep the daemon up (the pool
-                    // reports unhealthy and runs targeting it fail fast).
-                    tracing::error!(workdir = %wd.name, error = %e, "failed to start worktree pool");
-                }
-            }
-        }
-        let pools = Arc::new(pools);
-
         let mailboxes = Arc::new(RwLock::new(
             instances
                 .iter()
@@ -159,30 +136,14 @@ impl Supervisor {
         // case IPC falls back to the daemon-level state.
         let primary = instances.first().cloned();
 
-        // Snapshot of every configured runner the IPC server can
-        // route requests to. Built once at startup; runtime add /
-        // remove (Phase 7 of the parent design) will mutate this map
-        // when that work lands.
+        // Shared registry for IPC routing, including runners activated
+        // after startup by local enrollment or machine control.
         let ipc_instances: HashMap<uuid::Uuid, RunnerInstance> = instances
             .iter()
             .cloned()
             .map(|i| (i.runner_id, i))
             .collect();
-        let ipc = IpcServer {
-            path: paths.ipc_socket_path(),
-            primary_state: primary
-                .as_ref()
-                .map(|p| p.state.clone())
-                .unwrap_or_else(|| state.clone()),
-            paths: paths.clone(),
-            instances: Arc::new(ipc_instances),
-            pools: pools.clone(),
-        };
-        let ipc_handle = tokio::spawn(async move {
-            if let Err(e) = ipc.run().await {
-                tracing::error!("ipc server exited: {e:#}");
-            }
-        });
+        let ipc_instances = Arc::new(std::sync::RwLock::new(ipc_instances));
 
         if opts.offline {
             tracing::info!("offline mode: HTTP transport disabled");
@@ -196,11 +157,28 @@ impl Supervisor {
             shared_machine_token: shared_machine_token.clone(),
             paths: paths.clone(),
             daemon: config.daemon.clone(),
-            pools: pools.clone(),
             mailboxes: mailboxes.clone(),
             hello_runners: hello_runners.clone(),
             daemon_state: state.clone(),
+            instances: ipc_instances.clone(),
+            activation_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
+
+        let ipc = IpcServer {
+            path: paths.ipc_socket_path(),
+            primary_state: primary
+                .as_ref()
+                .map(|p| p.state.clone())
+                .unwrap_or_else(|| state.clone()),
+            paths: paths.clone(),
+            instances: ipc_instances,
+            spawn_ctx: spawn_ctx.clone(),
+        };
+        let ipc_handle = tokio::spawn(async move {
+            if let Err(e) = ipc.run().await {
+                tracing::error!("ipc server exited: {e:#}");
+            }
+        });
 
         // One RunnerLoop per instance. Each consumes from its mailbox.
         let mut loop_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
@@ -308,6 +286,8 @@ async fn build_runner_instance(
         RunnerInstance::new_offline(runner_cfg, paths, daemon.clone())
     };
     inst.paths.ensure()?;
+    // IPC must report the configured identity even before the first heartbeat.
+    inst.state.set_runner_id(inst.runner_id).await;
     Ok(inst)
 }
 
@@ -320,13 +300,33 @@ pub(crate) struct RunnerSpawnCtx {
     shared_machine_token: Option<String>,
     pub(crate) paths: Paths,
     daemon: DaemonConfig,
-    pools: Arc<HashMap<String, PoolHandle>>,
     mailboxes: Arc<RwLock<HashMap<uuid::Uuid, mpsc::Sender<InboundEnvelope>>>>,
     hello_runners: Arc<RwLock<HelloRunnerMap>>,
     daemon_state: StateHandle,
+    instances: Arc<std::sync::RwLock<HashMap<uuid::Uuid, RunnerInstance>>>,
+    activation_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl RunnerSpawnCtx {
+    pub(crate) async fn activate_configured(&self, name: &str) -> Result<()> {
+        let cfg = crate::config::file::load_config(&self.paths)?;
+        cfg.validate()
+            .map_err(|e| anyhow::anyhow!("invalid config: {e}"))?;
+        if cfg.daemon.cloud_url != self.daemon.cloud_url
+            || cfg.daemon.dev_machine_id != self.daemon.dev_machine_id
+            || cfg.cli.as_ref().and_then(|cli| cli.token.as_deref())
+                != self.shared_machine_token.as_deref()
+        {
+            anyhow::bail!("daemon identity changed; restart before activating a runner");
+        }
+        let runner = cfg
+            .runners
+            .into_iter()
+            .find(|r| r.name == name)
+            .ok_or_else(|| anyhow::anyhow!("no configured runner named {name:?}"))?;
+        self.add_runner(runner).await
+    }
+
     pub(crate) fn cloud_url(&self) -> String {
         self.daemon.cloud_url.clone()
     }
@@ -336,11 +336,17 @@ impl RunnerSpawnCtx {
     /// Registers the instance in the shared mailbox / hello maps and
     /// spawns the same three tasks the startup loop spawns. Handles are
     /// deliberately detached: on daemon shutdown the tasks die with the
-    /// process, and the graceful drain walks `hello_runners`, which
-    /// includes hot-added runners. Known gap: the IPC server's instance
-    /// snapshot is built at startup, so the TUI won't list this runner
-    /// until the next daemon restart.
+    /// process, and the graceful drain and IPC registry include hot-added runners.
     pub(crate) async fn add_runner(&self, runner_cfg: RunnerConfig) -> Result<()> {
+        let _activation = self.activation_lock.lock().await;
+        if self
+            .instances
+            .read()
+            .expect("runner registry poisoned")
+            .contains_key(&runner_cfg.runner_id)
+        {
+            return Ok(());
+        }
         let inst = build_runner_instance(
             runner_cfg,
             self.transport.as_ref(),
@@ -365,7 +371,11 @@ impl RunnerSpawnCtx {
             );
         }
         let _tasks = spawn_instance_tasks(&inst, self).await;
-        tracing::info!(runner_id = %inst.runner_id, name = %inst.name, "hot-added runner from machine control session");
+        self.instances
+            .write()
+            .expect("runner registry poisoned")
+            .insert(inst.runner_id, inst.clone());
+        tracing::info!(runner_id = %inst.runner_id, name = %inst.name, "activated runner in running daemon");
         Ok(())
     }
 }
@@ -379,10 +389,36 @@ struct SpawnedInstanceTasks {
     refresh: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// The binary this runner's configured agent kind will actually launch.
+fn agent_binary_for(config: &crate::config::schema::RunnerConfig) -> &str {
+    match config.agent.kind {
+        crate::config::schema::AgentKind::Codex => &config.codex.binary,
+        crate::config::schema::AgentKind::ClaudeCode => &config.claude_code.binary,
+        crate::config::schema::AgentKind::CursorAgent => &config.cursor_agent.binary,
+        crate::config::schema::AgentKind::OpenClaw => &config.openclaw.binary,
+        crate::config::schema::AgentKind::Grok => &config.grok.binary,
+        crate::config::schema::AgentKind::MuseCode => &config.muse_code.binary,
+    }
+}
+
 /// Spawn the RunnerLoop + HttpLoop + refresh loop for one instance.
 /// Extracted from `Supervisor::run`'s startup loop so the machine
 /// control session's hot-add path spawns byte-identical machinery.
 async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> SpawnedInstanceTasks {
+    // Probe the agent binary once per daemon start, in the background: the
+    // answer is only used for reporting, so it must never delay bringing the
+    // runner online (or fail startup if the binary is briefly unavailable
+    // during a desktop upgrade).
+    {
+        let slot = inst.engine_version.clone();
+        let binary = agent_binary_for(&inst.config).to_string();
+        let env = crate::agent::agent_env_for_config(&inst.config);
+        tokio::spawn(async move {
+            if let Some(version) = crate::util::shell::binary_version(&binary, &env).await {
+                *slot.write().await = Some(version);
+            }
+        });
+    }
     let mut tasks = SpawnedInstanceTasks {
         runner_loop: None,
         http_loop: None,
@@ -408,18 +444,15 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
     let live_mailboxes = ctx.mailboxes.clone();
     let live_hello_runners = ctx.hello_runners.clone();
     let daemon_paths = ctx.paths.clone();
-    // Resolve this runner's pool (if it references a work dir). Cloned
-    // handle is cheap (wraps an mpsc sender).
-    let inst_pool = runner_config
-        .workdir
-        .as_deref()
-        .and_then(|name| ctx.pools.get(name).cloned());
+    // The working dir reported to the cloud is this runner's single, exclusive
+    // work dir.
+    let attach_working_dir = resolve_working_dir(inst);
+    let inst_chat_active = inst.chat_active.clone();
     let h = tokio::spawn(async move {
         let run = RunnerLoop {
             runner_paths,
             paths: daemon_paths,
             runner_config,
-            pool: inst_pool,
             out: inst_out,
             state: inst_state,
             approvals: inst_approvals,
@@ -430,6 +463,7 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
             live_hello_runners,
             current_run: None,
             current_chat: None,
+            local_chat_active: inst_chat_active,
         };
         if let Err(e) = run.run().await {
             tracing::error!("runner loop exited: {e:#}");
@@ -455,15 +489,9 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
             inst.state.rx_status.clone(),
             inst.state.rx_in_flight.clone(),
             inst.state.shutdown_notified(),
-            attach_body_for_instance(inst, resolve_working_dir(inst, &ctx.pools)),
+            attach_body_for_instance(inst, attach_working_dir),
         )
         .with_state(inst.state.clone())
-        .with_pool(
-            inst.config
-                .workdir
-                .as_deref()
-                .and_then(|name| ctx.pools.get(name).cloned()),
-        )
         .with_teardown_rx(inst.remove_tx.subscribe());
         let close_client = client.clone();
         let local_state = inst.state.clone();
@@ -627,21 +655,10 @@ async fn load_runner_credentials(
 }
 
 /// Resolve the local dev-machine working directory the cloud should
-/// display for this runner. Pooled runners (those referencing a
-/// `[[workdir]]`) report the workdir's canonical clone path; legacy
-/// runners report their `workspace.working_dir`. Both paths are normalized
-/// to absolute paths. A pooled runner with no pool reports no directory
-/// rather than its vestigial legacy path, which it refuses to execute in.
-fn resolve_working_dir(
-    inst: &RunnerInstance,
-    pools: &HashMap<String, PoolHandle>,
-) -> Option<std::path::PathBuf> {
-    match inst.config.workdir.as_deref() {
-        Some(name) => pools
-            .get(name)
-            .map(|pool| canonical_for_compare(pool.canonical())),
-        None => Some(canonical_for_compare(&inst.config.workspace.working_dir)),
-    }
+/// display for this runner: its single, exclusive `workspace.working_dir`,
+/// normalized to an absolute path.
+fn resolve_working_dir(inst: &RunnerInstance) -> Option<std::path::PathBuf> {
+    Some(canonical_for_compare(&inst.config.workspace.working_dir))
 }
 
 fn attach_body_for_instance(
@@ -649,9 +666,20 @@ fn attach_body_for_instance(
     working_dir: Option<std::path::PathBuf>,
 ) -> AttachBody {
     let mut agent_versions = HashMap::new();
+    let kind_key = format!("{:?}", inst.config.agent.kind).to_ascii_lowercase();
+    // The agent binary's own version when we managed to probe it, falling back
+    // to the runner's version so the key is never absent (older cloud builds
+    // read it positionally). `try_read` keeps this function sync and lock-free:
+    // a probe in flight just means this attach reports the fallback and the
+    // next reconnect carries the real value.
+    let probed = inst
+        .engine_version
+        .try_read()
+        .ok()
+        .and_then(|guard| guard.clone());
     agent_versions.insert(
-        format!("{:?}", inst.config.agent.kind).to_ascii_lowercase(),
-        crate::RUNNER_VERSION.to_string(),
+        kind_key,
+        probed.unwrap_or_else(|| crate::RUNNER_VERSION.to_string()),
     );
     AttachBody {
         version: crate::RUNNER_VERSION.to_string(),
@@ -669,6 +697,7 @@ fn attach_body_for_instance(
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default(),
         agent_versions,
+        agent_kind: inst.config.agent.kind,
     }
 }
 
@@ -760,9 +789,6 @@ struct RunnerLoop {
     /// the host-wide config lock.
     paths: Paths,
     runner_config: crate::config::schema::RunnerConfig,
-    /// Worktree pool for this runner's work dir, if it references one.
-    /// `None` for legacy runners (no pool — run directly in `working_dir`).
-    pool: Option<PoolHandle>,
     out: RunnerOut,
     state: StateHandle,
     approvals: ApprovalRouter,
@@ -780,6 +806,12 @@ struct RunnerLoop {
     /// next inbound frame.
     current_run: Option<CurrentRun>,
     current_chat: Option<CurrentChat>,
+    /// Shared with this runner's `RunnerInstance` (and therefore the IPC
+    /// server): `true` while a *local* chat turn (PDASHOSS01-159, driven over
+    /// the daemon IPC socket, not this cloud loop) holds the working copy. The
+    /// assign lane consults it so a managed run and a local chat never modify
+    /// the same working copy at the same time (issue AC6).
+    local_chat_active: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct CurrentRun {
@@ -837,8 +869,8 @@ enum ChatCommand {
     Message(ChatTurn),
     Cancel { reason: Option<String> },
     Close { reason: Option<String> },
-    /// Tear down this runtime to make room for another session (or to free a
-    /// non-pooled runner's working dir for an assign) WITHOUT closing the
+    /// Tear down this runtime to make room for another session (or to free the
+    /// runner's working dir for an assign) WITHOUT closing the
     /// cloud session: it stays open and a later warm/message revives it via
     /// `local_thread_id`. Contrast with `Shutdown`, which emits a terminal
     /// `ChatClosed`.
@@ -901,9 +933,7 @@ impl RunnerLoop {
             done_rx,
         });
         let mut worker = ChatWorker {
-            runner_paths: self.runner_paths.clone(),
             runner_config: self.runner_config.clone(),
-            pool: self.pool.clone(),
             state: self.state.clone(),
             approvals: self.approvals.clone(),
             out: self.out.clone(),
@@ -1028,38 +1058,44 @@ impl RunnerLoop {
                     run_id,
                     prompt,
                     repo_url,
-                    git_work_branch,
                     expected_codex_model,
                     ..
                 } => {
-                    // Cross-lane exclusion applies ONLY to legacy non-pooled
-                    // runners: they share one `working_dir` between chat and
-                    // issue execution, so the two cannot run concurrently
-                    // (design §3.5). Pooled runners run the chat lane in a
-                    // dedicated worktree, so an issue assign coexists with an
-                    // active chat — no rejection, no teardown.
-                    if self.pool.is_none() {
-                        if self
-                            .current_chat
-                            .as_ref()
-                            .is_some_and(|chat| *chat.active_rx.borrow())
-                        {
-                            tracing::warn!(
-                                %run_id,
-                                "assign received while chat is active on a non-pooled runner; rejecting"
-                            );
-                            // NACK rather than silently dropping, so the cloud
-                            // re-queues the run instead of leaving it stuck
-                            // ASSIGNED forever (#246).
-                            self.nack_assign(
-                                run_id,
-                                "assign rejected: a chat turn is active on this runner".to_string(),
-                            );
-                            continue;
-                        }
-                        if self.current_chat.is_some() {
-                            self.stop_idle_chat_runtime().await;
-                        }
+                    // Cross-lane exclusion: a runner has one working dir shared
+                    // between chat and issue execution, so the two cannot run
+                    // concurrently. A concurrent chat means a second runner, not
+                    // a parallel lane inside this one (PDASHOSS01-133). Reject an
+                    // assign while a chat turn is active; tear an idle chat
+                    // runtime down to free the dir.
+                    let cloud_chat_active = self
+                        .current_chat
+                        .as_ref()
+                        .is_some_and(|chat| *chat.active_rx.borrow());
+                    // A *local* chat turn (driven over the daemon IPC socket,
+                    // PDASHOSS01-159) holds the same working copy but lives in
+                    // a different actor, so it is invisible to `current_chat` —
+                    // consult the shared flag too (issue AC6).
+                    let local_chat_active = self
+                        .local_chat_active
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                    if cloud_chat_active || local_chat_active {
+                        tracing::warn!(
+                            %run_id,
+                            cloud_chat_active,
+                            local_chat_active,
+                            "assign received while chat is active on this runner; rejecting"
+                        );
+                        // NACK rather than silently dropping, so the cloud
+                        // re-queues the run instead of leaving it stuck
+                        // ASSIGNED forever (#246).
+                        self.nack_assign(
+                            run_id,
+                            "assign rejected: a chat turn is active on this runner".to_string(),
+                        );
+                        continue;
+                    }
+                    if self.current_chat.is_some() {
+                        self.stop_idle_chat_runtime().await;
                     }
                     // Intra-assign-lane guard — one issue in flight at a time —
                     // is kept for ALL runners (the assign lane stays
@@ -1110,7 +1146,6 @@ impl RunnerLoop {
                     let runner_paths = self.runner_paths.clone();
                     let daemon_paths = self.paths.clone();
                     let runner_config = self.runner_config.clone();
-                    let pool = self.pool.clone();
                     let state = self.state.clone();
                     let approvals = self.approvals.clone();
                     let out = self.out.clone();
@@ -1119,20 +1154,13 @@ impl RunnerLoop {
                             runner_paths,
                             daemon_paths,
                             runner_config,
-                            pool,
                             state,
                             approvals,
                             out,
                             cancel,
                         };
                         if let Err(e) = worker
-                            .run(
-                                run_id,
-                                prompt,
-                                repo_url,
-                                git_work_branch,
-                                expected_codex_model,
-                            )
+                            .run(run_id, prompt, repo_url, expected_codex_model)
                             .await
                         {
                             tracing::error!("run {run_id} failed: {e:#}");
@@ -1194,11 +1222,9 @@ impl RunnerLoop {
                     cwd,
                     model,
                 } => {
-                    // Only legacy non-pooled runners reject chat during an issue
-                    // run (shared `working_dir`, design §3.5). Pooled runners
-                    // accept chat concurrently — its dedicated worktree keeps the
-                    // two lanes isolated.
-                    if self.pool.is_none() && self.current_run.is_some() {
+                    // One working dir per runner: chat cannot run during an issue
+                    // run. A concurrent chat means a second runner.
+                    if self.current_run.is_some() {
                         let _ = self
                             .out
                             .send(ClientMsg::ChatFailed {
@@ -1270,10 +1296,8 @@ impl RunnerLoop {
                     cwd,
                     model,
                 } => {
-                    // Legacy non-pooled runners skip warm during an issue run
-                    // (shared `working_dir`, §3.5); pooled runners warm the chat
-                    // lane concurrently in its dedicated worktree.
-                    if self.pool.is_none() && self.current_run.is_some() {
+                    // One working dir per runner: skip warm during an issue run.
+                    if self.current_run.is_some() {
                         let _ = self
                             .out
                             .send(ClientMsg::ChatEvent {
@@ -1464,22 +1488,6 @@ impl RunnerLoop {
                         .write()
                         .await
                         .remove(&self.runner_paths.runner_id);
-                    // Detach the dedicated chat worktree from the canonical's
-                    // git bookkeeping before we blow the dir away, so we don't
-                    // leave a stale `.git/worktrees/<name>` admin entry behind
-                    // (otherwise pruned only at the next pool init).
-                    if let Some(pool) = &self.pool {
-                        let chat_wt = crate::workspace::chat_worktree::path_for(&self.runner_paths);
-                        if chat_wt.exists() {
-                            let _ = crate::workspace::git::worktree_remove(
-                                pool.canonical(),
-                                &chat_wt,
-                                true,
-                            )
-                            .await;
-                            let _ = crate::workspace::git::worktree_prune(pool.canonical()).await;
-                        }
-                    }
                     // Best-effort cleanup of this runner's local data
                     // dir. The on-disk state is keyed by runner_id and
                     // is dead weight once the cloud-side row is gone.
@@ -1648,13 +1656,7 @@ fn timing_payload(stage: &str, mut payload: serde_json::Value) -> serde_json::Va
 }
 
 struct ChatWorker {
-    runner_paths: RunnerPaths,
     runner_config: crate::config::schema::RunnerConfig,
-    /// Worktree pool for this runner's work dir, if any. Used only to reach the
-    /// canonical clone (`PoolHandle::canonical`) for the dedicated chat worktree
-    /// — the chat lane does NOT lease pool desks (design §3.1/§3.7); it runs in
-    /// its own per-runner worktree, leaving the pool entirely for issue runs.
-    pool: Option<PoolHandle>,
     state: StateHandle,
     approvals: ApprovalRouter,
     out: RunnerOut,
@@ -1664,9 +1666,11 @@ struct ChatWorker {
 
 impl ChatWorker {
     async fn run(&mut self, chat_session_id: uuid::Uuid) {
-        // Phase 2: a session idles out after 5 minutes of silence, then its work
-        // is committed + pushed (below). Reviving (a new message for the same
-        // session id) spawns a fresh worker that resumes the pushed branch.
+        // A session's runtime idles out after 5 minutes of silence and the
+        // worker exits. Chat runs in the runner's one working directory and
+        // performs no git lifecycle of its own — the agent drives git per the
+        // prompt (PDASHOSS01-133). Reviving (a new message for the same session
+        // id) spawns a fresh worker in the same directory.
         const CHAT_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
         let mut bridge: Option<AgentBridge> = None;
@@ -1677,8 +1681,7 @@ impl ChatWorker {
         // B4: the chat lane gets its own graceful-shutdown signal. Before this,
         // only the assign lane observed `shutdown_notified()`, so on daemon
         // shutdown / RemoveRunner the chat loop was aborted with no terminal
-        // `ChatClosed`. A turn already in flight finishes first; the dedicated
-        // chat worktree persists either way.
+        // `ChatClosed`. A turn already in flight finishes first.
         //
         // The `Notified` future is created ONCE and pinned across iterations:
         // `notify_waiters()` does not store a permit, so a fresh future created
@@ -1816,24 +1819,6 @@ impl ChatWorker {
         }
         let _ = self.active_tx.send(false);
         self.state.set_chat_active(false).await;
-
-        // Phase 2: persist this session's work on its branch (commit + push) so
-        // nothing is left only on the dev machine and a revive can resume it.
-        // No-op on a clean tree, so read-only sessions push nothing.
-        if self.pool.is_some() {
-            let root = crate::workspace::chat_worktree::path_for(&self.runner_paths);
-            if root.exists() {
-                match crate::workspace::chat_worktree::end_session(&root).await {
-                    Ok(true) => {
-                        tracing::info!(%chat_session_id, "chat session changes committed and pushed")
-                    }
-                    Ok(false) => {}
-                    Err(e) => {
-                        tracing::warn!(%chat_session_id, error = %e, "chat session persist failed")
-                    }
-                }
-            }
-        }
     }
 
     async fn send_timing_event(
@@ -2391,43 +2376,16 @@ impl ChatWorker {
 
     async fn resolve_chat_workspace(
         &mut self,
-        chat_session_id: uuid::Uuid,
+        _chat_session_id: uuid::Uuid,
         cwd: Option<&str>,
     ) -> Result<std::path::PathBuf> {
-        // The chat lane runs in a DEDICATED per-runner worktree managed outside
-        // the issue pool (design §3.1/§3.7), NOT a pool `Session` desk. It
-        // persists across chat sessions, can never collide with or starve issue
-        // runs, and binds cwd once per session (which every agent supports —
-        // §3.6). `workspace.working_dir` stays vestigial for pooled runners.
-        let workspace_path = if let Some(pool) = &self.pool {
-            let chat_path = crate::workspace::chat_worktree::path_for(&self.runner_paths);
-            let root = crate::workspace::chat_worktree::ensure(pool.canonical(), &chat_path)
-                .await
-                .map_err(|e| anyhow::anyhow!("dedicated chat worktree: {e:#}"))?;
-            // Phase 2: start (or resume) this session's branch so its work is
-            // committed + pushed on session end and reconstructable on revive.
-            // Runs once per session (the caller only resolves when unset).
-            crate::workspace::chat_worktree::start_session(
-                pool.canonical(),
-                &root,
-                self.runner_paths.runner_id,
-                chat_session_id,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("chat session branch: {e:#}"))?;
-            root
-        } else if self.runner_config.workdir.is_some() {
-            // Work-dir runner whose pool failed to construct — fail rather
-            // than silently running in a vestigial directory.
-            anyhow::bail!(
-                "work dir {:?} has no worktree pool (pool construction failed at startup)",
-                self.runner_config.workdir.as_deref().unwrap_or("?"),
-            );
-        } else {
-            let workspace_path = self.runner_config.workspace.working_dir.clone();
-            std::fs::create_dir_all(&workspace_path)?;
-            workspace_path
-        };
+        // One working dir per runner: chat runs in exactly the same directory as
+        // issue runs, `workspace.working_dir`. There is no separate chat
+        // workspace and no git lifecycle here — the agent drives git per the
+        // prompt. This is the PDASHOSS01-83 fix: a warm-runner chat message does
+        // no git operation before the agent spawns.
+        let workspace_path = self.runner_config.workspace.working_dir.clone();
+        std::fs::create_dir_all(&workspace_path)?;
         if let Some(cwd) = cwd.filter(|s| !s.is_empty()) {
             let requested = std::path::PathBuf::from(cwd);
             let requested = if requested.is_absolute() {
@@ -2670,8 +2628,6 @@ struct AssignWorker {
     runner_paths: RunnerPaths,
     daemon_paths: Paths,
     runner_config: crate::config::schema::RunnerConfig,
-    /// Worktree pool for this runner's work dir, if any (see `RunnerLoop`).
-    pool: Option<PoolHandle>,
     state: StateHandle,
     approvals: ApprovalRouter,
     out: RunnerOut,
@@ -2707,7 +2663,8 @@ impl AssignWorker {
             AgentKind::ClaudeCode
             | AgentKind::CursorAgent
             | AgentKind::OpenClaw
-            | AgentKind::Grok => FailureReason::AgentCrash,
+            | AgentKind::Grok
+            | AgentKind::MuseCode => FailureReason::AgentCrash,
         }
     }
 
@@ -2716,17 +2673,10 @@ impl AssignWorker {
         run_id: uuid::Uuid,
         prompt: String,
         repo_url: Option<String>,
-        git_work_branch: Option<String>,
         expected_codex_model: Option<String>,
     ) -> Result<()> {
-        self.handle_assign(
-            run_id,
-            prompt,
-            repo_url,
-            git_work_branch,
-            expected_codex_model,
-        )
-        .await
+        self.handle_assign(run_id, prompt, repo_url, expected_codex_model)
+            .await
     }
 
     async fn handle_assign(
@@ -2734,134 +2684,39 @@ impl AssignWorker {
         run_id: uuid::Uuid,
         prompt: String,
         repo_url: Option<String>,
-        git_work_branch: Option<String>,
         expected_codex_model: Option<String>,
     ) -> Result<()> {
-        // Resolve the directory the agent runs in. Pooled runners lease a git
-        // worktree from their work dir's pool (which may park/wait when all
-        // desks are busy); legacy runners resolve `workspace.working_dir`
-        // directly. The lease (if any) lives for the whole function and
-        // releases on drop — salvage→clean→park→return — on every exit path,
-        // success or failure. See `.ai_design/worktree_pooling/`.
-        //
-        // `_lease` is read only via Drop, so the underscore prefix silences
-        // the unused-variable lint while keeping it bound to function scope.
-        let mut _lease: Option<crate::workspace::pool::Lease> = None;
-        let pinned_branch = git_work_branch.as_deref().filter(|s| !s.is_empty());
-        let workspace_path = if let Some(pool) = self.pool.clone() {
-            // Authoritative queued reporting (design §6.1): the pool owner
-            // notifies on this channel when the request actually parks, and
-            // again on every position change (positions only decrease). This
-            // can't race the enqueue the way a pre-acquire snapshot could, and
-            // it also covers branch-lock waits while desks sit free. The
-            // forwarder task ends when the pool drops the sender (granted,
-            // cancelled, or failed). A cloud that predates the `queued`
-            // endpoint 404s and the runner silently stops reporting
-            // (feature-detect in `post_run_queued`).
-            let (queued_tx, mut queued_rx) = tokio::sync::mpsc::unbounded_channel();
-            let queued_out = self.out.clone();
-            tokio::spawn(async move {
-                while let Some(queue_position) = queued_rx.recv().await {
-                    if let Err(err) = queued_out
-                        .send(ClientMsg::RunQueued {
-                            run_id,
-                            queue_position,
-                        })
-                        .await
-                    {
-                        tracing::warn!(error = %err, "failed to send run_queued");
-                    }
-                }
-            });
-            let req = LeaseRequest {
-                kind: LeaseKind::Run,
-                holder_id: run_id,
-                branch: pinned_branch.map(str::to_string),
-                queued_tx: Some(queued_tx),
-            };
-            // Race the lease against this run's cancel signal: a cancel that
-            // arrives while the run is parked in the queue must dequeue it and
-            // report `RunCancelled` immediately, with no desk ever leased
-            // (design §5 / §6.2).
-            let acquired = tokio::select! {
-                biased;
-                _ = self.cancel.cancelled() => {
-                    pool.cancel(run_id);
-                    self.send(ClientMsg::RunCancelled {
-                        run_id,
-                        cancelled_at: Utc::now(),
-                        tokens: None,
-                        model: None,
-                    })
-                    .await;
-                    self.state.set_current_run(None).await;
-                    return Ok(());
-                }
-                res = pool.acquire(req) => res,
-            };
-            match acquired {
-                Ok(lease) => {
-                    let p = lease.path().to_path_buf();
-                    _lease = Some(lease);
-                    p
-                }
-                // Dequeued by a cancel that raced our select arm (the pool
-                // processed the cancel first) — report cancelled, not failed.
-                Err(crate::workspace::pool::AcquireError::Cancelled) => {
-                    self.send(ClientMsg::RunCancelled {
-                        run_id,
-                        cancelled_at: Utc::now(),
-                        tokens: None,
-                        model: None,
-                    })
-                    .await;
-                    self.state.set_current_run(None).await;
-                    return Ok(());
-                }
-                Err(e) => {
-                    self.send(ClientMsg::RunFailed {
-                        run_id,
-                        reason: FailureReason::WorkspaceSetup,
-                        detail: Some(format!("worktree lease failed: {e}")),
-                        ended_at: Utc::now(),
-                        tokens: None,
-                        model: None,
-                    })
-                    .await;
-                    self.state.set_current_run(None).await;
-                    return Ok(());
-                }
-            }
-        } else if self.runner_config.workdir.is_some() {
-            // The runner references a work dir but no pool handle exists
-            // (pool construction failed at startup). Never fall back to the
-            // legacy path here: `workspace.working_dir` is vestigial for
-            // pooled runners and could even point at the canonical clone.
-            self.send(ClientMsg::RunFailed {
-                run_id,
-                reason: FailureReason::WorkspaceSetup,
-                detail: Some(format!(
-                    "work dir {:?} has no worktree pool (pool construction failed at startup; \
-                     check the daemon log)",
-                    self.runner_config.workdir.as_deref().unwrap_or("?"),
-                )),
-                ended_at: Utc::now(),
-                tokens: None,
-                model: None,
-            })
-            .await;
-            self.state.set_current_run(None).await;
-            return Ok(());
-        } else {
+        // Scope the run id over everything this run does so every agent
+        // subprocess the bridges spawn (and re-spawn per turn) inherits
+        // `PIDASH_RUN_ID` — see `util::shell::RUN_ENV`.
+        crate::util::shell::RUN_ENV
+            .scope(
+                crate::util::shell::RunEnv { run_id },
+                self.handle_assign_inner(run_id, prompt, repo_url, expected_codex_model),
+            )
+            .await
+    }
+
+    async fn handle_assign_inner(
+        &mut self,
+        run_id: uuid::Uuid,
+        prompt: String,
+        repo_url: Option<String>,
+        expected_codex_model: Option<String>,
+    ) -> Result<()> {
+        // Resolve the directory the agent runs in: this runner's single,
+        // exclusive `workspace.working_dir`. Clone-bootstrap it once if a repo
+        // url is provided (`resolve` tolerates a non-git task folder too).
+        let workspace_path = {
             let wd = self.runner_config.workspace.working_dir.clone();
             match crate::workspace::resolve(&wd, repo_url.as_deref()).await {
                 Ok(crate::workspace::Resolution::ExistingRepo(p))
-                | Ok(crate::workspace::Resolution::Cloned(p)) => p,
+                | Ok(crate::workspace::Resolution::Cloned(p))
+                | Ok(crate::workspace::Resolution::Directory(p)) => p,
                 Err(e) => {
                     let reason = match &e {
                         crate::workspace::ResolveError::Clone(_) => FailureReason::GitAuth,
-                        crate::workspace::ResolveError::MissingRepoUrl
-                        | crate::workspace::ResolveError::NonEmptyNonRepo(_)
+                        crate::workspace::ResolveError::NonEmptyNonRepo(_)
                         | crate::workspace::ResolveError::UnsupportedScheme(_) => {
                             FailureReason::WorkspaceSetup
                         }
@@ -2899,29 +2754,10 @@ impl AssignWorker {
             );
         }
 
-        // Pre-flight checkout: if the issue pins an existing branch, land on
-        // it before the agent runs so it commits onto that branch directly.
-        // When not set, the agent handles branch creation per the prompt.
-        // Pooled runs SKIP this — the pool already checked the branch out in
-        // the leased worktree (and holds the branch lock for it).
-        if self.pool.is_none()
-            && let Some(branch) = git_work_branch.as_deref().filter(|s| !s.is_empty())
-            && let Err(e) =
-                crate::workspace::git::checkout_work_branch(&workspace_path, branch).await
-        {
-            self.send(ClientMsg::RunFailed {
-                run_id,
-                reason: FailureReason::WorkspaceSetup,
-                detail: Some(format!("checkout {branch}: {e:#}")),
-                ended_at: Utc::now(),
-                tokens: None,
-                model: None,
-            })
-            .await;
-            // Same reason as above: clear the early-stamp on failure.
-            self.state.set_current_run(None).await;
-            return Ok(());
-        }
+        // No platform-side branch checkout: the cloud supplies the work branch
+        // in the prompt context and the agent checks it out (or creates one off
+        // the base branch) itself. The platform supplies git information; the
+        // agent performs git operations (PDASHOSS01-136).
 
         let ws_state = crate::workspace::git::workspace_state(&workspace_path)
             .await
@@ -3068,23 +2904,8 @@ impl AssignWorker {
         idx.upsert(summary);
         idx.save(&self.runner_paths).ok();
 
-        // A clean completion returns its worktree without salvaging; any other
-        // terminal outcome (failed/cancelled, reached here normally) leaves the
-        // lease's default `Aborted` outcome so the dirty tree is salvaged to the
-        // run's branch before the desk recycles (design §4.4).
-        if outcome.status_label == "completed"
-            && let Some(lease) = _lease.as_mut()
-        {
-            lease.mark_success();
-        }
-
         if outcome.status_label == "cancelled" {
             let terminal_metadata = self.run_metadata().await;
-            // Queue worktree salvage/release before acknowledging cancellation
-            // to the cloud. The cloud uses RunCancelled as the project-move
-            // handoff barrier, so it must not dispatch a replacement while
-            // this agent bridge is still alive.
-            drop(_lease.take());
             self.state.set_current_run(None).await;
             self.send(ClientMsg::RunCancelled {
                 run_id,
@@ -3588,7 +3409,7 @@ mod tests {
     use crate::cloud::protocol::Envelope;
     use crate::config::schema::{
         AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, CursorAgentSection,
-        GrokSection, OpenClawSection, RunnerConfig, WorkspaceSection,
+        GrokSection, MuseCodeSection, OpenClawSection, RunnerConfig, WorkspaceSection,
     };
     use crate::daemon::state::ExecCommandSnapshot;
     use chrono::TimeZone;
@@ -3611,41 +3432,132 @@ mod tests {
             project_slug: Some(project_slug.into()),
             pod_id: None,
             workspace: WorkspaceSection { working_dir },
-            workdir: None,
             agent: AgentSection::default(),
             codex: CodexSection::default(),
             claude_code: ClaudeCodeSection::default(),
             cursor_agent: CursorAgentSection::default(),
             openclaw: OpenClawSection::default(),
             grok: GrokSection::default(),
+            muse_code: MuseCodeSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         }
     }
 
     #[test]
-    fn resolve_working_dir_absolutizes_legacy_runner_path() {
+    fn resolve_working_dir_absolutizes_runner_path() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = paths_for(tmp.path());
         let relative = PathBuf::from(format!("relative-wd-{}", uuid::Uuid::new_v4()));
         let expected = std::path::absolute(&relative).unwrap();
         let (out_tx, _out_rx) = mpsc::channel::<Envelope<ClientMsg>>(1);
-        let inst = RunnerInstance::new(runner_config("legacy", "WEB", relative), &paths, out_tx);
+        let inst = RunnerInstance::new(runner_config("main", "WEB", relative), &paths, out_tx);
 
-        assert_eq!(resolve_working_dir(&inst, &HashMap::new()), Some(expected));
+        assert_eq!(resolve_working_dir(&inst), Some(expected));
     }
 
-    #[test]
-    fn resolve_working_dir_does_not_report_vestigial_path_without_pool() {
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = paths_for(tmp.path());
-        let mut config = runner_config("pooled", "WEB", tmp.path().join("vestigial"));
-        config.workdir = Some("missing-pool".into());
-        let (out_tx, _out_rx) = mpsc::channel::<Envelope<ClientMsg>>(1);
-        let inst = RunnerInstance::new(config, &paths, out_tx);
+    #[tokio::test]
+    async fn repo_free_assignment_reaches_agent_spawn_and_skips_branch_checkout() {
+        for kind in [AgentKind::Codex, AgentKind::ClaudeCode] {
+            let tmp = tempfile::tempdir().unwrap();
+            let paths = paths_for(tmp.path());
+            paths.ensure().unwrap();
+            let wd = tmp.path().join("task-folder");
+            std::fs::create_dir_all(&wd).unwrap();
+            std::fs::write(wd.join("notes.txt"), "preserve user content").unwrap();
+            let mut config = runner_config("general-tasks", "TEST", wd.clone());
+            config.project_slug = None; // no cloud context lookup in this test
+            config.agent.kind = kind;
+            let missing_binary = tmp.path().join("missing-agent").to_string_lossy().into_owned();
+            config.codex.binary = missing_binary.clone();
+            config.claude_code.binary = missing_binary;
+            let runner_paths = paths.for_runner(config.runner_id);
+            runner_paths.ensure().unwrap();
+            let (tx, mut rx) = mpsc::channel(16);
+            let mut worker = AssignWorker {
+                runner_paths,
+                daemon_paths: paths,
+                runner_config: config.clone(),
+                state: StateHandle::new(Config {
+                    version: 2,
+                    daemon: Default::default(),
+                    runners: vec![config.clone()],
+                    cli: None,
+                }),
+                approvals: ApprovalRouter::new(),
+                out: RunnerOut::new(config.runner_id, tx),
+                cancel: tokio_util::sync::CancellationToken::new(),
+            };
+            worker
+                .run(
+                    uuid::Uuid::new_v4(),
+                    "Summarize these notes".into(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                rx.recv().await.unwrap().body,
+                ClientMsg::Accept { .. }
+            ));
+            // Deliberately absent engine proves the assignment got past
+            // workspace setup and reached the agent-specific spawn path.
+            let failure = rx.recv().await.unwrap().body;
+            assert!(matches!(
+                failure,
+                ClientMsg::RunFailed {
+                    reason: FailureReason::CodexCrash | FailureReason::AgentCrash,
+                    ..
+                }
+            ));
+            assert_eq!(
+                std::fs::read_to_string(wd.join("notes.txt")).unwrap(),
+                "preserve user content"
+            );
+            assert!(!wd.join(".git").exists());
+        }
+    }
 
-        let working_dir = resolve_working_dir(&inst, &HashMap::new());
-        assert_eq!(working_dir, None);
-        assert_eq!(attach_body_for_instance(&inst, working_dir).working_dir, "");
+    #[tokio::test]
+    async fn chat_and_run_resolve_to_the_same_working_dir() {
+        // One exclusive dir per runner: the chat lane resolves to exactly the
+        // runner's `workspace.working_dir` — the same directory an issue run
+        // resolves — with no separate chat workspace path.
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("the-one-dir");
+        let config = runner_config("main", "WEB", wd.clone());
+        let (tx, _rx) = mpsc::channel::<Envelope<ClientMsg>>(1);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(1);
+        let (active_tx, _active_rx) = watch::channel(false);
+        let mut chat = ChatWorker {
+            runner_config: config.clone(),
+            state: StateHandle::new(Config {
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![config.clone()],
+                cli: None,
+            }),
+            approvals: ApprovalRouter::new(),
+            out: RunnerOut::new(config.runner_id, tx),
+            command_rx: cmd_rx,
+            active_tx,
+        };
+        let chat_dir = chat
+            .resolve_chat_workspace(uuid::Uuid::new_v4(), None)
+            .await
+            .unwrap();
+        assert_eq!(chat_dir, wd);
+
+        // The issue-run path resolves the very same directory (non-git folder).
+        let run_dir = match crate::workspace::resolve(&config.workspace.working_dir, None)
+            .await
+            .unwrap()
+        {
+            crate::workspace::Resolution::Directory(p)
+            | crate::workspace::Resolution::ExistingRepo(p)
+            | crate::workspace::Resolution::Cloned(p) => p,
+        };
+        assert_eq!(run_dir, chat_dir);
     }
 
     #[tokio::test]
@@ -3902,7 +3814,6 @@ mod tests {
             version: 2,
             daemon: Default::default(),
             runners: vec![],
-            workdirs: vec![],
             cli: None,
         });
         let task = tokio::spawn(async move {

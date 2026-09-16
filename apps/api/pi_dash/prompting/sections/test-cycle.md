@@ -139,32 +139,27 @@ downgraded pass.
    - **OPS**: apply a trivial config fix; otherwise report.
    - **NON_TECHNICAL**: summarize only — do not mutate the deliverable.
 
-## Step 3 — Emit a done-signal
+## Step 3 — Decide where the task goes next
 
-The test pass concludes by matching the outcome (see "Available states"
-and "Ending the run"):
+The test pass concludes with the next-state decision from "Task
+lifecycle" (match the target `group` first in "Available states", then the
+name), then the outcome report from "Ending the run":
 
-- **completed** — all tests pass / every acceptance criterion is met.
-  Post your results comment and **leave the issue In Test**. Do **not**
-  move it to a `completed`/Done state: the runner never promotes an issue
-  to Done — a human closes it once they've seen the results, or a separate
-  supporting process does. (Test ticking is bounded; once it's exhausted
-  the issue simply stays In Test. If a later tick finds nothing has
-  changed, emit a **noop** and exit without moving state — see the noop
-  rule below: update the workpad if needed, but do **not** post a thread
-  comment.)
-- **blocked** — real defects that need a human/dev, **or** the test could
-  not be run (missing env / creds / tooling — e.g. no browser for a UI
-  kind). Follow "Blocking the run" (post the results comment, move to
-  "Blocked" if the project has that state).
-- **paused** — the acceptance criteria are ambiguous or absent and the
-  deliverable is high-stakes: a clarifying question for the human. Follow
-  "Blocking the run".
-- **noop** — nothing has changed since your last test pass. Update the
-  workpad if there is anything new to record, then exit without moving
-  state. **Do not post a thread comment.** A tick that found nothing to do
-  is not worth a comment — "Test tick (N/M) — noop, nothing changed"
-  clutters the human's thread with noise and buries the comments that
-  matter. Comment only when you have something a human actually needs to
-  see (a defect, a question, a result); silence is the correct signal for
-  "nothing changed."
+- **pass** — every acceptance criterion is met. Post your results comment
+  and **leave the issue In Test**. Never move it to `completed`/Done — a
+  human closes it once they've seen the results. Yield `done`.
+- **defects** — real defects that need fixing. Record per-criterion
+  verdicts and list the defects as open items in the workpad `### Path to
+  done` block, post the results comment, and move the issue **back to In
+  Progress** (the `started` group) so the next run fixes them. Do not use
+  Blocked for a bug. Yield `done`.
+- **cannot run** — the test could not be run (missing env / creds /
+  tooling — e.g. no browser for a UI kind). Follow "Blocking the run" and
+  say exactly what was missing. Yield `blocked`.
+- **clarification** — the acceptance criteria are ambiguous or absent and
+  the deliverable is high-stakes. Follow "Blocking the run". Yield
+  `waiting_on_human`.
+- **nothing changed** since your last pass — leave the issue In Test and
+  yield `done`. Do **not** post a bare "test tick (N/M) — noop, nothing
+  changed" comment; silence is the correct signal for "nothing changed,"
+  and such comments only bury the ones a human actually needs.

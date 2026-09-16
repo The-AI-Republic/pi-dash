@@ -42,27 +42,6 @@ Parent issue context (this issue is a sub-issue of {{ parent.identifier }}):
 {% if lineage %}
 - This issue has a multi-level parent lineage. Full chain, current issue first up to the root:
 {% for node in lineage %}{{ node.identifier }}: {{ node.title }}{% if loop.first %} (current){% endif %}{% if not loop.last %} → {% endif %}{% endfor %}
-- Only the direct parent's content is shown above. To learn about any ancestor, run `pidash issue get <ANCESTOR-ID>` and `pidash comment list <ANCESTOR-ID>` (for example, the root issue is `pidash issue get {{ lineage[-1].identifier }}`).
 {% endif %}
-{% endif %}
-
-Repository:
-{% if repo.url %}
-- Remote: {{ repo.url }}
-- Base branch: {{ repo.base_branch or "(use the repository's default branch — run `git symbolic-ref refs/remotes/origin/HEAD` to resolve it)" }}
-{% if repo.work_branch %}
-- Work branch: {{ repo.work_branch }} — check this branch out and commit directly onto it. Do not create a new feature branch.
-{% else %}
-- Work branch: (none) — create a fresh feature branch off the base branch for your work.
-{% endif %}
-{% else %}
-- Work in the runner's configured working directory. Do not clone or touch any other path.
-{% endif %}
-{% if code_reviews %}
-
-Associated {{ repo.code_review_term }}s (git PRs/MRs already linked to this issue):
-{% for cr in code_reviews %}
-- {{ cr.title or cr.url }} — {{ cr.url }} (state: {{ cr.state }}{% if cr.merged %}, merged{% endif %}{% if cr.draft %}, draft{% endif %})
-{% endfor %}
-These are existing code reviews already attached to this issue. Inspect any that are relevant before starting — your task may build on this prior work. When you open a new {{ repo.code_review_term }}, do not duplicate one that is already open here; reuse it instead.
+- **The ancestor chain is required reading before you implement.** {% if lineage %}Only the direct parent's content is shown above. {% endif %}As a required part of analyze-and-scope (Step 0.5), walk from the direct parent {% if lineage %}up to the root issue{% else %}(the chain here is just the parent){% endif %}: run `pidash issue get <ANCESTOR-ID>` and `pidash comment list <ANCESTOR-ID>` for each ancestor{% if lineage %} (the root is `pidash issue get {{ lineage[-1].identifier }}`){% endif %}, fold their framing / acceptance criteria / design decisions / research findings into your workpad, and use them to judge whether this issue is ready to implement. Do this once and record what you learn so continuation runs don't re-fetch.
 {% endif %}

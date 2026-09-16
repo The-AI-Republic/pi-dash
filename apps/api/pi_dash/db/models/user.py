@@ -261,6 +261,15 @@ class Profile(TimeAuditModel):
     is_subscribed_to_changelog = models.BooleanField(default=False)
     product_tour = models.JSONField(default=get_default_product_tour)
 
+    # Namespaced preferences owned by whatever build is running, so a
+    # deployment-specific setting needs no column here. Shape is
+    # ``{namespace: {key: value}}``; the recognised namespaces and their
+    # defaults come from ``pi_dash.ee.settings.user_settings`` (empty in CE),
+    # and ``ProfileEndpoint`` rejects anything not declared there. Read through
+    # ``pi_dash.ee.settings.user_settings.get_setting`` rather than indexing
+    # this field directly.
+    settings = models.JSONField(default=dict)
+
     class Meta:
         verbose_name = "Profile"
         verbose_name_plural = "Profiles"

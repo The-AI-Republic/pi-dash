@@ -162,28 +162,26 @@ def _humanize_interval(seconds: int) -> str:
 
 
 def _tick_context(issue: Issue) -> Optional[Dict[str, Any]]:
-    """Surface the issue's ticking schedule, or ``None`` when it isn't live.
+    """Surface the issue's budget pool and clock for the prompt.
 
-    Lets the prompt tell the agent it is being re-invoked on a cadence and
-    how much tick budget remains before the cap-hit auto-pause. ``cap`` /
-    ``remaining`` are ``None`` for an infinite (``-1``) cap so templates can
-    branch with ``{% if tick.cap is not none %}``.
+    One pool per issue (``.ai_design/ticking_relevance/design.md`` §5.3):
+    the agent is told how many machine-started runs the issue has used and
+    how many remain **including when the clock is stopped** — that is
+    exactly the spent-pool case the budget line exists to warn about.
+    ``cap`` / ``remaining`` are ``None`` for an infinite (``-1``) pool so
+    templates can branch with ``{% if tick.cap is not none %}``.
 
-    Returns ``None`` — so the templates' "Pi Dash automatically re-invokes
-    the agent" block does not render — when no ticker row exists, when the
-    ticker is disarmed (cap hit, user disabled, left the ticking state:
-    promising automatic re-invocation would be false and invites the agent
-    to defer work to a tick that never fires), or when the configured
-    cadence is nonsense (the project-default interval/cap fields are
-    API-writable with no validation; "every 0 hours" or "of -2 ticks"
-    must not reach a prompt).
+    Returns ``None`` only when no ticker row exists (the issue has never
+    entered the ticking bucket) or when the configured cadence is nonsense
+    (the project fields are API-writable with no validation; "every 0
+    hours" or "of -2 runs" must not reach a prompt).
     """
     from pi_dash.db.models.issue_agent_ticker import INFINITE_MAX_TICKS
 
     # Reverse OneToOne — RelatedObjectDoesNotExist subclasses AttributeError,
     # so getattr's default covers issues that never armed a ticker.
     ticker = getattr(issue, "agent_ticker", None)
-    if ticker is None or not ticker.enabled:
+    if ticker is None:
         return None
     cap = ticker.effective_max_ticks()
     interval = ticker.effective_interval_seconds()
@@ -192,10 +190,15 @@ def _tick_context(issue: Issue) -> Optional[Dict[str, Any]]:
     if cap != INFINITE_MAX_TICKS and cap < 0:
         return None
     unlimited = cap == INFINITE_MAX_TICKS
+    remaining = None if unlimited else max(0, cap - ticker.used)
     return {
-        "count": ticker.tick_count,
+        "count": ticker.used,
         "cap": None if unlimited else cap,
-        "remaining": None if unlimited else max(0, cap - ticker.tick_count),
+        "remaining": remaining,
+        # ``used`` already counts this run when the ticker started it, so
+        # ``remaining == 0`` means "no machine-started run follows this one".
+        "spent": (not unlimited) and remaining == 0,
+        "clock_live": bool(ticker.enabled),
         "interval_seconds": interval,
         "interval_human": _humanize_interval(interval),
     }
@@ -297,6 +300,30 @@ def _code_reviews_context(issue: Issue) -> list[Dict[str, Any]]:
     ]
 
 
+def extra_toolsets_vars(run) -> Dict[str, Any]:
+    """Prompt variables for deployment-provided toolsets.
+
+    ``extra_toolsets`` is read from the run's own plan snapshot, the same flag
+    ``cloud_agent.runtime`` gates on, so the prompt can never claim tools the
+    run will not be given. The prompt has to say they exist at all because
+    their names are not knowable at plan time and so never reach
+    ``available_tools``.
+
+    The schema-fetch tool is named by the seam rather than here: it belongs to
+    whichever deployment supplies the tools, and naming one in shared code
+    would make every other deployment's agent call a tool that does not exist.
+    """
+    # Local import: the seam is overlayable, and a module-scope import would
+    # bind CE's version before an overlay could replace it.
+    from pi_dash.ee.cloud_agent.toolsets import extra_toolsets_schema_tool
+
+    enabled = bool((getattr(run, "tool_plan", {}) or {}).get("extra_toolsets"))
+    return {
+        "extra_toolsets": enabled,
+        "extra_toolsets_schema_tool": extra_toolsets_schema_tool() if enabled else "",
+    }
+
+
 def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
     """Build the dict passed into Jinja.
 
@@ -395,6 +422,7 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
         },
         "available_tools": (getattr(run, "tool_plan", {}) or {}).get("tools", []),
         "unavailable_capabilities": (getattr(run, "tool_plan", {}) or {}).get("unavailable_capabilities", []),
+        **extra_toolsets_vars(run),
         "limits": (getattr(run, "tool_plan", {}) or {}).get("limits", {}),
         # Ticking schedule (None when the issue has no ticker row). Lets the
         # template explain the re-invocation cadence and remaining budget.
@@ -477,6 +505,7 @@ def build_scheduler_context(binding, run: AgentRun) -> Dict[str, Any]:
         },
         "available_tools": (getattr(run, "tool_plan", {}) or {}).get("tools", []),
         "unavailable_capabilities": (getattr(run, "tool_plan", {}) or {}).get("unavailable_capabilities", []),
+        **extra_toolsets_vars(run),
         "limits": (getattr(run, "tool_plan", {}) or {}).get("limits", {}),
         "scheduler_task_body": scheduler_task_body,
     }

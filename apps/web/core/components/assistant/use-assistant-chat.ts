@@ -7,11 +7,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import { AssistantService } from "@pi-dash/services";
-import type { IAssistantEvent, IAssistantMessage } from "@pi-dash/types";
+import type { IAssistantEvent, IAssistantMessage, IAssistantSkippedServer } from "@pi-dash/types";
+import { bySeq, latestRealMessage, withNotice, type ById } from "@/components/assistant/notices";
 
 const service = new AssistantService();
-
-const bySeq = (a: IAssistantMessage, b: IAssistantMessage): number => a.seq - b.seq;
 
 // Server page size for transcript fetches. Threads are capped server-side
 // (MAX_THREAD_MESSAGES), so the pagination loop below is bounded to a few pages.
@@ -38,8 +37,6 @@ function deltaText(payload: Record<string, unknown>): string {
   }
   return "";
 }
-
-type ById = Record<string, IAssistantMessage>;
 
 export interface UseAssistantChat {
   messages: IAssistantMessage[];
@@ -70,6 +67,12 @@ export function useAssistantChat(slug: string | undefined, threadId: string | un
   // Track applied delta event seqs so an SSE reconnect (which replays from 0)
   // doesn't double-append in-flight streamed text.
   const appliedDeltas = useRef<Set<number>>(new Set());
+  // Notices anchor to the highest message seq present when they arrive, so on a
+  // cold load they must wait for the transcript — the SSE replay and the SWR
+  // fetch race, and anchoring against an empty map would pin every replayed
+  // notice to the top of the thread.
+  const transcriptLoaded = useRef(false);
+  const pendingNotices = useRef<{ seq: number; servers: IAssistantSkippedServer[]; at: string }[]>([]);
 
   const { data: base, mutate } = useSWR<IAssistantMessage[]>(
     slug && threadId ? ["assistant-messages", slug, threadId] : null,
@@ -84,6 +87,8 @@ export function useAssistantChat(slug: string | undefined, threadId: string | un
     setBusy(false);
     setError(null);
     appliedDeltas.current = new Set();
+    transcriptLoaded.current = false;
+    pendingNotices.current = [];
   }, [slug, threadId]);
 
   // Merge the durable transcript (SWR fetch/poll) into local state without
@@ -99,6 +104,22 @@ export function useAssistantChat(slug: string | undefined, threadId: string | un
       }
       return next;
     });
+    transcriptLoaded.current = true;
+    // The transcript is in — anchor any notices that replayed ahead of it,
+    // oldest event first so they keep their relative order. Drained out here
+    // rather than inside the updater above: an updater must stay pure, or
+    // StrictMode's double invocation drops the notices on the second pass.
+    if (pendingNotices.current.length > 0) {
+      const queued = pendingNotices.current;
+      pendingNotices.current = [];
+      // eslint-disable-next-line unicorn/no-array-sort -- local array, discarded; toSorted not in tsconfig lib target
+      queued.sort((a, b) => a.seq - b.seq);
+      setById((prev) => {
+        let next = prev;
+        for (const n of queued) next = withNotice(next, n.seq, n.servers, n.at);
+        return next;
+      });
+    }
   }, [base]);
 
   // Fallback turn-completion detection from polled state (covers a missed SSE
@@ -111,8 +132,10 @@ export function useAssistantChat(slug: string | undefined, threadId: string | un
     const list = Object.values(byId);
     if (list.length === 0) return;
     if (list.some((m) => m.status === "streaming")) return;
-    let last: IAssistantMessage | undefined;
-    for (const m of list) if (!last || m.seq > last.seq) last = m;
+    // Notices are excluded: anchored after the message they follow, one would
+    // otherwise always be the max-seq item, never carry a terminal role, and
+    // wedge the composer for the rest of the turn.
+    const last = latestRealMessage(list);
     if (last && (last.role === "assistant" || last.role === "error") && last.status !== "streaming") {
       setBusy(false);
     }
@@ -151,6 +174,24 @@ export function useAssistantChat(slug: string | undefined, threadId: string | un
         case "tool_result": {
           const m = payload.message as IAssistantMessage | undefined;
           if (m) setById((prev) => ({ ...prev, [m.id]: { ...prev[m.id], ...m } }));
+          break;
+        }
+        case "tool_servers_skipped": {
+          // A run dropped one or more MCP tool servers (blocked URL, unreadable
+          // credential, unreachable, died mid-run, or the whole resolver
+          // failing). Surface it as an inline, non-fatal notice anchored to the
+          // turn it belongs to (see withNotice) so it interleaves in the thread
+          // and an SSE replay from 0 is idempotent. It is client-only (never
+          // persisted); reload re-derives it from the replayed event.
+          const servers = (payload.servers as IAssistantSkippedServer[] | undefined) ?? [];
+          if (servers.length === 0) break;
+          if (!transcriptLoaded.current) {
+            // Replayed ahead of the transcript — hold it until there is
+            // something to anchor against (flushed by the merge effect).
+            pendingNotices.current.push({ seq: event.seq, servers, at: event.created_at });
+            break;
+          }
+          setById((prev) => withNotice(prev, event.seq, servers, event.created_at));
           break;
         }
         case "turn_failed":

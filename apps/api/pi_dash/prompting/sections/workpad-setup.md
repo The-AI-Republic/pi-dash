@@ -42,7 +42,9 @@ This is the first run on this issue — the workpad is empty. You will create it
 {% if parent and parent.work_branch %}
      - This issue has a parent ({{ parent.identifier }}) with an active implementation branch. Use the parent's branch as base: `BASE={{ parent.work_branch }}`.
 {% elif parent %}
-     - This issue has a parent ({{ parent.identifier }}) but the parent has no implementation branch yet. Fall back to the project base branch: `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}`. Note the fallback in the workpad `Notes`.
+     - This issue has a parent ({{ parent.identifier }}) with no implementation branch yet. **Do not treat this as an automatic fall-back to the project base** — route it through the parent-readiness judgment you made in analyze-and-scope (Step 0.5):
+       - Parent is a **research / design / spec** issue (no code expected), or an implementation issue whose work is already merged into the base branch: base off the project base — `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}` — and note in the workpad `Notes` why the parent's lack of a branch is expected here.
+       - Parent is an **implementation** issue still in progress with no branch yet **and this issue depends on its code**: do **not** base off the project base. Treat it as a blocker — follow "Blocking the run" instead of creating a branch, and stop.
 {% else %}
      - This issue is independent (no parent). Use the project base branch: `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}`.
 {% endif %}

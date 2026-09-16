@@ -202,7 +202,13 @@ class ProfileSerializer(BaseSerializer):
     class Meta:
         model = Profile
         fields = "__all__"
-        read_only_fields = ["user"]
+        # ``settings`` is read-only here on purpose. It is a namespaced bag
+        # whose recognised contents are declared by the running build
+        # (``pi_dash.ee.settings.user_settings``), so writes must go through
+        # that validation and be merged per namespace — see ``ProfileEndpoint``.
+        # With ``fields = "__all__"`` any future endpoint reusing this
+        # serializer would otherwise expose an unvalidated, whole-field write.
+        read_only_fields = ["user", "settings"]
 
 
 class AccountSerializer(BaseSerializer):

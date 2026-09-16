@@ -18,12 +18,14 @@ export default defineConfig({
     css: false,
   },
   resolve: {
+    // First match wins and "@" also matches "@/<anything>", so the specific
+    // prefixes must come before it (same mapping as tsconfig.json paths).
     alias: {
-      "@": path.resolve(__dirname, "./core"),
       "@/app": path.resolve(__dirname, "./app"),
       "@/helpers": path.resolve(__dirname, "./helpers"),
       "@/styles": path.resolve(__dirname, "./styles"),
       "@/pi-dash-web": path.resolve(__dirname, "./ce"),
+      "@": path.resolve(__dirname, "./core"),
     },
   },
 });

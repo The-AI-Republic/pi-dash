@@ -19,6 +19,7 @@ and the standard ``django_db_setup`` fixture (same surface as
 """
 
 import pytest
+from django.test import override_settings
 from rest_framework import status as http_status
 
 from pi_dash.db.models import (
@@ -354,3 +355,34 @@ class TestIssueAdvancedSearchProjectScoping:
         )
         assert response.status_code == http_status.HTTP_200_OK
         assert response.data["count"] == 1
+
+
+@pytest.mark.contract
+class TestIssueAdvancedSearchWebUrl:
+    """Each result row carries an absolute, human-clickable web URL built
+    from deployment config, and omits it entirely when no base is set.
+    """
+
+    @pytest.mark.django_db
+    @override_settings(WEB_URL="https://pi-dash.example.com", APP_BASE_URL=None)
+    def test_result_has_absolute_web_url(
+        self, api_key_client, workspace, search_project, create_user
+    ):
+        issue = _make_issue(search_project, create_user, name="linkable", description="alpha")
+        response = api_key_client.get(_url(workspace.slug) + "?q=alpha")
+        assert response.status_code == http_status.HTTP_200_OK
+        row = next(r for r in response.data["results"] if r["id"] == str(issue.id))
+        assert (
+            row["url"]
+            == f"https://pi-dash.example.com/{workspace.slug}/browse/ST-{issue.sequence_id}"
+        )
+
+    @pytest.mark.django_db
+    @override_settings(WEB_URL=None, APP_BASE_URL=None)
+    def test_url_omitted_when_base_unset(
+        self, api_key_client, workspace, search_project, create_user
+    ):
+        _make_issue(search_project, create_user, name="linkable", description="alpha")
+        response = api_key_client.get(_url(workspace.slug) + "?q=alpha")
+        assert response.status_code == http_status.HTTP_200_OK
+        assert all("url" not in r for r in response.data["results"])

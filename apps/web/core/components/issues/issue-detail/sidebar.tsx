@@ -31,6 +31,7 @@ import { MemberDropdown } from "@/components/dropdowns/member/dropdown";
 import { PodDropdown } from "@/components/dropdowns/pod/dropdown";
 import {
   cloudAgentOption,
+  managedAgentOption,
   executionTargetPatch,
   executionTargetValue,
 } from "@/components/dropdowns/pod/execution-target";
@@ -146,6 +147,7 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
                 value={executionTargetValue(issue, projectDetails)}
                 onChange={(val) => issueOperations.update(workspaceSlug, projectId, issueId, executionTargetPatch(val))}
                 cloudAgent={cloudAgentOption(projectDetails)}
+                managedAgent={managedAgentOption(projectDetails)}
                 disabled={!isEditable}
                 projectId={projectId?.toString() ?? ""}
                 buttonVariant="transparent-with-text"

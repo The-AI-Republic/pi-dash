@@ -31,6 +31,7 @@ use uuid::Uuid;
 use crate::cloud::protocol::{
     ClientMsg, Envelope, RunnerStatus as WireStatus, ServerMsg, WIRE_VERSION,
 };
+use crate::config::schema::AgentKind;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -317,6 +318,13 @@ pub struct AttachBody {
     /// persists it on the Runner row and surfaces it in runner detail.
     pub working_dir: String,
     pub agent_versions: HashMap<String, String>,
+    /// The `AgentKind` this runner is configured to drive, so the cloud can
+    /// identify the agent exactly instead of guessing from the model slug /
+    /// runner name / host label (`session_service.apply_hello` persists it as an
+    /// `agent:<kind>` capability). Serialised snake_case (`"claude_code"`,
+    /// `"muse_code"`) — the same spelling the diagnostics matcher expects. A
+    /// cloud that predates this field simply ignores it.
+    pub agent_kind: AgentKind,
 }
 
 // ---------------------------------------------------------------------------
@@ -1172,12 +1180,6 @@ pub struct PollStatus {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_count: Option<u32>,
-    /// Free worktree desks in this runner's work dir pool, when it has one.
-    /// The cloud stores it and uses it as a soft capacity hint when choosing
-    /// between equally-eligible runners (design §6.4). Optional / additive —
-    /// an old cloud ignores it; a runner with no pool omits it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub free_worktrees: Option<u32>,
 }
 
 /// Wire-side wrapper used to express the three states of `observed_run_id`:
@@ -1255,7 +1257,6 @@ impl PollStatus {
             tokens: None,
             model: None,
             turn_count: None,
-            free_worktrees: None,
         }
     }
 
@@ -1280,7 +1281,6 @@ impl PollStatus {
             tokens: None,
             model: None,
             turn_count: None,
-            free_worktrees: None,
         }
     }
 
@@ -1352,10 +1352,6 @@ pub struct HttpLoop {
     /// which is identical to the v3 wire shape — used by tests and any
     /// caller that doesn't want to thread state through.
     pub state: Option<crate::daemon::state::StateHandle>,
-    /// This runner's worktree pool, when it references a work dir. When set,
-    /// `poll_once` reports `free_worktrees` so the cloud can prefer a runner
-    /// with a free desk (design §6.4). `None` for legacy runners.
-    pub pool: Option<crate::workspace::pool::PoolHandle>,
     teardown_rx: Option<watch::Receiver<bool>>,
     inline_acks: VecDeque<String>,
     /// Bounded mid-dedupe (design.md §8 / Decision 21). At-least-once
@@ -1475,7 +1471,6 @@ impl HttpLoop {
             shutdown,
             attach_body,
             state: None,
-            pool: None,
             teardown_rx: None,
             inline_acks: VecDeque::new(),
             mid_dedupe: MidDedupe::with_capacity(MID_DEDUPE_CAPACITY),
@@ -1488,13 +1483,6 @@ impl HttpLoop {
     /// `agent_observability_v1` flag is enabled.
     pub fn with_state(mut self, state: crate::daemon::state::StateHandle) -> Self {
         self.state = Some(state);
-        self
-    }
-
-    /// Attach this runner's worktree pool so `poll_once` reports the free-desk
-    /// capacity hint (design §6.4).
-    pub fn with_pool(mut self, pool: Option<crate::workspace::pool::PoolHandle>) -> Self {
-        self.pool = pool;
         self
     }
 
@@ -1729,7 +1717,7 @@ impl HttpLoop {
         }
         let wire_status = *self.status_rx.borrow();
         let in_flight = *self.in_flight_rx.borrow();
-        let mut status = match self.state.as_ref() {
+        let status = match self.state.as_ref() {
             Some(state) if state.agent_observability_v1() => {
                 let snapshot = state.observability_snapshot().await;
                 let approvals = state.approvals_pending_value().await;
@@ -1737,12 +1725,6 @@ impl HttpLoop {
             }
             _ => PollStatus::from_wire(wire_status, in_flight),
         };
-        // Capacity hint: free desks in this runner's pool (design §6.4).
-        if let Some(pool) = self.pool.as_ref()
-            && let Some(snap) = pool.snapshot().await
-        {
-            status.free_worktrees = Some(snap.free_worktrees());
-        }
         let resp = self
             .client
             .poll(acks, status, self.long_poll_interval_secs)
@@ -2498,6 +2480,7 @@ mod tests {
             host_label: "h".into(),
             working_dir: "/tmp/wd".into(),
             agent_versions: std::collections::HashMap::new(),
+            agent_kind: AgentKind::default(),
         }
     }
 
@@ -2536,7 +2519,8 @@ mod tests {
         // Regression: AttachBody must NOT carry any observability fields.
         // The poll path is the single ingestion site for the
         // per-active-run snapshot; session-open stays a thin
-        // identity/resume body.
+        // identity/resume body. `agent_kind` is identity, not observability —
+        // which agent this runner drives, persisted once on session-open.
         let body = sample_attach_body();
         let v = serde_json::to_value(&body).unwrap();
         let keys: std::collections::BTreeSet<_> = v.as_object().unwrap().keys().cloned().collect();
@@ -2550,6 +2534,7 @@ mod tests {
             "host_label",
             "working_dir",
             "agent_versions",
+            "agent_kind",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -2558,6 +2543,18 @@ mod tests {
             keys, expected,
             "AttachBody serialised key set drifted: {keys:?}"
         );
+    }
+
+    #[test]
+    fn attach_body_reports_agent_kind_snake_case() {
+        // Contract with `session_service.apply_hello`, which persists the
+        // value as an `agent:<kind>` capability the diagnostics matcher reads.
+        // The spelling must stay snake_case (`muse_code`, not `musecode` /
+        // `muse-code`) so `infer_agent_label` matches it.
+        let mut body = sample_attach_body();
+        body.agent_kind = AgentKind::MuseCode;
+        let v = serde_json::to_value(&body).unwrap();
+        assert_eq!(v["agent_kind"], serde_json::json!("muse_code"));
     }
 
     #[test]

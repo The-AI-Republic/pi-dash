@@ -3,6 +3,8 @@
 //! `interrupt`, `shutdown`) through [`AgentBridge`], so the supervisor does
 //! not have to know which underlying CLI is driving a run.
 
+pub mod package;
+
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
@@ -263,6 +265,38 @@ pub struct RunPayload {
     pub model: Option<String>,
 }
 
+
+/// Build the Pi Dash-controlled environment for this runner's agent.
+///
+/// Empty for a user-enrolled runner, so its agent inherits the operator's
+/// environment exactly as it always has. A managed runner instead gets its own
+/// `CODEX_HOME`, the bundled CLI on `PATH`, `PIDASH_CONFIG_DIR` /
+/// `PIDASH_DATA_DIR` pointing at the app's own tree (so the agent's `pidash
+/// issue|comment|workpad` calls authenticate with the managed `[cli].token`
+/// rather than a raw token in the environment), and a credential file read
+/// once per spawn.
+pub fn agent_env_for_config(runner: &RunnerConfig) -> crate::util::shell::AgentEnv {
+    let managed = runner.codex.codex_home.is_some();
+    crate::util::shell::AgentEnv {
+        codex_home: runner.codex.codex_home.clone(),
+        path_prepend: runner.codex.path_prepend.clone(),
+        // The daemon's own config/data dirs, forwarded so the agent's `pidash`
+        // calls land on the same tree the daemon is using. Read from this
+        // process's environment rather than the runner config because they are
+        // a property of the daemon (the desktop sets them when it spawns
+        // `pidash __run`), not of any one runner. Only forwarded for a managed
+        // runner: a user-enrolled agent should keep resolving config the way
+        // it always has, including from the default XDG location.
+        config_dir: managed
+            .then(|| std::env::var_os("PIDASH_CONFIG_DIR").map(std::path::PathBuf::from))
+            .flatten(),
+        data_dir: managed
+            .then(|| std::env::var_os("PIDASH_DATA_DIR").map(std::path::PathBuf::from))
+            .flatten(),
+        model_token_file: runner.codex.model_token_file.clone(),
+    }
+}
+
 /// Enum dispatch over the concrete bridges. Each variant owns the agent's
 /// subprocess; the supervisor treats them uniformly.
 pub enum AgentBridge {
@@ -271,6 +305,7 @@ pub enum AgentBridge {
     CursorAgent(crate::cursor_agent::bridge::Bridge),
     OpenClaw(crate::openclaw::bridge::Bridge),
     Grok(crate::grok::bridge::Bridge),
+    MuseCode(crate::muse_code::bridge::Bridge),
 }
 
 /// Per-run cursor, paired with an `AgentBridge`. Holds agent-specific frame
@@ -281,6 +316,7 @@ pub enum AgentCursor {
     CursorAgent(crate::cursor_agent::bridge::BridgeCursor),
     OpenClaw(crate::openclaw::bridge::BridgeCursor),
     Grok(crate::grok::bridge::BridgeCursor),
+    MuseCode(crate::muse_code::bridge::BridgeCursor),
 }
 
 impl AgentCursor {
@@ -291,6 +327,7 @@ impl AgentCursor {
             AgentCursor::CursorAgent(c) => c.run_id,
             AgentCursor::OpenClaw(c) => c.run_id,
             AgentCursor::Grok(c) => c.run_id,
+            AgentCursor::MuseCode(c) => c.run_id,
         }
     }
 
@@ -301,6 +338,7 @@ impl AgentCursor {
             AgentCursor::CursorAgent(c) => &c.thread_id,
             AgentCursor::OpenClaw(c) => &c.thread_id,
             AgentCursor::Grok(c) => &c.thread_id,
+            AgentCursor::MuseCode(c) => &c.thread_id,
         }
     }
 
@@ -311,6 +349,7 @@ impl AgentCursor {
             AgentCursor::CursorAgent(c) => c.model.as_deref(),
             AgentCursor::OpenClaw(c) => c.model.as_deref(),
             AgentCursor::Grok(c) => c.model.as_deref(),
+            AgentCursor::MuseCode(c) => c.model.as_deref(),
         }
     }
 }
@@ -335,11 +374,12 @@ impl AgentBridge {
     ) -> Result<Self> {
         match runner.agent.kind {
             AgentKind::Codex => {
-                let b = crate::codex::bridge::Bridge::spawn(
+                let b = crate::codex::bridge::Bridge::spawn_with_env(
                     &runner.codex.binary,
                     cwd,
                     selected_model(model_override, runner.codex.model_default.clone()),
                     runner.codex.effort_default.clone(),
+                    &agent_env_for_config(runner),
                 )
                 .await?;
                 Ok(AgentBridge::Codex(b))
@@ -384,6 +424,16 @@ impl AgentBridge {
                 .await?;
                 Ok(AgentBridge::Grok(b))
             }
+            AgentKind::MuseCode => {
+                let b = crate::muse_code::bridge::Bridge::spawn_with_resume(
+                    &runner.muse_code.binary,
+                    cwd,
+                    selected_model(model_override, runner.muse_code.model_default.clone()),
+                    resume_session_id,
+                )
+                .await?;
+                Ok(AgentBridge::MuseCode(b))
+            }
         }
     }
 
@@ -394,6 +444,7 @@ impl AgentBridge {
             AgentBridge::CursorAgent(b) => Ok(AgentCursor::CursorAgent(b.run(payload, cwd).await?)),
             AgentBridge::OpenClaw(b) => Ok(AgentCursor::OpenClaw(b.run(payload, cwd).await?)),
             AgentBridge::Grok(b) => Ok(AgentCursor::Grok(b.run(payload, cwd).await?)),
+            AgentBridge::MuseCode(b) => Ok(AgentCursor::MuseCode(b.run(payload, cwd).await?)),
         }
     }
 
@@ -410,6 +461,9 @@ impl AgentBridge {
                 Ok(AgentCursor::OpenClaw(b.run_one_shot(payload, cwd).await?))
             }
             AgentBridge::Grok(b) => Ok(AgentCursor::Grok(b.run_one_shot(payload, cwd).await?)),
+            AgentBridge::MuseCode(b) => {
+                Ok(AgentCursor::MuseCode(b.run_one_shot(payload, cwd).await?))
+            }
         }
     }
 
@@ -425,6 +479,7 @@ impl AgentBridge {
             AgentBridge::CursorAgent(b) => b.warm(cwd).await,
             AgentBridge::OpenClaw(b) => b.warm(cwd).await,
             AgentBridge::Grok(b) => b.warm(cwd).await,
+            AgentBridge::MuseCode(b) => b.warm(cwd).await,
         }
     }
 
@@ -441,6 +496,7 @@ impl AgentBridge {
             (AgentBridge::CursorAgent(b), AgentCursor::CursorAgent(c)) => b.next_events(c).await,
             (AgentBridge::OpenClaw(b), AgentCursor::OpenClaw(c)) => b.next_events(c).await,
             (AgentBridge::Grok(b), AgentCursor::Grok(c)) => b.next_events(c).await,
+            (AgentBridge::MuseCode(b), AgentCursor::MuseCode(c)) => b.next_events(c).await,
             // These pairings are constructed together by `run`, so a mismatch
             // is a programmer error — fail loudly.
             _ => panic!("agent bridge and cursor variants mismatched"),
@@ -458,6 +514,7 @@ impl AgentBridge {
             AgentBridge::CursorAgent(b) => b.send_approval(approval_id, decision).await,
             AgentBridge::OpenClaw(b) => b.send_approval(approval_id, decision).await,
             AgentBridge::Grok(b) => b.send_approval(approval_id, decision).await,
+            AgentBridge::MuseCode(b) => b.send_approval(approval_id, decision).await,
         }
     }
 
@@ -468,6 +525,7 @@ impl AgentBridge {
             AgentBridge::CursorAgent(b) => b.interrupt().await,
             AgentBridge::OpenClaw(b) => b.interrupt().await,
             AgentBridge::Grok(b) => b.interrupt().await,
+            AgentBridge::MuseCode(b) => b.interrupt().await,
         }
     }
 
@@ -478,6 +536,7 @@ impl AgentBridge {
             AgentBridge::CursorAgent(b) => b.shutdown(grace).await,
             AgentBridge::OpenClaw(b) => b.shutdown(grace).await,
             AgentBridge::Grok(b) => b.shutdown(grace).await,
+            AgentBridge::MuseCode(b) => b.shutdown(grace).await,
         }
     }
 
@@ -492,6 +551,7 @@ impl AgentBridge {
             AgentBridge::CursorAgent(b) => b.process_handle(),
             AgentBridge::OpenClaw(b) => b.process_handle(),
             AgentBridge::Grok(b) => b.process_handle(),
+            AgentBridge::MuseCode(b) => b.process_handle(),
         }
     }
 
@@ -507,6 +567,7 @@ impl AgentBridge {
             AgentBridge::CursorAgent(b) => b.recent_stderr().await,
             AgentBridge::OpenClaw(b) => b.recent_stderr().await,
             AgentBridge::Grok(b) => b.recent_stderr().await,
+            AgentBridge::MuseCode(b) => b.recent_stderr().await,
         }
     }
 }
