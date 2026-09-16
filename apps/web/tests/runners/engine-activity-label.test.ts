@@ -47,9 +47,21 @@ describe("engineActivityLabel", () => {
     );
   });
 
+  it("shows no lifecycle narration — a busy indicator covers that, as in Codex/Claude Code", () => {
+    for (const method of ["thread/started", "turn/started", "turn/completed"]) {
+      expect(engineActivityLabel(raw(method)), method).toBeNull();
+    }
+    const lifecycle = (kind: string): IAgentChatEvent =>
+      ({ id: 1, session: "s", message: null, seq: 1, kind, payload: {}, created_at: "" }) as IAgentChatEvent;
+    for (const kind of ["turn_started", "message_started", "run_started"]) {
+      expect(engineActivityLabel(lifecycle(kind)), kind).toBeNull();
+    }
+  });
+
   it("hides the chat messages themselves — the transcript renders those", () => {
     expect(engineActivityLabel(raw("item/started", { item: { type: "userMessage" } }))).toBeNull();
     expect(engineActivityLabel(raw("item/completed", { item: { type: "agentMessage" } }))).toBeNull();
+    expect(engineActivityLabel(raw("item/started", { item: { type: "reasoning" } }))).toBeNull();
   });
 
   it("hides startup chatter and accounting", () => {

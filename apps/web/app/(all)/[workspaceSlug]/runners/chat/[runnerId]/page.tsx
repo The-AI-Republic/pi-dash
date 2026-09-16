@@ -101,25 +101,32 @@ function sessionHistoryItem(session: IAgentChatSession, activeId: string | undef
 }
 
 /**
- * Engine frames the daemon does not classify arrive as `kind: "raw"` with the
- * real method inside the payload, so an activity strip that printed
- * `event.kind` showed a stack of identical "raw" rows. Translate the frames a
- * user cares about — commands, file edits, warnings — and drop the rest:
- * startup chatter, token/rate-limit accounting, and the user/assistant
- * messages, which the transcript already renders.
+ * What the agent is *doing*, for the activity strip — or `null` to show
+ * nothing.
  *
- * Returns `null` for anything that should not appear in the strip.
+ * Only work the user would otherwise not see: commands run, files edited,
+ * approvals, failures, warnings. Lifecycle narration ("session started",
+ * "working…", "replying") is deliberately absent: a modern agent UI shows a
+ * busy indicator and its tool calls, not a running commentary, and the strip
+ * showing it was the original complaint in a prettier form.
+ *
+ * Engine frames the daemon does not classify arrive as `kind: "raw"` with the
+ * real method inside the payload, which is why this reads the payload rather
+ * than the kind.
  */
 export function engineActivityLabel(event: IAgentChatEvent): string | null {
   if (event.kind !== "raw") {
-    const named: Record<string, string> = {
+    const named: Record<string, string | null> = {
       chat_approval_request: "Waiting for your approval",
       chat_failed: "Failed",
-      message_started: "Replying",
-      turn_started: "Session started",
-      run_started: "Started",
+      // Lifecycle — the composer's busy state already says this.
+      message_started: null,
+      turn_started: null,
+      run_started: null,
     };
-    return named[event.kind] ?? event.kind;
+    // `??` would treat a deliberate null as "absent" and fall back to the raw
+    // kind, which is exactly the narration this map exists to suppress.
+    return event.kind in named ? named[event.kind] : event.kind;
   }
   const payload = event.payload as { method?: string; params?: Record<string, unknown> } | undefined;
   const method = payload?.method ?? "";
@@ -127,19 +134,16 @@ export function engineActivityLabel(event: IAgentChatEvent): string | null {
   const item = (params.item ?? {}) as Record<string, unknown>;
   const itemType = typeof item.type === "string" ? item.type : "";
   switch (method) {
-    case "thread/started":
-      return "Session started";
-    case "turn/started":
-      return "Working…";
     case "warning":
       return typeof params.message === "string" ? `Warning: ${params.message}` : "Warning";
     case "item/started":
     case "item/completed": {
       const done = method === "item/completed";
       switch (itemType) {
-        // Rendered as chat messages already.
+        // The transcript renders these; the strip would only duplicate them.
         case "userMessage":
         case "agentMessage":
+        case "reasoning":
           return null;
         case "commandExecution": {
           const command = typeof item.command === "string" ? item.command : "command";
@@ -149,13 +153,15 @@ export function engineActivityLabel(event: IAgentChatEvent): string | null {
           const path = typeof item.path === "string" ? item.path : "a file";
           return `${done ? "Edited" : "Editing"} ${path}`;
         }
-        case "reasoning":
-          return done ? null : "Thinking…";
         default:
           return itemType ? `${done ? "Finished" : "Started"} ${itemType}` : null;
       }
     }
-    // Startup chatter and accounting — real, but not what a user is watching for.
+    // Lifecycle, startup chatter and accounting — real, but not what a user is
+    // watching for.
+    case "thread/started":
+    case "turn/started":
+    case "turn/completed":
     case "remoteControl/status/changed":
     case "thread/status/changed":
     case "thread/tokenUsage/updated":
@@ -493,6 +499,9 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     )
     .map((event) => ({ event, label: engineActivityLabel(event) }))
     .filter((row): row is { event: IAgentChatEvent; label: string } => row.label !== null)
+    // A started/completed pair for the same command reads as a duplicate;
+    // keep the latest wording only.
+    .filter((row, index, rows) => index === rows.length - 1 || rows[index + 1].label !== row.label)
     .slice(-6)
     .map(({ event, label }) => (
       <div key={event.seq} className="rounded border border-subtle bg-surface-1 px-3 py-2 text-11 text-secondary">
