@@ -371,6 +371,50 @@ fn install_from_bundle<R: Runtime>(app: &AppHandle<R>) -> Result<Option<PathBuf>
     Ok(Some(installed))
 }
 
+/// Sign the installed CLI in, using the grant the app already approved.
+///
+/// The app is signed in, so it can start a device-code grant and approve it
+/// with its own session — the two calls the web UI's `/auth/device/` page
+/// makes. What it must not do is write the CLI's credential file: the machine
+/// token, the workspace binding and the config format all belong to the
+/// runner. So it hands the approved device code to the installed CLI
+/// (`pidash auth login --device-code`), which finishes exactly as an
+/// interactive login would.
+///
+/// Output is streamed to the webview as `pidash-install-log`, the same channel
+/// the installer uses.
+#[tauri::command]
+pub async fn pidash_cli_login<R: Runtime>(
+    app: AppHandle<R>,
+    device_code: String,
+    cloud_url: String,
+    workspace: Option<String>,
+) -> Result<(), String> {
+    let status = detect_pidash_cli().await;
+    let Some(cli) = status.path else {
+        return Err("The pidash CLI is not installed yet.".to_string());
+    };
+    let mut args = vec![
+        "auth".to_string(),
+        "login".to_string(),
+        "--no-browser".to_string(),
+        "--url".to_string(),
+        cloud_url,
+        "--device-code".to_string(),
+        device_code,
+    ];
+    if let Some(slug) = workspace.filter(|s| !s.is_empty()) {
+        args.push("--workspace".to_string());
+        args.push(slug);
+    }
+    let app_clone = app.clone();
+    match tauri::async_runtime::spawn_blocking(move || run_installer(&app_clone, &cli, &args)).await
+    {
+        Ok(result) => result,
+        Err(e) => Err(format!("login task panicked: {e}")),
+    }
+}
+
 /// Find `pidash` by name on PATH. Returns the absolute path resolved by
 /// the OS's resolver. Used as a fallback after [`known_install_paths`]
 /// to cover users who installed via brew / winget / a custom path.
