@@ -305,6 +305,40 @@ describe("LocalChatTransport verbs", () => {
       expect.objectContaining({ chatSessionId: SESSION, localApprovalId: "ap-1", decision: "accept" })
     );
   });
+
+  it("never sends a runner selector — the stored id is not a daemon runner name", async () => {
+    // The daemon resolves `runner` by the *name* in its own config
+    // (`resolve_runner`, runner/src/ipc/server.rs). The id this transport holds
+    // is the synthetic route id `pidash-builtin`, which no daemon is
+    // configured under, so sending it failed every request with
+    // `no runner named "pidash-builtin"`. Omitting it selects the daemon's
+    // single managed runner.
+    ctx = makeBridge({
+      chat_append_event: {
+        id: "u1",
+        session_id: SESSION,
+        seq: 3,
+        role: "user",
+        content: "hi",
+        tool_calls: null,
+        approval_decision: null,
+        created_at: 20,
+      },
+    });
+    transport = new LocalChatTransport(ctx.bridge);
+    await transport.sendChatMessage(SESSION, "hi");
+    await transport.warmChatSession(SESSION);
+    await transport.cancelChat(SESSION);
+    await transport.closeChat(SESSION);
+    await transport.decideChatApproval(SESSION, "ap-1", "accept");
+    const chatCalls = ctx.invoke.mock.calls.filter(([command]) => String(command).startsWith("chat_"));
+    expect(chatCalls.length).toBeGreaterThan(0);
+    for (const [command, args] of chatCalls) {
+      expect((args as Record<string, unknown>) ?? {}, `${command} must not carry a runner selector`).not.toHaveProperty(
+        "runner"
+      );
+    }
+  });
 });
 
 describe("LocalChatTransport.subscribeChatEvents", () => {

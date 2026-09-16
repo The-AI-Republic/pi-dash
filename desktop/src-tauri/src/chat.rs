@@ -215,7 +215,12 @@ fn spawn_stream<R: Runtime>(
             sink.error(chat_session_id, &e);
         }
     });
-    streams.lock().unwrap().insert(chat_session_id, handle);
+    // Replacing a session's reader (a warm followed by a send) must abort the
+    // old task: dropping a `JoinHandle` detaches it, leaving the previous
+    // connection's reader alive and unreachable.
+    if let Some(previous) = streams.lock().unwrap().insert(chat_session_id, handle) {
+        previous.abort();
+    }
 }
 
 // ---------------------------------------------------------------------------

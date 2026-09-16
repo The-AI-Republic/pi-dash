@@ -319,6 +319,14 @@ function storedEventToMessage(e: StoredEvent): IAgentChatMessage {
 export class LocalChatTransport implements ChatTransport {
   constructor(private readonly bridge: TauriBridge) {}
 
+  // No `runner` selector is sent with any chat request. The daemon's selector
+  // is a *runner name* from its own config (`resolve_runner`, runner/src/ipc/
+  // server.rs); the id this transport knows is the synthetic route id
+  // `pidash-builtin`, which no daemon is configured under — passing it fails
+  // every request with `no runner named "pidash-builtin"`. Omitting it lets
+  // the daemon resolve its single managed runner, which is what the desktop
+  // bundle always hosts.
+
   private account(): string {
     const account = this.bridge.getAccount();
     if (!account) throw new Error("Local chat requires a signed-in account.");
@@ -382,7 +390,6 @@ export class LocalChatTransport implements ChatTransport {
       chatSessionId: sessionId,
       messageId: crypto.randomUUID(),
       content,
-      runner: session?.project,
       cwd: session?.working_dir,
       localThreadId: session?.engine_thread_id ?? undefined,
     });
@@ -397,7 +404,6 @@ export class LocalChatTransport implements ChatTransport {
     });
     await this.bridge.invoke<void>("chat_warm", {
       chatSessionId: sessionId,
-      runner: session?.project,
       cwd: session?.working_dir,
       localThreadId: session?.engine_thread_id ?? undefined,
     });
@@ -412,7 +418,6 @@ export class LocalChatTransport implements ChatTransport {
     });
     await this.bridge.invoke<void>("chat_cancel", {
       chatSessionId: sessionId,
-      runner: session?.project,
       reason,
     });
     return { ok: true };
@@ -426,7 +431,6 @@ export class LocalChatTransport implements ChatTransport {
     });
     await this.bridge.invoke<void>("chat_close", {
       chatSessionId: sessionId,
-      runner: session?.project,
     });
     // Slice-3 has no closed state; return the session as-is so the UI keeps the
     // transcript readable.
@@ -451,7 +455,6 @@ export class LocalChatTransport implements ChatTransport {
       chatSessionId: sessionId,
       localApprovalId,
       decision,
-      runner: session?.project,
     });
   }
 

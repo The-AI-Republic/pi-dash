@@ -759,41 +759,75 @@ async fn resolve_approval<S: ChatSink>(
                     }
                     Ok(_) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => return Ok(None),
+                    Err(_) => {
+                        // The router's broadcast channel closed, so no decision
+                        // can ever arrive. Continuing would leave the engine
+                        // parked on an approval with the TTL arm gone and the
+                        // working-copy guard still held, so end the turn.
+                        bridge.interrupt().await.ok();
+                        ctx.approvals.expire(approval_id).await;
+                        return Ok(Some(Response::ChatFailed {
+                            chat_session_id: ctx.chat_session_id,
+                            code: "approval_channel_closed".into(),
+                            detail: Some("approval router stopped before a decision arrived".into()),
+                            failed_at: Utc::now(),
+                        }));
+                    }
                 }
             }
         }
     }
 }
 
-/// One working dir per runner: chat resolves to the same `workspace.working_dir`
-/// an issue run uses (the AC6 guard keeps the two lanes mutually exclusive). An
-/// optional `cwd` may narrow to a subdirectory but may not escape the
-/// workspace root.
+/// Resolve the directory a local chat turn runs in.
+///
+/// Two shapes are allowed, and the difference matters:
+///
+/// * **No `cwd`** — the runner's own `workspace.working_dir`, the same
+///   directory an issue run uses. The AC6 guard (`try_begin_local_turn`) is
+///   what keeps the two lanes off it at the same time.
+/// * **An absolute `cwd`** — the caller's own working copy. The desktop host
+///   passes the per-account chat working copy it owns
+///   (`<app-data>/managed/chat/<account>/workdirs/...`, a deliberate *sibling*
+///   of the runner's `workdirs` tree — see `ManagedPaths`), which satisfies
+///   AC6 by construction rather than by locking. Refusing it, as an earlier
+///   containment-only rule did, failed every desktop chat send with
+///   "chat cwd is outside runner workspace".
+///
+/// A relative `cwd` still narrows to a subdirectory of the runner workspace,
+/// and `..` is refused in both shapes: a lexical `starts_with` check would
+/// otherwise accept `<workspace>/../escape`. The caller is trusted to the same
+/// degree as any other IPC request — the control socket is owner-only and the
+/// desktop host is its only client — so an absolute path is a directory
+/// selection, not a privilege boundary. It must already exist, so a typo
+/// fails loudly instead of silently creating a tree somewhere unexpected.
 fn resolve_chat_workspace(config: &RunnerConfig, cwd: Option<&str>) -> Result<PathBuf> {
     let workspace_path = config.workspace.working_dir.clone();
-    std::fs::create_dir_all(&workspace_path)?;
     if let Some(cwd) = cwd.filter(|s| !s.is_empty()) {
         let requested_rel = PathBuf::from(cwd);
-        // A lexical `starts_with` check treats `<workspace>/../evil` as inside
-        // the workspace (the `..` is not normalised away), so a `..` component
-        // must be refused outright rather than resolved.
         if requested_rel
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
         {
             anyhow::bail!("chat cwd must not contain `..`");
         }
-        let requested = if requested_rel.is_absolute() {
-            requested_rel
-        } else {
-            workspace_path.join(requested_rel)
-        };
+        if requested_rel.is_absolute() {
+            if !requested_rel.is_dir() {
+                anyhow::bail!(
+                    "chat cwd {} does not exist (the caller owns this directory and must create it)",
+                    requested_rel.display()
+                );
+            }
+            return Ok(requested_rel);
+        }
+        std::fs::create_dir_all(&workspace_path)?;
+        let requested = workspace_path.join(requested_rel);
         if !requested.starts_with(&workspace_path) {
             anyhow::bail!("chat cwd is outside runner workspace");
         }
         return Ok(requested);
     }
+    std::fs::create_dir_all(&workspace_path)?;
     Ok(workspace_path)
 }
 
@@ -1178,8 +1212,19 @@ mod tests {
     fn resolve_chat_workspace_confines_to_workspace() {
         let cfg = config();
         std::fs::create_dir_all(&cfg.workspace.working_dir).unwrap();
-        // An absolute path outside the workspace is rejected.
-        assert!(resolve_chat_workspace(&cfg, Some("/etc")).is_err());
+        // An absolute path is the caller's own working copy (the desktop's
+        // per-account chat tree is a sibling of the runner's `workdirs`), so it
+        // is accepted when it exists...
+        let outside = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve_chat_workspace(&cfg, Some(outside.path().to_str().unwrap())).unwrap(),
+            outside.path()
+        );
+        // ...and refused when it does not, rather than being created blind.
+        assert!(
+            resolve_chat_workspace(&cfg, Some(&format!("{}/nope", outside.path().display())))
+                .is_err()
+        );
         // No cwd resolves to the workspace root itself.
         assert_eq!(
             resolve_chat_workspace(&cfg, None).unwrap(),
