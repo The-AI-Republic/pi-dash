@@ -2612,6 +2612,7 @@ dependencies = [
 name = "pi-dash-desktop"
 version = "0.3.0"
 dependencies = [
+ "chrono",
  "libc",
  "pidash-ipc",
  "serde",
