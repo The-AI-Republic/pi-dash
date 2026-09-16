@@ -196,6 +196,30 @@ export async function connectAgentProject(workspaceSlug: string, projectId: stri
  * the same queue, so calling it before every warm/send is cheap once the
  * daemon is up.
  */
+/**
+ * Whether this server will let the bundled agent run, and why not when it
+ * won't. Backs the picker's "Built-in agent" entry so a server with
+ * `MANAGED_RUNNER_ENABLED=false` shows the reason up front instead of
+ * accepting a message it can never send.
+ *
+ * Never throws: an unreachable API or an expired session is reported as
+ * unavailable with the message, which is exactly what the picker wants to
+ * show.
+ */
+export async function agentAvailability(): Promise<{ available: boolean; reason?: string }> {
+  if (!isDesktop()) return { available: false };
+  try {
+    const profile = await api<Profile>("/api/users/me/ai-assistant/agent-profile/");
+    if (profile.available) return { available: true };
+    return {
+      available: false,
+      reason: AGENT_RUNTIME_REASON_MESSAGES[profile.reason_code] ?? profile.reason_code,
+    };
+  } catch (error) {
+    return { available: false, reason: error instanceof Error ? error.message : undefined };
+  }
+}
+
 export async function ensureChatRuntime(workspaceSlug: string): Promise<void> {
   if (!isDesktop()) return;
   const current = generation;

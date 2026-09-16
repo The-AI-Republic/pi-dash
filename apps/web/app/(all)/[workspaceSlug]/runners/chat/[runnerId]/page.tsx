@@ -334,12 +334,18 @@ const RunnerChatPage = observer(function RunnerChatPage() {
       mutateMessages();
       mutateSessions();
     } catch (e: unknown) {
-      const err = e as { error?: string } | null;
+      // `error` is the API's field; `message` is what a thrown `Error` carries.
+      // Reading only the former flattened every local-transport failure —
+      // "Pi Dash Agent is not enabled on this server", "connecting to managed
+      // daemon" — into a generic "Unable to send message".
+      const err = e as { error?: string; message?: string } | null;
+      const reason = err?.error ?? err?.message;
       setDraft(content);
+      setStreamError(reason ?? null);
       setToast({
         type: TOAST_TYPE.ERROR,
         title: "Chat failed",
-        message: err?.error ?? "Unable to send message",
+        message: reason ?? "Unable to send message",
       });
     } finally {
       setSending(false);
