@@ -100,6 +100,73 @@ function sessionHistoryItem(session: IAgentChatSession, activeId: string | undef
   return { id: session.id, title, subtitle, active: session.id === activeId };
 }
 
+/**
+ * Engine frames the daemon does not classify arrive as `kind: "raw"` with the
+ * real method inside the payload, so an activity strip that printed
+ * `event.kind` showed a stack of identical "raw" rows. Translate the frames a
+ * user cares about — commands, file edits, warnings — and drop the rest:
+ * startup chatter, token/rate-limit accounting, and the user/assistant
+ * messages, which the transcript already renders.
+ *
+ * Returns `null` for anything that should not appear in the strip.
+ */
+export function engineActivityLabel(event: IAgentChatEvent): string | null {
+  if (event.kind !== "raw") {
+    const named: Record<string, string> = {
+      chat_approval_request: "Waiting for your approval",
+      chat_failed: "Failed",
+      message_started: "Replying",
+      turn_started: "Session started",
+      run_started: "Started",
+    };
+    return named[event.kind] ?? event.kind;
+  }
+  const payload = event.payload as { method?: string; params?: Record<string, unknown> } | undefined;
+  const method = payload?.method ?? "";
+  const params = (payload?.params ?? {}) as Record<string, unknown>;
+  const item = (params.item ?? {}) as Record<string, unknown>;
+  const itemType = typeof item.type === "string" ? item.type : "";
+  switch (method) {
+    case "thread/started":
+      return "Session started";
+    case "turn/started":
+      return "Working…";
+    case "warning":
+      return typeof params.message === "string" ? `Warning: ${params.message}` : "Warning";
+    case "item/started":
+    case "item/completed": {
+      const done = method === "item/completed";
+      switch (itemType) {
+        // Rendered as chat messages already.
+        case "userMessage":
+        case "agentMessage":
+          return null;
+        case "commandExecution": {
+          const command = typeof item.command === "string" ? item.command : "command";
+          return `${done ? "Ran" : "Running"}: ${command}`;
+        }
+        case "fileChange": {
+          const path = typeof item.path === "string" ? item.path : "a file";
+          return `${done ? "Edited" : "Editing"} ${path}`;
+        }
+        case "reasoning":
+          return done ? null : "Thinking…";
+        default:
+          return itemType ? `${done ? "Finished" : "Started"} ${itemType}` : null;
+      }
+    }
+    // Startup chatter and accounting — real, but not what a user is watching for.
+    case "remoteControl/status/changed":
+    case "thread/status/changed":
+    case "thread/tokenUsage/updated":
+    case "account/rateLimits/updated":
+    case "mcpServer/startupStatus/updated":
+      return null;
+    default:
+      return method || null;
+  }
+}
+
 const RunnerChatPage = observer(function RunnerChatPage() {
   const { runnerId } = useParams<{ runnerId: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -424,10 +491,12 @@ const RunnerChatPage = observer(function RunnerChatPage() {
       (event) =>
         !["assistant_delta", "turn_completed", "chat_closed", "chat_warmed", "chat_timing"].includes(event.kind)
     )
+    .map((event) => ({ event, label: engineActivityLabel(event) }))
+    .filter((row): row is { event: IAgentChatEvent; label: string } => row.label !== null)
     .slice(-6)
-    .map((event) => (
+    .map(({ event, label }) => (
       <div key={event.seq} className="rounded border border-subtle bg-surface-1 px-3 py-2 text-11 text-secondary">
-        <span className="font-mono">{event.kind}</span>
+        <span className="font-mono truncate">{label}</span>
       </div>
     ));
 
