@@ -589,6 +589,7 @@ async fn drive_turn<S: ChatSink>(
                                 kind,
                                 payload,
                                 reason,
+                                &mut cancelled,
                                 sink,
                             )
                             .await?
@@ -642,7 +643,17 @@ struct ApprovalCtx<'a> {
 /// Evaluate the approval policy; auto-decide when the policy allows, otherwise
 /// surface a `ChatApprovalRequest` and block on the shared approval router
 /// until a `ChatDecide` (on another connection) resolves it. Returns
-/// `Some(terminal)` only when the approval path itself failed the turn.
+/// `Some(terminal)` only when the approval path itself ended the turn — the
+/// user cancelled (`cancelled`), the approval timed out, or sending the
+/// decision to the engine failed.
+///
+/// The wait is not open-ended: an abandoned approval (the user closed the tab,
+/// the host crashed, or the socket dropped without a `ChatCancel`) would
+/// otherwise park the turn forever, and `chat_active` would stay `true` and
+/// NACK every future managed `Assign` (issue AC1 interrupt + AC7 regression).
+/// The `cancelled` arm handles an explicit interrupt; the `expires_at`
+/// deadline is the backstop for a silent disconnect.
+#[allow(clippy::too_many_arguments)]
 async fn resolve_approval<S: ChatSink>(
     ctx: ApprovalCtx<'_>,
     bridge: &mut AgentBridge,
@@ -650,6 +661,7 @@ async fn resolve_approval<S: ChatSink>(
     kind: ApprovalKind,
     payload: serde_json::Value,
     reason: Option<String>,
+    cancelled: &mut std::pin::Pin<&mut tokio::sync::futures::Notified<'_>>,
     sink: &mut S,
 ) -> Result<Option<Response>> {
     let policy = Policy::new(&ctx.config.approval_policy, ctx.workspace);
@@ -690,49 +702,132 @@ async fn resolve_approval<S: ChatSink>(
     })
     .await?;
 
+    // The turn parked here must still observe an interrupt and a TTL. Reuse
+    // the turn's single pinned `cancelled` future so a cancel that landed
+    // mid-poll is not missed, and fail closed at the deadline.
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs(APPROVAL_TTL_MINUTES.max(0) as u64 * 60);
     loop {
-        match rx.recv().await {
-            Ok(ApprovalRecord {
-                approval_id: aid,
-                status: ApprovalStatus::Resolved { decision, .. },
-                ..
-            }) if aid == approval_id => {
-                if let Err(e) = bridge.send_approval(approval_id, decision).await {
-                    return Ok(Some(Response::ChatFailed {
-                        chat_session_id: ctx.chat_session_id,
-                        code: "approval_send_failed".into(),
-                        detail: Some(format!("{e:#}")),
-                        failed_at: Utc::now(),
-                    }));
-                }
-                return Ok(None);
+        tokio::select! {
+            biased;
+            _ = cancelled.as_mut() => {
+                // Explicit interrupt (ChatCancel/ChatClose) while the approval
+                // was outstanding: abort the engine turn and release the
+                // working-copy guard rather than parking forever.
+                bridge.interrupt().await.ok();
+                ctx.approvals.expire(approval_id).await;
+                return Ok(Some(Response::ChatMessageCompleted {
+                    chat_session_id: ctx.chat_session_id,
+                    message_id: ctx.message_id,
+                    turn_id: None,
+                    assistant_message: None,
+                    status: "cancelled".into(),
+                    completed_at: Utc::now(),
+                }));
             }
-            Ok(_) => continue,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(_) => return Ok(None),
+            _ = tokio::time::sleep_until(deadline) => {
+                // No decision within the TTL (silent host crash / socket drop
+                // with no ChatCancel): expire the approval, interrupt the
+                // engine, and fail the turn so the guard is released.
+                bridge.interrupt().await.ok();
+                ctx.approvals.expire(approval_id).await;
+                return Ok(Some(Response::ChatFailed {
+                    chat_session_id: ctx.chat_session_id,
+                    code: "approval_timeout".into(),
+                    detail: Some(format!(
+                        "no approval decision within {APPROVAL_TTL_MINUTES} minutes"
+                    )),
+                    failed_at: Utc::now(),
+                }));
+            }
+            recv = rx.recv() => {
+                match recv {
+                    Ok(ApprovalRecord {
+                        approval_id: aid,
+                        status: ApprovalStatus::Resolved { decision, .. },
+                        ..
+                    }) if aid == approval_id => {
+                        if let Err(e) = bridge.send_approval(approval_id, decision).await {
+                            return Ok(Some(Response::ChatFailed {
+                                chat_session_id: ctx.chat_session_id,
+                                code: "approval_send_failed".into(),
+                                detail: Some(format!("{e:#}")),
+                                failed_at: Utc::now(),
+                            }));
+                        }
+                        return Ok(None);
+                    }
+                    Ok(_) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => {
+                        // The router's broadcast channel closed, so no decision
+                        // can ever arrive. Continuing would leave the engine
+                        // parked on an approval with the TTL arm gone and the
+                        // working-copy guard still held, so end the turn.
+                        bridge.interrupt().await.ok();
+                        ctx.approvals.expire(approval_id).await;
+                        return Ok(Some(Response::ChatFailed {
+                            chat_session_id: ctx.chat_session_id,
+                            code: "approval_channel_closed".into(),
+                            detail: Some("approval router stopped before a decision arrived".into()),
+                            failed_at: Utc::now(),
+                        }));
+                    }
+                }
+            }
         }
     }
 }
 
-/// One working dir per runner: chat resolves to the same `workspace.working_dir`
-/// an issue run uses (the AC6 guard keeps the two lanes mutually exclusive). An
-/// optional `cwd` may narrow to a subdirectory but may not escape the
-/// workspace root.
+/// Resolve the directory a local chat turn runs in.
+///
+/// Two shapes are allowed, and the difference matters:
+///
+/// * **No `cwd`** — the runner's own `workspace.working_dir`, the same
+///   directory an issue run uses. The AC6 guard (`try_begin_local_turn`) is
+///   what keeps the two lanes off it at the same time.
+/// * **An absolute `cwd`** — the caller's own working copy. The desktop host
+///   passes the per-account chat working copy it owns
+///   (`<app-data>/managed/chat/<account>/workdirs/...`, a deliberate *sibling*
+///   of the runner's `workdirs` tree — see `ManagedPaths`), which satisfies
+///   AC6 by construction rather than by locking. Refusing it, as an earlier
+///   containment-only rule did, failed every desktop chat send with
+///   "chat cwd is outside runner workspace".
+///
+/// A relative `cwd` still narrows to a subdirectory of the runner workspace,
+/// and `..` is refused in both shapes: a lexical `starts_with` check would
+/// otherwise accept `<workspace>/../escape`. The caller is trusted to the same
+/// degree as any other IPC request — the control socket is owner-only and the
+/// desktop host is its only client — so an absolute path is a directory
+/// selection, not a privilege boundary. It must already exist, so a typo
+/// fails loudly instead of silently creating a tree somewhere unexpected.
 fn resolve_chat_workspace(config: &RunnerConfig, cwd: Option<&str>) -> Result<PathBuf> {
     let workspace_path = config.workspace.working_dir.clone();
-    std::fs::create_dir_all(&workspace_path)?;
     if let Some(cwd) = cwd.filter(|s| !s.is_empty()) {
-        let requested = PathBuf::from(cwd);
-        let requested = if requested.is_absolute() {
-            requested
-        } else {
-            workspace_path.join(requested)
-        };
+        let requested_rel = PathBuf::from(cwd);
+        if requested_rel
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            anyhow::bail!("chat cwd must not contain `..`");
+        }
+        if requested_rel.is_absolute() {
+            if !requested_rel.is_dir() {
+                anyhow::bail!(
+                    "chat cwd {} does not exist (the caller owns this directory and must create it)",
+                    requested_rel.display()
+                );
+            }
+            return Ok(requested_rel);
+        }
+        std::fs::create_dir_all(&workspace_path)?;
+        let requested = workspace_path.join(requested_rel);
         if !requested.starts_with(&workspace_path) {
             anyhow::bail!("chat cwd is outside runner workspace");
         }
         return Ok(requested);
     }
+    std::fs::create_dir_all(&workspace_path)?;
     Ok(workspace_path)
 }
 
@@ -984,6 +1079,81 @@ mod tests {
         }
     }
 
+    /// A fake app-server that warms, starts a turn, then requests a command
+    /// approval and hangs — the turn can only end via the approval wait's
+    /// cancel arm or its TTL backstop, never on its own.
+    fn approval_hang_script() -> &'static str {
+        r#"
+            set -e
+            read _
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+            read _
+            read _
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_appr"}}'
+            read _
+            printf '%s\n' '{"jsonrpc":"2.0","method":"item/commandExecution/requestApproval","params":{"approval_id":"appr1","command":"danger-cmd","cwd":"/tmp","item_id":"i1","reason":"needs approval"}}'
+            sleep 5
+        "#
+    }
+
+    #[tokio::test]
+    async fn abandoned_approval_is_interrupted_by_cancel() {
+        // H1: an outstanding approval must not park the turn forever. A cancel
+        // arriving while the turn waits on the approval must unwind it — before
+        // this fix the wait loop had no cancel arm and would hang.
+        let cfg = config();
+        let approvals = ApprovalRouter::new();
+        let cancel = Arc::new(Notify::new());
+        let mut bridge = fake_bridge(approval_hang_script()).await;
+        bridge.warm(&cfg.workspace.working_dir).await.expect("warm");
+
+        let cancel2 = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            cancel2.notify_waiters();
+        });
+
+        let mut sink = VecSink::default();
+        let (mut seq, mut started) = (0u64, false);
+        let terminal = tokio::time::timeout(
+            Duration::from_secs(3),
+            drive_turn(
+                DriveCtx {
+                    chat_session_id: Uuid::new_v4(),
+                    message_id: Uuid::new_v4(),
+                    content: "run it".into(),
+                    model: None,
+                    runner_id: cfg.runner_id,
+                    config: &cfg,
+                    approvals: &approvals,
+                    workspace: &cfg.workspace.working_dir,
+                    cancel: &cancel,
+                },
+                &mut bridge,
+                &mut seq,
+                &mut started,
+                &mut sink,
+            ),
+        )
+        .await
+        .expect("turn must not park on an abandoned approval")
+        .expect("drive turn");
+
+        // The approval surfaced to the UI first...
+        assert!(
+            sink.frames
+                .iter()
+                .any(|f| matches!(f, Response::ChatApprovalRequest { .. })),
+            "missing ChatApprovalRequest: {:?}",
+            sink.frames
+        );
+        // ...and the cancel unwound the parked turn as cancelled.
+        match terminal {
+            Response::ChatMessageCompleted { status, .. } => assert_eq!(status, "cancelled"),
+            other => panic!("expected cancelled ChatMessageCompleted, got {other:?}"),
+        }
+    }
+
     fn offline_instance() -> RunnerInstance {
         use crate::config::schema::DaemonConfig;
         use crate::util::paths::Paths;
@@ -1042,8 +1212,19 @@ mod tests {
     fn resolve_chat_workspace_confines_to_workspace() {
         let cfg = config();
         std::fs::create_dir_all(&cfg.workspace.working_dir).unwrap();
-        // An absolute path outside the workspace is rejected.
-        assert!(resolve_chat_workspace(&cfg, Some("/etc")).is_err());
+        // An absolute path is the caller's own working copy (the desktop's
+        // per-account chat tree is a sibling of the runner's `workdirs`), so it
+        // is accepted when it exists...
+        let outside = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve_chat_workspace(&cfg, Some(outside.path().to_str().unwrap())).unwrap(),
+            outside.path()
+        );
+        // ...and refused when it does not, rather than being created blind.
+        assert!(
+            resolve_chat_workspace(&cfg, Some(&format!("{}/nope", outside.path().display())))
+                .is_err()
+        );
         // No cwd resolves to the workspace root itself.
         assert_eq!(
             resolve_chat_workspace(&cfg, None).unwrap(),
@@ -1052,5 +1233,9 @@ mod tests {
         // A relative subdir under the workspace is accepted and stays under it.
         let ok = resolve_chat_workspace(&cfg, Some("sub")).unwrap();
         assert!(ok.starts_with(&cfg.workspace.working_dir));
+        // `..` traversal must be refused: a lexical `starts_with` check would
+        // otherwise accept `<workspace>/../escape`, which resolves outside.
+        assert!(resolve_chat_workspace(&cfg, Some("../escape")).is_err());
+        assert!(resolve_chat_workspace(&cfg, Some("sub/../../escape")).is_err());
     }
 }

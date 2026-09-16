@@ -431,7 +431,12 @@ const RunnerChatPage = observer(function RunnerChatPage() {
             <div className="flex h-12 shrink-0 items-center justify-between border-b border-subtle">
               <div className="min-w-0">
                 <div className="text-15 truncate font-semibold text-primary">{runner?.name ?? "Runner"}</div>
-                <div className="text-12 text-secondary">{runner?.pod_detail?.name ?? runner?.status ?? ""}</div>
+                {/* Working directory the chat operates in, when the session
+                    reports one (the desktop built-in agent runs in its own
+                    working copy). Falls back to pod/status for cloud runners. */}
+                <div className="truncate text-12 text-secondary" title={session?.cwd || undefined}>
+                  {session?.cwd || runner?.pod_detail?.name || runner?.status || ""}
+                </div>
               </div>
               <div className="flex items-center gap-2">
                 {runner && (

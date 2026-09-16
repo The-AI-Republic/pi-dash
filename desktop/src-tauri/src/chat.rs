@@ -100,8 +100,21 @@ impl<R: Runtime> ChatSink for TauriSink<R> {
 /// `first` is the first frame already read by the caller (so a synchronous
 /// error — e.g. the daemon's `501` before slice 1b, or a connection refusal —
 /// is surfaced to the `invoke` rather than only to the event channel). Every
-/// `Chat*` frame is handed to `sink`; the terminal `Ack` ends the stream, and a
+/// `Chat*` frame is handed to `sink`; the stream ends on a terminator, and a
 /// `Response::Error` becomes an `Err` the caller reports as a transport error.
+///
+/// A stream terminates on one of:
+/// * `Ack` — the daemon's terminator for a `ChatWarm` turn;
+/// * `ChatMessageCompleted` / `ChatFailed` / `ChatClosed` — the terminal frame
+///   of a `ChatSend` / `ChatClose`. The daemon returns this frame and then keeps
+///   the connection open for the next request without a trailing `Ack`, so the
+///   terminal frame *is* the end of the turn. Without stopping here the reader
+///   would block on `read_next` forever, leaking the task and connection every
+///   turn.
+///
+/// EOF *before* any terminator means the daemon dropped the connection
+/// mid-turn (a crash): that is surfaced as an `Err` so the UI fails the session
+/// rather than hanging on a spinner.
 async fn drive_stream<S: ChatSink>(
     mut client: Client,
     first: Response,
@@ -110,16 +123,29 @@ async fn drive_stream<S: ChatSink>(
     let mut frame = first;
     loop {
         match frame {
-            // The daemon's terminator after the last chat frame.
+            // The daemon's terminator after a warm turn's frames.
             Response::Ack => return Ok(()),
             Response::Error(err) => {
                 return Err(format!("daemon error {}: {}", err.code, err.message));
+            }
+            // Terminal turn frames: forward, then end the stream — the daemon
+            // sends no trailing `Ack` and holds the connection open, so this is
+            // the turn's true end.
+            terminal @ (Response::ChatMessageCompleted { .. }
+            | Response::ChatFailed { .. }
+            | Response::ChatClosed { .. }) => {
+                sink.frame(&terminal);
+                return Ok(());
             }
             other => sink.frame(&other),
         }
         match client.read_next().await.map_err(|e| e.to_string())? {
             Some(next) => frame = next,
-            None => return Ok(()),
+            None => {
+                return Err(
+                    "managed daemon closed the chat stream before it completed".to_string(),
+                );
+            }
         }
     }
 }
@@ -158,6 +184,10 @@ async fn call_once(socket: &Path, req: Request) -> Result<(), String> {
         .map_err(|e| format!("chat request failed: {e}"))?
     {
         Response::Ack => Ok(()),
+        // `handle_close` emits `ChatClosed` on the connection *before* the
+        // dispatch layer writes the terminal `Ack`; `call` reads only that first
+        // frame, so `ChatClosed` is the success signal for a close round-trip.
+        Response::ChatClosed { .. } => Ok(()),
         Response::Error(err) => Err(format!("daemon error {}: {}", err.code, err.message)),
         other => Err(format!("unexpected response: {other:?}")),
     }
@@ -185,7 +215,12 @@ fn spawn_stream<R: Runtime>(
             sink.error(chat_session_id, &e);
         }
     });
-    streams.lock().unwrap().insert(chat_session_id, handle);
+    // Replacing a session's reader (a warm followed by a send) must abort the
+    // old task: dropping a `JoinHandle` detaches it, leaving the previous
+    // connection's reader alive and unreachable.
+    if let Some(previous) = streams.lock().unwrap().insert(chat_session_id, handle) {
+        previous.abort();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -384,9 +419,10 @@ mod tests {
     }
 
     /// A `ChatSend` streams every `Chat*` frame to the sink, in order, and the
-    /// terminal `Ack` ends the stream cleanly without being surfaced.
+    /// terminal `ChatMessageCompleted` ends the stream — the daemon sends no
+    /// trailing `Ack` for a send turn, so the completed frame is the terminator.
     #[tokio::test]
-    async fn streams_chat_frames_then_stops_on_ack() {
+    async fn send_stream_stops_on_completed_frame() {
         let dir = tempfile::tempdir().unwrap();
         let id = Uuid::new_v4();
         let frames = vec![
@@ -410,7 +446,6 @@ mod tests {
                 status: "completed".into(),
                 completed_at: chrono_now(),
             },
-            Response::Ack,
         ];
         let (socket, server) = write_frames(dir.path(), frames);
 
@@ -419,11 +454,88 @@ mod tests {
         server.await.unwrap();
 
         let got = sink.frames.lock().unwrap();
-        assert_eq!(got.len(), 3, "3 chat frames, Ack not forwarded");
+        assert_eq!(got.len(), 3, "all 3 chat frames forwarded incl. completed");
         assert!(matches!(got[0], Response::ChatMessageStarted { .. }));
         assert!(matches!(got[1], Response::ChatEvent { .. }));
         assert!(matches!(got[2], Response::ChatMessageCompleted { .. }));
         assert!(sink.errors.lock().unwrap().is_empty());
+    }
+
+    /// M2: after the terminal `ChatMessageCompleted` the daemon keeps the
+    /// connection open (it loops for the next request) and sends no `Ack`. The
+    /// reader must stop on the completed frame rather than blocking on
+    /// `read_next` forever — otherwise the task and connection leak every turn.
+    #[tokio::test]
+    async fn send_stream_returns_on_completed_without_trailing_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let socket = socket_path(dir.path());
+        let listener = UnixListener::bind(&socket).unwrap();
+        // Server writes the terminal frame, then holds the connection open
+        // (never sends Ack, never closes) — exactly what the real daemon does.
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let frame = Response::ChatMessageCompleted {
+                chat_session_id: id,
+                message_id: Uuid::nil(),
+                turn_id: None,
+                assistant_message: Some("done".into()),
+                status: "completed".into(),
+                completed_at: chrono_now(),
+            };
+            let mut bytes = serde_json::to_vec(&frame).unwrap();
+            bytes.push(b'\n');
+            reader.get_mut().write_all(&bytes).await.unwrap();
+            reader.get_mut().flush().await.unwrap();
+            // Hold the connection open long enough that a blocking reader would
+            // still be parked when the assertion runs.
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        });
+
+        let sink = CollectSink::default();
+        // Must return promptly on the completed frame, not time out.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            stream_session(&socket, sample_send(), &sink),
+        )
+        .await
+        .expect("stream must not block after the completed frame")
+        .expect("stream ok");
+        assert_eq!(sink.frames.lock().unwrap().len(), 1);
+        assert!(sink.errors.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    /// M4: EOF before any terminal frame means the daemon dropped the
+    /// connection mid-turn (a crash). That must surface as an `Err` — which the
+    /// command maps to a `chat://error` — not a silent `Ok` that hangs the UI.
+    #[tokio::test]
+    async fn premature_eof_is_a_transport_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        // Only a non-terminal frame, then the server closes → EOF mid-turn.
+        let frames = vec![Response::ChatMessageStarted {
+            chat_session_id: id,
+            message_id: Uuid::nil(),
+            turn_id: None,
+            started_at: chrono_now(),
+        }];
+        let (socket, server) = write_frames(dir.path(), frames);
+
+        let sink = CollectSink::default();
+        let err = stream_session(&socket, sample_send(), &sink)
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(
+            err.contains("before it completed"),
+            "unexpected error: {err}"
+        );
+        // The started frame was still forwarded before the drop.
+        assert_eq!(sink.frames.lock().unwrap().len(), 1);
     }
 
     /// A daemon that predates the slice-1b handler answers `Chat*` with a `501`
@@ -466,6 +578,32 @@ mod tests {
         call_once(
             &socket,
             Request::ChatCancel {
+                chat_session_id: Uuid::nil(),
+                runner: None,
+                reason: None,
+            },
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+    }
+
+    /// A `ChatClose` round-trip succeeds: `handle_close` emits `ChatClosed`
+    /// (which `call` reads as the first frame) before the terminal `Ack`, so
+    /// `ChatClosed` must be treated as success rather than an unexpected frame.
+    #[tokio::test]
+    async fn call_once_accepts_chat_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (socket, server) = write_frames(
+            dir.path(),
+            vec![Response::ChatClosed {
+                chat_session_id: Uuid::nil(),
+                closed_at: chrono_now(),
+            }],
+        );
+        call_once(
+            &socket,
+            Request::ChatClose {
                 chat_session_id: Uuid::nil(),
                 runner: None,
                 reason: None,

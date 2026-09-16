@@ -22,6 +22,15 @@ export function isDesktop() {
   return typeof window !== "undefined" && "__TAURI__" in window;
 }
 
+/**
+ * The signed-in account id, set by {@link resumeAgentRuntime}. Local chat
+ * history is scoped per account, so the local chat transport keys its SQLite
+ * store by this value. Empty until the runtime has resumed for a user.
+ */
+export function getAgentAccount(): string {
+  return activeUserId;
+}
+
 function invoke<T>(command: string, args?: Record<string, unknown>) {
   return (window as unknown as { __TAURI__: Native }).__TAURI__.core.invoke<T>(command, args);
 }
