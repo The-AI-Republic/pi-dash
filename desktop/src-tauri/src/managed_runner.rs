@@ -47,6 +47,16 @@ pub const RUNNER_BIN: &str = "pidash.exe";
 #[cfg(not(windows))]
 pub const RUNNER_BIN: &str = "pidash";
 
+/// The bundled engine binary path for a given Tauri `resource_dir`.
+///
+/// Pulled out of [`ManagedPaths::resolve`] so a test can pin that the engine
+/// path is a pure function of `resource_dir` — which `resolve` re-reads on
+/// every call — so after an app update the daemon is handed the newly bundled
+/// engine, never a stale path from the previous install.
+fn engine_bin_path(resource_dir: &Path) -> PathBuf {
+    resource_dir.join("bin").join(ENGINE_BIN)
+}
+
 /// Daemons this app started, keyed by workspace.
 ///
 /// Empty whenever no daemon is running — which is the normal state before
@@ -95,11 +105,17 @@ impl ManagedPaths {
             .app_data_dir()
             .map_err(|e| format!("resolving app data dir: {e}"))?;
         let root = base.join("managed");
-        let bin_dir = app
+        // Re-read the *current* bundle's resource dir on every call — nothing
+        // here is cached. This is what makes an app update pick up the newly
+        // bundled engine: once the update installs a new bundle, `resource_dir()`
+        // points at it, so `engine` resolves to the new binary rather than a
+        // stale path from the previous install. There is no auto-download; a new
+        // engine only ever arrives with a new app build (see PDASHOSS01-158).
+        let resource_dir = app
             .path()
             .resource_dir()
-            .map_err(|e| format!("resolving resource dir: {e}"))?
-            .join("bin");
+            .map_err(|e| format!("resolving resource dir: {e}"))?;
+        let bin_dir = resource_dir.join("bin");
         Ok(Self {
             config_dir: root.join("pidash"),
             data_dir: root.join("pidash/data"),
@@ -108,7 +124,7 @@ impl ManagedPaths {
             model_token_file: root.join("runtime/model.token"),
             workdirs: root.join("workdirs"),
             chat_dir: root.join("chat"),
-            engine: bin_dir.join(ENGINE_BIN),
+            engine: engine_bin_path(&resource_dir),
             runner: bin_dir.join(RUNNER_BIN),
             bin_dir,
             root,
@@ -675,6 +691,26 @@ pub fn shutdown<R: Runtime>(app: &AppHandle<R>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The engine path handed to the daemon is derived purely from the
+    /// bundle's `resource_dir`, which `ManagedPaths::resolve` re-reads on every
+    /// call. So after an app update installs a new bundle (a new resource dir),
+    /// the daemon runs the newly bundled engine — never a stale path from the
+    /// previous install. This pins that invariant (PDASHOSS01-158, item 2).
+    #[test]
+    fn engine_path_tracks_the_current_bundle_resource_dir() {
+        let old = Path::new("/Applications/Pi Dash.app/Contents/Resources/v1");
+        let new = Path::new("/Applications/Pi Dash.app/Contents/Resources/v2");
+
+        // Fully determined by resource_dir: `<resource_dir>/bin/<engine>`.
+        assert_eq!(engine_bin_path(old), old.join("bin").join(ENGINE_BIN));
+        // A different install dir therefore yields a different engine path —
+        // an update can never resolve to the old bundle's binary.
+        assert_ne!(engine_bin_path(old), engine_bin_path(new));
+        // And it always lives under the given bundle's bin/.
+        assert!(engine_bin_path(new).starts_with(new.join("bin")));
+        assert!(engine_bin_path(new).ends_with(ENGINE_BIN));
+    }
 
     #[test]
     fn workspace_and_project_paths_accept_identifiers_but_not_traversal() {
