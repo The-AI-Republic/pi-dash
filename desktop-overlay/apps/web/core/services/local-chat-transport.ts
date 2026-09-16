@@ -51,7 +51,7 @@ import type {
   TAgentChatMessageRole,
   TApprovalDecision,
 } from "@pi-dash/types";
-import { getAgentAccount, isDesktop } from "@/services/agent-runtime";
+import { ensureChatRuntime, getAgentAccount, isDesktop } from "@/services/agent-runtime";
 
 /** Synthetic runner id for the bundled built-in engine (see the picker seam). */
 export const BUILTIN_RUNNER_ID = "pidash-builtin";
@@ -179,6 +179,13 @@ export interface TauriBridge {
   listen<T>(event: string, handler: (payload: T) => void): Promise<() => void>;
   /** The signed-in account id that scopes local history. */
   getAccount(): string;
+  /**
+   * Make the bundled daemon ready to serve this chat: enrol the machine if
+   * needed, write the engine config and model credential, and start the
+   * daemon. Without it a chat opened straight after sign-in has nothing to
+   * talk to, and the send fails at "connecting to managed daemon".
+   */
+  ensureRuntime(): Promise<void>;
 }
 
 /**
@@ -384,6 +391,9 @@ export class LocalChatTransport implements ChatTransport {
       account,
       sessionId,
     });
+    // The daemon owns the engine, so it has to be up before the turn is
+    // submitted. Idempotent once it is.
+    await this.bridge.ensureRuntime();
     // Streaming happens over `chat://frame`; the command returns once the turn
     // has been submitted.
     await this.bridge.invoke<void>("chat_send", {
@@ -402,6 +412,7 @@ export class LocalChatTransport implements ChatTransport {
       account,
       sessionId,
     });
+    await this.bridge.ensureRuntime();
     await this.bridge.invoke<void>("chat_warm", {
       chatSessionId: sessionId,
       cwd: session?.working_dir,
@@ -411,11 +422,8 @@ export class LocalChatTransport implements ChatTransport {
   }
 
   async cancelChat(sessionId: string, reason?: string): Promise<{ ok: boolean }> {
-    const account = this.account();
-    const session = await this.bridge.invoke<StoredSession | null>("chat_get_session", {
-      account,
-      sessionId,
-    });
+    // No session lookup: cancel carries only the session id now that the
+    // runner selector is gone, and the daemon resolves its own runner.
     await this.bridge.invoke<void>("chat_cancel", {
       chatSessionId: sessionId,
       reason,
@@ -446,11 +454,6 @@ export class LocalChatTransport implements ChatTransport {
    * this is an additive local-only verb the desktop approval UI calls.
    */
   async decideChatApproval(sessionId: string, localApprovalId: string, decision: TApprovalDecision): Promise<void> {
-    const account = this.account();
-    const session = await this.bridge.invoke<StoredSession | null>("chat_get_session", {
-      account,
-      sessionId,
-    });
     await this.bridge.invoke<void>("chat_decide", {
       chatSessionId: sessionId,
       localApprovalId,
@@ -563,6 +566,11 @@ function tauriBridge(): TauriBridge {
     invoke: (command, args) => tauri.core.invoke(command, args),
     listen: (event, handler) => tauri.event.listen(event, (e) => handler(e.payload)),
     getAccount: () => getAgentAccount(),
+    // The workspace slug is the first path segment of every in-app route
+    // (`/:workspaceSlug/...`); the chat page has no other handle on it, and
+    // enrolment is keyed by slug rather than by the workspace id the chat
+    // session stores.
+    ensureRuntime: () => ensureChatRuntime(decodeURIComponent(window.location.pathname.split("/")[1] ?? "")),
   };
 }
 

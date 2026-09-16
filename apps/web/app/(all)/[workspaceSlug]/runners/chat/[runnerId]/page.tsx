@@ -113,6 +113,8 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   // contract) — so the reference is stable and effects can depend on it.
   const transport = useMemo(() => getChatTransport(), []);
   const [draft, setDraft] = useState("");
+  // Last transport-level stream failure, rendered above the composer.
+  const [streamError, setStreamError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [creatingChat, setCreatingChat] = useState(false);
   // Bridges the gap between choosing a session (panel click / New chat) and
@@ -261,6 +263,8 @@ const RunnerChatPage = observer(function RunnerChatPage() {
 
   const handleEvent = useCallback(
     (event: IAgentChatEvent) => {
+      // Any frame means the stream is alive again.
+      setStreamError(null);
       setEvents((prev) => (prev.some((item) => item.seq === event.seq) ? prev : [...prev, event]));
       if (event.kind === "assistant_delta") {
         if (!appliedDeltaSeqsRef.current.has(event.seq)) {
@@ -279,10 +283,21 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     },
     [mutateMessages, mutateSessions, session?.id]
   );
-  const handleEventError = useCallback(() => {
-    mutateSessions();
-    mutateMessages();
-  }, [mutateMessages, mutateSessions]);
+  const handleEventError = useCallback(
+    (error: unknown) => {
+      mutateSessions();
+      mutateMessages();
+      // Surface only errors that carry a message. The cloud transport forwards
+      // raw `EventSource` error events (no message) on every transient
+      // reconnect, and those must stay silent as they always have; a local
+      // transport failure — daemon not running, socket dropped mid-turn —
+      // arrives as a real `Error` and used to be swallowed here, leaving the
+      // user with a sent message and no reply and no explanation.
+      const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+      if (message) setStreamError(message);
+    },
+    [mutateMessages, mutateSessions]
+  );
   useAgentChatEvents(session?.id, handleEvent, handleEventError);
 
   async function ensureSession(): Promise<IAgentChatSession> {
@@ -457,16 +472,29 @@ const RunnerChatPage = observer(function RunnerChatPage() {
           emptyState={<div className="py-16 text-center text-13 text-secondary">No messages</div>}
           listFooter={eventStrip.length > 0 ? <>{eventStrip}</> : undefined}
           composer={
-            <ChatComposer
-              draft={draft}
-              onDraftChange={setDraft}
-              onSend={send}
-              onStop={stop}
-              busy={busy}
-              sending={sending}
-              disabledReason={reason}
-              placeholder="Message this runner…"
-            />
+            <>
+              {streamError && (
+                <div
+                  role="alert"
+                  className="border-danger/40 bg-danger/5 text-danger mb-2 flex items-start justify-between gap-2 rounded-md border px-3 py-2 text-12"
+                >
+                  <span className="min-w-0">{streamError}</span>
+                  <button type="button" className="shrink-0 text-11 underline" onClick={() => setStreamError(null)}>
+                    Dismiss
+                  </button>
+                </div>
+              )}
+              <ChatComposer
+                draft={draft}
+                onDraftChange={setDraft}
+                onSend={send}
+                onStop={stop}
+                busy={busy}
+                sending={sending}
+                disabledReason={reason}
+                placeholder="Message this runner…"
+              />
+            </>
           }
         />
       </div>

@@ -39,8 +39,9 @@ function makeBridge(overrides: Partial<Record<string, unknown>> = {}) {
     listeners[event] = handler;
     return () => delete listeners[event];
   });
-  const bridge: TauriBridge = { invoke, listen, getAccount: () => "acct-1" };
-  return { bridge, invoke, listen, listeners };
+  const ensureRuntime = vi.fn(async () => {});
+  const bridge: TauriBridge = { invoke, listen, getAccount: () => "acct-1", ensureRuntime };
+  return { bridge, invoke, listen, listeners, ensureRuntime };
 }
 
 function emit(listeners: Record<string, (payload: unknown) => void>, event: string, payload: unknown) {
@@ -304,6 +305,62 @@ describe("LocalChatTransport verbs", () => {
       "chat_decide",
       expect.objectContaining({ chatSessionId: SESSION, localApprovalId: "ap-1", decision: "accept" })
     );
+  });
+
+  it("brings the daemon up before warming or sending — a chat right after sign-in has no runtime yet", async () => {
+    // Until this existed, the only thing that ever started the bundled daemon
+    // was connecting a project, so a chat opened straight after sign-in failed
+    // at "connecting to managed daemon" with nothing shown to the user.
+    const order: string[] = [];
+    ctx = makeBridge({
+      chat_append_event: {
+        id: "u1",
+        session_id: SESSION,
+        seq: 3,
+        role: "user",
+        content: "hi",
+        tool_calls: null,
+        approval_decision: null,
+        created_at: 20,
+      },
+    });
+    ctx.ensureRuntime.mockImplementation(async () => {
+      order.push("ensureRuntime");
+    });
+    ctx.invoke.mockImplementation(async (command: string) => {
+      if (command.startsWith("chat_warm") || command.startsWith("chat_send")) order.push(command);
+      if (command === "chat_append_event")
+        return {
+          id: "u1",
+          session_id: SESSION,
+          seq: 3,
+          role: "user",
+          content: "hi",
+          tool_calls: null,
+          approval_decision: null,
+          created_at: 20,
+        };
+      if (command === "chat_get_session")
+        return {
+          id: SESSION,
+          title: "",
+          workspace: "ws",
+          project: "pidash-builtin",
+          working_dir: "/tmp/chat/ws/proj",
+          engine_version: "0.1.23",
+          engine_thread_id: "thread-9",
+          created_at: 1000,
+          updated_at: 2000,
+        };
+      return undefined;
+    });
+    transport = new LocalChatTransport(ctx.bridge);
+
+    await transport.warmChatSession(SESSION);
+    await transport.sendChatMessage(SESSION, "hi");
+
+    expect(ctx.ensureRuntime).toHaveBeenCalledTimes(2);
+    expect(order).toEqual(["ensureRuntime", "chat_warm", "ensureRuntime", "chat_send"]);
   });
 
   it("never sends a runner selector — the stored id is not a daemon runner name", async () => {
