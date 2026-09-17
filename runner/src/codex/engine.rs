@@ -18,10 +18,39 @@
 //! can drive one engine process concurrently — each in its own thread, each
 //! reading only its own events — with no head-of-line blocking on streaming
 //! frames.
+//!
+//! ## Crash / respawn (a shared crash domain that recovers)
+//!
+//! One process serving every session means one crash takes them all down — an
+//! accepted cost (see the issue's "Decisions"). What makes it acceptable is
+//! recovery. When the engine process exits, the actor observes its stdout close
+//! and:
+//!
+//! 1. **fails the in-flight turns** — every live session's event stream closes
+//!    (`next_events` yields `None`), which each lane already surfaces as a
+//!    failed turn, so the user sees a failed turn rather than a silent hang;
+//! 2. **stays up** — the actor keeps the same command channel, so every
+//!    [`EngineHandle`] a lane holds stays valid across the replacement;
+//! 3. **respawns lazily** — the next `warm`/`run` rebuilds the app-server from
+//!    the retained spawn recipe, so an idle crashed engine isn't respun on a
+//!    hot loop and the failing lane can read the dead process's stderr for its
+//!    failure detail *before* the process is replaced;
+//! 4. **resumes each live thread from its stored id** — the actor retains the
+//!    `session → (thread_id, cwd)` map across the crash and issues
+//!    `thread/resume` for each on the fresh process, so a chat continues its
+//!    conversation on the next message instead of starting over.
+//!
+//! A permanently-broken engine (respawn fails, or the fresh process dies again
+//! before any frame flows) is capped at [`MAX_RESPAWNS_WITHOUT_PROGRESS`]
+//! consecutive attempts, after which the actor gives up and every subsequent
+//! command errors — the daemon then reports failed turns rather than spinning.
 
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
@@ -29,6 +58,24 @@ use crate::agent::{AgentProcessHandle, StderrRing, StderrSnapshot};
 use crate::cloud::protocol::ApprovalDecision;
 use crate::codex::bridge::{Bridge, BridgeEvent, RunPayload};
 use crate::util::shell::AgentEnv;
+
+/// How many times the engine will respawn back-to-back without any evidence of
+/// progress (a frame flowing, or a warm/run succeeding) before it gives up.
+/// Bounds a crash loop on a permanently-broken engine so the daemon reports
+/// failed turns instead of spinning; a healthy engine resets the counter the
+/// moment work flows again, so ordinary crash recovery is never affected.
+const MAX_RESPAWNS_WITHOUT_PROGRESS: u32 = 5;
+
+/// A short pause before rebuilding the app-server after a crash, so a process
+/// that dies immediately on startup can't be respun in a tight busy loop.
+const RESPAWN_BACKOFF: Duration = Duration::from_millis(250);
+
+/// Builds a fresh [`Bridge`] (a new app-server process) when the engine needs
+/// to respawn after its process exits. `None` means the engine was constructed
+/// from a pre-built bridge with no recipe to rebuild from, so it dies on exit
+/// rather than recovering.
+pub type RespawnFactory =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<Bridge>> + Send>> + Send + Sync>;
 
 /// A live session on the shared engine: the codex thread its turn runs on and a
 /// stream carrying only that session's demultiplexed events.
@@ -39,6 +86,16 @@ use crate::util::shell::AgentEnv;
 pub struct EngineSession {
     pub thread_id: String,
     pub events: mpsc::UnboundedReceiver<BridgeEvent>,
+}
+
+/// The process-scoped observability the engine surfaces to lanes: the current
+/// app-server's pid + exit watch, and its stderr ring. Held behind a mutex and
+/// swapped by the actor on respawn so a lane re-reading after a crash sees the
+/// *new* process, while a lane reading between the crash and the next respawn
+/// still sees the dead process's stderr for its failure detail.
+struct Observability {
+    process_handle: AgentProcessHandle,
+    stderr_ring: StderrRing,
 }
 
 /// Commands the actor accepts. Each carries a `oneshot` the actor replies on so
@@ -78,31 +135,44 @@ enum EngineCommand {
 #[derive(Clone)]
 pub struct EngineHandle {
     cmd_tx: mpsc::Sender<EngineCommand>,
-    /// Captured once at construction: pid + exit watch for the one engine
-    /// process. Shared by every session (the engine is a shared crash domain),
-    /// so a lane reads this exactly as it read the per-bridge process handle.
-    process_handle: AgentProcessHandle,
-    /// The engine process's stderr ring, so a lane can enrich a failure detail
-    /// with recent stderr without an actor round-trip.
-    stderr_ring: StderrRing,
+    /// Current process's pid/exit-watch + stderr ring. Shared with the actor,
+    /// which swaps its contents on respawn so a lane reading after a crash sees
+    /// the replacement process (the engine is a shared crash domain, but a
+    /// recoverable one).
+    obs: Arc<std::sync::Mutex<Observability>>,
     /// Engine-wide default model, so a session cursor can resolve the model it
     /// ran under the same way [`Bridge::run_session`] does (`payload.model` else
-    /// this default).
+    /// this default). Fixed for the life of the engine (part of the spawn
+    /// recipe), so it is not behind the respawn mutex.
     model_default: Option<String>,
 }
 
 impl EngineHandle {
     /// The shared engine process's observability handle (pid + exit watch).
     /// Every session shares one process, so this is the same handle regardless
-    /// of which session asks.
+    /// of which session asks; after a respawn it reflects the new process.
     pub fn process_handle(&self) -> AgentProcessHandle {
-        self.process_handle.clone()
+        self.obs
+            .lock()
+            .expect("engine observability mutex poisoned")
+            .process_handle
+            .clone()
     }
 
     /// Snapshot the shared engine's recent stderr (plus the dropped-noise
-    /// tally), for enriching a failed turn's detail.
+    /// tally), for enriching a failed turn's detail. Reads the *current*
+    /// process's ring — between a crash and the next respawn that is still the
+    /// dead process's ring, so a failure detail built on `next_events → None`
+    /// captures the crash output.
     pub async fn recent_stderr(&self) -> StderrSnapshot {
-        self.stderr_ring.lock().await.snapshot()
+        let ring = {
+            self.obs
+                .lock()
+                .expect("engine observability mutex poisoned")
+                .stderr_ring
+                .clone()
+        };
+        ring.lock().await.snapshot()
     }
 
     /// The engine-wide default model, if configured.
@@ -202,47 +272,71 @@ pub struct SharedCodexEngine {
 
 impl SharedCodexEngine {
     /// Wrap an already-built `Bridge` (a live or fake app-server) in a shared
-    /// engine, spawning the actor task that owns it.
+    /// engine, spawning the actor task that owns it. The engine cannot respawn
+    /// (no recipe), so it dies on process exit — use [`Self::spawn_with_env`] /
+    /// [`Self::spawn`] for a recoverable engine, or
+    /// [`Self::from_bridge_with_factory`] to supply a respawn recipe in tests.
     pub fn from_bridge(bridge: Bridge) -> Self {
+        Self::from_bridge_with_respawn(bridge, None)
+    }
+
+    /// [`Self::from_bridge`] with a caller-supplied respawn factory. Used in
+    /// tests to make a fake app-server recoverable: `factory` builds the
+    /// replacement `Bridge` (e.g. a second fake process) the way
+    /// [`Self::spawn_with_env`] rebuilds a real one.
+    pub fn from_bridge_with_factory<F, Fut>(bridge: Bridge, factory: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Bridge>> + Send + 'static,
+    {
+        let respawn: RespawnFactory = Arc::new(move || Box::pin(factory()));
+        Self::from_bridge_with_respawn(bridge, Some(respawn))
+    }
+
+    fn from_bridge_with_respawn(bridge: Bridge, respawn: Option<RespawnFactory>) -> Self {
         // Capture the process-wide observability handles and the default model
         // *before* the bridge moves into the actor, so a lane holding an
         // `EngineHandle` can read them without an actor round-trip — exactly as
         // it read them from a per-lane `AgentBridge` before the engine was
-        // shared.
+        // shared. The observability is shared with the actor so it can swap in
+        // the replacement process's handles on respawn.
         let process_handle = bridge.server.process_handle();
         let stderr_ring = bridge.server.stderr_ring();
         let model_default = bridge.model_default.clone();
+        let obs = Arc::new(std::sync::Mutex::new(Observability {
+            process_handle,
+            stderr_ring,
+        }));
         // Modest buffer: commands are short-lived RPCs, not a data plane. The
         // event fan-out uses unbounded per-session channels instead, so a slow
         // event consumer never backs up into the command path.
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
-        let actor = tokio::spawn(run_actor(bridge, cmd_rx));
+        let actor = tokio::spawn(run_actor(bridge, cmd_rx, obs.clone(), respawn));
         Self {
             handle: EngineHandle {
                 cmd_tx,
-                process_handle,
-                stderr_ring,
+                obs,
                 model_default,
             },
             actor,
         }
     }
 
-    /// Spawn a real codex app-server and wrap it in a shared engine.
+    /// Spawn a real codex app-server and wrap it in a recoverable shared engine.
     pub async fn spawn(
         binary: &str,
         cwd: &Path,
         model_default: Option<String>,
         effort_default: Option<String>,
     ) -> Result<Self> {
-        let bridge = Bridge::spawn(binary, cwd, model_default, effort_default).await?;
-        Ok(Self::from_bridge(bridge))
+        Self::spawn_with_env(binary, cwd, model_default, effort_default, &AgentEnv::default()).await
     }
 
     /// Spawn a real codex app-server with a Pi Dash-controlled environment
     /// (managed `CODEX_HOME`, bundled CLI on `PATH`, model credential file) and
-    /// wrap it in a shared engine. This is the constructor the daemon uses so
-    /// the shared engine authenticates exactly like the per-lane bridge did.
+    /// wrap it in a recoverable shared engine. This is the constructor the
+    /// daemon uses so the shared engine authenticates exactly like the per-lane
+    /// bridge did — and rebuilds itself the same way after a crash.
     pub async fn spawn_with_env(
         binary: &str,
         cwd: &Path,
@@ -250,9 +344,30 @@ impl SharedCodexEngine {
         effort_default: Option<String>,
         env: &AgentEnv,
     ) -> Result<Self> {
-        let bridge =
-            Bridge::spawn_with_env(binary, cwd, model_default, effort_default, env).await?;
-        Ok(Self::from_bridge(bridge))
+        let bridge = Bridge::spawn_with_env(
+            binary,
+            cwd,
+            model_default.clone(),
+            effort_default.clone(),
+            env,
+        )
+        .await?;
+        // The recipe, captured by value so a respawn can rebuild an identical
+        // process long after the caller's references have gone.
+        let binary = binary.to_string();
+        let cwd = cwd.to_path_buf();
+        let env = env.clone();
+        let factory: RespawnFactory = Arc::new(move || {
+            let binary = binary.clone();
+            let cwd = cwd.clone();
+            let model_default = model_default.clone();
+            let effort_default = effort_default.clone();
+            let env = env.clone();
+            Box::pin(async move {
+                Bridge::spawn_with_env(&binary, &cwd, model_default, effort_default, &env).await
+            })
+        });
+        Ok(Self::from_bridge_with_respawn(bridge, Some(factory)))
     }
 
     /// A fresh handle to this engine.
@@ -277,13 +392,31 @@ impl Drop for SharedCodexEngine {
     }
 }
 
+/// Per-session bookkeeping the actor keeps *outside* the `Bridge` so it survives
+/// a process replacement: the codex thread the session last ran on and the cwd
+/// it ran in. Both are needed to `thread/resume` the session on a fresh process.
+type ResumeMap = HashMap<String, (String, PathBuf)>;
+
 /// The single owner of `&mut Bridge`. Multiplexes command handling and event
 /// fan-out over one `select!` loop so streaming frames on one thread never wait
 /// behind another lane, while each RPC still gets exclusive stdio for the brief
-/// window it needs to read its response.
-async fn run_actor(mut bridge: Bridge, mut cmd_rx: mpsc::Receiver<EngineCommand>) {
+/// window it needs to read its response. Recovers from a process crash by
+/// respawning lazily and resuming live threads (see the module docs).
+async fn run_actor(
+    mut bridge: Bridge,
+    mut cmd_rx: mpsc::Receiver<EngineCommand>,
+    obs: Arc<std::sync::Mutex<Observability>>,
+    respawn: Option<RespawnFactory>,
+) {
     // thread id → the owning session's event sink.
     let mut routes: HashMap<String, mpsc::UnboundedSender<BridgeEvent>> = HashMap::new();
+    // session → (thread id, cwd), retained across a crash to resume threads.
+    let mut resume_map: ResumeMap = HashMap::new();
+    // Is `bridge` a live process? Flips to false when its stdout closes, back to
+    // true once a respawn succeeds.
+    let mut alive = true;
+    // Consecutive respawns with no intervening progress; see the constant.
+    let mut respawns_since_progress: u32 = 0;
 
     loop {
         tokio::select! {
@@ -298,13 +431,38 @@ async fn run_actor(mut bridge: Bridge, mut cmd_rx: mpsc::Receiver<EngineCommand>
                 };
                 match cmd {
                     EngineCommand::Warm { session, cwd, reply } => {
-                        let _ = reply.send(bridge.warm_session(&session, &cwd).await);
+                        if !ensure_alive(
+                            &mut bridge, &obs, &respawn, &mut resume_map,
+                            &mut alive, &mut respawns_since_progress,
+                        ).await {
+                            let _ = reply.send(Err(anyhow!(
+                                "codex engine is down and could not be respawned"
+                            )));
+                            continue;
+                        }
+                        let res = bridge.warm_session(&session, &cwd).await;
+                        if let Ok(thread_id) = &res {
+                            resume_map.insert(session, (thread_id.clone(), cwd));
+                            respawns_since_progress = 0;
+                        }
+                        let _ = reply.send(res);
                     }
                     EngineCommand::Run { session, payload, cwd, reply } => {
+                        if !ensure_alive(
+                            &mut bridge, &obs, &respawn, &mut resume_map,
+                            &mut alive, &mut respawns_since_progress,
+                        ).await {
+                            let _ = reply.send(Err(anyhow!(
+                                "codex engine is down and could not be respawned"
+                            )));
+                            continue;
+                        }
                         match bridge.run_session(&session, &payload, &cwd).await {
                             Ok(thread_id) => {
                                 let (evt_tx, evt_rx) = mpsc::unbounded_channel();
                                 routes.insert(thread_id.clone(), evt_tx);
+                                resume_map.insert(session, (thread_id.clone(), cwd));
+                                respawns_since_progress = 0;
                                 let _ = reply.send(Ok(EngineSession { thread_id, events: evt_rx }));
                             }
                             Err(e) => {
@@ -313,12 +471,28 @@ async fn run_actor(mut bridge: Bridge, mut cmd_rx: mpsc::Receiver<EngineCommand>
                         }
                     }
                     EngineCommand::Approval { approval_id, decision, reply } => {
-                        let _ = reply.send(bridge.send_approval(&approval_id, decision).await);
+                        // The turn an approval answers only exists on a live
+                        // process; if the engine crashed the turn is already
+                        // dead, so a dropped approval is moot — don't respawn
+                        // just to deliver it.
+                        let res = if alive {
+                            bridge.send_approval(&approval_id, decision).await
+                        } else {
+                            Ok(())
+                        };
+                        let _ = reply.send(res);
                     }
                     EngineCommand::Interrupt { reply } => {
-                        let _ = reply.send(bridge.interrupt().await);
+                        // Nothing to interrupt on a dead process; its turns are
+                        // already failing. Reply Ok without respawning.
+                        let res = if alive { bridge.interrupt().await } else { Ok(()) };
+                        let _ = reply.send(res);
                     }
                     EngineCommand::Release { session, reply } => {
+                        // Map removal only — safe whether the process is alive,
+                        // dead, or freshly respawned. Drop the resume entry too
+                        // so a later crash doesn't resurrect a closed session.
+                        resume_map.remove(&session);
                         let released = bridge.release_session(&session);
                         if let Some(thread_id) = &released {
                             // Dropping the sender closes the session's stream.
@@ -332,9 +506,15 @@ async fn run_actor(mut bridge: Bridge, mut cmd_rx: mpsc::Receiver<EngineCommand>
                 }
             }
 
-            ev = bridge.next_session_event() => {
+            // Only poll the engine's stdout while the process is alive; a dead
+            // bridge would return `None` immediately and busy-loop. When dead,
+            // the actor parks on `cmd_rx` and respawns on the next warm/run.
+            ev = bridge.next_session_event(), if alive => {
                 match ev {
                     Some((thread_id, events)) => {
+                        // A frame flowed: the engine is working, so forgive any
+                        // accumulated respawn attempts.
+                        respawns_since_progress = 0;
                         if let Some(tx) = routes.get(&thread_id) {
                             for e in events {
                                 // Unbounded: a slow consumer must not stall the
@@ -345,9 +525,11 @@ async fn run_actor(mut bridge: Bridge, mut cmd_rx: mpsc::Receiver<EngineCommand>
                     }
                     None => {
                         // Engine stdout closed (exit / crash). Drop every route
-                        // so live sessions see their stream end, then stop.
+                        // so live sessions see their stream end (a failed turn),
+                        // and mark the process dead — but keep the actor (and so
+                        // every EngineHandle) alive to respawn on next use.
                         routes.clear();
-                        break;
+                        alive = false;
                     }
                 }
             }
@@ -357,4 +539,77 @@ async fn run_actor(mut bridge: Bridge, mut cmd_rx: mpsc::Receiver<EngineCommand>
     // Best-effort graceful shutdown of the app-server process.
     let Bridge { server, .. } = bridge;
     let _ = server.shutdown(Duration::from_secs(2)).await;
+}
+
+/// Ensure `bridge` is a live process, respawning it (and resuming every live
+/// thread from its stored id) if it crashed. Returns `true` when the engine is
+/// ready to serve, `false` when it cannot be recovered (no respawn recipe, the
+/// respawn cap was hit, or the rebuild itself failed) — the caller then errors
+/// the command so the lane reports a failed turn instead of hanging.
+async fn ensure_alive(
+    bridge: &mut Bridge,
+    obs: &Arc<std::sync::Mutex<Observability>>,
+    respawn: &Option<RespawnFactory>,
+    resume_map: &mut ResumeMap,
+    alive: &mut bool,
+    respawns_since_progress: &mut u32,
+) -> bool {
+    if *alive {
+        return true;
+    }
+    let Some(factory) = respawn else {
+        return false;
+    };
+    if *respawns_since_progress >= MAX_RESPAWNS_WITHOUT_PROGRESS {
+        tracing::error!(
+            attempts = *respawns_since_progress,
+            "codex engine crashed repeatedly with no progress; giving up on respawn"
+        );
+        return false;
+    }
+    *respawns_since_progress += 1;
+    tokio::time::sleep(RESPAWN_BACKOFF).await;
+
+    let new_bridge = match factory().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("codex engine respawn failed: {e:#}");
+            return false;
+        }
+    };
+    *bridge = new_bridge;
+
+    // Point the shared observability at the replacement process so lanes that
+    // re-read pid / exit-watch / stderr after this see the new process.
+    {
+        let mut o = obs.lock().expect("engine observability mutex poisoned");
+        o.process_handle = bridge.server.process_handle();
+        o.stderr_ring = bridge.server.stderr_ring();
+    }
+
+    // Resume every session that was live before the crash, from its stored
+    // thread id, so a conversation continues on the next turn. A session that
+    // won't resume is dropped from the map — its next warm/run starts fresh
+    // rather than erroring forever.
+    let mut unresumable = Vec::new();
+    for (session, (thread_id, cwd)) in resume_map.iter() {
+        if let Err(e) = bridge.resume_session(session, thread_id, cwd).await {
+            tracing::warn!(
+                session = %session,
+                thread_id = %thread_id,
+                "codex thread resume failed after respawn: {e:#}"
+            );
+            unresumable.push(session.clone());
+        }
+    }
+    for session in unresumable {
+        resume_map.remove(&session);
+    }
+
+    *alive = true;
+    tracing::info!(
+        resumed = resume_map.len(),
+        "codex engine respawned and resumed live threads"
+    );
+    true
 }

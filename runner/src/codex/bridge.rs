@@ -14,8 +14,8 @@ use crate::codex::app_server::AppServer;
 use crate::util::shell::AgentEnv;
 use crate::codex::jsonrpc::{self, Incoming};
 use crate::codex::schema::{
-    ApprovalResponseParams, ClientInfo, InitializeParams, NotificationKind, ThreadStartParams,
-    TurnInputItem, TurnStartParams,
+    ApprovalResponseParams, ClientInfo, InitializeParams, NotificationKind, ThreadResumeParams,
+    ThreadStartParams, TurnInputItem, TurnStartParams,
 };
 
 pub struct Bridge {
@@ -175,6 +175,24 @@ impl Bridge {
         Ok(thread_id)
     }
 
+    /// Reattach `session` to an already-existing codex thread by its stored id,
+    /// via `thread/resume`. Used after the shared engine respawns its
+    /// app-server process (crash/recovery): a fresh process has forgotten every
+    /// live thread, so each session that was live before the crash is resumed by
+    /// the id the runner retained. Registers the session→thread mapping just
+    /// like [`Bridge::warm_session`] so a subsequent `run_session` reuses it.
+    pub async fn resume_session(
+        &mut self,
+        session: &str,
+        thread_id: &str,
+        cwd: &Path,
+    ) -> Result<()> {
+        self.ensure_initialized().await?;
+        self.resume_thread(thread_id, cwd).await?;
+        self.sessions.insert(session.to_string(), thread_id.to_string());
+        Ok(())
+    }
+
     /// Close the thread for `session`, keeping the engine process alive.
     /// Returns the thread id that was released, if any.
     pub fn release_session(&mut self, session: &str) -> Option<String> {
@@ -279,6 +297,28 @@ impl Bridge {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .context("thread/start missing threadId")
+    }
+
+    /// Send `thread/resume` for an existing thread id and wait for the ack.
+    /// Unlike [`Bridge::start_thread`] the id is already known (the runner kept
+    /// it across the process replacement), so we don't parse one out of the
+    /// response — we only confirm the resume didn't error.
+    async fn resume_thread(&mut self, thread_id: &str, cwd: &Path) -> Result<()> {
+        let id = self.server.alloc_id();
+        let line = jsonrpc::request(
+            id,
+            "thread/resume",
+            &ThreadResumeParams {
+                thread_id: thread_id.to_string(),
+                cwd: cwd.to_string_lossy().to_string(),
+                model: self.model_default.clone(),
+                sandbox: "danger-full-access".into(),
+                approval_policy: "never".into(),
+            },
+        )?;
+        self.server.send_raw(&line).await?;
+        let _ = self.await_response(id, Duration::from_secs(30)).await?;
+        Ok(())
     }
 
     async fn start_turn(&mut self, thread_id: &str, payload: &RunPayload) -> Result<()> {
