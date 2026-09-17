@@ -129,6 +129,16 @@ impl AppServer {
         self.stderr_ring.clone()
     }
 
+    /// Request an out-of-band force-kill of the app-server process *without*
+    /// consuming the `AppServer` (which [`Self::shutdown`] requires). The shared
+    /// engine uses this to recycle an idle-but-bloated process in place: the
+    /// wait task force-kills the child and publishes its exit, and `kill_on_drop`
+    /// on the eventual drop is a harmless no-op on an already-dead child.
+    /// Best-effort — if the wait task has already exited, the send is dropped.
+    pub fn request_force_kill(&self) {
+        let _ = self.kill_tx.try_send(KillRequest::Force);
+    }
+
     pub async fn shutdown(mut self, grace: std::time::Duration) -> Result<()> {
         // Half-close stdin so codex notices end-of-input.
         drop(self.stdin);

@@ -44,6 +44,24 @@
 //! before any frame flows) is capped at [`MAX_RESPAWNS_WITHOUT_PROGRESS`]
 //! consecutive attempts, after which the actor gives up and every subsequent
 //! command errors — the daemon then reports failed turns rather than spinning.
+//!
+//! ## Idle-RSS recycle (a leak safety net)
+//!
+//! A long-lived process accretes memory. A fresh idle engine measures ~115 MB
+//! RSS on the reference machine; that figure is of a *fresh* process, so a
+//! process kept warm for hours could sit far higher. To bound that, the actor
+//! samples the engine's RSS on a slow timer and, when the process is **idle**
+//! (zero live threads — every chat closed and every run ended, so there is no
+//! turn to lose and nothing to resume) *and* its RSS is at or above
+//! [`RECYCLE_RSS_THRESHOLD_BYTES`], recycles it: the current process is
+//! force-killed to free its memory immediately, and the next `warm`/`run`
+//! respawns a fresh one through the same lazy path a crash uses. The recycle is
+//! deliberately confined to the idle case — while any thread is live the
+//! process is never killed out from under it, so an active or between-turns
+//! session is never disrupted by the safety net (only by a real crash, which
+//! resume already covers). The threshold is a generous multiple of the fresh
+//! baseline so ordinary operation never trips it; it exists to catch runaway
+//! growth, not to churn a healthy process.
 
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -69,6 +87,77 @@ const MAX_RESPAWNS_WITHOUT_PROGRESS: u32 = 5;
 /// A short pause before rebuilding the app-server after a crash, so a process
 /// that dies immediately on startup can't be respun in a tight busy loop.
 const RESPAWN_BACKOFF: Duration = Duration::from_millis(250);
+
+/// How often the actor samples the engine's RSS to decide whether an idle
+/// process has grown enough to recycle. Deliberately slow: this is a leak
+/// safety net, not a hot control loop, and each sample shells out to `ps`.
+const RECYCLE_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+
+/// The resident-set-size at or above which an *idle* engine is recycled.
+///
+/// A fresh idle engine measures ~115 MB RSS on the reference machine, so 1 GiB
+/// is roughly nine times the fresh baseline: comfortably above anything normal
+/// operation produces, yet low enough to reclaim a genuinely runaway process
+/// before it starves the host. The check only ever fires while the engine is
+/// idle (zero live threads), so a recycle costs nothing but a respawn on the
+/// next use — hence a generous, conservative threshold rather than a tight one.
+const RECYCLE_RSS_THRESHOLD_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Samples a process's resident set size in bytes from its pid, or `None` when
+/// the pid is unknown or the platform sample failed. A missing sample must
+/// never *force* a recycle — `None` simply means "don't recycle this tick".
+/// Injectable so tests can drive a recycle deterministically without a real
+/// bloated process; production uses [`default_rss_sampler`].
+pub type RssSampler = Arc<dyn Fn(u32) -> Option<u64> + Send + Sync>;
+
+/// Tunables for the idle-RSS recycle safety net (see the module docs). Exposed
+/// so tests can drive a recycle deterministically with a stub sampler and a
+/// short interval; production uses [`RecyclePolicy::default`].
+#[derive(Clone)]
+pub struct RecyclePolicy {
+    /// RSS at or above which an idle engine is recycled.
+    pub threshold_bytes: u64,
+    /// How often to sample RSS.
+    pub check_interval: Duration,
+    /// Maps a pid to its RSS in bytes.
+    pub sampler: RssSampler,
+}
+
+impl Default for RecyclePolicy {
+    fn default() -> Self {
+        Self {
+            threshold_bytes: RECYCLE_RSS_THRESHOLD_BYTES,
+            check_interval: RECYCLE_CHECK_INTERVAL,
+            sampler: default_rss_sampler(),
+        }
+    }
+}
+
+/// The production RSS sampler: `ps -o rss= -p <pid>` reports the resident set
+/// size in kibibytes on both macOS and Linux. On non-unix (no portable sample
+/// without an extra dependency; dev machines are macOS/Linux) it always returns
+/// `None`, disabling the recycle safety net there.
+fn default_rss_sampler() -> RssSampler {
+    Arc::new(sample_rss)
+}
+
+#[cfg(unix)]
+fn sample_rss(pid: u32) -> Option<u64> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let kib: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+    Some(kib * 1024)
+}
+
+#[cfg(not(unix))]
+fn sample_rss(_pid: u32) -> Option<u64> {
+    None
+}
 
 /// Builds a fresh [`Bridge`] (a new app-server process) when the engine needs
 /// to respawn after its process exits. `None` means the engine was constructed
@@ -277,7 +366,7 @@ impl SharedCodexEngine {
     /// [`Self::spawn`] for a recoverable engine, or
     /// [`Self::from_bridge_with_factory`] to supply a respawn recipe in tests.
     pub fn from_bridge(bridge: Bridge) -> Self {
-        Self::from_bridge_with_respawn(bridge, None)
+        Self::from_bridge_with_respawn(bridge, None, RecyclePolicy::default())
     }
 
     /// [`Self::from_bridge`] with a caller-supplied respawn factory. Used in
@@ -289,11 +378,32 @@ impl SharedCodexEngine {
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Bridge>> + Send + 'static,
     {
-        let respawn: RespawnFactory = Arc::new(move || Box::pin(factory()));
-        Self::from_bridge_with_respawn(bridge, Some(respawn))
+        Self::from_bridge_with_factory_and_recycle(bridge, factory, RecyclePolicy::default())
     }
 
-    fn from_bridge_with_respawn(bridge: Bridge, respawn: Option<RespawnFactory>) -> Self {
+    /// [`Self::from_bridge_with_factory`] with a caller-supplied recycle policy.
+    /// Used in tests to drive the idle-RSS recycle deterministically: a stub
+    /// sampler reports an over-threshold RSS and a short interval fires the
+    /// check quickly, so a test need not wait for the production cadence or grow
+    /// a real process past a gibibyte.
+    pub fn from_bridge_with_factory_and_recycle<F, Fut>(
+        bridge: Bridge,
+        factory: F,
+        recycle: RecyclePolicy,
+    ) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Bridge>> + Send + 'static,
+    {
+        let respawn: RespawnFactory = Arc::new(move || Box::pin(factory()));
+        Self::from_bridge_with_respawn(bridge, Some(respawn), recycle)
+    }
+
+    fn from_bridge_with_respawn(
+        bridge: Bridge,
+        respawn: Option<RespawnFactory>,
+        recycle: RecyclePolicy,
+    ) -> Self {
         // Capture the process-wide observability handles and the default model
         // *before* the bridge moves into the actor, so a lane holding an
         // `EngineHandle` can read them without an actor round-trip — exactly as
@@ -311,7 +421,7 @@ impl SharedCodexEngine {
         // event fan-out uses unbounded per-session channels instead, so a slow
         // event consumer never backs up into the command path.
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
-        let actor = tokio::spawn(run_actor(bridge, cmd_rx, obs.clone(), respawn));
+        let actor = tokio::spawn(run_actor(bridge, cmd_rx, obs.clone(), respawn, recycle));
         Self {
             handle: EngineHandle {
                 cmd_tx,
@@ -367,7 +477,11 @@ impl SharedCodexEngine {
                 Bridge::spawn_with_env(&binary, &cwd, model_default, effort_default, &env).await
             })
         });
-        Ok(Self::from_bridge_with_respawn(bridge, Some(factory)))
+        Ok(Self::from_bridge_with_respawn(
+            bridge,
+            Some(factory),
+            RecyclePolicy::default(),
+        ))
     }
 
     /// A fresh handle to this engine.
@@ -407,6 +521,7 @@ async fn run_actor(
     mut cmd_rx: mpsc::Receiver<EngineCommand>,
     obs: Arc<std::sync::Mutex<Observability>>,
     respawn: Option<RespawnFactory>,
+    recycle: RecyclePolicy,
 ) {
     // thread id → the owning session's event sink.
     let mut routes: HashMap<String, mpsc::UnboundedSender<BridgeEvent>> = HashMap::new();
@@ -417,6 +532,11 @@ async fn run_actor(
     let mut alive = true;
     // Consecutive respawns with no intervening progress; see the constant.
     let mut respawns_since_progress: u32 = 0;
+
+    // Idle-RSS recycle timer. The first tick fires immediately; that first
+    // sample is of a fresh process (well under threshold), so it is a no-op.
+    let mut recycle_check = tokio::time::interval(recycle.check_interval);
+    recycle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -533,12 +653,53 @@ async fn run_actor(
                     }
                 }
             }
+
+            // Idle-RSS recycle safety net. Only meaningful while the process is
+            // alive and idle: killing it out from under a live thread would lose
+            // work, so a bloated-but-busy engine is left alone until it drains.
+            _ = recycle_check.tick(), if alive => {
+                if let Some((pid, bytes)) = idle_engine_to_recycle(&bridge, &recycle).await {
+                    tracing::info!(
+                        rss_bytes = bytes,
+                        pid,
+                        threshold = recycle.threshold_bytes,
+                        "recycling idle codex engine above RSS threshold"
+                    );
+                    // Free the memory now; the next warm/run respawns a fresh
+                    // process through the same lazy path a crash uses. A
+                    // deliberate recycle is not a crash, so it leaves the respawn
+                    // cap counter untouched (already 0 after any successful
+                    // warm/run).
+                    bridge.server.request_force_kill();
+                    routes.clear();
+                    alive = false;
+                }
+            }
         }
     }
 
     // Best-effort graceful shutdown of the app-server process.
     let Bridge { server, .. } = bridge;
     let _ = server.shutdown(Duration::from_secs(2)).await;
+}
+
+/// Decide whether the engine should be recycled this tick. Returns
+/// `Some((pid, rss_bytes))` only when the process is idle (zero live threads)
+/// *and* its sampled RSS is at or above the policy threshold; `None` otherwise
+/// (busy, no pid, or the sample failed — a missing sample never forces a
+/// recycle). The RSS sample runs on a blocking pool since the default sampler
+/// shells out to `ps`.
+async fn idle_engine_to_recycle(bridge: &Bridge, recycle: &RecyclePolicy) -> Option<(u32, u64)> {
+    if bridge.live_thread_count() != 0 {
+        return None;
+    }
+    let pid = bridge.server.process_handle().pid?;
+    let sampler = recycle.sampler.clone();
+    let bytes = tokio::task::spawn_blocking(move || sampler(pid))
+        .await
+        .ok()
+        .flatten()?;
+    (bytes >= recycle.threshold_bytes).then_some((pid, bytes))
 }
 
 /// Ensure `bridge` is a live process, respawning it (and resuming every live
