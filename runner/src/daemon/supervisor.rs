@@ -1979,7 +1979,16 @@ impl ChatWorker {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("chat workspace missing"))?;
 
-        if bridge.as_ref().is_some_and(bridge_has_exited) {
+        // Only tear the bridge down here when the process is gone for good. The
+        // shared codex engine self-heals — its process outlives a crash and the
+        // next warm/run respawns it and resumes this thread from its stored id —
+        // so tearing it down would call `release_session` and drop the engine's
+        // resume entry, forcing a fresh thread and losing the conversation. A
+        // per-session subprocess does not survive its exit, so it must close.
+        if bridge
+            .as_ref()
+            .is_some_and(|b| bridge_has_exited(b) && !b.survives_process_exit())
+        {
             if let Some(bridge) = bridge.take() {
                 bridge.shutdown(Duration::from_secs(1)).await.ok();
             }
@@ -2097,7 +2106,16 @@ impl ChatWorker {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("chat workspace missing"))?;
 
-        if bridge.as_ref().is_some_and(bridge_has_exited) {
+        // Only tear the bridge down here when the process is gone for good. The
+        // shared codex engine self-heals — its process outlives a crash and the
+        // next warm/run respawns it and resumes this thread from its stored id —
+        // so tearing it down would call `release_session` and drop the engine's
+        // resume entry, forcing a fresh thread and losing the conversation. A
+        // per-session subprocess does not survive its exit, so it must close.
+        if bridge
+            .as_ref()
+            .is_some_and(|b| bridge_has_exited(b) && !b.survives_process_exit())
+        {
             if let Some(bridge) = bridge.take() {
                 bridge.shutdown(Duration::from_secs(1)).await.ok();
             }
@@ -3678,6 +3696,196 @@ mod tests {
             | crate::workspace::Resolution::Cloned(p) => p,
         };
         assert_eq!(run_dir, chat_dir);
+    }
+
+    #[tokio::test]
+    async fn shared_engine_chat_crash_keeps_session_and_resumes_same_thread() {
+        // Regression for the ungated pre-operation teardown in `handle_turn`
+        // (mirrored in `handle_warm`): after the shared codex engine crashes
+        // mid-turn, the NEXT chat message must NOT tear the bridge down — doing
+        // so calls `SharedCodex::shutdown` → `release_session`, which drops the
+        // engine's resume entry, so the message starts a FRESH thread and the
+        // conversation is lost. Slice 3 gated only the *in-loop* crash branch on
+        // `!survives_process_exit()`; the two pre-operation guards were left
+        // ungated, and the fake engine tests miss it because they drive the
+        // engine actor directly, not the supervisor's turn flow.
+        //
+        // Two fake app-servers: A streams a partial delta on `th1` then dies
+        // mid-turn; B honours `thread/resume` (continuing `th1`), but if instead
+        // asked for a fresh `thread/start` — exactly what a wrongly-released
+        // session forces — hands back a DIFFERENT id `th_fresh`. Asserting the
+        // follow-up turn ran on `th1` therefore fails loudly if either guard is
+        // ever un-gated.
+        const SCRIPT_CRASH_MID_TURN: &str = r#"
+            set -e
+            read _                                  # initialize
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+            read _                                  # initialized (no response)
+            read _                                  # thread/start (id 2)
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th1"}}'
+            read _                                  # turn/start (id 3, no response)
+            printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"th1","text":"a1"}}'
+            # crash: exit mid-turn, before turn/completed
+        "#;
+        const SCRIPT_RESUME_OR_FRESH: &str = r#"
+            set -e
+            read _                                  # initialize
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+            read _                                  # initialized (no response)
+            read req                                # thread/resume OR thread/start (id 2)
+            case "$req" in
+              *thread/resume*)
+                printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
+                TID=th1 ;;
+              *)
+                printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_fresh"}}'
+                TID=th_fresh ;;
+            esac
+            read _                                  # turn/start (id 3, no response)
+            printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"'"$TID"'","text":"b1"}}'
+            printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"'"$TID"'","conclusion":"success","done":{"status":"ok"}}}'
+            sleep 0.5
+        "#;
+
+        async fn spawn_fake(script: &str) -> crate::codex::app_server::AppServer {
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.arg("-c").arg(script);
+            crate::codex::app_server::AppServer::spawn_command(cmd)
+                .await
+                .expect("spawn fake codex")
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("the-one-dir");
+        let config = runner_config("main", "WEB", wd.clone());
+
+        // Initial process crashes mid-turn; the factory brings up a
+        // resume-capable replacement on the next warm/run.
+        let server_a = spawn_fake(SCRIPT_CRASH_MID_TURN).await;
+        let engine = crate::codex::engine::SharedCodexEngine::from_bridge_with_factory(
+            crate::codex::bridge::Bridge::from_server(server_a, None),
+            || async {
+                let server = spawn_fake(SCRIPT_RESUME_OR_FRESH).await;
+                Ok(crate::codex::bridge::Bridge::from_server(server, None))
+            },
+        );
+
+        let (tx, mut rx) = mpsc::channel::<Envelope<ClientMsg>>(1024);
+        // Hold a live command sender so `command_rx.recv()` pends under the
+        // biased select and the event arm wins; dropping it would surface as a
+        // spurious "cancelled" and break the turn before it can crash/resume.
+        let (_cmd_tx, cmd_rx) = mpsc::channel(4);
+        let (active_tx, _active_rx) = watch::channel(false);
+        let mut chat = ChatWorker {
+            runner_config: config.clone(),
+            state: StateHandle::new(Config {
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![config.clone()],
+                cli: None,
+            }),
+            approvals: ApprovalRouter::new(),
+            out: RunnerOut::new(config.runner_id, tx),
+            command_rx: cmd_rx,
+            active_tx,
+            codex_engine: Some(engine.handle()),
+        };
+
+        // The chat lane's per-runtime locals, threaded across both turns exactly
+        // as `ChatWorker::run` threads them across `handle_turn` calls.
+        let chat_session_id = uuid::Uuid::new_v4();
+        let mut bridge: Option<AgentBridge> = None;
+        let mut workspace_path: Option<std::path::PathBuf> = None;
+        let mut bridge_seq = 0u64;
+        let mut started_sent = false;
+
+        let turn1 = ChatTurn {
+            message_id: uuid::Uuid::new_v4(),
+            content: "hi".into(),
+            cwd: None,
+            model: None,
+            local_thread_id: None,
+            local_session_id: None,
+        };
+        let close1 = chat
+            .handle_turn(
+                chat_session_id,
+                turn1,
+                &mut bridge,
+                &mut workspace_path,
+                &mut bridge_seq,
+                &mut started_sent,
+            )
+            .await
+            .expect("turn 1 handled");
+        // A shared-engine mid-turn crash is a failed turn, not a lost runtime:
+        // handle_turn returns `false` (keep warm) and retains the bridge.
+        assert!(
+            !close1,
+            "shared-engine crash must keep the chat runtime warm, not close it"
+        );
+        assert!(
+            bridge.is_some(),
+            "the bridge must be retained across the crash — not torn down and released"
+        );
+        // The exact predicate both pre-operation teardown guards evaluate: the
+        // process has exited, but a shared engine *survives* that exit, so the
+        // guard must NOT tear the bridge down (which would release the session).
+        // This is the deterministic mirror of the guard; the resume assertion
+        // below exercises the guard's real code path end to end.
+        let retained = bridge.as_ref().unwrap();
+        assert!(
+            bridge_has_exited(retained),
+            "the shared engine's process should have exited on the mid-turn crash"
+        );
+        assert!(
+            retained.survives_process_exit(),
+            "a shared codex engine must report it survives its process exit"
+        );
+
+        let turn2_id = uuid::Uuid::new_v4();
+        let turn2 = ChatTurn {
+            message_id: turn2_id,
+            content: "again".into(),
+            cwd: None,
+            model: None,
+            local_thread_id: None,
+            local_session_id: None,
+        };
+        chat
+            .handle_turn(
+                chat_session_id,
+                turn2,
+                &mut bridge,
+                &mut workspace_path,
+                &mut bridge_seq,
+                &mut started_sent,
+            )
+            .await
+            .expect("turn 2 handled");
+
+        // The follow-up turn's `ChatMessageStarted` names the thread it ran on;
+        // it must be the resumed `th1`. A `th_fresh` here means the pre-op guard
+        // released the session and the engine started a brand-new thread — the
+        // very conversation-loss this fix prevents.
+        let mut resumed_thread = None;
+        while let Ok(env) = rx.try_recv() {
+            if let ClientMsg::ChatMessageStarted {
+                message_id,
+                turn_id,
+                ..
+            } = env.body
+            {
+                if message_id == turn2_id {
+                    resumed_thread = turn_id;
+                }
+            }
+        }
+        assert_eq!(
+            resumed_thread.as_deref(),
+            Some("th1"),
+            "follow-up turn must resume th1; a fresh thread means the session was wrongly released"
+        );
     }
 
     #[tokio::test]
