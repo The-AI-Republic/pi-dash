@@ -114,7 +114,11 @@ export const IssuePeekOverviewHeader = observer(function IssuePeekOverviewHeader
 
   const workItemLink = generateWorkItemLink({
     workspaceSlug,
-    projectId: issueDetails?.project_id,
+    // Prefer the route projectId (present immediately, and what isWorkItemLinkReady
+    // trusts for archived items); fall back to the loaded detail's project_id. Using
+    // issueDetails?.project_id alone left the archive link at /projects/undefined/...
+    // while details loaded, even though the button was already enabled.
+    projectId: projectId ?? issueDetails?.project_id,
     issueId,
     projectIdentifier,
     sequenceId: issueDetails?.sequence_id,

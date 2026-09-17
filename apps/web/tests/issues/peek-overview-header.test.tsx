@@ -200,6 +200,18 @@ describe("IssuePeekOverviewHeader expand button", () => {
     expect(expand?.getAttribute("href")).toBe("/acme/projects/proj-1/archives/issues/issue-1");
   });
 
+  it("keeps the archive link valid while the issue detail is still loading", () => {
+    // Detail not yet in the store: issueDetails?.project_id is undefined, but the
+    // archive route must use the route projectId prop, not /projects/undefined/...
+    getIssueById.mockReturnValue(undefined);
+    getProjectIdentifierById.mockReturnValue(undefined);
+
+    renderHeader({ isArchived: true });
+
+    const expand = screen.getByTestId("move-diagonal").closest("a");
+    expect(expand?.getAttribute("href")).toBe("/acme/projects/proj-1/archives/issues/issue-1");
+  });
+
   it("lets modified clicks fall through to native navigation without tearing down the peek", () => {
     getIssueById.mockReturnValue({ project_id: "proj-1", sequence_id: 42 });
     getProjectIdentifierById.mockReturnValue("PROJ");
