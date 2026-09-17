@@ -102,6 +102,7 @@ REST_FRAMEWORK = {
         # AI assistant: the only platform-compute brake in the BYOK-only MVP.
         "assistant_message": "30/hour",
         "assistant_llm_test": "6/minute",
+        "assistant_stt_test": "6/minute",
         "assistant_llm_generate_title": "20/minute",
         # Desktop agent credential. Refreshed once per token lifetime in normal
         # use, so a low ceiling still leaves generous headroom for retries.
