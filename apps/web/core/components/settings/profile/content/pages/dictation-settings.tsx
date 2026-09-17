@@ -9,24 +9,21 @@ import { observer } from "mobx-react";
 import useSWR from "swr";
 import { setToast, TOAST_TYPE } from "@pi-dash/propel/toast";
 import { AssistantService } from "@pi-dash/services";
-import type { IUserLLMConfig, TAssistantProviderKind } from "@pi-dash/types";
+import type { IUserSTTConfig } from "@pi-dash/types";
 import { Button } from "@pi-dash/ui";
-import { AssistantMCPServersSettings } from "./assistant-mcp-servers";
-import { DictationSettings } from "./dictation-settings";
 
 const service = new AssistantService();
 
-const KNOWN_MODELS = [
-  "anthropic/claude-sonnet-4-6",
-  "meta-llama/llama-3.3-70b-instruct",
-  "qwen/qwen-2.5-72b-instruct",
-  "deepseek/deepseek-chat",
-];
+/**
+ * Stable anchor for the composer's not-configured mic path to deep-link to
+ * (sub-issue #5). When dictation is unconfigured the mic button should route
+ * here rather than failing at click time.
+ */
+export const DICTATION_SETTINGS_ANCHOR = "voice-dictation";
 
-export const AIAssistantProfileSettings = observer(function AIAssistantProfileSettings() {
-  const { data: config, mutate } = useSWR<IUserLLMConfig>("assistant-llm-config", () => service.getLLMConfig());
+export const DictationSettings = observer(function DictationSettings() {
+  const { data: config, mutate } = useSWR<IUserSTTConfig>("assistant-stt-config", () => service.getSTTConfig());
 
-  const [provider, setProvider] = useState<TAssistantProviderKind>("openai_compatible");
   const [baseUrl, setBaseUrl] = useState("");
   const [modelName, setModelName] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -35,7 +32,6 @@ export const AIAssistantProfileSettings = observer(function AIAssistantProfileSe
 
   useEffect(() => {
     if (config) {
-      setProvider(config.provider_kind);
       setBaseUrl(config.base_url);
       setModelName(config.model_name);
     }
@@ -44,15 +40,14 @@ export const AIAssistantProfileSettings = observer(function AIAssistantProfileSe
   const save = async () => {
     setSaving(true);
     try {
-      await service.putLLMConfig({
-        provider_kind: provider,
-        base_url: provider === "anthropic" ? undefined : baseUrl,
-        model_name: modelName,
+      await service.putSTTConfig({
+        base_url: baseUrl.trim(),
+        model_name: modelName.trim(),
         api_key: apiKey || undefined,
       });
       setApiKey("");
       await mutate();
-      setToast({ type: TOAST_TYPE.SUCCESS, title: "Saved", message: "AI provider configuration updated." });
+      setToast({ type: TOAST_TYPE.SUCCESS, title: "Saved", message: "Voice dictation configuration updated." });
     } catch (e: unknown) {
       const err = e as { detail?: string; error?: string } | null;
       setToast({
@@ -68,9 +63,13 @@ export const AIAssistantProfileSettings = observer(function AIAssistantProfileSe
   const test = async () => {
     setTesting(true);
     try {
-      const res = await service.testLLMConfig();
+      const res = await service.testSTTConfig();
       if (res.ok) {
-        setToast({ type: TOAST_TYPE.SUCCESS, title: "Connection OK", message: "Your provider responded." });
+        setToast({
+          type: TOAST_TYPE.SUCCESS,
+          title: "Connection OK",
+          message: "Your transcription endpoint responded.",
+        });
       } else {
         setToast({ type: TOAST_TYPE.ERROR, title: "Connection failed", message: res.error_code || "Unknown error" });
       }
@@ -81,62 +80,46 @@ export const AIAssistantProfileSettings = observer(function AIAssistantProfileSe
   };
 
   const remove = async () => {
-    await service.deleteLLMConfig();
+    await service.deleteSTTConfig();
     setApiKey("");
     setBaseUrl("");
     setModelName("");
     await mutate();
-    setToast({ type: TOAST_TYPE.INFO, title: "Removed", message: "AI provider configuration deleted." });
+    setToast({ type: TOAST_TYPE.INFO, title: "Removed", message: "Voice dictation configuration deleted." });
   };
 
   return (
-    <div className="flex max-w-xl flex-col gap-5">
+    <div id={DICTATION_SETTINGS_ANCHOR} className="flex max-w-xl flex-col gap-5">
       <div>
-        <h3 className="text-16 font-semibold text-primary">AI Assistant</h3>
+        <h3 className="text-16 font-semibold text-primary">Voice dictation</h3>
         <p className="mt-1 text-13 text-secondary">
-          Connect your own LLM provider to use the assistant. Tool-calling quality varies by model — we recommend models
-          with native function-calling support.
+          Hold the mic button in the chat composer to record, release to transcribe. Connect your own OpenAI-compatible
+          speech-to-text endpoint — the <code>/v1/audio/transcriptions</code> route — with its base URL, API key, and
+          model.
+        </p>
+        <p className="mt-2 text-13 text-secondary">
+          Your audio is sent directly to the endpoint you configure here and is not stored by Pi Dash.
         </p>
       </div>
 
       <label className="flex flex-col gap-1 text-13">
-        <span className="text-secondary">Provider</span>
-        <select
-          value={provider}
-          onChange={(e) => setProvider(e.target.value as TAssistantProviderKind)}
+        <span className="text-secondary">Base URL</span>
+        <input
+          value={baseUrl}
+          onChange={(e) => setBaseUrl(e.target.value)}
+          placeholder="https://api.openai.com/v1"
           className="rounded-md border border-subtle bg-surface-1 px-3 py-2"
-        >
-          <option value="openai_compatible">OpenAI-compatible (OpenRouter, vLLM, …)</option>
-          <option value="anthropic">Anthropic</option>
-        </select>
+        />
       </label>
-
-      {provider === "openai_compatible" && (
-        <label className="flex flex-col gap-1 text-13">
-          <span className="text-secondary">Base URL</span>
-          <input
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder="https://openrouter.ai/api/v1"
-            className="rounded-md border border-subtle bg-surface-1 px-3 py-2"
-          />
-        </label>
-      )}
 
       <label className="flex flex-col gap-1 text-13">
         <span className="text-secondary">Model</span>
         <input
           value={modelName}
           onChange={(e) => setModelName(e.target.value)}
-          list="assistant-known-models"
-          placeholder="meta-llama/llama-3.3-70b-instruct"
+          placeholder="whisper-1"
           className="rounded-md border border-subtle bg-surface-1 px-3 py-2"
         />
-        <datalist id="assistant-known-models">
-          {KNOWN_MODELS.map((m) => (
-            <option key={m} value={m} />
-          ))}
-        </datalist>
       </label>
 
       <label className="flex flex-col gap-1 text-13">
@@ -145,13 +128,13 @@ export const AIAssistantProfileSettings = observer(function AIAssistantProfileSe
           type="password"
           value={apiKey}
           onChange={(e) => setApiKey(e.target.value)}
-          placeholder={config?.has_api_key ? "•••• (saved) — enter to replace" : "Your provider API key"}
+          placeholder={config?.has_api_key ? "•••• (saved) — enter to replace" : "Your transcription API key"}
           className="rounded-md border border-subtle bg-surface-1 px-3 py-2"
         />
       </label>
 
       <div className="flex items-center gap-2">
-        <Button onClick={save} loading={saving} disabled={!modelName.trim()}>
+        <Button onClick={save} loading={saving} disabled={!baseUrl.trim() || !modelName.trim()}>
           Save
         </Button>
         <Button onClick={test} variant="neutral-primary" loading={testing} disabled={!config?.has_api_key}>
@@ -168,14 +151,6 @@ export const AIAssistantProfileSettings = observer(function AIAssistantProfileSe
           Last verified: {new Date(config.last_verified_at).toLocaleString()}
         </div>
       )}
-
-      <div className="mt-2 border-t border-subtle pt-5">
-        <DictationSettings />
-      </div>
-
-      <div className="mt-2 border-t border-subtle pt-5">
-        <AssistantMCPServersSettings />
-      </div>
     </div>
   );
 });

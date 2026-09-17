@@ -12,6 +12,8 @@ import type {
   IAssistantThread,
   IUserLLMConfig,
   IUserLLMConfigInput,
+  IUserSTTConfig,
+  IUserSTTConfigInput,
 } from "@pi-dash/types";
 import { APIService } from "../api.service";
 
@@ -117,6 +119,40 @@ export class AssistantService extends APIService {
 
   async testLLMConfig(): Promise<{ ok: boolean; error_code?: string; detail?: string }> {
     return this.post(`/api/users/me/ai-assistant/config/test/`)
+      .then((res) => res?.data)
+      .catch((err) => {
+        throw err?.response?.data;
+      });
+  }
+
+  // --- BYO speech-to-text (dictation) config (user-level) ---
+
+  async getSTTConfig(): Promise<IUserSTTConfig> {
+    return this.get(`/api/users/me/ai-assistant/stt-config/`)
+      .then((res) => res?.data)
+      .catch((err) => {
+        throw err?.response?.data;
+      });
+  }
+
+  async putSTTConfig(data: IUserSTTConfigInput): Promise<IUserSTTConfig> {
+    return this.put(`/api/users/me/ai-assistant/stt-config/`, data)
+      .then((res) => res?.data)
+      .catch((err) => {
+        throw err?.response?.data;
+      });
+  }
+
+  async deleteSTTConfig(): Promise<void> {
+    return this.delete(`/api/users/me/ai-assistant/stt-config/`)
+      .then((res) => res?.data)
+      .catch((err) => {
+        throw err?.response?.data;
+      });
+  }
+
+  async testSTTConfig(): Promise<{ ok: boolean; error_code?: string; detail?: string }> {
+    return this.post(`/api/users/me/ai-assistant/stt-config/test/`)
       .then((res) => res?.data)
       .catch((err) => {
         throw err?.response?.data;
