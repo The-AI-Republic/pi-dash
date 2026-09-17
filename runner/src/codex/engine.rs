@@ -25,8 +25,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::agent::{AgentProcessHandle, StderrRing, StderrSnapshot};
 use crate::cloud::protocol::ApprovalDecision;
 use crate::codex::bridge::{Bridge, BridgeEvent, RunPayload};
+use crate::util::shell::AgentEnv;
 
 /// A live session on the shared engine: the codex thread its turn runs on and a
 /// stream carrying only that session's demultiplexed events.
@@ -76,9 +78,38 @@ enum EngineCommand {
 #[derive(Clone)]
 pub struct EngineHandle {
     cmd_tx: mpsc::Sender<EngineCommand>,
+    /// Captured once at construction: pid + exit watch for the one engine
+    /// process. Shared by every session (the engine is a shared crash domain),
+    /// so a lane reads this exactly as it read the per-bridge process handle.
+    process_handle: AgentProcessHandle,
+    /// The engine process's stderr ring, so a lane can enrich a failure detail
+    /// with recent stderr without an actor round-trip.
+    stderr_ring: StderrRing,
+    /// Engine-wide default model, so a session cursor can resolve the model it
+    /// ran under the same way [`Bridge::run_session`] does (`payload.model` else
+    /// this default).
+    model_default: Option<String>,
 }
 
 impl EngineHandle {
+    /// The shared engine process's observability handle (pid + exit watch).
+    /// Every session shares one process, so this is the same handle regardless
+    /// of which session asks.
+    pub fn process_handle(&self) -> AgentProcessHandle {
+        self.process_handle.clone()
+    }
+
+    /// Snapshot the shared engine's recent stderr (plus the dropped-noise
+    /// tally), for enriching a failed turn's detail.
+    pub async fn recent_stderr(&self) -> StderrSnapshot {
+        self.stderr_ring.lock().await.snapshot()
+    }
+
+    /// The engine-wide default model, if configured.
+    pub fn model_default(&self) -> Option<&str> {
+        self.model_default.as_deref()
+    }
+
     async fn send<T>(
         &self,
         make: impl FnOnce(oneshot::Sender<T>) -> EngineCommand,
@@ -173,13 +204,26 @@ impl SharedCodexEngine {
     /// Wrap an already-built `Bridge` (a live or fake app-server) in a shared
     /// engine, spawning the actor task that owns it.
     pub fn from_bridge(bridge: Bridge) -> Self {
+        // Capture the process-wide observability handles and the default model
+        // *before* the bridge moves into the actor, so a lane holding an
+        // `EngineHandle` can read them without an actor round-trip — exactly as
+        // it read them from a per-lane `AgentBridge` before the engine was
+        // shared.
+        let process_handle = bridge.server.process_handle();
+        let stderr_ring = bridge.server.stderr_ring();
+        let model_default = bridge.model_default.clone();
         // Modest buffer: commands are short-lived RPCs, not a data plane. The
         // event fan-out uses unbounded per-session channels instead, so a slow
         // event consumer never backs up into the command path.
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let actor = tokio::spawn(run_actor(bridge, cmd_rx));
         Self {
-            handle: EngineHandle { cmd_tx },
+            handle: EngineHandle {
+                cmd_tx,
+                process_handle,
+                stderr_ring,
+                model_default,
+            },
             actor,
         }
     }
@@ -192,6 +236,22 @@ impl SharedCodexEngine {
         effort_default: Option<String>,
     ) -> Result<Self> {
         let bridge = Bridge::spawn(binary, cwd, model_default, effort_default).await?;
+        Ok(Self::from_bridge(bridge))
+    }
+
+    /// Spawn a real codex app-server with a Pi Dash-controlled environment
+    /// (managed `CODEX_HOME`, bundled CLI on `PATH`, model credential file) and
+    /// wrap it in a shared engine. This is the constructor the daemon uses so
+    /// the shared engine authenticates exactly like the per-lane bridge did.
+    pub async fn spawn_with_env(
+        binary: &str,
+        cwd: &Path,
+        model_default: Option<String>,
+        effort_default: Option<String>,
+        env: &AgentEnv,
+    ) -> Result<Self> {
+        let bridge =
+            Bridge::spawn_with_env(binary, cwd, model_default, effort_default, env).await?;
         Ok(Self::from_bridge(bridge))
     }
 

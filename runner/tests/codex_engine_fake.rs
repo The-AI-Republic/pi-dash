@@ -196,3 +196,48 @@ async fn releasing_a_session_keeps_the_engine_and_other_sessions_alive() {
     // The engine still answers — the process is alive.
     assert_eq!(h.live_thread_count().await, 1);
 }
+
+#[tokio::test]
+async fn engine_handle_exposes_process_observability() {
+    // The daemon's lanes read pid / exit-watch / recent-stderr / default-model
+    // from the engine the same way they read them from a per-lane bridge. The
+    // handle must surface all four without an actor round-trip on the hot path.
+    // Emit the stderr line up front: this test never starts a session, so the
+    // fake is never sent `initialize` and must not block on stdin first.
+    let script = r#"
+        set -e
+        printf 'boot: fake codex up\n' 1>&2
+        sleep 0.5
+    "#;
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(script);
+    let server = AppServer::spawn_command(cmd).await.expect("spawn fake codex");
+    let engine =
+        SharedCodexEngine::from_bridge(Bridge::from_server(server, Some("gpt-x".into())));
+    let h = engine.handle();
+
+    // pid captured at spawn; process still alive so exit watch is unset.
+    let ph = h.process_handle();
+    assert!(ph.pid.is_some(), "engine handle should surface the pid");
+    assert!(
+        ph.exit_rx.borrow().is_none(),
+        "process is alive, no exit snapshot yet"
+    );
+
+    // Default model threaded from the bridge.
+    assert_eq!(h.model_default(), Some("gpt-x"));
+
+    // Recent-stderr snapshots the shared ring (the fake wrote one boot line).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let snap = h.recent_stderr().await;
+        if snap.lines.iter().any(|l| l.contains("boot: fake codex up")) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "stderr line never surfaced: {snap:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}

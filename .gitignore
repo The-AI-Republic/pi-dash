@@ -120,3 +120,6 @@ scripts/
 # Rust
 /target/
 /runner/target/
+
+# Pi Dash agent scratch workpad (local only)
+.pidash-workpad.md

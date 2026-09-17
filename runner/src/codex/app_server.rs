@@ -121,6 +121,14 @@ impl AppServer {
         }
     }
 
+    /// Clone the shared stderr ring so a long-lived owner (the shared engine)
+    /// can snapshot recent stderr without holding `&AppServer`. The ring is an
+    /// `Arc<Mutex<..>>` the drain task keeps pushing to, so the clone stays
+    /// live for the process's lifetime.
+    pub fn stderr_ring(&self) -> StderrRing {
+        self.stderr_ring.clone()
+    }
+
     pub async fn shutdown(mut self, grace: std::time::Duration) -> Result<()> {
         // Half-close stdin so codex notices end-of-input.
         drop(self.stdin);
