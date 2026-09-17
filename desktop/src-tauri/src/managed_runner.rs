@@ -26,6 +26,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -89,7 +90,7 @@ pub struct ManagedPaths {
 }
 
 impl ManagedPaths {
-    fn for_workspace<R: Runtime>(app: &AppHandle<R>, workspace: &str) -> Result<Self, String> {
+    pub(crate) fn for_workspace<R: Runtime>(app: &AppHandle<R>, workspace: &str) -> Result<Self, String> {
         if !valid_component(workspace) {
             return Err("Invalid workspace slug".into());
         }
@@ -97,6 +98,19 @@ impl ManagedPaths {
         paths.config_dir = paths.config_dir.join(workspace);
         paths.data_dir = paths.config_dir.join("data");
         Ok(paths)
+    }
+
+    /// Where the daemon for *this* tree binds its control socket.
+    ///
+    /// Not `runtime_dir`. The daemon is started per workspace with
+    /// `PIDASH_DATA_DIR` pointing at the re-rooted `data_dir`, and the runner
+    /// derives its runtime dir as `<data_dir>/runtime` whenever that override
+    /// is present (`runner/src/util/paths.rs`). `runtime_dir` here is the
+    /// *shared* tree that holds the model token, which no daemon binds under —
+    /// reaching for it is how the chat transport ended up looking for a socket
+    /// nothing was listening on.
+    pub(crate) fn daemon_runtime_dir(&self) -> PathBuf {
+        self.data_dir.join("runtime")
     }
 
     pub fn resolve<R: Runtime>(app: &AppHandle<R>) -> Result<Self, String> {
@@ -341,16 +355,43 @@ pub async fn managed_start_daemon<R: Runtime>(
 ) -> Result<(), String> {
     let paths = ManagedPaths::for_workspace(&app, &workspace)?;
     paths.ensure()?;
+    // The spawn is synchronous and holds the daemon-state lock; keeping it in
+    // its own function guarantees the (non-`Send`) guard is dropped before the
+    // await below, and keeps this command's future `Send`.
+    if spawn_daemon_locked(&app, &paths, &workspace)? == DaemonStart::AlreadyRunning {
+        return Ok(());
+    }
+    // Spawning is not the same as being reachable. The daemon binds its control
+    // socket a moment after exec, and callers — the chat transport above all —
+    // connect the instant this returns, so returning early surfaced as
+    // "connecting to managed daemon: … pidash.sock" on the first send of a
+    // session. Wait for the socket to answer before claiming the daemon is up.
+    wait_for_daemon(&paths).await;
+    Ok(())
+}
 
+#[derive(PartialEq)]
+enum DaemonStart {
+    Spawned,
+    AlreadyRunning,
+}
+
+/// Spawn the daemon for `workspace` unless one is already running. Synchronous
+/// on purpose — see the caller.
+fn spawn_daemon_locked<R: Runtime>(
+    app: &AppHandle<R>,
+    paths: &ManagedPaths,
+    workspace: &str,
+) -> Result<DaemonStart, String> {
     let state = app.state::<DaemonState>();
     let mut guard = state.0.lock().map_err(|_| "daemon state poisoned")?;
-    if let Some(child) = guard.get_mut(&workspace) {
+    if let Some(child) = guard.get_mut(workspace) {
         match child.try_wait() {
             // Already running — starting a second daemon on the same config
             // would have two processes claiming the same runner rows.
-            Ok(None) => return Ok(()),
+            Ok(None) => return Ok(DaemonStart::AlreadyRunning),
             _ => {
-                guard.remove(&workspace);
+                guard.remove(workspace);
             }
         }
     }
@@ -358,7 +399,7 @@ pub async fn managed_start_daemon<R: Runtime>(
     // Refresh every configured project's paths, even when sessionStorage
     // restores a workspace without reopening each project. AppImage mounts
     // are ephemeral; persisted paths from the previous launch are invalid.
-    let rebind = base_command(&paths, &paths.runner)
+    let rebind = base_command(paths, &paths.runner)
         .args(["__managed", "rebind", "--engine"])
         .arg(&paths.engine)
         .arg("--codex-home")
@@ -379,15 +420,32 @@ pub async fn managed_start_daemon<R: Runtime>(
         .append(true)
         .open(paths.data_dir.join("desktop-daemon.log"))
         .map_err(|e| format!("opening daemon log: {e}"))?;
-    let child = base_command(&paths, &paths.runner)
+    let child = base_command(paths, &paths.runner)
         .arg("__run")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(log))
         .spawn()
         .map_err(|e| format!("spawning pidash __run: {e}"))?;
-    guard.insert(workspace, child);
-    Ok(())
+    guard.insert(workspace.to_string(), child);
+    Ok(DaemonStart::Spawned)
+}
+
+/// Poll the daemon's control socket until it answers, or give up.
+///
+/// Best-effort by design: a daemon that is slow to bind is common (cold start,
+/// a busy machine), while one that never binds is a real failure the caller
+/// will see on its first request with a far better error than anything this
+/// could invent. So the timeout is generous and a miss is not an error.
+async fn wait_for_daemon(paths: &ManagedPaths) {
+    const ATTEMPTS: u32 = 40;
+    const INTERVAL: Duration = Duration::from_millis(250);
+    for _ in 0..ATTEMPTS {
+        if crate::ipc::managed_status(paths).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(INTERVAL).await;
+    }
 }
 
 /// Stop the daemon, waiting briefly for an in-flight run to finish.

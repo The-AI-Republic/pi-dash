@@ -32,6 +32,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
+# `managed_start_daemon` waits for the daemon's control socket to answer
+# before returning; without the wait the chat transport connects into the gap
+# between spawn and bind. Tauri already runs on tokio — this only names the
+# timer we use.
+tokio = { version = "1", default-features = false, features = ["time"] }
 
 [target.'cfg(unix)'.dependencies]
 # Only for SIGTERM on the bundled daemon: killing it outright would turn a
@@ -42,8 +47,8 @@ libc = "0.2"
 tempfile = "3"
 # Timestamps for the chat frame variants in `chat`'s hermetic stream tests.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-# Drives the hermetic StatusGet round-trip test in `ipc` against a stub
-# Unix-socket server. Production callers get their runtime from Tauri.
+# The tests need a runtime and the net/io features on top of the `time`
+# feature the crate itself depends on.
 tokio = { version = "1", features = [
     "macros",
     "rt-multi-thread",

@@ -12,8 +12,11 @@
 //! named pipe on Windows, both handled by `pidash_ipc::Client`).
 //!
 //! The socket path matches the daemon's own `RunnerPaths::ipc_socket_path`
-//! (`<runtime_dir>/pidash.sock`) — the managed tree's `runtime/` dir is the
-//! same one the daemon binds under, so no extra path plumbing is needed.
+//! (`<runtime_dir>/pidash.sock`). Which runtime dir matters: the daemon runs
+//! **per workspace** with `PIDASH_DATA_DIR` set to the re-rooted `data_dir`,
+//! so it binds under `<data_dir>/runtime`, not the shared `managed/runtime/`
+//! that holds the model token. Use [`ManagedPaths::daemon_runtime_dir`] (via
+//! `ManagedPaths::for_workspace`) rather than `paths.runtime_dir`.
 //!
 //! Scope note (PDASHOSS01-158): this lands the *capability* — the desktop
 //! crate depends on `pidash-ipc` (not the runner) and can round-trip
@@ -42,7 +45,7 @@ pub fn socket_path(runtime_dir: &Path) -> PathBuf {
 /// answers with anything other than a `Status` frame — the caller decides
 /// whether "no daemon" is an error or just "not signed in yet".
 pub async fn managed_status(paths: &ManagedPaths) -> Result<StatusSnapshot, String> {
-    status_over(&socket_path(&paths.runtime_dir)).await
+    status_over(&socket_path(&paths.daemon_runtime_dir())).await
 }
 
 /// Connect to a daemon at `socket` and complete a single `StatusGet`
