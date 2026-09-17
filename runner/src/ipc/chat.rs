@@ -47,7 +47,7 @@ use super::protocol::Response;
 use crate::agent::{AgentBridge, BridgeEvent, RunPayload};
 use crate::approval::policy::Policy;
 use crate::approval::router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource};
-use crate::cloud::protocol::{ApprovalDecision, ApprovalKind};
+use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, ApprovalMode};
 use crate::config::schema::RunnerConfig;
 use crate::daemon::runner_instance::RunnerInstance;
 
@@ -105,6 +105,11 @@ struct SessionRuntime {
     workspace: Option<PathBuf>,
     bridge_seq: u64,
     started_sent: bool,
+    /// The approval mode this session's engine thread was spawned under.
+    /// Captured once, when the bridge is first spawned, and then held for the
+    /// life of the thread so a mode change mid-session cannot retune a turn
+    /// already in flight — it takes effect on the next thread instead.
+    approval_mode: ApprovalMode,
 }
 
 /// Per-`RunnerInstance` registry of live chat sessions, keyed by
@@ -194,6 +199,7 @@ pub(crate) struct WarmArgs {
     pub chat_session_id: Uuid,
     pub cwd: Option<String>,
     pub model: Option<String>,
+    pub mode: Option<ApprovalMode>,
     pub local_thread_id: Option<String>,
     pub local_session_id: Option<String>,
 }
@@ -204,6 +210,7 @@ pub(crate) struct SendArgs {
     pub content: String,
     pub cwd: Option<String>,
     pub model: Option<String>,
+    pub mode: Option<ApprovalMode>,
     pub local_thread_id: Option<String>,
     pub local_session_id: Option<String>,
 }
@@ -229,6 +236,7 @@ pub(crate) async fn handle_warm<S: ChatSink>(
         args.cwd.as_deref(),
         args.model.clone(),
         resume_id.as_deref(),
+        args.mode,
     )
     .await
     {
@@ -309,6 +317,7 @@ pub(crate) async fn handle_send<S: ChatSink>(
         args.cwd.as_deref(),
         args.model.clone(),
         resume_id.as_deref(),
+        args.mode,
     )
     .await
     {
@@ -328,6 +337,7 @@ pub(crate) async fn handle_send<S: ChatSink>(
     // sibling fields; write them back once the turn returns.
     let mut bridge_seq = rt.bridge_seq;
     let mut started_sent = rt.started_sent;
+    let approval_mode = rt.approval_mode;
     let outcome = {
         let bridge = rt
             .bridge
@@ -339,6 +349,7 @@ pub(crate) async fn handle_send<S: ChatSink>(
                 message_id: args.message_id,
                 content: args.content,
                 model: args.model,
+                mode: approval_mode,
                 runner_id: inst.config.runner_id,
                 config: &inst.config,
                 approvals: &inst.approvals,
@@ -441,6 +452,7 @@ async fn ensure_bridge(
     cwd: Option<&str>,
     model: Option<String>,
     resume_id: Option<&str>,
+    mode: Option<ApprovalMode>,
 ) -> Result<PathBuf> {
     if rt.workspace.is_none() {
         rt.workspace = Some(resolve_chat_workspace(&inst.config, cwd)?);
@@ -457,9 +469,20 @@ async fn ensure_bridge(
         rt.started_sent = false;
     }
     if rt.bridge.is_none() {
+        // Capture the mode for the whole thread the moment we spawn it. A
+        // later warm/send that carries a different mode reuses this bridge and
+        // does not disturb the captured value — the new mode only lands when a
+        // fresh session spawns its own bridge.
+        rt.approval_mode = mode.unwrap_or_default();
         rt.bridge = Some(
-            AgentBridge::spawn_from_config_with_resume(&inst.config, &workspace, model, resume_id)
-                .await?,
+            AgentBridge::spawn_from_config_with_resume(
+                &inst.config,
+                &workspace,
+                model,
+                resume_id,
+                Some(rt.approval_mode),
+            )
+            .await?,
         );
     }
     Ok(workspace)
@@ -470,6 +493,7 @@ struct DriveCtx<'a> {
     message_id: Uuid,
     content: String,
     model: Option<String>,
+    mode: ApprovalMode,
     runner_id: Uuid,
     config: &'a RunnerConfig,
     approvals: &'a ApprovalRouter,
@@ -493,6 +517,7 @@ async fn drive_turn<S: ChatSink>(
         message_id,
         content,
         model,
+        mode,
         runner_id,
         config,
         approvals,
@@ -580,6 +605,7 @@ async fn drive_turn<S: ChatSink>(
                                     chat_session_id,
                                     runner_id,
                                     message_id,
+                                    mode,
                                     config,
                                     approvals,
                                     workspace,
@@ -635,6 +661,7 @@ struct ApprovalCtx<'a> {
     chat_session_id: Uuid,
     runner_id: Uuid,
     message_id: Uuid,
+    mode: ApprovalMode,
     config: &'a RunnerConfig,
     approvals: &'a ApprovalRouter,
     workspace: &'a Path,
@@ -664,7 +691,7 @@ async fn resolve_approval<S: ChatSink>(
     cancelled: &mut std::pin::Pin<&mut tokio::sync::futures::Notified<'_>>,
     sink: &mut S,
 ) -> Result<Option<Response>> {
-    let policy = Policy::new(&ctx.config.approval_policy, ctx.workspace);
+    let policy = Policy::new(&ctx.config.approval_policy, ctx.workspace, ctx.mode);
     if let Some(auto) = policy.evaluate(kind, &payload).into_cloud() {
         if let Err(e) = bridge.send_approval(approval_id, auto).await {
             return Ok(Some(Response::ChatFailed {
@@ -976,6 +1003,7 @@ mod tests {
                 message_id,
                 content: "hi".into(),
                 model: None,
+                mode: ApprovalMode::Ask,
                 runner_id: cfg.runner_id,
                 config: &cfg,
                 approvals: &approvals,
@@ -1057,6 +1085,7 @@ mod tests {
                     message_id: Uuid::new_v4(),
                     content: "hang".into(),
                     model: None,
+                    mode: ApprovalMode::Ask,
                     runner_id: cfg.runner_id,
                     config: &cfg,
                     approvals: &approvals,
@@ -1123,6 +1152,7 @@ mod tests {
                     message_id: Uuid::new_v4(),
                     content: "run it".into(),
                     model: None,
+                    mode: ApprovalMode::Ask,
                     runner_id: cfg.runner_id,
                     config: &cfg,
                     approvals: &approvals,

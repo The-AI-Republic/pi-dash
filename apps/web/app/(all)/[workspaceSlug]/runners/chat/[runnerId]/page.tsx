@@ -11,7 +11,15 @@ import { useParams, useSearchParams } from "react-router";
 import useSWR from "swr";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { getChatTransport, getRunnerDetail } from "@pi-dash/services";
-import type { IAgentChatEvent, IAgentChatMessage, IAgentChatSession, IRunner } from "@pi-dash/types";
+import type {
+  IAgentChatEvent,
+  IAgentChatMessage,
+  IAgentChatSession,
+  IRunner,
+  TApprovalDecision,
+  TApprovalKind,
+  TApprovalMode,
+} from "@pi-dash/types";
 import { Badge, Button } from "@pi-dash/ui";
 import { calculateTimeAgo, renderFormattedDate } from "@pi-dash/utils";
 import { ChatComposer } from "@/components/chat/composer";
@@ -20,6 +28,43 @@ import { type ChatHistoryItem, ChatHistoryPanel } from "@/components/chat/histor
 import { ChatMessage } from "@/components/chat/message";
 import { useAgentChatEvents } from "@/components/runners/chat/use-agent-chat-events";
 import { useWorkspace } from "@/hooks/store/use-workspace";
+import { ChatApprovalModeSelect, ChatApprovalPrompt, type PendingChatApproval } from "@/pi-dash-web/components/desktop";
+
+/**
+ * The additive, local-only transport verbs for built-in-engine approvals (see
+ * `local-chat-transport.ts`). Absent on the cloud transport — their presence is
+ * how the page decides to show the approval mode control and inline prompts.
+ */
+interface ApprovalCapableTransport {
+  setApprovalMode?: (sessionId: string, mode: TApprovalMode) => void;
+  getApprovalMode?: (sessionId: string) => TApprovalMode;
+  decideChatApproval?: (sessionId: string, localApprovalId: string, decision: TApprovalDecision) => Promise<void>;
+}
+
+const DEFAULT_APPROVAL_MODE: TApprovalMode = "full_access";
+
+/** Persisted per-runner so the chosen mode survives a reload. */
+function approvalModeStorageKey(runnerId: string | undefined): string {
+  return `pidash:chat-approval-mode:${runnerId ?? "unknown"}`;
+}
+
+/** Project a `chat_approval_request` event onto the prompt's shape. */
+function pendingApprovalFromEvent(event: IAgentChatEvent): PendingChatApproval | null {
+  const payload = event.payload as Record<string, unknown>;
+  const localApprovalId = payload.local_approval_id;
+  if (typeof localApprovalId !== "string") return null;
+  const kind = (typeof payload.approval_kind === "string" ? payload.approval_kind : "other") as TApprovalKind;
+  const { local_approval_id, approval_kind, reason, expires_at, ...rest } = payload;
+  void local_approval_id;
+  void approval_kind;
+  return {
+    localApprovalId,
+    kind,
+    reason: typeof reason === "string" ? reason : "",
+    payload: rest,
+    expiresAt: typeof expires_at === "string" ? expires_at : null,
+  };
+}
 
 function assistantDeltaText(payload: Record<string, unknown>): string {
   const params = payload.params;
@@ -185,6 +230,30 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   // (a mid-session swap needs an explicit SWR `mutate`, per the seam's
   // contract) — so the reference is stable and effects can depend on it.
   const transport = useMemo(() => getChatTransport(), []);
+  // Approvals + mode are a built-in-engine (local transport) capability; the
+  // cloud transport lacks these verbs and keeps its separate /approvals page.
+  const approvalsSupported = useMemo(
+    () => typeof (transport as ApprovalCapableTransport).decideChatApproval === "function",
+    [transport]
+  );
+  const [approvalMode, setApprovalModeState] = useState<TApprovalMode>(DEFAULT_APPROVAL_MODE);
+  const approvalModeRef = useRef(approvalMode);
+  useEffect(() => {
+    approvalModeRef.current = approvalMode;
+  }, [approvalMode]);
+  // Push the currently-selected mode into the transport's slot for a session
+  // right before it is warmed or sent to, so the runner captures it when it
+  // spawns the thread. A no-op on the cloud transport.
+  const applyApprovalMode = useCallback(
+    (sessionId: string) => {
+      (transport as ApprovalCapableTransport).setApprovalMode?.(sessionId, approvalModeRef.current);
+    },
+    [transport]
+  );
+  // The single open approval prompt (the engine asks one at a time). Cleared on
+  // a decision, on any terminal turn frame, and at the request's TTL.
+  const [pendingApproval, setPendingApproval] = useState<PendingChatApproval | null>(null);
+  const [decideBusy, setDecideBusy] = useState(false);
   const [draft, setDraft] = useState("");
   // Last transport-level stream failure, rendered above the composer.
   const [streamError, setStreamError] = useState<string | null>(null);
@@ -259,7 +328,79 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     streamStartedAtRef.current = Date.now();
     setEvents([]);
     setLiveMessages([]);
+    setPendingApproval(null);
   }, [session?.id]);
+
+  // Load the persisted per-runner mode. Only meaningful on a transport that
+  // supports approvals; the cloud transport ignores the mode entirely.
+  useEffect(() => {
+    if (!approvalsSupported) return;
+    let stored: string | null = null;
+    try {
+      stored = window.localStorage.getItem(approvalModeStorageKey(runnerId));
+    } catch {
+      stored = null;
+    }
+    setApprovalModeState(
+      stored === "ask" || stored === "workspace" || stored === "full_access" ? stored : DEFAULT_APPROVAL_MODE
+    );
+  }, [runnerId, approvalsSupported]);
+
+  const changeApprovalMode = useCallback(
+    (mode: TApprovalMode) => {
+      setApprovalModeState(mode);
+      try {
+        window.localStorage.setItem(approvalModeStorageKey(runnerId), mode);
+      } catch {
+        /* private mode / storage disabled — the in-memory value still holds */
+      }
+      // Update the current session's slot too; the runner only honours it on
+      // the next thread, so a turn already running keeps the mode it started.
+      if (session?.id) (transport as ApprovalCapableTransport).setApprovalMode?.(session.id, mode);
+    },
+    [runnerId, session?.id, transport]
+  );
+
+  const decideApproval = useCallback(
+    async (decision: TApprovalDecision) => {
+      const request = pendingApproval;
+      if (!request || !session?.id) return;
+      setDecideBusy(true);
+      // Clear optimistically so the prompt doesn't linger on a slow round-trip;
+      // the turn continues and streams to completion either way.
+      setPendingApproval(null);
+      try {
+        await (transport as ApprovalCapableTransport).decideChatApproval?.(
+          session.id,
+          request.localApprovalId,
+          decision
+        );
+      } catch (e: unknown) {
+        const err = e as { error?: string; message?: string } | null;
+        setStreamError(err?.error ?? err?.message ?? "Could not send the approval decision");
+        // Restore the prompt so the user can retry the decision.
+        setPendingApproval(request);
+      } finally {
+        setDecideBusy(false);
+      }
+    },
+    [pendingApproval, session?.id, transport]
+  );
+
+  // The prompt expires with the request's TTL: the runner drops the approval
+  // and ends the turn at the deadline, so the UI must not keep offering a
+  // button that would answer a request the daemon has already discarded.
+  useEffect(() => {
+    if (!pendingApproval?.expiresAt) return;
+    const remaining = Date.parse(pendingApproval.expiresAt) - Date.now();
+    if (!Number.isFinite(remaining)) return;
+    if (remaining <= 0) {
+      setPendingApproval(null);
+      return;
+    }
+    const timer = window.setTimeout(() => setPendingApproval(null), remaining);
+    return () => window.clearTimeout(timer);
+  }, [pendingApproval]);
 
   useEffect(() => {
     let cancelled = false;
@@ -275,6 +416,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
         if (warmSessionRef.current === session.id) return;
         warmSessionRef.current = session.id;
         try {
+          applyApprovalMode(session.id);
           await transport.warmChatSession(session.id);
         } catch {
           return;
@@ -303,6 +445,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
             ? currentSessions
             : [created, ...currentSessions];
         }, false);
+        applyApprovalMode(created.id);
         await transport.warmChatSession(created.id);
         mutateSessions();
       } catch {
@@ -314,6 +457,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
       cancelled = true;
     };
   }, [
+    applyApprovalMode,
     mutateSessions,
     pendingSessionId,
     requestedSessionId,
@@ -348,6 +492,17 @@ const RunnerChatPage = observer(function RunnerChatPage() {
           }
         }
         return;
+      }
+      if (event.kind === "chat_approval_request") {
+        const request = pendingApprovalFromEvent(event);
+        if (request) setPendingApproval(request);
+        return;
+      }
+      // Any terminal turn frame resolves the parked approval — approve/deny let
+      // the turn continue to turn_completed, a TTL/cancel ends it as failed or
+      // cancelled. Clearing here covers the cases the click handler doesn't.
+      if (["turn_completed", "chat_failed", "chat_closed"].includes(event.kind)) {
+        setPendingApproval(null);
       }
       if (["turn_started", "turn_completed", "chat_failed", "chat_closed", "chat_warmed"].includes(event.kind)) {
         mutateSessions();
@@ -403,6 +558,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     setDraft("");
     try {
       const target = await ensureSession();
+      applyApprovalMode(target.id);
       await transport.sendChatMessage(target.id, content);
       mutateMessages();
       mutateSessions();
@@ -427,6 +583,9 @@ const RunnerChatPage = observer(function RunnerChatPage() {
 
   async function stop() {
     if (!session) return;
+    // Interrupting cancels the turn; the open prompt (if any) is answered by
+    // that cancel, so clear it immediately rather than leaving a dead button.
+    setPendingApproval(null);
     await transport.cancelChat(session.id, "user_cancelled");
     mutateSessions();
   }
@@ -464,6 +623,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
         return currentSessions.some((item) => item.id === created.id) ? currentSessions : [created, ...currentSessions];
       }, false);
       // Warm in the background; the session is usable without waiting for it.
+      applyApprovalMode(created.id);
       transport.warmChatSession(created.id).catch(() => {});
       selectSession(created.id);
     } catch (e: unknown) {
@@ -538,6 +698,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
+                {approvalsSupported && <ChatApprovalModeSelect value={approvalMode} onChange={changeApprovalMode} />}
                 {runner && (
                   <Badge variant={runner.status === "online" ? "accent-success" : "accent-neutral"}>
                     {runner.status}
@@ -557,6 +718,11 @@ const RunnerChatPage = observer(function RunnerChatPage() {
           listFooter={eventStrip.length > 0 ? <>{eventStrip}</> : undefined}
           composer={
             <>
+              {pendingApproval && (
+                <div className="mb-2">
+                  <ChatApprovalPrompt request={pendingApproval} onDecide={decideApproval} busy={decideBusy} />
+                </div>
+              )}
               {streamError && (
                 <div
                   role="alert"
