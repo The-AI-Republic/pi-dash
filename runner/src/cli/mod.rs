@@ -200,6 +200,7 @@ async fn run_default(paths: &crate::util::paths::Paths) -> Result<()> {
                 url: None,
                 no_browser: false,
                 workspace: None,
+                device_code: None,
             }),
         };
         return auth::run(args, paths).await;

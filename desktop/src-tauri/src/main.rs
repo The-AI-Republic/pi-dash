@@ -264,6 +264,28 @@ async fn check_for_updates(handle: tauri::AppHandle) {
     handle.restart();
 }
 
+/// Wipe the webview's own session state — cookies first of all.
+///
+/// Sign-out posts to the server and relies on its `Set-Cookie` deletions
+/// reaching this webview. They do not: the page origin is `tauri://localhost`
+/// while the API is a different origin, so the deletion is dropped and the
+/// session survives a "sign out" — the app lands on the sign-in page, the
+/// route guard sees a live session, and bounces straight back in. The app owns
+/// this cookie jar, so it clears it itself rather than trusting a cross-origin
+/// response to do it.
+///
+/// Called by the web layer *after* the sign-out request (which needs the CSRF
+/// cookie) and before it navigates.
+#[tauri::command]
+async fn desktop_clear_web_data<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "no main webview window".to_string())?;
+    window
+        .clear_all_browsing_data()
+        .map_err(|e| format!("clearing webview data: {e}"))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `target_url` is the server origin that the deep-link sign-in handler
     // navigates the webview to during sign-in (see handle_deep_link). It is
@@ -382,6 +404,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             open_in_browser,
             pidash_cli::detect_pidash_cli,
             pidash_cli::install_pidash_cli,
+            pidash_cli::pidash_cli_login,
             // Direct local chat with the built-in engine (PDASHOSS01-159):
             // these reach the daemon over its IPC socket and stream Chat*
             // frames back to the webview as `chat://frame` events — never via
@@ -402,6 +425,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             managed_runner::managed_start_daemon,
             managed_runner::managed_stop_daemon,
             managed_runner::managed_sign_out,
+            desktop_clear_web_data,
             managed_runner::managed_doctor,
             // Direct local chat history: stored on this machine only, per
             // account, never relayed to or stored by the Pi Dash server.
