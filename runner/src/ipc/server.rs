@@ -315,6 +315,7 @@ impl IpcServer {
                 runner,
                 cwd,
                 model,
+                mode,
                 local_thread_id,
                 local_session_id,
             } => {
@@ -326,6 +327,7 @@ impl IpcServer {
                         chat_session_id,
                         cwd,
                         model,
+                        mode,
                         local_thread_id,
                         local_session_id,
                     },
@@ -340,6 +342,7 @@ impl IpcServer {
                 runner,
                 cwd,
                 model,
+                mode,
                 local_thread_id,
                 local_session_id,
             } => {
@@ -353,6 +356,7 @@ impl IpcServer {
                         content,
                         cwd,
                         model,
+                        mode,
                         local_thread_id,
                         local_session_id,
                     },

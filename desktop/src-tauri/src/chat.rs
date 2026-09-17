@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use pidash_ipc::protocol::{Request, Response};
-use pidash_ipc::{ApprovalDecision, Client};
+use pidash_ipc::{ApprovalDecision, ApprovalMode, Client};
 use serde::Serialize;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -246,6 +246,7 @@ pub async fn chat_warm<R: Runtime>(
     runner: Option<String>,
     cwd: Option<String>,
     model: Option<String>,
+    mode: Option<ApprovalMode>,
     local_thread_id: Option<String>,
     local_session_id: Option<String>,
 ) -> Result<(), String> {
@@ -255,6 +256,7 @@ pub async fn chat_warm<R: Runtime>(
         runner,
         cwd,
         model,
+        mode,
         local_thread_id,
         local_session_id,
     };
@@ -275,6 +277,7 @@ pub async fn chat_send<R: Runtime>(
     runner: Option<String>,
     cwd: Option<String>,
     model: Option<String>,
+    mode: Option<ApprovalMode>,
     local_thread_id: Option<String>,
     local_session_id: Option<String>,
 ) -> Result<(), String> {
@@ -286,6 +289,7 @@ pub async fn chat_send<R: Runtime>(
         runner,
         cwd,
         model,
+        mode,
         local_thread_id,
         local_session_id,
     };
@@ -426,6 +430,7 @@ mod tests {
             runner: None,
             cwd: None,
             model: None,
+            mode: None,
             local_thread_id: None,
             local_session_id: None,
         }

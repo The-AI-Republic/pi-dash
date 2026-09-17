@@ -6,7 +6,7 @@ use uuid::Uuid;
 // These wire enums moved to the shared `pidash-ipc` crate (PDASHOSS01-158);
 // re-exported here so every `cloud::protocol::{RunnerStatus, ApprovalKind,
 // ApprovalDecision}` call site is unchanged.
-pub use pidash_ipc::dto::{ApprovalDecision, ApprovalKind, RunnerStatus};
+pub use pidash_ipc::dto::{ApprovalDecision, ApprovalKind, ApprovalMode, RunnerStatus};
 
 /// Wire version — bump on incompatible shape changes.
 ///
