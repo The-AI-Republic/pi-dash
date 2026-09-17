@@ -98,6 +98,14 @@ async fn chat_and_run_share_one_engine_through_agent_bridge() {
     let mut chat_bridge = AgentBridge::shared_codex(engine.handle(), Uuid::new_v4().to_string());
     let mut run_bridge = AgentBridge::shared_codex(engine.handle(), Uuid::new_v4().to_string());
 
+    // The shared engine's process outlives any one session, so the chat lane
+    // treats a mid-turn `agent stdout closed` as a failed turn (respawn +
+    // resume on the next message), not a lost runtime.
+    assert!(
+        chat_bridge.survives_process_exit(),
+        "SharedCodex bridge must report it survives a process exit"
+    );
+
     // Chat lane warms first (as ChatWorker::handle_warm does), then runs a turn.
     let warmed = chat_bridge.warm(&cwd).await.expect("warm chat");
     assert_eq!(warmed.as_deref(), Some("th_chat"));

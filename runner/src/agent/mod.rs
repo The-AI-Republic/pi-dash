@@ -635,6 +635,18 @@ impl AgentBridge {
         }
     }
 
+    /// True when this bridge is backed by the shared, always-on codex engine,
+    /// whose process outlives any one session and self-heals (respawn + resume
+    /// by stored thread id) after a crash. Every other variant owns a
+    /// per-session subprocess whose exit ends the session for good.
+    ///
+    /// The chat lane consults this so that an `agent stdout closed` mid-turn is
+    /// treated as a failed *turn* — keep the runtime warm; the next message
+    /// respawns the engine and resumes this thread — rather than a lost runtime.
+    pub fn survives_process_exit(&self) -> bool {
+        matches!(self, AgentBridge::SharedCodex(_))
+    }
+
     /// Bridge-owned observability handle: the agent subprocess's PID and a
     /// watch receiver that yields `Some(ExitSnapshot)` once the wait task
     /// observes termination. Supervisor uses this to drive

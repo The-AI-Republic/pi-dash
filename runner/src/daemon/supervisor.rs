@@ -2243,7 +2243,15 @@ impl ChatWorker {
                             failed_at: Utc::now(),
                         }).await.ok();
                         self.state.set_chat_active(false).await;
-                        return Ok(true);
+                        // The shared codex engine self-heals: its process
+                        // outlives this crash and the next message respawns it
+                        // and resumes this thread from its stored id. Keep the
+                        // runtime warm (return `false`) so the session isn't
+                        // released — releasing would drop the engine's resume
+                        // entry and the next message would start a fresh thread,
+                        // losing the conversation. A per-session subprocess is
+                        // gone for good, so its runtime must still close.
+                        return Ok(!bridge.survives_process_exit());
                     };
                     let mut done = false;
                     for ev in events {
