@@ -356,6 +356,7 @@ impl AgentCursor {
             AgentCursor::CursorAgent(_) => "cursor_agent",
             AgentCursor::OpenClaw(_) => "openclaw",
             AgentCursor::Grok(_) => "grok",
+            AgentCursor::MuseCode(_) => "muse_code",
         }
     }
 
