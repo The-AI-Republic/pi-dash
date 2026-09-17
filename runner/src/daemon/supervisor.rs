@@ -464,6 +464,7 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
             current_run: None,
             current_chat: None,
             local_chat_active: inst_chat_active,
+            codex_engine: None,
         };
         if let Err(e) = run.run().await {
             tracing::error!("runner loop exited: {e:#}");
@@ -812,6 +813,12 @@ struct RunnerLoop {
     /// assign lane consults it so a managed run and a local chat never modify
     /// the same working copy at the same time (issue AC6).
     local_chat_active: Arc<std::sync::atomic::AtomicBool>,
+    /// The one long-lived codex engine this runner shares across its chat lane
+    /// and its issue-run lane (PDASHOSS01-172). Spawned lazily on first codex
+    /// use via [`RunnerLoop::ensure_codex_engine`]; `None` for non-codex
+    /// runners and until first use. Dropping it (on loop exit) aborts the actor
+    /// and reaps the engine process.
+    codex_engine: Option<crate::codex::engine::SharedCodexEngine>,
 }
 
 struct CurrentRun {
@@ -919,6 +926,40 @@ impl RunnerLoop {
         let _ = tokio::time::timeout(Duration::from_secs(5), &mut chat.done_rx).await;
     }
 
+    /// Acquire a handle to this runner's shared codex engine, spawning it once
+    /// on first use. Returns `None` for a non-codex runner (local runners stay
+    /// one-process-per-session by design — PDASHOSS01-172), in which case the
+    /// caller falls back to spawning a per-lane `AgentBridge`. A spawn failure
+    /// is logged and also yields `None` so the lane degrades to a per-lane
+    /// bridge rather than failing the run outright.
+    async fn ensure_codex_engine(&mut self) -> Option<crate::codex::engine::EngineHandle> {
+        if self.runner_config.agent.kind != AgentKind::Codex {
+            return None;
+        }
+        if self.codex_engine.is_none() {
+            let codex = &self.runner_config.codex;
+            match crate::codex::engine::SharedCodexEngine::spawn_with_env(
+                &codex.binary,
+                &self.runner_config.workspace.working_dir,
+                codex.model_default.clone(),
+                codex.effort_default.clone(),
+                &crate::agent::agent_env_for_config(&self.runner_config),
+            )
+            .await
+            {
+                Ok(engine) => self.codex_engine = Some(engine),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to spawn shared codex engine; falling back to per-lane bridge"
+                    );
+                    return None;
+                }
+            }
+        }
+        self.codex_engine.as_ref().map(|e| e.handle())
+    }
+
     async fn start_chat_runtime(
         &mut self,
         chat_session_id: uuid::Uuid,
@@ -926,6 +967,8 @@ impl RunnerLoop {
         let (tx, rx) = mpsc::channel(8);
         let (active_tx, active_rx) = watch::channel(false);
         let (done_tx, done_rx) = oneshot::channel();
+        // Share this runner's one codex engine with the chat lane (codex only).
+        let codex_engine = self.ensure_codex_engine().await;
         self.current_chat = Some(CurrentChat {
             chat_session_id,
             tx: tx.clone(),
@@ -939,6 +982,7 @@ impl RunnerLoop {
             out: self.out.clone(),
             command_rx: rx,
             active_tx,
+            codex_engine,
         };
         tokio::spawn(async move {
             worker.run(chat_session_id).await;
@@ -1149,6 +1193,10 @@ impl RunnerLoop {
                     let state = self.state.clone();
                     let approvals = self.approvals.clone();
                     let out = self.out.clone();
+                    // Share this runner's one codex engine with the issue-run
+                    // lane (codex only); non-codex falls back to a per-run
+                    // subprocess inside the worker.
+                    let codex_engine = self.ensure_codex_engine().await;
                     tokio::spawn(async move {
                         let mut worker = AssignWorker {
                             runner_paths,
@@ -1158,6 +1206,7 @@ impl RunnerLoop {
                             approvals,
                             out,
                             cancel,
+                            codex_engine,
                         };
                         if let Err(e) = worker
                             .run(run_id, prompt, repo_url, expected_codex_model)
@@ -1662,6 +1711,11 @@ struct ChatWorker {
     out: RunnerOut,
     command_rx: mpsc::Receiver<ChatCommand>,
     active_tx: watch::Sender<bool>,
+    /// A clone of this runner's shared codex engine handle, for the codex kind.
+    /// `Some` → chat turns run as threads on the shared engine (no per-turn
+    /// subprocess spawn); `None` → the legacy per-session `AgentBridge` path
+    /// (non-codex runners, or a shared-engine spawn failure).
+    codex_engine: Option<crate::codex::engine::EngineHandle>,
 }
 
 impl ChatWorker {
@@ -1866,6 +1920,35 @@ impl ChatWorker {
         });
     }
 
+    /// Build the chat bridge for this session: a thread on this runner's shared
+    /// codex engine when one is available, else the legacy per-session
+    /// `AgentBridge` (non-codex runners, or a shared-engine spawn failure).
+    /// `model`/`resume_id` only reach the per-session path — the shared engine
+    /// carries the model per turn and codex ignores `--resume`.
+    async fn build_chat_bridge(
+        &self,
+        chat_session_id: uuid::Uuid,
+        workspace_path: &std::path::Path,
+        model: Option<String>,
+        resume_id: Option<&str>,
+    ) -> Result<AgentBridge> {
+        match &self.codex_engine {
+            Some(handle) => Ok(AgentBridge::shared_codex(
+                handle.clone(),
+                chat_session_id.to_string(),
+            )),
+            None => {
+                AgentBridge::spawn_from_config_with_resume(
+                    &self.runner_config,
+                    workspace_path,
+                    model,
+                    resume_id,
+                )
+                .await
+            }
+        }
+    }
+
     async fn handle_warm(
         &mut self,
         chat_session_id: uuid::Uuid,
@@ -1911,8 +1994,8 @@ impl ChatWorker {
         if bridge.is_none() {
             let spawn_started = Instant::now();
             *bridge = Some(
-                AgentBridge::spawn_from_config_with_resume(
-                    &self.runner_config,
+                self.build_chat_bridge(
+                    chat_session_id,
                     workspace_path,
                     warm.model,
                     resume_id.as_deref(),
@@ -2028,8 +2111,8 @@ impl ChatWorker {
         if bridge.is_none() {
             let spawn_started = Instant::now();
             *bridge = Some(
-                AgentBridge::spawn_from_config_with_resume(
-                    &self.runner_config,
+                self.build_chat_bridge(
+                    chat_session_id,
                     workspace_path,
                     turn.model.clone(),
                     resume_id.as_deref(),
@@ -2632,6 +2715,11 @@ struct AssignWorker {
     approvals: ApprovalRouter,
     out: RunnerOut,
     cancel: tokio_util::sync::CancellationToken,
+    /// A clone of this runner's shared codex engine handle, for the codex kind.
+    /// `Some` → the run executes as a thread on the shared engine; `None` → the
+    /// legacy per-run `AgentBridge` subprocess (non-codex runners, or a
+    /// shared-engine spawn failure).
+    codex_engine: Option<crate::codex::engine::EngineHandle>,
 }
 
 struct RunMetadata {
@@ -2665,6 +2753,24 @@ impl AssignWorker {
             | AgentKind::OpenClaw
             | AgentKind::Grok
             | AgentKind::MuseCode => FailureReason::AgentCrash,
+        }
+    }
+
+    /// Build the bridge for this run: a thread on this runner's shared codex
+    /// engine when one is available, else the legacy per-run `AgentBridge`
+    /// subprocess. `model` only reaches the per-run path — the shared engine
+    /// carries the model on the turn.
+    async fn build_run_bridge(
+        &self,
+        run_id: uuid::Uuid,
+        workspace_path: &std::path::Path,
+        model: Option<String>,
+    ) -> Result<AgentBridge> {
+        match &self.codex_engine {
+            Some(handle) => Ok(AgentBridge::shared_codex(handle.clone(), run_id.to_string())),
+            None => {
+                AgentBridge::spawn_from_config(&self.runner_config, workspace_path, model).await
+            }
         }
     }
 
@@ -2797,12 +2903,9 @@ impl AssignWorker {
         // Bridge to the configured agent (Codex or Claude Code). `AgentBridge`
         // hides which CLI is actually being driven from the rest of this
         // worker; the event flow below is identical for both.
-        let mut bridge = match AgentBridge::spawn_from_config(
-            &self.runner_config,
-            &workspace_path,
-            expected_codex_model.clone(),
-        )
-        .await
+        let mut bridge = match self
+            .build_run_bridge(run_id, &workspace_path, expected_codex_model.clone())
+            .await
         {
             Ok(b) => b,
             Err(e) => {
@@ -3493,6 +3596,7 @@ mod tests {
                 approvals: ApprovalRouter::new(),
                 out: RunnerOut::new(config.runner_id, tx),
                 cancel: tokio_util::sync::CancellationToken::new(),
+                codex_engine: None,
             };
             worker
                 .run(
@@ -3548,6 +3652,7 @@ mod tests {
             out: RunnerOut::new(config.runner_id, tx),
             command_rx: cmd_rx,
             active_tx,
+            codex_engine: None,
         };
         let chat_dir = chat
             .resolve_chat_workspace(uuid::Uuid::new_v4(), None)
