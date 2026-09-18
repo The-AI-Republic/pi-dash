@@ -111,6 +111,131 @@ async fn warm_bridge_reuses_initialized_thread_across_turns() {
 }
 
 #[tokio::test]
+async fn multiplexed_sessions_route_frames_to_their_own_threads() {
+    // One engine process hosts two conversations as separate threads. The fake
+    // app-server hands out `th_a` and `th_b`, then emits interleaved frames
+    // each stamped with its `threadId`. The Bridge must demultiplex them so
+    // each thread's cursor sees only its own events, in order (delta before
+    // completed), and neither turn stalls the other.
+    let script = r#"
+        set -e
+        read _                                  # initialize
+        printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+        read _                                  # initialized (no response)
+        read _                                  # thread/start for session A
+        printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_a"}}'
+        read _                                  # thread/start for session B
+        printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"threadId":"th_b"}}'
+        read _                                  # turn/start A (no response)
+        read _                                  # turn/start B (no response)
+        # Interleaved, thread-stamped notifications: A and B streaming at once.
+        printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"th_a","text":"a1"}}'
+        printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"th_b","text":"b1"}}'
+        printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"th_a","conclusion":"success","done":{"status":"ok","who":"a"}}}'
+        printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"th_b","conclusion":"success","done":{"status":"ok","who":"b"}}}'
+        sleep 0.3
+    "#;
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(script);
+    let server = AppServer::spawn_command(cmd)
+        .await
+        .expect("spawn fake codex");
+    let mut bridge = Bridge::from_server(server, None);
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let th_a = bridge.warm_session("A", &cwd).await.expect("warm A");
+    let th_b = bridge.warm_session("B", &cwd).await.expect("warm B");
+    assert_eq!(th_a, "th_a");
+    assert_eq!(th_b, "th_b");
+    assert_eq!(bridge.live_thread_count(), 0, "no turns started yet");
+
+    bridge
+        .run_session(
+            "A",
+            &RunPayload {
+                run_id: Uuid::new_v4(),
+                prompt: "a".into(),
+                model: None,
+            },
+            &cwd,
+        )
+        .await
+        .expect("run A");
+    bridge
+        .run_session(
+            "B",
+            &RunPayload {
+                run_id: Uuid::new_v4(),
+                prompt: "b".into(),
+                model: None,
+            },
+            &cwd,
+        )
+        .await
+        .expect("run B");
+    assert_eq!(bridge.live_thread_count(), 2, "two live threads");
+
+    // Collect the demuxed events per thread until both turns complete.
+    let mut a_completed = false;
+    let mut b_completed = false;
+    let mut a_saw_own_delta = false;
+    let mut b_saw_own_delta = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline && !(a_completed && b_completed) {
+        let Some((thread_id, events)) =
+            tokio::time::timeout(Duration::from_secs(1), bridge.next_session_event())
+                .await
+                .ok()
+                .flatten()
+        else {
+            continue;
+        };
+        for ev in events {
+            match ev {
+                BridgeEvent::Raw { method, params, .. } => {
+                    // Isolation: every frame routed to a thread carries that
+                    // thread's id — never the other conversation's.
+                    let stamped = params.get("threadId").and_then(|v| v.as_str());
+                    assert_eq!(
+                        stamped,
+                        Some(thread_id.as_str()),
+                        "frame {method} routed to the wrong thread"
+                    );
+                    if thread_id == "th_a" && params.get("text").and_then(|v| v.as_str()) == Some("a1")
+                    {
+                        a_saw_own_delta = true;
+                    }
+                    if thread_id == "th_b" && params.get("text").and_then(|v| v.as_str()) == Some("b1")
+                    {
+                        b_saw_own_delta = true;
+                    }
+                }
+                BridgeEvent::Completed { done_payload, .. } => {
+                    // Ordering: the delta must arrive before completion.
+                    if thread_id == "th_a" {
+                        assert!(a_saw_own_delta, "A completed before its own delta");
+                        assert_eq!(done_payload["who"], "a");
+                        a_completed = true;
+                    } else if thread_id == "th_b" {
+                        assert!(b_saw_own_delta, "B completed before its own delta");
+                        assert_eq!(done_payload["who"], "b");
+                        b_completed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(a_completed, "thread A never completed");
+    assert!(b_completed, "thread B never completed");
+
+    // Closing one session drops its thread but keeps the process (and B) alive.
+    assert_eq!(bridge.release_session("A").as_deref(), Some("th_a"));
+    assert_eq!(bridge.live_thread_count(), 1, "A released, B still live");
+    assert_eq!(bridge.release_session("A"), None, "double-release is a no-op");
+}
+
+#[tokio::test]
 async fn bridge_happy_path_drives_fake_codex_to_completion() {
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(fake_codex_script());

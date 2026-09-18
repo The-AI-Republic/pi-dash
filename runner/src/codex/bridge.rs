@@ -14,8 +14,8 @@ use crate::codex::app_server::AppServer;
 use crate::util::shell::AgentEnv;
 use crate::codex::jsonrpc::{self, Incoming};
 use crate::codex::schema::{
-    ApprovalResponseParams, ClientInfo, InitializeParams, NotificationKind, ThreadStartParams,
-    TurnInputItem, TurnStartParams,
+    ApprovalResponseParams, ClientInfo, InitializeParams, NotificationKind, ThreadResumeParams,
+    ThreadStartParams, TurnInputItem, TurnStartParams,
 };
 
 pub struct Bridge {
@@ -27,6 +27,16 @@ pub struct Bridge {
     pub effort_default: Option<String>,
     initialized: bool,
     thread_id: Option<String>,
+    /// Multiplexer: session id → thread id. One engine process can host many
+    /// conversations/runs, each anchored to its own codex thread. The legacy
+    /// single-`thread_id` path (via [`Bridge::warm`] / [`Bridge::run`]) is kept
+    /// for callers that have not yet migrated to the per-session API.
+    sessions: std::collections::HashMap<String, String>,
+    /// Multiplexer: thread id → its cursor. In multiplexed mode the Bridge owns
+    /// the cursors so [`Bridge::next_session_event`] can demultiplex inbound
+    /// frames by the `threadId` codex stamps on every frame, keeping one cursor
+    /// (and thus per-thread ordering) per live thread.
+    cursors: std::collections::HashMap<String, BridgeCursor>,
     /// Notifications that arrived while we were waiting for an RPC response
     /// (e.g. an early `account/reauthRequired` during `initialize`). Drained
     /// by [`Bridge::next_frame`] before reading from the live stream so the
@@ -59,6 +69,8 @@ impl Bridge {
             effort_default,
             initialized: false,
             thread_id: None,
+            sessions: std::collections::HashMap::new(),
+            cursors: std::collections::HashMap::new(),
             pending: std::collections::VecDeque::new(),
         })
     }
@@ -72,6 +84,8 @@ impl Bridge {
             effort_default: None,
             initialized: false,
             thread_id: None,
+            sessions: std::collections::HashMap::new(),
+            cursors: std::collections::HashMap::new(),
             pending: std::collections::VecDeque::new(),
         }
     }
@@ -112,6 +126,130 @@ impl Bridge {
             pending_command_approval_id: None,
             unpaired_waiting_on_approval: false,
         })
+    }
+
+    // ---- Multiplexer API -------------------------------------------------
+    //
+    // The legacy `warm`/`run`/`next_frame` path above anchors the whole Bridge
+    // to a single thread. The methods below let one engine process host many
+    // conversations/runs concurrently: a caller `warm_session`s a thread for
+    // its session key, `run_session`s turns on it, and demultiplexes inbound
+    // frames with `next_session_event`, which routes each frame to the cursor
+    // for the `threadId` codex stamped on it. Threads are torn down with
+    // `release_session` while the process keeps running.
+
+    /// Acquire (or reuse) the codex thread bound to `session`, returning its
+    /// thread id. Idempotent: a second call for the same session returns the
+    /// same thread without starting another.
+    pub async fn warm_session(&mut self, session: &str, cwd: &Path) -> Result<String> {
+        self.ensure_initialized().await?;
+        if let Some(thread_id) = self.sessions.get(session) {
+            return Ok(thread_id.clone());
+        }
+        let thread_id = self.start_thread(cwd).await?;
+        self.sessions.insert(session.to_string(), thread_id.clone());
+        Ok(thread_id)
+    }
+
+    /// Start a turn for `session`, warming its thread first if needed. Returns
+    /// the thread id the turn runs on; the per-thread cursor is retained by the
+    /// Bridge and driven by [`Bridge::next_session_event`].
+    pub async fn run_session(
+        &mut self,
+        session: &str,
+        payload: &RunPayload,
+        cwd: &Path,
+    ) -> Result<String> {
+        let thread_id = self.warm_session(session, cwd).await?;
+        self.start_turn(&thread_id, payload).await?;
+        let cursor = BridgeCursor {
+            run_id: payload.run_id,
+            thread_id: thread_id.clone(),
+            model: payload.model.clone().or_else(|| self.model_default.clone()),
+            seq: 0,
+            pending_command: None,
+            pending_command_approval_id: None,
+            unpaired_waiting_on_approval: false,
+        };
+        self.cursors.insert(thread_id.clone(), cursor);
+        Ok(thread_id)
+    }
+
+    /// Reattach `session` to an already-existing codex thread by its stored id,
+    /// via `thread/resume`. Used after the shared engine respawns its
+    /// app-server process (crash/recovery): a fresh process has forgotten every
+    /// live thread, so each session that was live before the crash is resumed by
+    /// the id the runner retained. Registers the session→thread mapping just
+    /// like [`Bridge::warm_session`] so a subsequent `run_session` reuses it.
+    pub async fn resume_session(
+        &mut self,
+        session: &str,
+        thread_id: &str,
+        cwd: &Path,
+    ) -> Result<()> {
+        self.ensure_initialized().await?;
+        self.resume_thread(thread_id, cwd).await?;
+        self.sessions.insert(session.to_string(), thread_id.to_string());
+        Ok(())
+    }
+
+    /// Close the thread for `session`, keeping the engine process alive.
+    /// Returns the thread id that was released, if any.
+    pub fn release_session(&mut self, session: &str) -> Option<String> {
+        let thread_id = self.sessions.remove(session)?;
+        self.cursors.remove(&thread_id);
+        Some(thread_id)
+    }
+
+    /// Number of live threads currently multiplexed on this engine.
+    pub fn live_thread_count(&self) -> usize {
+        self.cursors.len()
+    }
+
+    /// The `threadId` codex stamps on a frame, if present. Used to route a
+    /// frame to the cursor that owns its thread.
+    fn frame_thread_id(frame: &Incoming) -> Option<String> {
+        match frame {
+            Incoming::Notification { params, .. } => params
+                .get("threadId")
+                .or_else(|| params.get("thread_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            Incoming::Response { .. } => None,
+        }
+    }
+
+    /// Read the next inbound frame and demultiplex it to the cursor for its
+    /// thread, returning `(thread_id, events)`. Frames are routed by the
+    /// stamped `threadId`; a frame with no `threadId` is routed to the sole
+    /// live thread when there is exactly one (covering transport frames codex
+    /// does not stamp), otherwise skipped. Returns `None` when the engine's
+    /// stdout closes.
+    ///
+    /// Per-thread ordering is preserved because frames are consumed in stream
+    /// order and each is dispatched to its own cursor; a busy turn on one
+    /// thread never blocks another's frames from being processed.
+    pub async fn next_session_event(&mut self) -> Option<(String, Vec<BridgeEvent>)> {
+        loop {
+            let frame = self.next_frame().await?;
+            let routed = Self::frame_thread_id(&frame).or_else(|| {
+                if self.cursors.len() == 1 {
+                    self.cursors.keys().next().cloned()
+                } else {
+                    None
+                }
+            });
+            let Some(thread_id) = routed else {
+                // No thread to attribute this frame to (unknown or ambiguous);
+                // drop it rather than misroute it to the wrong conversation.
+                continue;
+            };
+            let Some(cursor) = self.cursors.get_mut(&thread_id) else {
+                continue;
+            };
+            let events = cursor.translate(frame);
+            return Some((thread_id, events));
+        }
     }
 
     async fn ensure_initialized(&mut self) -> Result<()> {
@@ -159,6 +297,28 @@ impl Bridge {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .context("thread/start missing threadId")
+    }
+
+    /// Send `thread/resume` for an existing thread id and wait for the ack.
+    /// Unlike [`Bridge::start_thread`] the id is already known (the runner kept
+    /// it across the process replacement), so we don't parse one out of the
+    /// response — we only confirm the resume didn't error.
+    async fn resume_thread(&mut self, thread_id: &str, cwd: &Path) -> Result<()> {
+        let id = self.server.alloc_id();
+        let line = jsonrpc::request(
+            id,
+            "thread/resume",
+            &ThreadResumeParams {
+                thread_id: thread_id.to_string(),
+                cwd: cwd.to_string_lossy().to_string(),
+                model: self.model_default.clone(),
+                sandbox: "danger-full-access".into(),
+                approval_policy: "never".into(),
+            },
+        )?;
+        self.server.send_raw(&line).await?;
+        let _ = self.await_response(id, Duration::from_secs(30)).await?;
+        Ok(())
     }
 
     async fn start_turn(&mut self, thread_id: &str, payload: &RunPayload) -> Result<()> {
