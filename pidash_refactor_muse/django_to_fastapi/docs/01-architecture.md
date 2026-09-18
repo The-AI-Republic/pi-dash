@@ -42,14 +42,15 @@ not impressions.
 - **Utils (shared kernel).** 72 files, ~11.5k LOC: custom cursor paginators
   (`utils/paginator.py`, `utils/global_paginator.py` — no DRF built-in
   pagination in use), `ComplexFilterBackend` / `IssueFilterSet`
-  (`utils/filters.py`), `issue_filters`, `order_queryset`, cache, host/URL,
+  (`utils/filters/` package: `filter_backend.py`, `filterset.py`),
+  `issue_filters`, `order_queryset`, cache, host/URL,
   timezone, CSV, porters, GitHub clients, and a full permission tree
   (`utils/permissions/`) that **mirrors** `app/permissions/` (~1,028 lines
   combined across the two trees).
 - **Bgtasks (worker plane).** 41 files, ~9.8k LOC; 60 of the 78 repo-wide
   Celery task decorators live here (mail, webhooks, sync, exports,
   notifications, scheduler, agent ticker, loop), with beat wiring in
-  `settings/celery.py` (`beat_schedule`, `DatabaseScheduler` via
+  `pi_dash/celery.py` (`beat_schedule`, `DatabaseScheduler` via
   django-celery-beat). `bgtasks/{github_signals,scheduler}.py` bridge events
   into tasks.
 - **Cross-cutting.** 168 `transaction.atomic` sites; ~38 signal receivers across
@@ -226,7 +227,7 @@ DRF today; contract tests pin it.
   responses. Offset/limit styles stay per-endpoint as today — no
   normalization during migration.
 - **Filtering.** `ComplexFilterBackend` / `IssueFilterSet` semantics
-  (`utils/filters.py`, `utils/issue_filters.py`, `utils/order_queryset.py`)
+  (`utils/filters/` package, `utils/issue_filters.py`, `utils/order_queryset.py`)
   are re-implemented as explicit, typed filter parsers in
   `core/filtering.py` + per-module filter models. No `django-filter`
   dependency in the new backend; every accepted query param is declared on
