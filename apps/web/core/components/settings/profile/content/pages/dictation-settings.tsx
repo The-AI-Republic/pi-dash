@@ -71,7 +71,11 @@ export const DictationSettings = observer(function DictationSettings() {
           message: "Your transcription endpoint responded.",
         });
       } else {
-        setToast({ type: TOAST_TYPE.ERROR, title: "Connection failed", message: res.error_code || "Unknown error" });
+        setToast({
+          type: TOAST_TYPE.ERROR,
+          title: "Connection failed",
+          message: res.detail || res.error_code || "Unknown error",
+        });
       }
       await mutate();
     } finally {

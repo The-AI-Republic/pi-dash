@@ -168,6 +168,26 @@ describe("DictationSettings", () => {
     );
   });
 
+  it("AC5c: Test connection prefers the readable detail over the raw error_code", async () => {
+    getSTTConfig.mockResolvedValue({ base_url: "u", model_name: "m", has_api_key: true, last_verified_at: null });
+    testSTTConfig.mockResolvedValue({
+      ok: false,
+      error_code: "provider_auth_failed",
+      detail: "The API key was rejected.",
+    });
+    renderSettings();
+
+    const test = await screen.findByRole("button", { name: "Test connection" });
+    await waitFor(() => expect(test).toBeEnabled());
+    await userEvent.click(test);
+
+    await waitFor(() =>
+      expect(setToast).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "ERROR", message: "The API key was rejected." })
+      )
+    );
+  });
+
   it("AC6: with a saved key, Test/Remove render and the API-key placeholder shows the saved state; Remove deletes and clears", async () => {
     getSTTConfig.mockResolvedValue({ base_url: "u", model_name: "m", has_api_key: true, last_verified_at: null });
     deleteSTTConfig.mockResolvedValue(undefined);

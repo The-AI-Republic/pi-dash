@@ -158,6 +158,24 @@ describe("useDictation", () => {
     expect(trackStop).toHaveBeenCalled();
   });
 
+  it("routes to not-configured when transcribe returns stt_config_missing", async () => {
+    transcribeAudio.mockRejectedValue({ error: "stt_config_missing", detail: "Configure dictation in Settings." });
+    const onResult = vi.fn();
+    const { result } = renderHook(() => useDictation({ onResult }), { wrapper });
+    await waitFor(() => expect(result.current.isUnconfigured).toBe(false));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    nowMs = 1500;
+    await act(async () => {
+      result.current.stop();
+    });
+
+    await waitFor(() => expect(result.current.status).toBe("unconfigured"));
+    expect(onResult).not.toHaveBeenCalled();
+  });
+
   it("releases the microphone stream on unmount", async () => {
     const { result, unmount } = renderHook(() => useDictation({ onResult: vi.fn() }), { wrapper });
     await waitFor(() => expect(result.current.isUnconfigured).toBe(false));
