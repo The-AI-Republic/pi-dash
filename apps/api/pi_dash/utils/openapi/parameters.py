@@ -283,6 +283,14 @@ PER_PAGE_PARAMETER = OpenApiParameter(
     ],
 )
 
+PARENT_PARAMETER = OpenApiParameter(
+    name="parent",
+    type=OpenApiTypes.UUID,
+    location=OpenApiParameter.QUERY,
+    description="List only the children of this parent work item (its UUID).",
+    required=False,
+)
+
 # External Integration Parameters
 EXTERNAL_ID_PARAMETER = OpenApiParameter(
     name="external_id",

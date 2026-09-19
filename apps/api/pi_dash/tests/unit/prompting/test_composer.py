@@ -668,6 +668,83 @@ def test_coding_task_keeps_building_parts_after_a_pr():
     assert "a partial implementation must not move the issue to In Review" in body
 
 
+# ----------------------------------------------------------------------
+# Split into child issues (task-level), not per-run slices (PDASHOSS01-169)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_coding_task_split_standard_is_independence_not_size():
+    """The split decision must be keyed on independence, not on size or on
+    crossing layers. A modern agent can finish a large, clear change in one long
+    run (there is no run timeout), and splitting one feature by layer lets each
+    side build against its own guess of the shared contract — which is how voice
+    dictation (PDASHOSS01-148) shipped with every part green and the mic broken.
+    """
+    body = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_ctx()
+    ).text
+
+    assert "Split on independence, never on size." in body
+    # The old size and layer signals must be gone.
+    assert "clearly more than one run's work" not in body
+    assert "span different areas" not in body
+    # One-line test the agent can apply, plus explicit split / do-not-split lists.
+    assert "without ever seeing child A's code or decisions" in body
+    assert "**Split when**" in body
+    assert "**Do not split when** the parts share an interface that is not yet fixed" in body
+    # Size is a fallback only; splitting has a real run cost.
+    assert "**Size is only a fallback.**" in body
+    assert "**Count the cost.**" in body
+    # If a split must cross an interface: contract first, producer before consumer.
+    assert "**Pin any shared contract first.**" in body
+    assert "producer lands before the consumer starts" in body
+
+
+@pytest.mark.unit
+def test_coding_task_split_gate_creates_child_issues():
+    """The split outcome must direct the agent to create child issues *itself*
+    with `pidash issue create --parent`, list existing children first for
+    idempotency, apply the guardrails, and park the parent — not just propose a
+    split and leave triage to a human (PDASHOSS01-169)."""
+    body = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_ctx()
+    ).text
+
+    # The outcome is now "create children yourself", keyed on genuinely separate tasks.
+    assert "Split into child issues" in body
+    assert "break it into child issues **yourself**" in body
+    # Concrete CLI: create children under the parent, list them first for idempotency.
+    assert "pidash issue create --project SAMPLE --parent SAMPLE-1" in body
+    assert "pidash issue list --project SAMPLE --parent SAMPLE-1" in body
+    # Guardrails: cap, single-run sizing, depth 1.
+    assert "At most ~6 children per split" in body
+    assert "do **not** split a child further (depth 1)" in body
+    # Parent is parked (not left In Progress on waiting_on_external, which keeps ticking).
+    assert "Move the parent to **Todo**" in body
+    assert "keeps ticking for In Progress and would burn the parent's budget" in body
+    # The multi-part outcome (PDASHOSS01-168) is still the home for parts of one task.
+    assert "Proceed with a multi-part plan" in body
+
+
+@pytest.mark.unit
+def test_coding_task_tracking_parent_is_context_not_blocker():
+    """A child whose parent is a tracking issue (split into children, no branch
+    of its own) must not hit the 'parent in progress with no branch' blocker —
+    the readiness block treats a tracking parent as context and the base-branch
+    resolution bases off the project base or a sibling branch (PDASHOSS01-169)."""
+    ctx = _coding_ctx_chain(2)
+    ctx["repo"]["work_branch"] = None  # this child has no branch yet -> resolve a base
+    ctx["parent"]["work_branch"] = None  # tracking parent will never have a branch
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    # Readiness block (analyze-and-scope step 2): tracking parent is context, not a blocker.
+    assert "Parent is a **tracking issue**" in body
+    assert "context, not a blocker" in body
+    # Base-branch resolution (workpad-setup): tracking parent -> project base or sibling branch.
+    assert "it carries no code branch of its own and will never get one" in body
+
+
 @pytest.mark.unit
 def test_coding_task_advances_stage_only_when_all_parts_done():
     """The issue moves to In Review only when every planned part is built; the
