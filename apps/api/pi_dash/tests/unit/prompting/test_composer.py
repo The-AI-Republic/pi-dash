@@ -674,6 +674,34 @@ def test_coding_task_keeps_building_parts_after_a_pr():
 
 
 @pytest.mark.unit
+def test_coding_task_split_standard_is_independence_not_size():
+    """The split decision must be keyed on independence, not on size or on
+    crossing layers. A modern agent can finish a large, clear change in one long
+    run (there is no run timeout), and splitting one feature by layer lets each
+    side build against its own guess of the shared contract — which is how voice
+    dictation (PDASHOSS01-148) shipped with every part green and the mic broken.
+    """
+    body = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_ctx()
+    ).text
+
+    assert "Split on independence, never on size." in body
+    # The old size and layer signals must be gone.
+    assert "clearly more than one run's work" not in body
+    assert "span different areas" not in body
+    # One-line test the agent can apply, plus explicit split / do-not-split lists.
+    assert "without ever seeing child A's code or decisions" in body
+    assert "**Split when**" in body
+    assert "**Do not split when** the parts share an interface that is not yet fixed" in body
+    # Size is a fallback only; splitting has a real run cost.
+    assert "**Size is only a fallback.**" in body
+    assert "**Count the cost.**" in body
+    # If a split must cross an interface: contract first, producer before consumer.
+    assert "**Pin any shared contract first.**" in body
+    assert "producer lands before the consumer starts" in body
+
+
+@pytest.mark.unit
 def test_coding_task_split_gate_creates_child_issues():
     """The split outcome must direct the agent to create child issues *itself*
     with `pidash issue create --parent`, list existing children first for
