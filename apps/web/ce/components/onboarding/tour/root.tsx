@@ -107,7 +107,10 @@ export const TourRoot = observer(function TourRoot(props: TOnboardingTourProps) 
                 title="Pi Dash core concept video"
                 className="h-full w-full border-0"
                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                sandbox="allow-scripts allow-presentation allow-popups allow-popups-to-escape-sandbox"
+                // YouTube is cross-origin to the app, so allow-same-origin can't let it script the parent — and without it
+                // the player never initializes (blank frame).
+                // oxlint-disable-next-line react/iframe-missing-sandbox
+                sandbox="allow-scripts allow-same-origin allow-presentation allow-popups allow-popups-to-escape-sandbox"
                 allowFullScreen
               />
             </div>
