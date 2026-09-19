@@ -163,12 +163,14 @@ export class AssistantService extends APIService {
    * Transcribe a recorded audio blob via the user's configured STT endpoint.
    * The blob is uploaded as multipart/form-data; the backend injects the model
    * and forwards to the provider's `/v1/audio/transcriptions` route, returning
-   * the recognized text. On failure the rejected value is the API error body
-   * (e.g. `{ error_code: "not_configured" }`) so callers can branch on it.
+   * the recognized text. The upload field is `file`, matching both the backend
+   * (`request.FILES["file"]`) and the OpenAI-compatible transcription contract.
+   * On failure the rejected value is the API error body
+   * (e.g. `{ error: "stt_config_missing", detail: "…" }`) so callers can branch on it.
    */
   async transcribeAudio(audio: Blob, filename = "dictation.webm"): Promise<{ text: string }> {
     const form = new FormData();
-    form.append("audio", audio, filename);
+    form.append("file", audio, filename);
     return this.post(`/api/users/me/ai-assistant/transcribe/`, form)
       .then((res) => res?.data)
       .catch((err) => {

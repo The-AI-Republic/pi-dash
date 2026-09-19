@@ -140,6 +140,47 @@ describe("useDictation", () => {
     expect(trackStop).toHaveBeenCalled(); // stream released
   });
 
+  // The backend reports transcribe failures as `{ error, detail }` (see
+  // apps/api/pi_dash/assistant/views/transcribe.py). These pin that shape.
+  it("routes a stt_config_missing response to the unconfigured state", async () => {
+    transcribeAudio.mockRejectedValue({ error: "stt_config_missing", detail: "Configure dictation in Settings." });
+    const onResult = vi.fn();
+    const { result } = renderHook(() => useDictation({ onResult }), { wrapper });
+    await waitFor(() => expect(result.current.isUnconfigured).toBe(false));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    nowMs = 1500;
+    await act(async () => {
+      result.current.stop();
+    });
+
+    await waitFor(() => expect(result.current.status).toBe("unconfigured"));
+    expect(result.current.isUnconfigured).toBe(true);
+    expect(onResult).not.toHaveBeenCalled();
+  });
+
+  it("shows the backend detail for a provider failure", async () => {
+    transcribeAudio.mockRejectedValue({
+      error: "provider_auth_failed",
+      detail: "The dictation provider rejected the API key.",
+    });
+    const { result } = renderHook(() => useDictation({ onResult: vi.fn() }), { wrapper });
+    await waitFor(() => expect(result.current.isUnconfigured).toBe(false));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    nowMs = 1500;
+    await act(async () => {
+      result.current.stop();
+    });
+
+    await waitFor(() => expect(result.current.status).toBe("error"));
+    expect(result.current.errorMessage).toBe("The dictation provider rejected the API key.");
+  });
+
   it("discards an accidental sub-threshold tap without transcribing", async () => {
     const onResult = vi.fn();
     const { result } = renderHook(() => useDictation({ onResult }), { wrapper });
