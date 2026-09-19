@@ -137,8 +137,8 @@ export function useDictation({ onResult }: UseDictationOptions): UseDictation {
         if (trimmed) onResult(trimmed);
         setStatus("idle");
       } catch (err: unknown) {
-        const code = (err as { error_code?: string; code?: string } | null)?.error_code;
-        if (code === "not_configured") {
+        const code = (err as { error?: string } | null)?.error;
+        if (code === "stt_config_missing") {
           setStatus("unconfigured");
           return;
         }

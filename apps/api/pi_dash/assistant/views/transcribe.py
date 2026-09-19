@@ -16,7 +16,11 @@ Design constraints (see ``PDASHOSS01-151`` / the epic ``PDASHOSS01-148``):
   in Settings" state (mirrors the chat ``llm_config_missing`` gate).
 * **Size-capped** — OpenHub's gateway caps transcription uploads at 25 MB, so
   anything larger is guaranteed to fail on the cloud path; reject it cleanly
-  rather than stream a doomed upload.
+  rather than stream a doomed upload. Note the effective cap is usually lower:
+  ``RequestBodySizeLimitMiddleware`` rejects any body over
+  ``DATA_UPLOAD_MAX_MEMORY_SIZE`` (``FILE_SIZE_LIMIT``, 5 MB by default) with
+  413 ``REQUEST_BODY_TOO_LARGE`` before this view runs. That is ample for the
+  composer's 60 s opus recordings; raise ``FILE_SIZE_LIMIT`` to accept more.
 * **Throttled** — every call spends the user's money (or cloud wallet credit).
 * **Not persisted** — the audio is forwarded for the one request and dropped;
   it never touches the DB or backups (same as the OpenHub gateway).
