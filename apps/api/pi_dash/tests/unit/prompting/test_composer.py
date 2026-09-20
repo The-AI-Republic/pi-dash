@@ -733,6 +733,25 @@ def test_coding_task_split_gate_creates_child_issues():
 
 
 @pytest.mark.unit
+def test_coding_task_guardrails_allow_the_tracking_parent_child_list():
+    """The Guardrails section forbids editing an issue description for planning
+    or progress tracking. The split outcome depends on doing exactly that to the
+    *parent* — the child list in the parent's description is the only signal a
+    child's run can read to recognise a tracking parent. Both places must carry
+    the carve-out, or the agent follows the unqualified prohibition and the
+    tracking-parent signal is never written (PDASHOSS01-169)."""
+    body = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_ctx()
+    ).text
+
+    # Guardrails: the prohibition still stands, but names the split exception.
+    assert "Do not edit the issue title or description for planning or progress tracking" in body
+    assert "you *do* rewrite that parent's description to carry the child list" in body
+    # pidash-cli `issue patch` docs carry the same carve-out.
+    assert 'The one case where `--description` is correct is recording the child list on a **tracking parent**' in body
+
+
+@pytest.mark.unit
 def test_coding_task_tracking_parent_is_context_not_blocker():
     """A child whose parent is a tracking issue (split into children, no branch
     of its own) must not hit the 'parent in progress with no branch' blocker —
