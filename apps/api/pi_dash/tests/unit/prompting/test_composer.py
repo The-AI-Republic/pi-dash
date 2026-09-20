@@ -752,6 +752,25 @@ def test_coding_task_guardrails_allow_the_tracking_parent_child_list():
 
 
 @pytest.mark.unit
+def test_coding_task_parent_description_rewrite_sends_markdown_not_html():
+    """The split outcome tells the run to read the parent's description and write
+    it back with the child list appended. `pidash issue get` exposes the
+    description only as `description_html` (the serializer excludes
+    `description_stripped`), so pasting what you just read straight into
+    `--description` makes the server escape it — the parent's description becomes
+    visible `&lt;p&gt;` source, and it is re-escaped on every later rewrite. The
+    prompt must say to send plain markdown (PDASHOSS01-169).
+    """
+    body = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_ctx()
+    ).text
+
+    assert "**Send plain markdown, never the HTML you just read.**" in body
+    assert "returns the description only as `description_html`" in body
+    assert "Convert it back to plain markdown first" in body
+
+
+@pytest.mark.unit
 def test_coding_task_tracking_parent_is_context_not_blocker():
     """A child whose parent is a tracking issue (split into children, no branch
     of its own) must not hit the 'parent in progress with no branch' blocker —
