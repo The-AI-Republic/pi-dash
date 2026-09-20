@@ -31,7 +31,7 @@ from .issue import Issue
 
 #: Registry-level fallbacks, used only when the project row somehow lacks
 #: the field (``getattr`` default). Project defaults are the real policy.
-DEFAULT_INTERVAL_SECONDS = 43200  # 12 h
+DEFAULT_INTERVAL_SECONDS = 10800  # 3 h
 DEFAULT_MAX_TICKS = 10            # one pool per issue, any stage
 DEFAULT_RETICK_GRANT = 3
 INFINITE_MAX_TICKS = -1
@@ -175,8 +175,10 @@ class IssueAgentTicker(BaseModel):
     def effective_interval_seconds(self) -> int:
         """Interval for the issue's *current* stage — project policy.
 
-        Cadence is rhythm, not budget: it may differ per stage (12 h / 8 h /
-        12 h) even though the budget is one pool.
+        Cadence is rhythm, not budget: the three per-stage interval columns
+        are retained so cadences can diverge again, but they are currently
+        unified at 3 h (10800 s) — every stage ticks on the same rhythm
+        (PDASHOSS01-167) — even though the budget is one pool.
         """
         # Local import keeps the model file free of orchestration imports
         # at module load time (orchestration imports state).

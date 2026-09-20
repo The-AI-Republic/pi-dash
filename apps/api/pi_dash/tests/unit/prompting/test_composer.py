@@ -405,7 +405,7 @@ def test_session_framing_renders_tick_guidance_and_schedule():
     assert "(5 remaining)" in out
     # The lifecycle section carries the budget line and the pool rules.
     assert "Runs used on this issue: **5 of 10** (5 remaining)" in out
-    assert "about every 12 hours" in out
+    assert "about every 3 hours" in out
 
 
 @pytest.mark.unit
@@ -514,7 +514,7 @@ def test_session_framing_omits_trigger_block_for_scheduler():
 # Ancestor-chain required reading + parent-readiness (PDASHOSS01-97)
 # ----------------------------------------------------------------------
 
-REQUIRED_READING_DIRECTIVE = "The ancestor chain is required reading before you implement."
+REQUIRED_READING_DIRECTIVE = "Required reading before you implement:"
 
 
 def _coding_ctx_chain(depth: int) -> dict:
@@ -768,3 +768,113 @@ def test_coding_task_advances_stage_only_when_all_parts_done():
     # The whole-issue testing hand-off is posted once, listing every PR.
     assert "Hand off to testing — once, for the whole issue, when every plan part is built." in body
     assert "list every PR" in body
+
+
+# ----------------------------------------------------------------------
+# Work item relationships section (PDASHOSS01-160): one independent section
+# carrying ancestors, children, and relates_to siblings together.
+# ----------------------------------------------------------------------
+
+RELATIONSHIPS_HEADING = "## Work item relationships"
+
+
+def _relationships_ctx(*, parent=True, children=0, related=0) -> dict:
+    """A coding-task context with the relationship groups dialled independently.
+
+    Starts from the parentless minimal sample (so ``parent``/``lineage`` are
+    None and both list groups start empty), then adds back exactly the groups
+    the test wants.
+    """
+    ctx = copy.deepcopy(sample_contexts("coding-task")[1])
+    assert ctx["parent"] is None and ctx["children"] == [] and ctx["related"] == []
+    if parent:
+        populated = sample_contexts("coding-task")[0]
+        ctx["parent"] = copy.deepcopy(populated["parent"])
+        ctx["lineage"] = None  # direct parent only
+    ctx["children"] = [
+        {"identifier": f"SAMPLE-c{i}", "title": f"Child {i}", "state": "Backlog"}
+        for i in range(children)
+    ]
+    ctx["related"] = [
+        {"identifier": f"SAMPLE-r{i}", "title": f"Related {i}", "state": "Cancelled"}
+        for i in range(related)
+    ]
+    return ctx
+
+
+@pytest.mark.unit
+def test_relationships_section_absent_when_nothing_connected():
+    """No parent, no children, no relations → no section at all: no heading,
+    no dangling required-reading directive."""
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING not in body
+    assert REQUIRED_READING_DIRECTIVE not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_renders_children_group():
+    """A child-only issue (no parent, no relations) renders just the children
+    group under the single relationships section."""
+    ctx = _relationships_ctx(parent=False, children=2, related=0)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING in body
+    assert "Children (down):" in body
+    assert "SAMPLE-c0: Child 0 (Backlog)" in body
+    assert "SAMPLE-c1: Child 1 (Backlog)" in body
+    assert REQUIRED_READING_DIRECTIVE in body
+    # Groups degrade independently: no parent / related content leaks in.
+    assert "Ancestors (up):" not in body
+    assert "Related work items (across):" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_renders_related_group():
+    """A relates_to-only issue renders just the related group."""
+    ctx = _relationships_ctx(parent=False, children=0, related=1)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING in body
+    assert "Related work items (across):" in body
+    assert "SAMPLE-r0: Related 0 (Cancelled)" in body
+    assert "Children (down):" not in body
+    assert "Ancestors (up):" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_renders_all_three_groups_together():
+    """Ancestors, children, and related render in one contiguous section with a
+    single required-reading directive."""
+    ctx = _relationships_ctx(parent=True, children=1, related=1)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert body.count(RELATIONSHIPS_HEADING) == 1
+    assert "Ancestors (up):" in body
+    assert "Children (down):" in body
+    assert "Related work items (across):" in body
+    # Parent keeps its inline description + comment-count hint.
+    assert "Parent description." in body
+    assert "run `pidash comment list SAMPLE-0` to read them." in body
+    # Exactly one required-reading directive, not one per group.
+    assert body.count(REQUIRED_READING_DIRECTIVE) == 1
+
+
+@pytest.mark.unit
+def test_relationships_section_lineage_only_when_grandparent():
+    """The lineage chain renders only when a grandparent+ exists; a direct-parent
+    issue shows the parent line but no lineage chain."""
+    ctx = _relationships_ctx(parent=True, children=0, related=0)
+    ctx["lineage"] = None
+    body2 = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+    assert "Lineage (current → root):" not in body2
+
+    ctx["lineage"] = [
+        {"identifier": "SAMPLE-1", "title": "Current"},
+        {"identifier": "SAMPLE-0", "title": "Parent issue"},
+        {"identifier": "SAMPLE-root", "title": "Root issue"},
+    ]
+    body3 = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+    assert "Lineage (current → root):" in body3
+    assert "SAMPLE-root" in body3

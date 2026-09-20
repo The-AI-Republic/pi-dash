@@ -155,6 +155,44 @@
                     </Directory>
                 </Directory>
             </Directory>
+
+            <!--
+              Start Menu shortcut ("Sign in to Pi Dash"). This is the fallback
+              for the silent-install path (`msiexec /qn` — Group Policy /
+              Intune / SCCM), where the ExitDialog never runs and nothing can
+              be popped: the admin deploys the MSI, the user finds this
+              shortcut and completes sign-in. Points at the same
+              pidash-setup.cmd the ExitDialog checkbox launches, so both routes
+              land in the identical console `pidash auth login` flow.
+            -->
+            <Directory Id='ProgramMenuFolder'>
+                <Directory Id='ApplicationProgramsFolder' Name='Pi Dash'>
+                    <Component Id='StartMenuShortcut' Guid='*'>
+                        <Shortcut Id='SetupShortcut'
+                                  Name='Sign in to Pi Dash'
+                                  Description='Complete Pi Dash setup: sign in via the console pidash auth login flow.'
+                                  Target='[#setupCmdFile]'
+                                  WorkingDirectory='Bin'/>
+                        <RemoveFolder Id='CleanupProgramsFolder' Directory='ApplicationProgramsFolder' On='uninstall'/>
+                        <!--
+                          ICE43 requires a non-advertised shortcut's component
+                          to key off HKCU (a per-user keypath). The earlier
+                          HKLM integer keypath (PDASHOSS01-125) is the specific
+                          thing ICE43 rejects — `light` exited 204 and the MSI
+                          build failed. HKCU is the WiX-documented keypath for a
+                          shortcut to an installed file; any ICE57 per-user /
+                          per-machine note it raises is a validation warning,
+                          not a build failure.
+                        -->
+                        <RegistryValue Root='HKCU'
+                                       Key='Software\AI Republic\pidash'
+                                       Name='StartMenuShortcut'
+                                       Type='integer'
+                                       Value='1'
+                                       KeyPath='yes'/>
+                    </Component>
+                </Directory>
+            </Directory>
         </Directory>
 
 
@@ -176,6 +214,7 @@
 
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='setupCmd'/>
+            <ComponentRef Id='StartMenuShortcut'/>
 
             <Feature
                 Id='Environment'
