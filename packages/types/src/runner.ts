@@ -253,6 +253,14 @@ export type TApprovalKind = "command_execution" | "file_change" | "network_acces
 export type TApprovalDecision = "accept" | "decline" | "accept_for_session";
 export type TApprovalStatus = "pending" | "accepted" | "declined" | "expired";
 
+/**
+ * The approval *mode* a local (built-in engine) chat runs under — the spectrum
+ * the engine supports, chosen by the user per chat. Wire values match the
+ * runner's `ApprovalMode` serde (`pidash-ipc`). `full_access` is the default so
+ * an absent value preserves the engine's historical no-prompt posture.
+ */
+export type TApprovalMode = "ask" | "workspace" | "full_access";
+
 export interface IApprovalRequest {
   id: string;
   agent_run: string;

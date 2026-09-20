@@ -50,6 +50,7 @@ import type {
   IRunner,
   TAgentChatMessageRole,
   TApprovalDecision,
+  TApprovalMode,
 } from "@pi-dash/types";
 import { ensureChatRuntime, getAgentAccount, isDesktop } from "@/services/agent-runtime";
 
@@ -329,8 +330,31 @@ function storedEventToMessage(e: StoredEvent): IAgentChatMessage {
  * message lists come from the slice-3 local SQLite store; live turns stream
  * through the slice-2 Tauri command + event surface.
  */
+/** The engine's historical posture, used when no mode has been chosen. */
+export const DEFAULT_APPROVAL_MODE: TApprovalMode = "full_access";
+
 export class LocalChatTransport implements ChatTransport {
   constructor(private readonly bridge: TauriBridge) {}
+
+  /**
+   * Per-session approval mode. The runner captures the mode when it spawns the
+   * session's engine thread and holds it for that thread's life, so the value
+   * sent on each `chat_warm` / `chat_send` only takes effect for a session that
+   * has not yet been warmed — changing it affects the next thread, never a turn
+   * already in flight. In-memory, additive local-only state (like
+   * `decideChatApproval`); the shared `ChatTransport` interface is untouched.
+   */
+  private readonly approvalModes = new Map<string, TApprovalMode>();
+
+  /** Set the approval mode for a session's next thread. Local-only verb. */
+  setApprovalMode(sessionId: string, mode: TApprovalMode): void {
+    this.approvalModes.set(sessionId, mode);
+  }
+
+  /** The mode a session will warm under, defaulting to full access. */
+  getApprovalMode(sessionId: string): TApprovalMode {
+    return this.approvalModes.get(sessionId) ?? DEFAULT_APPROVAL_MODE;
+  }
 
   // No `runner` selector is sent with any chat request. The daemon's selector
   // is a *runner name* from its own config (`resolve_runner`, runner/src/ipc/
@@ -408,6 +432,7 @@ export class LocalChatTransport implements ChatTransport {
       messageId: crypto.randomUUID(),
       content,
       cwd: session?.working_dir,
+      mode: this.getApprovalMode(sessionId),
       localThreadId: session?.engine_thread_id ?? undefined,
     });
     return storedEventToMessage(stored);
@@ -424,6 +449,7 @@ export class LocalChatTransport implements ChatTransport {
       workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
       cwd: session?.working_dir,
+      mode: this.getApprovalMode(sessionId),
       localThreadId: session?.engine_thread_id ?? undefined,
     });
     return { ok: true };
