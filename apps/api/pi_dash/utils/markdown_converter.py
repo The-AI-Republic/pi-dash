@@ -102,6 +102,14 @@ class TiptapMarkdownConverter(MarkdownConverter):
         # `data-checked`; emitting it again here would double it up.
         return ""
 
+    def convert_div(self, el, text, parent_tags):
+        # The editor serialises a horizontal rule as a wrapper
+        # `<div data-type="horizontalRule">`, not as `<hr>`, so without this
+        # the rule is dropped from the markdown entirely.
+        if el.get("data-type") == "horizontalRule":
+            return self.convert_hr(el, text, parent_tags)
+        return super().convert_div(el, text, parent_tags)
+
     # -- Tiptap custom nodes ----------------------------------------------
     #
     # markdownify maps a tag name to `convert_<name>` with `-` replaced by

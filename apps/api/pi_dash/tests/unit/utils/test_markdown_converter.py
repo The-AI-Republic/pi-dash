@@ -36,6 +36,16 @@ class TestBlockNodes:
     def test_horizontal_rule(self):
         assert html_to_markdown("<p>a</p><hr /><p>b</p>") == "a\n\n---\n\nb"
 
+    def test_tiptap_horizontal_rule_div_is_kept(self):
+        # The editor emits a wrapper div rather than `<hr>`; the rule has a
+        # markdown equivalent and must not be dropped.
+        html = '<p>a</p><div class="py-4" data-type="horizontalRule"><div></div></div><p>b</p>'
+
+        assert html_to_markdown(html) == "a\n\n---\n\nb"
+
+    def test_plain_div_is_not_turned_into_a_rule(self):
+        assert html_to_markdown("<div><p>a</p></div>") == "a"
+
 
 class TestLists:
     def test_nested_unordered_list_is_indented(self):
