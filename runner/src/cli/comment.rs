@@ -137,13 +137,23 @@ async fn cmd_add(
             "provide a comment body (--body/--body-file) or at least one --image",
         ));
     }
+
+    // Read and validate every image up front. A bad path or unsupported type
+    // anywhere in the list must fail before the *first* upload, otherwise the
+    // earlier images are already stored as assets that nothing will ever
+    // reference.
+    let prepared = images
+        .iter()
+        .map(|path| PreparedImage::load(path))
+        .collect::<Result<Vec<_>, _>>()?;
+
     let issue = resolve_issue(client, identifier).await?;
 
     // Upload each image and collect the embed nodes before posting the comment,
     // so a failed upload aborts without leaving a half-written comment.
     let mut image_nodes = String::new();
-    for path in &images {
-        let asset_id = upload_image(client, &issue.project_id, path).await?;
+    for image in prepared {
+        let asset_id = upload_image(client, &issue.project_id, image).await?;
         image_nodes.push_str(&image_component_html(&asset_id));
     }
 
@@ -175,32 +185,69 @@ fn compose_comment_html(body: Option<&str>, image_nodes: &str) -> String {
     }
 }
 
-/// Upload a single image through the API-key asset surface and return its
-/// asset UUID. Three steps mirror the web client: create the asset (which
+/// An image that has been read off disk and validated, ready to upload.
+struct PreparedImage {
+    filename: String,
+    content_type: &'static str,
+    bytes: Vec<u8>,
+}
+
+impl std::fmt::Debug for PreparedImage {
+    /// Print the byte count rather than the bytes, so a failing assertion
+    /// doesn't dump megabytes of binary into the test output.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedImage")
+            .field("filename", &self.filename)
+            .field("content_type", &self.content_type)
+            .field("bytes", &format_args!("{} bytes", self.bytes.len()))
+            .finish()
+    }
+}
+
+impl PreparedImage {
+    /// Resolve the file name, map the extension to an image MIME type, and
+    /// read the bytes. Every failure mode that can be detected without
+    /// talking to the server is detected here.
+    fn load(path: &Path) -> Result<Self, CliError> {
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| {
+                CliError::new(
+                    EXIT_INVALID,
+                    format!("image path has no file name: {}", display_path(path)),
+                )
+            })?
+            .to_string();
+        let content_type = image_mime_type(path)?;
+        let bytes = std::fs::read(path).map_err(|e| {
+            CliError::new(
+                EXIT_INVALID,
+                format!("failed reading image {}: {e}", display_path(path)),
+            )
+        })?;
+        Ok(Self {
+            filename,
+            content_type,
+            bytes,
+        })
+    }
+}
+
+/// Upload a single prepared image through the API-key asset surface and return
+/// its asset UUID. Three steps mirror the web client: create the asset (which
 /// returns a presigned POST), push the bytes straight to S3/MinIO, then mark
 /// the asset uploaded.
 async fn upload_image(
     client: &ApiClient,
     project_id: &str,
-    path: &Path,
+    image: PreparedImage,
 ) -> Result<String, CliError> {
-    let filename = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| {
-            CliError::new(
-                EXIT_INVALID,
-                format!("image path has no file name: {}", display_path(path)),
-            )
-        })?
-        .to_string();
-    let content_type = image_mime_type(path)?;
-    let bytes = std::fs::read(path).map_err(|e| {
-        CliError::new(
-            EXIT_UNKNOWN,
-            format!("failed reading image {}: {e}", display_path(path)),
-        )
-    })?;
+    let PreparedImage {
+        filename,
+        content_type,
+        bytes,
+    } = image;
     let size = bytes.len();
 
     // 1. Create the asset row and get a presigned upload target.
@@ -390,7 +437,7 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        CommentBodyArgs, CommentSpeakerArgs, add_fold_label, add_speaker_metadata,
+        CommentBodyArgs, CommentSpeakerArgs, PreparedImage, add_fold_label, add_speaker_metadata,
         compose_comment_html, image_component_html, image_mime_type, load_comment_body,
         load_comment_body_opt,
     };
@@ -533,6 +580,43 @@ mod tests {
         assert_eq!(err.exit_code, crate::api_client::EXIT_INVALID);
         let err = image_mime_type(Path::new("noext")).expect_err("missing extension");
         assert_eq!(err.exit_code, crate::api_client::EXIT_INVALID);
+    }
+
+    #[test]
+    fn prepared_image_load_reads_bytes_and_mime() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("shot.png");
+        std::fs::write(&path, b"\x89PNG fake bytes").expect("write fixture");
+
+        let image = PreparedImage::load(&path).expect("png loads");
+        assert_eq!(image.filename, "shot.png");
+        assert_eq!(image.content_type, "image/png");
+        assert_eq!(image.bytes, b"\x89PNG fake bytes");
+    }
+
+    #[test]
+    fn prepared_image_load_rejects_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = PreparedImage::load(&dir.path().join("absent.png"))
+            .expect_err("a missing file must not load");
+        assert_eq!(err.exit_code, crate::api_client::EXIT_INVALID);
+    }
+
+    /// Every image is read and validated before the first upload, so a bad
+    /// path late in the list cannot leave earlier images uploaded as orphaned
+    /// assets.
+    #[test]
+    fn prepared_image_load_fails_whole_batch_before_any_upload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let good = dir.path().join("good.png");
+        std::fs::write(&good, b"png").expect("write fixture");
+        let bad = dir.path().join("notes.txt");
+        std::fs::write(&bad, b"text").expect("write fixture");
+
+        let batch: Result<Vec<_>, _> = [good, bad].iter().map(|p| PreparedImage::load(p)).collect();
+        let err = batch.expect_err("a .txt anywhere in the batch fails the batch");
+        assert_eq!(err.exit_code, crate::api_client::EXIT_INVALID);
+        assert!(err.message.contains("unsupported image type"), "{}", err.message);
     }
 
     #[test]
