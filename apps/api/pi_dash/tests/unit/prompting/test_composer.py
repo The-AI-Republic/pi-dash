@@ -723,6 +723,11 @@ def test_coding_task_split_gate_creates_child_issues():
     # Parent is parked (not left In Progress on waiting_on_external, which keeps ticking).
     assert "Move the parent to **Todo**" in body
     assert "keeps ticking for In Progress and would burn the parent's budget" in body
+    # The child list goes into the parent's description: that is the signal a child's
+    # run reads to recognise a tracking parent (the child only ever sees the parent's
+    # description, never its comments).
+    assert "Record the children in this parent's description" in body
+    assert "pidash issue patch SAMPLE-1 --description" in body
     # The multi-part outcome (PDASHOSS01-168) is still the home for parts of one task.
     assert "Proceed with a multi-part plan" in body
 
