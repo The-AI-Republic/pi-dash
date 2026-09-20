@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::dto::{
-    ApprovalDecision, ApprovalKind, ApprovalRecord, ObservabilitySnapshot, RunSummary, RunnerStatus,
+    ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRecord, ObservabilitySnapshot, RunSummary,
+    RunnerStatus,
 };
 
 /// IPC wire version. Bumped on incompatible shape changes between
@@ -145,6 +146,12 @@ pub enum Request {
         cwd: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// Approval mode for this session's engine thread. Absent = the
+        /// engine's historical full-access posture (no prompts). Captured when
+        /// the session's bridge is first spawned; changing it later takes
+        /// effect on the next thread, not a turn already in flight.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<ApprovalMode>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         local_thread_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,6 +174,11 @@ pub enum Request {
         cwd: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// See [`Request::ChatWarm::mode`]. Only consulted when this send is
+        /// what first spawns the session bridge; otherwise the mode the
+        /// session was warmed with is kept for the whole thread.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<ApprovalMode>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         local_thread_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -793,6 +805,7 @@ mod tests {
             runner: Some("laptop-main".into()),
             cwd: Some("/work/repo".into()),
             model: Some("gpt-5.1-codex".into()),
+            mode: Some(ApprovalMode::Ask),
             local_thread_id: Some("thread-abc".into()),
             local_session_id: Some("session-xyz".into()),
         };
@@ -806,6 +819,7 @@ mod tests {
                 runner,
                 cwd,
                 model,
+                mode,
                 local_thread_id,
                 local_session_id,
             } => {
@@ -815,6 +829,7 @@ mod tests {
                 assert_eq!(runner.as_deref(), Some("laptop-main"));
                 assert_eq!(cwd.as_deref(), Some("/work/repo"));
                 assert_eq!(model.as_deref(), Some("gpt-5.1-codex"));
+                assert_eq!(mode, Some(ApprovalMode::Ask));
                 assert_eq!(local_thread_id.as_deref(), Some("thread-abc"));
                 assert_eq!(local_session_id.as_deref(), Some("session-xyz"));
             }
@@ -831,13 +846,14 @@ mod tests {
             runner: None,
             cwd: None,
             model: None,
+            mode: None,
             local_thread_id: None,
             local_session_id: None,
         };
         let s = serde_json::to_string(&req).unwrap();
         // `skip_serializing_if = Option::is_none` keeps absent selectors
         // off the wire (and keeps older daemons from tripping on them).
-        for field in ["runner", "cwd", "model", "local_thread_id", "local_session_id"] {
+        for field in ["runner", "cwd", "model", "mode", "local_thread_id", "local_session_id"] {
             assert!(!s.contains(field), "unexpected {field} in {s}");
         }
         // Required fields are still present.

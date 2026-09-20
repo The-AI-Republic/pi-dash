@@ -1916,6 +1916,7 @@ impl ChatWorker {
                     workspace_path,
                     warm.model,
                     resume_id.as_deref(),
+                    None,
                 )
                 .await?,
             );
@@ -2033,6 +2034,7 @@ impl ChatWorker {
                     workspace_path,
                     turn.model.clone(),
                     resume_id.as_deref(),
+                    None,
                 )
                 .await?,
             );
@@ -2226,7 +2228,7 @@ impl ChatWorker {
                                 reason,
                                 ..
                             } => {
-                                let policy = Policy::new(&self.runner_config.approval_policy, workspace_path);
+                                let policy = Policy::new(&self.runner_config.approval_policy, workspace_path, crate::cloud::protocol::ApprovalMode::Ask);
                                 let decision = policy.evaluate(kind, &payload);
                                 if let Some(auto) = decision.into_cloud() {
                                     if let Err(e) = bridge.send_approval(&approval_id, auto).await {
@@ -3197,7 +3199,7 @@ impl AssignWorker {
                 reason,
             } => {
                 run_events.flush_before_lifecycle(&self.out).await;
-                let policy = Policy::new(&self.runner_config.approval_policy, workspace_root);
+                let policy = Policy::new(&self.runner_config.approval_policy, workspace_root, crate::cloud::protocol::ApprovalMode::Ask);
                 let decision = policy.evaluate(kind, &payload);
                 if let Some(auto) = decision.into_cloud() {
                     bridge.send_approval(&approval_id, auto).await.ok();

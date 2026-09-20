@@ -287,13 +287,45 @@ describe("LocalChatTransport verbs", () => {
     expect(args.cwd).toBe("/tmp/chat/ws/proj");
     expect(args.localThreadId).toBe("thread-9");
     expect(typeof args.messageId).toBe("string");
+    // Defaults to full access (the engine's historical no-prompt posture) when
+    // no mode has been chosen for the session.
+    expect(args.mode).toBe("full_access");
+  });
+
+  it("sends the chosen approval mode on warm and send; defaults to full access", async () => {
+    const local = makeBridge({
+      chat_append_event: {
+        id: "u1",
+        session_id: SESSION,
+        seq: 3,
+        role: "user",
+        content: "hi",
+        tool_calls: null,
+        approval_decision: null,
+        created_at: 20,
+      },
+    });
+    const t = new LocalChatTransport(local.bridge);
+    expect(t.getApprovalMode(SESSION)).toBe("full_access");
+    t.setApprovalMode(SESSION, "ask");
+    expect(t.getApprovalMode(SESSION)).toBe("ask");
+
+    await t.warmChatSession(SESSION);
+    expect(local.invoke).toHaveBeenCalledWith("chat_warm", expect.objectContaining({ mode: "ask" }));
+
+    await t.sendChatMessage(SESSION, "hi");
+    const sendCall = local.invoke.mock.calls.find((c) => c[0] === "chat_send");
+    expect((sendCall![1] as Record<string, unknown>).mode).toBe("ask");
+
+    // A different session is unaffected — mode is per session.
+    expect(t.getApprovalMode("other-session")).toBe("full_access");
   });
 
   it("warm / cancel / close / decide reach their commands", async () => {
     await transport.warmChatSession(SESSION);
     expect(ctx.invoke).toHaveBeenCalledWith(
       "chat_warm",
-      expect.objectContaining({ chatSessionId: SESSION, cwd: "/tmp/chat/ws/proj" })
+      expect.objectContaining({ chatSessionId: SESSION, cwd: "/tmp/chat/ws/proj", mode: "full_access" })
     );
 
     await transport.cancelChat(SESSION, "user_cancelled");

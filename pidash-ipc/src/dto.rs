@@ -44,6 +44,28 @@ pub enum ApprovalDecision {
     AcceptForSession,
 }
 
+/// The approval *mode* a local chat session runs under — the spectrum the
+/// built-in engine supports, chosen by the user per chat. Carried on
+/// `Request::ChatWarm` / `Request::ChatSend`; the runner derives the engine's
+/// per-thread `sandbox` / `approval_policy` from it and mediates the requests
+/// the engine surfaces. Distinct vocabulary from the runner's static
+/// [`ApprovalRecord`]/policy: a mode is the user's coarse choice, the policy
+/// is the allow/deny floor applied within it.
+///
+/// `FullAccess` is the default so an absent field preserves today's posture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalMode {
+    /// Ask before anything the policy does not auto-decide.
+    Ask,
+    /// Ask only for actions outside the working copy; in-workspace edits run.
+    Workspace,
+    /// Full access — no user prompts (the denylist floor still refuses).
+    /// Matches the historical hardcoded posture, so it stays the default.
+    #[default]
+    FullAccess,
+}
+
 // ---------------------------------------------------------------------------
 // history::index
 // ---------------------------------------------------------------------------
