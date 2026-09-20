@@ -16,6 +16,7 @@ mod remove;
 pub mod resolve;
 mod restart;
 mod run;
+pub mod run_cmd;
 // `runner` is `pub` so the TUI can call its library functions
 // (`add`, `remove`) directly without going through clap.
 pub mod runner;
@@ -132,6 +133,11 @@ pub enum Command {
     /// Verify the CLI's Pi Dash credentials end-to-end.
     Workspace(workspace::WorkspaceArgs),
 
+    /// Report this agent run's outcome to Pi Dash (`run yield`). Used by
+    /// the agent from inside a run; reads the run id from `PIDASH_RUN_ID`.
+    #[command(name = "run")]
+    RunCmd(run_cmd::RunCmdArgs),
+
     /// Internal: run the daemon in the foreground. Invoked by systemd/launchd
     /// via the generated unit file. Not a user-facing verb.
     #[command(name = "__run", hide = true)]
@@ -176,6 +182,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::State(args) => run_crud(state::run(args, &paths).await),
         Command::Workpad(args) => run_crud(workpad::run(args, &paths).await),
         Command::Workspace(args) => run_crud(workspace::run(args, &paths).await),
+        Command::RunCmd(args) => run_crud(run_cmd::run(args, &paths).await),
         Command::Run(args) => run::run(args, &paths).await,
         Command::Managed(args) => managed::run(args, &paths).await,
     }
@@ -193,6 +200,7 @@ async fn run_default(paths: &crate::util::paths::Paths) -> Result<()> {
                 url: None,
                 no_browser: false,
                 workspace: None,
+                device_code: None,
             }),
         };
         return auth::run(args, paths).await;

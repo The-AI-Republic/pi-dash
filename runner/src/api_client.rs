@@ -83,6 +83,28 @@ pub struct CliEnv {
     pub api_url: String,
     pub workspace_slug: String,
     pub token: String,
+    /// The agent run this CLI invocation belongs to, from `PIDASH_RUN_ID`
+    /// (set by the daemon on the agent process). Sent as
+    /// [`RUN_ID_HEADER`] on every mutating request so the cloud can tell a
+    /// state move made from inside a run apart from a human's — account
+    /// identity cannot, since the token resolves to the runner owner's
+    /// account. `None` for operator / scripted use.
+    pub run_id: Option<String>,
+}
+
+/// Header carrying [`CliEnv::run_id`]. Mirrors
+/// `pi_dash.api.views.issue.RUN_ID_HEADER` on the cloud.
+pub const RUN_ID_HEADER: &str = "X-Pi-Dash-Run-Id";
+
+/// Environment variable the daemon sets on the agent process with the
+/// current `AgentRun` id. See `util::shell::RunEnv`.
+pub const RUN_ID_ENV: &str = "PIDASH_RUN_ID";
+
+fn run_id_from_env() -> Option<String> {
+    std::env::var(RUN_ID_ENV)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 impl CliEnv {
@@ -99,6 +121,7 @@ impl CliEnv {
             api_url: api_url.trim_end_matches('/').to_string(),
             workspace_slug,
             token,
+            run_id: run_id_from_env(),
         })
     }
 
@@ -167,6 +190,7 @@ impl CliEnv {
             api_url: api_url.trim_end_matches('/').to_string(),
             workspace_slug,
             token,
+            run_id: run_id_from_env(),
         })
     }
 
@@ -225,6 +249,13 @@ impl ApiClient {
             .request(method.clone(), &url)
             .header("X-Api-Key", &self.env.token)
             .header("Accept", "application/json");
+        // Reads are attributed to nobody; every write carries the run id so
+        // the cloud knows it came from inside this agent run.
+        if method != Method::GET
+            && let Some(run_id) = &self.env.run_id
+        {
+            req = req.header(RUN_ID_HEADER, run_id);
+        }
         if let Some(payload) = body {
             req = req.json(payload);
         }

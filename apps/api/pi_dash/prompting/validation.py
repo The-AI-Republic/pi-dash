@@ -129,8 +129,10 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
             "limits": {},
             "tick": {
                 "count": 5,
-                "cap": 24,
-                "remaining": 19,
+                "cap": 10,
+                "remaining": 5,
+                "spent": False,
+                "clock_live": True,
                 "interval_seconds": 10800,
                 "interval_human": "3 hours",
             },

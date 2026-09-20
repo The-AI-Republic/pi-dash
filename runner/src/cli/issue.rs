@@ -61,6 +61,16 @@ pub enum IssueCommand {
         /// Project-scoped identifier, e.g. `ENG-42`.
         identifier: String,
     },
+    /// Start an agent run on a work item, identical to clicking "Run AI" in
+    /// the web app (same prompt, ticker reset, and runner pinning). Use it to
+    /// kick an agent that has stalled or not picked up a reply. Prints the
+    /// dispatched run as JSON. Exits non-zero when no run could be dispatched
+    /// (a 409 whose body carries a machine-readable `reason`:
+    /// `active_run_exists` | `no_pod` | `no_eligible_runner`).
+    RunAi {
+        /// Project-scoped identifier, e.g. `ENG-42`.
+        identifier: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -84,6 +94,11 @@ pub struct CreateArgs {
     /// Initial state — exact state name (case-insensitive) or a state UUID.
     #[arg(long)]
     pub state: Option<String>,
+
+    /// Parent issue — project-scoped identifier (`PROJ-123`) or a raw UUID.
+    /// Attaches the new work item as a sub-issue of the given parent.
+    #[arg(long)]
+    pub parent: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -125,6 +140,16 @@ pub struct PatchArgs {
     /// Priority: `none|low|medium|high|urgent`.
     #[arg(long)]
     pub priority: Option<String>,
+
+    /// New parent issue — project-scoped identifier (`PROJ-123`) or a raw
+    /// UUID. Mutually exclusive with `--clear-parent`.
+    #[arg(long, conflicts_with = "clear_parent")]
+    pub parent: Option<String>,
+
+    /// Detach the current parent, making this a top-level issue (sends
+    /// `parent: null`). Mutually exclusive with `--parent`.
+    #[arg(long)]
+    pub clear_parent: bool,
 }
 
 #[derive(Debug, Args)]
@@ -199,6 +224,7 @@ pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
         IssueCommand::AttachReview(a) => cmd_attach_review(&client, a).await,
         IssueCommand::AttachPr(a) => cmd_attach_review(&client, a).await,
         IssueCommand::ReTick { identifier } => cmd_re_tick(&client, &identifier).await,
+        IssueCommand::RunAi { identifier } => cmd_run_ai(&client, &identifier).await,
     };
     match result {
         Ok(()) => 0,
@@ -226,31 +252,25 @@ async fn cmd_create(
 
     let project_ref = resolve_create_project(client, paths, args.project.as_deref()).await?;
 
-    let mut body: Map<String, Value> = Map::new();
-    body.insert("name".into(), Value::String(args.title));
-    if let Some(desc) = args.description {
-        // Issue descriptions are stored as rich text: the API's serializer is a
-        // ModelSerializer over the `Issue` model, whose only description column
-        // is `description_html` (it has no plain `description` field). Sending a
-        // bare `description` key was silently dropped, so CLI-created issues had
-        // an empty body. Convert the plain-text/markdown input to minimal HTML
-        // and send it under the key the server actually persists.
-        body.insert(
-            "description_html".into(),
-            Value::String(description_to_html(&desc)),
-        );
-    }
-    if let Some(prio) = args.priority {
-        body.insert("priority".into(), Value::String(prio));
-    }
-    if let Some(state) = args.state {
-        let uuid = if looks_like_uuid(&state) {
-            state
-        } else {
-            resolve_state_name(client, &project_ref, &state).await?
-        };
-        body.insert("state".into(), Value::String(uuid));
-    }
+    // Resolve the network-dependent fields first, then hand the already-resolved
+    // values to the pure body builder so the URL/body contract is unit-testable.
+    let state_uuid = match args.state.as_deref() {
+        Some(state) if looks_like_uuid(state) => Some(state.to_string()),
+        Some(state) => Some(resolve_state_name(client, &project_ref, state).await?),
+        None => None,
+    };
+    let parent_uuid = match args.parent.as_deref() {
+        Some(parent) => Some(resolve_parent_id(client, parent).await?),
+        None => None,
+    };
+
+    let body = build_create_body(
+        args.title,
+        args.description.as_deref(),
+        args.priority,
+        state_uuid,
+        parent_uuid,
+    );
 
     let path = format!(
         "workspaces/{}/projects/{}/work-items/",
@@ -262,6 +282,59 @@ async fn cmd_create(
         serde_json::to_string(&resp).expect("serialize JSON value")
     );
     Ok(())
+}
+
+/// Assemble the `work-items` POST body from already-resolved values. Kept pure
+/// (no network) so the field contract — including the rich-text `description_html`
+/// key and the `parent` FK the MCP path also sends — is unit-testable.
+fn build_create_body(
+    title: String,
+    description: Option<&str>,
+    priority: Option<String>,
+    state_uuid: Option<String>,
+    parent_uuid: Option<String>,
+) -> Map<String, Value> {
+    let mut body: Map<String, Value> = Map::new();
+    body.insert("name".into(), Value::String(title));
+    if let Some(desc) = description {
+        // Issue descriptions are stored as rich text: the API's serializer is a
+        // ModelSerializer over the `Issue` model, whose only description column
+        // is `description_html` (it has no plain `description` field). Sending a
+        // bare `description` key was silently dropped, so CLI-created issues had
+        // an empty body. Convert the plain-text/markdown input to minimal HTML
+        // and send it under the key the server actually persists.
+        body.insert(
+            "description_html".into(),
+            Value::String(description_to_html(desc)),
+        );
+    }
+    if let Some(prio) = priority {
+        body.insert("priority".into(), Value::String(prio));
+    }
+    if let Some(uuid) = state_uuid {
+        body.insert("state".into(), Value::String(uuid));
+    }
+    if let Some(uuid) = parent_uuid {
+        body.insert("parent".into(), Value::String(uuid));
+    }
+    body
+}
+
+/// Resolve a `--parent` value to an issue UUID. A raw UUID is accepted as-is
+/// (mirroring `--state`); otherwise the `PROJ-123` identifier is resolved via
+/// the by-identifier GET. Empty input is a clean pre-API error; a well-formed
+/// but nonexistent identifier surfaces as the GET's not-found error, and the
+/// server owns cross-workspace/cross-project validation of the final `parent`.
+async fn resolve_parent_id(client: &ApiClient, parent: &str) -> Result<String, CliError> {
+    let trimmed = parent.trim();
+    if trimmed.is_empty() {
+        return Err(CliError::new(EXIT_INVALID, "--parent must not be empty"));
+    }
+    if looks_like_uuid(trimmed) {
+        Ok(trimmed.to_string())
+    } else {
+        Ok(resolve_issue(client, trimmed).await?.id)
+    }
 }
 
 async fn resolve_create_project(
@@ -391,46 +464,44 @@ fn html_escape(s: &str) -> String {
     out
 }
 
+/// The `parent`-field mutation requested by a `pidash issue patch`.
+///
+/// `clap`'s `conflicts_with` guarantees `--parent` and `--clear-parent` are
+/// never both present, so these three variants are exhaustive.
+enum ParentPatch {
+    /// `--parent` given; the resolved parent issue UUID.
+    Set(String),
+    /// `--clear-parent` given; detach the parent by sending `parent: null`.
+    Clear,
+    /// Neither flag given; leave the parent untouched.
+    Unchanged,
+}
+
 async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> {
-    let mut body: Map<String, Value> = Map::new();
-
-    if let Some(ref title) = args.title {
-        body.insert("name".into(), Value::String(title.clone()));
-    }
-    if let Some(ref desc) = args.description {
-        // Same rich-text contract as `cmd_create`: the server stores the body in
-        // `description_html`, and the PATCH view keys the description-version
-        // bookkeeping off `request.data.get("description_html")`. Convert the
-        // plain-text/markdown input and send it under that key; the model
-        // re-derives `description_stripped` and the serializer re-sanitizes the
-        // HTML on save.
-        body.insert(
-            "description_html".into(),
-            Value::String(description_to_html(desc)),
-        );
-    }
-    if let Some(ref prio) = args.priority {
-        body.insert("priority".into(), Value::String(prio.clone()));
-    }
-
     // Resolve issue first — we always need project_id for the mutating PATCH URL.
     let issue = resolve_issue(client, &args.identifier).await?;
 
-    if let Some(ref state) = args.state {
-        let uuid = if looks_like_uuid(state) {
-            state.clone()
-        } else {
-            resolve_state_name(client, &issue.project_id, state).await?
-        };
-        body.insert("state".into(), Value::String(uuid));
-    }
+    let state_uuid = match args.state.as_deref() {
+        Some(state) if looks_like_uuid(state) => Some(state.to_string()),
+        Some(state) => Some(resolve_state_name(client, &issue.project_id, state).await?),
+        None => None,
+    };
 
-    if body.is_empty() {
-        return Err(CliError::new(
-            EXIT_INVALID,
-            "at least one of --state/--title/--description/--priority is required",
-        ));
-    }
+    let parent = if args.clear_parent {
+        ParentPatch::Clear
+    } else if let Some(ref parent) = args.parent {
+        ParentPatch::Set(resolve_parent_id(client, parent).await?)
+    } else {
+        ParentPatch::Unchanged
+    };
+
+    let body = build_patch_body(
+        args.title.as_deref(),
+        args.description.as_deref(),
+        args.priority.as_deref(),
+        state_uuid,
+        parent,
+    )?;
 
     let path = format!(
         "workspaces/{}/projects/{}/work-items/{}/",
@@ -442,6 +513,60 @@ async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> 
         serde_json::to_string(&resp).expect("serialize JSON value")
     );
     Ok(())
+}
+
+/// Assemble the `work-items` PATCH body from already-resolved values, enforcing
+/// the "at least one mutation" guard. Kept pure (no network) so the body
+/// contract — including `parent: null` for `--clear-parent` and the fact that a
+/// parent mutation satisfies the guard — is unit-testable.
+fn build_patch_body(
+    title: Option<&str>,
+    description: Option<&str>,
+    priority: Option<&str>,
+    state_uuid: Option<String>,
+    parent: ParentPatch,
+) -> Result<Map<String, Value>, CliError> {
+    let mut body: Map<String, Value> = Map::new();
+
+    if let Some(title) = title {
+        body.insert("name".into(), Value::String(title.to_string()));
+    }
+    if let Some(desc) = description {
+        // Same rich-text contract as `build_create_body`: the server stores the
+        // body in `description_html`, and the PATCH view keys the
+        // description-version bookkeeping off `request.data.get("description_html")`.
+        // Convert the plain-text/markdown input and send it under that key; the
+        // model re-derives `description_stripped` and the serializer re-sanitizes
+        // the HTML on save.
+        body.insert(
+            "description_html".into(),
+            Value::String(description_to_html(desc)),
+        );
+    }
+    if let Some(prio) = priority {
+        body.insert("priority".into(), Value::String(prio.to_string()));
+    }
+    if let Some(uuid) = state_uuid {
+        body.insert("state".into(), Value::String(uuid));
+    }
+    match parent {
+        ParentPatch::Set(uuid) => {
+            body.insert("parent".into(), Value::String(uuid));
+        }
+        ParentPatch::Clear => {
+            body.insert("parent".into(), Value::Null);
+        }
+        ParentPatch::Unchanged => {}
+    }
+
+    if body.is_empty() {
+        return Err(CliError::new(
+            EXIT_INVALID,
+            "at least one of --state/--title/--description/--priority/--parent/--clear-parent is required",
+        ));
+    }
+
+    Ok(body)
 }
 
 async fn cmd_attach_review(client: &ApiClient, args: AttachReviewArgs) -> Result<(), CliError> {
@@ -556,9 +681,31 @@ async fn cmd_re_tick(client: &ApiClient, identifier: &str) -> Result<(), CliErro
     Ok(())
 }
 
+/// Build the token-API path for `POST .../work-items/<id>/run-ai/`.
+fn run_ai_path(workspace_slug: &str, project_id: &str, issue_id: &str) -> String {
+    format!("workspaces/{workspace_slug}/projects/{project_id}/work-items/{issue_id}/run-ai/")
+}
+
+async fn cmd_run_ai(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
+    let issue = resolve_issue(client, identifier).await?;
+    let path = run_ai_path(&client.env.workspace_slug, &issue.project_id, &issue.id);
+    // 201 returns the dispatched run; a 409 (nothing dispatched — active run,
+    // no pod, no eligible runner) or a 403 (requested from inside the issue's
+    // own active agent run) is surfaced by `client.post` as a `CliError` whose
+    // detail carries the response body — including the machine-readable
+    // `reason` — and `?` propagates it to a non-zero exit via `report_error`.
+    let resp = client.post(&path, &serde_json::json!({})).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn percent_encode_value_passes_unreserved() {
@@ -732,5 +879,145 @@ mod tests {
         };
         let params = build_search_params(&args).expect("valid args");
         assert!(params.iter().all(|(k, _)| *k != "project"));
+    }
+
+    // --- parent support --------------------------------------------------
+
+    #[test]
+    fn build_create_body_includes_resolved_parent() {
+        let body = build_create_body(
+            "Sub-task".to_string(),
+            None,
+            None,
+            None,
+            Some("11111111-2222-3333-4444-555555555555".to_string()),
+        );
+        assert_eq!(
+            body.get("parent").and_then(Value::as_str),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+        assert_eq!(body.get("name").and_then(Value::as_str), Some("Sub-task"));
+    }
+
+    #[test]
+    fn build_create_body_omits_parent_when_absent() {
+        let body = build_create_body("Top-level".to_string(), None, None, None, None);
+        assert!(!body.contains_key("parent"));
+    }
+
+    #[test]
+    fn build_patch_body_sets_parent_uuid() {
+        let body = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Set("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string()),
+        )
+        .expect("parent is a valid mutation");
+        assert_eq!(
+            body.get("parent").and_then(Value::as_str),
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        );
+    }
+
+    #[test]
+    fn build_patch_body_clear_parent_sends_null() {
+        let body = build_patch_body(None, None, None, None, ParentPatch::Clear)
+            .expect("clear-parent is a valid mutation");
+        // `--clear-parent` must emit an explicit JSON null (detach), not omit
+        // the key — omitting it would leave the parent unchanged server-side.
+        assert_eq!(body.get("parent"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn build_patch_body_parent_alone_satisfies_guard() {
+        // A parent mutation with no other flag must not trip the
+        // "at least one of ..." guard.
+        assert!(
+            build_patch_body(None, None, None, None, ParentPatch::Set("x".to_string())).is_ok()
+        );
+        assert!(build_patch_body(None, None, None, None, ParentPatch::Clear).is_ok());
+    }
+
+    #[test]
+    fn build_patch_body_empty_is_rejected() {
+        let err = build_patch_body(None, None, None, None, ParentPatch::Unchanged)
+            .expect_err("no mutations must be rejected");
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        // The guard message advertises the parent flags so agents can discover them.
+        assert!(err.message.contains("--parent"));
+        assert!(err.message.contains("--clear-parent"));
+    }
+
+    /// Parse `pidash issue patch` args in isolation. `PatchArgs` derives
+    /// `Args`, not `Parser`, so wrap it in a throwaway `Parser` to exercise the
+    /// `conflicts_with` relationship the way clap enforces it at runtime.
+    #[derive(Debug, clap::Parser)]
+    struct PatchArgsHarness {
+        #[command(flatten)]
+        args: PatchArgs,
+    }
+
+    #[test]
+    fn patch_parent_and_clear_parent_conflict() {
+        use clap::Parser;
+        let err = PatchArgsHarness::try_parse_from([
+            "patch",
+            "PROJ-1",
+            "--parent",
+            "PROJ-2",
+            "--clear-parent",
+        ])
+        .expect_err("--parent and --clear-parent are mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn patch_parent_alone_parses() {
+        use clap::Parser;
+        let parsed =
+            PatchArgsHarness::try_parse_from(["patch", "PROJ-1", "--parent", "PROJ-2"]).unwrap();
+        assert_eq!(parsed.args.parent.as_deref(), Some("PROJ-2"));
+        assert!(!parsed.args.clear_parent);
+    }
+
+    #[test]
+    fn patch_clear_parent_alone_parses() {
+        use clap::Parser;
+        let parsed =
+            PatchArgsHarness::try_parse_from(["patch", "PROJ-1", "--clear-parent"]).unwrap();
+        assert!(parsed.args.clear_parent);
+        assert!(parsed.args.parent.is_none());
+    }
+
+    #[derive(Debug, clap::Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        issue: IssueArgs,
+    }
+
+    #[test]
+    fn run_ai_parses_positional_identifier() {
+        let parsed = TestCli::try_parse_from(["pidash", "run-ai", "ENG-42"]).expect("parse run-ai");
+        match parsed.issue.command {
+            IssueCommand::RunAi { identifier } => assert_eq!(identifier, "ENG-42"),
+            other => panic!("expected run-ai, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_ai_requires_an_identifier() {
+        // A missing positional identifier is a clap parse error, not a
+        // silent workspace-wide call.
+        assert!(TestCli::try_parse_from(["pidash", "run-ai"]).is_err());
+    }
+
+    #[test]
+    fn run_ai_path_targets_the_work_item_run_ai_route() {
+        assert_eq!(
+            run_ai_path("eng", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"),
+            "workspaces/eng/projects/11111111-1111-1111-1111-111111111111/work-items/22222222-2222-2222-2222-222222222222/run-ai/"
+        );
     }
 }

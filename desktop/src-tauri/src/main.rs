@@ -4,6 +4,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod chat;
+mod chat_history;
+mod ipc;
 mod managed_runner;
 mod pidash_cli;
 
@@ -261,6 +264,28 @@ async fn check_for_updates(handle: tauri::AppHandle) {
     handle.restart();
 }
 
+/// Wipe the webview's own session state — cookies first of all.
+///
+/// Sign-out posts to the server and relies on its `Set-Cookie` deletions
+/// reaching this webview. They do not: the page origin is `tauri://localhost`
+/// while the API is a different origin, so the deletion is dropped and the
+/// session survives a "sign out" — the app lands on the sign-in page, the
+/// route guard sees a live session, and bounces straight back in. The app owns
+/// this cookie jar, so it clears it itself rather than trusting a cross-origin
+/// response to do it.
+///
+/// Called by the web layer *after* the sign-out request (which needs the CSRF
+/// cookie) and before it navigates.
+#[tauri::command]
+async fn desktop_clear_web_data<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "no main webview window".to_string())?;
+    window
+        .clear_all_browsing_data()
+        .map_err(|e| format!("clearing webview data: {e}"))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `target_url` is the server origin that the deep-link sign-in handler
     // navigates the webview to during sign-in (see handle_deep_link). It is
@@ -374,10 +399,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .manage(ZoomState(Mutex::new(1.0)))
         .manage(AppConfig { target_url, bundle_root })
         .manage(managed_runner::DaemonState::default())
+        .manage(chat::ChatState::default())
         .invoke_handler(tauri::generate_handler![
             open_in_browser,
             pidash_cli::detect_pidash_cli,
             pidash_cli::install_pidash_cli,
+            pidash_cli::pidash_cli_login,
+            // Direct local chat with the built-in engine (PDASHOSS01-159):
+            // these reach the daemon over its IPC socket and stream Chat*
+            // frames back to the webview as `chat://frame` events — never via
+            // the Pi Dash cloud chat relay.
+            chat::chat_warm,
+            chat::chat_send,
+            chat::chat_cancel,
+            chat::chat_close,
+            chat::chat_decide,
             // Built-in agent engine: the overlay JS holds the session and
             // makes the authenticated calls, then hands the results to these
             // commands, which own the local files and the daemon process.
@@ -389,7 +425,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             managed_runner::managed_start_daemon,
             managed_runner::managed_stop_daemon,
             managed_runner::managed_sign_out,
+            desktop_clear_web_data,
             managed_runner::managed_doctor,
+            // Direct local chat history: stored on this machine only, per
+            // account, never relayed to or stored by the Pi Dash server.
+            chat_history::chat_create_session,
+            chat_history::chat_list_sessions,
+            chat_history::chat_get_session,
+            chat_history::chat_list_events,
+            chat_history::chat_append_event,
+            chat_history::chat_set_thread_id,
+            chat_history::chat_rename_session,
+            chat_history::chat_delete_session,
+            chat_history::chat_clear_history,
+            chat_history::chat_working_dir,
         ])
         // Fallback for the navigation policy below: if a server-host page
         // does get through (e.g. a redirect the policy hook didn't see),

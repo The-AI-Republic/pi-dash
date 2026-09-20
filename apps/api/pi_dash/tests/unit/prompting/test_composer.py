@@ -378,12 +378,15 @@ def test_review_kind_approved_stays_in_review_not_done():
     out = compose("review", workspace=None, project=None, user=None, context=_ctx("review"))
     body = out.text
 
-    # The review success path routes to In Review...
-    assert '--state "In Review"' in body
+    # An approved review hands the task on to In Test; defects go back to
+    # In Progress with open items...
+    assert '--state "In Test"' in body
+    assert '--state "In Progress"' in body
     # ...and never to Done.
     assert '--state "Done"' not in body
-    # The approved outcome explicitly leaves the issue In Review.
-    assert "leave the issue In Review" in body or "leaves the issue In Review" in body
+    # The lifecycle is shared and the run reports its outcome.
+    assert "Task lifecycle" in body
+    assert "pidash run yield --outcome" in body
 
 
 # ----------------------------------------------------------------------
@@ -398,19 +401,89 @@ def test_session_framing_renders_tick_guidance_and_schedule():
         "coding-task", workspace=None, project=None, user=None, context=ctx
     ).text
     assert "automatically by the issue's ticker" in out
+    assert "used 5 of 10 agent runs" in out
+    assert "(5 remaining)" in out
+    # The lifecycle section carries the budget line and the pool rules.
+    assert "Runs used on this issue: **5 of 10** (5 remaining)" in out
     assert "about every 3 hours" in out
-    assert "used 5 of 24 ticks" in out
-    assert "19 remaining before the issue auto-pauses" in out
 
 
 @pytest.mark.unit
-def test_session_framing_review_tick_adds_noop_hint():
+def test_session_framing_review_tick_reports_done_not_noop():
     ctx = _ctx("review")
     out = compose(
         "review", workspace=None, project=None, user=None, context=ctx
     ).text
     assert "automatically by the issue's ticker" in out
-    assert "emit `noop`" in out  # review-specific done-signal nudge
+    assert "emit `noop`" not in out
+    assert "pidash run yield --outcome done" in out
+
+
+@pytest.mark.unit
+def test_lifecycle_warns_when_the_pool_is_spent():
+    ctx = _ctx("review")
+    ctx["tick"] = {
+        **ctx["tick"],
+        "count": 10,
+        "cap": 10,
+        "remaining": 0,
+        "spent": True,
+        "clock_live": False,
+    }
+    out = compose("review", workspace=None, project=None, user=None, context=ctx).text
+    assert "The pool is spent" in out
+    assert "No agent run will follow this one" in out
+    assert "Re-tick" in out
+
+
+@pytest.mark.unit
+def test_lifecycle_spent_branch_covers_the_last_run(kind="coding-task"):
+    ctx = _ctx(kind)
+    ctx["tick"] = {**ctx["tick"], "count": 10, "cap": 10, "remaining": 0, "spent": True, "clock_live": False}
+    out = compose(kind, workspace=None, project=None, user=None, context=ctx).text
+    assert "this is the last run" in out
+    assert "Never press Re-tick yourself" in out
+    assert "from Paused" in out
+
+
+@pytest.mark.unit
+def test_cli_docs_put_re_tick_out_of_the_agents_hands():
+    out = compose("coding-task", workspace=None, project=None, user=None, context=_ctx("coding-task")).text
+    assert "`pidash issue re-tick`" in out
+    assert "refuses a re-tick that comes from inside an agent run" in out
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["review", "test"])
+def test_review_and_test_get_lifecycle_workpad_repo_and_blocking(kind):
+    """The sections review/test cross-reference must actually be in their
+    prompt: no dangling "Blocking the run", the inlined workpad, the repo /
+    PR block, and the shared lifecycle."""
+    ctx = _ctx(kind)
+    out = compose(kind, workspace=None, project=None, user=None, context=ctx).text
+    assert "## Blocking the run" in out
+    assert "## Task lifecycle" in out
+    assert "## Workpad — read first, write last" in out
+    assert ctx["workpad_body"] in out
+    assert "Repository:" in out
+    assert "### Path to done" in out
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["review", "test"])
+def test_review_and_test_do_not_get_the_implementation_workpad_checklist(kind):
+    ctx = _ctx(kind)
+    out = compose(kind, workspace=None, project=None, user=None, context=ctx).text
+    assert "`### Progress Checkpoints` match what is actually true" not in out
+    assert "carried forward **unchanged**" in out
+    assert '"Analyze & scope" for tone' not in out
+
+
+@pytest.mark.unit
+def test_test_kind_defects_go_back_to_in_progress_not_blocked():
+    out = compose("test", workspace=None, project=None, user=None, context=_ctx("test")).text
+    assert "back to In Progress" in out
+    assert "Blocked for a bug" in out
 
 
 @pytest.mark.unit

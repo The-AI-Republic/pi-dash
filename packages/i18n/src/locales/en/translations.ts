@@ -370,6 +370,7 @@ export default {
   "Could not load pods.": "Could not load pods.",
   "Could not load projects.": "Could not load projects.",
   "Could not revert the prompt.": "Could not revert the prompt.",
+  "Could not delete the dev machine.": "Could not delete the dev machine.",
   "Could not revoke the dev machine.": "Could not revoke the dev machine.",
   "Could not rotate the dev machine token.": "Could not rotate the dev machine token.",
   "Could not save the prompt.": "Could not save the prompt.",
@@ -485,6 +486,7 @@ export default {
   Delete: "Delete",
   "Delete {entity}": "Delete {entity}",
   "Delete attachment": "Delete attachment",
+  "Delete dev machine?": "Delete dev machine?",
   "Delete draft": "Delete draft",
   "Delete personal access token": "Delete personal access token",
   "Delete runner?": "Delete runner?",
@@ -1576,13 +1578,26 @@ export default {
   "This module isn't active yet.": "This module isn't active yet.",
   "This permanently revokes the dev machine, invalidates its auth token, and revokes runners hosted on it. Use this when the machine should no longer be trusted.":
     "This permanently revokes the dev machine, invalidates its auth token, and revokes runners hosted on it. Use this when the machine should no longer be trusted.",
+  "This removes the dev machine connection entirely: its auth token is invalidated, the runners hosted on it are torn down, and the machine disappears from this list. Deleting a dev machine does not uninstall the AI agent (such as Codex or Claude) on the machine itself.":
+    "This removes the dev machine connection entirely: its auth token is invalidated, the runners hosted on it are torn down, and the machine disappears from this list. Deleting a dev machine does not uninstall the AI agent (such as Codex or Claude) on the machine itself.",
   "This run is not available. It may have been deleted or belong to a different workspace.":
     "This run is not available. It may have been deleted or belong to a different workspace.",
   "This soft-deletes the scheduler. Any active project bindings will stop firing. The slug becomes available for re-creation.":
     "This soft-deletes the scheduler. Any active project bindings will stop firing. The slug becomes available for re-creation.",
   "This workspace is back on the shared default template.": "This workspace is back on the shared default template.",
-  "Tick {count} of {max}": "Tick {count} of {max}",
-  "Tick {count}, no cap": "Tick {count}, no cap",
+  "{count} of {max} runs used": "{count} of {max} runs used",
+  "{count} runs used, no cap": "{count} runs used, no cap",
+  "Agent run queued": "Agent run queued",
+  "A run is already active on this work item. The next run starts as soon as it ends.":
+    "A run is already active on this work item. The next run starts as soon as it ends.",
+  "Added more runs to this issue's budget. The AI agent is starting now.":
+    "Added more runs to this issue's budget. The AI agent is starting now.",
+  "Added more runs to this issue's budget. The next run starts as soon as the active run ends.":
+    "Added more runs to this issue's budget. The next run starts as soon as the active run ends.",
+  "Re-ticking only applies while the issue is ticking and its run budget is used up.":
+    "Re-ticking only applies while the issue is ticking and its run budget is used up.",
+  "Add more runs to this issue's budget and start the AI agent now.":
+    "Add more runs to this issue's budget and start the AI agent now.",
   Time: "Time",
   "Time zone": "Time zone",
   "Timebox work as you see fit per project and change frequency from one period to the next.":

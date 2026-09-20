@@ -312,17 +312,27 @@ def build_tools(run_id, allowed_names, *, source="internal", server_key=""):
             # orchestration transition handler. A bare queryset .update()
             # would skip the signal-driven phase machinery entirely — no
             # ticker arm/disarm, no follow-up phase run.
-            locked = Issue.objects.select_for_update().select_related("state").get(pk=run.work_item_id)
+            # ``of=("self",)``: ``state`` is a nullable FK, so the join is an
+            # outer join and Postgres refuses ``FOR UPDATE`` on its nullable
+            # side (the same trap the move endpoint hit).
+            locked = Issue.objects.select_for_update(of=("self",)).select_related("state").get(pk=run.work_item_id)
             from_state = locked.state
             if from_state is not None and from_state.pk == state.pk:
                 return {"updated": False, "state": state.name, "state_id": str(state.id)}
             locked.state = state
+            # This move is made from inside an agent run: the ticker must
+            # treat it as an agent move (queued entry that counts against
+            # the pool; parks when the pool is spent), not as a free human
+            # move. Same carrier the local runner's CLI header sets.
+            from pi_dash.orchestration.signals import MOVED_BY_RUN_ATTR
+
+            setattr(locked, MOVED_BY_RUN_ATTR, run)
             with impersonate(run.created_by):
                 locked.save(update_fields=["state", "updated_at", "updated_by"])
             from pi_dash.orchestration import service as orchestration
 
             orchestration.handle_issue_state_transition(
-                locked, from_state, state, actor=run.created_by, dispatch_immediate=True
+                locked, from_state, state, actor=run.created_by, dispatch_immediate=True, moved_by_run=run
             )
             return {"updated": True, "state": state.name, "state_id": str(state.id)}
 

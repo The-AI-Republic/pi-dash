@@ -14,9 +14,10 @@ from pi_dash.prompting.renderer import validate_syntax
 
 @pytest.mark.unit
 def test_registry_loaded_with_expected_sections():
-    # 21 local sections (13 ported + relationships + 2 review + 2 test
-    # + 3 scheduler) plus 14 locked Cloud Agent sections.
-    assert len(registry.REGISTRY) == 35
+    # 24 local sections (13 ported + relationships + 2 review + 2 test
+    # + 3 scheduler + task-lifecycle + repo-context + workpad-context)
+    # plus 14 locked Cloud Agent sections.
+    assert len(registry.REGISTRY) == 38
     for key in (
         "intro",
         "relationships",
@@ -25,6 +26,9 @@ def test_registry_loaded_with_expected_sections():
         "test-intro",
         "test-cycle",
         "scheduler-task",
+        "task-lifecycle",
+        "repo-context",
+        "workpad-context",
     ):
         assert key in registry.REGISTRY
 

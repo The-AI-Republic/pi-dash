@@ -308,6 +308,13 @@ def update_issue(
         # include audit columns so update_fields doesn't drop them (BaseModel.save
         # sets updated_by from the impersonated user; updated_at is auto_now).
         update_fields += ["updated_at", "updated_by"]
+        # The save fires the orchestration signal; let it update the clock
+        # only and dispatch below with ``actor`` so one move makes one run
+        # (the signal would otherwise dispatch first and the explicit call
+        # would queue a second, free entry behind it).
+        from pi_dash.orchestration.signals import _DISPATCH_IMMEDIATE_ATTR
+
+        setattr(locked, _DISPATCH_IMMEDIATE_ATTR, False)
         locked.save(update_fields=update_fields)
         issue = locked
 

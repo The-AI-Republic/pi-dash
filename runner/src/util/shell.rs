@@ -51,6 +51,34 @@
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
+tokio::task_local! {
+    /// Per-run identity for the agent process, scoped to the task that
+    /// drives one `AgentRun` (see `Supervisor::handle_assign`). Every bridge
+    /// builds its agent `Command` through [`login_shell_command`] from
+    /// inside that task, so reading it here is the one place that reaches
+    /// all of them — the value lands on the child as `PIDASH_RUN_ID`, which
+    /// the agent's `pidash` invocations forward on every write. Chat
+    /// sessions never set it. Design: `.ai_design/ticking_relevance` §5.6.
+    pub static RUN_ENV: RunEnv;
+}
+
+/// What [`RUN_ENV`] carries. Kept as a struct so more per-run values can
+/// ride along without touching the bridges.
+#[derive(Debug, Clone)]
+pub struct RunEnv {
+    pub run_id: uuid::Uuid,
+}
+
+/// Environment variable name the agent reads for its run id.
+pub const RUN_ID_ENV: &str = "PIDASH_RUN_ID";
+
+/// Apply the task-scoped per-run environment, when there is one.
+fn apply_run_env(cmd: &mut Command) {
+    if let Ok(env) = RUN_ENV.try_with(|e| e.clone()) {
+        cmd.env(RUN_ID_ENV, env.run_id.to_string());
+    }
+}
+
 /// Re-assert Pi Dash's environment *after* the login shell's rc files have run.
 ///
 /// `bash -ilc` sources `~/.bash_profile` / `~/.bashrc`, which happens after the
@@ -155,6 +183,7 @@ pub fn login_shell_command_with_env(
         cmd.current_dir(cwd);
     }
     env.apply(&mut cmd);
+    apply_run_env(&mut cmd);
     if let Some(v) = &env.codex_home {
         cmd.env("CODEX_HOME", v.as_os_str());
     }
@@ -229,6 +258,10 @@ pub fn login_shell_command_with_env(
         cmd.env("PIDASH_AGENT_CWD", cwd.as_os_str());
     }
     env.apply(&mut cmd);
+    // Plain `env`, not re-exported by the script: the login shell's rc
+    // files have no reason to touch `PIDASH_RUN_ID`, and `exec "$@"`
+    // inherits it.
+    apply_run_env(&mut cmd);
     cmd.arg("-ilc").arg(SHELL_SCRIPT).arg("bash").arg(program);
     cmd.args(args);
     cmd
@@ -335,6 +368,28 @@ mod tests {
                 OsString::from("codex"),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn run_env_scope_puts_run_id_on_the_child() {
+        let run_id = uuid::Uuid::new_v4();
+        let cmd = RUN_ENV
+            .scope(RunEnv { run_id }, async {
+                login_shell_command("claude", &[], None)
+            })
+            .await;
+        assert_eq!(
+            env_value(&cmd, RUN_ID_ENV),
+            Some(OsString::from(run_id.to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn no_run_env_scope_means_no_run_id_on_the_child() {
+        // Chat sessions never enter a run scope; the agent must not inherit
+        // a stale id from anywhere.
+        let cmd = login_shell_command("claude", &[], None);
+        assert_eq!(env_value(&cmd, RUN_ID_ENV), None);
     }
 
     #[cfg(not(target_os = "windows"))]

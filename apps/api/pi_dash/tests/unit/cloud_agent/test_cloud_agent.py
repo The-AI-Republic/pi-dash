@@ -22,7 +22,7 @@ from pi_dash.cloud_agent.tools import ToolDenied, build_tools
 from pi_dash.cloud_agent.output import CloudAgentOutput
 from pi_dash.cloud_agent.tasks import run_cloud_agent, scan_queued_runs, sweep_stale_runs
 from pi_dash.core.agent_execution import AgentExecutorKind, agent_executor_options, get_default_agent_executor
-from pi_dash.db.models import Issue, IssueComment, ProjectMember, State, WorkspaceMember
+from pi_dash.db.models import Issue, IssueComment, Project, ProjectMember, State, WorkspaceMember
 from pi_dash.prompting.composer import build_direct_turn, build_first_turn
 from pi_dash.runner.models import AgentRun, AgentRunStatus, Runner, RunnerStatus
 from pi_dash.runner.services import matcher
@@ -632,3 +632,53 @@ def test_terminal_effects_are_idempotent(issue, create_user):
         assert apply_terminal_effects(run.id)
     hooks.assert_called_once()
     dispatch.assert_called_once_with(issue.workspace_id)
+
+
+@pytest.mark.unit
+@override_settings(**CLOUD_SETTINGS, CLOUD_AGENT_WRITES_ENABLED=True)
+def test_cloud_transition_is_an_agent_move_for_the_ticker(issue, create_user, project):
+    """A cloud run moving its issue must be attributed to the run, like the
+    local runner's ``X-Pi-Dash-Run-Id`` header: the next stage's entry is
+    queued on the clock and counts against the pool — not a free human move."""
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    started = State.objects.create(name="In Progress", group="started", project=project)
+    review = State.objects.create(name="In Review", group="review", project=project)
+    Issue.all_objects.filter(pk=issue.pk).update(state=started)
+    issue.refresh_from_db()
+    IssueAgentTicker.objects.create(issue=issue, used=2, enabled=True, next_run_at=timezone.now())
+    run = _cloud_run(issue, create_user, status=AgentRunStatus.RUNNING)
+
+    tools = {tool.__name__: tool for tool in build_tools(run.id, run.tool_plan["tools"])}
+    with patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()):
+        result = tools["pidash_transition_current_issue"](str(review.id))
+    assert result["updated"] is True
+    ticker = IssueAgentTicker.objects.get(issue=issue)
+    assert ticker.pending_entry is True
+    assert ticker.pending_entry_free is False
+    assert ticker.used == 2
+    assert AgentRun.objects.filter(work_item=issue).count() == 1
+
+
+@pytest.mark.unit
+@override_settings(**CLOUD_SETTINGS, CLOUD_AGENT_WRITES_ENABLED=True)
+def test_cloud_transition_on_a_spent_pool_parks(issue, create_user, project):
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    started = State.objects.create(name="In Progress", group="started", project=project)
+    review = State.objects.create(name="In Review", group="review", project=project)
+    Issue.all_objects.filter(pk=issue.pk).update(state=started)
+    issue.refresh_from_db()
+    Project.objects.filter(pk=project.pk).update(agent_default_max_ticks=10)
+    IssueAgentTicker.objects.create(issue=issue, used=10, enabled=True, next_run_at=timezone.now())
+    run = _cloud_run(issue, create_user, status=AgentRunStatus.RUNNING)
+
+    tools = {tool.__name__: tool for tool in build_tools(run.id, run.tool_plan["tools"])}
+    with patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()):
+        tools["pidash_transition_current_issue"](str(review.id))
+    issue.refresh_from_db()
+    assert issue.state_id == review.id
+    ticker = IssueAgentTicker.objects.get(issue=issue)
+    assert ticker.pending_entry is False
+    assert ticker.enabled is False
+    assert ticker.disarm_reason == "pool_spent"

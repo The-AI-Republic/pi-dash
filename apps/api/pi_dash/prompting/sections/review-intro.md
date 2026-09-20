@@ -17,3 +17,8 @@ Recent activity (chronological — humans and the agent's own prior runs):
 Latest implementation run output (read this carefully — it is your
 authoritative record of what was produced):
 {{ parent_done_payload }}
+
+If there is no prior run output above and no workpad, a human moved the
+issue straight into this stage: the work product is what the issue links
+to — an attached PR, a document, the description — and you create the
+workpad's `### Path to done` block yourself (see "Workpad").
