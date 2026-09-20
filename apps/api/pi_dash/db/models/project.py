@@ -143,19 +143,20 @@ class Project(BaseModel):
     #
     # One budget **pool** per issue (``agent_default_max_ticks``), spent by
     # machine-started runs in any of the three ticking stages, and one
-    # Re-tick grant size (``agent_retick_grant``). Cadence stays per stage
-    # (``agent_*_interval_seconds``) because rhythm legitimately differs —
-    # a test cycle is a slower loop than a review pass — but budget does
-    # not. The mapping from stage to interval field lives in
+    # Re-tick grant size (``agent_retick_grant``). Cadence is kept per stage
+    # (``agent_*_interval_seconds``) so rhythms can diverge again in the
+    # future, but the three defaults are currently unified at 3 h (10800 s)
+    # per PDASHOSS01-167 — every ticking stage fires on the same rhythm. The
+    # mapping from stage to interval field lives in
     # ``orchestration.agent_phases.CADENCE_FIELDS``.
     #
     # ``agent_ticking_enabled`` gates the project globally; every stage
     # respects it.
-    agent_default_interval_seconds = models.IntegerField(default=43200)  # In Progress, 12 h
+    agent_default_interval_seconds = models.IntegerField(default=10800)  # In Progress, 3 h
     agent_default_max_ticks = models.IntegerField(default=10)            # pool per issue, any stage
     agent_retick_grant = models.IntegerField(default=3)                   # runs added per Re-tick
-    agent_review_default_interval_seconds = models.IntegerField(default=28800)  # In Review, 8 h
-    agent_test_default_interval_seconds = models.IntegerField(default=43200)    # In Test, 12 h
+    agent_review_default_interval_seconds = models.IntegerField(default=10800)  # In Review, 3 h
+    agent_test_default_interval_seconds = models.IntegerField(default=10800)    # In Test, 3 h
     agent_ticking_enabled = models.BooleanField(default=True)
     # Execution policy for future runs. Existing runs retain their snapshotted
     # executor even when this setting changes.

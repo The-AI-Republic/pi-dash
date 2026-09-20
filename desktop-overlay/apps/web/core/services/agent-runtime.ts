@@ -22,6 +22,15 @@ export function isDesktop() {
   return typeof window !== "undefined" && "__TAURI__" in window;
 }
 
+/**
+ * The signed-in account id, set by {@link resumeAgentRuntime}. Local chat
+ * history is scoped per account, so the local chat transport keys its SQLite
+ * store by this value. Empty until the runtime has resumed for a user.
+ */
+export function getAgentAccount(): string {
+  return activeUserId;
+}
+
 function invoke<T>(command: string, args?: Record<string, unknown>) {
   return (window as unknown as { __TAURI__: Native }).__TAURI__.core.invoke<T>(command, args);
 }
@@ -166,6 +175,96 @@ export async function connectAgentProject(workspaceSlug: string, projectId: stri
       project: project.identifier,
       hostLabel,
     });
+    if (stopped || current !== generation) return;
+    await invoke("managed_start_daemon", { workspace: workspaceSlug });
+  });
+}
+
+/**
+ * Make the bundled runtime usable for a **local chat**, independent of any
+ * project the user has opened.
+ *
+ * Local chat talks to the bundled daemon (the daemon owns every engine
+ * process), and until this existed the only thing that ever started that
+ * daemon was {@link connectAgentProject} — so a user who signed in and opened
+ * the built-in agent got a chat box with nothing behind it: the send failed at
+ * "connecting to managed daemon" and the turn never arrived.
+ *
+ * Same sequence as {@link connectAgentProject}, minus the caller-supplied
+ * project: enrolment still registers this machine against one project, so the
+ * workspace's first project is used. It is idempotent and serialised through
+ * the same queue, so calling it before every warm/send is cheap once the
+ * daemon is up.
+ */
+/**
+ * Whether this server will let the bundled agent run, and why not when it
+ * won't. Backs the picker's "Built-in agent" entry so a server with
+ * `MANAGED_RUNNER_ENABLED=false` shows the reason up front instead of
+ * accepting a message it can never send.
+ *
+ * Never throws: an unreachable API or an expired session is reported as
+ * unavailable with the message, which is exactly what the picker wants to
+ * show.
+ */
+export async function agentAvailability(): Promise<{ available: boolean; reason?: string }> {
+  if (!isDesktop()) return { available: false };
+  try {
+    const profile = await api<Profile>("/api/users/me/ai-assistant/agent-profile/");
+    if (profile.available) return { available: true };
+    return {
+      available: false,
+      reason: AGENT_RUNTIME_REASON_MESSAGES[profile.reason_code] ?? profile.reason_code,
+    };
+  } catch (error) {
+    return { available: false, reason: error instanceof Error ? error.message : undefined };
+  }
+}
+
+export async function ensureChatRuntime(workspaceSlug: string): Promise<void> {
+  if (!isDesktop()) return;
+  const current = generation;
+  return enqueue(async () => {
+    if (stopped || current !== generation) throw new Error("Pi Dash Agent is signed out.");
+    const doctor = await invoke<{
+      runner_present: boolean;
+      engine_present: boolean;
+      host_label: string;
+    }>("managed_doctor");
+    if (!doctor.runner_present || !doctor.engine_present)
+      throw new Error("Pi Dash Agent needs repair. Reinstall the desktop app to restore its bundled engine.");
+    if (hostLabel && hostLabel !== doctor.host_label) {
+      workspaces.clear();
+      clearEnrollmentCache();
+    }
+    hostLabel = doctor.host_label;
+    // Writes the engine config and a fresh model credential — chat cannot
+    // reach a model without it.
+    await configure();
+    if (stopped || current !== generation) return;
+    if (!workspaces.has(workspaceSlug)) {
+      const enrollment = await api<{ machine_token: string; dev_machine_id: string }>(
+        "/api/v1/runner/dev-machines/desktop-enroll/",
+        "POST",
+        { workspace_slug: workspaceSlug, host_label: hostLabel }
+      );
+      await invoke("managed_bootstrap", {
+        cloudUrl: API_BASE_URL,
+        workspace: workspaceSlug,
+        machineToken: enrollment.machine_token,
+        devMachineId: enrollment.dev_machine_id,
+      });
+      workspaces.add(workspaceSlug);
+      saveEnrollmentCache();
+    }
+    const projects = await api<{ results?: { identifier: string }[] } | { identifier: string }[]>(
+      `/api/workspaces/${workspaceSlug}/projects/`
+    );
+    const list = Array.isArray(projects) ? projects : (projects.results ?? []);
+    const identifier = list.find((project) => project?.identifier)?.identifier;
+    if (!identifier) {
+      throw new Error("Create a project in this workspace before chatting with the built-in agent.");
+    }
+    await invoke("managed_enroll", { workspace: workspaceSlug, project: identifier, hostLabel });
     if (stopped || current !== generation) return;
     await invoke("managed_start_daemon", { workspace: workspaceSlug });
   });

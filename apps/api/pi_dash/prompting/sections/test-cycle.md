@@ -160,4 +160,6 @@ name), then the outcome report from "Ending the run":
   the deliverable is high-stakes. Follow "Blocking the run". Yield
   `waiting_on_human`.
 - **nothing changed** since your last pass — leave the issue In Test and
-  yield `done`.
+  yield `done`. Do **not** post a bare "test tick (N/M) — noop, nothing
+  changed" comment; silence is the correct signal for "nothing changed,"
+  and such comments only bury the ones a human actually needs.

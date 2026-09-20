@@ -1,6 +1,5 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
-use serde::{Deserialize, Serialize};
 use std::process::Stdio;
 use tokio::process::Command;
 
@@ -21,36 +20,11 @@ pub struct Args {
     pub runner: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Report {
-    pub checks: Vec<Check>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Check {
-    pub name: String,
-    pub ok: bool,
-    pub detail: String,
-    pub blocker: bool,
-}
-
-impl Report {
-    pub fn has_blockers(&self) -> bool {
-        self.checks.iter().any(|c| c.blocker && !c.ok)
-    }
-
-    pub fn print_compact(&self) {
-        for c in &self.checks {
-            let mark = if c.ok { "✓" } else { "✗" };
-            println!(
-                "  {mark} {name:<14} {detail}",
-                mark = mark,
-                name = c.name,
-                detail = c.detail
-            );
-        }
-    }
-}
+// The doctor `Report`/`Check` DTOs moved to the shared `pidash-ipc` crate
+// (PDASHOSS01-158) because the IPC `Response::Doctor` variant carries a
+// `Report`. Re-exported here so `cli::doctor::{Report, Check}` call sites are
+// unchanged.
+pub use pidash_ipc::dto::{Check, Report};
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     let report = execute(paths, args.runner.as_deref()).await?;

@@ -447,6 +447,7 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
     // The working dir reported to the cloud is this runner's single, exclusive
     // work dir.
     let attach_working_dir = resolve_working_dir(inst);
+    let inst_chat_active = inst.chat_active.clone();
     let h = tokio::spawn(async move {
         let run = RunnerLoop {
             runner_paths,
@@ -462,6 +463,7 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
             live_hello_runners,
             current_run: None,
             current_chat: None,
+            local_chat_active: inst_chat_active,
         };
         if let Err(e) = run.run().await {
             tracing::error!("runner loop exited: {e:#}");
@@ -804,6 +806,12 @@ struct RunnerLoop {
     /// next inbound frame.
     current_run: Option<CurrentRun>,
     current_chat: Option<CurrentChat>,
+    /// Shared with this runner's `RunnerInstance` (and therefore the IPC
+    /// server): `true` while a *local* chat turn (PDASHOSS01-159, driven over
+    /// the daemon IPC socket, not this cloud loop) holds the working copy. The
+    /// assign lane consults it so a managed run and a local chat never modify
+    /// the same working copy at the same time (issue AC6).
+    local_chat_active: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct CurrentRun {
@@ -1059,13 +1067,22 @@ impl RunnerLoop {
                     // a parallel lane inside this one (PDASHOSS01-133). Reject an
                     // assign while a chat turn is active; tear an idle chat
                     // runtime down to free the dir.
-                    if self
+                    let cloud_chat_active = self
                         .current_chat
                         .as_ref()
-                        .is_some_and(|chat| *chat.active_rx.borrow())
-                    {
+                        .is_some_and(|chat| *chat.active_rx.borrow());
+                    // A *local* chat turn (driven over the daemon IPC socket,
+                    // PDASHOSS01-159) holds the same working copy but lives in
+                    // a different actor, so it is invisible to `current_chat` —
+                    // consult the shared flag too (issue AC6).
+                    let local_chat_active = self
+                        .local_chat_active
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                    if cloud_chat_active || local_chat_active {
                         tracing::warn!(
                             %run_id,
+                            cloud_chat_active,
+                            local_chat_active,
                             "assign received while chat is active on this runner; rejecting"
                         );
                         // NACK rather than silently dropping, so the cloud
@@ -1899,6 +1916,7 @@ impl ChatWorker {
                     workspace_path,
                     warm.model,
                     resume_id.as_deref(),
+                    None,
                 )
                 .await?,
             );
@@ -2016,6 +2034,7 @@ impl ChatWorker {
                     workspace_path,
                     turn.model.clone(),
                     resume_id.as_deref(),
+                    None,
                 )
                 .await?,
             );
@@ -2209,7 +2228,7 @@ impl ChatWorker {
                                 reason,
                                 ..
                             } => {
-                                let policy = Policy::new(&self.runner_config.approval_policy, workspace_path);
+                                let policy = Policy::new(&self.runner_config.approval_policy, workspace_path, crate::cloud::protocol::ApprovalMode::Ask);
                                 let decision = policy.evaluate(kind, &payload);
                                 if let Some(auto) = decision.into_cloud() {
                                     if let Err(e) = bridge.send_approval(&approval_id, auto).await {
@@ -2857,6 +2876,13 @@ impl AssignWorker {
         self.send(ClientMsg::RunStarted {
             run_id,
             thread_id: cursor.thread_id().to_string(),
+            // Alias the session id to the thread id, mirroring the chat
+            // bridge's warm path (`local_session_id: Some(thread_id)`): the
+            // run path's only session handle today is the thread id. `agent_kind`
+            // lets the cloud interpret it per-CLI. Both are recorded durably in
+            // `agent_metadata`, which — unlike `thread_id` — survives a retry.
+            local_session_id: cursor.thread_id().to_string(),
+            agent_kind: cursor.agent_kind().to_string(),
             started_at: Utc::now(),
             model: run_model,
         })
@@ -3173,7 +3199,7 @@ impl AssignWorker {
                 reason,
             } => {
                 run_events.flush_before_lifecycle(&self.out).await;
-                let policy = Policy::new(&self.runner_config.approval_policy, workspace_root);
+                let policy = Policy::new(&self.runner_config.approval_policy, workspace_root, crate::cloud::protocol::ApprovalMode::Ask);
                 let decision = policy.evaluate(kind, &payload);
                 if let Some(auto) = decision.into_cloud() {
                     bridge.send_approval(&approval_id, auto).await.ok();

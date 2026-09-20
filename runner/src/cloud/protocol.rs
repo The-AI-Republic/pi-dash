@@ -3,6 +3,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+// These wire enums moved to the shared `pidash-ipc` crate (PDASHOSS01-158);
+// re-exported here so every `cloud::protocol::{RunnerStatus, ApprovalKind,
+// ApprovalDecision}` call site is unchanged.
+pub use pidash_ipc::dto::{ApprovalDecision, ApprovalKind, ApprovalMode, RunnerStatus};
+
 /// Wire version — bump on incompatible shape changes.
 ///
 /// v4 (current): per-runner HTTPS long-poll transport. The daemon presents
@@ -129,6 +134,16 @@ pub enum ClientMsg {
     RunStarted {
         run_id: Uuid,
         thread_id: String,
+        // Durably recorded into ``AgentRun.agent_metadata`` at run start
+        // (unlike ``thread_id``, which is a resume handle cleared on retry).
+        // ``local_session_id`` mirrors the chat bridge's warm-path alias of
+        // the thread id; ``agent_kind`` labels which CLI produced the run so a
+        // consumer can interpret the session/thread ids. Older cloud builds
+        // simply ignore the extra keys.
+        #[serde(default)]
+        local_session_id: String,
+        #[serde(default)]
+        agent_kind: String,
         started_at: DateTime<Utc>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
@@ -434,37 +449,11 @@ pub struct CreateRunnerCmd {
     pub reasoning_effort: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerStatus {
-    Idle,
-    Busy,
-    Reconnecting,
-    AwaitingReauth,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceState {
     pub branch: Option<String>,
     pub dirty: bool,
     pub head: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalKind {
-    CommandExecution,
-    FileChange,
-    NetworkAccess,
-    Other,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalDecision {
-    Accept,
-    Decline,
-    AcceptForSession,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
