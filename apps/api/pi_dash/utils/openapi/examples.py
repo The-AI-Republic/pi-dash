@@ -921,3 +921,38 @@ def get_sample_for_schema(schema_name):
         return SCHEMA_EXAMPLES.get(base_name, SAMPLE_GENERIC)
 
     return SCHEMA_EXAMPLES.get(schema_name, SAMPLE_GENERIC)
+
+
+# Page Response Examples
+PAGE_EXAMPLE = OpenApiExample(
+    name="Page",
+    value={
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Release checklist",
+        "parent": None,
+        "owned_by": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "access": 0,
+        "is_locked": False,
+        "archived_at": None,
+        "created_at": "2024-01-01T10:30:00Z",
+        "updated_at": "2024-01-10T15:45:00Z",
+    },
+)
+
+PAGE_DETAIL_EXAMPLE = OpenApiExample(
+    name="Page detail",
+    value={
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Release checklist",
+        "parent": None,
+        "owned_by": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "access": 0,
+        "is_locked": False,
+        "archived_at": None,
+        "created_at": "2024-01-01T10:30:00Z",
+        "updated_at": "2024-01-10T15:45:00Z",
+        "description_html": "<h1>Release checklist</h1><p>Tag the release <strong>first</strong>.</p>",
+        "description_stripped": "Release checklistTag the release first.",
+        "description_markdown": "# Release checklist\n\nTag the release **first**.",
+    },
+)
