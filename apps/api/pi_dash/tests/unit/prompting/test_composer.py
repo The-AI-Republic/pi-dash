@@ -454,6 +454,24 @@ def test_cli_docs_put_re_tick_out_of_the_agents_hands():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("kind", ["coding-task", "review", "test"])
+def test_cli_docs_teach_relation_commands(kind):
+    # PDASHOSS01-199: the agent can record and read dependencies itself.
+    out = compose(kind, workspace=None, project=None, user=None, context=_ctx(kind)).text
+    assert "`pidash issue relate <identifier> --blocked-by <ID>[,<ID>...]`" in out
+    assert "`pidash issue unrelate <identifier>" in out
+    assert "`pidash issue relations <identifier>`" in out
+
+
+@pytest.mark.unit
+def test_split_guidance_records_order_as_blocked_by():
+    out = compose("coding-task", workspace=None, project=None, user=None, context=_ctx("coding-task")).text
+    split = out[out.index("**Propose a split**") :]
+    split = split[: split.index("7. **Writing to the human")]
+    assert "pidash issue relate <later-child> --blocked-by <earlier-child>" in split
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("kind", ["review", "test"])
 def test_review_and_test_get_lifecycle_workpad_repo_and_blocking(kind):
     """The sections review/test cross-reference must actually be in their

@@ -287,6 +287,134 @@ async fn issue_get_does_not_invent_a_blocker_summary() {
     assert!(out.get("has_open_blockers").is_none());
 }
 
+const ENG_7: &str = r#"{"id":"00000000-0000-0000-0000-000000000007","project":"00000000-0000-0000-0000-0000000000aa","name":"handler"}"#;
+const ENG_7_BASE: &str = "/api/v1/workspaces/acme/projects/00000000-0000-0000-0000-0000000000aa/work-items/00000000-0000-0000-0000-000000000007/relations";
+
+#[tokio::test]
+async fn issue_relate_posts_the_relation_and_passes_the_result_through() {
+    // `pidash issue relate ENG-7 --blocked-by ENG-3,ENG-4`: resolve the source,
+    // then one POST carrying the targets as given (the server resolves them in
+    // the caller's scope). The response — including idempotent `unchanged`
+    // entries and the grouped `relations` — is printed verbatim.
+    let fake = start_fake(Box::new(|req| {
+        if req.method == "GET" {
+            assert_eq!(req.path, "/api/v1/workspaces/acme/work-items/ENG-7/");
+            return CannedResponse::ok(ENG_7);
+        }
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.path, format!("{ENG_7_BASE}/relate/"));
+        let body: serde_json::Value = serde_json::from_str(&req.body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"relation_type": "blocked_by", "issues": ["ENG-3", "ENG-4"]})
+        );
+        CannedResponse::ok(
+            r#"{"issue":"ENG-7","relation_type":"blocked_by","created":["ENG-4"],"unchanged":["ENG-3"],"conflicts":[],
+               "relations":{"blocked_by":[
+                 {"id":"3","identifier":"ENG-3","name":"model","state":"Done","state_group":"completed"},
+                 {"id":"4","identifier":"ENG-4","name":"query","state":"Todo","state_group":"unstarted"}]}}"#,
+        )
+    }))
+    .await;
+    let client = client(&fake);
+    let out = pidash::cli::issue::relate_issue(
+        &client,
+        "ENG-7",
+        "blocked_by",
+        &["ENG-3".to_string(), "ENG-4".to_string()],
+        pidash::cli::issue::RelationOp::Relate,
+    )
+    .await
+    .expect("relate");
+    assert_eq!(out["created"], serde_json::json!(["ENG-4"]));
+    assert_eq!(out["unchanged"], serde_json::json!(["ENG-3"]));
+    assert_eq!(out["relations"]["blocked_by"][1]["state"], "Todo");
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 2);
+    assert!(
+        recorded
+            .iter()
+            .all(|r| r.api_key.as_deref() == Some("test-token"))
+    );
+}
+
+#[tokio::test]
+async fn issue_unrelate_posts_to_the_unrelate_route() {
+    let fake = start_fake(Box::new(|req| {
+        if req.method == "GET" {
+            return CannedResponse::ok(ENG_7);
+        }
+        assert_eq!(req.path, format!("{ENG_7_BASE}/unrelate/"));
+        let body: serde_json::Value = serde_json::from_str(&req.body).unwrap();
+        assert_eq!(body["relation_type"], "blocked_by");
+        assert_eq!(body["issues"], serde_json::json!(["ENG-3"]));
+        CannedResponse::ok(
+            r#"{"issue":"ENG-7","relation_type":"blocked_by","removed":[],"not_related":["ENG-3"],"relations":{"blocked_by":[]}}"#,
+        )
+    }))
+    .await;
+    let client = client(&fake);
+    let out = pidash::cli::issue::relate_issue(
+        &client,
+        "ENG-7",
+        "blocked_by",
+        &["ENG-3".to_string()],
+        pidash::cli::issue::RelationOp::Unrelate,
+    )
+    .await
+    .expect("unrelate of an absent edge is not an error");
+    assert_eq!(out["not_related"], serde_json::json!(["ENG-3"]));
+}
+
+#[tokio::test]
+async fn issue_relate_surfaces_unresolved_targets_as_not_found() {
+    // One inaccessible target makes the server refuse the whole request; the
+    // CLI exits non-zero with the server's detail (which lists `unresolved`).
+    let fake = start_fake(Box::new(|req| {
+        if req.method == "GET" {
+            return CannedResponse::ok(ENG_7);
+        }
+        CannedResponse {
+            status: 404,
+            status_text: "Not Found",
+            body: r#"{"error":"work items not found or not accessible: SEC-1","unresolved":["SEC-1"]}"#.into(),
+        }
+    }))
+    .await;
+    let client = client(&fake);
+    let err = pidash::cli::issue::relate_issue(
+        &client,
+        "ENG-7",
+        "blocked_by",
+        &["SEC-1".to_string()],
+        pidash::cli::issue::RelationOp::Relate,
+    )
+    .await
+    .expect_err("404 must surface");
+    assert_eq!(err.exit_code, EXIT_NOT_FOUND);
+    assert!(err.detail.as_deref().unwrap_or("").contains("SEC-1"));
+}
+
+#[tokio::test]
+async fn issue_relations_reads_the_grouped_route() {
+    let fake = start_fake(Box::new(|req| {
+        if req.path.ends_with("/work-items/ENG-7/") {
+            return CannedResponse::ok(ENG_7);
+        }
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.path, format!("{ENG_7_BASE}/grouped/"));
+        CannedResponse::ok(
+            r#"{"issue":"ENG-7","relations":{"blocked_by":[],"blocking":[{"id":"9","identifier":"ENG-9","name":"api","state":"Todo","state_group":"unstarted"}]}}"#,
+        )
+    }))
+    .await;
+    let client = client(&fake);
+    let out = pidash::cli::issue::issue_relations(&client, "ENG-7")
+        .await
+        .expect("relations");
+    assert_eq!(out["relations"]["blocking"][0]["identifier"], "ENG-9");
+}
+
 #[tokio::test]
 async fn resolve_state_name_is_case_insensitive() {
     let fake = start_fake(Box::new(|req| {

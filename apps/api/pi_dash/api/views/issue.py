@@ -251,7 +251,12 @@ class WorkspaceIssueAPIEndpoint(BaseAPIView):
                 sequence_id=issue_identifier,
             )
             return Response(
-                IssueSerializer(issue, fields=self.fields, expand=self.expand).data,
+                IssueSerializer(
+                    issue,
+                    fields=self.fields,
+                    expand=self.expand,
+                    context={IssueSerializer.RELATIONS_VIEWER_CONTEXT: request.user},
+                ).data,
                 status=status.HTTP_200_OK,
             )
 
@@ -566,7 +571,12 @@ class IssueDetailAPIEndpoint(BaseAPIView):
             .values("count")
         ).get(workspace__slug=slug, project_id=project_id, pk=pk)
         return Response(
-            IssueSerializer(issue, fields=self.fields, expand=self.expand).data,
+            IssueSerializer(
+                issue,
+                fields=self.fields,
+                expand=self.expand,
+                context={IssueSerializer.RELATIONS_VIEWER_CONTEXT: request.user},
+            ).data,
             status=status.HTTP_200_OK,
         )
 
@@ -3005,6 +3015,123 @@ class IssueRelationListCreateAPIEndpoint(BaseAPIView):
             serializer_class(refetched_relations, many=True).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+class _IssueRelationAgentBase(BaseAPIView):
+    """Shared plumbing for the agent-facing relation endpoints (PDASHOSS01-199).
+
+    Unlike :class:`IssueRelationListCreateAPIEndpoint` these speak the shared
+    :mod:`pi_dash.orchestration.relations` vocabulary: targets may be given
+    as ``PROJ-123`` identifiers or UUIDs, every target must be a work item the
+    caller can see (active member of its project), writes are idempotent and
+    report ``created`` / ``unchanged`` / ``conflicts``, and every response
+    carries the source issue's grouped ``relations``.
+    """
+
+    model = IssueRelation
+    permission_classes = [ProjectEntityPermission]
+
+    def _source(self, slug, project_id, issue_id):
+        return Issue.issue_objects.select_related("project", "state", "workspace").get(
+            workspace__slug=slug, project_id=project_id, pk=issue_id
+        )
+
+    def _visible(self, request, slug):
+        from pi_dash.core.querysets import member_project_issues
+
+        return member_project_issues(request.user, slug)
+
+    def _write(self, request, slug, project_id, issue_id, operation):
+        from pi_dash.orchestration import relations
+
+        issue = self._source(slug, project_id, issue_id)
+        refs = request.data.get("issues")
+        if isinstance(refs, str):
+            refs = [refs]
+        if not isinstance(refs, list) or not refs:
+            return Response(
+                {"error": "issues must be a non-empty list of work item identifiers or UUIDs"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            relation_type = relations.validate_relation_type(request.data.get("relation_type"))
+        except relations.RelationError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        visible = self._visible(request, slug)
+        targets, unresolved = relations.resolve_refs(refs, visible)
+        if unresolved:
+            return Response(
+                {
+                    "error": "work items not found or not accessible: " + ", ".join(unresolved),
+                    "unresolved": unresolved,
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        try:
+            result = operation(issue, relation_type, targets, request.user)
+        except relations.RelationError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        result["relations"] = relations.grouped_relations(issue, visible)
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class IssueRelationGroupedAPIEndpoint(_IssueRelationAgentBase):
+    use_read_replica = True
+
+    @work_item_relation_docs(
+        operation_id="list_work_item_relations_grouped",
+        summary="List work item relations with details",
+        description="Every relation of a work item grouped by type (blocked_by, blocking, relates_to, duplicate, start_before, start_after, finish_before, finish_after, implemented_by, implements), each item carrying id, identifier, name, state and state_group. Items in projects the caller is not a member of are omitted.",  # noqa E501
+        parameters=[ISSUE_ID_PARAMETER],
+        responses={200: OpenApiResponse(description="Grouped relations"), 404: ISSUE_NOT_FOUND_RESPONSE},
+    )
+    def get(self, request, slug, project_id, issue_id):
+        from pi_dash.orchestration import relations
+
+        issue = self._source(slug, project_id, issue_id)
+        return Response(
+            {
+                "issue": relations.identifier(issue),
+                "relations": relations.grouped_relations(issue, self._visible(request, slug)),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class IssueRelationRelateAPIEndpoint(_IssueRelationAgentBase):
+    @work_item_relation_docs(
+        operation_id="relate_work_items",
+        summary="Relate work items (idempotent)",
+        description="Record `<issue> <relation_type> <each of issues>`. `issues` accepts identifiers (PROJ-123) or UUIDs. A pair that already has this relation is reported under `unchanged`; a pair that already has a different relation is reported under `conflicts` and left as is.",  # noqa E501
+        parameters=[ISSUE_ID_PARAMETER],
+        responses={
+            200: OpenApiResponse(description="created / unchanged / conflicts plus grouped relations"),
+            400: INVALID_REQUEST_RESPONSE,
+            404: ISSUE_NOT_FOUND_RESPONSE,
+        },
+    )
+    def post(self, request, slug, project_id, issue_id):
+        from pi_dash.orchestration import relations
+
+        return self._write(request, slug, project_id, issue_id, relations.relate)
+
+
+class IssueRelationUnrelateAPIEndpoint(_IssueRelationAgentBase):
+    @work_item_relation_docs(
+        operation_id="unrelate_work_items",
+        summary="Remove work item relations (idempotent)",
+        description="Remove `<issue> <relation_type> <each of issues>`. Only a relation of exactly that type is removed; a pair without it is reported under `not_related`.",  # noqa E501
+        parameters=[ISSUE_ID_PARAMETER],
+        responses={
+            200: OpenApiResponse(description="removed / not_related plus grouped relations"),
+            400: INVALID_REQUEST_RESPONSE,
+            404: ISSUE_NOT_FOUND_RESPONSE,
+        },
+    )
+    def post(self, request, slug, project_id, issue_id):
+        from pi_dash.orchestration import relations
+
+        return self._write(request, slug, project_id, issue_id, relations.unrelate)
 
 
 class IssueWorkpadAPIEndpoint(BaseAPIView):

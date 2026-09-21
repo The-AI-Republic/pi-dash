@@ -105,6 +105,13 @@ class IssueSerializer(BaseSerializer):
     #: payloads (see there).
     RELATIONS_SUMMARY_KEYS = ("relations_summary", "has_open_blockers")
 
+    #: Context key carrying the requesting user. When set, single-item
+    #: payloads also carry ``relations`` — every relation grouped by type with
+    #: identifier, title and state (PDASHOSS01-199), limited to what that user
+    #: can see. Without a viewer the block is omitted rather than leaking
+    #: titles from projects the caller may not belong to.
+    RELATIONS_VIEWER_CONTEXT = "relations_viewer"
+
     def __init__(self, *args, **kwargs):
         # ``BaseSerializer`` consumes ``fields``; remember which plain names
         # were requested so the computed blocker keys honour ``?fields=`` too.
@@ -407,6 +414,17 @@ class IssueSerializer(BaseSerializer):
             for key, value in relations_summary(instance).items():
                 if not self._requested_fields or key in self._requested_fields:
                     data[key] = value
+
+        viewer = self.context.get(self.RELATIONS_VIEWER_CONTEXT)
+        if (
+            viewer is not None
+            and not isinstance(self.parent, serializers.ListSerializer)
+            and (not self._requested_fields or "relations" in self._requested_fields)
+        ):
+            from pi_dash.core.querysets import member_project_issues
+            from pi_dash.orchestration.relations import grouped_relations
+
+            data["relations"] = grouped_relations(instance, member_project_issues(viewer, instance.workspace.slug))
 
         return data
 

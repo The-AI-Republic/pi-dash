@@ -338,3 +338,102 @@ def update_issue(
     if run_id:
         result["dispatched_run_id"] = run_id
     return result
+
+
+# --- Relations (PDASHOSS01-199) ---------------------------------------------
+# Same vocabulary and output shape as ``pidash issue relate|unrelate|relations``
+# and the MCP connector; the logic lives in ``pi_dash.orchestration.relations``.
+# Issue references may be identifiers (PROJ-12) or UUIDs, resolved only within
+# the user's member projects, so a relation can never reach an issue the user
+# cannot see.
+
+
+def _resolve_issue_refs(deps, refs: list[str]) -> list[Issue]:
+    from pi_dash.orchestration import relations
+
+    found, unresolved = relations.resolve_refs(refs, _scoping.scoped_issues(deps))
+    if unresolved:
+        raise _scoping.ToolNotFound("Issues not found or not accessible: " + ", ".join(unresolved))
+    return found
+
+
+def _relations_view(deps, issue) -> dict:
+    from pi_dash.orchestration import relations
+
+    grouped = relations.grouped_relations(issue, _scoping.scoped_issues(deps))
+    for items in grouped.values():
+        for item in items:
+            name, _ = _results.truncate(item["name"], _NAME_CAP)
+            item["name"] = _results.wrap_untrusted(name)
+    return grouped
+
+
+def _relation_write(ctx, issue: str, relation_type: str, related_issues: list[str], operation, verb: str) -> dict:
+    from pi_dash.orchestration import relations
+
+    deps = ctx.deps
+    (source,) = _resolve_issue_refs(deps, [issue])
+    _scoping.require_project_write(deps, str(source.project_id))
+    if not related_issues:
+        raise ModelRetry("related_issues must list at least one issue.")
+    targets = _resolve_issue_refs(deps, related_issues)
+    user = _scoping.user_for(deps)
+    try:
+        with impersonate(user):
+            result = operation(source, relation_type, targets, user)
+    except relations.RelationError as exc:
+        raise ModelRetry(str(exc)) from exc
+    changed = result.get("created") or result.get("removed") or []
+    if changed:
+        _results.record_write(
+            deps,
+            f"{verb} {_identifier(source)} {result['relation_type']} {', '.join(changed)}",
+            links=[_results.issue_link(deps, source)],
+        )
+    result["relations"] = _relations_view(deps, source)
+    return result
+
+
+@assistant.tool
+def relate_issues(
+    ctx: RunContext[AssistantDeps],
+    issue: str,
+    relation_type: str,
+    related_issues: list[str],
+) -> dict:
+    """Record a relation from ``issue`` to each of ``related_issues`` (identifiers
+    like PROJ-12, or UUIDs). relation_type is read from ``issue``'s side: one of
+    blocked_by, blocking, relates_to, duplicate, start_before, start_after,
+    finish_before, finish_after, implemented_by, implements. Use blocked_by when
+    ``issue`` cannot finish until the related issues do. Idempotent: pairs that
+    already have this relation come back under ``unchanged``; pairs that already
+    have a different relation come back under ``conflicts`` and are not changed.
+    Requires write access to ``issue``'s project."""
+    from pi_dash.orchestration import relations
+
+    return _relation_write(ctx, issue, relation_type, related_issues, relations.relate, "Related")
+
+
+@assistant.tool
+def unrelate_issues(
+    ctx: RunContext[AssistantDeps],
+    issue: str,
+    relation_type: str,
+    related_issues: list[str],
+) -> dict:
+    """Remove the ``relation_type`` relation between ``issue`` and each of
+    ``related_issues``. Only that exact relation is removed; pairs without it come
+    back under ``not_related`` (not an error). Requires write access."""
+    from pi_dash.orchestration import relations
+
+    return _relation_write(ctx, issue, relation_type, related_issues, relations.unrelate, "Unrelated")
+
+
+@assistant.tool
+def list_issue_relations(ctx: RunContext[AssistantDeps], issue: str) -> dict:
+    """List every relation of an issue (identifier or UUID), grouped by type from
+    its side (blocked_by, blocking, relates_to, ...), each with identifier, name
+    and state. Check ``blocked_by`` states before starting dependent work."""
+    deps = ctx.deps
+    (source,) = _resolve_issue_refs(deps, [issue])
+    return {"issue": _identifier(source), "relations": _relations_view(deps, source)}

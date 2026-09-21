@@ -74,6 +74,124 @@ pub enum IssueCommand {
         /// Project-scoped identifier, e.g. `ENG-42`.
         identifier: String,
     },
+    /// Record relations from a work item to others, e.g.
+    /// `pidash issue relate ENG-7 --blocked-by ENG-3,ENG-4`. Pass exactly one
+    /// relation flag; each takes a comma-separated list of identifiers (or
+    /// UUIDs). Idempotent: pairs that already carry the relation come back
+    /// under `unchanged`; pairs that already carry a *different* relation come
+    /// back under `conflicts` and are left as is (`unrelate` first to change
+    /// one). Prints `{issue, relation_type, created, unchanged, conflicts,
+    /// relations}`.
+    Relate(RelateArgs),
+    /// Remove relations, e.g. `pidash issue unrelate ENG-7 --blocked-by ENG-3`.
+    /// Only that exact relation is removed; pairs without it come back under
+    /// `not_related` (not an error). Prints `{issue, relation_type, removed,
+    /// not_related, relations}`.
+    Unrelate(RelateArgs),
+    /// List a work item's relations grouped by type from its side
+    /// (`blocked_by`, `blocking`, `relates_to`, …), each item `{id, identifier,
+    /// name, state, state_group}`. Prints `{issue, relations}`.
+    Relations {
+        /// Project-scoped identifier, e.g. `ENG-42`.
+        identifier: String,
+    },
+}
+
+/// Relation flags for `relate` / `unrelate`. Each names the relation from the
+/// first issue's side: `relate A --blocked-by B` means "A is blocked by B" and
+/// is the same edge as `relate B --blocking A`.
+#[derive(Debug, Args)]
+#[command(group(
+    clap::ArgGroup::new("relation")
+        .required(true)
+        .multiple(false)
+        .args([
+            "blocked_by", "blocking", "relates_to", "duplicate",
+            "start_before", "start_after", "finish_before", "finish_after",
+            "implemented_by", "implements",
+        ]),
+))]
+pub struct RelateArgs {
+    /// Project-scoped identifier, e.g. `ENG-42`.
+    pub identifier: String,
+
+    /// Issues this one cannot finish before (it waits on them).
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub blocked_by: Vec<String>,
+
+    /// Issues waiting on this one.
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub blocking: Vec<String>,
+
+    /// Loosely related issues (symmetric).
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub relates_to: Vec<String>,
+
+    /// Duplicates of this issue (symmetric).
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub duplicate: Vec<String>,
+
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub start_before: Vec<String>,
+
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub start_after: Vec<String>,
+
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub finish_before: Vec<String>,
+
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub finish_after: Vec<String>,
+
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub implemented_by: Vec<String>,
+
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub implements: Vec<String>,
+}
+
+impl RelateArgs {
+    /// The one relation flag given, as `(relation_type, [issue refs])` with
+    /// blank entries (`--blocked-by A,,B`) dropped.
+    pub fn relation(&self) -> Result<(&'static str, Vec<String>), CliError> {
+        let flags: [(&'static str, &Vec<String>); 10] = [
+            ("blocked_by", &self.blocked_by),
+            ("blocking", &self.blocking),
+            ("relates_to", &self.relates_to),
+            ("duplicate", &self.duplicate),
+            ("start_before", &self.start_before),
+            ("start_after", &self.start_after),
+            ("finish_before", &self.finish_before),
+            ("finish_after", &self.finish_after),
+            ("implemented_by", &self.implemented_by),
+            ("implements", &self.implements),
+        ];
+        let (relation_type, raw) =
+            flags
+                .into_iter()
+                .find(|(_, v)| !v.is_empty())
+                .ok_or_else(|| {
+                    CliError::new(
+                        EXIT_INVALID,
+                        "pass one relation flag, e.g. --blocked-by ENG-3",
+                    )
+                })?;
+        let refs: Vec<String> = raw
+            .iter()
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty())
+            .collect();
+        if refs.is_empty() {
+            return Err(CliError::new(
+                EXIT_INVALID,
+                format!(
+                    "--{} needs at least one issue",
+                    relation_type.replace('_', "-")
+                ),
+            ));
+        }
+        Ok((relation_type, refs))
+    }
 }
 
 #[derive(Debug, Args)]
@@ -228,6 +346,9 @@ pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
         IssueCommand::AttachPr(a) => cmd_attach_review(&client, a).await,
         IssueCommand::ReTick { identifier } => cmd_re_tick(&client, &identifier).await,
         IssueCommand::RunAi { identifier } => cmd_run_ai(&client, &identifier).await,
+        IssueCommand::Relate(a) => cmd_relate(&client, a, RelationOp::Relate).await,
+        IssueCommand::Unrelate(a) => cmd_relate(&client, a, RelationOp::Unrelate).await,
+        IssueCommand::Relations { identifier } => cmd_relations(&client, &identifier).await,
     };
     match result {
         Ok(()) => 0,
@@ -714,6 +835,66 @@ async fn cmd_run_ai(client: &ApiClient, identifier: &str) -> Result<(), CliError
     Ok(())
 }
 
+/// Which relation write `relate_issue` performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationOp {
+    Relate,
+    Unrelate,
+}
+
+async fn cmd_relate(client: &ApiClient, args: RelateArgs, op: RelationOp) -> Result<(), CliError> {
+    let (relation_type, refs) = args.relation()?;
+    let resp = relate_issue(client, &args.identifier, relation_type, &refs, op).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
+/// `POST .../work-items/<id>/relations/{relate,unrelate}/`. The related issues
+/// go to the server as given (identifiers or UUIDs): it resolves them within
+/// what the caller can see and refuses the whole request (404, `unresolved`)
+/// if any is missing, so nothing is half-written.
+pub async fn relate_issue(
+    client: &ApiClient,
+    identifier: &str,
+    relation_type: &str,
+    related: &[String],
+    op: RelationOp,
+) -> Result<Value, CliError> {
+    let issue = resolve_issue(client, identifier).await?;
+    let action = match op {
+        RelationOp::Relate => "relate",
+        RelationOp::Unrelate => "unrelate",
+    };
+    let path = format!(
+        "workspaces/{}/projects/{}/work-items/{}/relations/{action}/",
+        client.env.workspace_slug, issue.project_id, issue.id
+    );
+    let body = serde_json::json!({ "relation_type": relation_type, "issues": related });
+    client.post(&path, &body).await
+}
+
+async fn cmd_relations(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
+    let resp = issue_relations(client, identifier).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
+/// `GET .../work-items/<id>/relations/grouped/` — `{issue, relations}`.
+pub async fn issue_relations(client: &ApiClient, identifier: &str) -> Result<Value, CliError> {
+    let issue = resolve_issue(client, identifier).await?;
+    let path = format!(
+        "workspaces/{}/projects/{}/work-items/{}/relations/grouped/",
+        client.env.workspace_slug, issue.project_id, issue.id
+    );
+    client.get(&path).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1031,5 +1212,61 @@ mod tests {
             run_ai_path("eng", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"),
             "workspaces/eng/projects/11111111-1111-1111-1111-111111111111/work-items/22222222-2222-2222-2222-222222222222/run-ai/"
         );
+    }
+
+    fn relate_args(argv: &[&str]) -> Result<RelateArgs, clap::Error> {
+        let mut full = vec!["pidash", "relate"];
+        full.extend_from_slice(argv);
+        TestCli::try_parse_from(full).map(|parsed| match parsed.issue.command {
+            IssueCommand::Relate(a) => a,
+            other => panic!("expected relate, got {other:?}"),
+        })
+    }
+
+    #[test]
+    fn relate_splits_comma_separated_targets() {
+        let args = relate_args(&["ENG-7", "--blocked-by", "ENG-3,ENG-4"]).expect("parse relate");
+        assert_eq!(args.identifier, "ENG-7");
+        let (relation_type, refs) = args.relation().unwrap();
+        assert_eq!(relation_type, "blocked_by");
+        assert_eq!(refs, vec!["ENG-3".to_string(), "ENG-4".to_string()]);
+    }
+
+    #[test]
+    fn relate_drops_blank_entries() {
+        let args = relate_args(&["ENG-7", "--relates-to", " ENG-3 ,,ENG-4"]).unwrap();
+        let (relation_type, refs) = args.relation().unwrap();
+        assert_eq!(relation_type, "relates_to");
+        assert_eq!(refs, vec!["ENG-3".to_string(), "ENG-4".to_string()]);
+
+        let args = relate_args(&["ENG-7", "--blocking", ","]).unwrap();
+        let err = args.relation().expect_err("no targets left");
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert!(err.message.contains("--blocking"));
+    }
+
+    #[test]
+    fn relate_takes_exactly_one_relation_flag() {
+        let err = relate_args(&["ENG-7"]).expect_err("a relation flag is required");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        let err = relate_args(&["ENG-7", "--blocked-by", "ENG-3", "--blocking", "ENG-4"])
+            .expect_err("relation flags are exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn unrelate_and_relations_parse() {
+        let parsed =
+            TestCli::try_parse_from(["pidash", "unrelate", "ENG-7", "--blocked-by", "ENG-3"])
+                .unwrap();
+        match parsed.issue.command {
+            IssueCommand::Unrelate(a) => assert_eq!(a.relation().unwrap().0, "blocked_by"),
+            other => panic!("expected unrelate, got {other:?}"),
+        }
+        let parsed = TestCli::try_parse_from(["pidash", "relations", "ENG-7"]).unwrap();
+        match parsed.issue.command {
+            IssueCommand::Relations { identifier } => assert_eq!(identifier, "ENG-7"),
+            other => panic!("expected relations, got {other:?}"),
+        }
     }
 }
