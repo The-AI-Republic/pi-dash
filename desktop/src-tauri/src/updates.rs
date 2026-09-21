@@ -51,13 +51,18 @@ pub struct UpdateState {
 pub struct PendingUpdate {
     version: String,
     current_version: String,
+    /// Whether this update is downloading right now. The sidebar button
+    /// remounts (collapse, and routes that drop the sidebar entirely), so
+    /// it can't keep that in React state — it reads it from here.
+    installing: bool,
 }
 
 impl PendingUpdate {
-    fn of(update: &Update) -> Self {
+    fn of(update: &Update, installing: bool) -> Self {
         Self {
             version: update.version.clone(),
             current_version: update.current_version.clone(),
+            installing,
         }
     }
 }
@@ -79,14 +84,37 @@ async fn check(handle: &AppHandle) -> Option<Update> {
     }
 }
 
-/// Keep `update` for the sidebar button and tell the web UI about it.
-fn remember(handle: &AppHandle, update: Update) {
-    let payload = PendingUpdate::of(&update);
-    let state = handle.state::<UpdateState>();
-    *state.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(update);
+/// The update waiting for the sidebar button, if any.
+fn pending_update(state: &UpdateState) -> Option<PendingUpdate> {
+    let installing = state.installing.load(Ordering::SeqCst);
+    state
+        .pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|update| PendingUpdate::of(update, installing))
+}
+
+/// Tell the web UI what is waiting. Also sent after a failed install, so a
+/// button that remounted mid-download drops out of its installing state
+/// instead of staying disabled until the next launch.
+fn announce(handle: &AppHandle) {
+    let Some(payload) = pending_update(&handle.state::<UpdateState>()) else {
+        return;
+    };
     if let Err(e) = handle.emit(UPDATE_AVAILABLE_EVENT, payload) {
         eprintln!("updater: announcing update failed: {e}");
     }
+}
+
+/// Keep `update` for the sidebar button and tell the web UI about it.
+fn remember(handle: &AppHandle, update: Update) {
+    *handle
+        .state::<UpdateState>()
+        .pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(update);
+    announce(handle);
 }
 
 /// Check at startup. If a newer version is available, ask the user via a
@@ -182,12 +210,7 @@ pub async fn run_daily_checks(handle: AppHandle) {
 /// mount because [`UPDATE_AVAILABLE_EVENT`] may fire before it listens.
 #[tauri::command]
 pub fn desktop_pending_update(state: tauri::State<'_, UpdateState>) -> Option<PendingUpdate> {
-    state
-        .pending
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .map(PendingUpdate::of)
+    pending_update(&state)
 }
 
 /// Download and install the pending update, then restart into it.
@@ -209,6 +232,10 @@ pub async fn desktop_install_update(app: AppHandle) -> Result<(), String> {
     {
         eprintln!("updater: download/install failed: {e}");
         state.installing.store(false, Ordering::SeqCst);
+        // The caller learns about this from the rejected promise, but a
+        // button that remounted mid-download is a different component and
+        // would stay disabled. Announce the update again so it re-enables.
+        announce(&app);
         return Err(e.to_string());
     }
     app.restart();

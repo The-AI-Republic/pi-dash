@@ -48,7 +48,7 @@ describe("DesktopUpdateButton", () => {
   });
 
   it("shows an update deferred before it mounted", async () => {
-    invoke.mockResolvedValueOnce({ version: "0.4.0", currentVersion: "0.3.2" });
+    invoke.mockResolvedValueOnce({ version: "0.4.0", currentVersion: "0.3.2", installing: false });
     render(<DesktopUpdateButton />);
     await flush();
     expect(screen.getByRole("button", { name: "Update to Pi Dash 0.4.0" })).toBeTruthy();
@@ -57,12 +57,16 @@ describe("DesktopUpdateButton", () => {
   it("appears when the daily check announces an update", async () => {
     render(<DesktopUpdateButton />);
     await flush();
-    act(() => listeners.get(UPDATE_AVAILABLE_EVENT)?.({ payload: { version: "0.4.0", currentVersion: "0.3.2" } }));
+    act(() =>
+      listeners.get(UPDATE_AVAILABLE_EVENT)?.({
+        payload: { version: "0.4.0", currentVersion: "0.3.2", installing: false },
+      })
+    );
     expect(screen.getByRole("button", { name: "Update to Pi Dash 0.4.0" })).toBeTruthy();
   });
 
   it("installs on click and reports a failure", async () => {
-    invoke.mockResolvedValueOnce({ version: "0.4.0", currentVersion: "0.3.2" });
+    invoke.mockResolvedValueOnce({ version: "0.4.0", currentVersion: "0.3.2", installing: false });
     render(<DesktopUpdateButton />);
     await flush();
     invoke.mockRejectedValueOnce("signature mismatch");
@@ -70,6 +74,25 @@ describe("DesktopUpdateButton", () => {
     await flush();
     expect(invoke).toHaveBeenLastCalledWith("desktop_install_update");
     expect(mocks.toast).toHaveBeenCalledWith(expect.objectContaining({ message: "signature mismatch" }));
+    expect((screen.getByRole("button") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("stays disabled when it remounts while the update is downloading", async () => {
+    invoke.mockResolvedValueOnce({ version: "0.4.0", currentVersion: "0.3.2", installing: true });
+    render(<DesktopUpdateButton />);
+    await flush();
+    expect((screen.getByRole("button") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("re-enables when the desktop reports the download failed", async () => {
+    invoke.mockResolvedValueOnce({ version: "0.4.0", currentVersion: "0.3.2", installing: true });
+    render(<DesktopUpdateButton />);
+    await flush();
+    act(() =>
+      listeners.get(UPDATE_AVAILABLE_EVENT)?.({
+        payload: { version: "0.4.0", currentVersion: "0.3.2", installing: false },
+      })
+    );
     expect((screen.getByRole("button") as HTMLButtonElement).disabled).toBe(false);
   });
 

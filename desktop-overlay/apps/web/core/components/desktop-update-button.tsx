@@ -14,7 +14,7 @@ import { isDesktop } from "@/services/agent-runtime";
 /** Emitted by the desktop (`updates.rs`) when the daily check finds an update. */
 export const UPDATE_AVAILABLE_EVENT = "updater://available";
 
-type PendingUpdate = { version: string; currentVersion: string };
+type PendingUpdate = { version: string; currentVersion: string; installing: boolean };
 
 interface TauriGlobal {
   core: { invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> };
@@ -38,8 +38,16 @@ export function DesktopUpdateButton() {
     if (!isDesktop()) return;
     let active = true;
     let unlisten: (() => void) | undefined;
+    // The desktop owns both facts: which update is waiting, and whether it
+    // is downloading right now. A remount that landed mid-download must not
+    // show an enabled button — clicking it would only raise "an update is
+    // already installing".
+    const apply = (pending: PendingUpdate) => {
+      setUpdate(pending);
+      setInstalling(Boolean(pending.installing));
+    };
     const subscribe = async () => {
-      const stop = await tauri().event.listen<PendingUpdate>(UPDATE_AVAILABLE_EVENT, (e) => setUpdate(e.payload));
+      const stop = await tauri().event.listen<PendingUpdate>(UPDATE_AVAILABLE_EVENT, (e) => apply(e.payload));
       if (active) unlisten = stop;
       else stop();
     };
@@ -47,9 +55,9 @@ export function DesktopUpdateButton() {
     // already have fired, so ask for the update that is waiting.
     const loadPending = async () => {
       const pending = await tauri().core.invoke<PendingUpdate | null>("desktop_pending_update");
-      if (active && pending) setUpdate(pending);
+      if (active && pending) apply(pending);
     };
-    void subscribe();
+    subscribe().catch(() => undefined);
     loadPending().catch(() => undefined);
     return () => {
       active = false;
