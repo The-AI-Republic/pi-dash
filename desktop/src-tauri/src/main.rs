@@ -80,6 +80,13 @@ fn bundle_redirect_for(url: &Url, server: &Url, bundle_root: &Url) -> Option<Url
     Some(bundle_url(bundle_root, &path_and_query))
 }
 
+/// Whether this executable runs from an installed MSIX package; Windows
+/// installs package files under `...\WindowsApps\<package>\`.
+fn is_msix_install(exe: &std::path::Path) -> bool {
+    exe.components()
+        .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         eprintln!("window: main window not found");
@@ -592,11 +599,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // time, but for dev builds and re-installs we also register at
             // runtime. macOS reads the scheme from `Info.plist` and routes
             // without a re-launch.
+            //
+            // A Microsoft Store (MSIX) install declares the scheme in its
+            // package manifest instead. Registering at runtime there would
+            // write this version's WindowsApps path into HKCU, which goes
+            // stale on the next Store update and outlives an uninstall.
             #[cfg(any(target_os = "linux", target_os = "windows"))]
+            if !std::env::current_exe().is_ok_and(|exe| is_msix_install(&exe))
+                && let Err(e) = app.deep_link().register("pidash")
             {
-                if let Err(e) = app.deep_link().register("pidash") {
-                    eprintln!("deep-link: register failed: {e}");
-                }
+                eprintln!("deep-link: register failed: {e}");
             }
             let handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
@@ -636,6 +648,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn msix_installs_are_detected_by_their_package_directory() {
+        use std::path::Path;
+        // Windows paths split on `\` only on Windows; `/` is a separator on
+        // every platform, so these cases run in CI on any host.
+        assert!(is_msix_install(Path::new(
+            "C:/Program Files/WindowsApps/AIRepublic.PiDash_0.3.1.0_x64__acjt9zndhe44g/pi-dash-desktop.exe"
+        )));
+        assert!(is_msix_install(Path::new(
+            "C:/Program Files/windowsapps/AIRepublic.PiDash_0.3.1.0_x64__acjt9zndhe44g/pi-dash-desktop.exe"
+        )));
+        assert!(!is_msix_install(Path::new(
+            "C:/Users/me/AppData/Local/Pi Dash/pi-dash-desktop.exe"
+        )));
+        assert!(!is_msix_install(Path::new(
+            "/opt/WindowsAppsBackup/pi-dash-desktop"
+        )));
+    }
 
     fn server() -> Url {
         Url::parse("https://pidash.example.com").unwrap()
