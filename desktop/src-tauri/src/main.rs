@@ -6,6 +6,7 @@
 
 mod chat;
 mod chat_history;
+mod desktop_http;
 mod ipc;
 mod managed_runner;
 mod pidash_cli;
@@ -278,6 +279,9 @@ async fn check_for_updates(handle: tauri::AppHandle) {
 /// cookie) and before it navigates.
 #[tauri::command]
 async fn desktop_clear_web_data<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    let http = app.state::<desktop_http::DesktopHttp>();
+    let mut generation = http.generation.lock().await;
+    *generation += 1;
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "no main webview window".to_string())?;
@@ -334,6 +338,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = if hot_reload { "hot-reload" } else { "bundled" };
     eprintln!("Pi Dash: mode={mode} server target {target_url_str} (oss-sha {oss_sha})");
     let target_url = Url::parse(target_url_str)?;
+    let api_url = Url::parse(option_env!("VITE_API_BASE_URL").unwrap_or(target_url_str))?;
+    let desktop_http = desktop_http::DesktopHttp::new(api_url)?;
     let initial_webview = if hot_reload {
         WebviewUrl::External(target_url.clone())
     } else {
@@ -397,11 +403,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .manage(ZoomState(Mutex::new(1.0)))
+        .manage(desktop_http)
         .manage(AppConfig { target_url, bundle_root })
         .manage(managed_runner::DaemonState::default())
         .manage(chat::ChatState::default())
         .invoke_handler(tauri::generate_handler![
             open_in_browser,
+            desktop_http::desktop_api_request,
+            desktop_http::desktop_api_stream,
+            desktop_http::desktop_api_cancel,
             pidash_cli::detect_pidash_cli,
             pidash_cli::install_pidash_cli,
             pidash_cli::pidash_cli_login,
@@ -457,7 +467,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .setup(move |app| {
+            let api_origin = app.state::<desktop_http::DesktopHttp>()
+                .api_url.origin().ascii_serialization();
             let mut window = WebviewWindowBuilder::new(app, "main", initial_webview)
+                .initialization_script(format!(
+                    "Object.defineProperty(window, '__PIDASH_NATIVE_HTTP__', {{ value: {} }});",
+                    serde_json::to_string(&api_origin)?
+                ))
                 .title("Pi Dash")
                 .inner_size(1400.0, 900.0)
                 .min_inner_size(800.0, 600.0)
