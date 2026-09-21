@@ -143,6 +143,14 @@ and writes refreshed cookies back. HttpOnly cookie values stay in native
 code. The command accepts only the main app UI and `/api/` or `/auth/` URLs
 on the compiled `VITE_API_BASE_URL` origin, including redirects. Sign-out
 clears the store and prevents pending requests from restoring old cookies.
+Bodies cross IPC as raw bytes (a length-prefixed JSON head, then the body).
+Canceling or timing out a request aborts it natively; like Axios, requests
+have no deadline unless `timeout` is set.
+
+Credentialed Server-Sent Events have the same cookie problem, so chat
+streams open through `createApiEventSource()`, which uses
+`desktop_api_stream` on desktop and a plain `EventSource` elsewhere. Use it
+for any new credentialed API stream.
 
 Edition code that makes standalone Axios requests, such as token refresh,
 must also pass `adapter: getDesktopApiAdapter()`. Browser builds and older

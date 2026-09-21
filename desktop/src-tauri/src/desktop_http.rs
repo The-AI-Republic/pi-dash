@@ -2,9 +2,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The bundled UI is cross-site to its API. WKWebView/WebView2 can store the
-//! login cookies but omit them on XHR (including refresh). Make API requests
-//! natively, sharing the webview's persistent cookie store with the login
-//! navigation and sign-out. Cookie values never cross the IPC boundary.
+//! login cookies but omit them on XHR (including refresh) and EventSource.
+//! Make API requests natively, sharing the webview's persistent cookie store
+//! with the login navigation and sign-out. Cookie values never cross the IPC
+//! boundary.
+//!
+//! Request and response bodies travel as raw IPC bytes, framed as a 4-byte
+//! big-endian length, a JSON head and then the body, so API traffic is not
+//! re-encoded as JSON number arrays.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use reqwest::{
     Client, Method,
@@ -12,8 +21,9 @@ use reqwest::{
     header,
 };
 use serde::{Deserialize, Serialize};
+use tauri::ipc::{Channel, InvokeBody};
 use tauri::{Manager, Url, webview::Cookie};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 pub struct DesktopHttp {
     pub api_url: Url,
@@ -21,6 +31,9 @@ pub struct DesktopHttp {
     // Serialize cookie writes with logout, and discard responses from the old
     // session so an in-flight refresh cannot sign the user back in.
     pub generation: Mutex<u64>,
+    // Abort signals for in-flight requests and streams, keyed by the page's
+    // request id, so a canceled request stops instead of completing unseen.
+    inflight: std::sync::Mutex<HashMap<String, Arc<Notify>>>,
 }
 
 impl DesktopHttp {
@@ -34,28 +47,101 @@ impl DesktopHttp {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             generation: Mutex::new(0),
+            inflight: Default::default(),
         })
     }
+
+    fn track(&self, id: &str) -> Inflight<'_> {
+        let cancel = Arc::new(Notify::new());
+        self.inflight
+            .lock()
+            .unwrap()
+            .insert(id.to_owned(), cancel.clone());
+        Inflight {
+            http: self,
+            id: id.to_owned(),
+            cancel,
+        }
+    }
+
+    fn cancel(&self, id: &str) {
+        if let Some(cancel) = self.inflight.lock().unwrap().remove(id) {
+            // notify_one stores a permit, so a cancel that arrives before the
+            // request starts waiting is not lost.
+            cancel.notify_one();
+        }
+    }
 }
+
+struct Inflight<'a> {
+    http: &'a DesktopHttp,
+    id: String,
+    cancel: Arc<Notify>,
+}
+
+impl Drop for Inflight<'_> {
+    fn drop(&mut self) {
+        let mut inflight = self.http.inflight.lock().unwrap();
+        if inflight
+            .get(&self.id)
+            .is_some_and(|c| Arc::ptr_eq(c, &self.cancel))
+        {
+            inflight.remove(&self.id);
+        }
+    }
+}
+
+const CANCELED: &str = "API request canceled";
+const TIMED_OUT: &str = "API request timed out";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiRequest {
+    id: String,
     url: Url,
     method: String,
     #[serde(default)]
     headers: Vec<(String, String)>,
-    body: Option<Vec<u8>>,
+    #[serde(default)]
+    has_body: bool,
+    // None or 0 means no deadline, matching Axios' default.
     timeout_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ApiResponse {
+pub struct ResponseHead {
     status: u16,
     status_text: String,
     headers: Vec<(String, String)>,
-    body: Vec<u8>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum StreamEvent {
+    Head(ResponseHead),
+    Data { text: String },
+    // Sent on the channel rather than implied by the command resolving:
+    // channel messages can arrive after the invoke promise settles.
+    End,
+}
+
+fn frame(head: &[u8], body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + head.len() + body.len());
+    out.extend_from_slice(&(head.len() as u32).to_be_bytes());
+    out.extend_from_slice(head);
+    out.extend_from_slice(body);
+    out
+}
+
+fn unframe(bytes: &[u8]) -> Result<(&[u8], &[u8]), String> {
+    let len: [u8; 4] = bytes
+        .get(..4)
+        .and_then(|b| b.try_into().ok())
+        .ok_or("invalid API request frame")?;
+    let len = u32::from_be_bytes(len) as usize;
+    let head = bytes.get(4..4 + len).ok_or("invalid API request frame")?;
+    Ok((head, &bytes[4 + len..]))
 }
 
 fn same_origin(a: &Url, b: &Url) -> bool {
@@ -92,6 +178,9 @@ fn response_cookie(raw: &str, url: &Url) -> Option<Cookie<'static>> {
             return None;
         }
     } else {
+        // The webview's cookie API needs a domain. Some webviews store this
+        // as a domain cookie rather than host-only, widening it to the API
+        // host's subdomains; acceptable because only the API sets cookies.
         cookie.set_domain(host.to_owned());
     }
     if !cookie.path().is_some_and(|p| p.starts_with('/')) {
@@ -132,12 +221,41 @@ fn safe_request_header(name: &header::HeaderName) -> bool {
         && !name.as_str().starts_with("proxy-")
 }
 
-#[tauri::command]
-pub async fn desktop_api_request(
-    window: tauri::WebviewWindow,
-    state: tauri::State<'_, DesktopHttp>,
+fn response_head(response: &reqwest::Response) -> ResponseHead {
+    let status = response.status();
+    ResponseHead {
+        status: status.as_u16(),
+        status_text: status.canonical_reason().unwrap_or("").into(),
+        headers: response
+            .headers()
+            .iter()
+            .filter(|(name, _)| *name != header::SET_COOKIE)
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|v| (name.to_string(), v.to_owned()))
+            })
+            .collect(),
+    }
+}
+
+async fn check_session(state: &DesktopHttp, generation: u64) -> Result<(), String> {
+    if *state.generation.lock().await != generation {
+        return Err("session changed during request".into());
+    }
+    Ok(())
+}
+
+/// Send `request`, following same-origin API redirects, and return the final
+/// response with its cookies already written to the webview.
+async fn send(
+    window: &tauri::WebviewWindow,
+    state: &DesktopHttp,
     request: ApiRequest,
-) -> Result<ApiResponse, String> {
+    mut body: Option<Vec<u8>>,
+    deadline: Option<Instant>,
+) -> Result<(reqwest::Response, u64), String> {
     let config = window.state::<crate::AppConfig>();
     let source = window
         .url()
@@ -182,20 +300,18 @@ pub async fn desktop_api_request(
         origin.parse().map_err(|_| "invalid origin")?,
     );
     let generation = *state.generation.lock().await;
-    let mut body = request.body;
-    let timeout =
-        std::time::Duration::from_millis(request.timeout_ms.filter(|n| *n > 0).unwrap_or(60_000));
-    let deadline = std::time::Instant::now() + timeout;
 
     for _ in 0..10 {
-        let remaining = deadline
-            .checked_duration_since(std::time::Instant::now())
-            .ok_or("API request timed out")?;
         let mut request = state
             .client
             .request(method.clone(), url.clone())
-            .headers(headers.clone())
-            .timeout(remaining);
+            .headers(headers.clone());
+        if let Some(deadline) = deadline {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or(TIMED_OUT)?;
+            request = request.timeout(remaining);
+        }
         {
             let guard = state.generation.lock().await;
             if *guard != generation {
@@ -216,7 +332,7 @@ pub async fn desktop_api_request(
         // Do not return reqwest's URL-bearing errors: auth URLs may contain codes.
         let response = request.send().await.map_err(|e| {
             if e.is_timeout() {
-                "API request timed out"
+                TIMED_OUT
             } else {
                 "API request failed"
             }
@@ -242,51 +358,131 @@ pub async fn desktop_api_request(
                 }
             }
         }
-        if matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
-            if let Some(location) = response.headers().get(header::LOCATION) {
-                let target = location
-                    .to_str()
-                    .ok()
-                    .and_then(|v| url.join(v).ok())
-                    .ok_or("invalid API redirect")?;
-                if !allowed_api_url(&target, &state.api_url) {
-                    return Err("API redirect is not allowed".into());
-                }
-                if (status.as_u16() == 303 && method != Method::HEAD)
-                    || (matches!(status.as_u16(), 301 | 302) && method == Method::POST)
-                {
-                    method = Method::GET;
-                    body = None;
-                    headers.remove(header::CONTENT_TYPE);
-                }
-                url = target;
-                continue;
+        if matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308)
+            && let Some(location) = response.headers().get(header::LOCATION)
+        {
+            let target = location
+                .to_str()
+                .ok()
+                .and_then(|v| url.join(v).ok())
+                .ok_or("invalid API redirect")?;
+            if !allowed_api_url(&target, &state.api_url) {
+                return Err("API redirect is not allowed".into());
             }
+            if (status.as_u16() == 303 && method != Method::HEAD)
+                || (matches!(status.as_u16(), 301 | 302) && method == Method::POST)
+            {
+                method = Method::GET;
+                body = None;
+                headers.remove(header::CONTENT_TYPE);
+            }
+            url = target;
+            continue;
         }
-        let headers = response
-            .headers()
-            .iter()
-            .filter(|(name, _)| *name != header::SET_COOKIE)
-            .filter_map(|(name, value)| {
-                value
-                    .to_str()
-                    .ok()
-                    .map(|v| (name.to_string(), v.to_owned()))
-            })
-            .collect();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|_| "cannot read API response")?
-            .to_vec();
-        return Ok(ApiResponse {
-            status: status.as_u16(),
-            status_text: status.canonical_reason().unwrap_or("").into(),
-            headers,
-            body,
-        });
+        return Ok((response, generation));
     }
     Err("too many API redirects".into())
+}
+
+fn read_request(
+    request: &tauri::ipc::Request<'_>,
+) -> Result<(ApiRequest, Option<Vec<u8>>), String> {
+    // The postMessage IPC fallback delivers bytes as a JSON array.
+    let fallback;
+    let bytes = match request.body() {
+        InvokeBody::Raw(bytes) => bytes,
+        InvokeBody::Json(value) => {
+            fallback = serde_json::from_value::<Vec<u8>>(value.clone())
+                .map_err(|_| "invalid API request frame")?;
+            &fallback
+        }
+    };
+    let (head, body) = unframe(bytes)?;
+    let request: ApiRequest =
+        serde_json::from_slice(head).map_err(|_| "invalid API request frame")?;
+    let body = request.has_body.then(|| body.to_vec());
+    Ok((request, body))
+}
+
+#[tauri::command]
+pub async fn desktop_api_request(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, DesktopHttp>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<tauri::ipc::Response, String> {
+    let (request, body) = read_request(&request)?;
+    let inflight = state.track(&request.id);
+    let deadline = request
+        .timeout_ms
+        .filter(|n| *n > 0)
+        .map(|n| Instant::now() + Duration::from_millis(n));
+    let work = async {
+        let (response, _) = send(&window, &state, request, body, deadline).await?;
+        let head = serde_json::to_vec(&response_head(&response)).map_err(|e| e.to_string())?;
+        let body = response.bytes().await.map_err(|e| {
+            if e.is_timeout() {
+                TIMED_OUT
+            } else {
+                "cannot read API response"
+            }
+        })?;
+        Ok(tauri::ipc::Response::new(frame(&head, &body)))
+    };
+    tokio::select! {
+        result = work => result,
+        _ = inflight.cancel.notified() => Err(CANCELED.into()),
+    }
+}
+
+/// Stream a response body (Server-Sent Events) to the page as UTF-8 text.
+/// Resolves when the body ends; the page cancels it with
+/// `desktop_api_cancel`.
+#[tauri::command]
+pub async fn desktop_api_stream(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, DesktopHttp>,
+    request: ApiRequest,
+    channel: Channel<StreamEvent>,
+) -> Result<(), String> {
+    let inflight = state.track(&request.id);
+    let work = async {
+        let (mut response, generation) = send(&window, &state, request, None, None).await?;
+        channel
+            .send(StreamEvent::Head(response_head(&response)))
+            .map_err(|_| "stream closed")?;
+        let mut pending = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| "API stream failed")? {
+            check_session(&state, generation).await?;
+            pending.extend_from_slice(&chunk);
+            // Emit only whole UTF-8 characters; keep a split one for the next chunk.
+            let valid = match std::str::from_utf8(&pending) {
+                Ok(_) => pending.len(),
+                Err(e) if e.error_len().is_none() => e.valid_up_to(),
+                Err(_) => return Err("API stream is not UTF-8".into()),
+            };
+            if valid > 0 {
+                let rest = pending.split_off(valid);
+                let text = String::from_utf8(std::mem::replace(&mut pending, rest))
+                    .map_err(|_| "API stream is not UTF-8")?;
+                channel
+                    .send(StreamEvent::Data { text })
+                    .map_err(|_| "stream closed")?;
+            }
+        }
+        channel
+            .send(StreamEvent::End)
+            .map_err(|_| "stream closed")?;
+        Ok(())
+    };
+    tokio::select! {
+        result = work => result,
+        _ = inflight.cancel.notified() => Err(CANCELED.into()),
+    }
+}
+
+#[tauri::command]
+pub fn desktop_api_cancel(state: tauri::State<'_, DesktopHttp>, id: String) {
+    state.cancel(&id);
 }
 
 #[cfg(test)]
@@ -307,6 +503,40 @@ mod tests {
         cookie_header(cookies, &api().join(path).unwrap())
             .map(|v| v.to_str().unwrap().to_owned())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn frames_round_trip_and_reject_truncation() {
+        let framed = frame(br#"{"a":1}"#, &[0, 255]);
+        assert_eq!(
+            unframe(&framed).unwrap(),
+            (&br#"{"a":1}"#[..], &[0u8, 255][..])
+        );
+        assert!(unframe(&framed[..3]).is_err());
+        assert!(unframe(&framed[..8]).is_err());
+    }
+
+    #[tokio::test]
+    async fn cancel_is_delivered_even_before_the_request_waits() {
+        let http = DesktopHttp::new(api()).unwrap();
+        let inflight = http.track("r1");
+        http.cancel("r1");
+        tokio::time::timeout(Duration::from_secs(1), inflight.cancel.notified())
+            .await
+            .expect("cancel permit was lost");
+        drop(inflight);
+        assert!(http.inflight.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn finished_requests_do_not_leak_or_evict_a_reused_id() {
+        let http = DesktopHttp::new(api()).unwrap();
+        let first = http.track("r1");
+        let second = http.track("r1");
+        drop(first);
+        assert!(http.inflight.lock().unwrap().contains_key("r1"));
+        drop(second);
+        assert!(http.inflight.lock().unwrap().is_empty());
     }
 
     #[test]

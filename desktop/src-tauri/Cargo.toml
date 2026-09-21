@@ -38,8 +38,8 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # `managed_start_daemon` waits for the daemon's control socket to answer
 # before returning; without the wait the chat transport connects into the gap
 # between spawn and bind. Tauri already runs on tokio — this only names the
-# timer we use.
-tokio = { version = "1", default-features = false, features = ["time"] }
+# timer we use, plus `select!`/`Notify` for canceling native API requests.
+tokio = { version = "1", default-features = false, features = ["time", "macros", "sync"] }
 
 [target.'cfg(unix)'.dependencies]
 # Only for SIGTERM on the bundled daemon: killing it outright would turn a

@@ -410,6 +410,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .invoke_handler(tauri::generate_handler![
             open_in_browser,
             desktop_http::desktop_api_request,
+            desktop_http::desktop_api_stream,
+            desktop_http::desktop_api_cancel,
             pidash_cli::detect_pidash_cli,
             pidash_cli::install_pidash_cli,
             pidash_cli::pidash_cli_login,
