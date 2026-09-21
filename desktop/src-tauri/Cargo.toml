@@ -1,6 +1,6 @@
 [package]
 name = "pi-dash-desktop"
-version = "0.3.1"
+version = "0.3.2"
 description = "Pi Dash desktop app (Tauri v2)"
 edition = "2024"
 rust-version = "1.93"
