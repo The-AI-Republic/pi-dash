@@ -128,6 +128,38 @@ def test_preview_issue_renders(session_client, workspace, issue):
 
 
 @pytest.mark.contract
+def test_preview_issue_shows_blocked_by_and_blocking(session_client, workspace, project, issue, create_user):
+    from pi_dash.db.models import IssueRelation
+
+    with impersonate(create_user):
+        blocker = Issue.objects.create(
+            name="Model layer", workspace=workspace, project=project, state=issue.state, created_by=create_user
+        )
+        dependent = Issue.objects.create(
+            name="Handler", workspace=workspace, project=project, state=issue.state, created_by=create_user
+        )
+        for a, b in ((issue, blocker), (dependent, issue)):
+            IssueRelation.objects.create(
+                issue=a,
+                related_issue=b,
+                relation_type="blocked_by",
+                project=project,
+                workspace=workspace,
+                created_by=create_user,
+            )
+    resp = session_client.post(
+        _preview_url(workspace, "coding-task"), {"issue_id": str(issue.id)}, format="json"
+    )
+    assert resp.status_code == 200, resp.data
+    prompt = resp.data["prompt"]
+    assert "Blocked by (must be done first):" in prompt
+    assert f"WEB-{blocker.sequence_id}: Model layer (Todo)" in prompt
+    assert f"- Warning: WEB-{blocker.sequence_id} is still open" in prompt
+    assert "Blocking (waiting on this item):" in prompt
+    assert f"WEB-{dependent.sequence_id}: Handler (Todo)" in prompt
+
+
+@pytest.mark.contract
 def test_preview_review_kind_against_issue(session_client, workspace, issue):
     resp = session_client.post(
         _preview_url(workspace, "review"), {"issue_id": str(issue.id)}, format="json"

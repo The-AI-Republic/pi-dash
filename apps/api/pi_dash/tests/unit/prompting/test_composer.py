@@ -718,3 +718,85 @@ def test_relationships_section_lineage_only_when_grandparent():
     body3 = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
     assert "Lineage (current → root):" in body3
     assert "SAMPLE-root" in body3
+
+
+# ----------------------------------------------------------------------
+# Directional relations in the relationships section (PDASHOSS01-196).
+# ----------------------------------------------------------------------
+
+
+def _blocker(identifier="SAMPLE-b0", state="In Progress", state_group="started"):
+    return {"identifier": identifier, "title": f"Blocker {identifier}", "state": state, "state_group": state_group}
+
+
+@pytest.mark.unit
+def test_relationships_section_renders_open_blocker_with_warning():
+    """One open blocked_by → "Blocked by" group, a warning naming it, and the
+    decision guidance; the section renders even with no parent/children/related."""
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    ctx["blocked_by"] = [_blocker()]
+    ctx["open_blockers"] = ["SAMPLE-b0"]
+    ctx["has_open_blockers"] = True
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING in body
+    assert "Blocked by (must be done first):" in body
+    assert "- SAMPLE-b0: Blocker SAMPLE-b0 (In Progress)" in body
+    assert "- Warning: SAMPLE-b0 is still open" in body
+    assert "Open blockers (SAMPLE-b0) are information, not a hard stop" in body
+    assert "`Waiting on: <IDs>`" in body
+    assert REQUIRED_READING_DIRECTIVE in body
+    assert "Blocking (waiting on this item):" not in body
+    assert "Other relations:" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_closed_blockers_have_no_warning():
+    """Blockers that are all done list the group but no warning / guidance."""
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    ctx["blocked_by"] = [_blocker(state="Done", state_group="completed")]
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert "Blocked by (must be done first):" in body
+    assert "- SAMPLE-b0: Blocker SAMPLE-b0 (Done)" in body
+    assert "Warning:" not in body
+    assert "Open blockers (" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_omits_blocked_by_group_when_none():
+    ctx = _relationships_ctx(parent=True, children=0, related=0)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING in body
+    assert "Blocked by (must be done first):" not in body
+    assert "Blocking (waiting on this item):" not in body
+    assert "Other relations:" not in body
+    assert "Open blockers (" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_renders_blocking_and_other_relations():
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    ctx["blocking"] = [_blocker("SAMPLE-d0", state="Todo", state_group="unstarted")]
+    other = _blocker("SAMPLE-o0", state="Backlog", state_group="backlog")
+    ctx["other_relations"] = [{**other, "relation": "Implements"}]
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING in body
+    assert "Blocking (waiting on this item):" in body
+    assert "- SAMPLE-d0: Blocker SAMPLE-d0 (Todo)" in body
+    assert "Other relations:" in body
+    assert "- Implements SAMPLE-o0: Blocker SAMPLE-o0 (Backlog)" in body
+    assert "Blocked by (must be done first):" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_warning_pluralizes():
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    ctx["blocked_by"] = [_blocker("SAMPLE-b0"), _blocker("SAMPLE-b1")]
+    ctx["open_blockers"] = ["SAMPLE-b0", "SAMPLE-b1"]
+    ctx["has_open_blockers"] = True
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert "- Warning: SAMPLE-b0, SAMPLE-b1 are still open" in body
