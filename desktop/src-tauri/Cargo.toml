@@ -30,6 +30,9 @@ tauri-plugin-updater = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Share the updater's Rustls/ring provider rather than enabling a second one.
+reqwest = { version = "0.13", default-features = false, features = ["cookies", "rustls-no-provider", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 # `managed_start_daemon` waits for the daemon's control socket to answer
