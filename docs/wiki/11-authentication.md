@@ -51,6 +51,10 @@ The runner (`pidash` CLI) needs to authenticate to the cloud without a human at 
 pidash auth login --url https://your-pidash-instance.com
 ```
 
+`--url` is only needed for a self-hosted instance. Omit it and the CLI reuses
+this host's configured `[daemon].cloud_url`, falling back to the hosted cloud
+at `https://pidash.airepublic.com` — so the release installer never has to ask.
+
 1. CLI requests a device code from the cloud (`/api/v1/runner/enroll/...`).
 2. CLI shows the user a short code + URL to open in a browser.
 3. User approves in the browser (signed in via flow #2 above).

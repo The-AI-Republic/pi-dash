@@ -10,6 +10,10 @@
 //!    error, or the grant expires.
 //! 4. Write the returned `APIToken` to `[cli].token` in `config.toml`.
 //!
+//! The cloud to talk to comes from `--url`, else this host's existing
+//! `[daemon].cloud_url`, else [`crate::DEFAULT_CLOUD_URL`] — never from a
+//! prompt, so the release installer can run straight into step 1.
+//!
 //! After a successful login we simply confirm the account/workspace and
 //! point the user at the cloud URL. Registering a runner is a separate,
 //! explicit step (`pidash runner add`).
@@ -17,7 +21,7 @@
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use serde::Deserialize;
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::time::Duration;
 
 use crate::cli::runner_ops;
@@ -27,8 +31,9 @@ use crate::util::paths::Paths;
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     /// Pi Dash cloud base URL (e.g. `https://pidash.example.com`).
-    /// Optional if this host already has a `config.toml`; we reuse the
-    /// existing `[daemon].cloud_url` in that case.
+    /// Only needed for a self-hosted instance. Omitted, we reuse this
+    /// host's existing `[daemon].cloud_url` if it has one, and otherwise
+    /// fall back to the hosted cloud (`DEFAULT_CLOUD_URL`).
     #[arg(long)]
     pub url: Option<String>,
 
@@ -102,8 +107,16 @@ struct LoginOutcome {
 }
 
 async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOutcome> {
-    let cloud_url = resolve_cloud_url(args, paths)?;
+    let (cloud_url, source) = resolve_cloud_url(args, paths)?;
     crate::cli::connect::validate_cloud_url(&cloud_url)?;
+
+    // Only worth saying when we chose for them. If they passed `--url` or
+    // this host is already enrolled, repeating the URL back is noise.
+    if source == CloudUrlSource::Default {
+        println!();
+        println!("Connecting to Pi Dash at {cloud_url}");
+        println!("(Self-hosted? Cancel and run `pidash auth login --url <YOUR-URL>` instead.)");
+    }
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -184,41 +197,39 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
     Ok(LoginOutcome { cloud_url })
 }
 
-fn resolve_cloud_url(args: &Args, paths: &Paths) -> Result<String> {
+/// Where the cloud URL we're about to authenticate against came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloudUrlSource {
+    /// Explicit `--url` on this invocation.
+    Flag,
+    /// `[daemon].cloud_url` persisted by an earlier login or enrollment.
+    Config,
+    /// Nothing configured — the hosted cloud.
+    Default,
+}
+
+fn resolve_cloud_url(args: &Args, paths: &Paths) -> Result<(String, CloudUrlSource)> {
     if let Some(u) = &args.url {
-        return Ok(u.trim_end_matches('/').to_string());
+        return Ok((u.trim_end_matches('/').to_string(), CloudUrlSource::Flag));
     }
     if paths.config_path().exists() {
         let cfg = file::load_config(paths)?;
         if !cfg.daemon.cloud_url.is_empty() {
-            return Ok(cfg.daemon.cloud_url.trim_end_matches('/').to_string());
+            return Ok((
+                cfg.daemon.cloud_url.trim_end_matches('/').to_string(),
+                CloudUrlSource::Config,
+            ));
         }
     }
-    if std::io::stdin().is_terminal() {
-        return prompt_for_cloud_url();
-    }
-    anyhow::bail!("no cloud URL configured — pass --url https://your-pi-dash-instance.example.com");
-}
-
-fn prompt_for_cloud_url() -> Result<String> {
-    use std::io::BufRead;
-    println!();
-    println!("Enter your Pi Dash cloud URL.");
-    println!("(For AI Republic-hosted Pi Dash this is https://pidash.airepublic.com;");
-    println!(" for a self-hosted instance use your own URL.)");
-    println!();
-    print!("Cloud URL: ");
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    std::io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .context("reading cloud URL from stdin")?;
-    let url = line.trim();
-    if url.is_empty() {
-        anyhow::bail!("no cloud URL entered — re-run `pidash auth login --url <URL>`");
-    }
-    Ok(url.trim_end_matches('/').to_string())
+    // Fresh host, no `--url`: this is the released install one-liner's path
+    // into `auth login`, and the overwhelmingly common answer is our hosted
+    // cloud. Asking for it here made every hosted user type our own URL by
+    // hand — and gave headless installs nothing but an error. Default, and
+    // let self-hosters redirect with `--url`.
+    Ok((
+        crate::DEFAULT_CLOUD_URL.trim_end_matches('/').to_string(),
+        CloudUrlSource::Default,
+    ))
 }
 
 async fn start_device_code(client: &reqwest::Client, cloud_url: &str) -> Result<StartResponse> {
@@ -459,4 +470,77 @@ fn pick_workspace(workspaces: &[WorkspaceRow]) -> Result<&WorkspaceRow> {
         anyhow::bail!("selection {idx} out of range");
     }
     Ok(&workspaces[idx - 1])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn paths_for(root: &std::path::Path) -> Paths {
+        Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            runtime_dir: root.join("runtime"),
+        }
+    }
+
+    fn args_with_url(url: Option<&str>) -> Args {
+        Args {
+            url: url.map(str::to_string),
+            no_browser: true,
+            workspace: None,
+            device_code: None,
+        }
+    }
+
+    #[test]
+    fn defaults_to_hosted_cloud_when_nothing_is_configured() {
+        // The install one-liner's path: no flag, no config.toml. The user
+        // must not be asked to type our own production URL.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (url, source) = resolve_cloud_url(&args_with_url(None), &paths).unwrap();
+        assert_eq!(url, crate::DEFAULT_CLOUD_URL);
+        assert_eq!(source, CloudUrlSource::Default);
+    }
+
+    #[test]
+    fn default_cloud_url_passes_transport_validation() {
+        // A default nobody types by hand still has to clear the same
+        // https-only bar as a URL the user supplies.
+        crate::cli::connect::validate_cloud_url(crate::DEFAULT_CLOUD_URL).unwrap();
+    }
+
+    #[test]
+    fn explicit_url_flag_wins_and_trailing_slash_is_trimmed() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let args = args_with_url(Some("https://self.example.com/"));
+        let (url, source) = resolve_cloud_url(&args, &paths).unwrap();
+        assert_eq!(url, "https://self.example.com");
+        assert_eq!(source, CloudUrlSource::Flag);
+    }
+
+    #[test]
+    fn existing_config_url_is_reused_over_the_default() {
+        // Re-login on an enrolled self-hosted box must stay on that cloud.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        runner_ops::write_cli_token(&paths, "https://self.example.com", "tok").unwrap();
+        let (url, source) = resolve_cloud_url(&args_with_url(None), &paths).unwrap();
+        assert_eq!(url, "https://self.example.com");
+        assert_eq!(source, CloudUrlSource::Config);
+    }
+
+    #[test]
+    fn explicit_url_flag_wins_over_existing_config() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        runner_ops::write_cli_token(&paths, "https://self.example.com", "tok").unwrap();
+        let args = args_with_url(Some("https://other.example.com"));
+        let (url, source) = resolve_cloud_url(&args, &paths).unwrap();
+        assert_eq!(url, "https://other.example.com");
+        assert_eq!(source, CloudUrlSource::Flag);
+    }
 }

@@ -101,5 +101,6 @@ fi
 # auth — there's no one to approve the device code. Point at the
 # headless path instead.
 echo "No terminal detected — skipping auto-auth."
-echo "Run \`pidash auth login --no-browser --url <URL>\`, approve the printed"
-echo "URL from another browser, then run \`pidash runner add --project <PROJECT>\`."
+echo "Run \`pidash auth login --no-browser\`, approve the printed URL from"
+echo "another browser, then run \`pidash runner add --project <PROJECT>\`."
+echo "(Self-hosted Pi Dash? Add \`--url <YOUR-URL>\` to the login command.)"
