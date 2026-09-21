@@ -38,7 +38,8 @@ irm https://github.com/The-AI-Republic/pi-dash/releases/latest/download/install.
 
 The installer goes straight into the device-code flow against
 `https://pidash.airepublic.com` — approve it in the browser.
-(Self-hosting instead? Run `pidash auth login --url <YOUR-URL>` afterwards.)
+(Self-hosting instead? Cancel with Ctrl-C before approving, then run
+`pidash auth login --url <YOUR-URL>`.)
 
 ## 5. Register this machine as a runner
 
