@@ -24,7 +24,10 @@ pub struct IssueArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum IssueCommand {
-    /// Fetch a work item by `PROJ-123` identifier. Prints the full payload as JSON.
+    /// Fetch a work item by `PROJ-123` identifier. Prints the full payload as
+    /// JSON, including the blocker summary: `relations_summary` (`blocked_by`
+    /// / `blocking` lists of `{identifier, state, state_group}`) and
+    /// `has_open_blockers`.
     Get {
         /// Project-scoped identifier, e.g. `ENG-42`.
         identifier: String,
@@ -233,12 +236,21 @@ pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
 }
 
 async fn cmd_get(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
-    let issue = resolve_issue(client, identifier).await?;
+    let issue = get_issue(client, identifier).await?;
     println!(
         "{}",
-        serde_json::to_string(&issue.raw).expect("serialize JSON value")
+        serde_json::to_string(&issue).expect("serialize JSON value")
     );
     Ok(())
+}
+
+/// The JSON document `pidash issue get` prints. The server payload is passed
+/// through verbatim, so its blocker summary (`relations_summary`,
+/// `has_open_blockers`) reaches the agent exactly as the API and the run
+/// prompt describe it. Nothing is synthesized: an older server that doesn't
+/// send the block yields a payload without it.
+pub async fn get_issue(client: &ApiClient, identifier: &str) -> Result<Value, CliError> {
+    Ok(resolve_issue(client, identifier).await?.raw)
 }
 
 async fn cmd_create(

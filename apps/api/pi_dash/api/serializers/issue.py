@@ -101,6 +101,16 @@ class IssueSerializer(BaseSerializer):
         # workpad endpoint to keep ``GET /work-items/<id>/`` payloads small.
         exclude = ["description_json", "description_stripped", "workpad"]
 
+    #: Read-only blocker keys added by ``to_representation`` for single-item
+    #: payloads (see there).
+    RELATIONS_SUMMARY_KEYS = ("relations_summary", "has_open_blockers")
+
+    def __init__(self, *args, **kwargs):
+        # ``BaseSerializer`` consumes ``fields``; remember which plain names
+        # were requested so the computed blocker keys honour ``?fields=`` too.
+        self._requested_fields = {f for f in (kwargs.get("fields") or []) if isinstance(f, str)}
+        super().__init__(*args, **kwargs)
+
     def validate(self, data):
         if (
             data.get("start_date", None) is not None
@@ -384,6 +394,19 @@ class IssueSerializer(BaseSerializer):
                 data["labels"] = [
                     str(label) for label in IssueLabel.objects.filter(issue=instance).values_list("label_id", flat=True)
                 ]
+
+        # Blocker summary (PDASHOSS01-197) — the same picture the agent prompt
+        # carries, so ``GET /work-items/<id>/`` and ``pidash issue get`` show it.
+        # Single-item payloads only: under a ``ListSerializer`` it would cost
+        # several queries per row on the list endpoints.
+        if not isinstance(self.parent, serializers.ListSerializer) and (
+            not self._requested_fields or self._requested_fields.intersection(self.RELATIONS_SUMMARY_KEYS)
+        ):
+            from pi_dash.orchestration.blockers import relations_summary
+
+            for key, value in relations_summary(instance).items():
+                if not self._requested_fields or key in self._requested_fields:
+                    data[key] = value
 
         return data
 

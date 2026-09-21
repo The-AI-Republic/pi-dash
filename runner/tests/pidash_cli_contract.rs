@@ -231,6 +231,63 @@ async fn resolve_issue_extracts_id_and_project() {
 }
 
 #[tokio::test]
+async fn issue_get_carries_the_blocker_summary() {
+    // `pidash issue get` prints the server's blocker block verbatim, so the
+    // agent sees the same `relations_summary` / `has_open_blockers` the API
+    // and the run prompt carry (PDASHOSS01-197).
+    let fake = start_fake(Box::new(|req| {
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.path, "/api/v1/workspaces/acme/work-items/ENG-7/");
+        CannedResponse::ok(
+            r#"{"id":"00000000-0000-0000-0000-000000000007","project":"00000000-0000-0000-0000-0000000000aa","name":"handler",
+               "relations_summary":{
+                 "blocked_by":[{"identifier":"ENG-3","state":"In Review","state_group":"review"},
+                               {"identifier":"ENG-2","state":"Done","state_group":"completed"}],
+                 "blocking":[{"identifier":"ENG-9","state":"Todo","state_group":"unstarted"}]},
+               "has_open_blockers":true}"#,
+        )
+    }))
+    .await;
+    let client = client(&fake);
+    let out = pidash::cli::issue::get_issue(&client, "ENG-7")
+        .await
+        .expect("issue get");
+    assert_eq!(out["has_open_blockers"], serde_json::json!(true));
+    assert_eq!(
+        out["relations_summary"],
+        serde_json::json!({
+            "blocked_by": [
+                {"identifier": "ENG-3", "state": "In Review", "state_group": "review"},
+                {"identifier": "ENG-2", "state": "Done", "state_group": "completed"},
+            ],
+            "blocking": [
+                {"identifier": "ENG-9", "state": "Todo", "state_group": "unstarted"},
+            ],
+        })
+    );
+    assert_eq!(fake.recorded.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn issue_get_does_not_invent_a_blocker_summary() {
+    // An older server without the block: the CLI passes the payload through
+    // rather than fabricating an empty (and misleading "unblocked") summary.
+    let fake = start_fake(Box::new(|_req| {
+        CannedResponse::ok(
+            r#"{"id":"00000000-0000-0000-0000-000000000007","project":"00000000-0000-0000-0000-0000000000aa","name":"handler"}"#,
+        )
+    }))
+    .await;
+    let client = client(&fake);
+    let out = pidash::cli::issue::get_issue(&client, "ENG-7")
+        .await
+        .expect("issue get");
+    assert_eq!(out["name"], "handler");
+    assert!(out.get("relations_summary").is_none());
+    assert!(out.get("has_open_blockers").is_none());
+}
+
+#[tokio::test]
 async fn resolve_state_name_is_case_insensitive() {
     let fake = start_fake(Box::new(|req| {
         assert!(req.path.ends_with("/states/"));

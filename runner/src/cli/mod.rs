@@ -10,7 +10,7 @@ pub mod context;
 pub mod doctor;
 mod install;
 pub mod managed;
-mod issue;
+pub mod issue;
 mod project;
 mod remove;
 pub mod resolve;

@@ -1229,6 +1229,8 @@ class IssueDetailSerializer(IssueSerializer):
     is_intake = serializers.BooleanField(read_only=True)
     agent_ticker = serializers.SerializerMethodField()
     agent_status = serializers.SerializerMethodField()
+    relations_summary = serializers.SerializerMethodField()
+    has_open_blockers = serializers.SerializerMethodField()
 
     class Meta(IssueSerializer.Meta):
         fields = IssueSerializer.Meta.fields + [
@@ -1237,11 +1239,31 @@ class IssueDetailSerializer(IssueSerializer):
             "is_intake",
             "agent_ticker",
             "agent_status",
+            "relations_summary",
+            "has_open_blockers",
         ]
         read_only_fields = fields
 
     def _serialize_datetime(self, value):
         return value.isoformat() if value else None
+
+    def _blocker_summary(self, obj):
+        # Both fields come from one ``relations_summary`` call; cache it per
+        # issue so serializing the detail doesn't query the relations twice.
+        from pi_dash.orchestration.blockers import relations_summary
+
+        cache = self.__dict__.setdefault("_blocker_summary_cache", {})
+        if obj.pk not in cache:
+            cache[obj.pk] = relations_summary(obj)
+        return cache[obj.pk]
+
+    def get_relations_summary(self, obj):
+        """``{blocked_by, blocking}`` lists of ``{identifier, state, state_group}``
+        — the same blocker picture the agent prompt carries (PDASHOSS01-197)."""
+        return self._blocker_summary(obj)["relations_summary"]
+
+    def get_has_open_blockers(self, obj):
+        return self._blocker_summary(obj)["has_open_blockers"]
 
     def get_agent_ticker(self, obj):
         """Surface the per-issue continuation ticker for the issue detail UI.
