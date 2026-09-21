@@ -10,6 +10,7 @@ mod desktop_http;
 mod ipc;
 mod managed_runner;
 mod pidash_cli;
+mod updates;
 
 use std::sync::Mutex;
 
@@ -19,9 +20,7 @@ use tauri::{
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_deep_link::DeepLinkExt;
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
-use tauri_plugin_updater::UpdaterExt;
 
 const ZOOM_STEP: f64 = 0.1;
 const ZOOM_MIN: f64 = 0.3;
@@ -207,71 +206,6 @@ fn handle_deep_link(app: &tauri::AppHandle, url: &str) {
     }
 }
 
-/// Check the updater endpoint at startup. If a newer version is available,
-/// ask the user via a native dialog; install + restart on confirmation.
-///
-/// All failure modes (network down, malformed manifest, signature mismatch)
-/// log to stderr and return silently — the app keeps running on the current
-/// version. We don't want a flaky update server to gate launch.
-///
-/// Only runs when the build configures `plugins.updater` (see `main`).
-async fn check_for_updates(handle: tauri::AppHandle) {
-    let updater = match handle.updater() {
-        Ok(u) => u,
-        Err(e) => {
-            eprintln!("updater: construction failed: {e}");
-            return;
-        }
-    };
-    let update = match updater.check().await {
-        Ok(Some(u)) => u,
-        Ok(None) => return,
-        Err(e) => {
-            eprintln!("updater: check failed: {e}");
-            return;
-        }
-    };
-    let current = handle.package_info().version.to_string();
-    let install = handle
-        .dialog()
-        .message(format!(
-            "Pi Dash {new} is available (you have {current}).\n\n\
-             Install now? The app will restart automatically.",
-            new = update.version,
-            current = current,
-        ))
-        .title("Update available")
-        .kind(MessageDialogKind::Info)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Install".into(),
-            "Later".into(),
-        ))
-        .blocking_show();
-    if !install {
-        return;
-    }
-    if let Err(e) = update
-        .download_and_install(|_chunk, _total| {}, || {})
-        .await
-    {
-        eprintln!("updater: download/install failed: {e}");
-        // The user explicitly opted in to the install — staying silent on
-        // failure leaves them wondering whether anything happened. Surface
-        // the error in a dialog so they know they're still on the old
-        // version and can try again next launch.
-        handle
-            .dialog()
-            .message(format!(
-                "The update couldn't be installed.\n\n{e}\n\nYou can try again next launch."
-            ))
-            .title("Pi Dash update failed")
-            .kind(MessageDialogKind::Error)
-            .show(|_| {});
-        return;
-    }
-    handle.restart();
-}
-
 /// Wipe the webview's own session state — cookies first of all.
 ///
 /// Sign-out posts to the server and relies on its `Set-Cookie` deletions
@@ -414,6 +348,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .manage(AppConfig { target_url, bundle_root })
         .manage(managed_runner::DaemonState::default())
         .manage(chat::ChatState::default())
+        .manage(updates::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             open_in_browser,
             desktop_http::desktop_api_request,
@@ -443,6 +378,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             managed_runner::managed_stop_daemon,
             managed_runner::managed_sign_out,
             desktop_clear_web_data,
+            updates::desktop_pending_update,
+            updates::desktop_install_update,
             managed_runner::managed_doctor,
             // Direct local chat history: stored on this machine only, per
             // account, never relayed to or stored by the Pi Dash server.
@@ -617,14 +554,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
 
-            // Background updater check. Spawned (not awaited) so launch isn't
+            // Background updater checks. Spawned (not awaited) so launch isn't
             // blocked by network — if a new version is available the dialog
-            // appears moments after the window opens.
+            // appears moments after the window opens. The daily check only
+            // surfaces the sidebar update button (see `updates`).
             if updater_enabled {
-                let update_handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    check_for_updates(update_handle).await;
-                });
+                tauri::async_runtime::spawn(updates::prompt_at_launch(app.handle().clone()));
+                tauri::async_runtime::spawn(updates::run_daily_checks(app.handle().clone()));
             }
 
             // The agent uses the bundled CLI. Launching the desktop must not
