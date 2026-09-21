@@ -727,6 +727,10 @@ def _in_progress_state_for(issue: Issue):
 TRIGGER_TICK = AgentRunTrigger.TICK.value
 TRIGGER_COMMENT_AND_RUN = AgentRunTrigger.COMMENT_AND_RUN.value
 TRIGGER_RUN_AI = AgentRunTrigger.RUN_AI.value
+TRIGGER_BLOCKER_COMPLETED = AgentRunTrigger.BLOCKER_COMPLETED.value
+#: Triggers the clock starts on its own — resolved like a tick (system bot on
+#: a local runner, never an explicit actor).
+_MACHINE_TRIGGERS = frozenset({TRIGGER_TICK, TRIGGER_BLOCKER_COMPLETED})
 
 
 def _resolve_pod_for_issue(issue: Issue):
@@ -753,7 +757,7 @@ def _resolve_creator_for_trigger(issue: Issue, *, triggered_by: str, actor=None)
     if effective == AgentExecutorKind.LOCAL_RUNNER:
         if actor is not None:
             return actor
-        if triggered_by == TRIGGER_TICK:
+        if triggered_by in _MACHINE_TRIGGERS:
             from pi_dash.orchestration.workpad import get_agent_system_user
 
             return get_agent_system_user()
@@ -761,7 +765,7 @@ def _resolve_creator_for_trigger(issue: Issue, *, triggered_by: str, actor=None)
 
     from pi_dash.core.permissions import ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER, check_project_role
 
-    if actor is not None and triggered_by != TRIGGER_TICK:
+    if actor is not None and triggered_by not in _MACHINE_TRIGGERS:
         candidates = [actor]
     else:
         candidates = [issue.created_by, issue.project.project_lead, issue.project.default_assignee]
@@ -1347,6 +1351,7 @@ __all__ = [
     "RUN_AI_NO_POD",
     "RUN_OUTCOMES",
     "STOPPING_OUTCOMES",
+    "TRIGGER_BLOCKER_COMPLETED",
     "TRIGGER_COMMENT_AND_RUN",
     "TRIGGER_RUN_AI",
     "TRIGGER_TICK",
