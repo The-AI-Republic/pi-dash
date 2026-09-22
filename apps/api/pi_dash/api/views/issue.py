@@ -90,6 +90,7 @@ from .base import BaseAPIView
 from pi_dash.utils.host import base_host, issue_web_url
 from pi_dash.utils.constants import CLOSED_STATE_GROUPS, OPEN_STATE_GROUPS, STATE_GROUP_ORDER
 from pi_dash.utils.issue_relation_mapper import get_actual_relation
+from pi_dash.utils.issue_filters import IssueFilterError, work_item_list_filters
 from pi_dash.search.issue import extract_snippet, issue_search_queryset
 from pi_dash.utils.issue_move import move_work_item_to_project, IssueMoveError
 from pi_dash.bgtasks.webhook_task import model_activity
@@ -123,6 +124,12 @@ from pi_dash.utils.openapi import (
     WORKSPACE_SEARCH_PARAMETER,
     FIELDS_PARAMETER,
     EXPAND_PARAMETER,
+    WORK_ITEM_STATE_FILTER_PARAMETER,
+    WORK_ITEM_STATE_GROUP_FILTER_PARAMETER,
+    WORK_ITEM_PARENT_FILTER_PARAMETER,
+    WORK_ITEM_LABELS_FILTER_PARAMETER,
+    WORK_ITEM_PRIORITY_FILTER_PARAMETER,
+    WORK_ITEM_ASSIGNEES_FILTER_PARAMETER,
     create_paginated_response,
     # Request Examples
     ISSUE_CREATE_EXAMPLE,
@@ -294,7 +301,14 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
     @work_item_docs(
         operation_id="list_work_items",
         summary="List work items",
-        description="Retrieve a paginated list of all work items in a project. Supports filtering, ordering, and field selection through query parameters.",  # noqa: E501
+        description=(
+            "Retrieve a paginated list of all work items in a project. Supports filtering by state "
+            "(UUID or name), state_group, parent (UUID, identifier, or `null` for top-level), labels "
+            "(UUID or name), priority, and assignees; values within a filter are comma-separated and "
+            "OR together, different filters AND together. Use `fields` (e.g. "
+            "`fields=id,sequence_id,name,state,parent`) to return a smaller payload, and `order_by` "
+            "and the cursor as usual."
+        ),
         parameters=[
             CURSOR_PARAMETER,
             PER_PAGE_PARAMETER,
@@ -303,6 +317,12 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
             ORDER_BY_PARAMETER,
             FIELDS_PARAMETER,
             EXPAND_PARAMETER,
+            WORK_ITEM_STATE_FILTER_PARAMETER,
+            WORK_ITEM_STATE_GROUP_FILTER_PARAMETER,
+            WORK_ITEM_PARENT_FILTER_PARAMETER,
+            WORK_ITEM_LABELS_FILTER_PARAMETER,
+            WORK_ITEM_PRIORITY_FILTER_PARAMETER,
+            WORK_ITEM_ASSIGNEES_FILTER_PARAMETER,
         ],
         responses={
             200: create_paginated_response(
@@ -343,8 +363,14 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
 
         order_by_param = request.GET.get("order_by", "-created_at")
 
+        try:
+            filters = work_item_list_filters(request.query_params, project_id=project_id, workspace_slug=slug)
+        except IssueFilterError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
         issue_queryset = (
             self.get_queryset()
+            .filter(**filters)
             .annotate(
                 cycle_id=Subquery(
                     CycleIssue.objects.filter(issue=OuterRef("id"), deleted_at__isnull=True).values("cycle_id")[:1]
@@ -368,6 +394,8 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
         )
 
         total_issue_queryset = Issue.issue_objects.filter(project_id=project_id, workspace__slug=slug)
+        if filters:
+            total_issue_queryset = total_issue_queryset.filter(**filters).distinct()
 
         # Priority Ordering
         if order_by_param == "priority" or order_by_param == "-priority":
