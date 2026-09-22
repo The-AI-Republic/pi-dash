@@ -139,7 +139,7 @@ Windows에서는 MSI 설치 프로그램을 다운로드하여 실행하세요:
 ```bash
 # 1. 브라우저 기반 device-code 로그인 (`gh auth login` / `stripe login`과 유사).
 #    CLI 토큰을 ~/.config/pidash/config.toml에 저장합니다.
-pidash auth login --url https://your-pidash-instance.com
+pidash login --url https://your-pidash-instance.com
 
 # 2. 이 호스트를 runner로 등록합니다. 1단계의 토큰을 사용하므로
 #    enrollment-token을 붙여넣을 필요가 없습니다. 첫 runner에서는 OS
@@ -148,7 +148,7 @@ pidash auth login --url https://your-pidash-instance.com
 pidash runner add --project <project-id>
 ```
 
-`pidash auth login`은 아직 runner가 없을 때 인라인으로 runner 추가 여부를 묻기 때문에, 새 개발 노트북을 단일 명령으로 온보딩할 수 있습니다. 나중에 `pidash runner add --project <other-project-id>`로 runner를 추가하세요.
+`pidash login`(`pidash auth login`의 별칭)은 아직 runner가 없을 때 인라인으로 runner 추가 여부를 묻기 때문에, 새 개발 노트북을 단일 명령으로 온보딩할 수 있습니다. 나중에 `pidash runner add --project <other-project-id>`로 runner를 추가하세요.
 
 runner 데몬은 백그라운드에서 실행되며, 할당된 작업을 폴링하고, 이를 AI 에이전트에 디스패치한 뒤, 결과를 플랫폼에 다시 보고합니다.
 

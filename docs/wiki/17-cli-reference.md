@@ -24,11 +24,12 @@ First-run launcher. If no config exists, drops into `pidash auth login`. Otherwi
 
 ## Setup & auth
 
-### `pidash auth login`
+### `pidash login` / `pidash auth login`
 
-Browser-based device-code login. Same UX as `gh auth login` / `stripe login`.
+Browser-based device-code login. Same UX as `gh auth login` / `stripe login`. `pidash login` is a top-level alias of `pidash auth login`: same flags, same flow, same stored token.
 
 ```
+pidash login [--url <URL>] [--no-browser]
 pidash auth login [--url <URL>] [--no-browser]
 ```
 
