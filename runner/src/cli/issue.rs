@@ -7,6 +7,9 @@
 //! Thin wrappers around the `/api/v1/` REST surface. JSON on stdout, JSON on
 //! stderr for errors, exit codes per `api_client::EXIT_*`.
 
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
 use clap::{Args, Subcommand};
 use serde_json::{Map, Value};
 
@@ -24,7 +27,10 @@ pub struct IssueArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum IssueCommand {
-    /// Fetch a work item by `PROJ-123` identifier. Prints the full payload as JSON.
+    /// Fetch a work item by `PROJ-123` identifier. Prints the full payload as
+    /// JSON, including the blocker summary: `relations_summary` (`blocked_by`
+    /// / `blocking` lists of `{identifier, state, state_group}`) and
+    /// `has_open_blockers`.
     Get {
         /// Project-scoped identifier, e.g. `ENG-42`.
         identifier: String,
@@ -35,7 +41,9 @@ pub enum IssueCommand {
     Create(CreateArgs),
     /// List work items in a project. Returns the server's paginated envelope
     /// (`{count, next_cursor, prev_cursor, results: [...]}`) — pass `--cursor`
-    /// from a prior page to walk pages.
+    /// from a prior page to walk pages. Narrow the list with `--state`,
+    /// `--state-group`, `--parent`, `--label`, `--priority`; `--fields`
+    /// trims each item.
     List(ListArgs),
     /// Update fields on a work item. Pass only the fields you want to change.
     Patch(PatchArgs),
@@ -71,6 +79,124 @@ pub enum IssueCommand {
         /// Project-scoped identifier, e.g. `ENG-42`.
         identifier: String,
     },
+    /// Record relations from a work item to others, e.g.
+    /// `pidash issue relate ENG-7 --blocked-by ENG-3,ENG-4`. Pass exactly one
+    /// relation flag; each takes a comma-separated list of identifiers (or
+    /// UUIDs). Idempotent: pairs that already carry the relation come back
+    /// under `unchanged`; pairs that already carry a *different* relation come
+    /// back under `conflicts` and are left as is (`unrelate` first to change
+    /// one). Prints `{issue, relation_type, created, unchanged, conflicts,
+    /// relations}`.
+    Relate(RelateArgs),
+    /// Remove relations, e.g. `pidash issue unrelate ENG-7 --blocked-by ENG-3`.
+    /// Only that exact relation is removed; pairs without it come back under
+    /// `not_related` (not an error). Prints `{issue, relation_type, removed,
+    /// not_related, relations}`.
+    Unrelate(RelateArgs),
+    /// List a work item's relations grouped by type from its side
+    /// (`blocked_by`, `blocking`, `relates_to`, …), each item `{id, identifier,
+    /// name, state, state_group}`. Prints `{issue, relations}`.
+    Relations {
+        /// Project-scoped identifier, e.g. `ENG-42`.
+        identifier: String,
+    },
+}
+
+/// Relation flags for `relate` / `unrelate`. Each names the relation from the
+/// first issue's side: `relate A --blocked-by B` means "A is blocked by B" and
+/// is the same edge as `relate B --blocking A`.
+#[derive(Debug, Args)]
+#[command(group(
+    clap::ArgGroup::new("relation")
+        .required(true)
+        .multiple(false)
+        .args([
+            "blocked_by", "blocking", "relates_to", "duplicate",
+            "start_before", "start_after", "finish_before", "finish_after",
+            "implemented_by", "implements",
+        ]),
+))]
+pub struct RelateArgs {
+    /// Project-scoped identifier, e.g. `ENG-42`.
+    pub identifier: String,
+
+    /// Issues this one cannot finish before (it waits on them).
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub blocked_by: Vec<String>,
+
+    /// Issues waiting on this one.
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub blocking: Vec<String>,
+
+    /// Loosely related issues (symmetric).
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub relates_to: Vec<String>,
+
+    /// Duplicates of this issue (symmetric).
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub duplicate: Vec<String>,
+
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub start_before: Vec<String>,
+
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub start_after: Vec<String>,
+
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub finish_before: Vec<String>,
+
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub finish_after: Vec<String>,
+
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub implemented_by: Vec<String>,
+
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub implements: Vec<String>,
+}
+
+impl RelateArgs {
+    /// The one relation flag given, as `(relation_type, [issue refs])` with
+    /// blank entries (`--blocked-by A,,B`) dropped.
+    pub fn relation(&self) -> Result<(&'static str, Vec<String>), CliError> {
+        let flags: [(&'static str, &Vec<String>); 10] = [
+            ("blocked_by", &self.blocked_by),
+            ("blocking", &self.blocking),
+            ("relates_to", &self.relates_to),
+            ("duplicate", &self.duplicate),
+            ("start_before", &self.start_before),
+            ("start_after", &self.start_after),
+            ("finish_before", &self.finish_before),
+            ("finish_after", &self.finish_after),
+            ("implemented_by", &self.implemented_by),
+            ("implements", &self.implements),
+        ];
+        let (relation_type, raw) =
+            flags
+                .into_iter()
+                .find(|(_, v)| !v.is_empty())
+                .ok_or_else(|| {
+                    CliError::new(
+                        EXIT_INVALID,
+                        "pass one relation flag, e.g. --blocked-by ENG-3",
+                    )
+                })?;
+        let refs: Vec<String> = raw
+            .iter()
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty())
+            .collect();
+        if refs.is_empty() {
+            return Err(CliError::new(
+                EXIT_INVALID,
+                format!(
+                    "--{} needs at least one issue",
+                    relation_type.replace('_', "-")
+                ),
+            ));
+        }
+        Ok((relation_type, refs))
+    }
 }
 
 #[derive(Debug, Args)]
@@ -83,9 +209,8 @@ pub struct CreateArgs {
     #[arg(long)]
     pub title: String,
 
-    /// Description (plain text or markdown).
-    #[arg(long)]
-    pub description: Option<String>,
+    #[command(flatten)]
+    pub description: DescriptionArgs,
 
     /// Priority: `none|low|medium|high|urgent`.
     #[arg(long)]
@@ -101,7 +226,23 @@ pub struct CreateArgs {
     pub parent: Option<String>,
 }
 
+/// The description source shared by `create` and `patch`: inline or from a
+/// file (`-` = stdin). Both are markdown; the server converts it to the
+/// editor's rich text, so headings, lists, task lists, code and tables keep
+/// their structure.
 #[derive(Debug, Args)]
+pub struct DescriptionArgs {
+    /// Description as markdown. `--description ""` clears it.
+    #[arg(long, conflicts_with = "description_file")]
+    pub description: Option<String>,
+
+    /// Read the markdown description from a file; `-` reads it from stdin.
+    /// Prefer this for long or multi-line bodies. An empty file is an error.
+    #[arg(long = "description-file", value_name = "PATH")]
+    pub description_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Args)]
 pub struct ListArgs {
     /// Project identifier (slug like `ENG`) or project UUID.
     #[arg(long)]
@@ -118,6 +259,37 @@ pub struct ListArgs {
     /// Order-by field, e.g. `-created_at` (default), `priority`, `state__name`.
     #[arg(long)]
     pub order_by: Option<String>,
+
+    /// Only items in these states — comma-separated state names
+    /// (case-insensitive) and/or UUIDs. The server rejects an unknown name
+    /// and lists the valid ones.
+    #[arg(long)]
+    pub state: Option<String>,
+
+    /// Only items in these state groups — comma-separated from `backlog`,
+    /// `unstarted`, `started`, `review`, `test`, `completed`, `cancelled`.
+    #[arg(long)]
+    pub state_group: Option<String>,
+
+    /// Only sub-issues of this parent — `PROJ-123` identifier or UUID — or
+    /// `none` for top-level items only.
+    #[arg(long)]
+    pub parent: Option<String>,
+
+    /// Only items carrying any of these labels — comma-separated names
+    /// (case-insensitive) and/or UUIDs.
+    #[arg(long)]
+    pub label: Option<String>,
+
+    /// Only items with these priorities — comma-separated from
+    /// `urgent`, `high`, `medium`, `low`, `none`.
+    #[arg(long)]
+    pub priority: Option<String>,
+
+    /// Return only these fields per item, comma-separated, e.g.
+    /// `id,sequence_id,name,state,parent`.
+    #[arg(long)]
+    pub fields: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -133,9 +305,8 @@ pub struct PatchArgs {
     #[arg(long)]
     pub title: Option<String>,
 
-    /// New description (plain text or markdown).
-    #[arg(long)]
-    pub description: Option<String>,
+    #[command(flatten)]
+    pub description: DescriptionArgs,
 
     /// Priority: `none|low|medium|high|urgent`.
     #[arg(long)]
@@ -225,6 +396,9 @@ pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
         IssueCommand::AttachPr(a) => cmd_attach_review(&client, a).await,
         IssueCommand::ReTick { identifier } => cmd_re_tick(&client, &identifier).await,
         IssueCommand::RunAi { identifier } => cmd_run_ai(&client, &identifier).await,
+        IssueCommand::Relate(a) => cmd_relate(&client, a, RelationOp::Relate).await,
+        IssueCommand::Unrelate(a) => cmd_relate(&client, a, RelationOp::Unrelate).await,
+        IssueCommand::Relations { identifier } => cmd_relations(&client, &identifier).await,
     };
     match result {
         Ok(()) => 0,
@@ -233,12 +407,21 @@ pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
 }
 
 async fn cmd_get(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
-    let issue = resolve_issue(client, identifier).await?;
+    let issue = get_issue(client, identifier).await?;
     println!(
         "{}",
-        serde_json::to_string(&issue.raw).expect("serialize JSON value")
+        serde_json::to_string(&issue).expect("serialize JSON value")
     );
     Ok(())
+}
+
+/// The JSON document `pidash issue get` prints. The server payload is passed
+/// through verbatim, so its blocker summary (`relations_summary`,
+/// `has_open_blockers`) reaches the agent exactly as the API and the run
+/// prompt describe it. Nothing is synthesized: an older server that doesn't
+/// send the block yields a payload without it.
+pub async fn get_issue(client: &ApiClient, identifier: &str) -> Result<Value, CliError> {
+    Ok(resolve_issue(client, identifier).await?.raw)
 }
 
 async fn cmd_create(
@@ -250,6 +433,9 @@ async fn cmd_create(
         return Err(CliError::new(EXIT_INVALID, "--title must not be empty"));
     }
 
+    // Read the body before any network call so a bad path or empty stdin
+    // fails fast without resolving the project.
+    let description = load_description(&args.description, std::io::stdin())?;
     let project_ref = resolve_create_project(client, paths, args.project.as_deref()).await?;
 
     // Resolve the network-dependent fields first, then hand the already-resolved
@@ -266,7 +452,7 @@ async fn cmd_create(
 
     let body = build_create_body(
         args.title,
-        args.description.as_deref(),
+        description.as_deref(),
         args.priority,
         state_uuid,
         parent_uuid,
@@ -285,7 +471,7 @@ async fn cmd_create(
 }
 
 /// Assemble the `work-items` POST body from already-resolved values. Kept pure
-/// (no network) so the field contract — including the rich-text `description_html`
+/// (no network) so the field contract — including the `description_markdown`
 /// key and the `parent` FK the MCP path also sends — is unit-testable.
 fn build_create_body(
     title: String,
@@ -297,15 +483,12 @@ fn build_create_body(
     let mut body: Map<String, Value> = Map::new();
     body.insert("name".into(), Value::String(title));
     if let Some(desc) = description {
-        // Issue descriptions are stored as rich text: the API's serializer is a
-        // ModelSerializer over the `Issue` model, whose only description column
-        // is `description_html` (it has no plain `description` field). Sending a
-        // bare `description` key was silently dropped, so CLI-created issues had
-        // an empty body. Convert the plain-text/markdown input to minimal HTML
-        // and send it under the key the server actually persists.
+        // Send the raw markdown; the server converts it with the same
+        // markdown -> Tiptap HTML converter pages use and stores the result in
+        // `description_html`, so there is one converter for CLI and MCP.
         body.insert(
-            "description_html".into(),
-            Value::String(description_to_html(desc)),
+            "description_markdown".into(),
+            Value::String(desc.to_string()),
         );
     }
     if let Some(prio) = priority {
@@ -367,11 +550,44 @@ async fn resolve_create_project(
 }
 
 async fn cmd_list(client: &ApiClient, args: ListArgs) -> Result<(), CliError> {
+    let resp = list_issues(client, &args).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
+/// Fetch one page of `pidash issue list`. Resolves `--parent PROJ-123` to a
+/// UUID client-side (like `create --parent`); every other filter is passed
+/// through and validated by the server.
+pub async fn list_issues(client: &ApiClient, args: &ListArgs) -> Result<Value, CliError> {
     if args.project.trim().is_empty() {
         return Err(CliError::new(EXIT_INVALID, "--project must not be empty"));
     }
-    let project_ref = args.project.as_str();
+    let parent = match args.parent.as_deref() {
+        Some(p) if is_null_parent(p) => Some("null".to_string()),
+        Some(p) => Some(resolve_parent_id(client, p).await?),
+        None => None,
+    };
+    let query = build_list_query(args, parent)?;
+    let path = format!(
+        "workspaces/{}/projects/{}/work-items/{query}",
+        client.env.workspace_slug,
+        args.project.trim()
+    );
+    client.get(&path).await
+}
 
+fn is_null_parent(parent: &str) -> bool {
+    let p = parent.trim();
+    p.eq_ignore_ascii_case("none") || p.eq_ignore_ascii_case("null")
+}
+
+/// Assemble the list query string from the args and the already-resolved
+/// parent (`"null"` or a UUID). Pure so the flag → query-param contract is
+/// unit-testable.
+fn build_list_query(args: &ListArgs, parent: Option<String>) -> Result<String, CliError> {
     let mut params: Vec<(&str, String)> = Vec::new();
     if let Some(c) = args.cursor.as_ref() {
         params.push(("cursor", c.clone()));
@@ -382,23 +598,37 @@ async fn cmd_list(client: &ApiClient, args: ListArgs) -> Result<(), CliError> {
     if let Some(o) = args.order_by.as_ref() {
         params.push(("order_by", o.clone()));
     }
-    let query = build_query_string(&params);
-
-    let path = format!(
-        "workspaces/{}/projects/{}/work-items/{query}",
-        client.env.workspace_slug, project_ref
-    );
-    let resp = client.get(&path).await?;
-    println!(
-        "{}",
-        serde_json::to_string(&resp).expect("serialize JSON value")
-    );
-    Ok(())
+    let filters = [
+        ("state", "--state", &args.state),
+        ("state_group", "--state-group", &args.state_group),
+        ("labels", "--label", &args.label),
+        ("priority", "--priority", &args.priority),
+        ("fields", "--fields", &args.fields),
+    ];
+    for (key, flag, value) in filters {
+        if let Some(v) = value {
+            let v = v.trim();
+            if v.is_empty() {
+                return Err(CliError::new(
+                    EXIT_INVALID,
+                    format!("{flag} must not be empty"),
+                ));
+            }
+            params.push((key, v.to_string()));
+        }
+    }
+    if let Some(p) = parent {
+        params.push(("parent", p));
+    }
+    Ok(build_query_string(&params))
 }
 
 /// Build a query-string suffix (`?k=v&...`) with percent-encoded values.
 /// Returns an empty string when there are no params.
-fn build_query_string(params: &[(&str, String)]) -> String {
+///
+/// `pub(super)` so sibling subcommands (`page`) build their list query the
+/// same way rather than re-implementing the encoding.
+pub(super) fn build_query_string(params: &[(&str, String)]) -> String {
     if params.is_empty() {
         return String::new();
     }
@@ -424,44 +654,45 @@ fn percent_encode_value(v: &str) -> String {
     out
 }
 
-/// Convert the CLI's plain-text/markdown `--description` into the minimal HTML
-/// the web API stores in `description_html`.
-///
-/// Mirrors the server-side renderer
-/// (`apps/api/pi_dash/assistant/runtime/markdown.py::markdown_to_html`) so a
-/// description filed via the CLI reads identically to one filed by the in-app AI
-/// assistant: a blank line starts a new paragraph, a single newline becomes a
-/// `<br/>`, and empty input yields the model's default empty body. The server
-/// re-sanitizes the result via `validate_html_content`, so this only needs to be
-/// correct, not defensive.
-fn description_to_html(body: &str) -> String {
-    let paragraphs: Vec<String> = body
-        .split("\n\n")
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(|p| format!("<p>{}</p>", html_escape(p).replace('\n', "<br/>")))
-        .collect();
-    if paragraphs.is_empty() {
-        return "<p></p>".to_string();
-    }
-    paragraphs.join("")
-}
-
-/// Escape the five HTML-significant characters, matching Python's
-/// `html.escape(s, quote=True)` used by the server renderer.
-fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#x27;"),
-            _ => out.push(c),
+/// Resolve the description source. `--description-file -` reads `stdin`;
+/// `None` when neither flag was given. An inline `--description ""` is passed
+/// through (it clears the body), but an empty file or empty stdin is an error:
+/// it almost always means a failed pipe or a wrong path, not an intent to
+/// clear the description.
+fn load_description(
+    args: &DescriptionArgs,
+    mut stdin: impl Read,
+) -> Result<Option<String>, CliError> {
+    let (body, source) = match (&args.description, &args.description_file) {
+        (Some(body), _) => return Ok(Some(body.clone())),
+        (None, None) => return Ok(None),
+        (None, Some(path)) if path == Path::new("-") => {
+            let mut buf = String::new();
+            stdin.read_to_string(&mut buf).map_err(|e| {
+                CliError::new(
+                    EXIT_UNKNOWN,
+                    format!("failed reading description from stdin: {e}"),
+                )
+            })?;
+            (buf, "stdin".to_string())
         }
+        (None, Some(path)) => {
+            let body = std::fs::read_to_string(path).map_err(|e| {
+                CliError::new(
+                    EXIT_INVALID,
+                    format!("failed reading description file {}: {e}", path.display()),
+                )
+            })?;
+            (body, path.display().to_string())
+        }
+    };
+    if body.trim().is_empty() {
+        return Err(CliError::new(
+            EXIT_INVALID,
+            format!("--description-file {source} is empty"),
+        ));
     }
-    out
+    Ok(Some(body))
 }
 
 /// The `parent`-field mutation requested by a `pidash issue patch`.
@@ -478,6 +709,7 @@ enum ParentPatch {
 }
 
 async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> {
+    let description = load_description(&args.description, std::io::stdin())?;
     // Resolve issue first — we always need project_id for the mutating PATCH URL.
     let issue = resolve_issue(client, &args.identifier).await?;
 
@@ -497,7 +729,7 @@ async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> 
 
     let body = build_patch_body(
         args.title.as_deref(),
-        args.description.as_deref(),
+        description.as_deref(),
         args.priority.as_deref(),
         state_uuid,
         parent,
@@ -532,15 +764,11 @@ fn build_patch_body(
         body.insert("name".into(), Value::String(title.to_string()));
     }
     if let Some(desc) = description {
-        // Same rich-text contract as `build_create_body`: the server stores the
-        // body in `description_html`, and the PATCH view keys the
-        // description-version bookkeeping off `request.data.get("description_html")`.
-        // Convert the plain-text/markdown input and send it under that key; the
-        // model re-derives `description_stripped` and the serializer re-sanitizes
-        // the HTML on save.
+        // Same contract as `build_create_body`: the server converts the
+        // markdown and stores it in `description_html`.
         body.insert(
-            "description_html".into(),
-            Value::String(description_to_html(desc)),
+            "description_markdown".into(),
+            Value::String(desc.to_string()),
         );
     }
     if let Some(prio) = priority {
@@ -562,7 +790,7 @@ fn build_patch_body(
     if body.is_empty() {
         return Err(CliError::new(
             EXIT_INVALID,
-            "at least one of --state/--title/--description/--priority/--parent/--clear-parent is required",
+            "at least one of --state/--title/--description/--description-file/--priority/--parent/--clear-parent is required",
         ));
     }
 
@@ -702,6 +930,66 @@ async fn cmd_run_ai(client: &ApiClient, identifier: &str) -> Result<(), CliError
     Ok(())
 }
 
+/// Which relation write `relate_issue` performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationOp {
+    Relate,
+    Unrelate,
+}
+
+async fn cmd_relate(client: &ApiClient, args: RelateArgs, op: RelationOp) -> Result<(), CliError> {
+    let (relation_type, refs) = args.relation()?;
+    let resp = relate_issue(client, &args.identifier, relation_type, &refs, op).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
+/// `POST .../work-items/<id>/relations/{relate,unrelate}/`. The related issues
+/// go to the server as given (identifiers or UUIDs): it resolves them within
+/// what the caller can see and refuses the whole request (404, `unresolved`)
+/// if any is missing, so nothing is half-written.
+pub async fn relate_issue(
+    client: &ApiClient,
+    identifier: &str,
+    relation_type: &str,
+    related: &[String],
+    op: RelationOp,
+) -> Result<Value, CliError> {
+    let issue = resolve_issue(client, identifier).await?;
+    let action = match op {
+        RelationOp::Relate => "relate",
+        RelationOp::Unrelate => "unrelate",
+    };
+    let path = format!(
+        "workspaces/{}/projects/{}/work-items/{}/relations/{action}/",
+        client.env.workspace_slug, issue.project_id, issue.id
+    );
+    let body = serde_json::json!({ "relation_type": relation_type, "issues": related });
+    client.post(&path, &body).await
+}
+
+async fn cmd_relations(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
+    let resp = issue_relations(client, identifier).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
+/// `GET .../work-items/<id>/relations/grouped/` — `{issue, relations}`.
+pub async fn issue_relations(client: &ApiClient, identifier: &str) -> Result<Value, CliError> {
+    let issue = resolve_issue(client, identifier).await?;
+    let path = format!(
+        "workspaces/{}/projects/{}/work-items/{}/relations/grouped/",
+        client.env.workspace_slug, issue.project_id, issue.id
+    );
+    client.get(&path).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,47 +1017,162 @@ mod tests {
         assert_eq!(build_query_string(&[]), "");
     }
 
-    #[test]
-    fn description_to_html_empty_yields_empty_paragraph() {
-        // Matches the model's default empty body so `--description ""` clears it.
-        assert_eq!(description_to_html(""), "<p></p>");
-        assert_eq!(description_to_html("   \n  "), "<p></p>");
+    // --- description source ----------------------------------------------
+
+    const NO_STDIN: &[u8] = b"";
+
+    fn desc_file(path: impl Into<PathBuf>) -> DescriptionArgs {
+        DescriptionArgs {
+            description: None,
+            description_file: Some(path.into()),
+        }
     }
 
     #[test]
-    fn description_to_html_single_paragraph() {
-        assert_eq!(description_to_html("hello world"), "<p>hello world</p>");
+    fn load_description_none_when_no_flag() {
+        let args = DescriptionArgs {
+            description: None,
+            description_file: None,
+        };
+        assert_eq!(load_description(&args, NO_STDIN).expect("ok"), None);
     }
 
     #[test]
-    fn description_to_html_blank_line_splits_paragraphs() {
+    fn load_description_inline_passes_through_even_when_empty() {
+        // `--description ""` is the documented way to clear a body.
+        let args = DescriptionArgs {
+            description: Some(String::new()),
+            description_file: None,
+        };
         assert_eq!(
-            description_to_html("first para\n\nsecond para"),
-            "<p>first para</p><p>second para</p>"
+            load_description(&args, NO_STDIN).expect("ok").as_deref(),
+            Some("")
         );
     }
 
     #[test]
-    fn description_to_html_single_newline_becomes_br() {
+    fn load_description_reads_the_named_file_verbatim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("body.md");
+        let md = "# Heading\n\n- [ ] one\n  - nested\n";
+        std::fs::write(&path, md).expect("write");
         assert_eq!(
-            description_to_html("line one\nline two"),
-            "<p>line one<br/>line two</p>"
+            load_description(&desc_file(path), NO_STDIN)
+                .expect("body")
+                .as_deref(),
+            Some(md)
         );
     }
 
     #[test]
-    fn description_to_html_escapes_html_significant_chars() {
-        // Without escaping, `<`/`&` would corrupt the stored HTML (or be stripped
-        // by the server sanitizer), which is exactly how descriptions went missing.
-        assert_eq!(
-            description_to_html("a < b && c > d \"q\" 'x'"),
-            "<p>a &lt; b &amp;&amp; c &gt; d &quot;q&quot; &#x27;x&#x27;</p>"
-        );
+    fn load_description_dash_reads_stdin() {
+        let body = load_description(&desc_file("-"), &b"## From stdin\n"[..]).expect("body");
+        assert_eq!(body.as_deref(), Some("## From stdin\n"));
     }
 
     #[test]
-    fn description_to_html_collapses_extra_blank_lines_and_trims() {
-        assert_eq!(description_to_html("  a  \n\n\n  b  "), "<p>a</p><p>b</p>");
+    fn load_description_empty_file_is_invalid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("empty.md");
+        std::fs::write(&path, "  \n\n").expect("write");
+        let err = load_description(&desc_file(path), NO_STDIN).expect_err("empty file");
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert!(err.message.contains("is empty"), "{}", err.message);
+    }
+
+    #[test]
+    fn load_description_empty_stdin_is_invalid() {
+        let err = load_description(&desc_file("-"), NO_STDIN).expect_err("empty stdin");
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert!(err.message.contains("stdin is empty"), "{}", err.message);
+    }
+
+    #[test]
+    fn load_description_missing_file_is_invalid() {
+        let err = load_description(&desc_file("/nonexistent/pidash/body.md"), NO_STDIN)
+            .expect_err("missing file");
+        assert_eq!(err.exit_code, EXIT_INVALID);
+    }
+
+    #[test]
+    fn build_create_body_sends_description_markdown_verbatim() {
+        let md = "# Title\n\n- [x] done";
+        let body = build_create_body("T".to_string(), Some(md), None, None, None);
+        assert_eq!(
+            body.get("description_markdown").and_then(Value::as_str),
+            Some(md)
+        );
+        // The server owns conversion; the CLI must not also send HTML.
+        assert!(!body.contains_key("description_html"));
+    }
+
+    #[test]
+    fn build_patch_body_sends_description_markdown_and_satisfies_guard() {
+        let body = build_patch_body(
+            None,
+            Some("| a |\n|---|\n| 1 |"),
+            None,
+            None,
+            ParentPatch::Unchanged,
+        )
+        .expect("description alone is a valid mutation");
+        assert_eq!(
+            body.get("description_markdown").and_then(Value::as_str),
+            Some("| a |\n|---|\n| 1 |")
+        );
+        assert!(!body.contains_key("description_html"));
+    }
+
+    #[derive(Debug, clap::Parser)]
+    struct CreateArgsHarness {
+        #[command(flatten)]
+        args: CreateArgs,
+    }
+
+    #[test]
+    fn create_description_and_description_file_conflict() {
+        let err = CreateArgsHarness::try_parse_from([
+            "create",
+            "--title",
+            "T",
+            "--description",
+            "x",
+            "--description-file",
+            "-",
+        ])
+        .expect_err("--description and --description-file are mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn create_description_file_parses() {
+        let parsed = CreateArgsHarness::try_parse_from([
+            "create",
+            "--title",
+            "T",
+            "--description-file",
+            "-",
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed.args.description.description_file.as_deref(),
+            Some(Path::new("-"))
+        );
+        assert!(parsed.args.description.description.is_none());
+    }
+
+    #[test]
+    fn patch_description_and_description_file_conflict() {
+        let err = PatchArgsHarness::try_parse_from([
+            "patch",
+            "PROJ-1",
+            "--description-file",
+            "body.md",
+            "--description",
+            "x",
+        ])
+        .expect_err("--description and --description-file are mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
@@ -782,6 +1185,53 @@ mod tests {
             build_query_string(&params),
             "?cursor=abc%3Ddef%26ghi&per_page=50"
         );
+    }
+
+    #[test]
+    fn build_list_query_without_filters_is_unchanged() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            per_page: Some(10),
+            ..Default::default()
+        };
+        assert_eq!(build_list_query(&args, None).unwrap(), "?per_page=10");
+    }
+
+    #[test]
+    fn build_list_query_maps_every_filter_flag() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state: Some("Backlog,In Review".into()),
+            state_group: Some("backlog,started".into()),
+            label: Some("bug".into()),
+            priority: Some("high,urgent".into()),
+            fields: Some("id,name".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_list_query(&args, Some("null".into())).unwrap(),
+            "?state=Backlog%2CIn%20Review&state_group=backlog%2Cstarted&labels=bug\
+             &priority=high%2Curgent&fields=id%2Cname&parent=null"
+        );
+    }
+
+    #[test]
+    fn build_list_query_rejects_blank_filter_values() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("  ".into()),
+            ..Default::default()
+        };
+        let err = build_list_query(&args, None).unwrap_err();
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert!(err.message.contains("--state-group"));
+    }
+
+    #[test]
+    fn null_parent_accepts_none_and_null() {
+        assert!(is_null_parent("none"));
+        assert!(is_null_parent(" NULL "));
+        assert!(!is_null_parent("ENG-1"));
     }
 
     fn search_args(query: &str) -> SearchArgs {
@@ -1019,5 +1469,61 @@ mod tests {
             run_ai_path("eng", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"),
             "workspaces/eng/projects/11111111-1111-1111-1111-111111111111/work-items/22222222-2222-2222-2222-222222222222/run-ai/"
         );
+    }
+
+    fn relate_args(argv: &[&str]) -> Result<RelateArgs, clap::Error> {
+        let mut full = vec!["pidash", "relate"];
+        full.extend_from_slice(argv);
+        TestCli::try_parse_from(full).map(|parsed| match parsed.issue.command {
+            IssueCommand::Relate(a) => a,
+            other => panic!("expected relate, got {other:?}"),
+        })
+    }
+
+    #[test]
+    fn relate_splits_comma_separated_targets() {
+        let args = relate_args(&["ENG-7", "--blocked-by", "ENG-3,ENG-4"]).expect("parse relate");
+        assert_eq!(args.identifier, "ENG-7");
+        let (relation_type, refs) = args.relation().unwrap();
+        assert_eq!(relation_type, "blocked_by");
+        assert_eq!(refs, vec!["ENG-3".to_string(), "ENG-4".to_string()]);
+    }
+
+    #[test]
+    fn relate_drops_blank_entries() {
+        let args = relate_args(&["ENG-7", "--relates-to", " ENG-3 ,,ENG-4"]).unwrap();
+        let (relation_type, refs) = args.relation().unwrap();
+        assert_eq!(relation_type, "relates_to");
+        assert_eq!(refs, vec!["ENG-3".to_string(), "ENG-4".to_string()]);
+
+        let args = relate_args(&["ENG-7", "--blocking", ","]).unwrap();
+        let err = args.relation().expect_err("no targets left");
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert!(err.message.contains("--blocking"));
+    }
+
+    #[test]
+    fn relate_takes_exactly_one_relation_flag() {
+        let err = relate_args(&["ENG-7"]).expect_err("a relation flag is required");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        let err = relate_args(&["ENG-7", "--blocked-by", "ENG-3", "--blocking", "ENG-4"])
+            .expect_err("relation flags are exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn unrelate_and_relations_parse() {
+        let parsed =
+            TestCli::try_parse_from(["pidash", "unrelate", "ENG-7", "--blocked-by", "ENG-3"])
+                .unwrap();
+        match parsed.issue.command {
+            IssueCommand::Unrelate(a) => assert_eq!(a.relation().unwrap().0, "blocked_by"),
+            other => panic!("expected unrelate, got {other:?}"),
+        }
+        let parsed = TestCli::try_parse_from(["pidash", "relations", "ENG-7"]).unwrap();
+        match parsed.issue.command {
+            IssueCommand::Relations { identifier } => assert_eq!(identifier, "ENG-7"),
+            other => panic!("expected relations, got {other:?}"),
+        }
     }
 }

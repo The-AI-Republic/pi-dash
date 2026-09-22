@@ -71,7 +71,8 @@
 > - The ticker becomes **one clock per issue** that reads the current stage
 >   as a parameter, never torn down and rebuilt on a stage change.
 > - One budget **pool of 10 runs per issue**, any stage; replaces the three
->   per-stage caps (24 / 4 / 3). Re-tick grants +3. Entry runs count.
+>   per-stage caps (24 / 4 / 3). Re-tick grants a fresh pool (+10 by
+>   default). Entry runs count.
 > - Only machine-started runs (timer ticks, agent-made moves) spend budget.
 >   Human-started runs (a human moving the issue, Comment & Run, Run AI) are
 >   free and always fire — one run each. Agent-made moves when the pool is
@@ -194,7 +195,7 @@ implements — §10):
 | Timer due                              | `fire_tick`: read the _current_ stage at claim → prompt kind; `used += 1`; render fresh.                                                                                                                                                                                                |
 | Run ends with an outcome (§7)          | If the issue is still in the stage the run was rendered for: `progressed` / `waiting_on_external` → next tick; `done` (stay) / `waiting_on_human` / `blocked` → clock stops. If the issue has already moved on: ignore — the clock is already set for the new room.                     |
 | Pool spent (`used == cap`)             | Clock stops, `cap_hit`. In Progress additionally → Paused at run end (as today). Re-tick appears.                                                                                                                                                                                       |
-| Re-tick                                | `granted += 3`; fire now (§4.5 if a run is active).                                                                                                                                                                                                                                     |
+| Re-tick                                | `granted += agent_default_max_ticks` (a fresh pool); fire now (§4.5 if a run is active).                                                                                                                                                                                                |
 | Run AI / Comment & Run                 | One free run now; the clock re-times only if `used < cap`.                                                                                                                                                                                                                              |
 | Issue leaves the bucket                | Dormant. Keep `used` / `granted`.                                                                                                                                                                                                                                                       |
 
@@ -334,11 +335,11 @@ pending entry simply now belongs to the newer stage — it is the same clock.
 
 ### 5.1 One pool
 
-|                | Value                                  | Notes                                                                |
-| -------------- | -------------------------------------- | -------------------------------------------------------------------- |
-| Pool per issue | **10** machine-started runs, any stage | `Project.agent_default_max_ticks`; replaces the three per-stage caps |
-| Re-tick grant  | **+3**                                 | `Project.agent_retick_grant`, new                                    |
-| Intervals      | **3 h / 3 h / 3 h** per stage          | unified (PDASHOSS01-167); cadence is rhythm, not budget              |
+|                | Value                                        | Notes                                                                |
+| -------------- | -------------------------------------------- | -------------------------------------------------------------------- |
+| Pool per issue | **10** machine-started runs, any stage       | `Project.agent_default_max_ticks`; replaces the three per-stage caps |
+| Re-tick grant  | **+ one pool** (`= agent_default_max_ticks`) | derived from the pool; no separate knob (PDASHOSS01-170)             |
+| Intervals      | **3 h / 3 h / 3 h** per stage                | unified (PDASHOSS01-167); cadence is rhythm, not budget              |
 
 **Unified 3 h cadence (PDASHOSS01-167).** Every ticking stage — In Progress,
 In Review, In Test — now fires on the same 3 h (10800 s) rhythm. The three
@@ -351,6 +352,10 @@ their default values are unified at 10800, and migration
 The earlier 12 h / 8 h / 12 h split gave no benefit worth the surprise of
 three different clocks — a per-issue override is still available for the rare
 case that wants a slower loop.
+
+Budget and cadence are independent: the budget is **one pool per issue**,
+shared by every stage, and a Re-tick refills it by a full pool
+(PDASHOSS01-170); cadence is **per stage**, currently the same 3 h everywhere.
 
 The per-stage split (4 / 3 / 3) considered earlier is **dropped**. It was a
 consequence of three separate clocks; with one clock it is a leftover, and
@@ -370,7 +375,8 @@ design, not part of this one.
   run, always — even when the pool is spent — and does not touch `used`. A
   human cannot loop, so there is nothing to guard against.
 - **There is no refill.** To give the _clock_ back, a human presses Re-tick
-  (§5.5), which adds `granted += 3`. Cap = project default + `granted`.
+  (§5.5), which adds a fresh pool: `granted += agent_default_max_ticks`. Cap
+  = project default + `granted`.
 - **At cap**, the clock stops with `cap_hit`. In Progress additionally →
   Paused at run end (as today); In Review / In Test stay put. Re-tick
   appears.
@@ -409,13 +415,13 @@ The clock stays stopped with `cap_hit`. Nothing fires.
 Principle: **human-started runs are free and always fire; only Re-tick adds
 budget.**
 
-| Human lever                      | Today                                                                                                                                             | New                                                                                                                                                               |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Re-tick** (`re_tick_ticker`)   | only when the current state is spent; adds one phase budget to that state's cap, keeps the cumulative count, re-arms; next run after the interval | only when the pool is spent; `granted += 3`, cumulative display ("10 of 13"); **fires a run now** (via §4.5 if a run is active). The only lever that adds budget. |
-| **Comment & Run**                | zeroes `tick_count`, fires now                                                                                                                    | fires now, **free** (no count, no reset). Re-arms the clock only if the pool has budget.                                                                          |
-| **Human moves the issue**        | enters state, counter → 0, entry run fires                                                                                                        | entry run fires, **free**, even when the pool is spent. `used` untouched. Clock re-armed only if budget remains. Distinguished from an agent move by §5.6.        |
-| **Run AI**                       | fires one run, ticker untouched                                                                                                                   | unchanged — free                                                                                                                                                  |
-| **Disable ticking on the issue** | on/off                                                                                                                                            | unchanged. Per-issue cap overrides are gone (§9); Re-tick is the only per-issue budget lever.                                                                     |
+| Human lever                      | Today                                                                                                                                             | New                                                                                                                                                                                                    |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Re-tick** (`re_tick_ticker`)   | only when the current state is spent; adds one phase budget to that state's cap, keeps the cumulative count, re-arms; next run after the interval | only when the pool is spent; `granted += agent_default_max_ticks` (a fresh pool), cumulative display ("10 of 20"); **fires a run now** (via §4.5 if a run is active). The only lever that adds budget. |
+| **Comment & Run**                | zeroes `tick_count`, fires now                                                                                                                    | fires now, **free** (no count, no reset). Re-arms the clock only if the pool has budget.                                                                                                               |
+| **Human moves the issue**        | enters state, counter → 0, entry run fires                                                                                                        | entry run fires, **free**, even when the pool is spent. `used` untouched. Clock re-armed only if budget remains. Distinguished from an agent move by §5.6.                                             |
+| **Run AI**                       | fires one run, ticker untouched                                                                                                                   | unchanged — free                                                                                                                                                                                       |
+| **Disable ticking on the issue** | on/off                                                                                                                                            | unchanged. Per-issue cap overrides are gone (§9); Re-tick is the only per-issue budget lever.                                                                                                          |
 
 Worked example — the pool is 10 of 10 and a review run sends the issue
 back with two defects:
@@ -426,9 +432,9 @@ back with two defects:
   issue to In Review; the clock is still stopped (pool spent), so the
   review waits for a human or another free run. `used` still reads 10 of
   10 — nothing was refilled, nothing needed to be.
-- Or the human presses **Re-tick** → 10 of 13, clock re-armed, run fires
-  now, and the next three machine runs can carry the issue through review
-  and test on their own.
+- Or the human presses **Re-tick** → 10 of 20, clock re-armed, run fires
+  now, and the next ten machine runs can carry the issue through review
+  and test on their own. A second press would take it to 20 of 30.
 
 ### 5.6 Telling agent moves from human moves
 
@@ -635,7 +641,7 @@ the implementation-only text around them.
 ```
 next_run_at, pending_entry, pending_entry_free, disarm_reason, user_disabled
 used       IntegerField(default=0)   machine-started runs, any stage
-granted    IntegerField(default=0)   added by Re-tick
+granted    IntegerField(default=0)   added by Re-tick (one pool per press)
 resume_parent_run                    kept; captured on every cross-stage move
 ```
 
@@ -651,8 +657,9 @@ enabled and used < cap and disarm_reason not in {terminal_signal}` — the
 
 `Project`:
 
-- `agent_default_max_ticks` 24 → **10** (now the pool).
-- `agent_retick_grant` new, default **3**.
+- `agent_default_max_ticks` 24 → **10** (now the pool). It is also the
+  Re-tick grant size — a press adds one whole pool — so there is no separate
+  grant field.
 - `agent_review_default_max_ticks`, `agent_test_default_max_ticks` —
   dropped. The three `*_interval_seconds` stay.
 
@@ -685,9 +692,9 @@ events:
   tick_due                              # from fire_tick, after the claim
 ```
 
-`reconcile` reads: current stage, `used`, `granted`, project pool + grant +
-interval for the stage, `user_disabled`, project ticking enabled, whether a
-run is active. It writes: `next_run_at`, `pending_entry`,
+`reconcile` reads: current stage, `used`, `granted`, project pool (also the
+Re-tick grant size) + interval for the stage, `user_disabled`, project
+ticking enabled, whether a run is active. It writes: `next_run_at`, `pending_entry`,
 `pending_entry_free`, `disarm_reason`, `granted`, `resume_parent_run`. It
 never writes `used` — only `fire_tick`'s claim does. The event table in §4.0
 is its specification; the guard in §7 is one branch of `run_ended`.

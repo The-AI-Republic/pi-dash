@@ -10,7 +10,9 @@ pub mod context;
 pub mod doctor;
 mod install;
 pub mod managed;
-mod issue;
+pub mod issue;
+// `pub` so the CLI contract tests can drive the page subcommands directly.
+pub mod page;
 mod project;
 mod remove;
 pub mod resolve;
@@ -61,6 +63,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Log this host in to Pi Dash (same as `pidash auth login`; see
+    /// `pidash auth` for status and logout).
+    Login(auth::login::Args),
+
     /// Authenticate this host as a user (`auth login` / `status` /
     /// `logout`). Mints a CLI token used by `pidash` commands and by
     /// `pidash runner add` to register runners.
@@ -124,6 +130,9 @@ pub enum Command {
     /// List, post, or edit work-item comments.
     Comment(comment::CommentArgs),
 
+    /// Read project pages — the project-scoped wiki (`page list` / `page get`).
+    Page(page::PageArgs),
+
     /// Inspect workflow states on a project.
     State(state::StateArgs),
 
@@ -160,6 +169,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     };
 
     match command {
+        Command::Login(args) => auth::login::run(args, &paths).await,
         Command::Auth(args) => auth::run(args, &paths).await,
         Command::Connect(args) => connect::run(args, &paths).await,
         Command::Config(args) => config_cmd::run(args, &paths).await,
@@ -179,6 +189,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Ai(args) => ai::run(args, &paths).await,
         Command::Issue(args) => run_crud(issue::run(args, &paths).await),
         Command::Comment(args) => run_crud(comment::run(args, &paths).await),
+        Command::Page(args) => run_crud(page::run(args, &paths).await),
         Command::State(args) => run_crud(state::run(args, &paths).await),
         Command::Workpad(args) => run_crud(workpad::run(args, &paths).await),
         Command::Workspace(args) => run_crud(workspace::run(args, &paths).await),

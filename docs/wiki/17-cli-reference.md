@@ -24,11 +24,12 @@ First-run launcher. If no config exists, drops into `pidash auth login`. Otherwi
 
 ## Setup & auth
 
-### `pidash auth login`
+### `pidash login` / `pidash auth login`
 
-Browser-based device-code login. Same UX as `gh auth login` / `stripe login`.
+Browser-based device-code login. Same UX as `gh auth login` / `stripe login`. `pidash login` is a top-level alias of `pidash auth login`: same flags, same flow, same stored token.
 
 ```
+pidash login [--url <URL>] [--no-browser]
 pidash auth login [--url <URL>] [--no-browser]
 ```
 
@@ -274,17 +275,25 @@ pidash issue get ENG-42
 Create a work item under a project.
 
 ```
-pidash issue create --title <TITLE> [--project <P>] [--description <D>]
+pidash issue create --title <TITLE> [--project <P>]
+                    [--description <D> | --description-file <PATH>]
                     [--priority <P>] [--state <S>]
 ```
 
-| Flag                | Purpose                                                                                                        |
-| ------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `--title <T>`       | **Required.**                                                                                                  |
-| `--project <P>`     | Project identifier or UUID. If omitted: `PIDASH_PROJECT_ID` env → local `default_project` → workspace default. |
-| `--description <D>` | Plain text or markdown.                                                                                        |
-| `--priority <P>`    | `none` \| `low` \| `medium` \| `high` \| `urgent`.                                                             |
-| `--state <S>`       | Initial state — name (case-insensitive) or UUID.                                                               |
+| Flag                        | Purpose                                                                                                                         |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `--title <T>`               | **Required.**                                                                                                                   |
+| `--project <P>`             | Project identifier or UUID. If omitted: `PIDASH_PROJECT_ID` env → local `default_project` → workspace default.                  |
+| `--description <D>`         | Description as markdown.                                                                                                        |
+| `--description-file <PATH>` | Read the markdown description from a file; `-` reads stdin. Conflicts with `--description`. Empty input is an error (exit `2`). |
+| `--priority <P>`            | `none` \| `low` \| `medium` \| `high` \| `urgent`.                                                                              |
+| `--state <S>`               | Initial state — name (case-insensitive) or UUID.                                                                                |
+
+**How descriptions land.** The CLI sends the markdown as `description_markdown`, and the server converts it with the same markdown → rich-text converter the page commands use. Headings, nested lists, task-list checkboxes, fenced code blocks (with language) and tables keep their structure in the web editor. For a long or multi-line body, write it to a file or pipe it instead of quoting it on the command line:
+
+```
+generate-body | pidash issue create --project ENG --title "Cold start: crate foo" --description-file -
+```
 
 ### `pidash issue list --project <P>`
 
@@ -292,29 +301,49 @@ List work items in a project. Returns the paginated envelope `{count, next_curso
 
 ```
 pidash issue list --project <P> [--cursor <C>] [--per-page <N>] [--order-by <F>]
+                  [--state <S>[,<S>...]] [--state-group <G>[,<G>...]] [--parent <PROJ-123|UUID|none>]
+                  [--label <L>[,<L>...]] [--priority <P>[,<P>...]] [--fields <F>[,<F>...]]
 ```
 
-| Flag             | Purpose                                                              |
-| ---------------- | -------------------------------------------------------------------- |
-| `--project <P>`  | **Required.**                                                        |
-| `--cursor <C>`   | Pagination cursor from a prior page's `next_cursor`.                 |
-| `--per-page <N>` | Items per page. Server default if omitted.                           |
-| `--order-by <F>` | Sort field, e.g. `-created_at` (default), `priority`, `state__name`. |
+| Flag                | Purpose                                                                                                          |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `--project <P>`     | **Required.**                                                                                                    |
+| `--cursor <C>`      | Pagination cursor from a prior page's `next_cursor`.                                                             |
+| `--per-page <N>`    | Items per page. Server default if omitted.                                                                       |
+| `--order-by <F>`    | Sort field, e.g. `-created_at` (default), `priority`, `state__name`.                                             |
+| `--state <S>`       | State names (case-insensitive) and/or UUIDs, comma-separated. An unknown name fails with the valid names listed. |
+| `--state-group <G>` | `backlog` \| `unstarted` \| `started` \| `review` \| `test` \| `completed` \| `cancelled`, comma-separated.      |
+| `--parent <P>`      | Sub-issues of this parent (`PROJ-123`, resolved to a UUID client-side, or a UUID); `none` for top-level only.    |
+| `--label <L>`       | Label names (case-insensitive) and/or UUIDs, comma-separated.                                                    |
+| `--priority <P>`    | `urgent` \| `high` \| `medium` \| `low` \| `none`, comma-separated.                                              |
+| `--fields <F>`      | Return only these fields per item, e.g. `id,sequence_id,name,state,parent`.                                      |
+
+Values within one flag OR together; different flags AND together. Example — Backlog sub-issues of an epic, small payload:
+
+```
+pidash issue list --project ENG --parent ENG-12 --state Backlog --fields id,sequence_id,name,state
+```
+
+The same filters are available as query parameters on `GET /api/v1/workspaces/<slug>/projects/<project>/work-items/`: `state`, `state_group`, `parent` (`null` for top-level), `labels`, `priority`, `assignees` (user UUIDs), plus `fields` and `expand`.
 
 ### `pidash issue patch <IDENTIFIER>`
 
 Update fields. Pass only the fields you want to change.
 
 ```
-pidash issue patch ENG-42 [--state <S>] [--title <T>] [--description <D>] [--priority <P>]
+pidash issue patch ENG-42 [--state <S>] [--title <T>]
+                          [--description <D> | --description-file <PATH>] [--priority <P>]
 ```
 
-| Flag                | Purpose                                            |
-| ------------------- | -------------------------------------------------- |
-| `--state <S>`       | State name (case-insensitive) or UUID.             |
-| `--title <T>`       | New title.                                         |
-| `--description <D>` | New description.                                   |
-| `--priority <P>`    | `none` \| `low` \| `medium` \| `high` \| `urgent`. |
+| Flag                        | Purpose                                                                                  |
+| --------------------------- | ---------------------------------------------------------------------------------------- |
+| `--state <S>`               | State name (case-insensitive) or UUID.                                                   |
+| `--title <T>`               | New title.                                                                               |
+| `--description <D>`         | New description as markdown. `--description ""` clears it.                               |
+| `--description-file <PATH>` | Read the new markdown description from a file; `-` reads stdin. Empty input is an error. |
+| `--priority <P>`            | `none` \| `low` \| `medium` \| `high` \| `urgent`.                                       |
+
+A description flag replaces the whole body. It is converted server-side, the same way as for `issue create`.
 
 ### `pidash issue move <IDENTIFIER> --project <P>`
 
@@ -405,6 +434,113 @@ branch on it.
 
 ---
 
+## Pages
+
+Project pages are a project-scoped wiki — decisions, conventions, stage plans. `list` and `get` read pages; `create`, `update`, `archive` and `unarchive` write them. Page bodies go in and come out as markdown.
+
+### `pidash page list --project <P>`
+
+List the pages of a project. Returns the paginated envelope `{count, next_cursor, prev_cursor, results}` carrying page **metadata only** (`id`, `name`, `parent`, `owned_by`, `access`, `is_locked`, `archived_at`, `created_at`, `updated_at`) — read a single page to get its body.
+
+```
+pidash page list --project ENG [--cursor <C>] [--per-page <N>] [--include-archived]
+```
+
+| Flag                 | Purpose                                              |
+| -------------------- | ---------------------------------------------------- |
+| `--project <P>`      | **Required.** Project slug (`ENG`) or project UUID.  |
+| `--cursor <C>`       | Pagination cursor from a prior page's `next_cursor`. |
+| `--per-page <N>`     | Items per page. Server default if omitted.           |
+| `--include-archived` | Also list archived pages. Excluded by default.       |
+
+Pages another member marked private are not listed. A caller who is not a member of the project gets exit code `3`.
+
+### `pidash page get <PAGE_UUID> --project <P>`
+
+Fetch one page. Prints the JSON envelope: the list metadata plus `description_html`, `description_stripped`, and `description_markdown`. The markdown is rendered server-side, so the CLI, the REST API and the MCP page tool all return the same text.
+
+```
+pidash page get 550e8400-e29b-41d4-a716-446655440000 --project ENG
+```
+
+| Flag            | Purpose                                                    |
+| --------------- | ---------------------------------------------------------- |
+| `--project <P>` | **Required.** Project slug (`ENG`) or project UUID.        |
+| `--body-only`   | Print only the markdown body instead of the JSON envelope. |
+
+`--body-only` is what an agent wants when it intends to read the page as a document:
+
+```
+pidash page get 550e8400-e29b-41d4-a716-446655440000 --project ENG --body-only > ./conventions.md
+```
+
+A page UUID that does not exist — or one that belongs to another member's private page — exits `4` (not found); the API deliberately does not distinguish the two.
+
+### `pidash page create --project <P> --title <T>`
+
+Create a page. Prints the created page (the same envelope as `page get`).
+
+```
+pidash page create --project ENG --title "Release checklist" --body-file ./checklist.md
+```
+
+| Flag                       | Purpose                                                       |
+| -------------------------- | ------------------------------------------------------------- |
+| `--project <P>`            | **Required.** Project slug (`ENG`) or project UUID.           |
+| `--title <T>`              | **Required.** Page title. Must not be blank.                  |
+| `--body <MD>`              | Page body as markdown. Mutually exclusive with `--body-file`. |
+| `--body-file <PATH>`       | Read the markdown body from a file; `-` reads stdin.          |
+| `--parent <PAGE_UUID>`     | Nest the new page under this page.                            |
+| `--access public\|private` | Page visibility. Server default (public) if omitted.          |
+
+Pipe a generated body straight in:
+
+```
+generate-notes | pidash page create --project ENG --title "X" --body-file -
+```
+
+### `pidash page update <PAGE_UUID> --project <P>`
+
+Change a page. Only the fields you pass are sent; at least one is required — an update with no field flags exits `2` without contacting the server. A body flag replaces the whole body (there is no append). Prints the updated page.
+
+```
+pidash page update 550e8400-e29b-41d4-a716-446655440000 --project ENG --body-file ./conventions.md
+```
+
+| Flag                                 | Purpose                                                                                 |
+| ------------------------------------ | --------------------------------------------------------------------------------------- |
+| `--project <P>`                      | **Required.** Project slug (`ENG`) or project UUID.                                     |
+| `--title <T>`                        | New title.                                                                              |
+| `--body <MD>` / `--body-file <PATH>` | New markdown body (`-` reads stdin). Mutually exclusive. An empty body clears the page. |
+| `--parent <PAGE_UUID>`               | Move the page under this page. Mutually exclusive with `--clear-parent`.                |
+| `--clear-parent`                     | Make the page top-level (sends `parent: null`).                                         |
+| `--access public\|private`           | Change visibility. Only the page owner may do this.                                     |
+
+### `pidash page archive <PAGE_UUID> --project <P>` / `pidash page unarchive <PAGE_UUID> --project <P>`
+
+Archive a page, or restore an archived one. Both print the page afterwards. Archived pages drop out of `page list` unless `--include-archived` is passed, and cannot be edited until unarchived.
+
+```
+pidash page archive 550e8400-e29b-41d4-a716-446655440000 --project ENG
+pidash page unarchive 550e8400-e29b-41d4-a716-446655440000 --project ENG
+```
+
+**Errors.** Page ids and `--parent` must be UUIDs; anything else exits `2` without a request, as does `--body` together with `--body-file` (a usage error from the argument parser). Server-side:
+
+| Status | Exit | When                                                                     |
+| ------ | ---- | ------------------------------------------------------------------------ |
+| 400    | `2`  | Invalid field (e.g. a parent page from another project).                 |
+| 409    | `2`  | The page is locked or archived.                                          |
+| 403    | `3`  | Not a project member, or changing `--access` on a page you do not own.   |
+| 404    | `4`  | Page does not exist, or is another member's private page.                |
+| 503    | `5`  | The live document service is unavailable (body writes only — see below). |
+
+**How body writes land.** The page editor is collaborative, so a page's content lives in a collaborative document (`description_binary`) alongside the `description_html` / `description_json` renderings. A body write sends markdown; the server regenerates all three through the live document service. If that service is unavailable the write fails with `503` (exit `5`) and nothing is changed — retry later.
+
+**Known limitation.** If a human has the page open in the editor while an agent updates its body, the editor's next save can overwrite the agent's edit. Prefer writing pages nobody is editing, and re-read with `page get` afterwards if it matters.
+
+---
+
 ## States
 
 ### `pidash state list [PROJECT_OR_ISSUE]`
@@ -430,7 +566,7 @@ Internal daemon entry point. Invoked by systemd / launchd / Windows scheduled ta
 
 ## Exit codes
 
-`issue`, `comment`, `state`, `workspace`, `project`, `context` print JSON on stdout and JSON on stderr for errors. Their exit codes follow `api_client::EXIT_*` constants — non-zero on any error.
+`issue`, `comment`, `page`, `state`, `workspace`, `project`, `context` print JSON on stdout and JSON on stderr for errors. Their exit codes follow `api_client::EXIT_*` constants — non-zero on any error.
 
 `ai` prints its reply as human-readable text on stdout (or JSON with `--json`), streams tool activity to stderr, and prints a `{"error": ...}` line to stderr on failure. It exits `0` when the assistant replies and non-zero otherwise (BYOK unconfigured, assistant error, or local timeout).
 

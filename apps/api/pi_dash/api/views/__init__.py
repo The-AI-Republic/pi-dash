@@ -35,6 +35,9 @@ from .issue import (
     IssueSearchEndpoint,
     IssueAdvancedSearchEndpoint,
     IssueRelationListCreateAPIEndpoint,
+    IssueRelationGroupedAPIEndpoint,
+    IssueRelationRelateAPIEndpoint,
+    IssueRelationUnrelateAPIEndpoint,
     IssueWorkpadAPIEndpoint,
 )
 
@@ -79,5 +82,7 @@ from .user import UserEndpoint
 from .invite import WorkspaceInvitationsViewset
 
 from .sticky import StickyViewSet
+
+from .page import PageListAPIEndpoint, PageDetailAPIEndpoint, PageArchiveAPIEndpoint
 
 from .runner import RunnerDeleteEndpoint

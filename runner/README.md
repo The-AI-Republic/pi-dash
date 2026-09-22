@@ -119,8 +119,9 @@ Then run the setup steps manually:
 ```bash
 # 1. Log in as your user. Opens a browser to approve a short code shown in
 #    the terminal — same idea as `gh auth login` or `stripe login`. Stores
-#    a CLI token at ~/.config/pidash/config.toml.
-pidash auth login --url https://pidash.example.com
+#    a CLI token at ~/.config/pidash/config.toml. (`pidash auth login` is
+#    the same command; `pidash auth status` / `logout` live under `auth`.)
+pidash login --url https://pidash.example.com
 
 # 2. Register this host as a runner. Uses the token from step 1 to mint
 #    runner credentials cloud-side; no enrollment-token paste needed. On
@@ -132,7 +133,7 @@ pidash runner add --project WEB
 pidash tui
 ```
 
-`pidash auth login` prompts to add a runner inline when no runner exists yet on the host — for the dev-laptop case, that single command is enough. Bare `pidash` with no subcommand also drops into the login flow when no config exists, so if you installed via the MSI or skipped auto-auth, you can re-trigger setup just by typing `pidash`.
+`pidash login` prompts to add a runner inline when no runner exists yet on the host — for the dev-laptop case, that single command is enough. Bare `pidash` with no subcommand also drops into the login flow when no config exists, so if you installed via the MSI or skipped auto-auth, you can re-trigger setup just by typing `pidash`.
 
 Useful follow-ups:
 

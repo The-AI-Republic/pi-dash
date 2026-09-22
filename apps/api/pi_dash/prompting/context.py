@@ -146,6 +146,106 @@ def _related_context(issue: Issue) -> list[Dict[str, Any]]:
     return out
 
 
+#: Directional relation types surfaced in the relationships section, in render
+#: order, with the phrase that reads naturally before the other item
+#: ("this item <phrase> X"). ``blocked_by`` / ``blocking`` get their own groups;
+#: the rest render together under "Other relations". Keys cover both the stored
+#: forward types and their inverses from ``IssueRelationChoices._REVERSE_MAPPING``
+#: — only forward types are ever written, so the inverse is what the *other*
+#: end of a row sees.
+_DIRECTIONAL_RELATION_LABELS: Dict[str, str] = {
+    "blocked_by": "Blocked by",
+    "blocking": "Blocking",
+    "start_before": "Starts before",
+    "start_after": "Starts after",
+    "finish_before": "Finishes before",
+    "finish_after": "Finishes after",
+    "implemented_by": "Implemented by",
+    "implements": "Implements",
+}
+
+#: State groups that mean a blocker no longer holds this item back.
+_CLOSED_STATE_GROUPS = frozenset({"completed", "cancelled"})
+
+
+def _directional_relations_context(issue: Issue) -> Dict[str, list[Dict[str, Any]]]:
+    """Directional relations keyed by type *as seen from ``issue``*.
+
+    A row ``(issue=A, related_issue=B, relation_type=T)`` means "A T B", so A
+    sees B under ``T`` and B sees A under the reverse of ``T`` (``blocked_by``
+    -> ``blocking`` etc.). Same both-endpoints query shape as
+    ``_related_context``: collect the other end of each row, dedupe per type,
+    skip self and soft-deleted targets, and cap each type at
+    ``_MAX_RELATIONSHIP_ITEMS``. Each item is ``{identifier, title, state,
+    state_group}`` — ``state_group`` lets the template tell an open blocker
+    from a finished one. Every key in ``_DIRECTIONAL_RELATION_LABELS`` is
+    present (empty list when none).
+    """
+    from django.db.models import Q
+
+    from pi_dash.db.models.issue import IssueRelation, IssueRelationChoices
+
+    reverse = IssueRelationChoices._REVERSE_MAPPING
+    forward_types = [t for t in reverse if t in _DIRECTIONAL_RELATION_LABELS]
+    relations = (
+        IssueRelation.objects.filter(relation_type__in=forward_types)
+        .filter(Q(issue_id=issue.id) | Q(related_issue_id=issue.id))
+        # The default manager drops soft-deleted relation rows; a soft-deleted
+        # work item on either end must not surface either.
+        .filter(issue__deleted_at__isnull=True, related_issue__deleted_at__isnull=True)
+        .select_related(
+            "issue__state",
+            "issue__project",
+            "related_issue__state",
+            "related_issue__project",
+        )
+        .order_by("-created_at")
+    )
+    out: Dict[str, list[Dict[str, Any]]] = {key: [] for key in _DIRECTIONAL_RELATION_LABELS}
+    seen: Dict[str, set[Any]] = {key: set() for key in _DIRECTIONAL_RELATION_LABELS}
+    for rel in relations:
+        if rel.issue_id == issue.id:
+            other, kind = rel.related_issue, rel.relation_type
+        else:
+            other, kind = rel.issue, reverse[rel.relation_type]
+        if other is None or other.id == issue.id:
+            continue
+        if other.id in seen[kind] or len(out[kind]) >= _MAX_RELATIONSHIP_ITEMS:
+            continue
+        seen[kind].add(other.id)
+        state = getattr(other, "state", None)
+        out[kind].append({**_issue_ref(other), "state_group": state.group if state else ""})
+    return out
+
+
+def _relations_context(issue: Issue) -> Dict[str, Any]:
+    """Context keys for the directional groups of the relationships section.
+
+    ``blocked_by`` / ``blocking`` are lists of work-item refs; ``other_relations``
+    flattens the remaining directional types into one list whose items carry a
+    human ``relation`` label ("Starts before", "Implements", ...).
+    ``open_blockers`` names the ``blocked_by`` items not yet completed or
+    cancelled, and ``has_open_blockers`` is its truthiness — the template warns
+    on it and the agent decides whether it can proceed.
+    """
+    by_type = _directional_relations_context(issue)
+    blocked_by = by_type["blocked_by"]
+    open_blockers = [b["identifier"] for b in blocked_by if b["state_group"] not in _CLOSED_STATE_GROUPS]
+    other_relations = [
+        {**item, "relation": label}
+        for kind, label in _DIRECTIONAL_RELATION_LABELS.items()
+        if kind not in ("blocked_by", "blocking")
+        for item in by_type[kind]
+    ]
+    return {
+        "blocked_by": blocked_by,
+        "blocking": by_type["blocking"],
+        "other_relations": other_relations,
+        "open_blockers": open_blockers,
+        "has_open_blockers": bool(open_blockers),
+    }
+
+
 def _absolute_issue_url(issue: Issue) -> str:
     """Return a best-effort deep link. Full URL construction lives in the
     web layer; we return a relative path so templates still have something
@@ -491,6 +591,12 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
         # corresponding group so no empty heading or dangling directive renders.
         "children": _children_context(issue),
         "related": _related_context(issue),
+        # Directional relations (blocked_by / blocking / start / finish /
+        # implements), both link directions resolved to this item's point of
+        # view, plus ``open_blockers`` / ``has_open_blockers`` for the
+        # "Blocked by" warning. The agent — not dispatch — decides whether an
+        # open blocker means it should wait (PDASHOSS01-195).
+        **_relations_context(issue),
         "run": {
             "id": str(run.id),
             "kind": _issue_run_kind(issue),

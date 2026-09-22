@@ -8,7 +8,7 @@ import { Buffer } from "buffer";
 import type { Extensions, JSONContent } from "@tiptap/core";
 import { getSchema } from "@tiptap/core";
 import { generateHTML, generateJSON } from "@tiptap/html";
-import { prosemirrorJSONToYDoc, yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
+import { prosemirrorJSONToYDoc, prosemirrorJSONToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
 import * as Y from "yjs";
 // extensions
 import type { TDocumentPayload } from "@pi-dash/types";
@@ -26,6 +26,7 @@ export const TITLE_EDITOR_EXTENSIONS: Extensions = TitleExtensions;
 // editor schemas
 const richTextEditorSchema = getSchema(RICH_TEXT_EDITOR_EXTENSIONS);
 const documentEditorSchema = getSchema(DOCUMENT_EDITOR_EXTENSIONS);
+const titleEditorSchema = getSchema(TITLE_EDITOR_EXTENSIONS);
 
 /**
  * @description apply updates to a doc and return the updated doc in binary format
@@ -199,6 +200,50 @@ export const getAllDocumentFormatsFromDocumentEditorBinaryData = (
 type TConvertHTMLDocumentToAllFormatsArgs = {
   document_html: string;
   variant: "rich" | "document";
+  /**
+   * Optional current Yjs state of the document. When supplied, the new content is
+   * applied as an in-place diff onto this doc's `default` fragment (preserving the
+   * Yjs lineage) instead of building a brand-new Y.Doc from scratch.
+   */
+  base_binary?: Uint8Array | null;
+  /**
+   * Optional title. When supplied, the doc's `title` fragment is set to this text
+   * (diffed in place when a base binary is given).
+   */
+  title?: string | null;
+};
+
+/**
+ * @description Builds the Yjs binary for new HTML content, optionally on top of an existing doc.
+ * With a base binary, the `default` (and, if a title is given, `title`) fragments are updated in
+ * place via y-prosemirror's `updateYFragment`, so the result is a descendant of the base doc: a
+ * client holding a cached copy of the base (e.g. y-indexeddb) can merge it without duplication.
+ * @returns {Uint8Array} the full encoded state of the resulting doc
+ */
+const getBinaryDataFromHTMLString = (args: {
+  document_html: string;
+  schema: typeof documentEditorSchema;
+  extensions: Extensions;
+  base_binary?: Uint8Array | null;
+  title?: string | null;
+}): Uint8Array => {
+  const { document_html, schema, extensions, base_binary, title } = args;
+  const yDoc = new Y.Doc();
+  if (base_binary && base_binary.length > 0) {
+    Y.applyUpdate(yDoc, base_binary);
+  }
+  const contentJSON = generateJSON(document_html ?? "<p></p>", extensions);
+  yDoc.transact(() => {
+    prosemirrorJSONToYXmlFragment(schema, contentJSON, yDoc.getXmlFragment("default"));
+    if (title != null) {
+      prosemirrorJSONToYXmlFragment(
+        titleEditorSchema,
+        generateTitleProsemirrorJson(title),
+        yDoc.getXmlFragment("title")
+      );
+    }
+  });
+  return Y.encodeStateAsUpdate(yDoc);
 };
 
 /**
@@ -206,17 +251,31 @@ type TConvertHTMLDocumentToAllFormatsArgs = {
  * @param {TConvertHTMLDocumentToAllFormatsArgs} args - Arguments containing HTML content and variant type
  * @param {string} args.document_html - The HTML content to convert
  * @param {"rich" | "document"} args.variant - The type of editor variant to use for conversion
- * @returns {TDocumentPayload} Object containing the document in all supported formats
+ * @param {Uint8Array} [args.base_binary] - Optional existing Yjs state to apply the new content onto
+ * @param {string} [args.title] - Optional title to write into the doc's `title` fragment
+ * @returns {TDocumentPayload} Object containing the document in all supported formats. `description_html`
+ *   is regenerated from the resulting doc (i.e. what the editor would serialise).
  * @throws {Error} If an invalid variant is provided
  */
 export const convertHTMLDocumentToAllFormats = (args: TConvertHTMLDocumentToAllFormatsArgs): TDocumentPayload => {
-  const { document_html, variant } = args;
+  const { document_html, variant, base_binary, title } = args;
+  const hasBase = !!base_binary && base_binary.length > 0;
+  const hasTitle = title != null;
 
   let allFormats: TDocumentPayload;
 
   if (variant === "rich") {
     // Convert HTML to binary format for rich text editor
-    const contentBinary = getBinaryDataFromRichTextEditorHTMLString(document_html);
+    const contentBinary =
+      hasBase || hasTitle
+        ? getBinaryDataFromHTMLString({
+            document_html,
+            schema: richTextEditorSchema,
+            extensions: RICH_TEXT_EDITOR_EXTENSIONS,
+            base_binary,
+            title,
+          })
+        : getBinaryDataFromRichTextEditorHTMLString(document_html);
     // Generate all document formats from the binary data
     const { contentBinaryEncoded, contentHTML, contentJSON } =
       getAllDocumentFormatsFromRichTextEditorBinaryData(contentBinary);
@@ -227,7 +286,16 @@ export const convertHTMLDocumentToAllFormats = (args: TConvertHTMLDocumentToAllF
     };
   } else if (variant === "document") {
     // Convert HTML to binary format for document editor
-    const contentBinary = getBinaryDataFromDocumentEditorHTMLString(document_html);
+    const contentBinary =
+      hasBase || hasTitle
+        ? getBinaryDataFromHTMLString({
+            document_html,
+            schema: documentEditorSchema,
+            extensions: DOCUMENT_EDITOR_EXTENSIONS,
+            base_binary,
+            title,
+          })
+        : getBinaryDataFromDocumentEditorHTMLString(document_html);
     // Generate all document formats from the binary data
     const { contentBinaryEncoded, contentHTML, contentJSON } = getAllDocumentFormatsFromDocumentEditorBinaryData(
       contentBinary,
