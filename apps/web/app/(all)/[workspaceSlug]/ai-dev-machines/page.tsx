@@ -6,7 +6,7 @@
 
 import { useState } from "react";
 import { observer } from "mobx-react";
-import { Ban, Check, Copy, Cpu, Download, Laptop, RotateCw, Terminal } from "lucide-react";
+import { Ban, Check, Copy, Cpu, Download, Laptop, RotateCw, Terminal, Trash2 } from "lucide-react";
 import useSWR from "swr";
 import { useTranslation } from "@pi-dash/i18n";
 import { Button, getButtonStyling } from "@pi-dash/propel/button";
@@ -83,8 +83,10 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
   const [addOpen, setAddOpen] = useState(false);
   const [rotateMachine, setRotateMachine] = useState<IDevMachine | null>(null);
   const [revokeMachine, setRevokeMachine] = useState<IDevMachine | null>(null);
+  const [deleteMachine, setDeleteMachine] = useState<IDevMachine | null>(null);
   const [rotating, setRotating] = useState(false);
   const [revoking, setRevoking] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const {
     data: devMachines,
     error: devMachinesError,
@@ -133,6 +135,25 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
     }
   }
 
+  async function confirmDeleteMachine() {
+    if (!deleteMachine || !workspaceId) return;
+    setDeleting(true);
+    try {
+      await service.deleteDevMachine(deleteMachine.id, workspaceId);
+      setDeleteMachine(null);
+      mutateDevMachines();
+    } catch (e: unknown) {
+      const err = e as { error?: string } | null;
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: t("Error!"),
+        message: err?.error ?? t("Could not delete the dev machine."),
+      });
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-8 p-6">
       <PageHead title={pageTitle} />
@@ -144,22 +165,32 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
       {/* Intro — what the CLI / daemon / runner each are */}
       <section className="flex flex-col gap-4">
         <h2 className="text-14 font-semibold text-primary">{t("What is the pidash CLI, daemon, and runner?")}</h2>
-        <p className="text-13 text-secondary">{t("Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:")}</p>
+        <p className="text-13 text-secondary">
+          {t(
+            "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:"
+          )}
+        </p>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
           <ConceptCard
             icon={<Terminal className="size-4" />}
             title={t("pidash CLI")}
-            body={t("The command-line tool installed on each dev machine. Handles authentication with the cloud, manages local config (`~/.pidash/config.toml`), and exposes commands for issues, comments, and runner management (`pidash auth login`, `pidash runner add`, `pidash doctor`, …).")}
+            body={t(
+              "The command-line tool installed on each dev machine. Handles authentication with the cloud, manages local config (`~/.pidash/config.toml`), and exposes commands for issues, comments, and runner management (`pidash auth login`, `pidash runner add`, `pidash doctor`, …)."
+            )}
           />
           <ConceptCard
             icon={<Cpu className="size-4" />}
             title={t("pidash daemon")}
-            body={t("A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.")}
+            body={t(
+              "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine."
+            )}
           />
           <ConceptCard
             icon={<Laptop className="size-4" />}
             title={t("AI Agent runner")}
-            body={t("A cloud-side row that represents one agent instance bound to a project (and optionally a pod). Running `pidash runner add` on a logged-in machine creates the row and binds that machine as the host. A machine can host many runners.")}
+            body={t(
+              "A cloud-side row that represents one agent instance bound to a project (and optionally a pod). Running `pidash runner add` on a logged-in machine creates the row and binds that machine as the host. A machine can host many runners."
+            )}
           />
         </div>
       </section>
@@ -168,7 +199,9 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <h2 className="text-14 font-semibold text-primary">{t("Dev machines")}</h2>
-            <p className="mt-1 text-13 text-secondary">{t("Machines that have authenticated with Pi Dash or host runners for this workspace.")}</p>
+            <p className="mt-1 text-13 text-secondary">
+              {t("Machines that have authenticated with Pi Dash or host runners for this workspace.")}
+            </p>
           </div>
           <Button onClick={() => setAddOpen(true)} disabled={!workspaceId}>
             {t("Add runner")}
@@ -225,12 +258,8 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
                           total: machine.runner_count,
                         })}
                       </td>
-                      <td className="px-3 py-2">
-                        {formatDateTime(machine.last_seen_at, t("Never"))}
-                      </td>
-                      <td className="px-3 py-2">
-                        {formatDateTime(machine.last_heartbeat_at, t("Never"))}
-                      </td>
+                      <td className="px-3 py-2">{formatDateTime(machine.last_seen_at, t("Never"))}</td>
+                      <td className="px-3 py-2">{formatDateTime(machine.last_heartbeat_at, t("Never"))}</td>
                       <td className="px-3 py-2 text-right">
                         <div className="flex justify-end gap-2">
                           {!machine.revoked_at && (
@@ -253,6 +282,14 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
                               </Button>
                             </>
                           )}
+                          <Button
+                            size="sm"
+                            variant="error-outline"
+                            prependIcon={<Trash2 />}
+                            onClick={() => setDeleteMachine(machine)}
+                          >
+                            {t("Delete")}
+                          </Button>
                         </div>
                       </td>
                     </tr>
@@ -273,7 +310,11 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
       {/* Install command — copy / paste */}
       <section className="flex flex-col gap-3">
         <h2 className="text-14 font-semibold text-primary">{t("Install the pidash CLI")}</h2>
-        <p className="text-13 text-secondary">{t("Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.")}</p>
+        <p className="text-13 text-secondary">
+          {t(
+            "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login."
+          )}
+        </p>
 
         <InstallCommand label={t("macOS / Linux")} command={INSTALL_CMD_UNIX} />
         <InstallCommand label={t("Windows (PowerShell)")} command={INSTALL_CMD_WINDOWS} />
@@ -284,7 +325,11 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
           hrefLabel={t("Download MSI")}
         />
 
-        <p className="text-12 text-secondary">{t("Prerequisite: the agent CLI you plan to use (`codex` or `claude`) must already be installed and on PATH. Run `pidash doctor` after install to verify.")}</p>
+        <p className="text-12 text-secondary">
+          {t(
+            "Prerequisite: the agent CLI you plan to use (`codex` or `claude`) must already be installed and on PATH. Run `pidash doctor` after install to verify."
+          )}
+        </p>
       </section>
 
       {workspaceId && workspaceSlug && (
@@ -301,7 +346,9 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
         handleSubmit={confirmRotateMachine}
         isSubmitting={rotating}
         title={t("Rotate dev machine token?")}
-        content={t("The active auth token for this dev machine will be invalidated. Runners on that machine will stop connecting until `pidash auth login` is run there again.")}
+        content={t(
+          "The active auth token for this dev machine will be invalidated. Runners on that machine will stop connecting until `pidash auth login` is run there again."
+        )}
         variant="primary"
         primaryButtonText={{ default: t("Rotate"), loading: t("Rotate") }}
       />
@@ -311,8 +358,21 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
         handleSubmit={confirmRevokeMachine}
         isSubmitting={revoking}
         title={t("Revoke dev machine?")}
-        content={t("This permanently revokes the dev machine, invalidates its auth token, and revokes runners hosted on it. Use this when the machine should no longer be trusted.")}
+        content={t(
+          "This permanently revokes the dev machine, invalidates its auth token, and revokes runners hosted on it. Use this when the machine should no longer be trusted."
+        )}
         primaryButtonText={{ default: t("Revoke"), loading: t("Revoke") }}
+      />
+      <AlertModalCore
+        isOpen={!!deleteMachine}
+        handleClose={() => (deleting ? null : setDeleteMachine(null))}
+        handleSubmit={confirmDeleteMachine}
+        isSubmitting={deleting}
+        title={t("Delete dev machine?")}
+        content={t(
+          "This removes the dev machine connection entirely: its auth token is invalidated, the runners hosted on it are torn down, and the machine disappears from this list. Deleting a dev machine does not uninstall the AI agent (such as Codex or Claude) on the machine itself."
+        )}
+        primaryButtonText={{ default: t("Delete"), loading: t("Delete") }}
       />
     </div>
   );

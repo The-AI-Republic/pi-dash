@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use pidash_ipc::protocol::{Request, Response};
-use pidash_ipc::{ApprovalDecision, Client};
+use pidash_ipc::{ApprovalDecision, ApprovalMode, Client};
 use serde::Serialize;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -194,9 +194,17 @@ async fn call_once(socket: &Path, req: Request) -> Result<(), String> {
 }
 
 /// Resolve the managed daemon's control socket for this app.
-fn resolve_socket<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
-    let paths = ManagedPaths::resolve(app)?;
-    Ok(socket_path(&paths.runtime_dir))
+/// The managed daemon's control socket **for this workspace**.
+///
+/// The daemon is started per workspace (`managed_start_daemon`) with its data
+/// dir re-rooted under `managed/pidash/<workspace>/data`, and the runner binds
+/// its socket at `<data_dir>/runtime/pidash.sock`. Resolving from the shared
+/// `managed/runtime/` instead — which only holds the model token — is a socket
+/// nothing listens on, and every chat send failed with "connecting to managed
+/// daemon" even though the daemon was up.
+fn resolve_socket<R: Runtime>(app: &AppHandle<R>, workspace: &str) -> Result<PathBuf, String> {
+    let paths = ManagedPaths::for_workspace(app, workspace)?;
+    Ok(socket_path(&paths.daemon_runtime_dir()))
 }
 
 /// Spawn the background reader for a streaming request and register its handle
@@ -233,19 +241,22 @@ fn spawn_stream<R: Runtime>(
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_warm<R: Runtime>(
     app: AppHandle<R>,
+    workspace: String,
     chat_session_id: Uuid,
     runner: Option<String>,
     cwd: Option<String>,
     model: Option<String>,
+    mode: Option<ApprovalMode>,
     local_thread_id: Option<String>,
     local_session_id: Option<String>,
 ) -> Result<(), String> {
-    let socket = resolve_socket(&app)?;
+    let socket = resolve_socket(&app, &workspace)?;
     let req = Request::ChatWarm {
         chat_session_id,
         runner,
         cwd,
         model,
+        mode,
         local_thread_id,
         local_session_id,
     };
@@ -259,16 +270,18 @@ pub async fn chat_warm<R: Runtime>(
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_send<R: Runtime>(
     app: AppHandle<R>,
+    workspace: String,
     chat_session_id: Uuid,
     message_id: Uuid,
     content: String,
     runner: Option<String>,
     cwd: Option<String>,
     model: Option<String>,
+    mode: Option<ApprovalMode>,
     local_thread_id: Option<String>,
     local_session_id: Option<String>,
 ) -> Result<(), String> {
-    let socket = resolve_socket(&app)?;
+    let socket = resolve_socket(&app, &workspace)?;
     let req = Request::ChatSend {
         chat_session_id,
         message_id,
@@ -276,6 +289,7 @@ pub async fn chat_send<R: Runtime>(
         runner,
         cwd,
         model,
+        mode,
         local_thread_id,
         local_session_id,
     };
@@ -287,11 +301,12 @@ pub async fn chat_send<R: Runtime>(
 #[tauri::command]
 pub async fn chat_cancel<R: Runtime>(
     app: AppHandle<R>,
+    workspace: String,
     chat_session_id: Uuid,
     runner: Option<String>,
     reason: Option<String>,
 ) -> Result<(), String> {
-    let socket = resolve_socket(&app)?;
+    let socket = resolve_socket(&app, &workspace)?;
     call_once(
         &socket,
         Request::ChatCancel {
@@ -308,11 +323,12 @@ pub async fn chat_cancel<R: Runtime>(
 #[tauri::command]
 pub async fn chat_close<R: Runtime>(
     app: AppHandle<R>,
+    workspace: String,
     chat_session_id: Uuid,
     runner: Option<String>,
     reason: Option<String>,
 ) -> Result<(), String> {
-    let socket = resolve_socket(&app)?;
+    let socket = resolve_socket(&app, &workspace)?;
     let result = call_once(
         &socket,
         Request::ChatClose {
@@ -341,12 +357,13 @@ pub async fn chat_close<R: Runtime>(
 #[tauri::command]
 pub async fn chat_decide<R: Runtime>(
     app: AppHandle<R>,
+    workspace: String,
     chat_session_id: Uuid,
     local_approval_id: String,
     decision: ApprovalDecision,
     runner: Option<String>,
 ) -> Result<(), String> {
-    let socket = resolve_socket(&app)?;
+    let socket = resolve_socket(&app, &workspace)?;
     call_once(
         &socket,
         Request::ChatDecide {
@@ -413,6 +430,7 @@ mod tests {
             runner: None,
             cwd: None,
             model: None,
+            mode: None,
             local_thread_id: None,
             local_session_id: None,
         }

@@ -110,7 +110,7 @@ Two properties of that flow are deliberate:
 - **Silent installs spawn nothing.** `msiexec /qn` (Group Policy, Intune, SCCM) skips the installer UI entirely, so the checkbox never runs. Unattended IT deploys are unaffected.
 - **Sign-in runs as the installing user, not SYSTEM.** The package is per-machine and its execute sequence runs elevated, but the ExitDialog runs unelevated — which matters, because `auth login` writes the CLI token and workspace binding into the current user's profile.
 
-For silent installs, or if you clear the checkbox, sign in from a terminal: bare `pidash` with no config drops straight into `auth login`, as does `pidash auth login`. (A discoverable Start Menu shortcut for this step is tracked as a follow-up.)
+For silent installs, or if you clear the checkbox, sign in from a terminal: bare `pidash` with no config drops straight into `auth login`, as does `pidash auth login`. The MSI also installs a **Start Menu → Pi Dash → "Sign in to Pi Dash"** shortcut that runs the same flow — the discoverable path for silent/Group-Policy deploys where the ExitDialog never appears.
 
 Windows release assets also include a `pidash-x86_64-pc-windows-msvc.zip` archive with `pidash.exe` for advanced/manual installs.
 
@@ -119,8 +119,9 @@ Then run the setup steps manually:
 ```bash
 # 1. Log in as your user. Opens a browser to approve a short code shown in
 #    the terminal — same idea as `gh auth login` or `stripe login`. Stores
-#    a CLI token at ~/.config/pidash/config.toml.
-pidash auth login --url https://pidash.example.com
+#    a CLI token at ~/.config/pidash/config.toml. (`pidash auth login` is
+#    the same command; `pidash auth status` / `logout` live under `auth`.)
+pidash login --url https://pidash.example.com
 
 # 2. Register this host as a runner. Uses the token from step 1 to mint
 #    runner credentials cloud-side; no enrollment-token paste needed. On
@@ -132,7 +133,7 @@ pidash runner add --project WEB
 pidash tui
 ```
 
-`pidash auth login` prompts to add a runner inline when no runner exists yet on the host — for the dev-laptop case, that single command is enough. Bare `pidash` with no subcommand also drops into the login flow when no config exists, so if you installed via the MSI or skipped auto-auth, you can re-trigger setup just by typing `pidash`.
+`pidash login` prompts to add a runner inline when no runner exists yet on the host — for the dev-laptop case, that single command is enough. Bare `pidash` with no subcommand also drops into the login flow when no config exists, so if you installed via the MSI or skipped auto-auth, you can re-trigger setup just by typing `pidash`.
 
 Useful follow-ups:
 

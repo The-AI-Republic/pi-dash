@@ -19,6 +19,12 @@ export interface LocalChatContact {
   name: string;
   /** Short capability tag rendered beside the name, e.g. "Local". */
   label?: string;
+  /**
+   * Why this contact cannot be chatted with right now, in the user's words.
+   * When set, the picker shows the entry but does not link to it — a chat
+   * that cannot send is worse than a visibly unavailable one.
+   */
+  unavailableReason?: string;
 }
 
 /** No local contacts in the cloud web app. Overridden in the desktop build. */

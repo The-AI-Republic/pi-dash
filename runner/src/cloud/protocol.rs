@@ -6,7 +6,7 @@ use uuid::Uuid;
 // These wire enums moved to the shared `pidash-ipc` crate (PDASHOSS01-158);
 // re-exported here so every `cloud::protocol::{RunnerStatus, ApprovalKind,
 // ApprovalDecision}` call site is unchanged.
-pub use pidash_ipc::dto::{ApprovalDecision, ApprovalKind, RunnerStatus};
+pub use pidash_ipc::dto::{ApprovalDecision, ApprovalKind, ApprovalMode, RunnerStatus};
 
 /// Wire version — bump on incompatible shape changes.
 ///
@@ -83,12 +83,10 @@ pub struct RunEventRecord {
     pub payload: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenUsage {
-    pub input: u64,
-    pub output: u64,
-    pub total: u64,
-}
+// Same shape as the daemon's observability snapshot — including the
+// cache / reasoning breakdown and the verbatim `raw` usage object — so the
+// terminal run frames carry everything the agent reported (PDASHOSS01-188).
+pub use pidash_ipc::dto::TokenUsage;
 
 /// Messages the runner sends to the cloud.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +132,16 @@ pub enum ClientMsg {
     RunStarted {
         run_id: Uuid,
         thread_id: String,
+        // Durably recorded into ``AgentRun.agent_metadata`` at run start
+        // (unlike ``thread_id``, which is a resume handle cleared on retry).
+        // ``local_session_id`` mirrors the chat bridge's warm-path alias of
+        // the thread id; ``agent_kind`` labels which CLI produced the run so a
+        // consumer can interpret the session/thread ids. Older cloud builds
+        // simply ignore the extra keys.
+        #[serde(default)]
+        local_session_id: String,
+        #[serde(default)]
+        agent_kind: String,
         started_at: DateTime<Utc>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,

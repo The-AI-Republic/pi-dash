@@ -405,7 +405,7 @@ def test_session_framing_renders_tick_guidance_and_schedule():
     assert "(5 remaining)" in out
     # The lifecycle section carries the budget line and the pool rules.
     assert "Runs used on this issue: **5 of 10** (5 remaining)" in out
-    assert "about every 12 hours" in out
+    assert "about every 3 hours" in out
 
 
 @pytest.mark.unit
@@ -451,6 +451,24 @@ def test_cli_docs_put_re_tick_out_of_the_agents_hands():
     out = compose("coding-task", workspace=None, project=None, user=None, context=_ctx("coding-task")).text
     assert "`pidash issue re-tick`" in out
     assert "refuses a re-tick that comes from inside an agent run" in out
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["coding-task", "review", "test"])
+def test_cli_docs_teach_relation_commands(kind):
+    # PDASHOSS01-199: the agent can record and read dependencies itself.
+    out = compose(kind, workspace=None, project=None, user=None, context=_ctx(kind)).text
+    assert "`pidash issue relate <identifier> --blocked-by <ID>[,<ID>...]`" in out
+    assert "`pidash issue unrelate <identifier>" in out
+    assert "`pidash issue relations <identifier>`" in out
+
+
+@pytest.mark.unit
+def test_split_guidance_records_order_as_blocked_by():
+    out = compose("coding-task", workspace=None, project=None, user=None, context=_ctx("coding-task")).text
+    split = out[out.index("**Propose a split**") :]
+    split = split[: split.index("7. **Writing to the human")]
+    assert "pidash issue relate <later-child> --blocked-by <earlier-child>" in split
 
 
 @pytest.mark.unit
@@ -514,7 +532,7 @@ def test_session_framing_omits_trigger_block_for_scheduler():
 # Ancestor-chain required reading + parent-readiness (PDASHOSS01-97)
 # ----------------------------------------------------------------------
 
-REQUIRED_READING_DIRECTIVE = "The ancestor chain is required reading before you implement."
+REQUIRED_READING_DIRECTIVE = "Required reading before you implement:"
 
 
 def _coding_ctx_chain(depth: int) -> dict:
@@ -608,3 +626,195 @@ def test_coding_task_parent_no_branch_routes_through_readiness_not_autofallback(
     assert "Do not treat this as an automatic fall-back to the project base" in body
     # The dependency case routes into the existing blocking flow by reference.
     assert 'Treat it as a blocker — follow "Blocking the run" instead of creating a branch' in body
+
+
+# ----------------------------------------------------------------------
+# Work item relationships section (PDASHOSS01-160): one independent section
+# carrying ancestors, children, and relates_to siblings together.
+# ----------------------------------------------------------------------
+
+RELATIONSHIPS_HEADING = "## Work item relationships"
+
+
+def _relationships_ctx(*, parent=True, children=0, related=0) -> dict:
+    """A coding-task context with the relationship groups dialled independently.
+
+    Starts from the parentless minimal sample (so ``parent``/``lineage`` are
+    None and both list groups start empty), then adds back exactly the groups
+    the test wants.
+    """
+    ctx = copy.deepcopy(sample_contexts("coding-task")[1])
+    assert ctx["parent"] is None and ctx["children"] == [] and ctx["related"] == []
+    if parent:
+        populated = sample_contexts("coding-task")[0]
+        ctx["parent"] = copy.deepcopy(populated["parent"])
+        ctx["lineage"] = None  # direct parent only
+    ctx["children"] = [
+        {"identifier": f"SAMPLE-c{i}", "title": f"Child {i}", "state": "Backlog"}
+        for i in range(children)
+    ]
+    ctx["related"] = [
+        {"identifier": f"SAMPLE-r{i}", "title": f"Related {i}", "state": "Cancelled"}
+        for i in range(related)
+    ]
+    return ctx
+
+
+@pytest.mark.unit
+def test_relationships_section_absent_when_nothing_connected():
+    """No parent, no children, no relations → no section at all: no heading,
+    no dangling required-reading directive."""
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING not in body
+    assert REQUIRED_READING_DIRECTIVE not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_renders_children_group():
+    """A child-only issue (no parent, no relations) renders just the children
+    group under the single relationships section."""
+    ctx = _relationships_ctx(parent=False, children=2, related=0)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING in body
+    assert "Children (down):" in body
+    assert "SAMPLE-c0: Child 0 (Backlog)" in body
+    assert "SAMPLE-c1: Child 1 (Backlog)" in body
+    assert REQUIRED_READING_DIRECTIVE in body
+    # Groups degrade independently: no parent / related content leaks in.
+    assert "Ancestors (up):" not in body
+    assert "Related work items (across):" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_renders_related_group():
+    """A relates_to-only issue renders just the related group."""
+    ctx = _relationships_ctx(parent=False, children=0, related=1)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING in body
+    assert "Related work items (across):" in body
+    assert "SAMPLE-r0: Related 0 (Cancelled)" in body
+    assert "Children (down):" not in body
+    assert "Ancestors (up):" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_renders_all_three_groups_together():
+    """Ancestors, children, and related render in one contiguous section with a
+    single required-reading directive."""
+    ctx = _relationships_ctx(parent=True, children=1, related=1)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert body.count(RELATIONSHIPS_HEADING) == 1
+    assert "Ancestors (up):" in body
+    assert "Children (down):" in body
+    assert "Related work items (across):" in body
+    # Parent keeps its inline description + comment-count hint.
+    assert "Parent description." in body
+    assert "run `pidash comment list SAMPLE-0` to read them." in body
+    # Exactly one required-reading directive, not one per group.
+    assert body.count(REQUIRED_READING_DIRECTIVE) == 1
+
+
+@pytest.mark.unit
+def test_relationships_section_lineage_only_when_grandparent():
+    """The lineage chain renders only when a grandparent+ exists; a direct-parent
+    issue shows the parent line but no lineage chain."""
+    ctx = _relationships_ctx(parent=True, children=0, related=0)
+    ctx["lineage"] = None
+    body2 = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+    assert "Lineage (current → root):" not in body2
+
+    ctx["lineage"] = [
+        {"identifier": "SAMPLE-1", "title": "Current"},
+        {"identifier": "SAMPLE-0", "title": "Parent issue"},
+        {"identifier": "SAMPLE-root", "title": "Root issue"},
+    ]
+    body3 = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+    assert "Lineage (current → root):" in body3
+    assert "SAMPLE-root" in body3
+
+
+# ----------------------------------------------------------------------
+# Directional relations in the relationships section (PDASHOSS01-196).
+# ----------------------------------------------------------------------
+
+
+def _blocker(identifier="SAMPLE-b0", state="In Progress", state_group="started"):
+    return {"identifier": identifier, "title": f"Blocker {identifier}", "state": state, "state_group": state_group}
+
+
+@pytest.mark.unit
+def test_relationships_section_renders_open_blocker_with_warning():
+    """One open blocked_by → "Blocked by" group, a warning naming it, and the
+    decision guidance; the section renders even with no parent/children/related."""
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    ctx["blocked_by"] = [_blocker()]
+    ctx["open_blockers"] = ["SAMPLE-b0"]
+    ctx["has_open_blockers"] = True
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING in body
+    assert "Blocked by (must be done first):" in body
+    assert "- SAMPLE-b0: Blocker SAMPLE-b0 (In Progress)" in body
+    assert "- Warning: SAMPLE-b0 is still open" in body
+    assert "Open blockers (SAMPLE-b0) are information, not a hard stop" in body
+    assert "`Waiting on: <IDs>`" in body
+    assert REQUIRED_READING_DIRECTIVE in body
+    assert "Blocking (waiting on this item):" not in body
+    assert "Other relations:" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_closed_blockers_have_no_warning():
+    """Blockers that are all done list the group but no warning / guidance."""
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    ctx["blocked_by"] = [_blocker(state="Done", state_group="completed")]
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert "Blocked by (must be done first):" in body
+    assert "- SAMPLE-b0: Blocker SAMPLE-b0 (Done)" in body
+    assert "Warning:" not in body
+    assert "Open blockers (" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_omits_blocked_by_group_when_none():
+    ctx = _relationships_ctx(parent=True, children=0, related=0)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING in body
+    assert "Blocked by (must be done first):" not in body
+    assert "Blocking (waiting on this item):" not in body
+    assert "Other relations:" not in body
+    assert "Open blockers (" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_renders_blocking_and_other_relations():
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    ctx["blocking"] = [_blocker("SAMPLE-d0", state="Todo", state_group="unstarted")]
+    other = _blocker("SAMPLE-o0", state="Backlog", state_group="backlog")
+    ctx["other_relations"] = [{**other, "relation": "Implements"}]
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING in body
+    assert "Blocking (waiting on this item):" in body
+    assert "- SAMPLE-d0: Blocker SAMPLE-d0 (Todo)" in body
+    assert "Other relations:" in body
+    assert "- Implements SAMPLE-o0: Blocker SAMPLE-o0 (Backlog)" in body
+    assert "Blocked by (must be done first):" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_warning_pluralizes():
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    ctx["blocked_by"] = [_blocker("SAMPLE-b0"), _blocker("SAMPLE-b1")]
+    ctx["open_blockers"] = ["SAMPLE-b0", "SAMPLE-b1"]
+    ctx["has_open_blockers"] = True
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert "- Warning: SAMPLE-b0, SAMPLE-b1 are still open" in body

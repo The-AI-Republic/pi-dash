@@ -44,6 +44,28 @@ pub enum ApprovalDecision {
     AcceptForSession,
 }
 
+/// The approval *mode* a local chat session runs under — the spectrum the
+/// built-in engine supports, chosen by the user per chat. Carried on
+/// `Request::ChatWarm` / `Request::ChatSend`; the runner derives the engine's
+/// per-thread `sandbox` / `approval_policy` from it and mediates the requests
+/// the engine surfaces. Distinct vocabulary from the runner's static
+/// [`ApprovalRecord`]/policy: a mode is the user's coarse choice, the policy
+/// is the allow/deny floor applied within it.
+///
+/// `FullAccess` is the default so an absent field preserves today's posture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalMode {
+    /// Ask before anything the policy does not auto-decide.
+    Ask,
+    /// Ask only for actions outside the working copy; in-workspace edits run.
+    Workspace,
+    /// Full access — no user prompts (the denylist floor still refuses).
+    /// Matches the historical hardcoded posture, so it stays the default.
+    #[default]
+    FullAccess,
+}
+
 // ---------------------------------------------------------------------------
 // history::index
 // ---------------------------------------------------------------------------
@@ -106,13 +128,29 @@ pub enum ApprovalStatus {
 // ---------------------------------------------------------------------------
 
 /// Streaming token usage parsed opportunistically from a Codex
-/// `codex/event/token_count` Raw frame. Claude does not emit equivalent
-/// streaming counts during a run, so this is left `None` for Claude.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// `thread/tokenUsage/updated` (or legacy `codex/event/token_count`) Raw
+/// frame. Claude does not emit equivalent streaming counts during a run, so
+/// this is left `None` for Claude — its usage rides on the `RunCompleted`
+/// done payload instead.
+///
+/// Canonical keys (PDASHOSS01-188): `input` counts every prompt token,
+/// cached or not, so `total == input + output` across providers;
+/// `cache_read` / `cache_write` break `input` down and `reasoning` breaks
+/// `output` down. `raw` carries the usage object exactly as the agent
+/// reported it, so a counter we don't model yet still reaches the cloud.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input: u64,
     pub output: u64,
     pub total: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------

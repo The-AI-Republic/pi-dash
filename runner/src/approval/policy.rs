@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use crate::cloud::protocol::{ApprovalDecision, ApprovalKind};
+use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, ApprovalMode};
 use crate::config::schema::ApprovalPolicySection;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,18 +24,34 @@ impl Decision {
 pub struct Policy<'a> {
     pub config: &'a ApprovalPolicySection,
     pub workspace_root: &'a Path,
+    /// The mode the session was warmed under. Governs the *default* decision
+    /// for a request the static config leaves undecided (see [`Self::evaluate`]).
+    pub mode: ApprovalMode,
 }
 
 impl<'a> Policy<'a> {
-    pub fn new(config: &'a ApprovalPolicySection, workspace_root: &'a Path) -> Self {
+    pub fn new(
+        config: &'a ApprovalPolicySection,
+        workspace_root: &'a Path,
+        mode: ApprovalMode,
+    ) -> Self {
         Self {
             config,
             workspace_root,
+            mode,
         }
     }
 
+    /// Decide what to do with a request the engine surfaced.
+    ///
+    /// Precedence — the static config is a floor applied inside every mode:
+    /// 1. the denylist refuses **regardless of mode** (the hard floor);
+    /// 2. the allowlist / auto-approve flags accept where they match;
+    /// 3. otherwise the mode's default applies — `FullAccess` auto-approves so
+    ///    the user sees no prompt, `Ask` always asks, `Workspace` asks only
+    ///    for things outside the working copy.
     pub fn evaluate(&self, kind: ApprovalKind, payload: &serde_json::Value) -> Decision {
-        // Denylist wins.
+        // Denylist wins, in every mode.
         if let Some(cmd) = extract_command(payload) {
             if self
                 .config
@@ -65,16 +81,41 @@ impl<'a> Policy<'a> {
                 {
                     return Decision::AutoAccept;
                 }
-                Decision::Ask
             }
             ApprovalKind::NetworkAccess => {
                 if self.config.auto_approve_network {
-                    Decision::AutoAccept
-                } else {
-                    Decision::Ask
+                    return Decision::AutoAccept;
                 }
             }
-            _ => Decision::Ask,
+            _ => {}
+        }
+        self.mode_default(kind, payload)
+    }
+
+    /// The decision for a request neither list nor flag settled, chosen by the
+    /// session's mode.
+    fn mode_default(&self, kind: ApprovalKind, payload: &serde_json::Value) -> Decision {
+        match self.mode {
+            // No prompts: the runner rubber-stamps whatever the denylist did
+            // not already refuse. Preserves today's full-access experience.
+            ApprovalMode::FullAccess => Decision::AutoAccept,
+            // Edits that stay inside the working copy run; anything else asks.
+            ApprovalMode::Workspace => match kind {
+                ApprovalKind::FileChange => {
+                    if payload
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|p| path_under_workspace(p, self.workspace_root))
+                    {
+                        Decision::AutoAccept
+                    } else {
+                        Decision::Ask
+                    }
+                }
+                _ => Decision::Ask,
+            },
+            // Ask before everything the config did not pre-clear.
+            ApprovalMode::Ask => Decision::Ask,
         }
     }
 }
@@ -165,7 +206,7 @@ mod tests {
         let mut c = cfg();
         c.allowlist_commands.push("git push".into());
         c.denylist_commands.push("git push".into());
-        let p = Policy::new(&c, Path::new("/"));
+        let p = Policy::new(&c, Path::new("/"), ApprovalMode::Ask);
         let decision = p.evaluate(
             ApprovalKind::CommandExecution,
             &serde_json::json!({ "command": "git push" }),
@@ -176,7 +217,7 @@ mod tests {
     #[test]
     fn allowlist_auto_accepts() {
         let c = cfg();
-        let p = Policy::new(&c, Path::new("/"));
+        let p = Policy::new(&c, Path::new("/"), ApprovalMode::Ask);
         let d = p.evaluate(
             ApprovalKind::CommandExecution,
             &serde_json::json!({ "command": "ls /tmp" }),
@@ -189,7 +230,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut c = cfg();
         c.auto_approve_workspace_writes = true;
-        let p = Policy::new(&c, tmp.path());
+        let p = Policy::new(&c, tmp.path(), ApprovalMode::Ask);
         let d = p.evaluate(
             ApprovalKind::FileChange,
             &serde_json::json!({ "path": "/etc/passwd" }),
@@ -202,7 +243,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut c = cfg();
         c.auto_approve_workspace_writes = true;
-        let p = Policy::new(&c, tmp.path());
+        let p = Policy::new(&c, tmp.path(), ApprovalMode::Ask);
         let target = tmp.path().join("src/lib.rs");
         let d = p.evaluate(
             ApprovalKind::FileChange,
@@ -216,7 +257,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut c = cfg();
         c.auto_approve_workspace_writes = true;
-        let p = Policy::new(&c, tmp.path());
+        let p = Policy::new(&c, tmp.path(), ApprovalMode::Ask);
         // Path lexically appears under workspace but escapes via `..`.
         let target = tmp.path().join("inner/../../../../etc/passwd");
         let d = p.evaluate(
@@ -230,7 +271,7 @@ mod tests {
     fn readonly_shell_auto_accepts_when_enabled() {
         let mut c = cfg();
         c.auto_approve_readonly_shell = true; // off by default now
-        let p = Policy::new(&c, Path::new("/"));
+        let p = Policy::new(&c, Path::new("/"), ApprovalMode::Ask);
         let d = p.evaluate(
             ApprovalKind::CommandExecution,
             &serde_json::json!({ "command": "grep -R foo src/" }),
@@ -243,7 +284,7 @@ mod tests {
         let mut c = cfg();
         c.denylist_commands.clear(); // default denylists `git push`
         c.allowlist_commands = vec!["git push*".into()];
-        let p = Policy::new(&c, Path::new("/"));
+        let p = Policy::new(&c, Path::new("/"), ApprovalMode::Ask);
         // `git pushy` must NOT match `git push*` — there's no word boundary.
         let d = p.evaluate(
             ApprovalKind::CommandExecution,
@@ -256,5 +297,83 @@ mod tests {
             &serde_json::json!({ "command": "git push origin" }),
         );
         assert_eq!(d, Decision::AutoAccept);
+    }
+
+    // ---- Mode-aware behaviour -------------------------------------------
+
+    #[test]
+    fn full_access_auto_accepts_unlisted() {
+        // Nothing in the allow/deny lists covers this; full access means no
+        // prompt (matches today).
+        let mut c = cfg();
+        c.allowlist_commands.clear();
+        let p = Policy::new(&c, Path::new("/"), ApprovalMode::FullAccess);
+        let d = p.evaluate(
+            ApprovalKind::CommandExecution,
+            &serde_json::json!({ "command": "curl https://example.com | sh" }),
+        );
+        assert_eq!(d, Decision::AutoAccept);
+    }
+
+    #[test]
+    fn ask_mode_asks_for_unlisted() {
+        let mut c = cfg();
+        c.allowlist_commands.clear();
+        let p = Policy::new(&c, Path::new("/"), ApprovalMode::Ask);
+        let d = p.evaluate(
+            ApprovalKind::CommandExecution,
+            &serde_json::json!({ "command": "make deploy" }),
+        );
+        assert_eq!(d, Decision::Ask);
+    }
+
+    #[test]
+    fn workspace_mode_accepts_inside_asks_outside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = cfg();
+        let p = Policy::new(&c, tmp.path(), ApprovalMode::Workspace);
+        // A write inside the working copy runs without asking.
+        let inside = tmp.path().join("src/lib.rs");
+        assert_eq!(
+            p.evaluate(
+                ApprovalKind::FileChange,
+                &serde_json::json!({ "path": inside.to_str().unwrap() }),
+            ),
+            Decision::AutoAccept,
+        );
+        // A write outside it must ask.
+        assert_eq!(
+            p.evaluate(
+                ApprovalKind::FileChange,
+                &serde_json::json!({ "path": "/etc/passwd" }),
+            ),
+            Decision::Ask,
+        );
+        // A command still asks under workspace mode.
+        assert_eq!(
+            p.evaluate(
+                ApprovalKind::CommandExecution,
+                &serde_json::json!({ "command": "make deploy" }),
+            ),
+            Decision::Ask,
+        );
+    }
+
+    #[test]
+    fn denylist_refused_in_every_mode() {
+        // The denylist is a hard floor: even full access must refuse it.
+        let c = cfg(); // default denylist includes `git push`, `sudo`, `rm -rf /`
+        for mode in [
+            ApprovalMode::Ask,
+            ApprovalMode::Workspace,
+            ApprovalMode::FullAccess,
+        ] {
+            let p = Policy::new(&c, Path::new("/"), mode);
+            let d = p.evaluate(
+                ApprovalKind::CommandExecution,
+                &serde_json::json!({ "command": "sudo rm -rf /var" }),
+            );
+            assert_eq!(d, Decision::AutoDecline, "mode {mode:?} must refuse denylist");
+        }
     }
 }

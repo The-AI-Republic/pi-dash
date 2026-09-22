@@ -50,8 +50,9 @@ import type {
   IRunner,
   TAgentChatMessageRole,
   TApprovalDecision,
+  TApprovalMode,
 } from "@pi-dash/types";
-import { getAgentAccount, isDesktop } from "@/services/agent-runtime";
+import { ensureChatRuntime, getAgentAccount, isDesktop } from "@/services/agent-runtime";
 
 /** Synthetic runner id for the bundled built-in engine (see the picker seam). */
 export const BUILTIN_RUNNER_ID = "pidash-builtin";
@@ -179,6 +180,19 @@ export interface TauriBridge {
   listen<T>(event: string, handler: (payload: T) => void): Promise<() => void>;
   /** The signed-in account id that scopes local history. */
   getAccount(): string;
+  /**
+   * Make the bundled daemon ready to serve this chat: enrol the machine if
+   * needed, write the engine config and model credential, and start the
+   * daemon. Without it a chat opened straight after sign-in has nothing to
+   * talk to, and the send fails at "connecting to managed daemon".
+   */
+  ensureRuntime(): Promise<void>;
+  /**
+   * Workspace slug. The daemon runs per workspace and binds its control
+   * socket under that workspace's data dir, so every chat command carries the
+   * slug — without it the host resolves a socket nothing is listening on.
+   */
+  workspaceSlug(): string;
 }
 
 /**
@@ -316,8 +330,31 @@ function storedEventToMessage(e: StoredEvent): IAgentChatMessage {
  * message lists come from the slice-3 local SQLite store; live turns stream
  * through the slice-2 Tauri command + event surface.
  */
+/** The engine's historical posture, used when no mode has been chosen. */
+export const DEFAULT_APPROVAL_MODE: TApprovalMode = "full_access";
+
 export class LocalChatTransport implements ChatTransport {
   constructor(private readonly bridge: TauriBridge) {}
+
+  /**
+   * Per-session approval mode. The runner captures the mode when it spawns the
+   * session's engine thread and holds it for that thread's life, so the value
+   * sent on each `chat_warm` / `chat_send` only takes effect for a session that
+   * has not yet been warmed — changing it affects the next thread, never a turn
+   * already in flight. In-memory, additive local-only state (like
+   * `decideChatApproval`); the shared `ChatTransport` interface is untouched.
+   */
+  private readonly approvalModes = new Map<string, TApprovalMode>();
+
+  /** Set the approval mode for a session's next thread. Local-only verb. */
+  setApprovalMode(sessionId: string, mode: TApprovalMode): void {
+    this.approvalModes.set(sessionId, mode);
+  }
+
+  /** The mode a session will warm under, defaulting to full access. */
+  getApprovalMode(sessionId: string): TApprovalMode {
+    return this.approvalModes.get(sessionId) ?? DEFAULT_APPROVAL_MODE;
+  }
 
   // No `runner` selector is sent with any chat request. The daemon's selector
   // is a *runner name* from its own config (`resolve_runner`, runner/src/ipc/
@@ -384,13 +421,18 @@ export class LocalChatTransport implements ChatTransport {
       account,
       sessionId,
     });
+    // The daemon owns the engine, so it has to be up before the turn is
+    // submitted. Idempotent once it is.
+    await this.bridge.ensureRuntime();
     // Streaming happens over `chat://frame`; the command returns once the turn
     // has been submitted.
     await this.bridge.invoke<void>("chat_send", {
+      workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
       messageId: crypto.randomUUID(),
       content,
       cwd: session?.working_dir,
+      mode: this.getApprovalMode(sessionId),
       localThreadId: session?.engine_thread_id ?? undefined,
     });
     return storedEventToMessage(stored);
@@ -402,21 +444,22 @@ export class LocalChatTransport implements ChatTransport {
       account,
       sessionId,
     });
+    await this.bridge.ensureRuntime();
     await this.bridge.invoke<void>("chat_warm", {
+      workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
       cwd: session?.working_dir,
+      mode: this.getApprovalMode(sessionId),
       localThreadId: session?.engine_thread_id ?? undefined,
     });
     return { ok: true };
   }
 
   async cancelChat(sessionId: string, reason?: string): Promise<{ ok: boolean }> {
-    const account = this.account();
-    const session = await this.bridge.invoke<StoredSession | null>("chat_get_session", {
-      account,
-      sessionId,
-    });
+    // No session lookup: cancel carries only the session id now that the
+    // runner selector is gone, and the daemon resolves its own runner.
     await this.bridge.invoke<void>("chat_cancel", {
+      workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
       reason,
     });
@@ -430,6 +473,7 @@ export class LocalChatTransport implements ChatTransport {
       sessionId,
     });
     await this.bridge.invoke<void>("chat_close", {
+      workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
     });
     // Slice-3 has no closed state; return the session as-is so the UI keeps the
@@ -446,12 +490,8 @@ export class LocalChatTransport implements ChatTransport {
    * this is an additive local-only verb the desktop approval UI calls.
    */
   async decideChatApproval(sessionId: string, localApprovalId: string, decision: TApprovalDecision): Promise<void> {
-    const account = this.account();
-    const session = await this.bridge.invoke<StoredSession | null>("chat_get_session", {
-      account,
-      sessionId,
-    });
     await this.bridge.invoke<void>("chat_decide", {
+      workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
       localApprovalId,
       decision,
@@ -563,7 +603,22 @@ function tauriBridge(): TauriBridge {
     invoke: (command, args) => tauri.core.invoke(command, args),
     listen: (event, handler) => tauri.event.listen(event, (e) => handler(e.payload)),
     getAccount: () => getAgentAccount(),
+    // The workspace slug is the first path segment of every in-app route
+    // (`/:workspaceSlug/...`); the chat page has no other handle on it, and
+    // enrolment is keyed by slug rather than by the workspace id the chat
+    // session stores.
+    ensureRuntime: () => ensureChatRuntime(workspaceSlugFromLocation()),
+    workspaceSlug: workspaceSlugFromLocation,
   };
+}
+
+/**
+ * The workspace slug is the first path segment of every in-app route
+ * (`/:workspaceSlug/...`). The chat session stores the workspace *id*, which
+ * is not what the daemon's per-workspace tree is keyed by.
+ */
+function workspaceSlugFromLocation(): string {
+  return decodeURIComponent(window.location.pathname.split("/")[1] ?? "");
 }
 
 /** A synthetic runner so the shared chat page renders the built-in engine. */
