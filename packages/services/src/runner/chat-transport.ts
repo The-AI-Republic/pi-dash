@@ -51,6 +51,7 @@
 
 import type { IAgentChatEvent, IAgentChatMessage, IAgentChatSession } from "@pi-dash/types";
 
+import { createApiEventSource } from "../desktop-event-source";
 import { RunnerService } from "./runner.service";
 
 /**
@@ -162,9 +163,9 @@ class CloudChatTransport implements ChatTransport {
     onEvent: ChatEventHandler,
     onError?: ChatEventErrorHandler
   ): ChatEventUnsubscribe {
-    // Same-origin SSE with credentials, matching the previous
-    // `useAgentChatEvents` implementation exactly.
-    const source = new EventSource(this.service.chatEventsUrl(sessionId, after), {
+    // SSE with credentials, matching the previous `useAgentChatEvents`
+    // implementation; desktop builds stream through the native transport.
+    const source = createApiEventSource(this.service.chatEventsUrl(sessionId, after), {
       withCredentials: true,
     });
     source.addEventListener("chat.event", (message) => {

@@ -283,14 +283,6 @@ PER_PAGE_PARAMETER = OpenApiParameter(
     ],
 )
 
-PARENT_PARAMETER = OpenApiParameter(
-    name="parent",
-    type=OpenApiTypes.UUID,
-    location=OpenApiParameter.QUERY,
-    description="List only the children of this parent work item (its UUID).",
-    required=False,
-)
-
 # External Integration Parameters
 EXTERNAL_ID_PARAMETER = OpenApiParameter(
     name="external_id",
@@ -502,6 +494,77 @@ EXPAND_PARAMETER = OpenApiParameter(
             description="Include details for multiple relations",
         ),
     ],
+)
+
+# Work item list filters. Values within one parameter are comma-separated and
+# OR together; different parameters AND together.
+WORK_ITEM_STATE_FILTER_PARAMETER = OpenApiParameter(
+    name="state",
+    type=OpenApiTypes.STR,
+    location=OpenApiParameter.QUERY,
+    description=(
+        "Filter by state. Comma-separated state UUIDs and/or state names "
+        "(case-insensitive exact match within the project). An unknown name returns 400 "
+        "listing the valid state names."
+    ),
+    required=False,
+    examples=[
+        OpenApiExample(name="By name", value="Backlog,Todo"),
+        OpenApiExample(name="By id", value="550e8400-e29b-41d4-a716-446655440000"),
+    ],
+)
+
+WORK_ITEM_STATE_GROUP_FILTER_PARAMETER = OpenApiParameter(
+    name="state_group",
+    type=OpenApiTypes.STR,
+    location=OpenApiParameter.QUERY,
+    description=(
+        "Filter by state group. Comma-separated values from: "
+        "backlog, unstarted, started, review, test, completed, cancelled."
+    ),
+    required=False,
+    examples=[OpenApiExample(name="Open work", value="unstarted,started")],
+)
+
+WORK_ITEM_PARENT_FILTER_PARAMETER = OpenApiParameter(
+    name="parent",
+    type=OpenApiTypes.STR,
+    location=OpenApiParameter.QUERY,
+    description=(
+        "Filter by parent work item. Comma-separated parent UUIDs and/or identifiers "
+        "(e.g. PROJ-123). Pass `null` to return only top-level work items."
+    ),
+    required=False,
+    examples=[
+        OpenApiExample(name="Children of an epic", value="PROJ-123"),
+        OpenApiExample(name="Top-level only", value="null"),
+    ],
+)
+
+WORK_ITEM_LABELS_FILTER_PARAMETER = OpenApiParameter(
+    name="labels",
+    type=OpenApiTypes.STR,
+    location=OpenApiParameter.QUERY,
+    description="Filter by label. Comma-separated label UUIDs and/or label names (case-insensitive).",
+    required=False,
+    examples=[OpenApiExample(name="By name", value="bug,frontend")],
+)
+
+WORK_ITEM_PRIORITY_FILTER_PARAMETER = OpenApiParameter(
+    name="priority",
+    type=OpenApiTypes.STR,
+    location=OpenApiParameter.QUERY,
+    description="Filter by priority. Comma-separated values from: urgent, high, medium, low, none.",
+    required=False,
+    examples=[OpenApiExample(name="Hot", value="urgent,high")],
+)
+
+WORK_ITEM_ASSIGNEES_FILTER_PARAMETER = OpenApiParameter(
+    name="assignees",
+    type=OpenApiTypes.STR,
+    location=OpenApiParameter.QUERY,
+    description="Filter by assignee. Comma-separated user UUIDs.",
+    required=False,
 )
 
 ESTIMATE_ID_PARAMETER = OpenApiParameter(

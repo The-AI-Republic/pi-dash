@@ -93,6 +93,7 @@ class RunnerLiveStateSerializer(serializers.ModelSerializer):
             "input_tokens",
             "output_tokens",
             "total_tokens",
+            "usage",
             "llm_model",
             "turn_count",
             "updated_at",
@@ -302,6 +303,7 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "input_tokens",
             "output_tokens",
             "total_tokens",
+            "usage",
             "tool_plan",
             "tool_calls",
         ]

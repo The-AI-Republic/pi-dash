@@ -128,13 +128,29 @@ pub enum ApprovalStatus {
 // ---------------------------------------------------------------------------
 
 /// Streaming token usage parsed opportunistically from a Codex
-/// `codex/event/token_count` Raw frame. Claude does not emit equivalent
-/// streaming counts during a run, so this is left `None` for Claude.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// `thread/tokenUsage/updated` (or legacy `codex/event/token_count`) Raw
+/// frame. Claude does not emit equivalent streaming counts during a run, so
+/// this is left `None` for Claude — its usage rides on the `RunCompleted`
+/// done payload instead.
+///
+/// Canonical keys (PDASHOSS01-188): `input` counts every prompt token,
+/// cached or not, so `total == input + output` across providers;
+/// `cache_read` / `cache_write` break `input` down and `reasoning` breaks
+/// `output` down. `raw` carries the usage object exactly as the agent
+/// reported it, so a counter we don't model yet still reaches the cloud.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input: u64,
     pub output: u64,
     pub total: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------

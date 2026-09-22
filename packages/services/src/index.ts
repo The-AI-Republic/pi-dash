@@ -5,6 +5,9 @@
  */
 
 export { APIService } from "./api.service";
+export { getDesktopApiAdapter } from "./desktop-api-adapter";
+export { createApiEventSource } from "./desktop-event-source";
+export type { ApiEventSource } from "./desktop-event-source";
 export * from "./ai";
 export * from "./assistant";
 export * from "./auto-pm";

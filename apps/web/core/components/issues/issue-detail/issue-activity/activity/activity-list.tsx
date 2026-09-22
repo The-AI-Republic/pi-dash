@@ -31,6 +31,7 @@ import {
   IssueLinkActivity,
   IssueAttachmentActivity,
   IssueArchivedAtActivity,
+  IssueAgentWakeActivity,
   IssueInboxActivity,
 } from "./actions";
 
@@ -44,7 +45,6 @@ export const IssueActivityItem = observer(function IssueActivityItem(props: TIss
   // hooks
   const {
     activity: { getActivityById },
-    comment: {},
   } = useIssueDetail();
   const ISSUE_RELATION_OPTIONS = useTimeLineRelationOptions();
   const activityRelations = getValidKeysFromObject(ISSUE_RELATION_OPTIONS);
@@ -89,6 +89,8 @@ export const IssueActivityItem = observer(function IssueActivityItem(props: TIss
       return <IssueAttachmentActivity {...componentDefaultProps} showIssue={false} />;
     case "archived_at":
       return <IssueArchivedAtActivity {...componentDefaultProps} />;
+    case "agent_wake":
+      return <IssueAgentWakeActivity {...componentDefaultProps} />;
     case "intake":
     case "inbox":
       return <IssueInboxActivity {...componentDefaultProps} />;

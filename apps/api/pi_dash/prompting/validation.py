@@ -109,6 +109,23 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
             "related": [
                 {"identifier": "SAMPLE-9", "title": "Related issue", "state": "Cancelled"},
             ],
+            "blocked_by": [
+                {"identifier": "SAMPLE-3", "title": "Blocker issue", "state": "In Review", "state_group": "review"},
+            ],
+            "blocking": [
+                {"identifier": "SAMPLE-4", "title": "Dependent issue", "state": "Todo", "state_group": "unstarted"},
+            ],
+            "other_relations": [
+                {
+                    "identifier": "SAMPLE-5",
+                    "title": "Implementing issue",
+                    "state": "Backlog",
+                    "state_group": "backlog",
+                    "relation": "Implemented by",
+                },
+            ],
+            "open_blockers": ["SAMPLE-3"],
+            "has_open_blockers": True,
             "run": {
                 "id": "00000000-0000-0000-0000-000000000003",
                 "kind": kind,
@@ -173,6 +190,11 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
         "lineage": None,
         "children": [],
         "related": [],
+        "blocked_by": [],
+        "blocking": [],
+        "other_relations": [],
+        "open_blockers": [],
+        "has_open_blockers": False,
         "run": {
             "id": "00000000-0000-0000-0000-000000000003",
             "kind": kind,

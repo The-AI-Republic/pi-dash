@@ -27,6 +27,9 @@ from pi_dash.api.views import (
     IssueSearchEndpoint,
     IssueAdvancedSearchEndpoint,
     IssueRelationListCreateAPIEndpoint,
+    IssueRelationGroupedAPIEndpoint,
+    IssueRelationRelateAPIEndpoint,
+    IssueRelationUnrelateAPIEndpoint,
     IssueWorkpadAPIEndpoint,
 )
 
@@ -185,6 +188,21 @@ new_url_patterns = [
         "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/relations/",
         IssueRelationListCreateAPIEndpoint.as_view(http_method_names=["get", "post"]),
         name="work-item-relation-list",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/relations/grouped/",
+        IssueRelationGroupedAPIEndpoint.as_view(http_method_names=["get"]),
+        name="work-item-relation-grouped",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/relations/relate/",
+        IssueRelationRelateAPIEndpoint.as_view(http_method_names=["post"]),
+        name="work-item-relation-relate",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/relations/unrelate/",
+        IssueRelationUnrelateAPIEndpoint.as_view(http_method_names=["post"]),
+        name="work-item-relation-unrelate",
     ),
     path(
         "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/workpad/",

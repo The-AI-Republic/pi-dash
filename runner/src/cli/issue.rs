@@ -24,7 +24,10 @@ pub struct IssueArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum IssueCommand {
-    /// Fetch a work item by `PROJ-123` identifier. Prints the full payload as JSON.
+    /// Fetch a work item by `PROJ-123` identifier. Prints the full payload as
+    /// JSON, including the blocker summary: `relations_summary` (`blocked_by`
+    /// / `blocking` lists of `{identifier, state, state_group}`) and
+    /// `has_open_blockers`.
     Get {
         /// Project-scoped identifier, e.g. `ENG-42`.
         identifier: String,
@@ -35,7 +38,9 @@ pub enum IssueCommand {
     Create(CreateArgs),
     /// List work items in a project. Returns the server's paginated envelope
     /// (`{count, next_cursor, prev_cursor, results: [...]}`) — pass `--cursor`
-    /// from a prior page to walk pages.
+    /// from a prior page to walk pages. Narrow the list with `--state`,
+    /// `--state-group`, `--parent`, `--label`, `--priority`; `--fields`
+    /// trims each item.
     List(ListArgs),
     /// Update fields on a work item. Pass only the fields you want to change.
     Patch(PatchArgs),
@@ -71,6 +76,124 @@ pub enum IssueCommand {
         /// Project-scoped identifier, e.g. `ENG-42`.
         identifier: String,
     },
+    /// Record relations from a work item to others, e.g.
+    /// `pidash issue relate ENG-7 --blocked-by ENG-3,ENG-4`. Pass exactly one
+    /// relation flag; each takes a comma-separated list of identifiers (or
+    /// UUIDs). Idempotent: pairs that already carry the relation come back
+    /// under `unchanged`; pairs that already carry a *different* relation come
+    /// back under `conflicts` and are left as is (`unrelate` first to change
+    /// one). Prints `{issue, relation_type, created, unchanged, conflicts,
+    /// relations}`.
+    Relate(RelateArgs),
+    /// Remove relations, e.g. `pidash issue unrelate ENG-7 --blocked-by ENG-3`.
+    /// Only that exact relation is removed; pairs without it come back under
+    /// `not_related` (not an error). Prints `{issue, relation_type, removed,
+    /// not_related, relations}`.
+    Unrelate(RelateArgs),
+    /// List a work item's relations grouped by type from its side
+    /// (`blocked_by`, `blocking`, `relates_to`, …), each item `{id, identifier,
+    /// name, state, state_group}`. Prints `{issue, relations}`.
+    Relations {
+        /// Project-scoped identifier, e.g. `ENG-42`.
+        identifier: String,
+    },
+}
+
+/// Relation flags for `relate` / `unrelate`. Each names the relation from the
+/// first issue's side: `relate A --blocked-by B` means "A is blocked by B" and
+/// is the same edge as `relate B --blocking A`.
+#[derive(Debug, Args)]
+#[command(group(
+    clap::ArgGroup::new("relation")
+        .required(true)
+        .multiple(false)
+        .args([
+            "blocked_by", "blocking", "relates_to", "duplicate",
+            "start_before", "start_after", "finish_before", "finish_after",
+            "implemented_by", "implements",
+        ]),
+))]
+pub struct RelateArgs {
+    /// Project-scoped identifier, e.g. `ENG-42`.
+    pub identifier: String,
+
+    /// Issues this one cannot finish before (it waits on them).
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub blocked_by: Vec<String>,
+
+    /// Issues waiting on this one.
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub blocking: Vec<String>,
+
+    /// Loosely related issues (symmetric).
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub relates_to: Vec<String>,
+
+    /// Duplicates of this issue (symmetric).
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub duplicate: Vec<String>,
+
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub start_before: Vec<String>,
+
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub start_after: Vec<String>,
+
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub finish_before: Vec<String>,
+
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub finish_after: Vec<String>,
+
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub implemented_by: Vec<String>,
+
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub implements: Vec<String>,
+}
+
+impl RelateArgs {
+    /// The one relation flag given, as `(relation_type, [issue refs])` with
+    /// blank entries (`--blocked-by A,,B`) dropped.
+    pub fn relation(&self) -> Result<(&'static str, Vec<String>), CliError> {
+        let flags: [(&'static str, &Vec<String>); 10] = [
+            ("blocked_by", &self.blocked_by),
+            ("blocking", &self.blocking),
+            ("relates_to", &self.relates_to),
+            ("duplicate", &self.duplicate),
+            ("start_before", &self.start_before),
+            ("start_after", &self.start_after),
+            ("finish_before", &self.finish_before),
+            ("finish_after", &self.finish_after),
+            ("implemented_by", &self.implemented_by),
+            ("implements", &self.implements),
+        ];
+        let (relation_type, raw) =
+            flags
+                .into_iter()
+                .find(|(_, v)| !v.is_empty())
+                .ok_or_else(|| {
+                    CliError::new(
+                        EXIT_INVALID,
+                        "pass one relation flag, e.g. --blocked-by ENG-3",
+                    )
+                })?;
+        let refs: Vec<String> = raw
+            .iter()
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty())
+            .collect();
+        if refs.is_empty() {
+            return Err(CliError::new(
+                EXIT_INVALID,
+                format!(
+                    "--{} needs at least one issue",
+                    relation_type.replace('_', "-")
+                ),
+            ));
+        }
+        Ok((relation_type, refs))
+    }
 }
 
 #[derive(Debug, Args)]
@@ -101,7 +224,7 @@ pub struct CreateArgs {
     pub parent: Option<String>,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub struct ListArgs {
     /// Project identifier (slug like `ENG`) or project UUID.
     #[arg(long)]
@@ -119,11 +242,36 @@ pub struct ListArgs {
     #[arg(long)]
     pub order_by: Option<String>,
 
-    /// List only children of this parent — a `<PROJ>-<num>` identifier (or a
-    /// parent issue UUID). Lets a later run find the children an earlier run
-    /// created so it never files duplicates.
+    /// Only items in these states — comma-separated state names
+    /// (case-insensitive) and/or UUIDs. The server rejects an unknown name
+    /// and lists the valid ones.
+    #[arg(long)]
+    pub state: Option<String>,
+
+    /// Only items in these state groups — comma-separated from `backlog`,
+    /// `unstarted`, `started`, `review`, `test`, `completed`, `cancelled`.
+    #[arg(long)]
+    pub state_group: Option<String>,
+
+    /// Only sub-issues of this parent — `PROJ-123` identifier or UUID — or
+    /// `none` for top-level items only.
     #[arg(long)]
     pub parent: Option<String>,
+
+    /// Only items carrying any of these labels — comma-separated names
+    /// (case-insensitive) and/or UUIDs.
+    #[arg(long)]
+    pub label: Option<String>,
+
+    /// Only items with these priorities — comma-separated from
+    /// `urgent`, `high`, `medium`, `low`, `none`.
+    #[arg(long)]
+    pub priority: Option<String>,
+
+    /// Return only these fields per item, comma-separated, e.g.
+    /// `id,sequence_id,name,state,parent`.
+    #[arg(long)]
+    pub fields: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -231,6 +379,9 @@ pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
         IssueCommand::AttachPr(a) => cmd_attach_review(&client, a).await,
         IssueCommand::ReTick { identifier } => cmd_re_tick(&client, &identifier).await,
         IssueCommand::RunAi { identifier } => cmd_run_ai(&client, &identifier).await,
+        IssueCommand::Relate(a) => cmd_relate(&client, a, RelationOp::Relate).await,
+        IssueCommand::Unrelate(a) => cmd_relate(&client, a, RelationOp::Unrelate).await,
+        IssueCommand::Relations { identifier } => cmd_relations(&client, &identifier).await,
     };
     match result {
         Ok(()) => 0,
@@ -239,12 +390,21 @@ pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
 }
 
 async fn cmd_get(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
-    let issue = resolve_issue(client, identifier).await?;
+    let issue = get_issue(client, identifier).await?;
     println!(
         "{}",
-        serde_json::to_string(&issue.raw).expect("serialize JSON value")
+        serde_json::to_string(&issue).expect("serialize JSON value")
     );
     Ok(())
+}
+
+/// The JSON document `pidash issue get` prints. The server payload is passed
+/// through verbatim, so its blocker summary (`relations_summary`,
+/// `has_open_blockers`) reaches the agent exactly as the API and the run
+/// prompt describe it. Nothing is synthesized: an older server that doesn't
+/// send the block yields a payload without it.
+pub async fn get_issue(client: &ApiClient, identifier: &str) -> Result<Value, CliError> {
+    Ok(resolve_issue(client, identifier).await?.raw)
 }
 
 async fn cmd_create(
@@ -372,15 +532,46 @@ async fn resolve_create_project(
     ))
 }
 
-/// Assemble the ordered query params for `pidash issue list` from the parsed
-/// args and an already-resolved parent UUID.
-///
-/// Pulled out of `cmd_list` so the URL contract is testable without a network
-/// round-trip: the order is preserved by `build_query_string`, and `parent`
-/// carries the parent's UUID (resolved from a `<PROJ>-<num>` identifier by the
-/// caller) because the server filters children by UUID.
-fn build_list_params(args: &ListArgs, parent_uuid: Option<String>) -> Vec<(&'static str, String)> {
-    let mut params: Vec<(&'static str, String)> = Vec::new();
+async fn cmd_list(client: &ApiClient, args: ListArgs) -> Result<(), CliError> {
+    let resp = list_issues(client, &args).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
+/// Fetch one page of `pidash issue list`. Resolves `--parent PROJ-123` to a
+/// UUID client-side (like `create --parent`); every other filter is passed
+/// through and validated by the server.
+pub async fn list_issues(client: &ApiClient, args: &ListArgs) -> Result<Value, CliError> {
+    if args.project.trim().is_empty() {
+        return Err(CliError::new(EXIT_INVALID, "--project must not be empty"));
+    }
+    let parent = match args.parent.as_deref() {
+        Some(p) if is_null_parent(p) => Some("null".to_string()),
+        Some(p) => Some(resolve_parent_id(client, p).await?),
+        None => None,
+    };
+    let query = build_list_query(args, parent)?;
+    let path = format!(
+        "workspaces/{}/projects/{}/work-items/{query}",
+        client.env.workspace_slug,
+        args.project.trim()
+    );
+    client.get(&path).await
+}
+
+fn is_null_parent(parent: &str) -> bool {
+    let p = parent.trim();
+    p.eq_ignore_ascii_case("none") || p.eq_ignore_ascii_case("null")
+}
+
+/// Assemble the list query string from the args and the already-resolved
+/// parent (`"null"` or a UUID). Pure so the flag → query-param contract is
+/// unit-testable.
+fn build_list_query(args: &ListArgs, parent: Option<String>) -> Result<String, CliError> {
+    let mut params: Vec<(&str, String)> = Vec::new();
     if let Some(c) = args.cursor.as_ref() {
         params.push(("cursor", c.clone()));
     }
@@ -390,37 +581,29 @@ fn build_list_params(args: &ListArgs, parent_uuid: Option<String>) -> Vec<(&'sta
     if let Some(o) = args.order_by.as_ref() {
         params.push(("order_by", o.clone()));
     }
-    if let Some(parent) = parent_uuid {
-        params.push(("parent", parent));
+    let filters = [
+        ("state", "--state", &args.state),
+        ("state_group", "--state-group", &args.state_group),
+        ("labels", "--label", &args.label),
+        ("priority", "--priority", &args.priority),
+        ("fields", "--fields", &args.fields),
+    ];
+    for (key, flag, value) in filters {
+        if let Some(v) = value {
+            let v = v.trim();
+            if v.is_empty() {
+                return Err(CliError::new(
+                    EXIT_INVALID,
+                    format!("{flag} must not be empty"),
+                ));
+            }
+            params.push((key, v.to_string()));
+        }
     }
-    params
-}
-
-async fn cmd_list(client: &ApiClient, args: ListArgs) -> Result<(), CliError> {
-    if args.project.trim().is_empty() {
-        return Err(CliError::new(EXIT_INVALID, "--project must not be empty"));
+    if let Some(p) = parent {
+        params.push(("parent", p));
     }
-    let project_ref = args.project.clone();
-
-    // Resolve `--parent` to a UUID before assembling the query — the server
-    // filters children by the parent's UUID, not its `<PROJ>-<num>` identifier.
-    let parent_uuid = match args.parent.as_deref() {
-        Some(parent) => Some(resolve_parent_id(client, parent).await?),
-        None => None,
-    };
-    let params = build_list_params(&args, parent_uuid);
-    let query = build_query_string(&params);
-
-    let path = format!(
-        "workspaces/{}/projects/{}/work-items/{query}",
-        client.env.workspace_slug, project_ref
-    );
-    let resp = client.get(&path).await?;
-    println!(
-        "{}",
-        serde_json::to_string(&resp).expect("serialize JSON value")
-    );
-    Ok(())
+    Ok(build_query_string(&params))
 }
 
 /// Build a query-string suffix (`?k=v&...`) with percent-encoded values.
@@ -729,6 +912,66 @@ async fn cmd_run_ai(client: &ApiClient, identifier: &str) -> Result<(), CliError
     Ok(())
 }
 
+/// Which relation write `relate_issue` performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationOp {
+    Relate,
+    Unrelate,
+}
+
+async fn cmd_relate(client: &ApiClient, args: RelateArgs, op: RelationOp) -> Result<(), CliError> {
+    let (relation_type, refs) = args.relation()?;
+    let resp = relate_issue(client, &args.identifier, relation_type, &refs, op).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
+/// `POST .../work-items/<id>/relations/{relate,unrelate}/`. The related issues
+/// go to the server as given (identifiers or UUIDs): it resolves them within
+/// what the caller can see and refuses the whole request (404, `unresolved`)
+/// if any is missing, so nothing is half-written.
+pub async fn relate_issue(
+    client: &ApiClient,
+    identifier: &str,
+    relation_type: &str,
+    related: &[String],
+    op: RelationOp,
+) -> Result<Value, CliError> {
+    let issue = resolve_issue(client, identifier).await?;
+    let action = match op {
+        RelationOp::Relate => "relate",
+        RelationOp::Unrelate => "unrelate",
+    };
+    let path = format!(
+        "workspaces/{}/projects/{}/work-items/{}/relations/{action}/",
+        client.env.workspace_slug, issue.project_id, issue.id
+    );
+    let body = serde_json::json!({ "relation_type": relation_type, "issues": related });
+    client.post(&path, &body).await
+}
+
+async fn cmd_relations(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
+    let resp = issue_relations(client, identifier).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
+/// `GET .../work-items/<id>/relations/grouped/` — `{issue, relations}`.
+pub async fn issue_relations(client: &ApiClient, identifier: &str) -> Result<Value, CliError> {
+    let issue = resolve_issue(client, identifier).await?;
+    let path = format!(
+        "workspaces/{}/projects/{}/work-items/{}/relations/grouped/",
+        client.env.workspace_slug, issue.project_id, issue.id
+    );
+    client.get(&path).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -811,6 +1054,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_list_query_without_filters_is_unchanged() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            per_page: Some(10),
+            ..Default::default()
+        };
+        assert_eq!(build_list_query(&args, None).unwrap(), "?per_page=10");
+    }
+
+    #[test]
+    fn build_list_query_maps_every_filter_flag() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state: Some("Backlog,In Review".into()),
+            state_group: Some("backlog,started".into()),
+            label: Some("bug".into()),
+            priority: Some("high,urgent".into()),
+            fields: Some("id,name".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_list_query(&args, Some("null".into())).unwrap(),
+            "?state=Backlog%2CIn%20Review&state_group=backlog%2Cstarted&labels=bug\
+             &priority=high%2Curgent&fields=id%2Cname&parent=null"
+        );
+    }
+
+    #[test]
+    fn build_list_query_rejects_blank_filter_values() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("  ".into()),
+            ..Default::default()
+        };
+        let err = build_list_query(&args, None).unwrap_err();
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert!(err.message.contains("--state-group"));
+    }
+
+    #[test]
+    fn null_parent_accepts_none_and_null() {
+        assert!(is_null_parent("none"));
+        assert!(is_null_parent(" NULL "));
+        assert!(!is_null_parent("ENG-1"));
+    }
+
     fn search_args(query: &str) -> SearchArgs {
         SearchArgs {
             query: query.to_string(),
@@ -820,42 +1110,6 @@ mod tests {
             limit: None,
             sort: None,
         }
-    }
-
-    fn list_args(parent: Option<&str>) -> ListArgs {
-        ListArgs {
-            project: "ENG".to_string(),
-            cursor: None,
-            per_page: None,
-            order_by: None,
-            parent: parent.map(str::to_string),
-        }
-    }
-
-    #[test]
-    fn build_list_params_includes_resolved_parent() {
-        let params = build_list_params(
-            &list_args(Some("ENG-1")),
-            Some("33333333-3333-3333-3333-333333333333".to_string()),
-        );
-        assert_eq!(
-            params,
-            vec![(
-                "parent",
-                "33333333-3333-3333-3333-333333333333".to_string()
-            )]
-        );
-        // End-to-end: the UUID lands on the `parent` query key.
-        assert_eq!(
-            build_query_string(&params),
-            "?parent=33333333-3333-3333-3333-333333333333"
-        );
-    }
-
-    #[test]
-    fn build_list_params_omits_parent_when_none() {
-        let params = build_list_params(&list_args(None), None);
-        assert!(params.iter().all(|(k, _)| *k != "parent"));
     }
 
     #[test]
@@ -1082,5 +1336,61 @@ mod tests {
             run_ai_path("eng", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"),
             "workspaces/eng/projects/11111111-1111-1111-1111-111111111111/work-items/22222222-2222-2222-2222-222222222222/run-ai/"
         );
+    }
+
+    fn relate_args(argv: &[&str]) -> Result<RelateArgs, clap::Error> {
+        let mut full = vec!["pidash", "relate"];
+        full.extend_from_slice(argv);
+        TestCli::try_parse_from(full).map(|parsed| match parsed.issue.command {
+            IssueCommand::Relate(a) => a,
+            other => panic!("expected relate, got {other:?}"),
+        })
+    }
+
+    #[test]
+    fn relate_splits_comma_separated_targets() {
+        let args = relate_args(&["ENG-7", "--blocked-by", "ENG-3,ENG-4"]).expect("parse relate");
+        assert_eq!(args.identifier, "ENG-7");
+        let (relation_type, refs) = args.relation().unwrap();
+        assert_eq!(relation_type, "blocked_by");
+        assert_eq!(refs, vec!["ENG-3".to_string(), "ENG-4".to_string()]);
+    }
+
+    #[test]
+    fn relate_drops_blank_entries() {
+        let args = relate_args(&["ENG-7", "--relates-to", " ENG-3 ,,ENG-4"]).unwrap();
+        let (relation_type, refs) = args.relation().unwrap();
+        assert_eq!(relation_type, "relates_to");
+        assert_eq!(refs, vec!["ENG-3".to_string(), "ENG-4".to_string()]);
+
+        let args = relate_args(&["ENG-7", "--blocking", ","]).unwrap();
+        let err = args.relation().expect_err("no targets left");
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert!(err.message.contains("--blocking"));
+    }
+
+    #[test]
+    fn relate_takes_exactly_one_relation_flag() {
+        let err = relate_args(&["ENG-7"]).expect_err("a relation flag is required");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        let err = relate_args(&["ENG-7", "--blocked-by", "ENG-3", "--blocking", "ENG-4"])
+            .expect_err("relation flags are exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn unrelate_and_relations_parse() {
+        let parsed =
+            TestCli::try_parse_from(["pidash", "unrelate", "ENG-7", "--blocked-by", "ENG-3"])
+                .unwrap();
+        match parsed.issue.command {
+            IssueCommand::Unrelate(a) => assert_eq!(a.relation().unwrap().0, "blocked_by"),
+            other => panic!("expected unrelate, got {other:?}"),
+        }
+        let parsed = TestCli::try_parse_from(["pidash", "relations", "ENG-7"]).unwrap();
+        match parsed.issue.command {
+            IssueCommand::Relations { identifier } => assert_eq!(identifier, "ENG-7"),
+            other => panic!("expected relations, got {other:?}"),
+        }
     }
 }
