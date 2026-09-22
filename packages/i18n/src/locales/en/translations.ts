@@ -1587,6 +1587,7 @@ export default {
   "This workspace is back on the shared default template.": "This workspace is back on the shared default template.",
   "{count} of {max} runs used": "{count} of {max} runs used",
   "{count} runs used, no cap": "{count} runs used, no cap",
+  "{count} wait": "{count} wait",
   "{count} waits": "{count} waits",
   "Agent run queued": "Agent run queued",
   "A run is already active on this work item. The next run starts as soon as it ends.":

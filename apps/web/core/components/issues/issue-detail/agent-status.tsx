@@ -92,7 +92,8 @@ function formatRunDone(count: number, t: TranslationFn): string {
   });
 }
 
-function formatTickBudget(ticker: TIssueAgentTicker | null | undefined, t: TranslationFn): string | null {
+/** Exported for tests — the wait arithmetic below is easy to get subtly wrong. */
+export function formatTickBudget(ticker: TIssueAgentTicker | null | undefined, t: TranslationFn): string | null {
   if (!ticker) return null;
   // One pool per issue, spent in any stage; ``used`` falls back to the
   // pre-pool ``tick_count`` spelling for older payloads.
@@ -108,7 +109,8 @@ function formatTickBudget(ticker: TIssueAgentTicker | null | undefined, t: Trans
   const pool = Math.max(0, ticker.max_ticks - waited);
   const budget = t("{count} of {max} runs used", { count: workRuns, max: pool });
   if (waited === 0) return budget;
-  return `${budget}, ${t("{count} waits", { count: waited })}`;
+  // Same singular/plural shape as formatRunDone above.
+  return `${budget}, ${t(waited === 1 ? "{count} wait" : "{count} waits", { count: waited })}`;
 }
 
 function getPayloadString(payload: Record<string, unknown> | null | undefined, key: string): string | null {
