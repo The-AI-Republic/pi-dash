@@ -66,6 +66,19 @@ pub enum IssueCommand {
         /// Project-scoped identifier, e.g. `ENG-42`.
         identifier: String,
     },
+    /// Record that you have decided to wait on an open blocker, and buy back
+    /// the tick this run is about to spend. Read your blockers, decide you
+    /// cannot safely proceed, note why in the workpad, call this, and yield —
+    /// the next cadence tick re-asks. Raises the issue's tick cap by 1, so
+    /// the ending run costs no net budget. Bounded by one extra pool
+    /// (`Project.agent_default_max_ticks`): past that it is a no-op reporting
+    /// `wait_cap_reached`, and waiting then spends normal budget. Always
+    /// exits 0 — check `applied` and `reason` in the printed JSON
+    /// (`waited` | `wait_cap_reached` | `infinite_pool` | `no_ticker`).
+    Wait {
+        /// Project-scoped identifier, e.g. `ENG-42`.
+        identifier: String,
+    },
     /// Start an agent run on a work item, identical to clicking "Run AI" in
     /// the web app (same prompt, ticker reset, and runner pinning). Use it to
     /// kick an agent that has stalled or not picked up a reply. Prints the
@@ -378,6 +391,7 @@ pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
         IssueCommand::AttachReview(a) => cmd_attach_review(&client, a).await,
         IssueCommand::AttachPr(a) => cmd_attach_review(&client, a).await,
         IssueCommand::ReTick { identifier } => cmd_re_tick(&client, &identifier).await,
+        IssueCommand::Wait { identifier } => cmd_wait(&client, &identifier).await,
         IssueCommand::RunAi { identifier } => cmd_run_ai(&client, &identifier).await,
         IssueCommand::Relate(a) => cmd_relate(&client, a, RelationOp::Relate).await,
         IssueCommand::Unrelate(a) => cmd_relate(&client, a, RelationOp::Unrelate).await,
@@ -891,6 +905,26 @@ async fn cmd_re_tick(client: &ApiClient, identifier: &str) -> Result<(), CliErro
     Ok(())
 }
 
+/// Build the token-API path for `POST .../work-items/<id>/wait/`.
+fn wait_path(workspace_slug: &str, project_id: &str, issue_id: &str) -> String {
+    format!("workspaces/{workspace_slug}/projects/{project_id}/work-items/{issue_id}/wait/")
+}
+
+async fn cmd_wait(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
+    let issue = resolve_issue(client, identifier).await?;
+    let path = wait_path(&client.env.workspace_slug, &issue.project_id, &issue.id);
+    // The server applies the allowance and reports `applied: false` with a
+    // machine-readable `reason` when nothing changed, so a refused wait is a
+    // normal 200 rather than an error — the agent is yielding either way and
+    // must not be derailed by a non-zero exit.
+    let resp = client.post(&path, &serde_json::json!({})).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
 /// Build the token-API path for `POST .../work-items/<id>/run-ai/`.
 fn run_ai_path(workspace_slug: &str, project_id: &str, issue_id: &str) -> String {
     format!("workspaces/{workspace_slug}/projects/{project_id}/work-items/{issue_id}/run-ai/")
@@ -1335,6 +1369,31 @@ mod tests {
         assert_eq!(
             run_ai_path("eng", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"),
             "workspaces/eng/projects/11111111-1111-1111-1111-111111111111/work-items/22222222-2222-2222-2222-222222222222/run-ai/"
+        );
+    }
+
+    #[test]
+    fn wait_requires_an_identifier() {
+        // A missing positional identifier is a clap parse error, not a
+        // silent workspace-wide call.
+        assert!(TestCli::try_parse_from(["pidash", "wait"]).is_err());
+    }
+
+    #[test]
+    fn wait_parses_an_identifier() {
+        let parsed = TestCli::try_parse_from(["pidash", "wait", "ENG-42"])
+            .expect("wait accepts a project-scoped identifier");
+        match parsed.issue.command {
+            IssueCommand::Wait { identifier } => assert_eq!(identifier, "ENG-42"),
+            other => panic!("expected wait, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wait_path_targets_the_work_item_wait_route() {
+        assert_eq!(
+            wait_path("eng", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"),
+            "workspaces/eng/projects/11111111-1111-1111-1111-111111111111/work-items/22222222-2222-2222-2222-222222222222/wait/"
         );
     }
 

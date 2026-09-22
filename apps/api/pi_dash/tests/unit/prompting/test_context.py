@@ -723,6 +723,9 @@ def test_context_tick_populated_from_ticker(issue, run, project):
         "count": 5,
         "cap": 10,
         "remaining": 5,
+        # Nothing has waited: ``count`` / ``cap`` are the pool as configured.
+        "waited": 0,
+        "wait_allowance": 10,
         "spent": False,
         "clock_live": True,
         "interval_seconds": 7200,

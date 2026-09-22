@@ -762,7 +762,9 @@ def test_relationships_section_renders_open_blocker_with_warning():
     assert "- SAMPLE-b0: Blocker SAMPLE-b0 (In Progress)" in body
     assert "- Warning: SAMPLE-b0 is still open" in body
     assert "Open blockers (SAMPLE-b0) are information, not a hard stop" in body
-    assert "`Waiting on: <IDs>`" in body
+    # The agent decides and asks explicitly; the platform reads no marker.
+    assert "`pidash issue wait SAMPLE-1`" in body
+    assert "Waiting on: <IDs>" not in body
     assert REQUIRED_READING_DIRECTIVE in body
     assert "Blocking (waiting on this item):" not in body
     assert "Other relations:" not in body

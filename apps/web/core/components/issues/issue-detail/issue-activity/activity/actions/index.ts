@@ -21,7 +21,7 @@ export * from "./label";
 export * from "./link";
 export * from "./attachment";
 export * from "./archived-at";
-export * from "./agent-wake";
+export * from "./agent-wait";
 export * from "./inbox";
 export * from "./label-activity-chip";
 
