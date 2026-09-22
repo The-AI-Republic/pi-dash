@@ -35,7 +35,9 @@ pub enum IssueCommand {
     Create(CreateArgs),
     /// List work items in a project. Returns the server's paginated envelope
     /// (`{count, next_cursor, prev_cursor, results: [...]}`) — pass `--cursor`
-    /// from a prior page to walk pages.
+    /// from a prior page to walk pages. Narrow the list with `--state`,
+    /// `--state-group`, `--parent`, `--label`, `--priority`; `--fields`
+    /// trims each item.
     List(ListArgs),
     /// Update fields on a work item. Pass only the fields you want to change.
     Patch(PatchArgs),
@@ -101,7 +103,7 @@ pub struct CreateArgs {
     pub parent: Option<String>,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub struct ListArgs {
     /// Project identifier (slug like `ENG`) or project UUID.
     #[arg(long)]
@@ -118,6 +120,37 @@ pub struct ListArgs {
     /// Order-by field, e.g. `-created_at` (default), `priority`, `state__name`.
     #[arg(long)]
     pub order_by: Option<String>,
+
+    /// Only items in these states — comma-separated state names
+    /// (case-insensitive) and/or UUIDs. The server rejects an unknown name
+    /// and lists the valid ones.
+    #[arg(long)]
+    pub state: Option<String>,
+
+    /// Only items in these state groups — comma-separated from `backlog`,
+    /// `unstarted`, `started`, `review`, `test`, `completed`, `cancelled`.
+    #[arg(long)]
+    pub state_group: Option<String>,
+
+    /// Only sub-issues of this parent — `PROJ-123` identifier or UUID — or
+    /// `none` for top-level items only.
+    #[arg(long)]
+    pub parent: Option<String>,
+
+    /// Only items carrying any of these labels — comma-separated names
+    /// (case-insensitive) and/or UUIDs.
+    #[arg(long)]
+    pub label: Option<String>,
+
+    /// Only items with these priorities — comma-separated from
+    /// `urgent`, `high`, `medium`, `low`, `none`.
+    #[arg(long)]
+    pub priority: Option<String>,
+
+    /// Return only these fields per item, comma-separated, e.g.
+    /// `id,sequence_id,name,state,parent`.
+    #[arg(long)]
+    pub fields: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -367,11 +400,44 @@ async fn resolve_create_project(
 }
 
 async fn cmd_list(client: &ApiClient, args: ListArgs) -> Result<(), CliError> {
+    let resp = list_issues(client, &args).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
+/// Fetch one page of `pidash issue list`. Resolves `--parent PROJ-123` to a
+/// UUID client-side (like `create --parent`); every other filter is passed
+/// through and validated by the server.
+pub async fn list_issues(client: &ApiClient, args: &ListArgs) -> Result<Value, CliError> {
     if args.project.trim().is_empty() {
         return Err(CliError::new(EXIT_INVALID, "--project must not be empty"));
     }
-    let project_ref = args.project.as_str();
+    let parent = match args.parent.as_deref() {
+        Some(p) if is_null_parent(p) => Some("null".to_string()),
+        Some(p) => Some(resolve_parent_id(client, p).await?),
+        None => None,
+    };
+    let query = build_list_query(args, parent)?;
+    let path = format!(
+        "workspaces/{}/projects/{}/work-items/{query}",
+        client.env.workspace_slug,
+        args.project.trim()
+    );
+    client.get(&path).await
+}
 
+fn is_null_parent(parent: &str) -> bool {
+    let p = parent.trim();
+    p.eq_ignore_ascii_case("none") || p.eq_ignore_ascii_case("null")
+}
+
+/// Assemble the list query string from the args and the already-resolved
+/// parent (`"null"` or a UUID). Pure so the flag → query-param contract is
+/// unit-testable.
+fn build_list_query(args: &ListArgs, parent: Option<String>) -> Result<String, CliError> {
     let mut params: Vec<(&str, String)> = Vec::new();
     if let Some(c) = args.cursor.as_ref() {
         params.push(("cursor", c.clone()));
@@ -382,18 +448,29 @@ async fn cmd_list(client: &ApiClient, args: ListArgs) -> Result<(), CliError> {
     if let Some(o) = args.order_by.as_ref() {
         params.push(("order_by", o.clone()));
     }
-    let query = build_query_string(&params);
-
-    let path = format!(
-        "workspaces/{}/projects/{}/work-items/{query}",
-        client.env.workspace_slug, project_ref
-    );
-    let resp = client.get(&path).await?;
-    println!(
-        "{}",
-        serde_json::to_string(&resp).expect("serialize JSON value")
-    );
-    Ok(())
+    let filters = [
+        ("state", "--state", &args.state),
+        ("state_group", "--state-group", &args.state_group),
+        ("labels", "--label", &args.label),
+        ("priority", "--priority", &args.priority),
+        ("fields", "--fields", &args.fields),
+    ];
+    for (key, flag, value) in filters {
+        if let Some(v) = value {
+            let v = v.trim();
+            if v.is_empty() {
+                return Err(CliError::new(
+                    EXIT_INVALID,
+                    format!("{flag} must not be empty"),
+                ));
+            }
+            params.push((key, v.to_string()));
+        }
+    }
+    if let Some(p) = parent {
+        params.push(("parent", p));
+    }
+    Ok(build_query_string(&params))
 }
 
 /// Build a query-string suffix (`?k=v&...`) with percent-encoded values.
@@ -782,6 +859,53 @@ mod tests {
             build_query_string(&params),
             "?cursor=abc%3Ddef%26ghi&per_page=50"
         );
+    }
+
+    #[test]
+    fn build_list_query_without_filters_is_unchanged() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            per_page: Some(10),
+            ..Default::default()
+        };
+        assert_eq!(build_list_query(&args, None).unwrap(), "?per_page=10");
+    }
+
+    #[test]
+    fn build_list_query_maps_every_filter_flag() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state: Some("Backlog,In Review".into()),
+            state_group: Some("backlog,started".into()),
+            label: Some("bug".into()),
+            priority: Some("high,urgent".into()),
+            fields: Some("id,name".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_list_query(&args, Some("null".into())).unwrap(),
+            "?state=Backlog%2CIn%20Review&state_group=backlog%2Cstarted&labels=bug\
+             &priority=high%2Curgent&fields=id%2Cname&parent=null"
+        );
+    }
+
+    #[test]
+    fn build_list_query_rejects_blank_filter_values() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("  ".into()),
+            ..Default::default()
+        };
+        let err = build_list_query(&args, None).unwrap_err();
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert!(err.message.contains("--state-group"));
+    }
+
+    #[test]
+    fn null_parent_accepts_none_and_null() {
+        assert!(is_null_parent("none"));
+        assert!(is_null_parent(" NULL "));
+        assert!(!is_null_parent("ENG-1"));
     }
 
     fn search_args(query: &str) -> SearchArgs {

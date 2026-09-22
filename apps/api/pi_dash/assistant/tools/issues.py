@@ -19,6 +19,7 @@ from pi_dash.assistant.runtime.markdown import to_safe_html
 from pi_dash.assistant.tools import _results, _scoping
 from pi_dash.db.models import Issue
 from pi_dash.search.issue import issue_search_queryset
+from pi_dash.utils.issue_filters import IssueFilterError, work_item_list_filters
 
 _VALID_PRIORITIES = {"urgent", "high", "medium", "low", "none"}
 _SEARCH_LIMIT = 20
@@ -68,6 +69,56 @@ def search_issues(
     if query.strip():
         qs = issue_search_queryset(qs, query).distinct()
     qs = qs.order_by("-updated_at")
+    limit = max(1, min(int(limit or _SEARCH_LIMIT), _SEARCH_LIMIT))
+    offset = max(0, int(offset or 0))
+    window = list(qs[offset : offset + limit + 1])
+    has_more = len(window) > limit
+    return {
+        "results": [_brief(i) for i in window[:limit]],
+        "has_more": has_more,
+        "next_offset": offset + limit if has_more else None,
+    }
+
+
+@assistant.tool
+def list_issues(
+    ctx: RunContext[AssistantDeps],
+    project_id: str,
+    state: Optional[str] = None,
+    state_group: Optional[str] = None,
+    parent_issue_id: Optional[str] = None,
+    labels: Optional[str] = None,
+    priority: Optional[str] = None,
+    limit: int = _SEARCH_LIMIT,
+    offset: int = 0,
+) -> dict:
+    """List issues in one project, newest activity first, up to 20 per page.
+    Optional filters, each comma-separated (values OR together, filters AND
+    together): state (names or ids), state_group (backlog, unstarted, started,
+    review, test, completed, cancelled), parent_issue_id (issue id or PROJ-123
+    identifier, or "null" for top-level issues only), labels (names or ids),
+    priority (urgent, high, medium, low, none)."""
+    deps = ctx.deps
+    _scoping.get_project(deps, project_id)  # scope check
+    params = {
+        "state": state,
+        "state_group": state_group,
+        "parent": parent_issue_id,
+        "labels": labels,
+        "priority": priority,
+    }
+    try:
+        filters = work_item_list_filters(params, project_id=project_id, workspace_slug=deps.workspace_slug)
+    except IssueFilterError as e:
+        raise ModelRetry(str(e)) from e
+    qs = (
+        _scoping.scoped_issues(deps)
+        .filter(project_id=project_id)
+        .filter(**filters)
+        .select_related("project", "state")
+        .distinct()
+        .order_by("-updated_at")
+    )
     limit = max(1, min(int(limit or _SEARCH_LIMIT), _SEARCH_LIMIT))
     offset = max(0, int(offset or 0))
     window = list(qs[offset : offset + limit + 1])

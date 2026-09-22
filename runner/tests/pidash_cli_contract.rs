@@ -471,3 +471,161 @@ async fn run_yield_without_a_run_id_fails_before_any_request() {
     assert_eq!(err.exit_code, EXIT_INVALID);
     assert!(fake.recorded.lock().unwrap().is_empty());
 }
+
+const LIST_ENVELOPE: &str =
+    r#"{"count":0,"next_cursor":"10:1:0","prev_cursor":"10:-1:1","results":[]}"#;
+
+fn list_args(project: &str) -> pidash::cli::issue::ListArgs {
+    pidash::cli::issue::ListArgs {
+        project: project.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Run `issue list` against a fake that answers every request with the list
+/// envelope and return the recorded request paths.
+async fn list_paths(args: pidash::cli::issue::ListArgs) -> Vec<String> {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(LIST_ENVELOPE))).await;
+    let client = client(&fake);
+    let resp = pidash::cli::issue::list_issues(&client, &args)
+        .await
+        .expect("list succeeds");
+    assert_eq!(resp["next_cursor"], "10:1:0");
+    let recorded = fake.recorded.lock().unwrap();
+    assert!(recorded.iter().all(|r| r.method == "GET"));
+    recorded.iter().map(|r| r.path.clone()).collect()
+}
+
+const LIST_PATH: &str = "/api/v1/workspaces/acme/projects/ENG/work-items/";
+
+#[tokio::test]
+async fn issue_list_without_filters_sends_no_query() {
+    assert_eq!(
+        list_paths(list_args("ENG")).await,
+        vec![LIST_PATH.to_string()]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_state_flag_passes_names_through() {
+    let mut args = list_args("ENG");
+    args.state = Some("Backlog,In Review".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!("{LIST_PATH}?state=Backlog%2CIn%20Review")]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_state_group_flag() {
+    let mut args = list_args("ENG");
+    args.state_group = Some("backlog,started".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!("{LIST_PATH}?state_group=backlog%2Cstarted")]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_label_flag_maps_to_labels_param() {
+    let mut args = list_args("ENG");
+    args.label = Some("bug,frontend".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!("{LIST_PATH}?labels=bug%2Cfrontend")]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_priority_flag() {
+    let mut args = list_args("ENG");
+    args.priority = Some("urgent,high".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!("{LIST_PATH}?priority=urgent%2Chigh")]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_fields_flag() {
+    let mut args = list_args("ENG");
+    args.fields = Some("id,sequence_id,name,state,parent".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!(
+            "{LIST_PATH}?fields=id%2Csequence_id%2Cname%2Cstate%2Cparent"
+        )]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_parent_none_sends_null_without_lookup() {
+    let mut args = list_args("ENG");
+    args.parent = Some("none".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!("{LIST_PATH}?parent=null")]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_parent_uuid_is_passed_as_is() {
+    let mut args = list_args("ENG");
+    args.parent = Some("00000000-0000-0000-0000-000000000009".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!(
+            "{LIST_PATH}?parent=00000000-0000-0000-0000-000000000009"
+        )]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_parent_identifier_is_resolved_to_uuid() {
+    let fake = start_fake(Box::new(|req| {
+        if req.path == "/api/v1/workspaces/acme/work-items/ENG-7/" {
+            CannedResponse::ok(
+                r#"{"id":"00000000-0000-0000-0000-000000000007","project":"00000000-0000-0000-0000-0000000000aa","name":"epic"}"#,
+            )
+        } else {
+            CannedResponse::ok(LIST_ENVELOPE)
+        }
+    }))
+    .await;
+    let client = client(&fake);
+    let mut args = list_args("ENG");
+    args.parent = Some("ENG-7".into());
+    args.state = Some("Backlog".into());
+    args.per_page = Some(10);
+    pidash::cli::issue::list_issues(&client, &args)
+        .await
+        .expect("list succeeds");
+
+    let recorded = fake.recorded.lock().unwrap();
+    let paths: Vec<&str> = recorded.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        vec![
+            "/api/v1/workspaces/acme/work-items/ENG-7/",
+            "/api/v1/workspaces/acme/projects/ENG/work-items/?per_page=10&state=Backlog&parent=00000000-0000-0000-0000-000000000007",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_unknown_state_400_maps_to_exit_invalid() {
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 400,
+        status_text: "Bad Request",
+        body: r#"{"error":"Unknown state name(s): Nope. Valid states: Backlog, Done."}"#.into(),
+    }))
+    .await;
+    let client = client(&fake);
+    let mut args = list_args("ENG");
+    args.state = Some("Nope".into());
+    let err = pidash::cli::issue::list_issues(&client, &args)
+        .await
+        .unwrap_err();
+    assert_eq!(err.exit_code, EXIT_INVALID);
+    assert!(err.detail.unwrap_or_default().contains("Valid states"));
+}

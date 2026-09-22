@@ -292,14 +292,30 @@ List work items in a project. Returns the paginated envelope `{count, next_curso
 
 ```
 pidash issue list --project <P> [--cursor <C>] [--per-page <N>] [--order-by <F>]
+                  [--state <S>[,<S>...]] [--state-group <G>[,<G>...]] [--parent <PROJ-123|UUID|none>]
+                  [--label <L>[,<L>...]] [--priority <P>[,<P>...]] [--fields <F>[,<F>...]]
 ```
 
-| Flag             | Purpose                                                              |
-| ---------------- | -------------------------------------------------------------------- |
-| `--project <P>`  | **Required.**                                                        |
-| `--cursor <C>`   | Pagination cursor from a prior page's `next_cursor`.                 |
-| `--per-page <N>` | Items per page. Server default if omitted.                           |
-| `--order-by <F>` | Sort field, e.g. `-created_at` (default), `priority`, `state__name`. |
+| Flag                | Purpose                                                                                                          |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `--project <P>`     | **Required.**                                                                                                    |
+| `--cursor <C>`      | Pagination cursor from a prior page's `next_cursor`.                                                             |
+| `--per-page <N>`    | Items per page. Server default if omitted.                                                                       |
+| `--order-by <F>`    | Sort field, e.g. `-created_at` (default), `priority`, `state__name`.                                             |
+| `--state <S>`       | State names (case-insensitive) and/or UUIDs, comma-separated. An unknown name fails with the valid names listed. |
+| `--state-group <G>` | `backlog` \| `unstarted` \| `started` \| `review` \| `test` \| `completed` \| `cancelled`, comma-separated.      |
+| `--parent <P>`      | Sub-issues of this parent (`PROJ-123`, resolved to a UUID client-side, or a UUID); `none` for top-level only.    |
+| `--label <L>`       | Label names (case-insensitive) and/or UUIDs, comma-separated.                                                    |
+| `--priority <P>`    | `urgent` \| `high` \| `medium` \| `low` \| `none`, comma-separated.                                              |
+| `--fields <F>`      | Return only these fields per item, e.g. `id,sequence_id,name,state,parent`.                                      |
+
+Values within one flag OR together; different flags AND together. Example — Backlog sub-issues of an epic, small payload:
+
+```
+pidash issue list --project ENG --parent ENG-12 --state Backlog --fields id,sequence_id,name,state
+```
+
+The same filters are available as query parameters on `GET /api/v1/workspaces/<slug>/projects/<project>/work-items/`: `state`, `state_group`, `parent` (`null` for top-level), `labels`, `priority`, `assignees` (user UUIDs), plus `fields` and `expand`.
 
 ### `pidash issue patch <IDENTIFIER>`
 
