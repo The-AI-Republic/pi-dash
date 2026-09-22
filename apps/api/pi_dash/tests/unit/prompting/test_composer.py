@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 from pi_dash.prompting import recipes
@@ -38,6 +40,20 @@ def test_compose_coding_task_renders_no_leftover_jinja():
     )
     assert "{%" not in out.text and "{{" not in out.text
     assert "orchestrates AI agents" in out.text  # stable intro phrase
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("executor", ["local_runner", "managed_runner"])
+def test_repo_free_task_prompt_does_not_require_git(executor):
+    ctx = _ctx()
+    ctx["repo"]["url"] = ""
+    out = compose(
+        "coding-task", workspace=None, project=None, user=None,
+        context=ctx, executor_kind=executor,
+    ).text
+    assert "A Git repository is optional" in out
+    assert "ordinary folder, not a Git repository" in out
+    assert "Do not initialize a repository" in out
 
 
 @pytest.mark.unit
@@ -362,12 +378,15 @@ def test_review_kind_approved_stays_in_review_not_done():
     out = compose("review", workspace=None, project=None, user=None, context=_ctx("review"))
     body = out.text
 
-    # The review success path routes to In Review...
-    assert '--state "In Review"' in body
+    # An approved review hands the task on to In Test; defects go back to
+    # In Progress with open items...
+    assert '--state "In Test"' in body
+    assert '--state "In Progress"' in body
     # ...and never to Done.
     assert '--state "Done"' not in body
-    # The approved outcome explicitly leaves the issue In Review.
-    assert "leave the issue In Review" in body or "leaves the issue In Review" in body
+    # The lifecycle is shared and the run reports its outcome.
+    assert "Task lifecycle" in body
+    assert "pidash run yield --outcome" in body
 
 
 # ----------------------------------------------------------------------
@@ -382,19 +401,107 @@ def test_session_framing_renders_tick_guidance_and_schedule():
         "coding-task", workspace=None, project=None, user=None, context=ctx
     ).text
     assert "automatically by the issue's ticker" in out
+    assert "used 5 of 10 agent runs" in out
+    assert "(5 remaining)" in out
+    # The lifecycle section carries the budget line and the pool rules.
+    assert "Runs used on this issue: **5 of 10** (5 remaining)" in out
     assert "about every 3 hours" in out
-    assert "used 5 of 24 ticks" in out
-    assert "19 remaining before the issue auto-pauses" in out
 
 
 @pytest.mark.unit
-def test_session_framing_review_tick_adds_noop_hint():
+def test_session_framing_review_tick_reports_done_not_noop():
     ctx = _ctx("review")
     out = compose(
         "review", workspace=None, project=None, user=None, context=ctx
     ).text
     assert "automatically by the issue's ticker" in out
-    assert "emit `noop`" in out  # review-specific done-signal nudge
+    assert "emit `noop`" not in out
+    assert "pidash run yield --outcome done" in out
+
+
+@pytest.mark.unit
+def test_lifecycle_warns_when_the_pool_is_spent():
+    ctx = _ctx("review")
+    ctx["tick"] = {
+        **ctx["tick"],
+        "count": 10,
+        "cap": 10,
+        "remaining": 0,
+        "spent": True,
+        "clock_live": False,
+    }
+    out = compose("review", workspace=None, project=None, user=None, context=ctx).text
+    assert "The pool is spent" in out
+    assert "No agent run will follow this one" in out
+    assert "Re-tick" in out
+
+
+@pytest.mark.unit
+def test_lifecycle_spent_branch_covers_the_last_run(kind="coding-task"):
+    ctx = _ctx(kind)
+    ctx["tick"] = {**ctx["tick"], "count": 10, "cap": 10, "remaining": 0, "spent": True, "clock_live": False}
+    out = compose(kind, workspace=None, project=None, user=None, context=ctx).text
+    assert "this is the last run" in out
+    assert "Never press Re-tick yourself" in out
+    assert "from Paused" in out
+
+
+@pytest.mark.unit
+def test_cli_docs_put_re_tick_out_of_the_agents_hands():
+    out = compose("coding-task", workspace=None, project=None, user=None, context=_ctx("coding-task")).text
+    assert "`pidash issue re-tick`" in out
+    assert "refuses a re-tick that comes from inside an agent run" in out
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["coding-task", "review", "test"])
+def test_cli_docs_teach_relation_commands(kind):
+    # PDASHOSS01-199: the agent can record and read dependencies itself.
+    out = compose(kind, workspace=None, project=None, user=None, context=_ctx(kind)).text
+    assert "`pidash issue relate <identifier> --blocked-by <ID>[,<ID>...]`" in out
+    assert "`pidash issue unrelate <identifier>" in out
+    assert "`pidash issue relations <identifier>`" in out
+
+
+@pytest.mark.unit
+def test_split_guidance_records_order_as_blocked_by():
+    out = compose("coding-task", workspace=None, project=None, user=None, context=_ctx("coding-task")).text
+    split = out[out.index("**Propose a split**") :]
+    split = split[: split.index("7. **Writing to the human")]
+    assert "pidash issue relate <later-child> --blocked-by <earlier-child>" in split
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["review", "test"])
+def test_review_and_test_get_lifecycle_workpad_repo_and_blocking(kind):
+    """The sections review/test cross-reference must actually be in their
+    prompt: no dangling "Blocking the run", the inlined workpad, the repo /
+    PR block, and the shared lifecycle."""
+    ctx = _ctx(kind)
+    out = compose(kind, workspace=None, project=None, user=None, context=ctx).text
+    assert "## Blocking the run" in out
+    assert "## Task lifecycle" in out
+    assert "## Workpad — read first, write last" in out
+    assert ctx["workpad_body"] in out
+    assert "Repository:" in out
+    assert "### Path to done" in out
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["review", "test"])
+def test_review_and_test_do_not_get_the_implementation_workpad_checklist(kind):
+    ctx = _ctx(kind)
+    out = compose(kind, workspace=None, project=None, user=None, context=ctx).text
+    assert "`### Progress Checkpoints` match what is actually true" not in out
+    assert "carried forward **unchanged**" in out
+    assert '"Analyze & scope" for tone' not in out
+
+
+@pytest.mark.unit
+def test_test_kind_defects_go_back_to_in_progress_not_blocked():
+    out = compose("test", workspace=None, project=None, user=None, context=_ctx("test")).text
+    assert "back to In Progress" in out
+    assert "Blocked for a bug" in out
 
 
 @pytest.mark.unit
@@ -419,3 +526,295 @@ def test_session_framing_omits_trigger_block_for_scheduler():
     ).text
     assert "Why this run started" not in out
     assert "Ticking schedule" not in out
+
+
+# ----------------------------------------------------------------------
+# Ancestor-chain required reading + parent-readiness (PDASHOSS01-97)
+# ----------------------------------------------------------------------
+
+REQUIRED_READING_DIRECTIVE = "Required reading before you implement:"
+
+
+def _coding_ctx_chain(depth: int) -> dict:
+    """A populated coding-task context whose ancestor chain has ``depth``
+    issues (current + ancestors).
+
+    ``depth == 1`` is parentless (``parent``/``lineage`` both None). ``depth
+    == 2`` has a direct parent only — ``build_context`` leaves ``lineage``
+    None for a 2-chain. ``depth >= 3`` additionally carries a multi-level
+    ``lineage`` (grandparent+), current-first up to the root.
+    """
+    if depth < 1:
+        raise ValueError("depth must be >= 1")
+    if depth == 1:
+        ctx = copy.deepcopy(sample_contexts("coding-task")[1])  # minimal: parentless
+        assert ctx["parent"] is None and ctx["lineage"] is None
+        return ctx
+    ctx = copy.deepcopy(sample_contexts("coding-task")[0])  # populated: has a parent
+    if depth == 2:
+        ctx["lineage"] = None
+        return ctx
+    lineage = [
+        {"identifier": "SAMPLE-1", "title": "Sample issue title"},
+        {"identifier": "SAMPLE-0", "title": "Parent issue"},
+    ]
+    for i in range(depth - 3):
+        lineage.append({"identifier": f"SAMPLE-mid{i}", "title": f"Ancestor {i}"})
+    lineage.append({"identifier": "SAMPLE-root", "title": "Root issue"})
+    ctx["lineage"] = lineage
+    return ctx
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("depth", [2, 3, 4, 6])
+def test_coding_task_requires_ancestor_reading_when_parent(depth):
+    """When the issue has a parent (chain length >= 2), the assembled coding
+    prompt must direct the agent to read the ancestor chain before it
+    implements — required, not optional (PDASHOSS01-97). Holds whether the
+    chain is just the parent (len 2, lineage None) or a multi-level lineage
+    (len 3, 4, ...)."""
+    ctx = _coding_ctx_chain(depth)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert REQUIRED_READING_DIRECTIVE in body
+    # analyze-and-scope step 2 walks the chain and assesses readiness.
+    assert "Walk the ancestor chain to the root" in body
+    assert "ready to implement against" in body
+    # The old optional wording is gone.
+    assert "To learn about any ancestor" not in body
+
+
+@pytest.mark.unit
+def test_coding_task_no_ancestor_directive_when_parentless():
+    """A parentless issue gets no ancestor-chain directive — there is no chain
+    to walk (PDASHOSS01-97)."""
+    ctx = _coding_ctx_chain(1)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert REQUIRED_READING_DIRECTIVE not in body
+    assert "Walk the ancestor chain to the root" not in body
+
+
+@pytest.mark.unit
+def test_coding_task_ancestor_directive_adapts_to_chain_depth():
+    """For a 2-chain the directive says the chain is just the parent; for a
+    3+-chain it names walking up to the root and surfaces the root id."""
+    body2 = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_coding_ctx_chain(2)
+    ).text
+    body3 = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_coding_ctx_chain(3)
+    ).text
+
+    assert "the chain here is just the parent" in body2
+    assert "up to the root issue" not in body2  # no multi-level lineage for a 2-chain
+    assert "up to the root issue" in body3
+    assert "SAMPLE-root" in body3  # root id surfaced so the agent can walk to it
+
+
+@pytest.mark.unit
+def test_coding_task_parent_no_branch_routes_through_readiness_not_autofallback():
+    """workpad-setup must route the 'parent has no implementation branch' case
+    through the readiness judgment (research/design parent -> project base;
+    in-progress implementation dependency -> block) rather than an automatic
+    fall-back to the project base (PDASHOSS01-97)."""
+    ctx = _coding_ctx_chain(2)
+    ctx["repo"]["work_branch"] = None  # this issue has no branch yet -> resolve a base
+    ctx["parent"]["work_branch"] = None  # parent has no implementation branch yet
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert "Do not treat this as an automatic fall-back to the project base" in body
+    # The dependency case routes into the existing blocking flow by reference.
+    assert 'Treat it as a blocker — follow "Blocking the run" instead of creating a branch' in body
+
+
+# ----------------------------------------------------------------------
+# Work item relationships section (PDASHOSS01-160): one independent section
+# carrying ancestors, children, and relates_to siblings together.
+# ----------------------------------------------------------------------
+
+RELATIONSHIPS_HEADING = "## Work item relationships"
+
+
+def _relationships_ctx(*, parent=True, children=0, related=0) -> dict:
+    """A coding-task context with the relationship groups dialled independently.
+
+    Starts from the parentless minimal sample (so ``parent``/``lineage`` are
+    None and both list groups start empty), then adds back exactly the groups
+    the test wants.
+    """
+    ctx = copy.deepcopy(sample_contexts("coding-task")[1])
+    assert ctx["parent"] is None and ctx["children"] == [] and ctx["related"] == []
+    if parent:
+        populated = sample_contexts("coding-task")[0]
+        ctx["parent"] = copy.deepcopy(populated["parent"])
+        ctx["lineage"] = None  # direct parent only
+    ctx["children"] = [
+        {"identifier": f"SAMPLE-c{i}", "title": f"Child {i}", "state": "Backlog"}
+        for i in range(children)
+    ]
+    ctx["related"] = [
+        {"identifier": f"SAMPLE-r{i}", "title": f"Related {i}", "state": "Cancelled"}
+        for i in range(related)
+    ]
+    return ctx
+
+
+@pytest.mark.unit
+def test_relationships_section_absent_when_nothing_connected():
+    """No parent, no children, no relations → no section at all: no heading,
+    no dangling required-reading directive."""
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING not in body
+    assert REQUIRED_READING_DIRECTIVE not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_renders_children_group():
+    """A child-only issue (no parent, no relations) renders just the children
+    group under the single relationships section."""
+    ctx = _relationships_ctx(parent=False, children=2, related=0)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING in body
+    assert "Children (down):" in body
+    assert "SAMPLE-c0: Child 0 (Backlog)" in body
+    assert "SAMPLE-c1: Child 1 (Backlog)" in body
+    assert REQUIRED_READING_DIRECTIVE in body
+    # Groups degrade independently: no parent / related content leaks in.
+    assert "Ancestors (up):" not in body
+    assert "Related work items (across):" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_renders_related_group():
+    """A relates_to-only issue renders just the related group."""
+    ctx = _relationships_ctx(parent=False, children=0, related=1)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING in body
+    assert "Related work items (across):" in body
+    assert "SAMPLE-r0: Related 0 (Cancelled)" in body
+    assert "Children (down):" not in body
+    assert "Ancestors (up):" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_renders_all_three_groups_together():
+    """Ancestors, children, and related render in one contiguous section with a
+    single required-reading directive."""
+    ctx = _relationships_ctx(parent=True, children=1, related=1)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert body.count(RELATIONSHIPS_HEADING) == 1
+    assert "Ancestors (up):" in body
+    assert "Children (down):" in body
+    assert "Related work items (across):" in body
+    # Parent keeps its inline description + comment-count hint.
+    assert "Parent description." in body
+    assert "run `pidash comment list SAMPLE-0` to read them." in body
+    # Exactly one required-reading directive, not one per group.
+    assert body.count(REQUIRED_READING_DIRECTIVE) == 1
+
+
+@pytest.mark.unit
+def test_relationships_section_lineage_only_when_grandparent():
+    """The lineage chain renders only when a grandparent+ exists; a direct-parent
+    issue shows the parent line but no lineage chain."""
+    ctx = _relationships_ctx(parent=True, children=0, related=0)
+    ctx["lineage"] = None
+    body2 = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+    assert "Lineage (current → root):" not in body2
+
+    ctx["lineage"] = [
+        {"identifier": "SAMPLE-1", "title": "Current"},
+        {"identifier": "SAMPLE-0", "title": "Parent issue"},
+        {"identifier": "SAMPLE-root", "title": "Root issue"},
+    ]
+    body3 = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+    assert "Lineage (current → root):" in body3
+    assert "SAMPLE-root" in body3
+
+
+# ----------------------------------------------------------------------
+# Directional relations in the relationships section (PDASHOSS01-196).
+# ----------------------------------------------------------------------
+
+
+def _blocker(identifier="SAMPLE-b0", state="In Progress", state_group="started"):
+    return {"identifier": identifier, "title": f"Blocker {identifier}", "state": state, "state_group": state_group}
+
+
+@pytest.mark.unit
+def test_relationships_section_renders_open_blocker_with_warning():
+    """One open blocked_by → "Blocked by" group, a warning naming it, and the
+    decision guidance; the section renders even with no parent/children/related."""
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    ctx["blocked_by"] = [_blocker()]
+    ctx["open_blockers"] = ["SAMPLE-b0"]
+    ctx["has_open_blockers"] = True
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING in body
+    assert "Blocked by (must be done first):" in body
+    assert "- SAMPLE-b0: Blocker SAMPLE-b0 (In Progress)" in body
+    assert "- Warning: SAMPLE-b0 is still open" in body
+    assert "Open blockers (SAMPLE-b0) are information, not a hard stop" in body
+    assert "`Waiting on: <IDs>`" in body
+    assert REQUIRED_READING_DIRECTIVE in body
+    assert "Blocking (waiting on this item):" not in body
+    assert "Other relations:" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_closed_blockers_have_no_warning():
+    """Blockers that are all done list the group but no warning / guidance."""
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    ctx["blocked_by"] = [_blocker(state="Done", state_group="completed")]
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert "Blocked by (must be done first):" in body
+    assert "- SAMPLE-b0: Blocker SAMPLE-b0 (Done)" in body
+    assert "Warning:" not in body
+    assert "Open blockers (" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_omits_blocked_by_group_when_none():
+    ctx = _relationships_ctx(parent=True, children=0, related=0)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING in body
+    assert "Blocked by (must be done first):" not in body
+    assert "Blocking (waiting on this item):" not in body
+    assert "Other relations:" not in body
+    assert "Open blockers (" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_renders_blocking_and_other_relations():
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    ctx["blocking"] = [_blocker("SAMPLE-d0", state="Todo", state_group="unstarted")]
+    other = _blocker("SAMPLE-o0", state="Backlog", state_group="backlog")
+    ctx["other_relations"] = [{**other, "relation": "Implements"}]
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING in body
+    assert "Blocking (waiting on this item):" in body
+    assert "- SAMPLE-d0: Blocker SAMPLE-d0 (Todo)" in body
+    assert "Other relations:" in body
+    assert "- Implements SAMPLE-o0: Blocker SAMPLE-o0 (Backlog)" in body
+    assert "Blocked by (must be done first):" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_warning_pluralizes():
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    ctx["blocked_by"] = [_blocker("SAMPLE-b0"), _blocker("SAMPLE-b1")]
+    ctx["open_blockers"] = ["SAMPLE-b0", "SAMPLE-b1"]
+    ctx["has_open_blockers"] = True
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert "- Warning: SAMPLE-b0, SAMPLE-b1 are still open" in body

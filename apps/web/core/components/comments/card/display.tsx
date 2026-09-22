@@ -120,7 +120,7 @@ export const CommentCardDisplay = observer(function CommentCardDisplay(props: TC
           )}
         </div>
       )}
-      <div className="relative mb-3 flex w-full items-center gap-2">
+      <div className={cn("relative flex w-full items-center gap-2", showCommentContent && "mb-3")}>
         <Avatar size="sm" name={displayName} src={getFileURL(avatarUrl)} className="shrink-0" />
         <div className="flex flex-1 flex-wrap items-center gap-1">
           <div className="text-caption-sm-medium">{displayName}</div>
@@ -136,6 +136,16 @@ export const CommentCardDisplay = observer(function CommentCardDisplay(props: TC
               </span>
             </Tooltip>
           </div>
+          {isFolded && !(isEditing && setIsEditing) ? (
+            <button
+              type="button"
+              className="text-caption-sm-regular whitespace-nowrap text-secondary hover:text-primary"
+              aria-expanded={isFoldExpanded}
+              onClick={() => setIsFoldExpanded((expanded) => !expanded)}
+            >
+              Folded comment · Click to {isFoldExpanded ? "collapse" : "expand"}
+            </button>
+          ) : null}
         </div>
         {!disabled && (
           <div className="flex shrink-0 items-center gap-1">
@@ -164,16 +174,6 @@ export const CommentCardDisplay = observer(function CommentCardDisplay(props: TC
         />
       ) : (
         <>
-          {isFolded ? (
-            <button
-              type="button"
-              className="w-full rounded-md border border-subtle bg-layer-1 px-3 py-2 text-left text-caption-sm-regular text-secondary hover:bg-layer-2"
-              aria-expanded={isFoldExpanded}
-              onClick={() => setIsFoldExpanded((expanded) => !expanded)}
-            >
-              Folded comment · Click to {isFoldExpanded ? "collapse" : "expand"}
-            </button>
-          ) : null}
           {showCommentContent ? (
             <>
               {agentSpeakerLabel ? (

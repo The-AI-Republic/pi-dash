@@ -55,7 +55,18 @@ def _iter_text_values(value: Any):
             yield from _iter_text_values(item)
 
 
-def _match_agent_label(value: str) -> str:
+def _match_agent_label(value: str, *, from_model: bool = False) -> str:
+    """Map one text signal to an agent display name, "" when it says nothing.
+
+    ``from_model`` marks the value as a model slug rather than a
+    runner-scoped signal. Agents that drive another vendor's models make a
+    slug weak evidence: Cursor's own catalog ships ``grok-4.3``
+    (see ``runner-models.ts:CURSOR_OPTIONS``), so a Grok slug does not mean
+    the run used the Grok CLI. Naming the wrong vendor actively misdirects
+    an operator to re-authenticate the wrong account, which is worse than
+    falling through to the generic label, so Grok is not inferred from a
+    model. Genuine Grok runners are still matched on name / host label.
+    """
     lowered = value.lower()
     if "claude_code" in lowered or "claude-code" in lowered or "claude code" in lowered or "claude" in lowered:
         return "Claude Code"
@@ -63,8 +74,16 @@ def _match_agent_label(value: str) -> str:
         return "Codex"
     if "cursor_agent" in lowered or "cursor-agent" in lowered or "cursor" in lowered:
         return "Cursor"
-    if "openclaw" in lowered or "open-claw" in lowered or "acpx" in lowered:
+    if "openclaw" in lowered or "open-claw" in lowered or "open_claw" in lowered or "acpx" in lowered:
         return "OpenClaw"
+    if not from_model and re.search(r"\bgrok\b", lowered):
+        return "Grok"
+    # "muse" is a common English substring ("museum", "amused" — the latter
+    # shows up in generated host names), so the bare form needs a word
+    # boundary. The explicit spellings stay substring matches because
+    # "muse_code" has no boundary between "muse" and "_code".
+    if "muse_code" in lowered or "muse-code" in lowered or "muse code" in lowered or re.search(r"\bmuse\b", lowered):
+        return "Muse Code"
     return ""
 
 
@@ -91,7 +110,7 @@ def infer_agent_label(*, runner: Any = None, error: str = "", model: Any = None)
     misattribute the run; it is only consulted as a last resort.
     """
 
-    label = _match_agent_label(str(model or ""))
+    label = _match_agent_label(str(model or ""), from_model=True)
     if label:
         return label
 

@@ -4,10 +4,17 @@
  * See the LICENSE file for details.
  */
 
-import type { IAssistantLink, IAssistantMessage } from "@pi-dash/types";
+import type { IAssistantLink, IAssistantMessage, IAssistantSkippedServer } from "@pi-dash/types";
 import { ChatMessage, ChatToolActivity } from "@/components/chat/message";
+import { ToolServersSkippedNotice } from "@/components/assistant/tool-servers-skipped-notice";
 
 export function AssistantMessage({ message }: { message: IAssistantMessage }) {
+  // Client-synthesized notice (tool_servers_skipped) — render inline, not as a
+  // chat bubble.
+  if (message.role === "notice") {
+    const servers = (message.payload?.servers ?? []) as IAssistantSkippedServer[];
+    return <ToolServersSkippedNotice servers={servers} />;
+  }
   const isTool = message.role === "tool_call" || message.role === "tool_result";
   const links = (message.payload?.links ?? []) as IAssistantLink[];
   return (

@@ -27,6 +27,7 @@ from pi_dash.runner.views import (
     MachineTokenRedeemEndpoint,
     MetricsEndpoint,
     ProjectListEndpoint,
+    DesktopEnrollEndpoint,
     RunnerCreateEndpoint,
     RunAcceptEndpoint,
     RunApprovalEndpoint,
@@ -66,6 +67,14 @@ urlpatterns = [
         "runners/",
         RunnerCreateEndpoint.as_view(),
         name="runner-create",
+    ),
+    # Desktop-app machine enrollment (session auth, IsDesktopSession). The
+    # session-cookie equivalent of the CLI's device-code flow: mints the same
+    # MachineToken the bundled daemon then uses for everything else.
+    path(
+        "dev-machines/desktop-enroll/",
+        DesktopEnrollEndpoint.as_view(),
+        name="desktop-enroll",
     ),
     # CLI-facing project list — same view as /api/runners/projects/ but
     # mounted here so `pidash` calls stay under /api/v1/runner/. Auth

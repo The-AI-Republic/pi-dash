@@ -2,30 +2,28 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Periodic agent ticking — primitives for the per-issue ticker clock.
+"""Periodic agent ticking — one clock per issue.
 
-This module owns the per-issue ``IssueAgentTicker`` row: when to arm it,
-when to disarm it, when to reset it, how to dispatch a continuation run on
-a tick, and how to apply the deferred cap-hit pause.
+This module owns the per-issue ``IssueAgentTicker`` row. Every event that
+can change the clock (the issue entering / moving within / leaving the
+ticking bucket, a run ending with an outcome, a human asking for a run, a
+Re-tick) goes through :func:`reconcile`; it also dispatches continuation
+runs on a tick and applies the deferred cap-hit pause.
 
 This is internal continuation-cadence machinery, system-armed on Issue
 state transitions; it is not a user-authored periodic-job system.
 
-See ``.ai_design/issue_ticking_system/design.md`` for the full design;
-quick links:
-
-- §4 lifecycle (arm / disarm / re-arm)
-- §4.4.1 deferred cap-hit pause
-- §4.6 Comment & Run reset
-- §6 scanner + atomic claim
-- §12.2 public API surface
+See ``.ai_design/ticking_relevance/design.md`` (§4.0 event table, §4.5
+entry-run queue, §5 budget, §7 outcomes, §10.1 ``reconcile``) and, for the
+scanner / atomic claim, ``.ai_design/issue_ticking_system/design.md`` §6.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import Optional
+from typing import Any, Optional
 
 from django.db import transaction
 from django.utils import timezone
@@ -34,13 +32,14 @@ from pi_dash.db.models.issue import Issue
 from pi_dash.db.models.issue_agent_ticker import (
     DEFAULT_INTERVAL_SECONDS,
     DEFAULT_MAX_TICKS,
+    DEFAULT_RETICK_GRANT,
     INFINITE_MAX_TICKS,
     IssueAgentTicker,
     TickerDisarmReason,
     jitter_seconds,
 )
 from pi_dash.orchestration.agent_phases import is_ticking_state
-from pi_dash.runner.models import AgentRun, AgentRunTrigger
+from pi_dash.runner.models import AgentRun, AgentRunStatus, AgentRunTrigger
 
 logger = logging.getLogger(__name__)
 
@@ -56,39 +55,167 @@ PAUSED_STATE_NAME = "Paused"
 DELEGATION_STATE_NAME = "In Progress"
 
 
+
 # ---------------------------------------------------------------------------
-# Arming / disarming
+# One clock per issue — ``reconcile``
 # ---------------------------------------------------------------------------
+#
+# Every event that can change the ticker goes through ``reconcile``. The
+# older entry points (``arm_ticker``, ``disarm_ticker``,
+# ``reset_ticker_after_comment_and_run``, ``re_tick_ticker``,
+# ``maybe_disarm_on_terminal_signal``) are thin senders of one event each
+# and are kept so callers and tests migrate gradually.
+#
+# The event table in ``.ai_design/ticking_relevance/design.md`` §4.0 is the
+# specification; ``fire_tick`` (``bgtasks.agent_ticker``) is the only writer
+# of ``used``.
 
 
-def _cadence_fields(issue: Issue):
-    """Return the cadence column pair for the issue's *current* phase."""
-    from pi_dash.orchestration.agent_phases import cadence_fields_for
+#: Outcomes a run may report through ``pidash run yield`` (design §7).
+OUTCOME_PROGRESSED = "progressed"
+OUTCOME_WAITING_ON_HUMAN = "waiting_on_human"
+OUTCOME_WAITING_ON_EXTERNAL = "waiting_on_external"
+OUTCOME_DONE = "done"
+OUTCOME_BLOCKED = "blocked"
+RUN_OUTCOMES = frozenset(
+    {
+        OUTCOME_PROGRESSED,
+        OUTCOME_WAITING_ON_HUMAN,
+        OUTCOME_WAITING_ON_EXTERNAL,
+        OUTCOME_DONE,
+        OUTCOME_BLOCKED,
+    }
+)
+#: Outcomes that stop the clock for the stage the run was rendered for.
+STOPPING_OUTCOMES = frozenset({OUTCOME_DONE, OUTCOME_BLOCKED, OUTCOME_WAITING_ON_HUMAN})
+#: Legacy done-payload statuses from the Cloud Agent structured result and
+#: the pre-yield fence, mapped onto the §7 vocabulary. ``noop`` is per kind
+#: (see :func:`normalize_outcome`): "nothing changed" keeps an In Progress
+#: clock ticking and stops a review / test one.
+_LEGACY_OUTCOME_ALIASES = {
+    "completed": OUTCOME_DONE,
+    "paused": OUTCOME_WAITING_ON_HUMAN,
+}
 
-    return cadence_fields_for(getattr(issue, "state", None))
+
+class TickerEventKind:
+    ENTERED_BUCKET = "entered_bucket"
+    MOVED_STAGE = "moved_stage"
+    LEFT_BUCKET = "left_bucket"
+    RUN_ENDED = "run_ended"
+    HUMAN_RUN_REQUESTED = "human_run_requested"
+    RETICK = "retick"
 
 
-def _project_default_interval(issue: Issue) -> int:
-    """Project-level default interval for the issue's *current* phase.
+@dataclass(frozen=True)
+class TickerEvent:
+    """One thing that happened to an issue that the clock must react to."""
 
-    Used for the brand-new ticker row's first ``next_run_at`` compute,
-    where there is no row yet to ask ``effective_interval_seconds``.
-    Subsequent arms read directly from the row's phase-aware
-    ``effective_*`` methods.
-    """
-    fields = _cadence_fields(issue)
-    return getattr(issue.project, fields.project_interval, fields.default_interval)
+    kind: str
+    #: For ``ENTERED_BUCKET`` / ``MOVED_STAGE``: the run that made the move,
+    #: when an agent made it from inside a run (design §5.6). ``None`` means
+    #: a human made the move.
+    moved_by_run: Optional[AgentRun] = None
+    #: For ``ENTERED_BUCKET`` / ``MOVED_STAGE``: the latest implementation
+    #: run to remember for a later hand-back, when leaving In Progress.
+    resume_parent: Optional[AgentRun] = None
+    #: For ``RUN_ENDED``: the run and its reported outcome (``None`` when the
+    #: run exited without yielding — a per-kind default applies).
+    run: Optional[AgentRun] = None
+    outcome: Optional[str] = None
+    #: For ``HUMAN_RUN_REQUESTED`` / ``RETICK``: whether the caller intends to
+    #: dispatch a run right now (so the clock only needs re-timing) — or
+    #: wants ``reconcile`` to queue one if the issue is busy.
+    want_run: bool = True
+    #: For human levers: who asked, and the ``AgentRunTrigger`` the run
+    #: should carry. Remembered on the ticker when the entry has to be
+    #: queued, so the run that fires later is created as that person
+    #: (LLM config, runner eligibility) and labelled correctly.
+    actor: Optional[Any] = None
+    trigger: str = ""
+
+    # Convenience constructors — keep call sites readable.
+    @classmethod
+    def entered_bucket(cls, *, moved_by_run=None, resume_parent=None, want_run=True, actor=None):
+        return cls(
+            TickerEventKind.ENTERED_BUCKET,
+            moved_by_run=moved_by_run,
+            resume_parent=resume_parent,
+            want_run=want_run,
+            actor=actor,
+            trigger=AgentRunTrigger.STATE_TRANSITION.value,
+        )
+
+    @classmethod
+    def moved_stage(cls, *, moved_by_run=None, resume_parent=None, want_run=True, actor=None):
+        return cls(
+            TickerEventKind.MOVED_STAGE,
+            moved_by_run=moved_by_run,
+            resume_parent=resume_parent,
+            want_run=want_run,
+            actor=actor,
+            trigger=AgentRunTrigger.STATE_TRANSITION.value,
+        )
+
+    @classmethod
+    def left_bucket(cls):
+        return cls(TickerEventKind.LEFT_BUCKET)
+
+    @classmethod
+    def run_ended(cls, run: AgentRun, outcome: Optional[str] = None):
+        return cls(TickerEventKind.RUN_ENDED, run=run, outcome=outcome)
+
+    @classmethod
+    def human_run_requested(cls, *, want_run: bool = True, actor=None, trigger: str = ""):
+        return cls(
+            TickerEventKind.HUMAN_RUN_REQUESTED,
+            want_run=want_run,
+            actor=actor,
+            trigger=trigger or AgentRunTrigger.RUN_AI.value,
+        )
+
+    @classmethod
+    def retick(cls, *, want_run: bool = True, actor=None):
+        return cls(
+            TickerEventKind.RETICK,
+            want_run=want_run,
+            actor=actor,
+            trigger=AgentRunTrigger.RUN_AI.value,
+        )
 
 
-def _project_default_max_ticks(issue: Issue) -> int:
-    """Project-level default cap for the issue's *current* phase."""
-    fields = _cadence_fields(issue)
-    return getattr(issue.project, fields.project_max_ticks, fields.default_max_ticks)
+@dataclass
+class TickerDecision:
+    """What ``reconcile`` decided, for the caller to act on."""
+
+    ticker: Optional[IssueAgentTicker] = None
+    #: The caller should create and dispatch a run *now* (the issue is free
+    #: and a human asked for one). ``reconcile`` never creates runs itself.
+    dispatch_now: bool = False
+    #: An entry run was queued on the clock (design §4.5) — the issue was
+    #: busy, or an agent made the move. ``fire_tick`` will pick it up.
+    queued: bool = False
+    #: An agent moved the issue while the pool is spent: nothing fires; the
+    #: issue parks in its truthful state (design §5.4).
+    parked: bool = False
+    #: A Re-tick that granted budget.
+    granted: bool = False
+    reason: str = ""
+
+
+def is_paused_state(state) -> bool:
+    """The project's auto-pause parking state (``PAUSED_STATE_NAME``)."""
+    return state is not None and getattr(state, "name", None) == PAUSED_STATE_NAME
 
 
 def _project_ticking_enabled(issue: Issue) -> bool:
-    project = issue.project
+    project = getattr(issue, "project", None)
     return bool(getattr(project, "agent_ticking_enabled", True))
+
+
+def _clock_allowed(issue: Issue, ticker: IssueAgentTicker) -> bool:
+    """May this issue's clock run at all (user / project switches)?"""
+    return not ticker.user_disabled and _project_ticking_enabled(issue)
 
 
 def _compute_next_run_at(interval_seconds: int, *, base=None):
@@ -96,80 +223,377 @@ def _compute_next_run_at(interval_seconds: int, *, base=None):
     return base + timedelta(seconds=interval_seconds + jitter_seconds(interval_seconds))
 
 
+def _issue_has_active_run(issue: Issue) -> bool:
+    from pi_dash.orchestration import service as orchestration_service
+
+    return orchestration_service._active_run_for(issue) is not None
+
+
+def _lock_ticker(issue: Issue, *, create: bool) -> Optional[IssueAgentTicker]:
+    """Row-lock the issue's ticker, creating it (disabled, unarmed) if asked.
+
+    Callers hold ``transaction.atomic()``.
+    """
+    ticker = IssueAgentTicker.objects.select_for_update().filter(issue=issue).first()
+    if ticker is None and create:
+        ticker = IssueAgentTicker.objects.create(
+            issue=issue,
+            user_disabled=False,
+            next_run_at=None,
+            used=0,
+            granted=0,
+            enabled=False,
+            disarm_reason=TickerDisarmReason.NONE,
+        )
+    if ticker is not None:
+        # Bind the caller's (fresh) issue so the phase-aware resolvers read
+        # the state the caller sees rather than a lazily-loaded stale copy.
+        ticker.issue = issue
+    return ticker
+
+
+_TICKER_CLOCK_FIELDS = (
+    "enabled",
+    "disarm_reason",
+    "next_run_at",
+    "pending_entry",
+    "pending_entry_free",
+    "pending_entry_actor",
+    "pending_entry_trigger",
+    "granted",
+    "resume_parent_run",
+    "updated_at",
+)
+
+
+def _save_clock(ticker: IssueAgentTicker) -> None:
+    ticker.save(update_fields=list(_TICKER_CLOCK_FIELDS))
+
+
+def _clear_pending(ticker: IssueAgentTicker) -> None:
+    ticker.pending_entry = False
+    ticker.pending_entry_free = False
+    ticker.pending_entry_actor = None
+    ticker.pending_entry_trigger = ""
+
+
+def _stop_clock(ticker: IssueAgentTicker, reason: str) -> None:
+    ticker.enabled = False
+    ticker.disarm_reason = reason
+    _clear_pending(ticker)
+
+
+def _queue_entry(ticker: IssueAgentTicker, *, free: bool, actor=None, trigger: str = "") -> None:
+    """Owe an entry run for the current stage (design §4.5).
+
+    ``next_run_at = now`` so the scanner picks it up on its next pass;
+    ``fire_tick`` refuses while a run is active and leaves the clock
+    untouched, so the entry fires as soon as the issue is free. ``enabled``
+    must be ``True`` even when the pool is spent and the entry is free — the
+    scan admits pending rows regardless of cap — and even when the user or
+    project switched automatic ticking off: a human asked for *this* run.
+    ``fire_tick`` re-applies the switch after the claim so no timer tick
+    follows on a disabled clock.
+    """
+    ticker.enabled = True
+    ticker.disarm_reason = TickerDisarmReason.NONE
+    ticker.next_run_at = timezone.now()
+    ticker.pending_entry = True
+    ticker.pending_entry_free = free
+    ticker.pending_entry_actor = actor if free else None
+    ticker.pending_entry_trigger = trigger if free else ""
+
+
+def _stop_for_switch(ticker: IssueAgentTicker) -> None:
+    _stop_clock(
+        ticker,
+        TickerDisarmReason.USER_DISABLED if ticker.user_disabled else TickerDisarmReason.NONE,
+    )
+
+
+def _retime_clock(ticker: IssueAgentTicker, issue: Issue) -> None:
+    """Arm the clock for the current stage's interval if the pool allows.
+
+    A spent pool stops the clock with ``POOL_SPENT`` (not ``CAP_HIT`` — that
+    reason is reserved for the timer tick that consumed the last run, and it
+    is the only one that auto-Pauses; a human-started run on a spent pool
+    must leave the issue where the human can Re-tick it).
+    """
+    if not _clock_allowed(issue, ticker):
+        _stop_for_switch(ticker)
+        return
+    if ticker.cap_reached():
+        _stop_clock(ticker, TickerDisarmReason.POOL_SPENT)
+        return
+    ticker.enabled = True
+    ticker.disarm_reason = TickerDisarmReason.NONE
+    _clear_pending(ticker)
+    ticker.next_run_at = _compute_next_run_at(ticker.effective_interval_seconds())
+
+
+def normalize_outcome(value, phase_kind: str = "") -> Optional[str]:
+    """Map a done-payload ``status`` onto the §7 outcome vocabulary.
+
+    Returns ``None`` for anything unrecognised (a bridge's
+    ``{"conclusion": …}`` payload has no status at all), which the
+    ``RUN_ENDED`` handler treats as "the run did not yield". The legacy
+    ``noop`` ("nothing changed") follows the per-kind default: an In
+    Progress run that found nothing to do must keep ticking (CI may still
+    be running), while a review / test that found nothing new is satisfied.
+    """
+    if not isinstance(value, str):
+        return None
+    value = value.strip().lower()
+    if value in RUN_OUTCOMES:
+        return value
+    if value == "noop":
+        return default_outcome_for_kind(phase_kind or "")
+    return _LEGACY_OUTCOME_ALIASES.get(value)
+
+
+def outcome_for_run(run: AgentRun) -> Optional[str]:
+    payload = run.done_payload or {}
+    if not isinstance(payload, dict):
+        return None
+    return normalize_outcome(payload.get("status"), getattr(run, "phase_kind", "") or "")
+
+
+def default_outcome_for_kind(phase_kind: str) -> str:
+    """What a run that exited without yielding is taken to mean.
+
+    ``coding-task`` → keep ticking (the budget still bounds it). ``review``
+    / ``test`` → ``done`` (stay; stop) — the cost-safe reading, so an
+    approved review that forgets to yield does not tick to its cap.
+    """
+    from pi_dash.prompting.recipes import KIND_CODING_TASK
+
+    if phase_kind in ("", KIND_CODING_TASK):
+        return OUTCOME_PROGRESSED
+    return OUTCOME_DONE
+
+
+def reconcile(issue: Issue, event: TickerEvent) -> TickerDecision:
+    """Apply one event to the issue's clock and say what the caller should do.
+
+    Reads: the issue's current stage, ``used`` / ``granted``, the project's
+    pool / grant / interval for the stage, the user and project switches,
+    and whether a run is active. Writes: ``next_run_at``, ``pending_entry``,
+    ``pending_entry_free``, ``enabled``, ``disarm_reason``, ``granted``,
+    ``resume_parent_run``. Never writes ``used``.
+    """
+    handler = _EVENT_HANDLERS.get(event.kind)
+    if handler is None:
+        raise ValueError(f"unknown ticker event kind {event.kind!r}")
+    with transaction.atomic():
+        decision = handler(issue, event)
+    logger.info(
+        "agent_ticker: reconcile issue=%s event=%s -> dispatch_now=%s queued=%s parked=%s reason=%s",
+        issue.pk,
+        event.kind,
+        decision.dispatch_now,
+        decision.queued,
+        decision.parked,
+        decision.reason,
+    )
+    return decision
+
+
+def _on_enter_or_move(issue: Issue, event: TickerEvent) -> TickerDecision:
+    """Issue entered the bucket, or moved between its rooms (design §4.0).
+
+    No teardown, no rebuild: the same row keeps ``used`` / ``granted``. The
+    only questions are whether an entry run fires, whether it counts, and
+    which interval the clock reads next.
+    """
+    ticker = _lock_ticker(issue, create=True)
+    if event.resume_parent is not None:
+        ticker.resume_parent_run = event.resume_parent
+
+    decision = TickerDecision(ticker=ticker)
+    agent_move = event.moved_by_run is not None
+    clock_allowed = _clock_allowed(issue, ticker)
+
+    if agent_move:
+        if ticker.cap_reached():
+            # Pool spent: nothing fires. The issue sits in its truthful
+            # state; the run that moved it owes the human a comment (§5.4).
+            # ``POOL_SPENT``, not ``CAP_HIT``: parking must not auto-Pause
+            # the issue out from under the Re-tick the comment points at.
+            _stop_clock(ticker, TickerDisarmReason.POOL_SPENT)
+            decision.parked = True
+            decision.reason = "pool-spent"
+        elif not clock_allowed:
+            _stop_for_switch(ticker)
+            decision.reason = "ticking-disabled"
+        else:
+            # The agent moves the issue from inside its own run, so a
+            # direct dispatch would hit the single-active-run guard. Queue
+            # the entry on the clock; it counts (§5.2).
+            _queue_entry(ticker, free=False)
+            decision.queued = True
+            decision.reason = "entry-queued"
+    else:
+        # Human move: one free run, always — even into a spent pool.
+        if not event.want_run:
+            _retime_clock(ticker, issue)
+            decision.reason = "retimed"
+        elif _issue_has_active_run(issue):
+            _queue_entry(ticker, free=True, actor=event.actor, trigger=event.trigger)
+            decision.queued = True
+            decision.reason = "free-entry-queued"
+        else:
+            _retime_clock(ticker, issue)
+            decision.dispatch_now = True
+            decision.reason = "dispatch-now"
+    _save_clock(ticker)
+    return decision
+
+
+def _on_left_bucket(issue: Issue, event: TickerEvent) -> TickerDecision:
+    """Issue left the bucket: the clock goes dormant; the pool is kept."""
+    ticker = _lock_ticker(issue, create=False)
+    if ticker is None:
+        return TickerDecision(reason="no-ticker")
+    _stop_clock(ticker, TickerDisarmReason.LEFT_TICKING_STATE)
+    ticker.next_run_at = None
+    _save_clock(ticker)
+    return TickerDecision(ticker=ticker, reason="dormant")
+
+
+def _on_run_ended(issue: Issue, event: TickerEvent) -> TickerDecision:
+    """A run on the issue reached a resting status (design §7).
+
+    The guard: a run that moved the issue on and *then* reported ``done``
+    must not stop the clock that is already set for the next stage.
+    """
+    run = event.run
+    ticker = _lock_ticker(issue, create=False)
+    if ticker is None:
+        return TickerDecision(reason="no-ticker")
+    state = issue.state
+    if not is_ticking_state(state):
+        return TickerDecision(ticker=ticker, reason="not-in-bucket")
+
+    from pi_dash.orchestration.agent_phases import template_name_for
+    from pi_dash.prompting.recipes import kind_for
+
+    current_kind = kind_for(template_name_for(state))
+    run_kind = getattr(run, "phase_kind", "") or ""
+    if run_kind and run_kind != current_kind:
+        return TickerDecision(ticker=ticker, reason="stage-moved-on")
+
+    outcome = event.outcome if event.outcome is not None else outcome_for_run(run)
+    if outcome is None:
+        # No yield. A run that *completed* is read per kind (§7 defaults);
+        # one that failed, was cancelled, or was refused said nothing about
+        # the stage — keep ticking so the next tick retries, rather than
+        # stopping the clock on a crash (which would strand a review/test
+        # issue with no Re-tick button, since the cap was never reached).
+        if run.status == AgentRunStatus.COMPLETED:
+            outcome = default_outcome_for_kind(run_kind or current_kind)
+        elif run.status == AgentRunStatus.PAUSED_AWAITING_INPUT:
+            outcome = OUTCOME_WAITING_ON_HUMAN
+        else:
+            outcome = OUTCOME_PROGRESSED
+
+    if ticker.pending_entry:
+        # Something (a human, a queued hand-off) already owes the next run
+        # on this clock; the finished run's opinion does not override it.
+        return TickerDecision(ticker=ticker, reason=f"{outcome}:pending-entry-kept")
+
+    if outcome in STOPPING_OUTCOMES:
+        if ticker.enabled:
+            # Only stop an armed clock — a prior ``cap_hit`` must survive so
+            # the deferred auto-pause still fires (design §5.2).
+            _stop_clock(ticker, TickerDisarmReason.TERMINAL_SIGNAL)
+            _save_clock(ticker)
+            return TickerDecision(ticker=ticker, reason=f"{outcome}:stopped")
+        return TickerDecision(ticker=ticker, reason=f"{outcome}:already-stopped")
+
+    # progressed / waiting_on_external: keep ticking. ``fire_tick`` already
+    # re-timed the clock at claim for tick-started runs; make sure a
+    # human-started run leaves a live clock behind too.
+    if ticker.enabled and ticker.next_run_at is None and not ticker.cap_reached():
+        ticker.next_run_at = _compute_next_run_at(ticker.effective_interval_seconds())
+        _save_clock(ticker)
+    return TickerDecision(ticker=ticker, reason=f"{outcome}:keep-ticking")
+
+
+def _on_human_run_requested(issue: Issue, event: TickerEvent) -> TickerDecision:
+    """Run AI / Comment & Run: one free run now; re-time only if budget."""
+    ticker = _lock_ticker(issue, create=True)
+    decision = TickerDecision(ticker=ticker)
+    if event.want_run and _issue_has_active_run(issue):
+        _queue_entry(ticker, free=True, actor=event.actor, trigger=event.trigger)
+        decision.queued = True
+        decision.reason = "free-entry-queued"
+    else:
+        _retime_clock(ticker, issue)
+        decision.dispatch_now = event.want_run
+        decision.reason = "dispatch-now" if event.want_run else "retimed"
+    _save_clock(ticker)
+    return decision
+
+
+def _on_retick(issue: Issue, event: TickerEvent) -> TickerDecision:
+    """Re-tick: grant one project-sized budget slice, then fire now.
+
+    All guards must hold or the call is a no-op: a ticker row exists, the
+    issue is in the bucket, the pool is actually spent.
+    """
+    ticker = _lock_ticker(issue, create=False)
+    if ticker is None:
+        return TickerDecision(reason="no_ticker")
+    paused = is_paused_state(issue.state)
+    if not is_ticking_state(issue.state) and not paused:
+        return TickerDecision(ticker=ticker, reason="not_ticking_state")
+    if not ticker.cap_reached():
+        return TickerDecision(ticker=ticker, reason="budget_not_exhausted")
+
+    grant = getattr(issue.project, "agent_retick_grant", DEFAULT_RETICK_GRANT)
+    ticker.granted += max(0, int(grant))
+    decision = TickerDecision(ticker=ticker, granted=True, reason="granted")
+    if paused:
+        # The cap-hit auto-pause parked the issue outside the bucket. The
+        # grant lands here; ``re_tick_ticker`` moves the issue back to In
+        # Progress as a human move, which arms the clock and fires the run.
+        decision.reason = "granted-from-paused"
+        _save_clock(ticker)
+        return decision
+    if event.want_run and _issue_has_active_run(issue):
+        _queue_entry(ticker, free=True, actor=event.actor, trigger=event.trigger)
+        decision.queued = True
+    else:
+        _retime_clock(ticker, issue)
+        decision.dispatch_now = event.want_run
+    _save_clock(ticker)
+    return decision
+
+
+_EVENT_HANDLERS = {
+    TickerEventKind.ENTERED_BUCKET: _on_enter_or_move,
+    TickerEventKind.MOVED_STAGE: _on_enter_or_move,
+    TickerEventKind.LEFT_BUCKET: _on_left_bucket,
+    TickerEventKind.RUN_ENDED: _on_run_ended,
+    TickerEventKind.HUMAN_RUN_REQUESTED: _on_human_run_requested,
+    TickerEventKind.RETICK: _on_retick,
+}
+
+
+# ---------------------------------------------------------------------------
+# Thin senders — kept for callers and tests that predate ``reconcile``
+# ---------------------------------------------------------------------------
+
+
 def arm_ticker(
     issue: Issue,
     *,
     dispatch_immediate: bool = True,  # noqa: ARG001 — caller-only signal
 ) -> IssueAgentTicker:
-    """Create or reset the ticker for an issue entering a ticking state.
-
-    ``dispatch_immediate`` does not affect the schedule itself — arming
-    *never* fires a run. The flag exists only to document the caller's
-    intent: ``True`` means the caller is firing (or expects another
-    immediate dispatch), ``False`` means arming alone is enough — no
-    new run should be inferred from this call. Used by Comment & Run
-    on a Paused issue (§4.6) and by re-arm-on-comment in
-    :func:`pi_dash.orchestration.service.handle_issue_comment`.
-
-    Honors ``user_disabled`` and project-level ``agent_ticking_enabled``:
-    sets ``enabled = False`` when either suppresses ticks.
-    """
-    suppress_for_project = not _project_ticking_enabled(issue)
-
-    with transaction.atomic():
-        sched = IssueAgentTicker.objects.select_for_update().filter(issue=issue).first()
-        if sched is None:
-            # Brand-new row. We need a sensible ``next_run_at`` before
-            # we can ask for ``effective_interval_seconds`` (which
-            # consults the row), so use the project default for the
-            # issue's *current* phase — ``_project_default_interval``
-            # resolves that through the phase registry, so a Todo → In
-            # Review or Todo → In Test path that skips the impl phase
-            # still starts on its own phase's cadence. Subsequent arms
-            # use the row's phase-aware ``effective_interval_seconds``
-            # directly.
-            interval = _project_default_interval(issue)
-            sched = IssueAgentTicker.objects.create(
-                issue=issue,
-                interval_seconds=None,
-                max_ticks=None,
-                review_interval_seconds=None,
-                review_max_ticks=None,
-                test_interval_seconds=None,
-                test_max_ticks=None,
-                user_disabled=False,
-                next_run_at=_compute_next_run_at(interval),
-                tick_count=0,
-                enabled=not suppress_for_project,
-                disarm_reason=TickerDisarmReason.NONE,
-            )
-        else:
-            # Existing row — reset clock and re-evaluate enabled.
-            sched.tick_count = 0
-            sched.next_run_at = _compute_next_run_at(sched.effective_interval_seconds())
-            suppress = sched.user_disabled or suppress_for_project
-            sched.enabled = not suppress
-            # Re-arming clears any prior disarm cause; if we end up
-            # disabled because of user_disabled or project-suppress,
-            # the next disarm caller will set the appropriate reason.
-            sched.disarm_reason = TickerDisarmReason.NONE
-            sched.save(
-                update_fields=[
-                    "tick_count",
-                    "next_run_at",
-                    "enabled",
-                    "disarm_reason",
-                    "updated_at",
-                ]
-            )
-
-    logger.info(
-        "agent_ticker: armed issue=%s enabled=%s next_run_at=%s",
-        issue.pk,
-        sched.enabled,
-        sched.next_run_at,
-    )
-    return sched
+    """Human re-engagement without a run: re-time the clock for the current
+    stage if the pool allows. Never zeroes ``used``."""
+    decision = reconcile(issue, TickerEvent.human_run_requested(want_run=False))
+    return decision.ticker
 
 
 def disarm_ticker(
@@ -177,240 +601,119 @@ def disarm_ticker(
     *,
     reason: str = TickerDisarmReason.LEFT_TICKING_STATE,
 ) -> Optional[IssueAgentTicker]:
-    """Set ``enabled = False`` and persist ``disarm_reason``. Idempotent.
-
-    Called when issue leaves a ticking group, on cap hit, on terminal
-    done-signal, and when the user toggles ``user_disabled = True``
-    mid-flight. Returns the schedule if one exists; ``None`` otherwise.
-
-    The ``reason`` argument is **load-bearing**: only ``CAP_HIT``
-    triggers ``maybe_apply_deferred_pause`` to auto-Pause the issue.
-    Terminal-signal disarms (``completed`` / ``blocked``) leave the
-    issue in place for the human to act.
-
-    Note: this helper *overwrites* ``disarm_reason`` even when the
-    ticker is already disabled — callers are expected to know which
-    cause should win. This differs from
-    :func:`maybe_disarm_on_terminal_signal`, which deliberately
-    preserves the prior reason so an opportunistic terminal-signal
-    disarm cannot clobber a pre-existing ``CAP_HIT``. Today the only
-    production caller is the state-transition handler with the
-    default ``LEFT_TICKING_STATE`` reason. Callers needing the
-    terminal-signal semantics must use
-    :func:`maybe_disarm_on_terminal_signal`; passing
-    ``TERMINAL_SIGNAL`` here raises ``ValueError`` because the
-    overwrite-always behavior would silently clobber a pre-existing
-    ``CAP_HIT`` and skip the auto-pause.
-    """
+    """Stop the clock with ``reason``. Idempotent."""
     if reason == TickerDisarmReason.TERMINAL_SIGNAL:
         raise ValueError(
-            "disarm_ticker overwrites disarm_reason — use "
-            "maybe_disarm_on_terminal_signal() for TERMINAL_SIGNAL "
-            "to preserve a prior CAP_HIT and the auto-pause it gates."
+            "disarm_ticker overwrites disarm_reason — send a RUN_ENDED event "
+            "(reconcile) for TERMINAL_SIGNAL so a prior CAP_HIT survives."
         )
     with transaction.atomic():
-        sched = IssueAgentTicker.objects.select_for_update().filter(issue=issue).first()
-        if sched is None:
+        ticker = _lock_ticker(issue, create=False)
+        if ticker is None:
             return None
-        # Always update the reason — even when already disabled — so a
-        # later disarm with a different reason (e.g., terminal signal
-        # arriving on an already cap-hit-disabled ticker) does not
-        # incorrectly preserve the older reason. But the rule is that
-        # the *first* terminal cause wins for the auto-pause gate, so
-        # only the first transition flips ``enabled``.
-        changed = False
-        if sched.enabled:
-            sched.enabled = False
-            changed = True
-        if sched.disarm_reason != reason:
-            sched.disarm_reason = reason
-            changed = True
-        if changed:
-            sched.save(update_fields=["enabled", "disarm_reason", "updated_at"])
+        _stop_clock(ticker, reason)
+        if reason == TickerDisarmReason.LEFT_TICKING_STATE:
+            ticker.next_run_at = None
+        _save_clock(ticker)
     logger.info("agent_ticker: disarmed issue=%s reason=%s", issue.pk, reason)
-    return sched
+    return ticker
 
 
 def maybe_disarm_on_terminal_signal(run: AgentRun) -> bool:
-    """Disarm the ticker if the run's done-payload status is a phase-
-    final signal (``completed`` or ``blocked``).
-
-    Do not disarm on ``noop`` (which currently persists as
-    ``AgentRunStatus.COMPLETED``). The hook inspects
-    ``run.done_payload['status']`` rather than ``run.status`` because
-    ``noop`` and true completion share the same persisted run status.
-
-    **Critical:** only disarm when the ticker is currently *armed*. If
-    the ticker is already disabled, leave the existing
-    ``disarm_reason`` alone — that prior reason (typically ``CAP_HIT``
-    when cap was hit during the same tick that produced this run)
-    determines whether ``maybe_apply_deferred_pause`` will auto-Pause.
-    Overwriting a ``CAP_HIT`` reason with ``TERMINAL_SIGNAL`` would
-    silently drop the auto-pause.
-
-    Closes the gap in the existing issue-ticking design: the spec
-    says terminal completed/blocked should disarm but the existing
-    code only disarms via state transitions. Idempotent. Safe to
-    call alongside ``maybe_apply_deferred_pause``.
-
-    Returns ``True`` when a disarm was applied this call (i.e., the
-    ticker was armed and is now disabled with reason
-    ``TERMINAL_SIGNAL``).
-    """
+    """Send ``RUN_ENDED`` for ``run``; ``True`` when the clock was stopped."""
     if run.work_item_id is None:
         return False
-    payload = run.done_payload or {}
-    payload_status = (payload or {}).get("status")
-    if payload_status not in {"completed", "blocked"}:
-        return False
-    issue = run.work_item
-    with transaction.atomic():
-        sched = IssueAgentTicker.objects.select_for_update().filter(issue=issue).first()
-        if sched is None:
-            return False
-        # Already disabled — preserve the prior reason. See docstring.
-        if not sched.enabled:
-            return False
-        sched.enabled = False
-        sched.disarm_reason = TickerDisarmReason.TERMINAL_SIGNAL
-        sched.save(update_fields=["enabled", "disarm_reason", "updated_at"])
-    logger.info(
-        "agent_ticker: disarmed-on-terminal issue=%s payload_status=%s",
-        issue.pk,
-        payload_status,
-    )
-    return True
+    decision = reconcile(run.work_item, TickerEvent.run_ended(run))
+    return decision.reason.endswith(":stopped")
 
 
 def reset_ticker_after_comment_and_run(issue: Issue) -> Optional[IssueAgentTicker]:
-    """Reset ``tick_count = 0`` and ``next_run_at = NOW() + interval + jitter``.
+    """Comment & Run / Run AI, caller dispatches the run itself.
 
-    Called by the Comment & Run handler after the run is dispatched
-    (§4.6 step 4). Uses ``select_for_update`` to serialize against
-    ``fire_tick`` (§6.1).
+    Historical name — nothing is *reset* any more: human-started runs are
+    free (design §5.2). Re-times the clock if the pool has budget.
     """
-    with transaction.atomic():
-        sched = IssueAgentTicker.objects.select_for_update().filter(issue=issue).first()
-        if sched is None:
-            return None
-        sched.tick_count = 0
-        sched.next_run_at = _compute_next_run_at(sched.effective_interval_seconds())
-        # Comment & Run is an explicit re-engagement — re-enable unless
-        # the user has explicitly disabled ticking on this issue.
-        suppress = sched.user_disabled or not _project_ticking_enabled(issue)
-        sched.enabled = not suppress
-        sched.disarm_reason = TickerDisarmReason.NONE
-        sched.save(
-            update_fields=[
-                "tick_count",
-                "next_run_at",
-                "enabled",
-                "disarm_reason",
-                "updated_at",
-            ]
-        )
-    logger.info(
-        "agent_ticker: reset issue=%s next_run_at=%s",
-        issue.pk,
-        sched.next_run_at,
-    )
-    return sched
+    decision = reconcile(issue, TickerEvent.human_run_requested(want_run=False))
+    return decision.ticker
 
 
-def re_tick_ticker(issue: Issue) -> dict:
-    """Grant a fresh phase-sized tick budget to an exhausted ticker and re-arm.
+def re_tick_ticker(issue: Issue, *, actor=None) -> dict:
+    """Grant a Re-tick and start a run now (design §5.5).
 
-    Manual "re-ticking". When a ticker has burned through its budget
-    (``cap_reached()``) while the issue is still in a ticking state
-    (In Progress / In Review / In Test), the user can re-grant budget so the
-    continuation clock resumes. Unlike
-    :func:`reset_ticker_after_comment_and_run` (which zeroes
-    ``tick_count``), re-ticking **grows** the cap by one fresh phase
-    budget and leaves ``tick_count`` intact — the issue detail card keeps
-    showing cumulative progress ("Tick 24 of 48") rather than resetting to
-    "Tick 0 of 24".
-
-    The grant amount is the project default for the issue's *current*
-    phase (In Progress vs In Review), so re-ticking In Review re-grants the
-    In-Review budget and re-ticking In Progress re-grants the In-Progress
-    budget. Because ``tick_count == effective_max_ticks()`` at exhaustion,
-    ``new_cap = effective_max_ticks() + grant`` yields exactly ``grant``
-    fresh ticks. Using the phase's *project default* as the grant unit
-    keeps repeated re-ticks granting a stable amount even though the grant
-    is persisted by bumping the phase cap override.
-
-    Returns ``{"granted": bool, "reason": str, "ticker": IssueAgentTicker|None}``.
-    All three guardrails below must hold or the call is a no-op with
-    ``granted = False`` and no mutation:
-
-    * a ticker row exists (``reason = "no_ticker"``),
-    * the issue is currently in a ticking state (``reason =
-      "not_ticking_state"``),
-    * the budget is actually exhausted (``reason =
-      "budget_not_exhausted"``).
-
-    ``select_for_update`` serializes against ``fire_tick`` and the deferred
-    cap-hit pause (§6.1 / §4.4.1).
+    Returns ``{"granted": bool, "reason": str, "ticker": IssueAgentTicker|None,
+    "run": AgentRun|None}``.
     """
+    from pi_dash.orchestration import service as orchestration_service
+
+    # Grant, clock re-time and dispatch share one transaction: a Re-tick that
+    # produced no run (no pod, no creator, a preflight bounce) is reported
+    # as not granted and leaves the ticker exactly as it was.
     with transaction.atomic():
-        # Re-fetch and lock the issue inside the transaction so the state
-        # guard below sees the latest committed state, not a possibly-stale
-        # instance handed in by the caller. Without this, a concurrent
-        # transition out of a ticking state (e.g. to Done) could race the
-        # re-arm and leave the ticker enabled for a non-ticking issue.
-        locked_issue = (
+        locked = (
             Issue.all_objects.select_for_update(of=("self",))
-            .select_related("state", "project")
+            .select_related("state", "project", "workspace")
             .filter(pk=issue.pk)
             .first()
         )
-        if locked_issue is None:
-            return {"granted": False, "reason": "no_issue", "ticker": None}
+        if locked is None:
+            return {"granted": False, "reason": "no_issue", "ticker": None, "run": None}
+        decision = reconcile(locked, TickerEvent.retick(actor=actor))
+        result = {
+            "granted": decision.granted,
+            "reason": decision.reason,
+            "ticker": decision.ticker,
+            "run": None,
+        }
+        if not decision.granted:
+            return result
 
-        sched = IssueAgentTicker.objects.select_for_update().filter(issue=locked_issue).first()
-        if sched is None:
-            return {"granted": False, "reason": "no_ticker", "ticker": None}
-        # Bind the freshly-locked issue so phase-aware methods
-        # (``_cadence_fields``/``effective_max_ticks``) resolve against
-        # the current state rather than lazy-loading a fresh copy.
-        sched.issue = locked_issue
-        if not is_ticking_state(locked_issue.state):
-            return {"granted": False, "reason": "not_ticking_state", "ticker": sched}
-        if not sched.cap_reached():
-            return {"granted": False, "reason": "budget_not_exhausted", "ticker": sched}
+        creator = actor if actor is not None else orchestration_service._resolve_fallback_creator(locked)
+        if decision.reason == "granted-from-paused":
+            # Bring the issue back into the bucket as a human move (free
+            # entry, clock armed on the fresh budget). The signal only
+            # updates the clock; we dispatch below so the run carries
+            # ``actor``.
+            target = _in_progress_state_for(locked)
+            if target is None:
+                transaction.set_rollback(True)
+                return {"granted": False, "reason": "no_in_progress_state", "ticker": decision.ticker, "run": None}
+            from pi_dash.orchestration.signals import _DISPATCH_IMMEDIATE_ATTR
 
-        grant = _project_default_max_ticks(locked_issue)
-        # The grant lands on the *current* phase's own override column.
-        # Phases are siblings with independent budgets: extending an In
-        # Test issue must never inflate what In Review gets later, and
-        # vice versa.
-        cap_field = _cadence_fields(locked_issue).ticker_max_ticks
-        new_cap = sched.effective_max_ticks() + grant
-        setattr(sched, cap_field, new_cap)
+            setattr(locked, _DISPATCH_IMMEDIATE_ATTR, False)
+            locked.state = target
+            if hasattr(locked, "updated_by") and creator is not None:
+                locked.updated_by = creator
+            locked.save(update_fields=["state", "updated_at"])
+            decision.dispatch_now = True
 
-        # Re-arm: clear the disarm cause and restart the clock unless the
-        # user disabled ticking on this issue or the project suppresses it.
-        suppress = sched.user_disabled or not _project_ticking_enabled(locked_issue)
-        sched.enabled = not suppress
-        sched.disarm_reason = TickerDisarmReason.NONE
-        sched.next_run_at = _compute_next_run_at(sched.effective_interval_seconds())
-        sched.save(
-            update_fields=[
-                cap_field,
-                "enabled",
-                "disarm_reason",
-                "next_run_at",
-                "updated_at",
-            ]
+        if decision.dispatch_now:
+            run = dispatch_run_ai_run(locked, actor=creator) if creator is not None else None
+            if run is None:
+                transaction.set_rollback(True)
+                return {"granted": False, "reason": "dispatch-failed", "ticker": decision.ticker, "run": None}
+            result["run"] = run
+            result["ticker"] = IssueAgentTicker.objects.filter(issue=locked).first()
+    return result
+
+
+def _in_progress_state_for(issue: Issue):
+    """The project's registered In Progress state, if it has one."""
+    from pi_dash.db.models.state import State, StateGroup
+    from pi_dash.orchestration.agent_phases import PHASES
+
+    cfg = PHASES.get(StateGroup.STARTED.value)
+    if cfg is None:
+        return None
+    return (
+        State.all_state_objects.filter(
+            project_id=issue.project_id,
+            group=StateGroup.STARTED.value,
+            name=cfg.state_name,
+            deleted_at__isnull=True,
         )
-    logger.info(
-        "agent_ticker: re-ticked issue=%s new_cap=%s enabled=%s next_run_at=%s",
-        locked_issue.pk,
-        new_cap,
-        sched.enabled,
-        sched.next_run_at,
+        .order_by("sequence")
+        .first()
     )
-    return {"granted": True, "reason": "granted", "ticker": sched}
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +727,10 @@ def re_tick_ticker(issue: Issue) -> dict:
 TRIGGER_TICK = AgentRunTrigger.TICK.value
 TRIGGER_COMMENT_AND_RUN = AgentRunTrigger.COMMENT_AND_RUN.value
 TRIGGER_RUN_AI = AgentRunTrigger.RUN_AI.value
+TRIGGER_BLOCKER_COMPLETED = AgentRunTrigger.BLOCKER_COMPLETED.value
+#: Triggers the clock starts on its own — resolved like a tick (system bot on
+#: a local runner, never an explicit actor).
+_MACHINE_TRIGGERS = frozenset({TRIGGER_TICK, TRIGGER_BLOCKER_COMPLETED})
 
 
 def _resolve_pod_for_issue(issue: Issue):
@@ -446,10 +753,11 @@ def _resolve_creator_for_trigger(issue: Issue, *, triggered_by: str, actor=None)
     """Resolve a current human execution principal; bots never own tool authority."""
     from pi_dash.core.agent_execution import AgentExecutorKind, effective_executor_for_issue
 
-    if effective_executor_for_issue(issue) == AgentExecutorKind.LOCAL_RUNNER:
+    effective = effective_executor_for_issue(issue)
+    if effective == AgentExecutorKind.LOCAL_RUNNER:
         if actor is not None:
             return actor
-        if triggered_by == TRIGGER_TICK:
+        if triggered_by in _MACHINE_TRIGGERS:
             from pi_dash.orchestration.workpad import get_agent_system_user
 
             return get_agent_system_user()
@@ -457,11 +765,22 @@ def _resolve_creator_for_trigger(issue: Issue, *, triggered_by: str, actor=None)
 
     from pi_dash.core.permissions import ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER, check_project_role
 
-    if actor is not None and triggered_by != TRIGGER_TICK:
+    if actor is not None and triggered_by not in _MACHINE_TRIGGERS:
         candidates = [actor]
     else:
         candidates = [issue.created_by, issue.project.project_lead, issue.project.default_assignee]
-        candidates.extend(issue.assignees.all().order_by("id"))
+        # Live assignees only. ``Issue.assignees`` is a plain M2M over the
+        # soft-deleted ``IssueAssignee`` through-model, so it would also offer
+        # up users who were un-assigned — making a former assignee the
+        # execution principal (and LLM-config owner) for a cloud run.
+        from pi_dash.db.models.issue import IssueAssignee
+        from pi_dash.db.models.user import User
+
+        candidates.extend(
+            User.objects.filter(
+                pk__in=IssueAssignee.objects.filter(issue=issue).values_list("assignee_id", flat=True)
+            ).order_by("id")
+        )
     from pi_dash.core.agent_execution import user_has_llm_config
 
     seen = set()
@@ -477,6 +796,17 @@ def _resolve_creator_for_trigger(issue: Issue, *, triggered_by: str, actor=None)
         # dispatch_scheduler_run's candidate filter).
         if not user_has_llm_config(candidate):
             continue
+        # A managed run additionally executes on the *creator's own machine*,
+        # so a candidate with no desktop enrolled for this project could never
+        # serve it — picking them would create a run that waits forever for a
+        # laptop that does not exist. Note the system-user fallback above is
+        # deliberately not reachable here: a bot has neither a desktop nor a
+        # provider.
+        if effective == AgentExecutorKind.MANAGED_RUNNER:
+            from pi_dash.managed_runner.policy import enrolled_managed_runners
+
+            if not enrolled_managed_runners(issue.project, candidate).exists():
+                continue
         if check_project_role(
             candidate,
             issue.workspace.slug,
@@ -502,6 +832,7 @@ def preflight_eligibility_or_bounce(issue: Issue, *, run_creator, pod, triggered
     from pi_dash.core.agent_execution import (
         AgentExecutorKind,
         effective_executor_for_issue,
+        managed_runner_is_enabled,
         user_has_llm_config,
     )
 
@@ -512,11 +843,42 @@ def preflight_eligibility_or_bounce(issue: Issue, *, run_creator, pod, triggered
     #
     # Branch on the issue's *effective* executor: an issue pinned to the Cloud
     # Agent on a local-default project has no pod requirement at all.
-    if effective_executor_for_issue(issue) == AgentExecutorKind.CLOUD_AGENT:
+    effective = effective_executor_for_issue(issue)
+    if effective == AgentExecutorKind.CLOUD_AGENT:
         if run_creator is not None and user_has_llm_config(run_creator):
             return True
         _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by, reason="no-llm-config")
         return False
+
+    if effective == AgentExecutorKind.MANAGED_RUNNER:
+        # Structural gates only. "Your laptop is closed right now" is not one
+        # of them: the run is created and waits visibly (see
+        # ``cloud_agent.creation._managed_execution_fields``), because bouncing
+        # an issue back to Backlog every time a lid closes would be hostile and
+        # would disarm the ticker for work that is merely paused.
+        from pi_dash.managed_runner.errors import ManagedRunnerReason
+        from pi_dash.managed_runner.policy import enrolled_managed_runners, managed_llm_profile
+
+        if run_creator is None:
+            _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by, reason="no-managed-runner")
+            return False
+        if not managed_runner_is_enabled():
+            _bounce_issue_no_eligible_runner(
+                issue, triggered_by=triggered_by, reason=ManagedRunnerReason.DISABLED
+            )
+            return False
+        profile = managed_llm_profile(run_creator)
+        if not profile.available:
+            _bounce_issue_no_eligible_runner(
+                issue,
+                triggered_by=triggered_by,
+                reason=profile.reason_code or ManagedRunnerReason.LLM_CONFIG_MISSING,
+            )
+            return False
+        if not enrolled_managed_runners(issue.project, run_creator).exists():
+            _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by, reason="no-managed-runner")
+            return False
+        return True
 
     from pi_dash.runner.services.matcher import (
         pod_has_runner_for_issue_principal,
@@ -653,14 +1015,18 @@ def dispatch_continuation_run(
         )
         return None
 
-    parent = orchestration_service._latest_prior_run(issue)
-    if parent is None:
+    if orchestration_service._latest_prior_run(issue) is None:
         logger.info(
             "agent_ticker: skip dispatch issue=%s reason=no-prior-run triggered_by=%s",
             issue.pk,
             triggered_by,
         )
         return None
+    # The parent follows the same stage rules as a transition dispatch: a
+    # queued entry into review / test starts a fresh session; a hand-back
+    # into In Progress parents off the implementation lineage, not the
+    # review run that sent it back.
+    parent, fresh_session = orchestration_service.parent_for_next_run(issue)
 
     creator = _resolve_creator_for_trigger(issue, triggered_by=triggered_by, actor=actor)
     if creator is None:
@@ -671,11 +1037,16 @@ def dispatch_continuation_run(
         )
         from pi_dash.core.agent_execution import AgentExecutorKind, effective_executor_for_issue
 
-        if effective_executor_for_issue(issue) == AgentExecutorKind.CLOUD_AGENT:
+        effective = effective_executor_for_issue(issue)
+        if effective == AgentExecutorKind.CLOUD_AGENT:
             # On a cloud project "no creator" means no candidate holds a
             # usable LLM config — bounce loudly instead of letting the
             # ticker fire forever with zero user-visible signal.
             _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by, reason="no-llm-config")
+        elif effective == AgentExecutorKind.MANAGED_RUNNER:
+            # A managed run belongs to one person's desktop, so "no creator"
+            # means nobody could ever serve it — structural, bounce loudly.
+            _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by, reason="no-managed-runner")
         return None
 
     pod = _resolve_pod_for_issue(issue)
@@ -690,18 +1061,49 @@ def dispatch_continuation_run(
     if not preflight_eligibility_or_bounce(issue, run_creator=creator, pod=pod, triggered_by=triggered_by):
         return None
 
-    outcome = orchestration_service._create_continuation_run(
-        issue=issue,
-        parent=parent,
-        creator=creator,
-        pod=pod,
-        trigger=triggered_by,
-    )
+    if fresh_session or parent is None:
+        outcome = orchestration_service._create_and_dispatch_run(
+            issue=issue,
+            parent=None,
+            creator=creator,
+            pod=pod,
+            fresh_session=True,
+            trigger=triggered_by,
+        )
+    else:
+        outcome = orchestration_service._create_continuation_run(
+            issue=issue,
+            parent=parent,
+            creator=creator,
+            pod=pod,
+            trigger=triggered_by,
+        )
     return outcome.created_run
 
 
+# Machine-readable refusal reasons for a "Run AI" dispatch that produced no
+# run. The token ``run-ai`` endpoint surfaces these so a CLI / MCP caller can
+# tell "already running or queued" (retry later) apart from "nothing can run
+# it" (a structural problem to fix).
+RUN_AI_ACTIVE_RUN_EXISTS = "active_run_exists"
+RUN_AI_NO_POD = "no_pod"
+RUN_AI_NO_ELIGIBLE_RUNNER = "no_eligible_runner"
+
+
 def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
-    """Public wrapper for the "Run AI" button.
+    """Public wrapper for the "Run AI" button, returning just the run.
+
+    Thin adapter over :func:`dispatch_run_ai_run_with_reason` for callers
+    that only care whether a run was created (the web ``_post_run_ai`` path
+    and ``re_tick_ticker``). See that function for the prompt-parity
+    contract and the refusal-reason vocabulary.
+    """
+    run, _reason = dispatch_run_ai_run_with_reason(issue, actor=actor)
+    return run
+
+
+def dispatch_run_ai_run_with_reason(issue: Issue, *, actor) -> tuple[Optional[AgentRun], Optional[str]]:
+    """"Run AI" dispatch that also reports *why* nothing was created.
 
     Builds the same templated prompt the state-transition-into-In-Progress
     path produces, by routing through the orchestration service's run-
@@ -711,14 +1113,20 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
     state transition into the same phase.
 
     Behavior:
-    - Bails (returns ``None``) when an active run already exists on the
-      issue (single-active-run guardrail) or no pod is available.
+    - Returns ``(None, RUN_AI_ACTIVE_RUN_EXISTS)`` when an active run
+      already exists on the issue (single-active-run guardrail).
+    - Returns ``(None, RUN_AI_NO_ELIGIBLE_RUNNER)`` when no execution
+      principal / eligible runner can serve the run (no creator, or the
+      eligibility preflight bounced the issue).
+    - Returns ``(None, RUN_AI_NO_POD)`` when no pod is available.
     - When a prior run exists, delegates to ``_create_continuation_run``
       so the new run inherits parent linkage and runner pinning (repo
       locality, same as Comment & Run / tick).
     - When no prior run exists, delegates to ``_create_and_dispatch_run``
       so a brand-new issue's first agent run still goes through the
       templated prompt path.
+
+    On success returns ``(run, None)``.
     """
     from pi_dash.orchestration import service as orchestration_service
 
@@ -728,7 +1136,7 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
             issue.pk,
             TRIGGER_RUN_AI,
         )
-        return None
+        return None, RUN_AI_ACTIVE_RUN_EXISTS
 
     creator = _resolve_creator_for_trigger(issue, triggered_by=TRIGGER_RUN_AI, actor=actor)
     if creator is None:
@@ -739,9 +1147,12 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
         )
         from pi_dash.core.agent_execution import AgentExecutorKind, effective_executor_for_issue
 
-        if effective_executor_for_issue(issue) == AgentExecutorKind.CLOUD_AGENT:
+        effective = effective_executor_for_issue(issue)
+        if effective == AgentExecutorKind.CLOUD_AGENT:
             _bounce_issue_no_eligible_runner(issue, triggered_by=TRIGGER_RUN_AI, reason="no-llm-config")
-        return None
+        elif effective == AgentExecutorKind.MANAGED_RUNNER:
+            _bounce_issue_no_eligible_runner(issue, triggered_by=TRIGGER_RUN_AI, reason="no-managed-runner")
+        return None, RUN_AI_NO_ELIGIBLE_RUNNER
 
     pod = _resolve_pod_for_issue(issue)
     if pod is None:
@@ -750,13 +1161,13 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
             issue.pk,
             TRIGGER_RUN_AI,
         )
-        return None
+        return None, RUN_AI_NO_POD
 
     if not preflight_eligibility_or_bounce(issue, run_creator=creator, pod=pod, triggered_by=TRIGGER_RUN_AI):
-        return None
+        return None, RUN_AI_NO_ELIGIBLE_RUNNER
 
-    parent = orchestration_service._latest_prior_run(issue)
-    if parent is not None:
+    parent, fresh_session = orchestration_service.parent_for_next_run(issue)
+    if parent is not None and not fresh_session:
         outcome = orchestration_service._create_continuation_run(
             issue=issue,
             parent=parent,
@@ -770,9 +1181,29 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
             parent=None,
             creator=creator,
             pod=pod,
+            fresh_session=fresh_session,
             trigger=TRIGGER_RUN_AI,
         )
-    return outcome.created_run
+    return outcome.created_run, None
+
+
+def run_ai_for_human(issue: Issue, *, actor) -> tuple[Optional[AgentRun], Optional[str]]:
+    """Shared body for a human-initiated "Run AI" over the token API.
+
+    Re-times the clock for the free human run, dispatches through the same
+    :func:`dispatch_run_ai_run_with_reason` the web button uses, and rolls
+    the re-time back when nothing was created — so a refused call leaves the
+    ticker exactly as it was (design §5.2, mirrors ``_post_run_ai``'s
+    rollback). Returns ``(run, reason)``; ``reason`` is a machine-readable
+    refusal code when ``run`` is ``None``.
+    """
+    with transaction.atomic():
+        reset_ticker_after_comment_and_run(issue)
+        run, reason = dispatch_run_ai_run_with_reason(issue, actor=actor)
+        if run is None:
+            transaction.set_rollback(True)
+    return run, reason
+
 
 
 # ---------------------------------------------------------------------------
@@ -788,10 +1219,13 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
     Idempotent — only the first concurrent terminate event takes effect.
     Returns ``True`` when a transition was applied, ``False`` otherwise.
 
-    Gated on ``disarm_reason == CAP_HIT``: terminal-signal disarms
-    (``completed``/``blocked``) leave the issue in place for the human
-    to act. ``LEFT_TICKING_STATE`` and ``USER_DISABLED`` likewise are
-    not auto-pause causes.
+    Gated on ``disarm_reason == CAP_HIT`` — the timer tick that consumed
+    the last run. Terminal-signal stops leave the issue in place for the
+    human to act, and so does ``POOL_SPENT`` (an agent parked the issue, or
+    a human moved it, on an already-spent pool): the §5.4 comment tells the
+    human to Re-tick, which needs the issue to stay in the bucket.
+    ``LEFT_TICKING_STATE`` and ``USER_DISABLED`` likewise are not
+    auto-pause causes.
 
     Called from the runner Channels consumer after persisting a terminal
     run status.
@@ -802,6 +1236,11 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
     issue = run.work_item
     sched = IssueAgentTicker.objects.filter(issue=issue).first()
     if sched is None or sched.enabled:
+        return False
+    if sched.pending_entry:
+        # A queued entry run (a human's free run, or a hand-off) will fire
+        # as soon as the issue is free — do not pull the issue out from
+        # under it.
         return False
     if sched.disarm_reason != TickerDisarmReason.CAP_HIT:
         return False
@@ -898,17 +1337,40 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
 __all__ = [
     "DEFAULT_INTERVAL_SECONDS",
     "DEFAULT_MAX_TICKS",
+    "DEFAULT_RETICK_GRANT",
     "DELEGATION_STATE_NAME",
     "INFINITE_MAX_TICKS",
+    "OUTCOME_BLOCKED",
+    "OUTCOME_DONE",
+    "OUTCOME_PROGRESSED",
+    "OUTCOME_WAITING_ON_EXTERNAL",
+    "OUTCOME_WAITING_ON_HUMAN",
     "PAUSED_STATE_NAME",
+    "RUN_AI_ACTIVE_RUN_EXISTS",
+    "RUN_AI_NO_ELIGIBLE_RUNNER",
+    "RUN_AI_NO_POD",
+    "RUN_OUTCOMES",
+    "STOPPING_OUTCOMES",
+    "TRIGGER_BLOCKER_COMPLETED",
     "TRIGGER_COMMENT_AND_RUN",
     "TRIGGER_RUN_AI",
     "TRIGGER_TICK",
+    "TickerDecision",
+    "TickerEvent",
+    "TickerEventKind",
     "arm_ticker",
+    "default_outcome_for_kind",
     "disarm_ticker",
     "dispatch_continuation_run",
+    "is_paused_state",
     "dispatch_run_ai_run",
+    "dispatch_run_ai_run_with_reason",
+    "run_ai_for_human",
     "maybe_apply_deferred_pause",
     "maybe_disarm_on_terminal_signal",
+    "normalize_outcome",
+    "outcome_for_run",
+    "re_tick_ticker",
+    "reconcile",
     "reset_ticker_after_comment_and_run",
 ]

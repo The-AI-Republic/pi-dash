@@ -13,7 +13,6 @@ plan phases 4–5.
 
 from __future__ import annotations
 
-import uuid as _uuid
 from unittest.mock import patch
 
 import pytest
@@ -90,18 +89,30 @@ def _post_queued(api_client, run, token, position, key=None):
 # ---------------------------------------------------------------------------
 
 
+# The worktree pool is retired (PDASHOSS01-137): ``POST /runs/<id>/queued`` no
+# longer transitions a run into WAITING_FOR_WORKTREE or records a position. It
+# stays only so pre-retirement daemons that still post it get an acknowledgement
+# instead of a 404. Every post is acknowledged-and-dropped, leaving the run's
+# status and (deprecated) queue_position untouched.
+
+
 @pytest.mark.unit
-def test_queued_assigned_to_waiting_with_position(db, api_client, runner_token, assigned_run):
+def test_queued_assigned_stays_assigned(db, api_client, runner_token, assigned_run):
+    """No new run may enter WAITING_FOR_WORKTREE: an ASSIGNED run posting
+    ``queued`` is acknowledged and left ASSIGNED with no position."""
     resp = _post_queued(api_client, assigned_run, runner_token, 3)
     assert resp.status_code == 200, resp.data
     assert resp.data.get("ok") is True
+    assert resp.data.get("ignored") is True
     assigned_run.refresh_from_db()
-    assert assigned_run.status == AgentRunStatus.WAITING_FOR_WORKTREE
-    assert assigned_run.queue_position == 3
+    assert assigned_run.status == AgentRunStatus.ASSIGNED
+    assert assigned_run.queue_position is None
 
 
 @pytest.mark.unit
-def test_queued_waiting_to_waiting_refreshes_position(db, api_client, runner_token, assigned_run):
+def test_queued_leaves_historical_waiting_row_untouched(db, api_client, runner_token, assigned_run):
+    """A pre-retirement row already in WAITING_FOR_WORKTREE keeps rendering:
+    a ``queued`` post neither advances nor clears its stored position."""
     assigned_run.status = AgentRunStatus.WAITING_FOR_WORKTREE
     assigned_run.queue_position = 5
     assigned_run.save(update_fields=["status", "queue_position"])
@@ -110,13 +121,13 @@ def test_queued_waiting_to_waiting_refreshes_position(db, api_client, runner_tok
     assert resp.status_code == 200, resp.data
     assigned_run.refresh_from_db()
     assert assigned_run.status == AgentRunStatus.WAITING_FOR_WORKTREE
-    assert assigned_run.queue_position == 2
+    assert assigned_run.queue_position == 5
 
 
 @pytest.mark.unit
 def test_queued_does_not_regress_running_run(db, api_client, runner_token, assigned_run):
-    """A late/duplicate queued post against a RUNNING run is acknowledged and
-    dropped — it must never pull a live run back to WAITING_FOR_WORKTREE."""
+    """A queued post against a RUNNING run is acknowledged and dropped — it
+    must never pull a live run back to WAITING_FOR_WORKTREE."""
     assigned_run.status = AgentRunStatus.RUNNING
     assigned_run.started_at = timezone.now()
     assigned_run.save(update_fields=["status", "started_at"])
@@ -137,23 +148,10 @@ def test_queued_terminal_is_acknowledged_and_dropped(db, api_client, runner_toke
 
     resp = _post_queued(api_client, assigned_run, runner_token, 1)
     assert resp.status_code == 200, resp.data
-    assert resp.data.get("terminal") is True
+    assert resp.data.get("ok") is True
     assigned_run.refresh_from_db()
     assert assigned_run.status == AgentRunStatus.COMPLETED
     assert assigned_run.queue_position is None
-
-
-@pytest.mark.unit
-def test_queued_dedupes_duplicate(db, api_client, runner_token, assigned_run):
-    msg_id = _uuid.uuid4().hex
-    first = _post_queued(api_client, assigned_run, runner_token, 4, key=msg_id)
-    second = _post_queued(api_client, assigned_run, runner_token, 1, key=msg_id)
-    assert first.status_code == 200
-    assert second.status_code == 200
-    assert second.data.get("duplicate") is True
-    assigned_run.refresh_from_db()
-    # The duplicate must not have applied the second (smaller) position.
-    assert assigned_run.queue_position == 4
 
 
 @pytest.mark.unit
@@ -521,13 +519,13 @@ def test_poll_still_reaps_old_unreported_waiting_run(db, api_client, runner_toke
 
 
 # ---------------------------------------------------------------------------
-# free_worktrees capacity hint persistence (Phase 7)
+# free_worktrees capacity hint retired (PDASHOSS01-137)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.unit
-def test_poll_persists_free_worktrees(db, api_client, runner_token, enrolled_runner):
-    open_resp = _open_session(api_client, enrolled_runner, runner_token, in_flight=None)
+def _poll_with_status(api_client, runner, token, status_body):
+    """Open a session and issue one status poll, returning its response."""
+    open_resp = _open_session(api_client, runner, token, in_flight=None)
     assert open_resp.status_code == 201, open_resp.data
     sid = open_resp.data["session_id"]
 
@@ -547,52 +545,39 @@ def test_poll_persists_free_worktrees(db, api_client, runner_token, enrolled_run
         patch("pi_dash.settings.redis.async_redis_instance", return_value=None),
         patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()),
     ):
-        poll_resp = api_client.post(
-            f"/api/v1/runner/runners/{enrolled_runner.id}/sessions/{sid}/poll",
-            {
-                "ack": [],
-                "status": {
-                    "status": "online",
-                    "free_worktrees": 1,
-                    "ts": timezone.now().isoformat(),
-                },
-            },
+        return api_client.post(
+            f"/api/v1/runner/runners/{runner.id}/sessions/{sid}/poll",
+            {"ack": [], "status": status_body},
             format="json",
-            HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
         )
-    assert poll_resp.status_code == 200, poll_resp.data
-    enrolled_runner.refresh_from_db()
-    assert enrolled_runner.free_worktrees == 1
 
 
 @pytest.mark.unit
-def test_parse_free_worktrees_coercion():
-    assert session_service.parse_free_worktrees(None) is None
-    assert session_service.parse_free_worktrees("bad") is None
-    assert session_service.parse_free_worktrees(-1) is None
-    assert session_service.parse_free_worktrees(0) == 0
-    assert session_service.parse_free_worktrees("3") == 3
-    # Out-of-range reports are clamped to the column's int32 ceiling rather
-    # than raising (which would 500 the poll handler).
-    assert session_service.parse_free_worktrees(2**31 - 1) == 2**31 - 1
-    assert session_service.parse_free_worktrees(2**31) == session_service.FREE_WORKTREES_MAX
-    assert session_service.parse_free_worktrees(2**63) == session_service.FREE_WORKTREES_MAX
-
-
-@pytest.mark.unit
-def test_parse_queue_position_coercion():
-    from pi_dash.runner.views.run_endpoints import (
-        QUEUE_POSITION_MAX,
-        _parse_queue_position,
+def test_poll_ignores_reported_free_worktrees(db, api_client, runner_token, enrolled_runner):
+    """A pre-retirement daemon still reports ``free_worktrees``. The poll must
+    succeed and never persist it — the capacity hint is retired."""
+    resp = _poll_with_status(
+        api_client,
+        enrolled_runner,
+        runner_token,
+        {"status": "online", "free_worktrees": 1, "ts": timezone.now().isoformat()},
     )
+    assert resp.status_code == 200, resp.data
+    enrolled_runner.refresh_from_db()
+    assert enrolled_runner.free_worktrees is None
 
-    assert _parse_queue_position(None) is None
-    assert _parse_queue_position("bad") is None
-    assert _parse_queue_position(-1) is None
-    assert _parse_queue_position(0) == 0
-    assert _parse_queue_position("3") == 3
-    # Out-of-range reports are clamped to the PositiveSmallIntegerField
-    # ceiling rather than raising (which would 500 the endpoint).
-    assert _parse_queue_position(QUEUE_POSITION_MAX) == QUEUE_POSITION_MAX
-    assert _parse_queue_position(QUEUE_POSITION_MAX + 1) == QUEUE_POSITION_MAX
-    assert _parse_queue_position(2**31) == QUEUE_POSITION_MAX
+
+@pytest.mark.unit
+def test_poll_handles_daemon_without_free_worktrees(db, api_client, runner_token, enrolled_runner):
+    """A post-retirement daemon omits ``free_worktrees`` entirely; the session
+    poll handles it without error (acceptance criterion)."""
+    resp = _poll_with_status(
+        api_client,
+        enrolled_runner,
+        runner_token,
+        {"status": "online", "ts": timezone.now().isoformat()},
+    )
+    assert resp.status_code == 200, resp.data
+    enrolled_runner.refresh_from_db()
+    assert enrolled_runner.free_worktrees is None

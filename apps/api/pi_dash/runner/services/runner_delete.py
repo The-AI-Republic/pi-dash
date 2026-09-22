@@ -34,8 +34,9 @@ from __future__ import annotations
 from uuid import UUID
 
 from django.db import transaction
+from django.utils import timezone
 
-from pi_dash.runner.models import Runner
+from pi_dash.runner.models import DevMachine, MachineToken, Runner
 from pi_dash.runner.services.pubsub import (
     close_runner_session,
     send_runner_remove,
@@ -91,6 +92,55 @@ def delete_runner(runner: Runner, *, purge_local: bool) -> None:
         runner.revoke(reason=revoke_reason)
         close_runner_session(runner_pk)
         Runner.objects.filter(pk=runner_pk).delete()
+
+
+def delete_dev_machine(machine: DevMachine, *, purge_local: bool) -> None:
+    """Hard-delete a dev-machine *connection* cloud-side.
+
+    This is the destructive counterpart to ``DevMachineRevokeEndpoint``:
+    revoke leaves the machine (and its runner history) in the list marked
+    revoked; delete removes the connection entirely. Because the
+    ``DevMachine`` FKs are ``MachineSession=CASCADE``,
+    ``MachineToken=SET_NULL`` and ``Runner=SET_NULL``, a bare
+    ``machine.delete()`` would strand still-connecting runners and active
+    tokens. So we tear them down first, then drop the row.
+
+    Caller is responsible for authentication + authorization.
+
+    Order mirrors ``delete_runner``: the daemon control frame for each
+    runner is enqueued *before* ``runner.revoke()`` revokes the session —
+    once the session is revoked ``enqueue_for_runner`` would divert the
+    frame into the offline buffer that never drains for a row we are about
+    to delete. So we enqueue for every active runner first, then revoke +
+    close, then hard-delete the runner rows and the machine row (the
+    latter cascades ``MachineSession``).
+
+    ``purge_local`` matches ``delete_runner``: ``True`` sends
+    ``remove_runner`` + the canonical ``runner_removed`` reason so the
+    daemon also wipes the local ``[[runner]]`` block + data dir; ``False``
+    sends a plain ``revoke`` with a non-canonical reason so the local
+    install is left untouched.
+    """
+    machine_pk: UUID = machine.pk
+    with transaction.atomic():
+        now = timezone.now()
+        MachineToken.objects.filter(dev_machine_id=machine_pk, revoked_at__isnull=True).update(revoked_at=now)
+        runners = list(Runner.objects.select_for_update().filter(dev_machine_id=machine_pk))
+        active = [r for r in runners if r.revoked_at is None]
+        reason = "runner_removed" if purge_local else "user_revoke"
+        for runner in active:
+            if purge_local:
+                send_runner_remove(runner.pk, reason="dev machine deleted")
+            else:
+                send_runner_revoke(runner.pk, reason="dev machine deleted")
+        for runner in active:
+            runner.revoke(reason=reason)
+            close_runner_session(runner.pk)
+        # Drop the runner rows explicitly (FK is SET_NULL, so a machine
+        # delete alone would leave them orphaned) and then the machine row,
+        # which cascades any MachineSession rows.
+        Runner.objects.filter(dev_machine_id=machine_pk).delete()
+        DevMachine.objects.filter(pk=machine_pk).delete()
 
 
 def parse_purge_local(query_params, *, default: bool = True) -> bool:

@@ -6,6 +6,7 @@
 
 import { useState } from "react";
 import { observer } from "mobx-react";
+import { useParams } from "react-router";
 import useSWR from "swr";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
@@ -32,9 +33,17 @@ function approvalKindI18nLabel(kind: TApprovalKind): string {
 export const ApprovalsPage = observer(function ApprovalsPage() {
   const { t } = useTranslation();
   const { currentWorkspace } = useWorkspace();
-  const { data: approvals, mutate } = useSWR<IApprovalRequest[]>("runner-approvals", () => service.listApprovals(), {
-    refreshInterval: 2_000,
-  });
+  // Project-scoped on /<workspace>/projects/<projectId>/runners/approvals;
+  // undefined on the workspace aggregate route. Part of the SWR key so the two
+  // scopes don't share a cache entry.
+  const { projectId } = useParams<{ projectId?: string }>();
+  const { data: approvals, mutate } = useSWR<IApprovalRequest[]>(
+    ["runner-approvals", projectId ?? null],
+    () => service.listApprovals(projectId),
+    {
+      refreshInterval: 2_000,
+    }
+  );
   const [pending, setPending] = useState<string | null>(null);
   const pageTitle = currentWorkspace?.name
     ? t("{workspace} - AI Agents", { workspace: currentWorkspace.name })

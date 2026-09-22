@@ -13,6 +13,8 @@ from pi_dash.api.views import (
     IssueDetailAPIEndpoint,
     IssueMoveAPIEndpoint,
     IssueReTickAPIEndpoint,
+    IssueRunAiAPIEndpoint,
+    AgentRunYieldAPIEndpoint,
     IssueLinkListCreateAPIEndpoint,
     IssueLinkDetailAPIEndpoint,
     IssueCommentListCreateAPIEndpoint,
@@ -25,6 +27,9 @@ from pi_dash.api.views import (
     IssueSearchEndpoint,
     IssueAdvancedSearchEndpoint,
     IssueRelationListCreateAPIEndpoint,
+    IssueRelationGroupedAPIEndpoint,
+    IssueRelationRelateAPIEndpoint,
+    IssueRelationUnrelateAPIEndpoint,
     IssueWorkpadAPIEndpoint,
 )
 
@@ -130,6 +135,16 @@ new_url_patterns = [
         name="work-item-re-tick",
     ),
     path(
+        "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:pk>/run-ai/",
+        IssueRunAiAPIEndpoint.as_view(http_method_names=["post"]),
+        name="work-item-run-ai",
+    ),
+    path(
+        "workspaces/<str:slug>/agent-runs/<uuid:run_id>/yield/",
+        AgentRunYieldAPIEndpoint.as_view(http_method_names=["post"]),
+        name="agent-run-yield",
+    ),
+    path(
         "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/links/",
         IssueLinkListCreateAPIEndpoint.as_view(http_method_names=["get", "post"]),
         name="work-item-link-list",
@@ -173,6 +188,21 @@ new_url_patterns = [
         "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/relations/",
         IssueRelationListCreateAPIEndpoint.as_view(http_method_names=["get", "post"]),
         name="work-item-relation-list",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/relations/grouped/",
+        IssueRelationGroupedAPIEndpoint.as_view(http_method_names=["get"]),
+        name="work-item-relation-grouped",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/relations/relate/",
+        IssueRelationRelateAPIEndpoint.as_view(http_method_names=["post"]),
+        name="work-item-relation-relate",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/relations/unrelate/",
+        IssueRelationUnrelateAPIEndpoint.as_view(http_method_names=["post"]),
+        name="work-item-relation-unrelate",
     ),
     path(
         "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/workpad/",

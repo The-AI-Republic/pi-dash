@@ -45,7 +45,13 @@ export const IssuePeekUrlSync = observer(function IssuePeekUrlSync(props: Props)
   const urlProjectId = routeParams.projectId?.toString();
   const urlPeekIssueId = searchParams.get(PEEK_ISSUE_QUERY_KEY) || undefined;
   const urlPeekProjectId = searchParams.get(PEEK_PROJECT_QUERY_KEY) || undefined;
-  const urlPeekNestingRaw = searchParams.get(PEEK_NESTING_QUERY_KEY);
+  // Normalize to `undefined`: `searchParams.get` yields `null` for an absent
+  // param, but `desiredNestingParam` below is `string | undefined`. Comparing
+  // the two directly made the "nothing to change" guard always fail (`undefined
+  // !== null`), so the store->URL effect issued a redundant `replace` on every
+  // run. That extra navigation interrupted an in-flight `router.push` (see
+  // peek-overview/header.tsx) and swallowed the expand button's navigation.
+  const urlPeekNestingRaw = searchParams.get(PEEK_NESTING_QUERY_KEY) || undefined;
   const urlPeekNestingLevel = urlPeekNestingRaw ? Number(urlPeekNestingRaw) : undefined;
 
   const issueStoreType = useIssueStoreType();

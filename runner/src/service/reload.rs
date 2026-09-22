@@ -63,25 +63,26 @@ where
 {
     let svc = crate::service::detect();
 
-    // Self-heal: rewrite the service unit if it's gone (manual cleanup, an
-    // older `pidash uninstall`, or never written for the current install
-    // location). Without this, `pidash restart` after `pidash update` on a
-    // unit-less machine hard-fails — `pidash update` only swaps the binary
-    // and doesn't touch the unit, and operators should not need to know
-    // that `pidash install` is the magic recovery command.
+    // Self-heal: rewrite the service unit if it's gone (manual cleanup, a
+    // `pidash uninstall`/`remove`, or never written for the current install
+    // location). Without this, `pidash restart` on a unit-less machine
+    // hard-fails — `pidash update` only swaps the binary and doesn't touch
+    // the unit, and operators should not need to know that `pidash install`
+    // is the magic recovery command.
     //
-    // macOS-only today: the reported case is launchctl bootstrap returning
-    // EIO for a missing plist. systemd surfaces the same kind of failure
-    // with a clearer "Unit not found" message and Windows uses schtasks
-    // which has its own recovery path — extend per backend when we hit
-    // them. `launchd::start` keeps its precondition check as a last-line-
-    // of-defense for direct `pidash start` callers that don't pass through
-    // this self-heal.
-    #[cfg(target_os = "macos")]
-    match crate::service::launchd::rewrite_unit_if_missing(paths).await {
-        Ok(true) => progress("rewrote missing launchd plist".into()),
+    // All backends, not just launchd. This started as a launchd fix because
+    // that's where it was first reported (launchctl bootstrap returning a
+    // cryptic EIO), on the theory that systemd's clearer "Unit file does not
+    // exist" left the operator able to recover unaided. It doesn't: a
+    // legible error is still a hard failure, it names what's missing but not
+    // the fix, and the fix isn't guessable — `pidash install` writes the unit
+    // but then declines to start it when no runner is enrolled. `launchd::start`
+    // keeps its precondition check as a last line of defense for direct
+    // `pidash start` callers that don't pass through this self-heal.
+    match svc.rewrite_unit_if_missing(paths).await {
+        Ok(true) => progress("rewrote missing service unit".into()),
         Ok(false) => {}
-        Err(e) => tracing::warn!("pre-restart launchd unit check failed: {e:#}"),
+        Err(e) => tracing::warn!("pre-restart service unit check failed: {e:#}"),
     }
 
     progress("starting runner service".into());

@@ -19,7 +19,15 @@ from rest_framework import status
 from .. import BaseViewSet
 from pi_dash.app.serializers import IssueCommentSerializer, CommentReactionSerializer
 from pi_dash.app.permissions import allow_permission, ROLE
-from pi_dash.db.models import GitCommentSync, GithubCommentSync, IssueComment, ProjectMember, CommentReaction, Project, Issue
+from pi_dash.db.models import (
+    GitCommentSync,
+    GithubCommentSync,
+    IssueComment,
+    ProjectMember,
+    CommentReaction,
+    Project,
+    Issue,
+)
 from pi_dash.bgtasks.issue_activities_task import issue_activity
 from pi_dash.utils.host import base_host
 from pi_dash.bgtasks.webhook_task import model_activity

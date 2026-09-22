@@ -16,3 +16,4 @@ class RunnerConfig(AppConfig):
         # auto-creates a default pod per new project. See runner/signals.py.
         from pi_dash.runner import signals  # noqa: F401
         from pi_dash.cloud_agent import checks  # noqa: F401
+        from pi_dash.managed_runner import checks as managed_checks  # noqa: F401

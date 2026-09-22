@@ -20,6 +20,8 @@ from .issue import (
     IssueDetailAPIEndpoint,
     IssueMoveAPIEndpoint,
     IssueReTickAPIEndpoint,
+    IssueRunAiAPIEndpoint,
+    AgentRunYieldAPIEndpoint,
     LabelListCreateAPIEndpoint,
     LabelDetailAPIEndpoint,
     IssueLinkListCreateAPIEndpoint,
@@ -33,6 +35,9 @@ from .issue import (
     IssueSearchEndpoint,
     IssueAdvancedSearchEndpoint,
     IssueRelationListCreateAPIEndpoint,
+    IssueRelationGroupedAPIEndpoint,
+    IssueRelationRelateAPIEndpoint,
+    IssueRelationUnrelateAPIEndpoint,
     IssueWorkpadAPIEndpoint,
 )
 

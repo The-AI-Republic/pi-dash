@@ -26,6 +26,11 @@ export default defineConfig(() => ({
   // in-flight import ("Outdated Optimize Dep"), blanking the page. Pre-bundling
   // it (and its transitive remark/rehype stack) at server start avoids that.
   optimizeDeps: {
+    // React Router's lazy route modules pull in most of the client dependency
+    // graph only after the first request. Scan the app sources up front so Vite
+    // produces one stable graph instead of invalidating in-flight imports as
+    // each route family is discovered.
+    entries: ["app/**/*.{ts,tsx}"],
     include: ["react-markdown"],
   },
   plugins: [reactRouter(), tsconfigPaths({ projects: [path.resolve(__dirname, "tsconfig.json")] })],

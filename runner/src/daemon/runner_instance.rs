@@ -9,6 +9,7 @@
 //! See `.ai_design/n_runners_in_same_machine/design.md` §6.2.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
@@ -46,6 +47,18 @@ pub struct RunnerInstance {
     /// even if they weren't parked at the exact moment the signal was
     /// sent, preventing zombie heartbeats after per-runner teardown.
     pub remove_tx: watch::Sender<bool>,
+    /// Version string reported by this runner's agent binary, probed once at
+    /// startup. `None` when the binary is missing or did not answer — the
+    /// cloud then simply has no version to show, which is the honest answer.
+    pub engine_version: Arc<tokio::sync::RwLock<Option<String>>>,
+    /// Live local-chat sessions for this runner (PDASHOSS01-159), keyed by
+    /// `chat_session_id`. Shared by-Arc across every clone so all IPC
+    /// connections for the runner see the same sessions.
+    pub chat_sessions: crate::ipc::chat::ChatRegistry,
+    /// AC6 working-copy guard: `true` while a local chat turn holds this
+    /// runner's working copy. Observed by the assign lane (supervisor.rs) so a
+    /// managed run and a local chat never modify the same working copy at once.
+    pub chat_active: Arc<AtomicBool>,
 }
 
 impl RunnerInstance {
@@ -106,7 +119,6 @@ impl RunnerInstance {
             version: 2,
             daemon,
             runners: vec![config.clone()],
-            workdirs: vec![],
             cli: None,
         });
         let approvals = ApprovalRouter::new();
@@ -130,6 +142,9 @@ impl RunnerInstance {
             ack_tx,
             ack_rx: Arc::new(tokio::sync::Mutex::new(Some(ack_rx))),
             remove_tx,
+            engine_version: Arc::new(tokio::sync::RwLock::new(None)),
+            chat_sessions: crate::ipc::chat::ChatRegistry::new(),
+            chat_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -163,13 +178,13 @@ mod tests {
             workspace: WorkspaceSection {
                 working_dir: std::env::temp_dir().join("pidash-runner-instance-test"),
             },
-            workdir: None,
             agent: AgentSection::default(),
             codex: CodexSection::default(),
             claude_code: ClaudeCodeSection::default(),
             cursor_agent: CursorAgentSection::default(),
             openclaw: Default::default(),
             grok: Default::default(),
+            muse_code: Default::default(),
             approval_policy: ApprovalPolicySection::default(),
         }
     }

@@ -10,6 +10,12 @@ from pi_dash.celery import app
 pytestmark = pytest.mark.unit
 
 
+def test_every_scheduled_task_is_registered_by_worker_loader():
+    app.loader.import_default_modules()
+    scheduled = {entry["task"] for entry in app.conf.beat_schedule.values()}
+    assert not scheduled - set(app.tasks)
+
+
 def test_generic_git_sync_reuses_legacy_github_beat_schedule_name():
     schedule = app.conf.beat_schedule
 
