@@ -75,6 +75,9 @@ desktop/src-tauri/dist/
   — the real implementations of the `apps/web` agent-runtime stubs: enroll
   this machine, write the engine config and model credential, supervise the
   bundled daemon.
+- `apps/web/core/components/desktop-update-button.tsx` — the corner button
+  beside the sidebar's user menu while an app update is waiting (found by
+  the daily check, or deferred at launch); clicking it installs and restarts.
 - `apps/web/core/utils/desktop-web-url.ts` — resolves an in-app path against
   `VITE_WEB_BASE_URL` (baked by `dev-prep.sh`, defaulting to `PI_DASH_URL`).
   Bundled pages run on a Tauri-owned origin, so anything that builds a
