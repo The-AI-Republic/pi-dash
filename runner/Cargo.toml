@@ -42,6 +42,7 @@ tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
+    "multipart",
     "rustls-tls",
 ] }
 tracing = "0.1"
