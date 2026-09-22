@@ -17,7 +17,7 @@ from django.conf import settings
 from django.utils import timezone
 from rest_framework import status
 
-from pi_dash.db.models import Issue, IssueLabel, Label, Project, ProjectMember, State
+from pi_dash.db.models import Issue, IssueAssignee, IssueLabel, Label, Project, ProjectMember, State
 
 
 @pytest.fixture
@@ -175,6 +175,20 @@ class TestWorkItemListFilters:
     def test_unknown_priority_is_400(self, api_key_client, workspace, proj, world):
         response = api_key_client.get(_url(workspace, proj), {"priority": "p0"})
         assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_filter_by_assignee(self, api_key_client, workspace, proj, world, create_user):
+        for issue in (world["epic"], world["loose"]):
+            IssueAssignee.objects.create(
+                issue=issue, assignee=create_user, project=proj, workspace=workspace, created_by=create_user
+            )
+        IssueAssignee.objects.filter(issue=world["loose"]).update(deleted_at=timezone.now())
+        response = api_key_client.get(_url(workspace, proj), {"assignees": str(create_user.id)})
+        assert _names(response) == {"Epic"}
+
+    def test_invalid_assignee_is_400(self, api_key_client, workspace, proj, world):
+        response = api_key_client.get(_url(workspace, proj), {"assignees": "someone"})
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert "someone" in response.data["error"]
 
     def test_combined_filters_and_together(self, api_key_client, workspace, proj, world):
         params = {"state": "Backlog", "parent": f"FLT-{world['epic'].sequence_id}", "priority": "urgent"}
