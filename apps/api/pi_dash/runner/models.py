@@ -246,6 +246,9 @@ class AgentRunTrigger(models.TextChoices):
     RUN_AI = "run_ai", "Run AI button"
     COMMENT_AND_RUN = "comment_and_run", "Comment & Run"
     TICK = "tick", "Automatic tick"
+    #: An immediate tick fired because a ``blocked_by`` target of the issue
+    #: reached a completed / cancelled state (PDASHOSS01-198).
+    BLOCKER_COMPLETED = "blocker_completed", "Blocker completed"
     SCHEDULER = "scheduler", "Scheduler beat"
     DIRECT = "direct", "Direct"
 
@@ -259,6 +262,17 @@ HUMAN_TRIGGERS = frozenset(
         AgentRunTrigger.RUN_AI,
         AgentRunTrigger.COMMENT_AND_RUN,
         AgentRunTrigger.DIRECT,
+    }
+)
+
+
+#: Issue-run triggers the ticking clock starts on its own (the cadence tick
+#: and the blocker-completed wake). They run as the system bot on a local
+#: runner and count as automatic for cloud admission.
+AUTOMATIC_ISSUE_TRIGGERS = frozenset(
+    {
+        AgentRunTrigger.TICK,
+        AgentRunTrigger.BLOCKER_COMPLETED,
     }
 )
 

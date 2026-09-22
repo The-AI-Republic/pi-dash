@@ -406,6 +406,8 @@ CELERY_IMPORTS = (
     "pi_dash.bgtasks.issue_description_version_sync",
     # runner lifecycle tasks
     "pi_dash.runner.tasks",
+    # blocker-completed wake (PDASHOSS01-198)
+    "pi_dash.orchestration.wake",
 )
 
 FILE_SIZE_LIMIT = int(get_config("FILE_SIZE_LIMIT", 5242880))

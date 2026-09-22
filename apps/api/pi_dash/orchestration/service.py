@@ -35,6 +35,7 @@ from pi_dash.prompting.renderer import PromptRenderError
 from pi_dash.runner.models import (
     AgentRun,
     AgentRunStatus,
+    AUTOMATIC_ISSUE_TRIGGERS,
     AgentRunTrigger,
     Pod,
     Runner,
@@ -457,7 +458,7 @@ def _create_continuation_run(*, issue: Issue, parent: AgentRun, creator, pod, tr
             has_issue=True,
             requested=issue.agent_executor,
             actor=creator,
-            automatic=trigger == AgentRunTrigger.TICK,
+            automatic=trigger in AUTOMATIC_ISSUE_TRIGGERS,
         )
     except (ValueError, RuntimeError) as exc:
         logger.warning("orchestration.continuation: executor unavailable: %s", exc)
@@ -470,7 +471,7 @@ def _create_continuation_run(*, issue: Issue, parent: AgentRun, creator, pod, tr
             lock_cloud_creation_capacity(
                 project=issue.project,
                 executor_kind=execution["executor_kind"],
-                automatic=trigger == AgentRunTrigger.TICK,
+                automatic=trigger in AUTOMATIC_ISSUE_TRIGGERS,
             )
             or admission_error
         )
@@ -757,7 +758,7 @@ def _create_and_dispatch_run(
             has_issue=True,
             requested=issue.agent_executor,
             actor=creator,
-            automatic=trigger == AgentRunTrigger.TICK,
+            automatic=trigger in AUTOMATIC_ISSUE_TRIGGERS,
         )
     except (ValueError, RuntimeError) as exc:
         logger.warning("orchestration: executor unavailable: %s", exc)
@@ -769,7 +770,7 @@ def _create_and_dispatch_run(
             lock_cloud_creation_capacity(
                 project=issue.project,
                 executor_kind=execution["executor_kind"],
-                automatic=trigger == AgentRunTrigger.TICK,
+                automatic=trigger in AUTOMATIC_ISSUE_TRIGGERS,
             )
             or admission_error
         )
