@@ -14,6 +14,7 @@ from django.utils import timezone
 
 from pi_dash.db.models import Issue, Project, State
 from pi_dash.db.models.issue_agent_ticker import (
+    INFINITE_MAX_TICKS,
     IssueAgentTicker,
     TickerDisarmReason,
 )
@@ -457,8 +458,7 @@ def test_re_tick_in_test_grants_to_the_shared_pool(
     Issue.all_objects.filter(pk=issue.pk).update(state=in_test)
     issue.refresh_from_db()
     project.agent_default_max_ticks = 3
-    project.agent_retick_grant = 2
-    project.save(update_fields=["agent_default_max_ticks", "agent_retick_grant"])
+    project.save(update_fields=["agent_default_max_ticks"])
 
     sched = scheduling.arm_ticker(issue)
     sched.used = 3  # exhausted
@@ -469,8 +469,9 @@ def test_re_tick_in_test_grants_to_the_shared_pool(
     assert result["granted"] is True
 
     sched.refresh_from_db()
-    assert sched.granted == 2
-    assert sched.effective_max_ticks() == 5
+    # Re-tick grants one whole pool (= agent_default_max_ticks), not a fixed 3.
+    assert sched.granted == 3
+    assert sched.effective_max_ticks() == 6
 
 
 @pytest.mark.unit
@@ -812,7 +813,7 @@ def test_re_tick_from_paused_moves_the_issue_back_and_fires(seeded, issue, state
     issue.refresh_from_db()
     assert issue.state == states["in_progress"]
     sched.refresh_from_db()
-    assert sched.granted == issue.project.agent_retick_grant
+    assert sched.granted == issue.project.agent_default_max_ticks
     assert sched.enabled is True
     assert sched.cap_reached() is False
     fake.assert_called_once()
@@ -830,9 +831,11 @@ def test_re_tick_grants_extra_budget_when_exhausted(seeded, issue, states, no_re
     assert result["granted"] is True
     assert result["reason"] == "granted"
     ticker = result["ticker"]
-    # Cap grows by the project's Re-tick grant; ``used`` is NOT reset.
-    grant = issue.project.agent_retick_grant
+    # Cap grows by one whole pool (= agent_default_max_ticks); ``used`` is NOT
+    # reset. Pool 10, used 10 → cap 20.
+    grant = issue.project.agent_default_max_ticks
     assert ticker.effective_max_ticks() == cap + grant
+    assert ticker.effective_max_ticks() == 20
     assert ticker.used == cap
     assert ticker.cap_reached() is False
     # Re-armed: enabled, clock restarted, disarm cause cleared — and a run
@@ -841,6 +844,62 @@ def test_re_tick_grants_extra_budget_when_exhausted(seeded, issue, states, no_re
     assert ticker.disarm_reason == TickerDisarmReason.NONE
     assert ticker.next_run_at > timezone.now()
     no_retick_dispatch.assert_called_once()
+
+
+@pytest.mark.unit
+def test_second_re_tick_adds_another_full_pool(seeded, issue, states, no_retick_dispatch):
+    """Each press grants a fresh pool: 10 → 20 → 30 for a 10-pool project."""
+    _to_in_progress(issue, states)
+    sched = scheduling.arm_ticker(issue)
+    pool = sched.pool_size()  # 10
+    _exhaust(sched, pool)
+
+    first = scheduling.re_tick_ticker(issue)["ticker"]
+    assert first.granted == pool
+    assert first.effective_max_ticks() == 2 * pool  # 20
+
+    # Spend the second pool and press again.
+    _exhaust(sched, 2 * pool)
+    second = scheduling.re_tick_ticker(issue)["ticker"]
+    assert second.granted == 2 * pool
+    assert second.effective_max_ticks() == 3 * pool  # 30
+    assert second.used == 2 * pool
+    assert second.cap_reached() is False
+
+
+@pytest.mark.unit
+def test_re_tick_grant_scales_with_a_larger_pool(seeded, issue, states, project, no_retick_dispatch):
+    """A 20-pool project grants 20 per Re-tick, not a fixed 3."""
+    project.agent_default_max_ticks = 20
+    project.save(update_fields=["agent_default_max_ticks"])
+    _to_in_progress(issue, states)
+    sched = scheduling.arm_ticker(issue)
+    _exhaust(sched, 20)
+
+    ticker = scheduling.re_tick_ticker(issue)["ticker"]
+    assert ticker.granted == 20
+    assert ticker.effective_max_ticks() == 40
+
+
+@pytest.mark.unit
+def test_re_tick_leaves_granted_untouched_on_infinite_pool(seeded, issue, states, project, no_retick_dispatch):
+    """An infinite pool (-1) never reaches its cap, so Re-tick is a no-op with
+    reason ``budget_not_exhausted`` and the sentinel never leaks into
+    ``granted``."""
+    project.agent_default_max_ticks = INFINITE_MAX_TICKS
+    project.save(update_fields=["agent_default_max_ticks"])
+    _to_in_progress(issue, states)
+    sched = scheduling.arm_ticker(issue)
+    sched.used = 999  # would be "spent" on any finite pool
+    sched.save(update_fields=["used"])
+
+    result = scheduling.re_tick_ticker(issue)
+
+    assert result["granted"] is False
+    assert result["reason"] == "budget_not_exhausted"
+    sched.refresh_from_db()
+    assert sched.granted == 0
+    no_retick_dispatch.assert_not_called()
 
 
 @pytest.mark.unit
@@ -900,5 +959,5 @@ def test_re_tick_respects_user_disabled(seeded, issue, states, no_retick_dispatc
     # Budget is still granted, but ticking stays disabled per user's choice.
     assert result["granted"] is True
     ticker = result["ticker"]
-    assert ticker.effective_max_ticks() == cap + issue.project.agent_retick_grant
+    assert ticker.effective_max_ticks() == cap + issue.project.agent_default_max_ticks
     assert ticker.enabled is False

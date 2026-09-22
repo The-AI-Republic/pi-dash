@@ -32,7 +32,6 @@ from pi_dash.db.models.issue import Issue
 from pi_dash.db.models.issue_agent_ticker import (
     DEFAULT_INTERVAL_SECONDS,
     DEFAULT_MAX_TICKS,
-    DEFAULT_RETICK_GRANT,
     INFINITE_MAX_TICKS,
     IssueAgentTicker,
     TickerDisarmReason,
@@ -536,10 +535,17 @@ def _on_human_run_requested(issue: Issue, event: TickerEvent) -> TickerDecision:
 
 
 def _on_retick(issue: Issue, event: TickerEvent) -> TickerDecision:
-    """Re-tick: grant one project-sized budget slice, then fire now.
+    """Re-tick: grant a fresh project-sized pool, then fire now.
+
+    The grant is one whole per-issue pool (``Project.agent_default_max_ticks``,
+    default 10), so a press on a 10-pool issue takes the cap 10 → 20, a second
+    press → 30; a 20-pool project grants 20 each press. One knob, not two.
 
     All guards must hold or the call is a no-op: a ticker row exists, the
-    issue is in the bucket, the pool is actually spent.
+    issue is in the bucket, the pool is actually spent. An infinite pool
+    (``-1``) never reaches this grant — ``cap_reached()`` is never true so the
+    ``budget_not_exhausted`` guard above returns first — but guard it anyway so
+    a sentinel can never leak into ``granted``.
     """
     ticker = _lock_ticker(issue, create=False)
     if ticker is None:
@@ -550,8 +556,12 @@ def _on_retick(issue: Issue, event: TickerEvent) -> TickerDecision:
     if not ticker.cap_reached():
         return TickerDecision(ticker=ticker, reason="budget_not_exhausted")
 
-    grant = getattr(issue.project, "agent_retick_grant", DEFAULT_RETICK_GRANT)
-    ticker.granted += max(0, int(grant))
+    pool = ticker.pool_size()
+    if pool == INFINITE_MAX_TICKS:
+        # Unreachable given the cap guard above, but never fold the infinite
+        # sentinel into ``granted``.
+        return TickerDecision(ticker=ticker, reason="budget_not_exhausted")
+    ticker.granted += max(0, int(pool))
     decision = TickerDecision(ticker=ticker, granted=True, reason="granted")
     if paused:
         # The cap-hit auto-pause parked the issue outside the bucket. The
@@ -1337,7 +1347,6 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
 __all__ = [
     "DEFAULT_INTERVAL_SECONDS",
     "DEFAULT_MAX_TICKS",
-    "DEFAULT_RETICK_GRANT",
     "DELEGATION_STATE_NAME",
     "INFINITE_MAX_TICKS",
     "OUTCOME_BLOCKED",
