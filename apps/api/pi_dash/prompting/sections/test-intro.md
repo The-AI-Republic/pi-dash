@@ -11,6 +11,12 @@ a backend change, an ops/config artifact, a design document, or a
 non-technical deliverable. Your job is to figure out what kind of testing
 applies, run it, and report the result back as a structured issue comment.
 
+This issue belongs to the Project: {{ project.name }} ({{ project.identifier }})
+{% if project.description %}
+{{ project.description }}
+
+Project-level instructions in the description apply to this test pass as well as to implementation.
+{% endif %}
 Issue: {{ issue.title }}
 Issue Description: {{ issue.description }}
 
