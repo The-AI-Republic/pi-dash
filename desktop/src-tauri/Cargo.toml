@@ -1,6 +1,6 @@
 [package]
 name = "pi-dash-desktop"
-version = "0.3.0"
+version = "0.3.2"
 description = "Pi Dash desktop app (Tauri v2)"
 edition = "2024"
 rust-version = "1.93"
@@ -17,6 +17,11 @@ tauri-build = { version = "2", features = [] }
 url = "2"
 
 [dependencies]
+# The shared desktop ↔ daemon IPC protocol + transport client (PDASHOSS01-158).
+# The desktop depends on this lightweight crate — NOT the whole runner — which
+# is what the workspace `exclude = ["desktop"]` split protects. It is also the
+# foundation the direct-chat client (PDASHOSS01-159) builds on.
+pidash-ipc = { path = "../../pidash-ipc" }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
@@ -25,7 +30,16 @@ tauri-plugin-updater = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-uuid = { version = "1", features = ["v4"] }
+# Share the updater's Rustls/ring provider rather than enabling a second one.
+reqwest = { version = "0.13", default-features = false, features = ["cookies", "rustls-no-provider", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+# `managed_start_daemon` waits for the daemon's control socket to answer
+# before returning; without the wait the chat transport connects into the gap
+# between spawn and bind. Tauri already runs on tokio — this only names the
+# timer we use, plus `select!`/`Notify` for canceling native API requests.
+tokio = { version = "1", default-features = false, features = ["time", "macros", "sync"] }
 
 [target.'cfg(unix)'.dependencies]
 # Only for SIGTERM on the bundled daemon: killing it outright would turn a
@@ -34,6 +48,17 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# Timestamps for the chat frame variants in `chat`'s hermetic stream tests.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# The tests need a runtime and the net/io features on top of the `time`
+# feature the crate itself depends on.
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "time",
+] }
 
 [profile.release]
 lto = "thin"

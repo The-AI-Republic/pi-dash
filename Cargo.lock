@@ -1395,6 +1395,7 @@ dependencies = [
  "futures-util",
  "http",
  "nix 0.29.0",
+ "pidash-ipc",
  "rand 0.8.6",
  "ratatui",
  "reqwest 0.12.28",
@@ -1409,6 +1410,18 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "pidash-ipc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
  "uuid",
 ]
 

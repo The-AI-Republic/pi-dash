@@ -727,6 +727,10 @@ def _in_progress_state_for(issue: Issue):
 TRIGGER_TICK = AgentRunTrigger.TICK.value
 TRIGGER_COMMENT_AND_RUN = AgentRunTrigger.COMMENT_AND_RUN.value
 TRIGGER_RUN_AI = AgentRunTrigger.RUN_AI.value
+TRIGGER_BLOCKER_COMPLETED = AgentRunTrigger.BLOCKER_COMPLETED.value
+#: Triggers the clock starts on its own — resolved like a tick (system bot on
+#: a local runner, never an explicit actor).
+_MACHINE_TRIGGERS = frozenset({TRIGGER_TICK, TRIGGER_BLOCKER_COMPLETED})
 
 
 def _resolve_pod_for_issue(issue: Issue):
@@ -753,7 +757,7 @@ def _resolve_creator_for_trigger(issue: Issue, *, triggered_by: str, actor=None)
     if effective == AgentExecutorKind.LOCAL_RUNNER:
         if actor is not None:
             return actor
-        if triggered_by == TRIGGER_TICK:
+        if triggered_by in _MACHINE_TRIGGERS:
             from pi_dash.orchestration.workpad import get_agent_system_user
 
             return get_agent_system_user()
@@ -761,7 +765,7 @@ def _resolve_creator_for_trigger(issue: Issue, *, triggered_by: str, actor=None)
 
     from pi_dash.core.permissions import ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER, check_project_role
 
-    if actor is not None and triggered_by != TRIGGER_TICK:
+    if actor is not None and triggered_by not in _MACHINE_TRIGGERS:
         candidates = [actor]
     else:
         candidates = [issue.created_by, issue.project.project_lead, issue.project.default_assignee]
@@ -1077,8 +1081,29 @@ def dispatch_continuation_run(
     return outcome.created_run
 
 
+# Machine-readable refusal reasons for a "Run AI" dispatch that produced no
+# run. The token ``run-ai`` endpoint surfaces these so a CLI / MCP caller can
+# tell "already running or queued" (retry later) apart from "nothing can run
+# it" (a structural problem to fix).
+RUN_AI_ACTIVE_RUN_EXISTS = "active_run_exists"
+RUN_AI_NO_POD = "no_pod"
+RUN_AI_NO_ELIGIBLE_RUNNER = "no_eligible_runner"
+
+
 def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
-    """Public wrapper for the "Run AI" button.
+    """Public wrapper for the "Run AI" button, returning just the run.
+
+    Thin adapter over :func:`dispatch_run_ai_run_with_reason` for callers
+    that only care whether a run was created (the web ``_post_run_ai`` path
+    and ``re_tick_ticker``). See that function for the prompt-parity
+    contract and the refusal-reason vocabulary.
+    """
+    run, _reason = dispatch_run_ai_run_with_reason(issue, actor=actor)
+    return run
+
+
+def dispatch_run_ai_run_with_reason(issue: Issue, *, actor) -> tuple[Optional[AgentRun], Optional[str]]:
+    """"Run AI" dispatch that also reports *why* nothing was created.
 
     Builds the same templated prompt the state-transition-into-In-Progress
     path produces, by routing through the orchestration service's run-
@@ -1088,14 +1113,20 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
     state transition into the same phase.
 
     Behavior:
-    - Bails (returns ``None``) when an active run already exists on the
-      issue (single-active-run guardrail) or no pod is available.
+    - Returns ``(None, RUN_AI_ACTIVE_RUN_EXISTS)`` when an active run
+      already exists on the issue (single-active-run guardrail).
+    - Returns ``(None, RUN_AI_NO_ELIGIBLE_RUNNER)`` when no execution
+      principal / eligible runner can serve the run (no creator, or the
+      eligibility preflight bounced the issue).
+    - Returns ``(None, RUN_AI_NO_POD)`` when no pod is available.
     - When a prior run exists, delegates to ``_create_continuation_run``
       so the new run inherits parent linkage and runner pinning (repo
       locality, same as Comment & Run / tick).
     - When no prior run exists, delegates to ``_create_and_dispatch_run``
       so a brand-new issue's first agent run still goes through the
       templated prompt path.
+
+    On success returns ``(run, None)``.
     """
     from pi_dash.orchestration import service as orchestration_service
 
@@ -1105,7 +1136,7 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
             issue.pk,
             TRIGGER_RUN_AI,
         )
-        return None
+        return None, RUN_AI_ACTIVE_RUN_EXISTS
 
     creator = _resolve_creator_for_trigger(issue, triggered_by=TRIGGER_RUN_AI, actor=actor)
     if creator is None:
@@ -1121,7 +1152,7 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
             _bounce_issue_no_eligible_runner(issue, triggered_by=TRIGGER_RUN_AI, reason="no-llm-config")
         elif effective == AgentExecutorKind.MANAGED_RUNNER:
             _bounce_issue_no_eligible_runner(issue, triggered_by=TRIGGER_RUN_AI, reason="no-managed-runner")
-        return None
+        return None, RUN_AI_NO_ELIGIBLE_RUNNER
 
     pod = _resolve_pod_for_issue(issue)
     if pod is None:
@@ -1130,10 +1161,10 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
             issue.pk,
             TRIGGER_RUN_AI,
         )
-        return None
+        return None, RUN_AI_NO_POD
 
     if not preflight_eligibility_or_bounce(issue, run_creator=creator, pod=pod, triggered_by=TRIGGER_RUN_AI):
-        return None
+        return None, RUN_AI_NO_ELIGIBLE_RUNNER
 
     parent, fresh_session = orchestration_service.parent_for_next_run(issue)
     if parent is not None and not fresh_session:
@@ -1153,7 +1184,25 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
             fresh_session=fresh_session,
             trigger=TRIGGER_RUN_AI,
         )
-    return outcome.created_run
+    return outcome.created_run, None
+
+
+def run_ai_for_human(issue: Issue, *, actor) -> tuple[Optional[AgentRun], Optional[str]]:
+    """Shared body for a human-initiated "Run AI" over the token API.
+
+    Re-times the clock for the free human run, dispatches through the same
+    :func:`dispatch_run_ai_run_with_reason` the web button uses, and rolls
+    the re-time back when nothing was created — so a refused call leaves the
+    ticker exactly as it was (design §5.2, mirrors ``_post_run_ai``'s
+    rollback). Returns ``(run, reason)``; ``reason`` is a machine-readable
+    refusal code when ``run`` is ``None``.
+    """
+    with transaction.atomic():
+        reset_ticker_after_comment_and_run(issue)
+        run, reason = dispatch_run_ai_run_with_reason(issue, actor=actor)
+        if run is None:
+            transaction.set_rollback(True)
+    return run, reason
 
 
 
@@ -1297,8 +1346,12 @@ __all__ = [
     "OUTCOME_WAITING_ON_EXTERNAL",
     "OUTCOME_WAITING_ON_HUMAN",
     "PAUSED_STATE_NAME",
+    "RUN_AI_ACTIVE_RUN_EXISTS",
+    "RUN_AI_NO_ELIGIBLE_RUNNER",
+    "RUN_AI_NO_POD",
     "RUN_OUTCOMES",
     "STOPPING_OUTCOMES",
+    "TRIGGER_BLOCKER_COMPLETED",
     "TRIGGER_COMMENT_AND_RUN",
     "TRIGGER_RUN_AI",
     "TRIGGER_TICK",
@@ -1311,6 +1364,8 @@ __all__ = [
     "dispatch_continuation_run",
     "is_paused_state",
     "dispatch_run_ai_run",
+    "dispatch_run_ai_run_with_reason",
+    "run_ai_for_human",
     "maybe_apply_deferred_pause",
     "maybe_disarm_on_terminal_signal",
     "normalize_outcome",

@@ -69,8 +69,13 @@ pub async fn resolve_state_name(
         client.env.workspace_slug, project_id
     );
     let body = client.get(&path).await?;
+    // Current API returns the paginated envelope (`{count, results: [...]}`,
+    // default page size 1000); older deployments return a bare list. Accept
+    // both so the CLI works against either server.
     let states = body
-        .as_array()
+        .get("results")
+        .and_then(Value::as_array)
+        .or_else(|| body.as_array())
         .ok_or_else(|| CliError::new(EXIT_SERVER, "states response is not a list"))?;
     let needle = name.trim().to_lowercase();
     let mut matches: Vec<(String, String)> = Vec::new();

@@ -32,6 +32,7 @@ from pi_dash.runner.models import (
     RunnerLiveState,
     RunnerStatus,
 )
+from pi_dash.runner.services.usage import merge_usage
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,6 @@ TERMINAL_RUN_STATUSES = (
     AgentRunStatus.BLOCKED,
     AgentRunStatus.REFUSED,
 )
-BIGINT_MAX = 2**63 - 1
 
 _VALID_REFUSAL_CATEGORIES = frozenset(c.value for c in RefusalCategory)
 
@@ -64,29 +64,6 @@ def _normalize_refusal_category(raw: Any) -> str:
     return value if value in _VALID_REFUSAL_CATEGORIES else RefusalCategory.UNKNOWN.value
 
 
-def _coerce_token(raw: Any) -> Optional[int]:
-    if raw is None or raw == "":
-        return None
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return None
-    if value < 0 or value > BIGINT_MAX:
-        return None
-    return value
-
-
-def _token_updates(tokens: Any) -> Dict[str, int]:
-    if not isinstance(tokens, dict):
-        return {}
-    fields = {
-        "input_tokens": _coerce_token(tokens.get("input", tokens.get("input_tokens"))),
-        "output_tokens": _coerce_token(tokens.get("output", tokens.get("output_tokens"))),
-        "total_tokens": _coerce_token(tokens.get("total", tokens.get("total_tokens"))),
-    }
-    return {key: value for key, value in fields.items() if value is not None}
-
-
 def _payload_usage(payload: Any) -> Any:
     if isinstance(payload, dict):
         return payload.get("usage")
@@ -100,17 +77,25 @@ def _matching_live_state(runner: Runner, run_id: UUID | str) -> Optional[RunnerL
     ).first()
 
 
-def _usage_updates_from_live_state(state: Optional[RunnerLiveState]) -> Dict[str, Any]:
-    if state is None:
-        return {}
+def _usage_updates(
+    state: Optional[RunnerLiveState],
+    *,
+    payload_usage: Any = None,
+    tokens: Any = None,
+) -> Dict[str, Any]:
+    """``AgentRun`` updates for the run's token usage and model.
+
+    Three sources, fresher winning per counter: the live-state snapshot
+    (the only record for a run that crashed without reporting), the done
+    payload's ``usage`` (Claude reports its final usage there), and the
+    terminal frame's ``tokens``. ``usage`` is only written when at least
+    one source reported something, so an unreported run keeps ``{}``.
+    """
     updates: Dict[str, Any] = {}
-    if state.input_tokens is not None:
-        updates["input_tokens"] = state.input_tokens
-    if state.output_tokens is not None:
-        updates["output_tokens"] = state.output_tokens
-    if state.total_tokens is not None:
-        updates["total_tokens"] = state.total_tokens
-    if state.llm_model:
+    usage = merge_usage(state.usage if state is not None else None, payload_usage, tokens)
+    if usage:
+        updates["usage"] = usage
+    if state is not None and state.llm_model:
         updates["llm_model"] = state.llm_model[:128]
     return updates
 
@@ -184,9 +169,7 @@ def apply_run_paused(
     See legacy ``RunnerConsumer._handle_run_paused``.
     """
     live_state = _matching_live_state(runner, run_id)
-    usage_updates = _usage_updates_from_live_state(live_state)
-    usage_updates.update(_token_updates(_payload_usage(payload)))
-    usage_updates.update(_token_updates(tokens))
+    usage_updates = _usage_updates(live_state, payload_usage=_payload_usage(payload), tokens=tokens)
     model_value = _normalize_model(model)
     if model_value:
         usage_updates["llm_model"] = model_value
@@ -460,9 +443,7 @@ def finalize_run_terminal(
         if error_detail:
             updates["error"] = error_detail[:16000]
     live_state = _matching_live_state(runner, run_id)
-    updates.update(_usage_updates_from_live_state(live_state))
-    updates.update(_token_updates(_payload_usage(done_payload)))
-    updates.update(_token_updates(tokens))
+    updates.update(_usage_updates(live_state, payload_usage=_payload_usage(done_payload), tokens=tokens))
     model_value = _normalize_model(model)
     if model_value:
         updates["llm_model"] = model_value

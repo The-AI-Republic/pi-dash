@@ -66,6 +66,9 @@ name), then the outcome report from "Ending the run":
 - **clarification** — a question only a human can answer. Follow
   "Blocking the run". Yield `waiting_on_human`.
 - **waiting on a human reviewer / nothing changed** — the PR is waiting on
-  a person, or nothing has changed since your last pass. Post a short
-  comment only if it adds information, leave the issue In Review, and
-  yield `done` — the clock stops until a human acts.
+  a person, or nothing has changed since your last pass. Comment only if
+  you have something a human actually needs to see (a finding, a question,
+  a result); do **not** post a bare "review tick (N/M) — noop, nothing
+  changed" comment — silence is the correct signal for "nothing changed,"
+  and such comments only bury the ones that matter. Leave the issue In
+  Review and yield `done` — the clock stops until a human acts.

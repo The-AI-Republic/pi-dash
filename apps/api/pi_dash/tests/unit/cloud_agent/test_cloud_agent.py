@@ -284,7 +284,7 @@ def test_task_completes_structured_result_and_duplicate_message_is_ignored(issue
     with (
         patch(
             "pi_dash.cloud_agent.runtime.execute",
-            new=AsyncMock(return_value=(output, {"input_tokens": 10, "output_tokens": 4, "total_tokens": 14})),
+            new=AsyncMock(return_value=(output, {"usage": {"input": 10, "output": 4, "total": 14}})),
         ),
         patch("pi_dash.runner.services.agent_run_finalization._publish_effects"),
     ):
@@ -310,7 +310,7 @@ def test_blocked_model_outcome_uses_blocked_lifecycle_state(issue, create_user):
     with (
         patch(
             "pi_dash.cloud_agent.runtime.execute",
-            new=AsyncMock(return_value=(output, {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3})),
+            new=AsyncMock(return_value=(output, {"usage": {"input": 2, "output": 1, "total": 3}})),
         ),
         patch("pi_dash.runner.services.agent_run_finalization._publish_effects"),
     ):
@@ -329,7 +329,7 @@ def test_master_switch_is_rechecked_after_model_boundary(issue, create_user):
     with (
         patch(
             "pi_dash.cloud_agent.runtime.execute",
-            new=AsyncMock(return_value=(output, {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2})),
+            new=AsyncMock(return_value=(output, {"usage": {"input": 1, "output": 1, "total": 2}})),
         ),
         patch("pi_dash.cloud_agent.tasks.cloud_agent_is_configured", side_effect=[True, False]),
         patch("pi_dash.runner.services.agent_run_finalization._publish_effects"),

@@ -128,6 +128,38 @@ def test_preview_issue_renders(session_client, workspace, issue):
 
 
 @pytest.mark.contract
+def test_preview_issue_shows_blocked_by_and_blocking(session_client, workspace, project, issue, create_user):
+    from pi_dash.db.models import IssueRelation
+
+    with impersonate(create_user):
+        blocker = Issue.objects.create(
+            name="Model layer", workspace=workspace, project=project, state=issue.state, created_by=create_user
+        )
+        dependent = Issue.objects.create(
+            name="Handler", workspace=workspace, project=project, state=issue.state, created_by=create_user
+        )
+        for a, b in ((issue, blocker), (dependent, issue)):
+            IssueRelation.objects.create(
+                issue=a,
+                related_issue=b,
+                relation_type="blocked_by",
+                project=project,
+                workspace=workspace,
+                created_by=create_user,
+            )
+    resp = session_client.post(
+        _preview_url(workspace, "coding-task"), {"issue_id": str(issue.id)}, format="json"
+    )
+    assert resp.status_code == 200, resp.data
+    prompt = resp.data["prompt"]
+    assert "Blocked by (must be done first):" in prompt
+    assert f"WEB-{blocker.sequence_id}: Model layer (Todo)" in prompt
+    assert f"- Warning: WEB-{blocker.sequence_id} is still open" in prompt
+    assert "Blocking (waiting on this item):" in prompt
+    assert f"WEB-{dependent.sequence_id}: Handler (Todo)" in prompt
+
+
+@pytest.mark.contract
 def test_preview_review_kind_against_issue(session_client, workspace, issue):
     resp = session_client.post(
         _preview_url(workspace, "review"), {"issue_id": str(issue.id)}, format="json"
@@ -135,6 +167,38 @@ def test_preview_review_kind_against_issue(session_client, workspace, issue):
     assert resp.status_code == 200, resp.data
     # the requested kind wins → review prompt content
     assert "reviewing the work product" in resp.data["prompt"]
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
+    "kind,state_name,group",
+    [("review", "In Review", "review"), ("test", "In Test", "test")],
+)
+def test_preview_review_and_test_show_project_block(
+    session_client, workspace, project, create_user, kind, state_name, group
+):
+    project.description = "Reject stubs; run two independent review passes."
+    project.save(update_fields=["description"])
+    with impersonate(create_user):
+        state = State.objects.create(name=state_name, project=project, group=group)
+        issue = Issue.objects.create(
+            name="Port the parser",
+            workspace=workspace,
+            project=project,
+            state=state,
+            created_by=create_user,
+        )
+    resp = session_client.post(
+        _preview_url(workspace, kind), {"issue_id": str(issue.id)}, format="json"
+    )
+    assert resp.status_code == 200, resp.data
+    prompt = resp.data["prompt"]
+    assert "This issue belongs to the Project: Web (WEB)" in prompt
+    assert "Reject stubs; run two independent review passes." in prompt
+    assert (
+        f"Project-level instructions in the description apply to this {kind} pass"
+        in prompt
+    )
 
 
 @pytest.mark.contract

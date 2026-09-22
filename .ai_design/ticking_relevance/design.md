@@ -338,7 +338,19 @@ pending entry simply now belongs to the newer stage — it is the same clock.
 | -------------- | -------------------------------------- | -------------------------------------------------------------------- |
 | Pool per issue | **10** machine-started runs, any stage | `Project.agent_default_max_ticks`; replaces the three per-stage caps |
 | Re-tick grant  | **+3**                                 | `Project.agent_retick_grant`, new                                    |
-| Intervals      | 12 h / 8 h / 12 h per stage            | unchanged — cadence is rhythm, not budget                            |
+| Intervals      | **3 h / 3 h / 3 h** per stage          | unified (PDASHOSS01-167); cadence is rhythm, not budget              |
+
+**Unified 3 h cadence (PDASHOSS01-167).** Every ticking stage — In Progress,
+In Review, In Test — now fires on the same 3 h (10800 s) rhythm. The three
+per-stage interval columns (`Project.agent_default_interval_seconds`,
+`agent_review_default_interval_seconds`, `agent_test_default_interval_seconds`)
+and the `cadence_key` indirection through `CADENCE_FIELDS` are **retained** so
+cadences can be tuned apart again in the future without a schema change; only
+their default values are unified at 10800, and migration
+`0164_unify_ticking_cadence_3h` rewrites every existing project row to match.
+The earlier 12 h / 8 h / 12 h split gave no benefit worth the surprise of
+three different clocks — a per-issue override is still available for the rare
+case that wants a slower loop.
 
 The per-stage split (4 / 3 / 3) considered earlier is **dropped**. It was a
 consequence of three separate clocks; with one clock it is a leftover, and

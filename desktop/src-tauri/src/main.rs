@@ -4,8 +4,13 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod chat;
+mod chat_history;
+mod desktop_http;
+mod ipc;
 mod managed_runner;
 mod pidash_cli;
+mod updates;
 
 use std::sync::Mutex;
 
@@ -15,9 +20,7 @@ use tauri::{
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_deep_link::DeepLinkExt;
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
-use tauri_plugin_updater::UpdaterExt;
 
 const ZOOM_STEP: f64 = 0.1;
 const ZOOM_MIN: f64 = 0.3;
@@ -74,6 +77,13 @@ fn bundle_redirect_for(url: &Url, server: &Url, bundle_root: &Url) -> Option<Url
         None => url.path().to_string(),
     };
     Some(bundle_url(bundle_root, &path_and_query))
+}
+
+/// Whether this executable runs from an installed MSIX package; Windows
+/// installs package files under `...\WindowsApps\<package>\`.
+fn is_msix_install(exe: &std::path::Path) -> bool {
+    exe.components()
+        .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
@@ -196,69 +206,29 @@ fn handle_deep_link(app: &tauri::AppHandle, url: &str) {
     }
 }
 
-/// Check the updater endpoint at startup. If a newer version is available,
-/// ask the user via a native dialog; install + restart on confirmation.
+/// Wipe the webview's own session state — cookies first of all.
 ///
-/// All failure modes (network down, malformed manifest, signature mismatch)
-/// log to stderr and return silently — the app keeps running on the current
-/// version. We don't want a flaky update server to gate launch.
+/// Sign-out posts to the server and relies on its `Set-Cookie` deletions
+/// reaching this webview. They do not: the page origin is `tauri://localhost`
+/// while the API is a different origin, so the deletion is dropped and the
+/// session survives a "sign out" — the app lands on the sign-in page, the
+/// route guard sees a live session, and bounces straight back in. The app owns
+/// this cookie jar, so it clears it itself rather than trusting a cross-origin
+/// response to do it.
 ///
-/// Only runs when the build configures `plugins.updater` (see `main`).
-async fn check_for_updates(handle: tauri::AppHandle) {
-    let updater = match handle.updater() {
-        Ok(u) => u,
-        Err(e) => {
-            eprintln!("updater: construction failed: {e}");
-            return;
-        }
-    };
-    let update = match updater.check().await {
-        Ok(Some(u)) => u,
-        Ok(None) => return,
-        Err(e) => {
-            eprintln!("updater: check failed: {e}");
-            return;
-        }
-    };
-    let current = handle.package_info().version.to_string();
-    let install = handle
-        .dialog()
-        .message(format!(
-            "Pi Dash {new} is available (you have {current}).\n\n\
-             Install now? The app will restart automatically.",
-            new = update.version,
-            current = current,
-        ))
-        .title("Update available")
-        .kind(MessageDialogKind::Info)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Install".into(),
-            "Later".into(),
-        ))
-        .blocking_show();
-    if !install {
-        return;
-    }
-    if let Err(e) = update
-        .download_and_install(|_chunk, _total| {}, || {})
-        .await
-    {
-        eprintln!("updater: download/install failed: {e}");
-        // The user explicitly opted in to the install — staying silent on
-        // failure leaves them wondering whether anything happened. Surface
-        // the error in a dialog so they know they're still on the old
-        // version and can try again next launch.
-        handle
-            .dialog()
-            .message(format!(
-                "The update couldn't be installed.\n\n{e}\n\nYou can try again next launch."
-            ))
-            .title("Pi Dash update failed")
-            .kind(MessageDialogKind::Error)
-            .show(|_| {});
-        return;
-    }
-    handle.restart();
+/// Called by the web layer *after* the sign-out request (which needs the CSRF
+/// cookie) and before it navigates.
+#[tauri::command]
+async fn desktop_clear_web_data<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    let http = app.state::<desktop_http::DesktopHttp>();
+    let mut generation = http.generation.lock().await;
+    *generation += 1;
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "no main webview window".to_string())?;
+    window
+        .clear_all_browsing_data()
+        .map_err(|e| format!("clearing webview data: {e}"))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -309,6 +279,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = if hot_reload { "hot-reload" } else { "bundled" };
     eprintln!("Pi Dash: mode={mode} server target {target_url_str} (oss-sha {oss_sha})");
     let target_url = Url::parse(target_url_str)?;
+    let api_url = Url::parse(option_env!("VITE_API_BASE_URL").unwrap_or(target_url_str))?;
+    let desktop_http = desktop_http::DesktopHttp::new(api_url)?;
     let initial_webview = if hot_reload {
         WebviewUrl::External(target_url.clone())
     } else {
@@ -372,12 +344,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .manage(ZoomState(Mutex::new(1.0)))
+        .manage(desktop_http)
         .manage(AppConfig { target_url, bundle_root })
         .manage(managed_runner::DaemonState::default())
+        .manage(chat::ChatState::default())
+        .manage(updates::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             open_in_browser,
+            desktop_http::desktop_api_request,
+            desktop_http::desktop_api_stream,
+            desktop_http::desktop_api_cancel,
             pidash_cli::detect_pidash_cli,
             pidash_cli::install_pidash_cli,
+            pidash_cli::pidash_cli_login,
+            // Direct local chat with the built-in engine (PDASHOSS01-159):
+            // these reach the daemon over its IPC socket and stream Chat*
+            // frames back to the webview as `chat://frame` events — never via
+            // the Pi Dash cloud chat relay.
+            chat::chat_warm,
+            chat::chat_send,
+            chat::chat_cancel,
+            chat::chat_close,
+            chat::chat_decide,
             // Built-in agent engine: the overlay JS holds the session and
             // makes the authenticated calls, then hands the results to these
             // commands, which own the local files and the daemon process.
@@ -389,7 +377,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             managed_runner::managed_start_daemon,
             managed_runner::managed_stop_daemon,
             managed_runner::managed_sign_out,
+            desktop_clear_web_data,
+            updates::desktop_pending_update,
+            updates::desktop_install_update,
             managed_runner::managed_doctor,
+            // Direct local chat history: stored on this machine only, per
+            // account, never relayed to or stored by the Pi Dash server.
+            chat_history::chat_create_session,
+            chat_history::chat_list_sessions,
+            chat_history::chat_get_session,
+            chat_history::chat_list_events,
+            chat_history::chat_append_event,
+            chat_history::chat_set_thread_id,
+            chat_history::chat_rename_session,
+            chat_history::chat_delete_session,
+            chat_history::chat_clear_history,
+            chat_history::chat_working_dir,
         ])
         // Fallback for the navigation policy below: if a server-host page
         // does get through (e.g. a redirect the policy hook didn't see),
@@ -408,7 +411,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .setup(move |app| {
+            let api_origin = app.state::<desktop_http::DesktopHttp>()
+                .api_url.origin().ascii_serialization();
             let mut window = WebviewWindowBuilder::new(app, "main", initial_webview)
+                .initialization_script(format!(
+                    "Object.defineProperty(window, '__PIDASH_NATIVE_HTTP__', {{ value: {} }});",
+                    serde_json::to_string(&api_origin)?
+                ))
                 .title("Pi Dash")
                 .inner_size(1400.0, 900.0)
                 .min_inner_size(800.0, 600.0)
@@ -527,11 +536,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // time, but for dev builds and re-installs we also register at
             // runtime. macOS reads the scheme from `Info.plist` and routes
             // without a re-launch.
+            //
+            // A Microsoft Store (MSIX) install declares the scheme in its
+            // package manifest instead. Registering at runtime there would
+            // write this version's WindowsApps path into HKCU, which goes
+            // stale on the next Store update and outlives an uninstall.
             #[cfg(any(target_os = "linux", target_os = "windows"))]
+            if !std::env::current_exe().is_ok_and(|exe| is_msix_install(&exe))
+                && let Err(e) = app.deep_link().register("pidash")
             {
-                if let Err(e) = app.deep_link().register("pidash") {
-                    eprintln!("deep-link: register failed: {e}");
-                }
+                eprintln!("deep-link: register failed: {e}");
             }
             let handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
@@ -540,14 +554,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
 
-            // Background updater check. Spawned (not awaited) so launch isn't
+            // Background updater checks. Spawned (not awaited) so launch isn't
             // blocked by network — if a new version is available the dialog
-            // appears moments after the window opens.
+            // appears moments after the window opens. The daily check only
+            // surfaces the sidebar update button (see `updates`).
             if updater_enabled {
-                let update_handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    check_for_updates(update_handle).await;
-                });
+                tauri::async_runtime::spawn(updates::prompt_at_launch(app.handle().clone()));
+                tauri::async_runtime::spawn(updates::run_daily_checks(app.handle().clone()));
             }
 
             // The agent uses the bundled CLI. Launching the desktop must not
@@ -571,6 +584,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn msix_installs_are_detected_by_their_package_directory() {
+        use std::path::Path;
+        // Windows paths split on `\` only on Windows; `/` is a separator on
+        // every platform, so these cases run in CI on any host.
+        assert!(is_msix_install(Path::new(
+            "C:/Program Files/WindowsApps/AIRepublic.PiDash_0.3.1.0_x64__acjt9zndhe44g/pi-dash-desktop.exe"
+        )));
+        assert!(is_msix_install(Path::new(
+            "C:/Program Files/windowsapps/AIRepublic.PiDash_0.3.1.0_x64__acjt9zndhe44g/pi-dash-desktop.exe"
+        )));
+        assert!(!is_msix_install(Path::new(
+            "C:/Users/me/AppData/Local/Pi Dash/pi-dash-desktop.exe"
+        )));
+        assert!(!is_msix_install(Path::new(
+            "/opt/WindowsAppsBackup/pi-dash-desktop"
+        )));
+    }
 
     fn server() -> Url {
         Url::parse("https://pidash.example.com").unwrap()

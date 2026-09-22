@@ -32,6 +32,19 @@ class LLMConfigMissing(AssistantError):
     http_status = 422
 
 
+class STTConfigMissing(AssistantError):
+    """No usable dictation (speech-to-text) provider is configured.
+
+    Mirrors :class:`LLMConfigMissing` for the voice-dictation surface so the
+    composer can render a "configure dictation in Settings" state instead of a
+    generic failure. Distinct code keeps a dictation gate from looking like a
+    chat gate.
+    """
+
+    code = "stt_config_missing"
+    http_status = 422
+
+
 class AssistantNotConfigured(AssistantError):
     code = "assistant_not_configured"
     http_status = 503

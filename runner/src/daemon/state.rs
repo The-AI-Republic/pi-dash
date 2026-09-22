@@ -1,5 +1,4 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -24,64 +23,12 @@ impl Drop for AutoSwapGuard {
     }
 }
 
-/// Volatile observability fields that ride on `PollStatus`.
-///
-/// **Ownership (B2):** this snapshot is written **only by the assign (issue)
-/// lane** — `set_agent_pid`, `set_tokens`, `set_model`, `incr_turn`,
-/// `note_agent_event`, `note_exec_command*`. The chat lane MUST NOT write any of
-/// these (it has no per-lane slot here); per-lane chat observability is deferred
-/// (design `make_chat_issue_parallel_working` §3.3 B2 / Phase 3). With the two
-/// lanes running concurrently, a single shared snapshot would otherwise
-/// last-write-wins between two agents.
-///
-/// Doubles as
-/// the in-memory storage shape (held under one `Mutex` inside `Inner`)
-/// AND the wire-snapshot returned by `StateHandle::observability_snapshot()`.
-/// Keeping them in one struct means `reset_run_snapshot()` is a single
-/// `Default::default()` assignment and a new field added here is automatically
-/// included in reset, snapshot read, and rid-change wipe — no enumeration to
-/// keep in sync.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ObservabilitySnapshot {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_event_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_event_kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_event_summary: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_pid: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_subprocess_alive: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tokens: Option<TokenUsage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_count: Option<u32>,
-    /// Last shell command tool the agent kicked off (for failure-detail
-    /// enrichment), including whether a matching completion/result event was
-    /// later observed. Reset on rid change like the other per-run scalars;
-    /// never serialised onto the wire — only consumed locally to enrich
-    /// `RunFailed.detail` when the watchdog or stdout-close path fires.
-    #[serde(skip)]
-    pub last_exec_command: Option<ExecCommandSnapshot>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExecCommandSnapshot {
-    pub command: String,
-    pub cwd: Option<String>,
-    pub tool_call_id: Option<String>,
-    pub started_at: DateTime<Utc>,
-    pub completed_at: Option<DateTime<Utc>>,
-    /// `Some(true)` when the matching completion event reported a clean
-    /// terminal status, `Some(false)` for a non-success terminal (codex
-    /// `failed` status, Claude `is_error: true`). `None` when no
-    /// completion has been observed yet or the protocol frame didn't
-    /// surface an outcome.
-    pub completed_success: Option<bool>,
-}
+// `ObservabilitySnapshot` and `ExecCommandSnapshot` moved to the shared
+// `pidash-ipc` crate (PDASHOSS01-158) because `ObservabilitySnapshot` is a
+// wire type the IPC `Response` reaches into. They are re-exported here so
+// every `daemon::state::{ObservabilitySnapshot, ExecCommandSnapshot}` call
+// site is unchanged.
+pub use pidash_ipc::dto::{ExecCommandSnapshot, ObservabilitySnapshot};
 
 #[derive(Clone)]
 pub struct StateHandle {
@@ -740,6 +687,7 @@ mod tests {
                 input: 1,
                 output: 2,
                 total: 3,
+                ..Default::default()
             })
             .await;
         state.incr_turn().await;
