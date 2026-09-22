@@ -33,11 +33,13 @@ from pi_dash.prompting.recipes import KIND_CODING_TASK
 class CadenceFields:
     """Which project column holds one phase's *interval*.
 
-    Cadence is rhythm, not budget: each stage keeps its own interval (a
-    test cycle is a slower loop than a review pass) but the **budget is one
-    pool per issue** (``Project.agent_default_max_ticks`` +
-    ``IssueAgentTicker.granted``), so there is no per-phase cap column any
-    more. See ``.ai_design/ticking_relevance/design.md`` §5 / §9.
+    Cadence is rhythm, not budget: each stage keeps its own interval column
+    so rhythms can diverge again in the future, but the three are currently
+    unified at 3 h (10800 s) — every stage ticks on the same rhythm
+    (PDASHOSS01-167). The **budget is one pool per issue**
+    (``Project.agent_default_max_ticks`` + ``IssueAgentTicker.granted``), so
+    there is no per-phase cap column any more. See
+    ``.ai_design/ticking_relevance/design.md`` §5 / §9.
     """
 
     project_interval: str
@@ -51,15 +53,15 @@ class CadenceFields:
 CADENCE_FIELDS: dict[str, CadenceFields] = {
     "impl": CadenceFields(
         project_interval="agent_default_interval_seconds",
-        default_interval=43200,  # 12 h
+        default_interval=10800,  # 3 h
     ),
     "review": CadenceFields(
         project_interval="agent_review_default_interval_seconds",
-        default_interval=28800,  # 8 h
+        default_interval=10800,  # 3 h
     ),
     "test": CadenceFields(
         project_interval="agent_test_default_interval_seconds",
-        default_interval=43200,  # 12 h
+        default_interval=10800,  # 3 h
     ),
 }
 
@@ -129,7 +131,8 @@ PHASES: dict[str, PhaseConfig] = {
     StateGroup.TEST.value: PhaseConfig(
         state_name="In Test",
         template_name="test",
-        # In Test keeps its own rhythm (12 h); budget is the issue's pool.
+        # In Test resolves through its own interval column (currently
+        # unified at 3 h); budget is the issue's pool.
         cadence_key="test",
         # The `test` system prompt must land as the actual system prompt
         # of a fresh session, not a user-turn message on a resumed

@@ -14,12 +14,13 @@ from pi_dash.prompting.renderer import validate_syntax
 
 @pytest.mark.unit
 def test_registry_loaded_with_expected_sections():
-    # 23 local sections (13 ported + 2 review + 2 test + 3 scheduler
-    # + task-lifecycle + repo-context + workpad-context) plus 14 locked
-    # Cloud Agent sections.
-    assert len(registry.REGISTRY) == 37
+    # 24 local sections (13 ported + relationships + 2 review + 2 test
+    # + 3 scheduler + task-lifecycle + repo-context + workpad-context)
+    # plus 14 locked Cloud Agent sections.
+    assert len(registry.REGISTRY) == 38
     for key in (
         "intro",
+        "relationships",
         "pidash-cli",
         "review-cycle",
         "test-intro",

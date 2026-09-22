@@ -4,9 +4,12 @@
 
 """Tests for ``IssueAgentTicker`` — one clock per issue, one budget pool.
 
-The interval is stage-aware (a test cycle ticks slower than a review pass);
-the budget is not: ``used`` counts machine-started runs in any stage for the
-life of the issue, and the cap is the project pool plus whatever Re-tick
+The interval is resolved per stage (the three per-stage columns remain
+configurable, so a project *can* diverge cadences — this file's fixture
+sets divergent values to prove the indirection), though the shipped defaults
+are unified at 3 h across every stage (PDASHOSS01-167). The budget is not
+stage-aware: ``used`` counts machine-started runs in any stage for the life
+of the issue, and the cap is the project pool plus whatever Re-tick
 ``granted``. See ``.ai_design/ticking_relevance/design.md`` §5 / §9.
 """
 
@@ -171,13 +174,32 @@ def test_project_policy_schema_defaults(db, workspace, create_user):
             created_by=create_user,
         )
     assert project.agent_default_max_ticks == 10
-    assert project.agent_default_interval_seconds == 43200
-    assert project.agent_review_default_interval_seconds == 28800
-    assert project.agent_test_default_interval_seconds == 43200
-    # The Re-tick grant is the pool now — the separate knob is gone.
+    # PDASHOSS01-167: the three per-stage interval columns are retained but
+    # their defaults are unified at 3 h (10800 s) — a fresh project ticks on
+    # the same rhythm in every stage.
+    assert (
+        project.agent_default_interval_seconds
+        == project.agent_review_default_interval_seconds
+        == project.agent_test_default_interval_seconds
+        == 10800
+    )
+    # PDASHOSS01-170: the Re-tick grant is the pool now — the separate knob is gone.
     assert not hasattr(project, "agent_retick_grant")
     assert not hasattr(project, "agent_review_default_max_ticks")
     assert not hasattr(project, "agent_test_default_max_ticks")
+
+
+@pytest.mark.unit
+def test_registry_cadence_fallbacks_are_unified_at_3h():
+    """PDASHOSS01-167: every registry-level cadence fallback resolves to the
+    unified 3 h (10800 s) rhythm — the model-less path (``getattr`` default)
+    must agree with the project defaults."""
+    from pi_dash.db.models.issue_agent_ticker import DEFAULT_INTERVAL_SECONDS
+    from pi_dash.orchestration.agent_phases import CADENCE_FIELDS
+
+    assert DEFAULT_INTERVAL_SECONDS == 10800
+    assert {f.default_interval for f in CADENCE_FIELDS.values()} == {10800}
+    assert len(CADENCE_FIELDS) == 3  # impl / review / test columns retained
 
 
 @pytest.mark.unit

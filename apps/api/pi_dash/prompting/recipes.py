@@ -31,6 +31,7 @@ RECIPES: dict[str, tuple[str, ...]] = {
     KIND_CODING_TASK: (
         "intro",
         "repo-context",
+        "relationships",
         "session-framing",
         "pidash-cli",
         "task-lifecycle",

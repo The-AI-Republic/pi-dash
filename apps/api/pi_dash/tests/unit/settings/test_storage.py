@@ -204,3 +204,71 @@ class TestS3StorageSignedURLExpiration:
         mock_s3_client.generate_presigned_url.assert_called_once()
         call_kwargs = mock_s3_client.generate_presigned_url.call_args[1]
         assert call_kwargs["ExpiresIn"] == 120
+
+
+@pytest.mark.unit
+class TestS3StorageEndpointSelection:
+    """Test how ``is_server`` and ``request`` choose the MinIO endpoint used to
+    sign presigned URLs."""
+
+    _MINIO_ENV = {
+        "AWS_ACCESS_KEY_ID": "test-key",
+        "AWS_SECRET_ACCESS_KEY": "test-secret",
+        "AWS_S3_BUCKET_NAME": "test-bucket",
+        "AWS_REGION": "us-east-1",
+        "AWS_S3_ENDPOINT_URL": "http://pi-dash-minio:9000",
+        "USE_MINIO": "1",
+    }
+
+    def _make_request(self, host="public.example.com", scheme="https"):
+        request = Mock()
+        request.get_host.return_value = host
+        request.scheme = scheme
+        return request
+
+    @patch.dict(os.environ, _MINIO_ENV, clear=True)
+    @patch("pi_dash.settings.storage.boto3")
+    def test_is_server_kwarg_is_accepted(self, mock_boto3):
+        """Regression: constructing with ``is_server=True`` must not raise.
+
+        The API-key asset endpoints call ``S3Storage(request=..., is_server=True)``;
+        before this parameter existed every such call raised ``TypeError``.
+        """
+        mock_boto3.client.return_value = Mock()
+
+        storage = S3Storage(request=self._make_request(), is_server=True)
+
+        assert storage.is_server is True
+
+    @patch.dict(os.environ, _MINIO_ENV, clear=True)
+    @patch("pi_dash.settings.storage.boto3")
+    def test_server_signs_against_internal_endpoint(self, mock_boto3):
+        """``is_server=True`` signs against the internal endpoint even with a request."""
+        mock_boto3.client.return_value = Mock()
+
+        S3Storage(request=self._make_request(), is_server=True)
+
+        endpoint = mock_boto3.client.call_args[1]["endpoint_url"]
+        assert endpoint == "http://pi-dash-minio:9000"
+
+    @patch.dict(os.environ, _MINIO_ENV, clear=True)
+    @patch("pi_dash.settings.storage.boto3")
+    def test_client_signs_against_request_host(self, mock_boto3):
+        """A non-server request signs against the public host the client reached."""
+        mock_boto3.client.return_value = Mock()
+
+        S3Storage(request=self._make_request(host="public.example.com", scheme="https"))
+
+        endpoint = mock_boto3.client.call_args[1]["endpoint_url"]
+        assert endpoint == "https://public.example.com"
+
+    @patch.dict(os.environ, _MINIO_ENV, clear=True)
+    @patch("pi_dash.settings.storage.boto3")
+    def test_no_request_falls_back_to_internal_endpoint(self, mock_boto3):
+        """With no request the internal endpoint is used regardless of is_server."""
+        mock_boto3.client.return_value = Mock()
+
+        S3Storage()
+
+        endpoint = mock_boto3.client.call_args[1]["endpoint_url"]
+        assert endpoint == "http://pi-dash-minio:9000"

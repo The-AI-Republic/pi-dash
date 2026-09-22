@@ -11,7 +11,7 @@ is redundant. Existing ``IssueAgentTicker.granted`` values carry over
 unchanged — this only removes the (unused-by-consumption) project column.
 
 Reverse re-adds the column at its old default so a downgrade still validates
-against the pre-0164 model.
+against the pre-0166 model.
 """
 
 from django.db import migrations, models
@@ -19,7 +19,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("db", "0163_ticker_one_clock_one_pool"),
+        ("db", "0165_project_agent_wait_max_pause"),
     ]
 
     operations = [

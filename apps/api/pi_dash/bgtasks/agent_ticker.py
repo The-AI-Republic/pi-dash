@@ -72,12 +72,17 @@ def scan_due_tickers() -> int:
 
 
 @shared_task(name="pi_dash.bgtasks.agent_ticker.fire_tick")
-def fire_tick(ticker_id: str) -> bool:
+def fire_tick(ticker_id: str, trigger: str | None = None) -> bool:
     """Per-ticker worker. Atomically claims and dispatches.
+
+    ``trigger`` set means a forced tick fired *now* regardless of cadence
+    (the blocker-completed wake, ``orchestration.wake``): it skips the
+    ``next_run_at`` check and the waiting-on-blockers pause, labels the run
+    with ``trigger``, and otherwise claims like a timer tick (it counts).
 
     Returns ``True`` if a continuation run was dispatched, ``False`` if the
     fire was skipped (race lost, ticker changed, no active In Progress
-    state, run already in flight, etc.).
+    state, run already in flight, agent waiting on open blockers, etc.).
     """
     from pi_dash.orchestration.scheduling import (
         TRIGGER_RUN_AI,
@@ -100,7 +105,17 @@ def fire_tick(ticker_id: str) -> bool:
         if not ticker.enabled:
             return False
         now = timezone.now()
-        if ticker.next_run_at is None or ticker.next_run_at > now:
+        forced = bool(trigger)
+        if not forced and (ticker.next_run_at is None or ticker.next_run_at > now):
+            return False
+        if forced and ticker.pending_entry:
+            # An entry run is already owed (next_run_at = now); it fires on
+            # the next scan and serves the wake too.
+            logger.info(
+                "agent_ticker.fire_tick: skip ticker=%s trigger=%s reason=pending-entry",
+                ticker_id,
+                trigger,
+            )
             return False
 
         # A pending entry (design §4.5) fires even on a spent pool when it
@@ -160,6 +175,29 @@ def fire_tick(ticker_id: str) -> bool:
                 issue.pk,
             )
             return False
+        if not forced and not ticker.pending_entry:
+            # The agent chose to wait on open blockers (``Waiting on:`` in
+            # the workpad): skip this cadence tick without spending budget
+            # and look again one interval later. A blocker closing wakes
+            # the issue straight away (``orchestration.wake``).
+            from pi_dash.orchestration.wake import SKIP_WAITING_ON_BLOCKERS, waiting_pause
+
+            waiting_on = waiting_pause(issue, now=now)
+            if waiting_on:
+                from datetime import timedelta
+
+                from pi_dash.db.models.issue_agent_ticker import jitter_seconds
+
+                interval = ticker.effective_interval_seconds()
+                ticker.next_run_at = now + timedelta(seconds=interval + jitter_seconds(interval))
+                ticker.save(update_fields=["next_run_at", "updated_at"])
+                logger.info(
+                    "agent_ticker.fire_tick: skip issue=%s reason=%s waiting_on=%s",
+                    issue.pk,
+                    SKIP_WAITING_ON_BLOCKERS,
+                    ",".join(waiting_on),
+                )
+                return False
 
         # Claim: advance the clock first, then dispatch. We capture the
         # pre-claim values so we can roll back below if dispatch returns
@@ -179,7 +217,10 @@ def fire_tick(ticker_id: str) -> bool:
         # The queued human lever, if any — who asked and how — so the run
         # is created as that person and labelled with their trigger.
         claim_actor = ticker.pending_entry_actor if free_claim else None
-        claim_trigger = (ticker.pending_entry_trigger or TRIGGER_RUN_AI) if free_claim else TRIGGER_TICK
+        if free_claim:
+            claim_trigger = ticker.pending_entry_trigger or TRIGGER_RUN_AI
+        else:
+            claim_trigger = trigger or TRIGGER_TICK
 
         # Only machine-started runs spend the pool: a timer tick, or an
         # entry an agent's own move queued. A human's free entry does not.
@@ -287,9 +328,10 @@ def fire_tick(ticker_id: str) -> bool:
         )
         return False
     logger.info(
-        "agent_ticker.fire_tick: dispatched run=%s issue=%s used=%d free=%s cap_hit=%s",
+        "agent_ticker.fire_tick: dispatched run=%s issue=%s trigger=%s used=%d free=%s cap_hit=%s",
         run.pk,
         issue.pk,
+        claim_trigger,
         ticker.used,
         free_claim,
         cap_hit_now,
