@@ -45,7 +45,7 @@ Use `--fold` only for low-value status/noop updates that should remain available
 The workpad is your durable per-issue scratchpad — a single markdown document the agent owns. It is the only carrier of state between runs. It is **not** visible to humans in the comment thread; treat it as your own working memory, not a message to the operator.
 
 - `pidash workpad get [<identifier>]` — fetch the current workpad body. Returns `{body, updated_at}`. Defaults `<identifier>` to `PIDASH_ISSUE_IDENTIFIER` so you can call it bare.
-- `pidash workpad update [<identifier>] --body-file <path>` — overwrite the workpad body from a file. Defaults `<identifier>` to `PIDASH_ISSUE_IDENTIFIER`. An empty file clears it. There is no "append" — always write the full body.
+- `pidash workpad update [<identifier>] --body-file <path>` — overwrite the workpad body from a file. Defaults `<identifier>` to `PIDASH_ISSUE_IDENTIFIER`. An empty file clears it. There is no "append" — always write the full body. **On a successful upload the `--body-file` is deleted** so a stale local copy can't clobber newer server content on a later run; pass `--keep` to retain it. The next edit re-fetches with `pidash workpad get` (below), so a missing file after an update is expected, not an error.
 
 #### Pages
 
@@ -72,12 +72,12 @@ The remaining `pidash` subcommands (`configure`, `install`, `uninstall`, `start`
 
 ### Typical recipes
 
-Read your workpad, edit it, write it back:
+Read your workpad, edit it, write it back. Always start each edit by re-fetching from the server, then write back — `update` removes the file on success, so the next edit begins fresh from the authoritative copy:
 
 ```sh
 pidash workpad get | jq -r .body > ./.pidash-workpad.md
 # …edit the file in place…
-pidash workpad update --body-file ./.pidash-workpad.md
+pidash workpad update --body-file ./.pidash-workpad.md   # file is removed on success
 ```
 
 Post a blocker and move the issue to "Blocked":
