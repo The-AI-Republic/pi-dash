@@ -78,29 +78,154 @@ fn truncate(s: &str, max: usize) -> String {
     s[..end].to_string()
 }
 
-/// Best-effort parser for a Codex `codex/event/token_count` Raw frame's
-/// params. Returns `None` if the params don't match the expected shape.
-/// Failures are non-fatal — the supervisor logs at debug and continues.
+/// A token-usage frame, split into the counters the agent reported for the
+/// whole thread so far and — when the protocol reports it — the most recent
+/// model request on its own. `cumulative.raw` holds the reported usage object
+/// verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenUsageFrame {
+    pub cumulative: TokenUsage,
+    pub last: Option<TokenUsage>,
+}
+
+/// Best-effort parser for a token-usage Raw frame. Returns `None` if the
+/// method isn't a usage frame or the params don't carry input and output
+/// counts. Failures are non-fatal — the supervisor just skips the frame.
 ///
-/// Accepts either of the two shapes seen on the wire:
-///   - `{ "usage": { "input_tokens": ..., "output_tokens": ... } }`
-///   - `{ "input_tokens": ..., "output_tokens": ... }` (flat)
+/// Accepts the shapes seen on the wire:
+///   - `thread/tokenUsage/updated` (codex app-server v2, what the bundled
+///     engine emits): `{ "tokenUsage": { "total": {...}, "last": {...} } }`
+///     with camelCase counters (`inputTokens`, `cachedInputTokens`, …).
+///   - `codex/event/token_count`: `{ "msg": { "info": { "total_token_usage":
+///     {...}, "last_token_usage": {...} } } }` (or `info` at the top level),
+///     and the older `{ "usage": {...} }` / flat snake_case forms.
 ///
-/// Both shapes must additionally surface `total_tokens` to be accepted —
-/// a frame with only `input_tokens`/`output_tokens` and no `total_tokens`
-/// is treated as not-a-token-count to keep the parser narrow. This
-/// avoids false positives on unrelated frames that happen to carry
-/// numeric fields named `input_tokens` / `output_tokens`.
-pub fn parse_codex_token_count(params: &serde_json::Value) -> Option<TokenUsage> {
-    let usage = params.get("usage").unwrap_or(params);
-    let input = usage.get("input_tokens").and_then(|v| v.as_u64())?;
-    let output = usage.get("output_tokens").and_then(|v| v.as_u64())?;
-    let total = usage.get("total_tokens").and_then(|v| v.as_u64())?;
+/// `total_tokens` is optional: when the agent omits it the total is
+/// `input + output`. Everything else in the usage object is kept under
+/// `raw` so the cloud can store counters we don't model yet.
+pub fn parse_token_usage(method: &str, params: &serde_json::Value) -> Option<TokenUsageFrame> {
+    let (container, cumulative, last) = match method {
+        "thread/tokenUsage/updated" => {
+            let container = params.get("tokenUsage")?;
+            (container, container.get("total")?, container.get("last"))
+        }
+        "codex/event/token_count" => {
+            let info = params
+                .get("msg")
+                .and_then(|m| m.get("info"))
+                .or_else(|| params.get("info"));
+            match info {
+                Some(info) => (
+                    info,
+                    info.get("total_token_usage")?,
+                    info.get("last_token_usage"),
+                ),
+                None => {
+                    let usage = params.get("usage").unwrap_or(params);
+                    (usage, usage, None)
+                }
+            }
+        }
+        _ => return None,
+    };
+    let mut cumulative = usage_counters(cumulative)?;
+    cumulative.raw = Some(container.clone());
+    Some(TokenUsageFrame {
+        cumulative,
+        last: last.and_then(usage_counters),
+    })
+}
+
+/// Map one provider usage object onto the canonical counters. Mirrors the
+/// cloud's `pi_dash.runner.services.usage.normalize_usage` — keep the key
+/// lists in sync.
+fn usage_counters(usage: &serde_json::Value) -> Option<TokenUsage> {
+    let pick = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|k| usage.get(*k).and_then(|v| v.as_u64()))
+    };
+    let nested = |outer: &str, inner: &str| {
+        usage
+            .get(outer)
+            .and_then(|o| o.get(inner))
+            .and_then(|v| v.as_u64())
+    };
+    let mut input = pick(&["inputTokens", "input_tokens", "prompt_tokens"])?;
+    let output = pick(&["outputTokens", "output_tokens", "completion_tokens"])?;
+    let cache_read = pick(&[
+        "cachedInputTokens",
+        "cached_input_tokens",
+        "cache_read_input_tokens",
+    ])
+    .or_else(|| nested("prompt_tokens_details", "cached_tokens"))
+    .or_else(|| nested("input_tokens_details", "cached_tokens"));
+    let cache_write = pick(&[
+        "cacheWriteInputTokens",
+        "cache_write_input_tokens",
+        "cache_creation_input_tokens",
+    ]);
+    let reasoning = pick(&["reasoningOutputTokens", "reasoning_output_tokens"])
+        .or_else(|| nested("completion_tokens_details", "reasoning_tokens"))
+        .or_else(|| nested("output_tokens_details", "reasoning_tokens"));
+    // Anthropic reports cache reads / writes *beside* `input_tokens` rather
+    // than inside it; fold them in so `input` means the same thing for every
+    // provider.
+    if usage.get("cache_read_input_tokens").is_some()
+        || usage.get("cache_creation_input_tokens").is_some()
+    {
+        input = input
+            .saturating_add(cache_read.unwrap_or(0))
+            .saturating_add(cache_write.unwrap_or(0));
+    }
+    let total = pick(&["totalTokens", "total_tokens"]).unwrap_or(input.saturating_add(output));
     Some(TokenUsage {
         input,
         output,
         total,
+        cache_read,
+        cache_write,
+        reasoning,
+        raw: None,
     })
+}
+
+/// Turns thread-cumulative usage frames into this run's usage.
+///
+/// Codex reports usage for the whole thread, and a continuation run resumes
+/// the previous run's thread — so without a baseline every resumed run would
+/// re-report its predecessors' tokens and workspace rollups would double
+/// count. The baseline is the thread total *before* the first request seen in
+/// this run (`cumulative - last` on the first frame); when a frame carries no
+/// per-request figure the baseline is zero, i.e. the counters are taken as-is.
+#[derive(Debug, Default)]
+pub struct RunTokenMeter {
+    baseline: Option<TokenUsage>,
+}
+
+impl RunTokenMeter {
+    pub fn observe(&mut self, frame: TokenUsageFrame) -> TokenUsage {
+        let TokenUsageFrame { cumulative, last } = frame;
+        let baseline = self.baseline.get_or_insert_with(|| match &last {
+            Some(last) => subtract(&cumulative, last),
+            None => TokenUsage::default(),
+        });
+        let mut usage = subtract(&cumulative, baseline);
+        usage.raw = cumulative.raw;
+        usage
+    }
+}
+
+fn subtract(a: &TokenUsage, b: &TokenUsage) -> TokenUsage {
+    let opt = |a: Option<u64>, b: Option<u64>| a.map(|a| a.saturating_sub(b.unwrap_or(0)));
+    TokenUsage {
+        input: a.input.saturating_sub(b.input),
+        output: a.output.saturating_sub(b.output),
+        total: a.total.saturating_sub(b.total),
+        cache_read: opt(a.cache_read, b.cache_read),
+        cache_write: opt(a.cache_write, b.cache_write),
+        reasoning: opt(a.reasoning, b.reasoning),
+        raw: None,
+    }
 }
 
 /// Plain-data extract of a shell command the agent kicked off. Mirrors
@@ -472,42 +597,149 @@ mod tests {
     }
 
     #[test]
-    fn parse_codex_token_count_accepts_usage_block() {
+    fn parse_token_usage_accepts_legacy_usage_block() {
         let params = json!({
             "usage": {"input_tokens": 100, "output_tokens": 250, "total_tokens": 350}
         });
-        let u = parse_codex_token_count(&params).unwrap();
-        assert_eq!(u.input, 100);
-        assert_eq!(u.output, 250);
-        assert_eq!(u.total, 350);
+        let u = parse_token_usage("codex/event/token_count", &params)
+            .unwrap()
+            .cumulative;
+        assert_eq!((u.input, u.output, u.total), (100, 250, 350));
+        assert_eq!(u.raw, Some(params["usage"].clone()));
     }
 
     #[test]
-    fn parse_codex_token_count_accepts_flat_block_with_total() {
-        let params = json!({
-            "input_tokens": 10,
-            "output_tokens": 20,
-            "total_tokens": 30
-        });
-        let u = parse_codex_token_count(&params).unwrap();
-        assert_eq!(u.input, 10);
-        assert_eq!(u.output, 20);
-        assert_eq!(u.total, 30);
-    }
-
-    #[test]
-    fn parse_codex_token_count_rejects_flat_without_total() {
-        // Defensive: a frame with only input/output and no total is
-        // ambiguous — could be an unrelated event with a similar
-        // numeric field naming. Stay narrow to avoid false positives.
+    fn parse_token_usage_accepts_flat_block_without_total() {
         let params = json!({"input_tokens": 10, "output_tokens": 20});
-        assert!(parse_codex_token_count(&params).is_none());
+        let u = parse_token_usage("codex/event/token_count", &params)
+            .unwrap()
+            .cumulative;
+        assert_eq!((u.input, u.output, u.total), (10, 20, 30));
     }
 
     #[test]
-    fn parse_codex_token_count_returns_none_on_garbage() {
-        let params = json!({"unrelated": true});
-        assert!(parse_codex_token_count(&params).is_none());
+    fn parse_token_usage_reads_app_server_v2_frame() {
+        // Verbatim shape of a bundled-engine frame from runner history.
+        let params = json!({
+            "threadId": "t1",
+            "turnId": "turn1",
+            "tokenUsage": {
+                "last": {"cacheWriteInputTokens": 0, "cachedInputTokens": 11008,
+                         "inputTokens": 21763, "outputTokens": 551,
+                         "reasoningOutputTokens": 133, "totalTokens": 22314},
+                "modelContextWindow": 258400,
+                "total": {"cacheWriteInputTokens": 5, "cachedInputTokens": 11008,
+                          "inputTokens": 21763, "outputTokens": 551,
+                          "reasoningOutputTokens": 133, "totalTokens": 22314,
+                          "someFutureCounter": 9}
+            }
+        });
+        let frame = parse_token_usage("thread/tokenUsage/updated", &params).unwrap();
+        let u = &frame.cumulative;
+        assert_eq!((u.input, u.output, u.total), (21763, 551, 22314));
+        assert_eq!(u.cache_read, Some(11008));
+        assert_eq!(u.cache_write, Some(5));
+        assert_eq!(u.reasoning, Some(133));
+        // Unknown counters survive verbatim under raw.
+        let raw = u.raw.as_ref().unwrap();
+        assert_eq!(raw["total"]["someFutureCounter"], json!(9));
+        assert_eq!(raw["modelContextWindow"], json!(258400));
+        assert_eq!(frame.last.as_ref().map(|l| l.total), Some(22314));
+    }
+
+    #[test]
+    fn parse_token_usage_reads_legacy_event_msg_info() {
+        let params = json!({"msg": {"type": "token_count", "info": {
+            "total_token_usage": {"input_tokens": 58604, "cached_input_tokens": 40960,
+                                  "cache_write_input_tokens": 0, "output_tokens": 617,
+                                  "reasoning_output_tokens": 120, "total_tokens": 59221},
+            "last_token_usage": {"input_tokens": 29503, "cached_input_tokens": 28928,
+                                 "output_tokens": 255, "reasoning_output_tokens": 17,
+                                 "total_tokens": 29758}
+        }}});
+        let frame = parse_token_usage("codex/event/token_count", &params).unwrap();
+        assert_eq!(frame.cumulative.cache_read, Some(40960));
+        assert_eq!(frame.cumulative.reasoning, Some(120));
+        assert_eq!(frame.last.map(|l| l.input), Some(29503));
+    }
+
+    #[test]
+    fn usage_counters_folds_anthropic_cache_into_input() {
+        let usage = json!({"input_tokens": 2, "cache_creation_input_tokens": 15222,
+                           "cache_read_input_tokens": 15553, "output_tokens": 8});
+        let u = usage_counters(&usage).unwrap();
+        assert_eq!(u.input, 2 + 15222 + 15553);
+        assert_eq!(u.cache_read, Some(15553));
+        assert_eq!(u.cache_write, Some(15222));
+        assert_eq!(u.total, u.input + 8);
+    }
+
+    #[test]
+    fn usage_counters_reads_openai_nested_details() {
+        let usage = json!({"prompt_tokens": 1000, "completion_tokens": 300, "total_tokens": 1300,
+                           "prompt_tokens_details": {"cached_tokens": 600},
+                           "completion_tokens_details": {"reasoning_tokens": 120}});
+        let u = usage_counters(&usage).unwrap();
+        assert_eq!((u.input, u.output, u.total), (1000, 300, 1300));
+        assert_eq!(u.cache_read, Some(600));
+        assert_eq!(u.reasoning, Some(120));
+        assert_eq!(u.cache_write, None);
+    }
+
+    #[test]
+    fn parse_token_usage_ignores_other_methods_and_garbage() {
+        let usage = json!({"input_tokens": 10, "output_tokens": 20});
+        assert!(parse_token_usage("item/completed", &usage).is_none());
+        assert!(
+            parse_token_usage("codex/event/token_count", &json!({"unrelated": true})).is_none()
+        );
+        assert!(
+            parse_token_usage("thread/tokenUsage/updated", &json!({"tokenUsage": {}})).is_none()
+        );
+    }
+
+    fn v2_frame(total: (u64, u64, u64), last: (u64, u64, u64)) -> TokenUsageFrame {
+        let obj = |(i, c, o): (u64, u64, u64)| json!({"inputTokens": i, "cachedInputTokens": c, "outputTokens": o, "totalTokens": i + o});
+        parse_token_usage(
+            "thread/tokenUsage/updated",
+            &json!({"tokenUsage": {"total": obj(total), "last": obj(last)}}),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn run_token_meter_fresh_thread_reports_totals_as_is() {
+        let mut meter = RunTokenMeter::default();
+        let u = meter.observe(v2_frame((100, 40, 10), (100, 40, 10)));
+        assert_eq!(
+            (u.input, u.output, u.total, u.cache_read),
+            (100, 10, 110, Some(40))
+        );
+        let u = meter.observe(v2_frame((250, 90, 30), (150, 50, 20)));
+        assert_eq!(
+            (u.input, u.output, u.total, u.cache_read),
+            (250, 30, 280, Some(90))
+        );
+        assert!(u.raw.is_some());
+    }
+
+    #[test]
+    fn run_token_meter_subtracts_resumed_thread_history() {
+        // The thread already spent 1000/100 in a previous run; this run's
+        // first request adds 200/20.
+        let mut meter = RunTokenMeter::default();
+        let u = meter.observe(v2_frame((1200, 500, 120), (200, 80, 20)));
+        assert_eq!(
+            (u.input, u.output, u.total, u.cache_read),
+            (200, 20, 220, Some(80))
+        );
+        let u = meter.observe(v2_frame((1500, 700, 150), (300, 200, 30)));
+        assert_eq!(
+            (u.input, u.output, u.total, u.cache_read),
+            (500, 50, 550, Some(280))
+        );
+        // raw stays the verbatim, thread-cumulative object.
+        assert_eq!(u.raw.unwrap()["total"]["inputTokens"], json!(1500));
     }
 
     #[test]

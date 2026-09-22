@@ -243,6 +243,55 @@ impl ApiClient {
         self.request(Method::DELETE, path, None::<&()>).await
     }
 
+    /// POST a multipart/form-data upload to an **absolute** URL (not under
+    /// `/api/v1/`), sending no Pi Dash credentials.
+    ///
+    /// This is the S3/MinIO presigned-POST step of an asset upload: the
+    /// `fields` returned by the asset endpoint are appended first, then the
+    /// binary as a `file` part last (S3 requires `key`/policy fields to
+    /// precede the file). The presigned policy is the only authorization S3
+    /// needs, so the `X-Api-Key` header is deliberately omitted.
+    pub async fn post_multipart(
+        &self,
+        url: &str,
+        fields: &serde_json::Map<String, Value>,
+        filename: &str,
+        content_type: &str,
+        bytes: Vec<u8>,
+    ) -> Result<(), CliError> {
+        let mut form = reqwest::multipart::Form::new();
+        for (key, value) in fields {
+            // Presigned POST fields are strings; anything else is a malformed
+            // response from our own asset endpoint.
+            let text = value.as_str().ok_or_else(|| {
+                CliError::new(
+                    EXIT_SERVER,
+                    format!("presigned upload field {key} was not a string"),
+                )
+            })?;
+            form = form.text(key.clone(), text.to_string());
+        }
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(filename.to_string())
+            .mime_str(content_type)
+            .map_err(|e| CliError::new(EXIT_INVALID, format!("invalid content type: {e}")))?;
+        form = form.part("file", part);
+
+        let resp = self
+            .http
+            .post(url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| CliError::new(EXIT_UNKNOWN, format!("POST {url}: {e}")))?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let text = resp.text().await.unwrap_or_default();
+        Err(map_error_status(status, text))
+    }
+
     async fn request<B: Serialize + ?Sized>(
         &self,
         method: Method,

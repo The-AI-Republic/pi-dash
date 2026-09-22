@@ -158,6 +158,22 @@ class IssueSerializer(BaseSerializer):
         # workpad endpoint to keep ``GET /work-items/<id>/`` payloads small.
         exclude = ["description_json", "description_stripped", "workpad"]
 
+    #: Read-only blocker keys added by ``to_representation`` for single-item
+    #: payloads (see there).
+    RELATIONS_SUMMARY_KEYS = ("relations_summary", "has_open_blockers")
+
+    #: Context key carrying the requesting user. When set, single-item
+    #: payloads also carry ``relations`` — every relation grouped by type with
+    #: identifier, title and state (PDASHOSS01-199), limited to what that user
+    #: can see. Without a viewer the block is omitted rather than leaking
+    #: titles from projects the caller may not belong to.
+    RELATIONS_VIEWER_CONTEXT = "relations_viewer"
+
+    def __init__(self, *args, **kwargs):
+        # ``BaseSerializer`` consumes ``fields``; remember which plain names
+        # were requested so the computed blocker keys honour ``?fields=`` too.
+        self._requested_fields = {f for f in (kwargs.get("fields") or []) if isinstance(f, str)}
+        super().__init__(*args, **kwargs)
     def to_internal_value(self, data):
         data, from_markdown = normalize_description_input(data)
         self._description_from_markdown = from_markdown or self.context.get("description_from_markdown", False)
@@ -450,6 +466,30 @@ class IssueSerializer(BaseSerializer):
                 data["labels"] = [
                     str(label) for label in IssueLabel.objects.filter(issue=instance).values_list("label_id", flat=True)
                 ]
+
+        # Blocker summary (PDASHOSS01-197) — the same picture the agent prompt
+        # carries, so ``GET /work-items/<id>/`` and ``pidash issue get`` show it.
+        # Single-item payloads only: under a ``ListSerializer`` it would cost
+        # several queries per row on the list endpoints.
+        if not isinstance(self.parent, serializers.ListSerializer) and (
+            not self._requested_fields or self._requested_fields.intersection(self.RELATIONS_SUMMARY_KEYS)
+        ):
+            from pi_dash.orchestration.blockers import relations_summary
+
+            for key, value in relations_summary(instance).items():
+                if not self._requested_fields or key in self._requested_fields:
+                    data[key] = value
+
+        viewer = self.context.get(self.RELATIONS_VIEWER_CONTEXT)
+        if (
+            viewer is not None
+            and not isinstance(self.parent, serializers.ListSerializer)
+            and (not self._requested_fields or "relations" in self._requested_fields)
+        ):
+            from pi_dash.core.querysets import member_project_issues
+            from pi_dash.orchestration.relations import grouped_relations
+
+            data["relations"] = grouped_relations(instance, member_project_issues(viewer, instance.workspace.slug))
 
         return data
 

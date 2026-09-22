@@ -460,8 +460,8 @@ def test_context_related_merges_both_directions(workspace, project, state, creat
 
 @pytest.mark.unit
 def test_context_related_excludes_other_relation_types(workspace, project, state, create_user, run, issue):
-    # Only relates_to is surfaced; blocked_by / duplicate are not (this issue's
-    # documented assumption).
+    # The related group is relates_to only; blocked_by has its own group
+    # (PDASHOSS01-196) and duplicate is not surfaced at all.
     blocker = Issue.objects.create(
         name="Blocks us", workspace=workspace, project=project, state=state, created_by=create_user
     )
@@ -485,6 +485,157 @@ def test_context_related_excludes_soft_deleted(workspace, project, state, create
 
     ctx = build_context(issue, run)
     assert ctx["related"] == []
+
+
+# ----------------------------------------------------------------------
+# Directional relations (blocked_by / blocking / ...) — PDASHOSS01-196
+# ----------------------------------------------------------------------
+
+
+def _other_issue(workspace, project, state, create_user, name):
+    return Issue.objects.create(name=name, workspace=workspace, project=project, state=state, created_by=create_user)
+
+
+@pytest.mark.unit
+def test_context_directional_relations_empty_when_none(issue, run):
+    ctx = build_context(issue, run)
+    assert ctx["blocked_by"] == []
+    assert ctx["blocking"] == []
+    assert ctx["other_relations"] == []
+    assert ctx["open_blockers"] == []
+    assert ctx["has_open_blockers"] is False
+
+
+@pytest.mark.unit
+def test_context_blocked_by_and_blocking_resolve_both_directions(workspace, project, state, create_user, run, issue):
+    # Only the forward type is stored: (issue=A, related=B, "blocked_by") means
+    # A is blocked by B, so B sees A as "blocking".
+    blocker = _other_issue(workspace, project, state, create_user, "Blocks us")
+    dependent = _other_issue(workspace, project, state, create_user, "Waits on us")
+    _make_relation(issue, blocker, "blocked_by", create_user)
+    _make_relation(dependent, issue, "blocked_by", create_user)
+
+    ctx = build_context(issue, run)
+    assert [b["title"] for b in ctx["blocked_by"]] == ["Blocks us"]
+    assert [b["title"] for b in ctx["blocking"]] == ["Waits on us"]
+    item = ctx["blocked_by"][0]
+    assert item["identifier"] == f"TP-{blocker.sequence_id}"
+    assert item["state"] == "Todo"
+    assert item["state_group"] == "unstarted"
+    # relates_to stays separate from the directional groups.
+    assert ctx["related"] == []
+
+
+@pytest.mark.unit
+def test_context_other_relations_use_reverse_mapping(workspace, project, state, create_user, run, issue):
+    ours = {
+        "start_before": _other_issue(workspace, project, state, create_user, "We start before"),
+        "finish_before": _other_issue(workspace, project, state, create_user, "We finish before"),
+        "implemented_by": _other_issue(workspace, project, state, create_user, "Implements us"),
+    }
+    theirs = {
+        "start_before": _other_issue(workspace, project, state, create_user, "Starts before us"),
+        "finish_before": _other_issue(workspace, project, state, create_user, "Finishes before us"),
+        "implemented_by": _other_issue(workspace, project, state, create_user, "Implemented by us"),
+    }
+    for relation_type, other in ours.items():
+        _make_relation(issue, other, relation_type, create_user)
+    for relation_type, other in theirs.items():
+        _make_relation(other, issue, relation_type, create_user)
+
+    ctx = build_context(issue, run)
+    got = {(r["relation"], r["title"]) for r in ctx["other_relations"]}
+    assert got == {
+        ("Starts before", "We start before"),
+        ("Starts after", "Starts before us"),
+        ("Finishes before", "We finish before"),
+        ("Finishes after", "Finishes before us"),
+        ("Implemented by", "Implements us"),
+        ("Implements", "Implemented by us"),
+    }
+    assert ctx["blocked_by"] == [] and ctx["blocking"] == []
+
+
+@pytest.mark.unit
+def test_context_directional_relations_exclude_relates_to_and_duplicate(
+    workspace, project, state, create_user, run, issue
+):
+    _make_relation(issue, _other_issue(workspace, project, state, create_user, "Rel"), "relates_to", create_user)
+    _make_relation(issue, _other_issue(workspace, project, state, create_user, "Dup"), "duplicate", create_user)
+
+    ctx = build_context(issue, run)
+    assert ctx["blocked_by"] == [] and ctx["blocking"] == [] and ctx["other_relations"] == []
+
+
+@pytest.mark.unit
+def test_context_blocked_by_lists_pair_once_and_skips_self(workspace, project, state, create_user, run, issue):
+    blocker = _other_issue(workspace, project, state, create_user, "Blocker")
+    rel = _make_relation(issue, blocker, "blocked_by", create_user)
+    # A second live row for the same pair can't exist (unique constraint), so
+    # soft-delete the first and re-link: the default manager hides the old row
+    # and the live one must surface exactly once.
+    rel.delete()
+    _make_relation(issue, blocker, "blocked_by", create_user)
+    # Self-link rows are skipped outright.
+    _make_relation(issue, issue, "blocked_by", create_user)
+
+    ctx = build_context(issue, run)
+    assert [b["title"] for b in ctx["blocked_by"]] == ["Blocker"]
+    assert ctx["blocking"] == []
+
+
+@pytest.mark.unit
+def test_context_blocked_by_capped(workspace, project, state, create_user, run, issue):
+    from pi_dash.prompting.context import _MAX_RELATIONSHIP_ITEMS
+
+    for i in range(_MAX_RELATIONSHIP_ITEMS + 3):
+        _make_relation(issue, _other_issue(workspace, project, state, create_user, f"B{i}"), "blocked_by", create_user)
+
+    ctx = build_context(issue, run)
+    assert len(ctx["blocked_by"]) == _MAX_RELATIONSHIP_ITEMS
+    assert len(ctx["open_blockers"]) == _MAX_RELATIONSHIP_ITEMS
+
+
+@pytest.mark.unit
+def test_context_blocked_by_skips_soft_deleted_relation_and_target(workspace, project, state, create_user, run, issue):
+    gone_rel = _other_issue(workspace, project, state, create_user, "Relation deleted")
+    gone_issue = _other_issue(workspace, project, state, create_user, "Issue deleted")
+    _make_relation(issue, gone_rel, "blocked_by", create_user).delete()
+    _make_relation(issue, gone_issue, "blocked_by", create_user)
+    gone_issue.delete()  # soft delete the target work item
+
+    ctx = build_context(issue, run)
+    assert ctx["blocked_by"] == []
+    assert ctx["has_open_blockers"] is False
+
+
+@pytest.mark.unit
+def test_context_has_open_blockers_tracks_blocker_state_group(workspace, project, state, create_user, run, issue):
+    done = State.objects.create(name="Done", project=project, group="completed")
+    cancelled = State.objects.create(name="Cancelled", project=project, group="cancelled")
+    review = State.objects.create(name="In Review", project=project, group="review")
+    closed_a = Issue.objects.create(
+        name="Done one", workspace=workspace, project=project, state=done, created_by=create_user
+    )
+    closed_b = Issue.objects.create(
+        name="Dropped one", workspace=workspace, project=project, state=cancelled, created_by=create_user
+    )
+    _make_relation(issue, closed_a, "blocked_by", create_user)
+    _make_relation(issue, closed_b, "blocked_by", create_user)
+
+    ctx = build_context(issue, run)
+    assert len(ctx["blocked_by"]) == 2
+    assert ctx["open_blockers"] == []
+    assert ctx["has_open_blockers"] is False
+
+    still_open = Issue.objects.create(
+        name="Open one", workspace=workspace, project=project, state=review, created_by=create_user
+    )
+    _make_relation(issue, still_open, "blocked_by", create_user)
+
+    ctx = build_context(issue, run)
+    assert ctx["open_blockers"] == [f"TP-{still_open.sequence_id}"]
+    assert ctx["has_open_blockers"] is True
 
 
 @pytest.mark.unit

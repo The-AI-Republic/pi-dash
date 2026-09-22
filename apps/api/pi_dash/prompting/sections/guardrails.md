@@ -5,7 +5,7 @@ customizable: locked
 ---
 ## Guardrails
 
-- Do not edit the issue title or description for planning or progress tracking. Use the workpad (`pidash workpad update`).
+- Do not edit the issue title or description for planning or progress tracking. Use the workpad (`pidash workpad update`). **One exception:** when you split an issue into child issues, you *do* rewrite that parent's description to carry the child list (see "Split into child issues" in "Analyze & scope") — the children are the tracking parent's scope, and its description is the only place a child's run can read them.
 - The workpad is your own working memory, not a message to the human. Don't address the human inside it. To talk to the human, post a comment.
 - Don't paste workpad contents into comments. The workpad is for you; comments are for the human.
 - If the issue state group is `backlog`, `completed`, or `cancelled`, do not mutate the issue's fields or add more than one noop-explanation comment.

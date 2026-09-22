@@ -454,6 +454,27 @@ def test_cli_docs_put_re_tick_out_of_the_agents_hands():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("kind", ["coding-task", "review", "test"])
+def test_cli_docs_teach_relation_commands(kind):
+    # PDASHOSS01-199: the agent can record and read dependencies itself.
+    out = compose(kind, workspace=None, project=None, user=None, context=_ctx(kind)).text
+    assert "`pidash issue relate <identifier> --blocked-by <ID>[,<ID>...]`" in out
+    assert "`pidash issue unrelate <identifier>" in out
+    assert "`pidash issue relations <identifier>`" in out
+
+
+@pytest.mark.unit
+def test_split_guidance_records_order_as_blocked_by():
+    # PDASHOSS01-169 renamed the outcome from "Propose a split" to
+    # "Split into child issues" (the run files the children itself); the
+    # PDASHOSS01-199 ordering rule lives inside that outcome.
+    out = compose("coding-task", workspace=None, project=None, user=None, context=_ctx("coding-task")).text
+    split = out[out.index("**Split into child issues**") :]
+    split = split[: split.index("7. **Writing to the human")]
+    assert "pidash issue relate <later-child> --blocked-by <earlier-child>" in split
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("kind", ["review", "test"])
 def test_review_and_test_get_lifecycle_workpad_repo_and_blocking(kind):
     """The sections review/test cross-reference must actually be in their
@@ -611,6 +632,204 @@ def test_coding_task_parent_no_branch_routes_through_readiness_not_autofallback(
 
 
 # ----------------------------------------------------------------------
+# Multi-part plan: finish a multi-part issue in one run (PDASHOSS01-168)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_coding_task_split_gate_offers_multipart_plan():
+    """A large-but-clear issue must have a *Proceed with a multi-part plan*
+    outcome that separates size from ambiguity, rather than being forced to
+    block. The analyze-and-scope split gate used to allow Proceed only when the
+    work "fits one reasonable unit of delivery", so any big issue cost a run and
+    a human round-trip before any code (PDASHOSS01-168)."""
+    body = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_ctx()
+    ).text
+
+    # The new, non-blocking outcome exists and is keyed on clarity, not size.
+    assert "Proceed with a multi-part plan" in body
+    assert "larger than one PR, but the requirements and design are clear" in body
+    # Size and ambiguity are explicitly separated.
+    assert "Size is a different axis from ambiguity." in body
+    # Clarify is reserved for an open decision, not for a large-but-clear issue.
+    assert "a real product, UX, scope, or interface decision is unanswered" in body
+    # Split is reserved for genuinely separate deliverables in different issues.
+    assert "independent deliverables that belong in **different issues**" in body
+
+
+@pytest.mark.unit
+def test_coding_task_softens_splitting_bias():
+    """Once a plan is recorded or approved, the prompt must tell the agent not
+    to keep slicing the work into ever-smaller pieces on its own — the old
+    cost-comparison wording biased toward smaller pieces (slice 1 -> 1a/1b),
+    PDASHOSS01-168."""
+    body = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_ctx()
+    ).text
+
+    assert "don't split its parts further unless a new product or design decision actually surfaces" in body
+
+
+@pytest.mark.unit
+def test_coding_task_keeps_building_parts_after_a_pr():
+    """After a part's PR is open with parts remaining, the implementation
+    section must tell the agent to continue in the same run and must forbid
+    advancing the stage / yielding done on a partial implementation
+    (PDASHOSS01-168)."""
+    body = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_ctx()
+    ).text
+
+    # Steps 5-6 loop over the plan's parts within one run.
+    assert "you do **not** stop after the first" in body
+    assert "go back to step 5 for the next part" in body
+    # A partial implementation must not advance to In Review / yield done.
+    assert "do not yield `done` while parts are still unbuilt" in body
+    assert "a partial implementation must not move the issue to In Review" in body
+
+
+# ----------------------------------------------------------------------
+# Split into child issues (task-level), not per-run slices (PDASHOSS01-169)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_coding_task_split_standard_is_independence_not_size():
+    """The split decision must be keyed on independence, not on size or on
+    crossing layers. A modern agent can finish a large, clear change in one long
+    run (there is no run timeout), and splitting one feature by layer lets each
+    side build against its own guess of the shared contract — which is how voice
+    dictation (PDASHOSS01-148) shipped with every part green and the mic broken.
+    """
+    body = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_ctx()
+    ).text
+
+    assert "Split on independence, never on size." in body
+    # The old size and layer signals must be gone.
+    assert "clearly more than one run's work" not in body
+    assert "span different areas" not in body
+    # One-line test the agent can apply, plus explicit split / do-not-split lists.
+    assert "without ever seeing child A's code or decisions" in body
+    assert "**Split when**" in body
+    assert "**Do not split when** the parts share an interface that is not yet fixed" in body
+    # Size is a fallback only; splitting has a real run cost.
+    assert "**Size is only a fallback.**" in body
+    assert "**Count the cost.**" in body
+    # If a split must cross an interface: contract first, producer before consumer.
+    assert "**Pin any shared contract first.**" in body
+    assert "producer lands before the consumer starts" in body
+
+
+@pytest.mark.unit
+def test_coding_task_split_gate_creates_child_issues():
+    """The split outcome must direct the agent to create child issues *itself*
+    with `pidash issue create --parent`, list existing children first for
+    idempotency, apply the guardrails, and park the parent — not just propose a
+    split and leave triage to a human (PDASHOSS01-169)."""
+    body = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_ctx()
+    ).text
+
+    # The outcome is now "create children yourself", keyed on genuinely separate tasks.
+    assert "Split into child issues" in body
+    assert "break it into child issues **yourself**" in body
+    # Concrete CLI: create children under the parent, list them first for idempotency.
+    assert "pidash issue create --project SAMPLE --parent SAMPLE-1" in body
+    assert "pidash issue list --project SAMPLE --parent SAMPLE-1" in body
+    # Guardrails: cap, single-run sizing, depth 1.
+    assert "At most ~6 children per split" in body
+    assert "do **not** split a child further (depth 1)" in body
+    # Parent is parked (not left In Progress on waiting_on_external, which keeps ticking).
+    assert "Move the parent to **Todo**" in body
+    assert "keeps ticking for In Progress and would burn the parent's budget" in body
+    # The child list goes into the parent's description: that is the signal a child's
+    # run reads to recognise a tracking parent (the child only ever sees the parent's
+    # description, never its comments).
+    assert "Record the children in this parent's description" in body
+    assert "pidash issue patch SAMPLE-1 --description" in body
+    # The multi-part outcome (PDASHOSS01-168) is still the home for parts of one task.
+    assert "Proceed with a multi-part plan" in body
+
+
+@pytest.mark.unit
+def test_coding_task_guardrails_allow_the_tracking_parent_child_list():
+    """The Guardrails section forbids editing an issue description for planning
+    or progress tracking. The split outcome depends on doing exactly that to the
+    *parent* — the child list in the parent's description is the only signal a
+    child's run can read to recognise a tracking parent. Both places must carry
+    the carve-out, or the agent follows the unqualified prohibition and the
+    tracking-parent signal is never written (PDASHOSS01-169)."""
+    body = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_ctx()
+    ).text
+
+    # Guardrails: the prohibition still stands, but names the split exception.
+    assert "Do not edit the issue title or description for planning or progress tracking" in body
+    assert "you *do* rewrite that parent's description to carry the child list" in body
+    # pidash-cli `issue patch` docs carry the same carve-out.
+    assert 'The one case where `--description` is correct is recording the child list on a **tracking parent**' in body
+
+
+@pytest.mark.unit
+def test_coding_task_parent_description_rewrite_sends_markdown_not_html():
+    """The split outcome tells the run to read the parent's description and write
+    it back with the child list appended. `pidash issue get` exposes the
+    description only as `description_html` (the serializer excludes
+    `description_stripped`), so pasting what you just read straight into
+    `--description` makes the server escape it — the parent's description becomes
+    visible `&lt;p&gt;` source, and it is re-escaped on every later rewrite. The
+    prompt must say to send plain markdown (PDASHOSS01-169).
+    """
+    body = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_ctx()
+    ).text
+
+    assert "**Send plain markdown, never the HTML you just read.**" in body
+    assert "returns the description only as `description_html`" in body
+    assert "Convert it back to plain markdown first" in body
+
+
+@pytest.mark.unit
+def test_coding_task_tracking_parent_is_context_not_blocker():
+    """A child whose parent is a tracking issue (split into children, no branch
+    of its own) must not hit the 'parent in progress with no branch' blocker —
+    the readiness block treats a tracking parent as context and the base-branch
+    resolution bases off the project base or a sibling branch (PDASHOSS01-169)."""
+    ctx = _coding_ctx_chain(2)
+    ctx["repo"]["work_branch"] = None  # this child has no branch yet -> resolve a base
+    ctx["parent"]["work_branch"] = None  # tracking parent will never have a branch
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    # Readiness block (analyze-and-scope step 2): tracking parent is context, not a blocker.
+    assert "Parent is a **tracking issue**" in body
+    assert "context, not a blocker" in body
+    # Base-branch resolution (workpad-setup): tracking parent -> project base or sibling branch.
+    assert "it carries no code branch of its own and will never get one" in body
+
+
+@pytest.mark.unit
+def test_coding_task_advances_stage_only_when_all_parts_done():
+    """The issue moves to In Review only when every planned part is built; the
+    In Progress exit condition and the ending routing both carry the
+    all-parts-done gate (PDASHOSS01-168)."""
+    body = compose(
+        "coding-task", workspace=None, project=None, user=None, context=_ctx()
+    ).text
+
+    # task-lifecycle exit condition now requires every part built.
+    assert "Multi-part issues stay In Progress until the whole issue is done." in body
+    # While parts remain the run reports progressed (or waiting_on_external),
+    # not done, and stays In Progress.
+    assert "the issue **stays In Progress**" in body
+    assert "Plan parts still remain" in body
+    # The whole-issue testing hand-off is posted once, listing every PR.
+    assert "Hand off to testing — once, for the whole issue, when every plan part is built." in body
+    assert "list every PR" in body
+
+
+# ----------------------------------------------------------------------
 # Work item relationships section (PDASHOSS01-160): one independent section
 # carrying ancestors, children, and relates_to siblings together.
 # ----------------------------------------------------------------------
@@ -718,3 +937,85 @@ def test_relationships_section_lineage_only_when_grandparent():
     body3 = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
     assert "Lineage (current → root):" in body3
     assert "SAMPLE-root" in body3
+
+
+# ----------------------------------------------------------------------
+# Directional relations in the relationships section (PDASHOSS01-196).
+# ----------------------------------------------------------------------
+
+
+def _blocker(identifier="SAMPLE-b0", state="In Progress", state_group="started"):
+    return {"identifier": identifier, "title": f"Blocker {identifier}", "state": state, "state_group": state_group}
+
+
+@pytest.mark.unit
+def test_relationships_section_renders_open_blocker_with_warning():
+    """One open blocked_by → "Blocked by" group, a warning naming it, and the
+    decision guidance; the section renders even with no parent/children/related."""
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    ctx["blocked_by"] = [_blocker()]
+    ctx["open_blockers"] = ["SAMPLE-b0"]
+    ctx["has_open_blockers"] = True
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING in body
+    assert "Blocked by (must be done first):" in body
+    assert "- SAMPLE-b0: Blocker SAMPLE-b0 (In Progress)" in body
+    assert "- Warning: SAMPLE-b0 is still open" in body
+    assert "Open blockers (SAMPLE-b0) are information, not a hard stop" in body
+    assert "`Waiting on: <IDs>`" in body
+    assert REQUIRED_READING_DIRECTIVE in body
+    assert "Blocking (waiting on this item):" not in body
+    assert "Other relations:" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_closed_blockers_have_no_warning():
+    """Blockers that are all done list the group but no warning / guidance."""
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    ctx["blocked_by"] = [_blocker(state="Done", state_group="completed")]
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert "Blocked by (must be done first):" in body
+    assert "- SAMPLE-b0: Blocker SAMPLE-b0 (Done)" in body
+    assert "Warning:" not in body
+    assert "Open blockers (" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_omits_blocked_by_group_when_none():
+    ctx = _relationships_ctx(parent=True, children=0, related=0)
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING in body
+    assert "Blocked by (must be done first):" not in body
+    assert "Blocking (waiting on this item):" not in body
+    assert "Other relations:" not in body
+    assert "Open blockers (" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_renders_blocking_and_other_relations():
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    ctx["blocking"] = [_blocker("SAMPLE-d0", state="Todo", state_group="unstarted")]
+    other = _blocker("SAMPLE-o0", state="Backlog", state_group="backlog")
+    ctx["other_relations"] = [{**other, "relation": "Implements"}]
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert RELATIONSHIPS_HEADING in body
+    assert "Blocking (waiting on this item):" in body
+    assert "- SAMPLE-d0: Blocker SAMPLE-d0 (Todo)" in body
+    assert "Other relations:" in body
+    assert "- Implements SAMPLE-o0: Blocker SAMPLE-o0 (Backlog)" in body
+    assert "Blocked by (must be done first):" not in body
+
+
+@pytest.mark.unit
+def test_relationships_section_warning_pluralizes():
+    ctx = _relationships_ctx(parent=False, children=0, related=0)
+    ctx["blocked_by"] = [_blocker("SAMPLE-b0"), _blocker("SAMPLE-b1")]
+    ctx["open_blockers"] = ["SAMPLE-b0", "SAMPLE-b1"]
+    ctx["has_open_blockers"] = True
+    body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
+
+    assert "- Warning: SAMPLE-b0, SAMPLE-b1 are still open" in body

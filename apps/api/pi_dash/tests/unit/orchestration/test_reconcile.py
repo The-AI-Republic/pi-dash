@@ -41,7 +41,6 @@ def project(db, workspace, create_user):
             workspace=workspace,
             created_by=create_user,
             agent_default_max_ticks=10,
-            agent_retick_grant=3,
         )
 
 
@@ -394,8 +393,9 @@ def test_retick_grants_and_dispatches(seeded, issue, states):
     assert decision.granted is True
     assert decision.dispatch_now is True
     t = decision.ticker
-    assert t.granted == 3
-    assert t.effective_max_ticks() == 13
+    # Re-tick grants a fresh pool (= agent_default_max_ticks = 10), not 3.
+    assert t.granted == 10
+    assert t.effective_max_ticks() == 20
     assert t.enabled is True
 
 
@@ -684,7 +684,7 @@ def test_retick_is_honoured_from_paused(seeded, issue, states):
     decision = scheduling.reconcile(issue, TickerEvent.retick())
     assert decision.granted is True
     assert decision.reason == "granted-from-paused"
-    assert decision.ticker.granted == 3
+    assert decision.ticker.granted == 10
 
 
 @pytest.mark.unit
