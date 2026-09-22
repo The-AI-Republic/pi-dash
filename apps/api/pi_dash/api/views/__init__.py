@@ -35,6 +35,9 @@ from .issue import (
     IssueSearchEndpoint,
     IssueAdvancedSearchEndpoint,
     IssueRelationListCreateAPIEndpoint,
+    IssueRelationGroupedAPIEndpoint,
+    IssueRelationRelateAPIEndpoint,
+    IssueRelationUnrelateAPIEndpoint,
     IssueWorkpadAPIEndpoint,
 )
 

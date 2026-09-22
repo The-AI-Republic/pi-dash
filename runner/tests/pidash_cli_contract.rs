@@ -231,6 +231,191 @@ async fn resolve_issue_extracts_id_and_project() {
 }
 
 #[tokio::test]
+async fn issue_get_carries_the_blocker_summary() {
+    // `pidash issue get` prints the server's blocker block verbatim, so the
+    // agent sees the same `relations_summary` / `has_open_blockers` the API
+    // and the run prompt carry (PDASHOSS01-197).
+    let fake = start_fake(Box::new(|req| {
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.path, "/api/v1/workspaces/acme/work-items/ENG-7/");
+        CannedResponse::ok(
+            r#"{"id":"00000000-0000-0000-0000-000000000007","project":"00000000-0000-0000-0000-0000000000aa","name":"handler",
+               "relations_summary":{
+                 "blocked_by":[{"identifier":"ENG-3","state":"In Review","state_group":"review"},
+                               {"identifier":"ENG-2","state":"Done","state_group":"completed"}],
+                 "blocking":[{"identifier":"ENG-9","state":"Todo","state_group":"unstarted"}]},
+               "has_open_blockers":true}"#,
+        )
+    }))
+    .await;
+    let client = client(&fake);
+    let out = pidash::cli::issue::get_issue(&client, "ENG-7")
+        .await
+        .expect("issue get");
+    assert_eq!(out["has_open_blockers"], serde_json::json!(true));
+    assert_eq!(
+        out["relations_summary"],
+        serde_json::json!({
+            "blocked_by": [
+                {"identifier": "ENG-3", "state": "In Review", "state_group": "review"},
+                {"identifier": "ENG-2", "state": "Done", "state_group": "completed"},
+            ],
+            "blocking": [
+                {"identifier": "ENG-9", "state": "Todo", "state_group": "unstarted"},
+            ],
+        })
+    );
+    assert_eq!(fake.recorded.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn issue_get_does_not_invent_a_blocker_summary() {
+    // An older server without the block: the CLI passes the payload through
+    // rather than fabricating an empty (and misleading "unblocked") summary.
+    let fake = start_fake(Box::new(|_req| {
+        CannedResponse::ok(
+            r#"{"id":"00000000-0000-0000-0000-000000000007","project":"00000000-0000-0000-0000-0000000000aa","name":"handler"}"#,
+        )
+    }))
+    .await;
+    let client = client(&fake);
+    let out = pidash::cli::issue::get_issue(&client, "ENG-7")
+        .await
+        .expect("issue get");
+    assert_eq!(out["name"], "handler");
+    assert!(out.get("relations_summary").is_none());
+    assert!(out.get("has_open_blockers").is_none());
+}
+
+const ENG_7: &str = r#"{"id":"00000000-0000-0000-0000-000000000007","project":"00000000-0000-0000-0000-0000000000aa","name":"handler"}"#;
+const ENG_7_BASE: &str = "/api/v1/workspaces/acme/projects/00000000-0000-0000-0000-0000000000aa/work-items/00000000-0000-0000-0000-000000000007/relations";
+
+#[tokio::test]
+async fn issue_relate_posts_the_relation_and_passes_the_result_through() {
+    // `pidash issue relate ENG-7 --blocked-by ENG-3,ENG-4`: resolve the source,
+    // then one POST carrying the targets as given (the server resolves them in
+    // the caller's scope). The response — including idempotent `unchanged`
+    // entries and the grouped `relations` — is printed verbatim.
+    let fake = start_fake(Box::new(|req| {
+        if req.method == "GET" {
+            assert_eq!(req.path, "/api/v1/workspaces/acme/work-items/ENG-7/");
+            return CannedResponse::ok(ENG_7);
+        }
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.path, format!("{ENG_7_BASE}/relate/"));
+        let body: serde_json::Value = serde_json::from_str(&req.body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"relation_type": "blocked_by", "issues": ["ENG-3", "ENG-4"]})
+        );
+        CannedResponse::ok(
+            r#"{"issue":"ENG-7","relation_type":"blocked_by","created":["ENG-4"],"unchanged":["ENG-3"],"conflicts":[],
+               "relations":{"blocked_by":[
+                 {"id":"3","identifier":"ENG-3","name":"model","state":"Done","state_group":"completed"},
+                 {"id":"4","identifier":"ENG-4","name":"query","state":"Todo","state_group":"unstarted"}]}}"#,
+        )
+    }))
+    .await;
+    let client = client(&fake);
+    let out = pidash::cli::issue::relate_issue(
+        &client,
+        "ENG-7",
+        "blocked_by",
+        &["ENG-3".to_string(), "ENG-4".to_string()],
+        pidash::cli::issue::RelationOp::Relate,
+    )
+    .await
+    .expect("relate");
+    assert_eq!(out["created"], serde_json::json!(["ENG-4"]));
+    assert_eq!(out["unchanged"], serde_json::json!(["ENG-3"]));
+    assert_eq!(out["relations"]["blocked_by"][1]["state"], "Todo");
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 2);
+    assert!(
+        recorded
+            .iter()
+            .all(|r| r.api_key.as_deref() == Some("test-token"))
+    );
+}
+
+#[tokio::test]
+async fn issue_unrelate_posts_to_the_unrelate_route() {
+    let fake = start_fake(Box::new(|req| {
+        if req.method == "GET" {
+            return CannedResponse::ok(ENG_7);
+        }
+        assert_eq!(req.path, format!("{ENG_7_BASE}/unrelate/"));
+        let body: serde_json::Value = serde_json::from_str(&req.body).unwrap();
+        assert_eq!(body["relation_type"], "blocked_by");
+        assert_eq!(body["issues"], serde_json::json!(["ENG-3"]));
+        CannedResponse::ok(
+            r#"{"issue":"ENG-7","relation_type":"blocked_by","removed":[],"not_related":["ENG-3"],"relations":{"blocked_by":[]}}"#,
+        )
+    }))
+    .await;
+    let client = client(&fake);
+    let out = pidash::cli::issue::relate_issue(
+        &client,
+        "ENG-7",
+        "blocked_by",
+        &["ENG-3".to_string()],
+        pidash::cli::issue::RelationOp::Unrelate,
+    )
+    .await
+    .expect("unrelate of an absent edge is not an error");
+    assert_eq!(out["not_related"], serde_json::json!(["ENG-3"]));
+}
+
+#[tokio::test]
+async fn issue_relate_surfaces_unresolved_targets_as_not_found() {
+    // One inaccessible target makes the server refuse the whole request; the
+    // CLI exits non-zero with the server's detail (which lists `unresolved`).
+    let fake = start_fake(Box::new(|req| {
+        if req.method == "GET" {
+            return CannedResponse::ok(ENG_7);
+        }
+        CannedResponse {
+            status: 404,
+            status_text: "Not Found",
+            body: r#"{"error":"work items not found or not accessible: SEC-1","unresolved":["SEC-1"]}"#.into(),
+        }
+    }))
+    .await;
+    let client = client(&fake);
+    let err = pidash::cli::issue::relate_issue(
+        &client,
+        "ENG-7",
+        "blocked_by",
+        &["SEC-1".to_string()],
+        pidash::cli::issue::RelationOp::Relate,
+    )
+    .await
+    .expect_err("404 must surface");
+    assert_eq!(err.exit_code, EXIT_NOT_FOUND);
+    assert!(err.detail.as_deref().unwrap_or("").contains("SEC-1"));
+}
+
+#[tokio::test]
+async fn issue_relations_reads_the_grouped_route() {
+    let fake = start_fake(Box::new(|req| {
+        if req.path.ends_with("/work-items/ENG-7/") {
+            return CannedResponse::ok(ENG_7);
+        }
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.path, format!("{ENG_7_BASE}/grouped/"));
+        CannedResponse::ok(
+            r#"{"issue":"ENG-7","relations":{"blocked_by":[],"blocking":[{"id":"9","identifier":"ENG-9","name":"api","state":"Todo","state_group":"unstarted"}]}}"#,
+        )
+    }))
+    .await;
+    let client = client(&fake);
+    let out = pidash::cli::issue::issue_relations(&client, "ENG-7")
+        .await
+        .expect("relations");
+    assert_eq!(out["relations"]["blocking"][0]["identifier"], "ENG-9");
+}
+
+#[tokio::test]
 async fn resolve_state_name_is_case_insensitive() {
     let fake = start_fake(Box::new(|req| {
         assert!(req.path.ends_with("/states/"));
@@ -252,6 +437,64 @@ async fn resolve_state_name_is_case_insensitive() {
     .await
     .expect("state name resolved");
     assert_eq!(uuid, "00000000-0000-0000-0000-0000000000b2");
+}
+
+#[tokio::test]
+async fn resolve_state_name_accepts_paginated_envelope() {
+    let fake = start_fake(Box::new(|req| {
+        assert!(req.path.ends_with("/states/"));
+        CannedResponse::ok(
+            r#"{"grouped_by":null,"sub_grouped_by":null,"total_count":3,"next_cursor":"1000:1:0","prev_cursor":"1000:-1:1","next_page_results":false,"prev_page_results":false,"count":3,"total_pages":1,"total_results":3,"extra_stats":null,"results":[
+                {"id":"00000000-0000-0000-0000-0000000000b1","name":"Todo","group":"unstarted"},
+                {"id":"00000000-0000-0000-0000-0000000000b2","name":"In Progress","group":"started"},
+                {"id":"00000000-0000-0000-0000-0000000000b3","name":"Done","group":"completed"}
+            ]}"#,
+        )
+    }))
+    .await;
+    let client = client(&fake);
+    let uuid = pidash::cli::resolve::resolve_state_name(
+        &client,
+        "00000000-0000-0000-0000-0000000000aa",
+        "In Progress",
+    )
+    .await
+    .expect("state name resolved from envelope");
+    assert_eq!(uuid, "00000000-0000-0000-0000-0000000000b2");
+}
+
+#[tokio::test]
+async fn resolve_state_name_lists_available_from_envelope_when_missing() {
+    let fake = start_fake(Box::new(|_req| {
+        CannedResponse::ok(
+            r#"{"count":1,"results":[{"id":"00000000-0000-0000-0000-0000000000b1","name":"Todo","group":"unstarted"}]}"#,
+        )
+    }))
+    .await;
+    let client = client(&fake);
+    let err = pidash::cli::resolve::resolve_state_name(
+        &client,
+        "00000000-0000-0000-0000-0000000000aa",
+        "Blocked",
+    )
+    .await
+    .expect_err("should 404");
+    assert_eq!(err.exit_code, EXIT_NOT_FOUND);
+    assert_eq!(err.detail.as_deref(), Some("available: Todo"));
+}
+
+#[tokio::test]
+async fn resolve_state_name_rejects_object_without_results() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(r#"{"count":0}"#))).await;
+    let client = client(&fake);
+    let err = pidash::cli::resolve::resolve_state_name(
+        &client,
+        "00000000-0000-0000-0000-0000000000aa",
+        "Todo",
+    )
+    .await
+    .expect_err("malformed body");
+    assert_eq!(err.exit_code, EXIT_SERVER);
 }
 
 #[tokio::test]
@@ -471,6 +714,165 @@ async fn run_yield_without_a_run_id_fails_before_any_request() {
     assert_eq!(err.exit_code, EXIT_INVALID);
     assert!(fake.recorded.lock().unwrap().is_empty());
 }
+
+const LIST_ENVELOPE: &str =
+    r#"{"count":0,"next_cursor":"10:1:0","prev_cursor":"10:-1:1","results":[]}"#;
+
+fn list_args(project: &str) -> pidash::cli::issue::ListArgs {
+    pidash::cli::issue::ListArgs {
+        project: project.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Run `issue list` against a fake that answers every request with the list
+/// envelope and return the recorded request paths.
+async fn list_paths(args: pidash::cli::issue::ListArgs) -> Vec<String> {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(LIST_ENVELOPE))).await;
+    let client = client(&fake);
+    let resp = pidash::cli::issue::list_issues(&client, &args)
+        .await
+        .expect("list succeeds");
+    assert_eq!(resp["next_cursor"], "10:1:0");
+    let recorded = fake.recorded.lock().unwrap();
+    assert!(recorded.iter().all(|r| r.method == "GET"));
+    recorded.iter().map(|r| r.path.clone()).collect()
+}
+
+const LIST_PATH: &str = "/api/v1/workspaces/acme/projects/ENG/work-items/";
+
+#[tokio::test]
+async fn issue_list_without_filters_sends_no_query() {
+    assert_eq!(
+        list_paths(list_args("ENG")).await,
+        vec![LIST_PATH.to_string()]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_state_flag_passes_names_through() {
+    let mut args = list_args("ENG");
+    args.state = Some("Backlog,In Review".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!("{LIST_PATH}?state=Backlog%2CIn%20Review")]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_state_group_flag() {
+    let mut args = list_args("ENG");
+    args.state_group = Some("backlog,started".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!("{LIST_PATH}?state_group=backlog%2Cstarted")]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_label_flag_maps_to_labels_param() {
+    let mut args = list_args("ENG");
+    args.label = Some("bug,frontend".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!("{LIST_PATH}?labels=bug%2Cfrontend")]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_priority_flag() {
+    let mut args = list_args("ENG");
+    args.priority = Some("urgent,high".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!("{LIST_PATH}?priority=urgent%2Chigh")]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_fields_flag() {
+    let mut args = list_args("ENG");
+    args.fields = Some("id,sequence_id,name,state,parent".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!(
+            "{LIST_PATH}?fields=id%2Csequence_id%2Cname%2Cstate%2Cparent"
+        )]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_parent_none_sends_null_without_lookup() {
+    let mut args = list_args("ENG");
+    args.parent = Some("none".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!("{LIST_PATH}?parent=null")]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_parent_uuid_is_passed_as_is() {
+    let mut args = list_args("ENG");
+    args.parent = Some("00000000-0000-0000-0000-000000000009".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!(
+            "{LIST_PATH}?parent=00000000-0000-0000-0000-000000000009"
+        )]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_parent_identifier_is_resolved_to_uuid() {
+    let fake = start_fake(Box::new(|req| {
+        if req.path == "/api/v1/workspaces/acme/work-items/ENG-7/" {
+            CannedResponse::ok(
+                r#"{"id":"00000000-0000-0000-0000-000000000007","project":"00000000-0000-0000-0000-0000000000aa","name":"epic"}"#,
+            )
+        } else {
+            CannedResponse::ok(LIST_ENVELOPE)
+        }
+    }))
+    .await;
+    let client = client(&fake);
+    let mut args = list_args("ENG");
+    args.parent = Some("ENG-7".into());
+    args.state = Some("Backlog".into());
+    args.per_page = Some(10);
+    pidash::cli::issue::list_issues(&client, &args)
+        .await
+        .expect("list succeeds");
+
+    let recorded = fake.recorded.lock().unwrap();
+    let paths: Vec<&str> = recorded.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        vec![
+            "/api/v1/workspaces/acme/work-items/ENG-7/",
+            "/api/v1/workspaces/acme/projects/ENG/work-items/?per_page=10&state=Backlog&parent=00000000-0000-0000-0000-000000000007",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_unknown_state_400_maps_to_exit_invalid() {
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 400,
+        status_text: "Bad Request",
+        body: r#"{"error":"Unknown state name(s): Nope. Valid states: Backlog, Done."}"#.into(),
+    }))
+    .await;
+    let client = client(&fake);
+    let mut args = list_args("ENG");
+    args.state = Some("Nope".into());
+    let err = pidash::cli::issue::list_issues(&client, &args)
+        .await
+        .unwrap_err();
+    assert_eq!(err.exit_code, EXIT_INVALID);
+    assert!(err.detail.unwrap_or_default().contains("Valid states"));
+}
+
 
 // ---------------------------------------------------------------------------
 // `pidash page …` — the read path into project pages (PDASHOSS01-185).
