@@ -4,12 +4,15 @@
 
 import logging
 import uuid
+from typing import Optional
 
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
 from pi_dash.core.agent_execution import MACHINE_EXECUTORS, AgentExecutorKind
+from pi_dash.runner.fields import JSONKeyBigIntegerField
+from pi_dash.runner.services.usage import flat_token_fields
 
 _logger = logging.getLogger(__name__)
 
@@ -246,6 +249,9 @@ class AgentRunTrigger(models.TextChoices):
     RUN_AI = "run_ai", "Run AI button"
     COMMENT_AND_RUN = "comment_and_run", "Comment & Run"
     TICK = "tick", "Automatic tick"
+    #: An immediate tick fired because a ``blocked_by`` target of the issue
+    #: reached a completed / cancelled state (PDASHOSS01-198).
+    BLOCKER_COMPLETED = "blocker_completed", "Blocker completed"
     SCHEDULER = "scheduler", "Scheduler beat"
     DIRECT = "direct", "Direct"
 
@@ -259,6 +265,17 @@ HUMAN_TRIGGERS = frozenset(
         AgentRunTrigger.RUN_AI,
         AgentRunTrigger.COMMENT_AND_RUN,
         AgentRunTrigger.DIRECT,
+    }
+)
+
+
+#: Issue-run triggers the ticking clock starts on its own (the cadence tick
+#: and the blocker-completed wake). They run as the system bot on a local
+#: runner and count as automatic for cloud admission.
+AUTOMATIC_ISSUE_TRIGGERS = frozenset(
+    {
+        AgentRunTrigger.TICK,
+        AgentRunTrigger.BLOCKER_COMPLETED,
     }
 )
 
@@ -980,6 +997,16 @@ class AgentRun(models.Model):
     run_config = models.JSONField(default=dict, blank=True)
     required_capabilities = models.JSONField(default=list, blank=True)
     thread_id = models.CharField(max_length=128, blank=True, default="")
+    # General-purpose per-attempt run metadata. Unlike the four owned JSON
+    # contracts above (``run_config`` / ``done_payload`` / ``prompt_manifest``
+    # / ``required_capabilities``), this column has no single downstream
+    # consumer and is not fed back into any prompt or capability match. It is
+    # written once at run start with the runner-reported
+    # ``{local_session_id, local_thread_id, agent_kind}`` and — unlike
+    # ``thread_id``, which is a resume handle cleared on retry
+    # (run_lifecycle.apply_run_resume_unavailable) — is never cleared, so a
+    # failed attempt's session id survives for audit / local session lookup.
+    agent_metadata = models.JSONField(default=dict, blank=True)
     lease_expires_at = models.DateTimeField(null=True, blank=True)
     done_payload = models.JSONField(null=True, blank=True)
     error = models.TextField(blank=True, default="")
@@ -993,9 +1020,17 @@ class AgentRun(models.Model):
         default="",
     )
     llm_model = models.CharField(max_length=128, blank=True, default="")
-    input_tokens = models.BigIntegerField(null=True, blank=True)
-    output_tokens = models.BigIntegerField(null=True, blank=True)
-    total_tokens = models.BigIntegerField(null=True, blank=True)
+    # Token usage as one bag of counters in the canonical shape documented in
+    # ``pi_dash.runner.services.usage`` — input / output / total, the cache
+    # and reasoning breakdowns, and the agent's verbatim report under
+    # ``raw``. Written once, at pause / finalisation.
+    usage = models.JSONField(default=dict, blank=True)
+    # Generated from ``usage`` by Postgres, so workspace / project analytics
+    # keep summing real columns (with real statistics) and API responses keep
+    # their flat keys. Read-only: write ``usage`` instead.
+    input_tokens = JSONKeyBigIntegerField(source="usage", key="input")
+    output_tokens = JSONKeyBigIntegerField(source="usage", key="output")
+    total_tokens = JSONKeyBigIntegerField(source="usage", key="total")
     created_at = models.DateTimeField(auto_now_add=True)
     assigned_at = models.DateTimeField(null=True, blank=True)
     # Display-only position in the runner's local worktree queue while the
@@ -1463,9 +1498,10 @@ class RunnerLiveState(models.Model):
     # `usize → u32` conversion would still overflow this column, but
     # producing approvals_pending > 4 billion is not a realistic path.
     approvals_pending = models.PositiveIntegerField(null=True, blank=True)
-    input_tokens = models.BigIntegerField(null=True, blank=True)
-    output_tokens = models.BigIntegerField(null=True, blank=True)
-    total_tokens = models.BigIntegerField(null=True, blank=True)
+    # Streaming token usage, same canonical shape as ``AgentRun.usage``.
+    # Nothing aggregates this table, so the flat token fields are plain
+    # properties over it rather than columns.
+    usage = models.JSONField(default=dict, blank=True)
     llm_model = models.CharField(max_length=128, null=True, blank=True)
     turn_count = models.PositiveIntegerField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1484,3 +1520,15 @@ class RunnerLiveState(models.Model):
 
     def __str__(self) -> str:
         return f"RunnerLiveState(runner={self.runner_id} observed_run_id={self.observed_run_id})"
+
+    @property
+    def input_tokens(self) -> Optional[int]:
+        return flat_token_fields(self.usage)["input_tokens"]
+
+    @property
+    def output_tokens(self) -> Optional[int]:
+        return flat_token_fields(self.usage)["output_tokens"]
+
+    @property
+    def total_tokens(self) -> Optional[int]:
+        return flat_token_fields(self.usage)["total_tokens"]

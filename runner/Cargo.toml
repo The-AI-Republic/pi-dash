@@ -18,6 +18,7 @@ name = "pidash"
 path = "src/lib.rs"
 
 [dependencies]
+pidash-ipc = { path = "../pidash-ipc" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -41,6 +42,7 @@ tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
+    "multipart",
     "rustls-tls",
 ] }
 tracing = "0.1"

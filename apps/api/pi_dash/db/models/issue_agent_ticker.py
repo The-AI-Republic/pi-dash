@@ -14,7 +14,8 @@ when the issue moves between the three ticking stages: moving between rooms
 of the bucket is a parameter change (which interval the clock reads, which
 prompt the run gets), not a re-arm. Budget is one pool per issue — ``used``
 counts every machine-started run in any stage for the life of the issue;
-``granted`` is the extra budget a human added with Re-tick.
+``granted`` is the extra budget a human added with Re-tick — one fresh pool
+(``Project.agent_default_max_ticks``) per press.
 
 See ``.ai_design/ticking_relevance/design.md`` §4.0, §5 and §9.
 """
@@ -31,9 +32,8 @@ from .issue import Issue
 
 #: Registry-level fallbacks, used only when the project row somehow lacks
 #: the field (``getattr`` default). Project defaults are the real policy.
-DEFAULT_INTERVAL_SECONDS = 43200  # 12 h
+DEFAULT_INTERVAL_SECONDS = 10800  # 3 h
 DEFAULT_MAX_TICKS = 10            # one pool per issue, any stage
-DEFAULT_RETICK_GRANT = 3
 INFINITE_MAX_TICKS = -1
 JITTER_FRACTION = 0.1
 
@@ -95,7 +95,9 @@ class IssueAgentTicker(BaseModel):
     #: it. Human-started runs (a human moving the issue, Comment & Run, Run
     #: AI) do not touch it.
     used = models.IntegerField(default=0)
-    #: Extra budget added by Re-tick. Cap = project pool + ``granted``.
+    #: Extra budget added by Re-tick. Each press grants a fresh project-sized
+    #: pool (``Project.agent_default_max_ticks``), so ``granted`` accumulates in
+    #: pool-size steps. Cap = project pool + ``granted``.
     granted = models.IntegerField(default=0)
 
     user_disabled = models.BooleanField(default=False)
@@ -175,8 +177,10 @@ class IssueAgentTicker(BaseModel):
     def effective_interval_seconds(self) -> int:
         """Interval for the issue's *current* stage — project policy.
 
-        Cadence is rhythm, not budget: it may differ per stage (12 h / 8 h /
-        12 h) even though the budget is one pool.
+        Cadence is rhythm, not budget: the three per-stage interval columns
+        are retained so cadences can diverge again, but they are currently
+        unified at 3 h (10800 s) — every stage ticks on the same rhythm
+        (PDASHOSS01-167) — even though the budget is one pool.
         """
         # Local import keeps the model file free of orchestration imports
         # at module load time (orchestration imports state).

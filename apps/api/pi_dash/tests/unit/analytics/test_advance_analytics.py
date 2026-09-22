@@ -44,25 +44,19 @@ def test_overview_includes_agent_run_token_totals(db, session_client, workspace,
         workspace=workspace,
         created_by=create_user,
         pod=pod,
-        input_tokens=100,
-        output_tokens=40,
-        total_tokens=140,
+        usage={"input": 100, "output": 40, "total": 140},
     )
     AgentRun.objects.create(
         workspace=workspace,
         created_by=create_user,
         pod=pod,
-        input_tokens=None,
-        output_tokens=10,
-        total_tokens=None,
+        usage={"output": 10},
     )
     AgentRun.objects.create(
         workspace=workspace,
         created_by=create_user,
         pod=other_pod,
-        input_tokens=900,
-        output_tokens=90,
-        total_tokens=990,
+        usage={"input": 900, "output": 90, "total": 990},
     )
 
     resp = session_client.get(
@@ -85,17 +79,13 @@ def test_overview_agent_run_tokens_respect_date_filter(db, session_client, works
         workspace=workspace,
         created_by=create_user,
         pod=pod,
-        input_tokens=100,
-        output_tokens=40,
-        total_tokens=140,
+        usage={"input": 100, "output": 40, "total": 140},
     )
     old_run = AgentRun.objects.create(
         workspace=workspace,
         created_by=create_user,
         pod=pod,
-        input_tokens=900,
-        output_tokens=90,
-        total_tokens=990,
+        usage={"input": 900, "output": 90, "total": 990},
     )
     AgentRun.objects.filter(pk=old_run.pk).update(created_at=timezone.now() - timedelta(days=40))
 

@@ -70,3 +70,16 @@ jobs:
 
       - name: Test release packaging helpers
         run: python -m unittest discover -s desktop/tests -p 'test_*.py' -v
+
+      # The engine ships renamed to pidash-agent-engine; Codex re-execs helper
+      # copies of itself (arg0 / current_exe) to build its sandbox. If the
+      # rename broke that self-location the sandbox would silently not engage.
+      # This guard downloads the pinned upstream engine, runs it under its
+      # shipped name, and fails the build if an out-of-bounds write is not
+      # blocked — so a future CODEX_BUNDLE_VERSION bump can't ship a broken
+      # sandbox. Needs no model, session, or credential; only the download of
+      # the pinned release uses the network. See PDASHOSS01-162, design §24.8.
+      - name: Sandbox survives the engine rename (Linux)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python desktop/tests/sandbox_rename_smoke.py --stage

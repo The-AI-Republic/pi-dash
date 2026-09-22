@@ -132,10 +132,36 @@ exchange appears to succeed and every subsequent API call is unauthenticated.
 ### Server requirements
 
 The bundled SPA loads from `tauri://localhost` (Linux/macOS) or
-`http://tauri.localhost` (Windows; Tauri's `useHttpsScheme` is off) and makes
-credentialed XHRs to `VITE_API_BASE_URL`. The server's CORS and CSRF
-allowlists must include those origins (for the community server, add them to
-`CORS_ALLOWED_ORIGINS`).
+`http://tauri.localhost` (Windows; Tauri's `useHttpsScheme` is off). These are
+production asset origins. Cross-site XHRs can omit the API's cookies even
+when the login navigation stored them successfully and CORS is configured.
+
+The API services use `getDesktopApiAdapter()` to send requests through
+`desktop_api_request` in Rust. It shares the webview's persistent cookie
+store with the login navigation, applies cookie domain/path/expiry rules,
+and writes refreshed cookies back. HttpOnly cookie values stay in native
+code. The command accepts only the main app UI and `/api/` or `/auth/` URLs
+on the compiled `VITE_API_BASE_URL` origin, including redirects. Sign-out
+clears the store and prevents pending requests from restoring old cookies.
+Bodies cross IPC as raw bytes (a length-prefixed JSON head, then the body).
+Canceling or timing out a request aborts it natively; like Axios, requests
+have no deadline unless `timeout` is set.
+
+Credentialed Server-Sent Events have the same cookie problem, so chat
+streams open through `createApiEventSource()`, which uses
+`desktop_api_stream` on desktop and a plain `EventSource` elsewhere. Use it
+for any new credentialed API stream.
+
+Edition code that makes standalone Axios requests, such as token refresh,
+must also pass `adapter: getDesktopApiAdapter()`. Browser builds and older
+desktop binaries keep the default adapter. External storage uploads stay
+on the browser adapter so upload progress and cancellation keep working.
+
+Native requests send the app's actual `Origin`; the server's CSRF allowlist
+must still permit it. Keep the CORS allowlist for older desktop clients and
+any browser requests (for the community server, configure
+`CORS_ALLOWED_ORIGINS`). Changing `SameSite` alone is not a reliable fix
+for platform-specific third-party cookie policies.
 
 Signing in from the desktop requires a server that implements the desktop
 sign-in hand-off: the identity provider redirects to

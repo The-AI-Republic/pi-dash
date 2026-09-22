@@ -627,6 +627,15 @@ not a re-clone. Either way the agent works on `git_work_branch` in a
 Pi Dash-owned directory, never in a checkout the user has open in an
 editor; the first-run screen says so.
 
+**First-run copy — decision (PDASHOSS01-158, 2026-09-14).** The existing
+runtime banner — "Runs on this computer · Pi Dash uses its own working copy.
+Keep the app open while the agent runs." — satisfies this section. It states
+the three things §9.4 needs the user to know: the run is local, Pi Dash works
+in its own copy (not the user's open checkout), and the app must stay open for
+the run to continue. No additional first-run copy is added; the
+`apps/web/ce/components/desktop/agent-runtime-edition.ts` seam remains
+available if a future edition wants to expand it.
+
 Letting a user point the runner at an existing local clone instead is an
 optional later convenience (`pidash workdir add` semantics), not part of
 the MVP path.
@@ -660,11 +669,11 @@ scope here.
 
 Three layers, none inside the Codex binary:
 
-| Layer                            | Source                                                                                                                     | Change latency  |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | --------------- |
-| Task prompt (per run, per phase) | `prompting/` composer, sent in `turn/start`                                                                                | next run        |
-| Repo conventions                 | `AGENTS.override.md` / `AGENTS.md` in the worktree (`core/src/agents_md.rs`, walks cwd → project root; override name wins) | next run        |
-| Base instructions                | `instructions` / `model_instructions_file` in managed `CODEX_HOME/config.toml`                                             | next app launch |
+| Layer                            | Source                                                                                                                            | Change latency |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| Task prompt (per run, per phase) | `prompting/` composer, sent in `turn/start`                                                                                       | next run       |
+| Repo conventions                 | `AGENTS.override.md` / `AGENTS.md` in the worktree (`core/src/agents_md.rs`, walks cwd → project root; override name wins)        | next run       |
+| Base instructions                | Not shipped in v1 — folded into the task prompt composed by `prompting/`. (The `instructions` config key was removed; see §12.1.) | next run       |
 
 ### 10.1 Recipes
 
@@ -696,9 +705,11 @@ sections are the same customizable sections.
 
 ### 10.2 `AGENTS.md` placement
 
-The runner already owns the worktree. v1 writes nothing into the repo;
-`instructions` in the managed config carries Pi Dash's base guidance. If a
-per-project layer is wanted later, prefer `project_doc_fallback_filenames`
+The runner already owns the worktree. v1 writes nothing into the repo, and
+nothing into the managed config either: Pi Dash's base guidance is folded
+into the task prompt composed by `prompting/` (§10), not a config
+`instructions` key. If a per-project layer is wanted later, prefer
+`project_doc_fallback_filenames`
 (`config_toml.rs:314`) with a Pi Dash-specific filename that the workdir
 pool gitignores, over touching the user's `AGENTS.md`.
 
@@ -727,7 +738,11 @@ model_provider = "pidash"
 model          = "<OPENHUB_DEFAULT_MODEL or user selection>"
 approval_policy = "on-request"          # approvals surface via the runner → cloud UI
 sandbox_mode    = "workspace-write"
-instructions    = "<Pi Dash base guidance>"
+# No `instructions` key. Prompts do not live in the managed config: they
+# travel as turn input composed by `prompting/` and sent in `turn/start`
+# (see §10). The desktop's engine-config writer (`managed_runner.rs`) writes
+# no base-instruction field, and the runner sets none on the engine's Codex
+# path — so an `instructions` here would describe something that never runs.
 
 [model_providers.pidash]
 name      = "Pi Dash"
@@ -1230,7 +1245,7 @@ cloud runs.
 | 10  | `dev_metadata.codex_version` whitelist                                                                                                                                                                               | `runner/services/session_service.py`                                                                                                                                                       |
 | 11  | Doctor check `managed.E001`; `startup checks`                                                                                                                                                                        | `cloud_agent/checks.py`-style module `managed_runner/checks.py`                                                                                                                            |
 | 12  | Runner: `CodexSection.{codex_home,path_prepend,model_token_file}`; wrapper-script re-assert + `PIDASH_CONFIG_DIR`/`PIDASH_DATA_DIR` injection; Windows env; `engine_version` in session-open; `\_\_managed bootstrap | enroll                                                                                                                                                                                     | remove` subcommands | `runner/src/config/schema.rs`, `runner/src/util/shell.rs`, `runner/src/codex/app_server.rs`, `runner/src/cloud/protocol.rs`, `runner/src/cli/managed.rs` (new) |
-| 13  | Desktop: bundle resources; host controller (spawn `__run`, `__managed`, token file, graceful stop); overlay JS (enroll/profile/token calls, Run affordance, first-run copy); existing-Codex detector; About/licenses | `desktop/src-tauri/…`, `tauri.conf.json`, `desktop-overlay/apps/web/…` (OSS); `release-desktop.yml` (cloud release)                                                                            |
+| 13  | Desktop: bundle resources; host controller (spawn `__run`, `__managed`, token file, graceful stop); overlay JS (enroll/profile/token calls, Run affordance, first-run copy); existing-Codex detector; About/licenses | `desktop/src-tauri/…`, `tauri.conf.json`, `desktop-overlay/apps/web/…` (OSS); `release-desktop.yml` (cloud release)                                                                        |
 | 14  | Web: executor picker third option + reason copy; "Runs on this computer" affordance; project setting                                                                                                                 | `apps/web` (OSS) + overlay                                                                                                                                                                 |
 
 Order: 1 → 2 → 7 (boot must pass) → 3–6, 8–11 in any order → 12 → 13 → 14.
