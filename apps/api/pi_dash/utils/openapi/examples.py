@@ -100,7 +100,7 @@ ISSUE_CREATE_EXAMPLE = OpenApiExample(
     "IssueCreateSerializer",
     value={
         "name": "New Issue",
-        "description": "New issue description",
+        "description_markdown": "## Context\n\n- [ ] First step",
         "priority": "medium",
         "state": "0ec6cfa4-e906-4aad-9390-2df0303a41cd",
         "assignees": ["0ec6cfa4-e906-4aad-9390-2df0303a41cd"],
@@ -115,7 +115,7 @@ ISSUE_UPDATE_EXAMPLE = OpenApiExample(
     "IssueUpdateSerializer",
     value={
         "name": "Updated Issue",
-        "description": "Updated issue description",
+        "description_markdown": "## Context\n\n- [x] First step",
         "priority": "medium",
         "state": "0ec6cfa4-e906-4aad-9390-2df0303a41cd",
         "assignees": ["0ec6cfa4-e906-4aad-9390-2df0303a41cd"],
