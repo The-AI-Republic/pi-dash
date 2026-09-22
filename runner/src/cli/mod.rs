@@ -61,6 +61,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Log this host in to Pi Dash (same as `pidash auth login`; see
+    /// `pidash auth` for status and logout).
+    Login(auth::login::Args),
+
     /// Authenticate this host as a user (`auth login` / `status` /
     /// `logout`). Mints a CLI token used by `pidash` commands and by
     /// `pidash runner add` to register runners.
@@ -160,6 +164,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     };
 
     match command {
+        Command::Login(args) => auth::login::run(args, &paths).await,
         Command::Auth(args) => auth::run(args, &paths).await,
         Command::Connect(args) => connect::run(args, &paths).await,
         Command::Config(args) => config_cmd::run(args, &paths).await,
