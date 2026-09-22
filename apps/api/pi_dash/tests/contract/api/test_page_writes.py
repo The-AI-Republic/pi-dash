@@ -409,6 +409,29 @@ class TestPageUpdate:
         page.refresh_from_db()
         assert page.name == "A page"
 
+    def test_lock_applied_during_the_live_conversion_wins(
+        self, api_key_client, workspace, page_project, create_user, live, tasks
+    ):
+        page = _make_page(page_project, create_user, html="<p>old</p>", binary=b"\x00old-state")
+        convert = live.__call__
+
+        def lock_then_convert(url, json=None, timeout=None, **kwargs):
+            # A human locks the page while the live server is converting.
+            Page.objects.filter(pk=page.pk).update(is_locked=True)
+            return convert(url, json=json, timeout=timeout, **kwargs)
+
+        with mock.patch("pi_dash.utils.live_document.requests.post", side_effect=lock_then_convert):
+            response = api_key_client.patch(
+                _detail_url(workspace.slug, page_project.id, page.id), {"description_markdown": "x"}, format="json"
+            )
+
+        assert response.status_code == http_status.HTTP_409_CONFLICT
+        assert response.data["error_message"] == "PAGE_LOCKED"
+        page.refresh_from_db()
+        assert page.is_locked is True
+        assert page.description_html == "<p>old</p>"
+        tasks.track_page_version.assert_not_called()
+
     def test_archived_page_rejects_body_writes(self, api_key_client, workspace, page_project, create_user, live, tasks):
         page = _make_page(page_project, create_user, archived_at="2024-01-01")
 

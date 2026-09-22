@@ -446,15 +446,31 @@ class PageDetailAPIEndpoint(BasePageReadAPIEndpoint):
                 return _conversion_failed(exc)
 
         old_description_html = page.description_html
+        update_fields = ["updated_at", "updated_by"]
         for field in ("name", "access"):
             if field in data:
                 setattr(page, field, data[field])
+                update_fields.append(field)
         if "parent" in data:
             page.parent_id = data["parent"]
+            update_fields.append("parent")
         if document is not None:
             for field, value in _document_fields(document).items():
                 setattr(page, field, value)
-        page.save()
+                update_fields.append(field)
+            update_fields.append("description_stripped")
+
+        # The live conversion is a network round trip, so re-check the guards
+        # under a row lock and write only the fields this request changes: a
+        # lock or archive applied meanwhile must win, not be reverted by the
+        # stale instance.
+        with transaction.atomic():
+            current = Page.objects.select_for_update().only("is_locked", "archived_at").get(pk=page.pk)
+            if current.is_locked:
+                return _error("Page is locked", status.HTTP_409_CONFLICT, "PAGE_LOCKED")
+            if serializer.has_body and current.archived_at is not None:
+                return _error("Page is archived", status.HTTP_409_CONFLICT, "PAGE_ARCHIVED")
+            page.save(update_fields=update_fields)
 
         if serializer.has_body:
             _record_body_write(page.id, old_description_html, page.description_html, request.user.id)
