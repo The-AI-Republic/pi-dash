@@ -440,6 +440,64 @@ async fn resolve_state_name_is_case_insensitive() {
 }
 
 #[tokio::test]
+async fn resolve_state_name_accepts_paginated_envelope() {
+    let fake = start_fake(Box::new(|req| {
+        assert!(req.path.ends_with("/states/"));
+        CannedResponse::ok(
+            r#"{"grouped_by":null,"sub_grouped_by":null,"total_count":3,"next_cursor":"1000:1:0","prev_cursor":"1000:-1:1","next_page_results":false,"prev_page_results":false,"count":3,"total_pages":1,"total_results":3,"extra_stats":null,"results":[
+                {"id":"00000000-0000-0000-0000-0000000000b1","name":"Todo","group":"unstarted"},
+                {"id":"00000000-0000-0000-0000-0000000000b2","name":"In Progress","group":"started"},
+                {"id":"00000000-0000-0000-0000-0000000000b3","name":"Done","group":"completed"}
+            ]}"#,
+        )
+    }))
+    .await;
+    let client = client(&fake);
+    let uuid = pidash::cli::resolve::resolve_state_name(
+        &client,
+        "00000000-0000-0000-0000-0000000000aa",
+        "In Progress",
+    )
+    .await
+    .expect("state name resolved from envelope");
+    assert_eq!(uuid, "00000000-0000-0000-0000-0000000000b2");
+}
+
+#[tokio::test]
+async fn resolve_state_name_lists_available_from_envelope_when_missing() {
+    let fake = start_fake(Box::new(|_req| {
+        CannedResponse::ok(
+            r#"{"count":1,"results":[{"id":"00000000-0000-0000-0000-0000000000b1","name":"Todo","group":"unstarted"}]}"#,
+        )
+    }))
+    .await;
+    let client = client(&fake);
+    let err = pidash::cli::resolve::resolve_state_name(
+        &client,
+        "00000000-0000-0000-0000-0000000000aa",
+        "Blocked",
+    )
+    .await
+    .expect_err("should 404");
+    assert_eq!(err.exit_code, EXIT_NOT_FOUND);
+    assert_eq!(err.detail.as_deref(), Some("available: Todo"));
+}
+
+#[tokio::test]
+async fn resolve_state_name_rejects_object_without_results() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(r#"{"count":0}"#))).await;
+    let client = client(&fake);
+    let err = pidash::cli::resolve::resolve_state_name(
+        &client,
+        "00000000-0000-0000-0000-0000000000aa",
+        "Todo",
+    )
+    .await
+    .expect_err("malformed body");
+    assert_eq!(err.exit_code, EXIT_SERVER);
+}
+
+#[tokio::test]
 async fn resolve_state_name_errors_when_missing() {
     let fake = start_fake(Box::new(|_req| {
         CannedResponse::ok(
