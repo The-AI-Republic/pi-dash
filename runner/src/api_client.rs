@@ -237,6 +237,12 @@ impl ApiClient {
         self.request(Method::POST, path, Some(body)).await
     }
 
+    /// Bodiless DELETE. The server's JSON response (if any) is returned the
+    /// same way as for the other verbs.
+    pub async fn delete(&self, path: &str) -> Result<Value, CliError> {
+        self.request(Method::DELETE, path, None::<&()>).await
+    }
+
     async fn request<B: Serialize + ?Sized>(
         &self,
         method: Method,
