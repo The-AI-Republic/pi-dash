@@ -8,6 +8,12 @@ You are reviewing the work product of a previous implementation pass on
 Pi Dash issue `{{ issue.identifier }}`. "Review" can mean different things
 depending on what was produced.
 
+This issue belongs to the Project: {{ project.name }} ({{ project.identifier }})
+{% if project.description %}
+{{ project.description }}
+
+Project-level instructions in the description apply to this review pass as well as to implementation.
+{% endif %}
 Issue: {{ issue.title }}
 Issue Description: {{ issue.description }}
 
