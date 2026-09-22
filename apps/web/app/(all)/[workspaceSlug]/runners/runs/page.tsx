@@ -24,7 +24,6 @@ const service = new RunnerService();
 const STATUS_BADGE_VARIANT: Record<TAgentRunStatus, TBadgeVariant> = {
   queued: "accent-neutral",
   assigned: "accent-primary",
-  waiting_for_worktree: "accent-primary",
   running: "primary",
   cancel_requested: "accent-warning",
   awaiting_approval: "accent-warning",
@@ -40,7 +39,6 @@ const STATUS_BADGE_VARIANT: Record<TAgentRunStatus, TBadgeVariant> = {
 const RUN_STATUS_I18N_LABELS: Record<TAgentRunStatus, string> = {
   queued: "queued",
   assigned: "assigned",
-  waiting_for_worktree: "waiting for worktree",
   running: "running",
   cancel_requested: "cancellation requested",
   awaiting_approval: "awaiting approval",
@@ -52,6 +50,19 @@ const RUN_STATUS_I18N_LABELS: Record<TAgentRunStatus, string> = {
   cancelled: "cancelled",
   refused: "refused",
 };
+
+type TranslationFn = ReturnType<typeof useTranslation>["t"];
+
+// Historical runs can still carry a status that is no longer in the union
+// (e.g. the retired `waiting_for_worktree`). Fall back so those rows render
+// with a neutral badge and their raw status label instead of crashing.
+function statusBadgeVariant(status: TAgentRunStatus): TBadgeVariant {
+  return (STATUS_BADGE_VARIANT as Partial<Record<string, TBadgeVariant>>)[status] ?? "accent-neutral";
+}
+
+function statusLabel(status: TAgentRunStatus, t: TranslationFn): string {
+  return t((RUN_STATUS_I18N_LABELS as Partial<Record<string, string>>)[status] ?? status);
+}
 
 const ERROR_SOURCE_BADGE_VARIANT: Record<TAgentRunErrorSource, TBadgeVariant> = {
   agent: "accent-warning",
@@ -100,10 +111,17 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
   const { currentWorkspace } = useWorkspace();
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { workspaceSlug, runId } = useParams<{ workspaceSlug: string; runId?: string }>();
+  const { workspaceSlug, projectId, runId } = useParams<{
+    workspaceSlug: string;
+    projectId?: string;
+    runId?: string;
+  }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const workspaceId = currentWorkspace?.id;
   const selected = runId ?? null;
+  // Project-scoped when a projectId is in the route; the workspace aggregate
+  // leaves it undefined.
+  const base = projectId ? `/${workspaceSlug}/projects/${projectId}/runners` : `/${workspaceSlug}/runners`;
 
   // Current page comes from the URL (`?page=N`, 1-based) so a specific page is
   // directly linkable; missing/invalid values fall back to page 1.
@@ -111,8 +129,9 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
   const page = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
 
   const { data: runsPage, mutate } = useSWR<IAgentRunPage>(
-    workspaceId ? ["runner-runs", workspaceId, page] : null,
-    () => service.listRuns(workspaceId, page),
+    // projectId is part of the key so paging never leaks rows across scopes.
+    workspaceId ? ["runner-runs", workspaceId, page, projectId ?? null] : null,
+    () => service.listRuns(workspaceId, page, undefined, projectId),
     { refreshInterval: 5_000 }
   );
 
@@ -143,7 +162,7 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
     if (!workspaceSlug) return;
     // Preserve the `?page=` query so selecting a run doesn't reset pagination.
     const search = searchParams.toString();
-    navigate(`/${workspaceSlug}/runners/runs/${id}${search ? `?${search}` : ""}`, { replace: true });
+    navigate(`${base}/runs/${id}${search ? `?${search}` : ""}`, { replace: true });
   }
 
   async function confirmCancel() {
@@ -195,8 +214,8 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
                   >
                     <td className="px-3 py-2 whitespace-nowrap">{new Date(r.created_at).toLocaleString()}</td>
                     <td className="px-3 py-2">
-                      <Badge variant={STATUS_BADGE_VARIANT[r.status]} size="sm">
-                        {t(RUN_STATUS_I18N_LABELS[r.status])}
+                      <Badge variant={statusBadgeVariant(r.status)} size="sm">
+                        {statusLabel(r.status, t)}
                       </Badge>
                     </td>
                     <td className="font-mono max-w-[180px] truncate px-3 py-2 text-11">{r.prompt}</td>
@@ -250,8 +269,8 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
                 <div>
                   <div className="font-mono text-11">{detail.id}</div>
                   <div className="mt-1 flex items-center gap-2">
-                    <Badge variant={STATUS_BADGE_VARIANT[detail.status]} size="sm">
-                      {t(RUN_STATUS_I18N_LABELS[detail.status])}
+                    <Badge variant={statusBadgeVariant(detail.status)} size="sm">
+                      {statusLabel(detail.status, t)}
                     </Badge>
                     <Badge
                       variant={detail.executor_kind === "cloud_agent" ? "accent-primary" : "accent-neutral"}
@@ -259,13 +278,6 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
                     >
                       {detail.executor_kind === "cloud_agent" ? t("Pi Dash Cloud Agent") : t("Local Runner")}
                     </Badge>
-                    {detail.status === "waiting_for_worktree" &&
-                      typeof detail.queue_position === "number" &&
-                      detail.queue_position > 0 && (
-                        <span className="text-11 text-secondary">
-                          {t("Queued (position {count})", { count: detail.queue_position })}
-                        </span>
-                      )}
                   </div>
                 </div>
                 {!isTerminal(detail.status) && detail.status !== "cancel_requested" && (

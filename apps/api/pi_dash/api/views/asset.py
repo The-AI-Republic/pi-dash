@@ -436,8 +436,10 @@ class GenericAssetEndpoint(BaseAPIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Generate presigned URL for GET
-            storage = S3Storage(request=request, is_server=True)
+            # Generate presigned URL for GET. Sign against the public host the
+            # client reached us on so the URL is usable by external callers
+            # (e.g. the runner CLI), not only from inside the container network.
+            storage = S3Storage(request=request)
             presigned_url = storage.generate_presigned_url(
                 object_name=asset.asset.name, filename=asset.attributes.get("name")
             )
@@ -560,8 +562,10 @@ class GenericAssetEndpoint(BaseAPIView):
             entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,  # Using ISSUE_ATTACHMENT since we'll bind it to issues # noqa: E501
         )
 
-        # Get the presigned URL
-        storage = S3Storage(request=request, is_server=True)
+        # Get the presigned URL. Sign against the public host the client
+        # reached us on so the upload target is reachable by external callers
+        # (e.g. the runner CLI), not only from inside the container network.
+        storage = S3Storage(request=request)
         presigned_url = storage.generate_presigned_post(object_name=asset_key, file_type=type, file_size=size_limit)
 
         return Response(

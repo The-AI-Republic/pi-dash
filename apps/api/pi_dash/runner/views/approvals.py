@@ -28,11 +28,16 @@ class ApprovalListEndpoint(APIView):
 
     def get(self, request):
         # Approvals are routed to the run creator (decision #6, design §5.2).
-        qs = (
-            ApprovalRequest.objects.filter(agent_run__created_by=request.user)
-            .filter(status=ApprovalStatus.PENDING)
-            .order_by("-requested_at")[:200]
+        qs = ApprovalRequest.objects.filter(agent_run__created_by=request.user).filter(
+            status=ApprovalStatus.PENDING
         )
+        # Project scope for the per-project AI Workers panel: an approval reaches
+        # its project through its run's pod (``agent_run__pod__project``). Applied
+        # before the slice below, since a sliced queryset can't be filtered.
+        project_id = request.query_params.get("project")
+        if project_id:
+            qs = qs.filter(agent_run__pod__project_id=project_id)
+        qs = qs.order_by("-requested_at")[:200]
         return Response(ApprovalRequestSerializer(qs, many=True).data)
 
 

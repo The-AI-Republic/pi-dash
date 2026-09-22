@@ -18,7 +18,7 @@
  */
 
 // Mirrors the runner CLI's ``--agent`` value-enum (kebab-case).
-export type TRunnerAgent = "claude-code" | "codex" | "cursor-agent" | "open-claw" | "grok";
+export type TRunnerAgent = "claude-code" | "codex" | "cursor-agent" | "open-claw" | "grok" | "muse-code";
 
 export interface IRunnerModelOption {
   /** Unique select value within an agent's list. */
@@ -42,6 +42,8 @@ const DEFAULT_OPTION: IRunnerModelOption = {
 // Codex: model × reasoning effort. The effort tier is sent on `turn/start`;
 // `xhigh` is Codex's "extra high" tier.
 const CODEX_MODELS: Array<{ label: string; model: string }> = [
+  // GPT-6 Astra is the current flagship; a single snapshot with no tier slugs.
+  { label: "GPT-6 Astra", model: "gpt-6-astra" },
   // GPT-5.6 is a three-tier family: Sol (flagship), Terra (balanced), Luna
   // (fastest/cheapest). `gpt-5.6` aliases Sol; we pin explicit tier slugs.
   { label: "GPT-5.6 Sol", model: "gpt-5.6-sol" },
@@ -116,6 +118,9 @@ export const RUNNER_MODEL_OPTIONS: Record<TRunnerAgent, IRunnerModelOption[]> = 
   "cursor-agent": [DEFAULT_OPTION, ...CURSOR_OPTIONS],
   "open-claw": [DEFAULT_OPTION],
   grok: [DEFAULT_OPTION, ...GROK_OPTIONS],
+  // Muse Code's model slug space is provider-specific (Meta Model API); the
+  // runner accepts any non-empty slug, so offer just the agent default here.
+  "muse-code": [DEFAULT_OPTION],
 };
 
 /**
@@ -130,6 +135,7 @@ export const DEFAULT_MODEL_BY_AGENT: Record<TRunnerAgent, string> = {
   "cursor-agent": DEFAULT_MODEL_ID,
   "open-claw": DEFAULT_MODEL_ID,
   grok: DEFAULT_MODEL_ID,
+  "muse-code": DEFAULT_MODEL_ID,
 };
 
 /** Look up a selected option's label; falls back to the default label. */

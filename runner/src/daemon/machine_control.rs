@@ -21,7 +21,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use uuid::Uuid;
 
-use crate::cli::runner_ops::{ApplyEnrollOptions, RunnerWorkdirPlan, apply_enroll_response};
+use crate::cli::runner_ops::{ApplyEnrollOptions, apply_enroll_response};
 use crate::cloud::http::{
     CreateRunnerRequest, MachineClient, PollMessage, TransportError, create_runner,
 };
@@ -220,18 +220,16 @@ impl MachineControl {
         .await
         .map_err(|e| anyhow::anyhow!("cloud registration failed: {e}"))?;
 
-        // 2. Persist the `[[runner]]` block. `Legacy` workdir plan —
-        //    worktree pools are built once at daemon startup, so a
-        //    hot-added runner can't join one until the next restart;
-        //    running the agent directly in working_dir keeps config and
-        //    runtime consistent. Operators can migrate via the CLI.
+        // 2. Persist the `[[runner]]` block. The runner gets one exclusive
+        //    working directory: the caller's `working_dir` when supplied,
+        //    otherwise an auto-created path under the data dir. `add_runner`
+        //    below brings it up on hot-add — no restart required.
         let options = ApplyEnrollOptions {
             working_dir: (!cmd.working_dir.is_empty()).then(|| PathBuf::from(&cmd.working_dir)),
             agent_kind,
             model: (!cmd.model.is_empty()).then_some(cmd.model.as_str()),
             reasoning_effort: (!cmd.reasoning_effort.is_empty())
                 .then_some(cmd.reasoning_effort.as_str()),
-            workdir_plan: RunnerWorkdirPlan::Legacy,
         };
         let cloud_url = self.spawn_ctx.cloud_url();
         let applied = match apply_enroll_response(&self.spawn_ctx.paths, &resp, &cloud_url, options)
@@ -316,6 +314,8 @@ mod tests {
             AgentKind::CursorAgent
         );
         assert_eq!(parse_agent_kind("open-claw").unwrap(), AgentKind::OpenClaw);
+        assert_eq!(parse_agent_kind("grok").unwrap(), AgentKind::Grok);
+        assert_eq!(parse_agent_kind("muse-code").unwrap(), AgentKind::MuseCode);
         assert_eq!(parse_agent_kind("").unwrap(), AgentKind::default());
         assert!(parse_agent_kind("skynet").is_err());
     }

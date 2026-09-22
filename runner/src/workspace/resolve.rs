@@ -5,10 +5,8 @@ use crate::workspace::git;
 
 #[derive(Debug, Error)]
 pub enum ResolveError {
-    #[error("working_dir is not a git repo and is not empty; refusing to operate on {0:?}")]
+    #[error("cannot clone into a non-empty working_dir that is not a git repo: {0:?}")]
     NonEmptyNonRepo(PathBuf),
-    #[error("assignment did not include repo_url and working_dir has no git repo")]
-    MissingRepoUrl,
     #[error("repo_url has an unsupported scheme: {0:?}")]
     UnsupportedScheme(String),
     #[error("git clone failed: {0}")]
@@ -19,6 +17,8 @@ pub enum ResolveError {
 
 #[derive(Debug, Clone)]
 pub enum Resolution {
+    /// Ordinary task folder: Git is optional, and existing files are retained.
+    Directory(PathBuf),
     ExistingRepo(PathBuf),
     Cloned(PathBuf),
 }
@@ -33,10 +33,12 @@ pub async fn resolve(
     if git::is_git_repo(working_dir) {
         return Ok(Resolution::ExistingRepo(working_dir.to_path_buf()));
     }
+    let Some(url) = repo_url.filter(|url| !url.trim().is_empty()) else {
+        return Ok(Resolution::Directory(working_dir.to_path_buf()));
+    };
     if !git::is_empty_dir(working_dir) {
         return Err(ResolveError::NonEmptyNonRepo(working_dir.to_path_buf()));
     }
-    let url = repo_url.ok_or(ResolveError::MissingRepoUrl)?;
     if !is_supported_clone_url(url) {
         return Err(ResolveError::UnsupportedScheme(url.to_string()));
     }
@@ -78,18 +80,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refuses_non_empty_non_repo() {
+    async fn refuses_clone_into_non_empty_non_repo() {
         let tmp = tempdir().unwrap();
         std::fs::write(tmp.path().join("junk"), b"").unwrap();
-        let err = resolve(tmp.path(), None).await.unwrap_err();
+        let err = resolve(tmp.path(), Some("https://example.com/repo.git"))
+            .await
+            .unwrap_err();
         assert!(matches!(err, ResolveError::NonEmptyNonRepo(_)));
+        assert_eq!(std::fs::read(tmp.path().join("junk")).unwrap(), b"");
     }
 
     #[tokio::test]
-    async fn errors_on_missing_url_for_empty_dir() {
+    async fn accepts_empty_directory_without_repo_url() {
         let tmp = tempdir().unwrap();
-        let err = resolve(tmp.path(), None).await.unwrap_err();
-        assert!(matches!(err, ResolveError::MissingRepoUrl));
+        let resolution = resolve(tmp.path(), None).await.unwrap();
+        assert!(matches!(resolution, Resolution::Directory(_)));
+        assert!(!tmp.path().join(".git").exists());
+    }
+
+    #[tokio::test]
+    async fn preserves_existing_files_without_repo_url() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), "user notes").unwrap();
+        for url in [None, Some(""), Some("  ")] {
+            assert!(matches!(
+                resolve(tmp.path(), url).await.unwrap(),
+                Resolution::Directory(_)
+            ));
+            assert_eq!(
+                std::fs::read_to_string(tmp.path().join("notes.txt")).unwrap(),
+                "user notes"
+            );
+            assert!(!tmp.path().join(".git").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn creates_missing_task_directory() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("tasks/new");
+        assert!(
+            matches!(resolve(&path, None).await.unwrap(), Resolution::Directory(p) if p == path)
+        );
+        assert!(path.is_dir());
+    }
+
+    #[tokio::test]
+    async fn rejects_file_as_working_directory() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("notes.txt");
+        std::fs::write(&path, "keep").unwrap();
+        assert!(matches!(
+            resolve(&path, None).await.unwrap_err(),
+            ResolveError::Io(_)
+        ));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "keep");
     }
 
     #[tokio::test]

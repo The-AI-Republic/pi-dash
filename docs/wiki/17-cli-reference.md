@@ -24,11 +24,12 @@ First-run launcher. If no config exists, drops into `pidash auth login`. Otherwi
 
 ## Setup & auth
 
-### `pidash auth login`
+### `pidash login` / `pidash auth login`
 
-Browser-based device-code login. Same UX as `gh auth login` / `stripe login`.
+Browser-based device-code login. Same UX as `gh auth login` / `stripe login`. `pidash login` is a top-level alias of `pidash auth login`: same flags, same flow, same stored token.
 
 ```
+pidash login [--url <URL>] [--no-browser]
 pidash auth login [--url <URL>] [--no-browser]
 ```
 
@@ -292,14 +293,30 @@ List work items in a project. Returns the paginated envelope `{count, next_curso
 
 ```
 pidash issue list --project <P> [--cursor <C>] [--per-page <N>] [--order-by <F>]
+                  [--state <S>[,<S>...]] [--state-group <G>[,<G>...]] [--parent <PROJ-123|UUID|none>]
+                  [--label <L>[,<L>...]] [--priority <P>[,<P>...]] [--fields <F>[,<F>...]]
 ```
 
-| Flag             | Purpose                                                              |
-| ---------------- | -------------------------------------------------------------------- |
-| `--project <P>`  | **Required.**                                                        |
-| `--cursor <C>`   | Pagination cursor from a prior page's `next_cursor`.                 |
-| `--per-page <N>` | Items per page. Server default if omitted.                           |
-| `--order-by <F>` | Sort field, e.g. `-created_at` (default), `priority`, `state__name`. |
+| Flag                | Purpose                                                                                                          |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `--project <P>`     | **Required.**                                                                                                    |
+| `--cursor <C>`      | Pagination cursor from a prior page's `next_cursor`.                                                             |
+| `--per-page <N>`    | Items per page. Server default if omitted.                                                                       |
+| `--order-by <F>`    | Sort field, e.g. `-created_at` (default), `priority`, `state__name`.                                             |
+| `--state <S>`       | State names (case-insensitive) and/or UUIDs, comma-separated. An unknown name fails with the valid names listed. |
+| `--state-group <G>` | `backlog` \| `unstarted` \| `started` \| `review` \| `test` \| `completed` \| `cancelled`, comma-separated.      |
+| `--parent <P>`      | Sub-issues of this parent (`PROJ-123`, resolved to a UUID client-side, or a UUID); `none` for top-level only.    |
+| `--label <L>`       | Label names (case-insensitive) and/or UUIDs, comma-separated.                                                    |
+| `--priority <P>`    | `urgent` \| `high` \| `medium` \| `low` \| `none`, comma-separated.                                              |
+| `--fields <F>`      | Return only these fields per item, e.g. `id,sequence_id,name,state,parent`.                                      |
+
+Values within one flag OR together; different flags AND together. Example — Backlog sub-issues of an epic, small payload:
+
+```
+pidash issue list --project ENG --parent ENG-12 --state Backlog --fields id,sequence_id,name,state
+```
+
+The same filters are available as query parameters on `GET /api/v1/workspaces/<slug>/projects/<project>/work-items/`: `state`, `state_group`, `parent` (`null` for top-level), `labels`, `priority`, `assignees` (user UUIDs), plus `fields` and `expand`.
 
 ### `pidash issue patch <IDENTIFIER>`
 
@@ -402,6 +419,50 @@ hanging:
 Exit code is `0` when the assistant replies, and non-zero when the assistant
 reports an error, the wait times out, or BYOK is unconfigured — so scripts can
 branch on it.
+
+---
+
+## Pages
+
+Project pages are a project-scoped wiki — decisions, conventions, stage plans. These commands are read-only; pages are created and edited in the web app.
+
+### `pidash page list --project <P>`
+
+List the pages of a project. Returns the paginated envelope `{count, next_cursor, prev_cursor, results}` carrying page **metadata only** (`id`, `name`, `parent`, `owned_by`, `access`, `is_locked`, `archived_at`, `created_at`, `updated_at`) — read a single page to get its body.
+
+```
+pidash page list --project ENG [--cursor <C>] [--per-page <N>] [--include-archived]
+```
+
+| Flag                 | Purpose                                              |
+| -------------------- | ---------------------------------------------------- |
+| `--project <P>`      | **Required.** Project slug (`ENG`) or project UUID.  |
+| `--cursor <C>`       | Pagination cursor from a prior page's `next_cursor`. |
+| `--per-page <N>`     | Items per page. Server default if omitted.           |
+| `--include-archived` | Also list archived pages. Excluded by default.       |
+
+Pages another member marked private are not listed. A caller who is not a member of the project gets exit code `3`.
+
+### `pidash page get <PAGE_UUID> --project <P>`
+
+Fetch one page. Prints the JSON envelope: the list metadata plus `description_html`, `description_stripped`, and `description_markdown`. The markdown is rendered server-side, so the CLI, the REST API and the MCP page tool all return the same text.
+
+```
+pidash page get 550e8400-e29b-41d4-a716-446655440000 --project ENG
+```
+
+| Flag            | Purpose                                                    |
+| --------------- | ---------------------------------------------------------- |
+| `--project <P>` | **Required.** Project slug (`ENG`) or project UUID.        |
+| `--body-only`   | Print only the markdown body instead of the JSON envelope. |
+
+`--body-only` is what an agent wants when it intends to read the page as a document:
+
+```
+pidash page get 550e8400-e29b-41d4-a716-446655440000 --project ENG --body-only > ./conventions.md
+```
+
+A page UUID that does not exist — or one that belongs to another member's private page — exits `4` (not found); the API deliberately does not distinguish the two.
 
 ---
 

@@ -2,15 +2,22 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Per-issue agent ticker.
+"""Per-issue agent ticker — one clock per issue.
 
-The continuation clock that re-invokes the agent on a single in-progress
-issue. Internal lifecycle machinery, system-armed on Issue state
-transitions; it is not a user-authored periodic task. Renamed from
-``IssueAgentSchedule`` to free the word "scheduler" for a future
-user-authored project-level scheduling concept.
+The continuation clock that re-invokes the agent on an issue while it sits
+in the *ticking bucket* (In Progress / In Review / In Test). Internal
+lifecycle machinery, system-armed on Issue state transitions; it is not a
+user-authored periodic task.
 
-See ``.ai_design/issue_ticking_system/design.md`` §7.1.
+There is exactly one row per issue and it is **never torn down and rebuilt**
+when the issue moves between the three ticking stages: moving between rooms
+of the bucket is a parameter change (which interval the clock reads, which
+prompt the run gets), not a re-arm. Budget is one pool per issue — ``used``
+counts every machine-started run in any stage for the life of the issue;
+``granted`` is the extra budget a human added with Re-tick — one fresh pool
+(``Project.agent_default_max_ticks``) per press.
+
+See ``.ai_design/ticking_relevance/design.md`` §4.0, §5 and §9.
 """
 
 from __future__ import annotations
@@ -23,8 +30,10 @@ from .base import BaseModel
 from .issue import Issue
 
 
-DEFAULT_INTERVAL_SECONDS = 10800  # 3 hours
-DEFAULT_MAX_TICKS = 24            # 3 days at 3h cadence
+#: Registry-level fallbacks, used only when the project row somehow lacks
+#: the field (``getattr`` default). Project defaults are the real policy.
+DEFAULT_INTERVAL_SECONDS = 10800  # 3 h
+DEFAULT_MAX_TICKS = 10            # one pool per issue, any stage
 INFINITE_MAX_TICKS = -1
 JITTER_FRACTION = 0.1
 
@@ -33,15 +42,21 @@ class TickerDisarmReason(models.TextChoices):
     """Why the ticker is currently disarmed.
 
     ``maybe_apply_deferred_pause`` only auto-Pauses the issue when
-    ``disarm_reason == CAP_HIT``. Terminal-signal disarms
-    (``completed``/``blocked``) leave the issue in place for the
-    human to act. See ``.ai_design/create_review_state/design.md``
-    §4.5 / §7.3.
+    ``disarm_reason == CAP_HIT``. Terminal-signal disarms (``done`` /
+    ``blocked`` / ``waiting_on_human``) leave the issue in place for the
+    human to act. See ``.ai_design/ticking_relevance/design.md`` §5.2 / §7.
     """
 
     NONE = "", "None"
     LEFT_TICKING_STATE = "left_ticking_state", "Left Ticking State"
+    #: A timer tick consumed the last run in the pool. The only reason that
+    #: auto-Pauses an In Progress issue (``maybe_apply_deferred_pause``).
     CAP_HIT = "cap_hit", "Cap Hit"
+    #: The pool was already spent when the issue moved (an agent parked it
+    #: in its truthful state, or a human moved it and got one free run).
+    #: Never auto-pauses — the human is expected to Re-tick from here, and
+    #: Re-tick needs the issue to stay in the bucket.
+    POOL_SPENT = "pool_spent", "Pool Spent"
     TERMINAL_SIGNAL = "terminal_signal", "Terminal Signal"
     USER_DISABLED = "user_disabled", "User Disabled"
 
@@ -60,9 +75,10 @@ def jitter_seconds(interval_seconds: int) -> float:
 class IssueAgentTicker(BaseModel):
     """The clock that drives periodic agent re-invocation for one issue.
 
-    Exactly one row per issue (``issue`` is unique). Arming, disarming, and
-    user-edited overrides all mutate this row in place rather than creating
-    additional rows.
+    Exactly one row per issue (``issue`` is unique). Every event that can
+    change the clock goes through ``orchestration.scheduling.reconcile``;
+    nothing else should write these fields directly except ``fire_tick``'s
+    claim (which is the only writer of ``used``).
     """
 
     issue = models.OneToOneField(
@@ -71,43 +87,67 @@ class IssueAgentTicker(BaseModel):
         related_name="agent_ticker",
     )
 
-    # User-configured overrides for the **In Progress** phase.
-    # ``null`` means "inherit from project default".
-    interval_seconds = models.IntegerField(null=True, blank=True)
-    max_ticks = models.IntegerField(null=True, blank=True)
-    # User-configured overrides for the **In Review** phase. Mirror
-    # the In Progress pair; ``null`` means "inherit from project's
-    # ``agent_review_default_*``". See
-    # ``.ai_design/create_review_state/design.md`` §6.3.
-    review_interval_seconds = models.IntegerField(null=True, blank=True)
-    review_max_ticks = models.IntegerField(null=True, blank=True)
-    # User-configured overrides for the **In Test** phase. In Test is a
-    # sibling of In Review, not a variant of it — it owns its own pair
-    # so a cap grant in one phase can never inflate the other's budget.
-    # See ``.ai_design/create_test_state/design.md`` §3.2.
-    test_interval_seconds = models.IntegerField(null=True, blank=True)
-    test_max_ticks = models.IntegerField(null=True, blank=True)
+    # ------------------------------------------------------------------
+    # Budget — one pool for the life of the issue
+    # ------------------------------------------------------------------
+    #: Machine-started runs consumed so far, in any stage. Never reset on a
+    #: stage change or on re-entry to the bucket. Only ``fire_tick`` writes
+    #: it. Human-started runs (a human moving the issue, Comment & Run, Run
+    #: AI) do not touch it.
+    used = models.IntegerField(default=0)
+    #: Extra budget added by Re-tick. Each press grants a fresh project-sized
+    #: pool (``Project.agent_default_max_ticks``), so ``granted`` accumulates in
+    #: pool-size steps. Cap = project pool + ``granted``.
+    granted = models.IntegerField(default=0)
+
     user_disabled = models.BooleanField(default=False)
 
-    # Runtime state.
+    # ------------------------------------------------------------------
+    # The clock
+    # ------------------------------------------------------------------
     next_run_at = models.DateTimeField(null=True, blank=True)
-    tick_count = models.IntegerField(default=0)
     last_tick_at = models.DateTimeField(null=True, blank=True)
+    #: Persisted form of the derived "is the clock live" answer —
+    #: ``reconcile`` recomputes it on every event (see
+    #: ``scheduling._enabled_for``). Stored, not computed, so the scanner
+    #: can index on it.
     enabled = models.BooleanField(default=True)
-    # Why the ticker is currently disarmed. Empty string when armed.
-    # See TickerDisarmReason for semantics; load-bearing for the
-    # cap-hit-only auto-pause gate in ``maybe_apply_deferred_pause``.
+    #: Why the ticker is currently disarmed. Empty string when armed.
+    #: Load-bearing for the cap-hit-only auto-pause gate in
+    #: ``maybe_apply_deferred_pause``.
     disarm_reason = models.CharField(
         max_length=32,
         blank=True,
         default="",
         choices=TickerDisarmReason.choices,
     )
-    # On entering Review from a different ticking phase, the latest
-    # implementation-phase run is captured here so the reverse
-    # transition (Review → In Progress) can resume that exact session
-    # rather than parenting off the latest review run.
-    # See design §6.3.
+    #: An entry run for the current stage is owed but could not be created
+    #: because a run was active at the time (design §4.5). ``next_run_at``
+    #: is already ``now``; ``fire_tick`` fires it as soon as the issue is
+    #: free and clears the flag. The UI reads it as "next run queued".
+    pending_entry = models.BooleanField(default=False)
+    #: The pending entry was human-started (a human moved the issue,
+    #: Comment & Run, Run AI, Re-tick) and therefore must not count against
+    #: the pool when ``fire_tick`` claims it.
+    pending_entry_free = models.BooleanField(default=False)
+    #: Who asked for the pending entry (a human lever), so the queued run is
+    #: created as that person — same LLM config / runner eligibility as if
+    #: it had dispatched immediately. ``None`` for an agent-queued entry.
+    pending_entry_actor = models.ForeignKey(
+        "db.User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    #: The ``AgentRunTrigger`` the pending entry should be created with
+    #: (``run_ai`` / ``comment_and_run`` / ``state_transition``); empty for
+    #: an agent-queued entry, which fires as a ``tick``.
+    pending_entry_trigger = models.CharField(max_length=24, blank=True, default="")
+
+    #: The latest implementation-phase run, captured on every cross-stage
+    #: move so a hand-back to In Progress can parent off the implementation
+    #: lineage rather than off a review/test run.
     resume_parent_run = models.ForeignKey(
         "runner.AgentRun",
         null=True,
@@ -131,58 +171,51 @@ class IssueAgentTicker(BaseModel):
         return f"IssueAgentTicker(issue={self.issue_id}, enabled={self.enabled})"
 
     # ------------------------------------------------------------------
-    # Effective values (override-or-project-default)
+    # Effective values
     # ------------------------------------------------------------------
 
-    def _cadence_fields(self):
-        """Return the :class:`CadenceFields` for the issue's current phase.
+    def effective_interval_seconds(self) -> int:
+        """Interval for the issue's *current* stage — project policy.
 
-        Every ticking phase owns an independent override/default column
-        pair, so this resolver never has to know which phase it is
-        looking at — it just asks the registry. A state that is not a
-        registered ticking state (including a custom workspace state
-        inside a ticking group) falls back to the implementation pair.
+        Cadence is rhythm, not budget: the three per-stage interval columns
+        are retained so cadences can diverge again, but they are currently
+        unified at 3 h (10800 s) — every stage ticks on the same rhythm
+        (PDASHOSS01-167) — even though the budget is one pool.
         """
-        # Local import keeps the model file free of orchestration
-        # imports at module load time (orchestration imports state).
+        # Local import keeps the model file free of orchestration imports
+        # at module load time (orchestration imports state).
         from pi_dash.orchestration.agent_phases import cadence_fields_for
 
-        return cadence_fields_for(self.issue.state)
+        fields = cadence_fields_for(self.issue.state)
+        return getattr(self.issue.project, fields.project_interval, fields.default_interval)
 
-    def effective_interval_seconds(self) -> int:
-        """Return the interval to use for the issue's current phase.
-
-        Falls back through: per-issue override for that phase → the
-        project default for that phase → the registry constant.
-        """
-        fields = self._cadence_fields()
-        override = getattr(self, fields.ticker_interval, None)
-        if override is not None and override > 0:
-            return override
-        return getattr(
-            self.issue.project,
-            fields.project_interval,
-            fields.default_interval,
-        )
+    def pool_size(self) -> int:
+        """The project's per-issue pool, before any Re-tick grant.
+        ``-1`` means infinite."""
+        return getattr(self.issue.project, "agent_default_max_ticks", DEFAULT_MAX_TICKS)
 
     def effective_max_ticks(self) -> int:
-        """Return the cap to use for the issue's current phase. ``-1``
-        means infinite. Same resolution chain as
-        ``effective_interval_seconds`` against the max-ticks column.
-        """
-        fields = self._cadence_fields()
-        override = getattr(self, fields.ticker_max_ticks, None)
-        if override is not None:
-            return override
-        return getattr(
-            self.issue.project,
-            fields.project_max_ticks,
-            fields.default_max_ticks,
-        )
+        """Cap = project pool + ``granted``. ``-1`` means infinite."""
+        pool = self.pool_size()
+        if pool == INFINITE_MAX_TICKS:
+            return INFINITE_MAX_TICKS
+        return pool + self.granted
+
+    def remaining(self) -> int | None:
+        """Runs left in the pool, or ``None`` when the cap is infinite."""
+        cap = self.effective_max_ticks()
+        if cap == INFINITE_MAX_TICKS:
+            return None
+        return max(0, cap - self.used)
 
     def cap_reached(self) -> bool:
-        """Has this ticker already exhausted its tick budget?"""
+        """Has this issue exhausted its pool?"""
         cap = self.effective_max_ticks()
         if cap == INFINITE_MAX_TICKS:
             return False
-        return self.tick_count >= cap
+        return self.used >= cap
+
+    # Back-compat spelling for external readers; ``used`` is the field.
+    @property
+    def tick_count(self) -> int:
+        return self.used

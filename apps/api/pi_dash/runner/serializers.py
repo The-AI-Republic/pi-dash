@@ -93,6 +93,7 @@ class RunnerLiveStateSerializer(serializers.ModelSerializer):
             "input_tokens",
             "output_tokens",
             "total_tokens",
+            "usage",
             "llm_model",
             "turn_count",
             "updated_at",
@@ -168,6 +169,10 @@ class RunnerSerializer(serializers.ModelSerializer):
             "name",
             "status",
             "host_label",
+            # Read-only: derived from the enrolling machine. Exposed so admin
+            # and support tooling can answer "is this the bundled desktop
+            # runner or one the user installed?" without a second query.
+            "provisioning",
             "os",
             "arch",
             "runner_version",
@@ -191,6 +196,9 @@ class RunnerSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id",
             "status",
+            # Never client-settable: a runner must not be able to claim it is
+            # Pi Dash-managed and thereby become eligible for pinned work.
+            "provisioning",
             "os",
             "arch",
             "runner_version",
@@ -274,6 +282,7 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "cancel_reason",
             "prompt",
             "thread_id",
+            "agent_metadata",
             "runner",
             "work_item",
             "pod",
@@ -294,6 +303,7 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "input_tokens",
             "output_tokens",
             "total_tokens",
+            "usage",
             "tool_plan",
             "tool_calls",
         ]

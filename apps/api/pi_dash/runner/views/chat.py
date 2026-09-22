@@ -151,6 +151,12 @@ class AgentChatSessionListEndpoint(APIView):
             elif not can_view_runner(request.user, runner):
                 qs = qs.none()
             qs = qs.filter(runner_id=runner_id)
+        project_id = request.query_params.get("project")
+        if project_id:
+            # Project scope for the per-project AI Workers panel: a chat session
+            # reaches its project through its pod (``pod__project``). AND-combines
+            # with the visibility filters below.
+            qs = qs.filter(pod__project_id=project_id)
         qs = qs.filter(runner_visible_to_user_q(request.user, prefix="runner__"))
         if not workspace_id or not is_workspace_admin(request.user, workspace_id):
             qs = qs.filter(created_by=request.user)

@@ -128,74 +128,26 @@ class RunAcceptEndpoint(_RunEndpointBase):
 
 
 class RunQueuedEndpoint(_RunEndpointBase):
-    """``POST /runs/<run_id>/queued`` — runner reports the run is waiting.
+    """``POST /runs/<run_id>/queued`` — retired worktree-queue notice.
 
-    The runner accepted the run but cannot acquire a worktree lease yet, so it
-    sits in the daemon's local queue. Body carries ``queue_position`` (the
-    run's position in that queue). See
-    ``.ai_design/worktree_pooling/design.md`` §6.1.
-
-    Transition rules:
-
-    - ``ASSIGNED`` → ``WAITING_FOR_WORKTREE`` (and store the position).
-    - ``WAITING_FOR_WORKTREE`` → ``WAITING_FOR_WORKTREE`` (position refresh as
-      the queue drains; positions only decrease).
-    - ``RUNNING`` or any terminal status → acknowledged and dropped without a
-      state change. A late or duplicate ``queued`` post must never regress a
-      run that already started (or finished); the runner posts ``accept`` at
-      lease grant, which is what actually drives ``RUNNING``.
+    The worktree pool is retired (PDASHOSS01-137): a runner no longer queues
+    locally for a lease, so there is nothing to record and no new run may
+    enter ``WAITING_FOR_WORKTREE``. Pre-retirement daemons may still POST here
+    after this ships, so the endpoint stays and acknowledges the post (never
+    404s it and never makes the daemon retry), but it performs no state
+    transition and writes no ``queue_position``. A run simply stays
+    ``ASSIGNED`` until the runner posts ``accept`` (which drives ``RUNNING``).
+    Historical rows that already hold ``WAITING_FOR_WORKTREE`` are untouched
+    and keep rendering / redelivering via their status-set membership.
     """
 
     def post(self, request, run_id):
         run, err = self._resolve(request, run_id)
         if err:
             return err
-        with transaction.atomic():
-            if not _record_dedupe(run, _idempotency_key(request)):
-                return Response({"ok": True, "duplicate": True})
-            locked, closed = self._lock_non_terminal(run)
-            if closed:
-                # Terminal: acknowledge so the runner stops retrying; the
-                # ``_lock_non_terminal`` helper already returns ``terminal``.
-                return closed
-            if locked.status not in (
-                AgentRunStatus.ASSIGNED,
-                AgentRunStatus.WAITING_FOR_WORKTREE,
-            ):
-                # RUNNING (or any other non-terminal state): acknowledge and
-                # drop. A run that has already started must not regress to
-                # WAITING_FOR_WORKTREE on a late/duplicate queued post.
-                return Response({"ok": True, "ignored": True})
-            position = _parse_queue_position(request.data.get("queue_position"))
-            AgentRun.objects.filter(pk=locked.pk).update(
-                status=AgentRunStatus.WAITING_FOR_WORKTREE,
-                queue_position=position,
-            )
-        return Response({"ok": True})
-
-
-# ``AgentRun.queue_position`` is a PositiveSmallIntegerField; Postgres
-# rejects anything above the signed-int16 ceiling, so out-of-range reports
-# are clamped rather than allowed to 500 the endpoint.
-QUEUE_POSITION_MAX = 32767
-
-
-def _parse_queue_position(raw) -> Optional[int]:
-    """Coerce a reported queue position to a non-negative int, else ``None``.
-
-    A missing or malformed value clears the stored position rather than
-    erroring — the field is display-only and never load-bearing. Values
-    beyond the column's int16 range are clamped for the same reason.
-    """
-    if raw is None:
-        return None
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return None
-    if value < 0:
-        return None
-    return min(value, QUEUE_POSITION_MAX)
+        # Acknowledge and drop. There is no side effect to guard, so the
+        # dedupe/lock machinery the transition used is no longer needed.
+        return Response({"ok": True, "ignored": True})
 
 
 class RunStartedEndpoint(_RunEndpointBase):
@@ -212,10 +164,25 @@ class RunStartedEndpoint(_RunEndpointBase):
             if pending := self._cancellation_pending(locked):
                 return pending
             thread_id = (request.data.get("thread_id") or "")[:128]
+            # ``local_thread_id`` defaults to ``thread_id`` for older runners
+            # that report only the resume handle; ``local_session_id`` and
+            # ``agent_kind`` are new keys the run bridge reports at start.
+            # agent_metadata is write-once here and never cleared on retry (so
+            # a failed attempt's session id survives), in contrast to the
+            # ``thread_id`` write, which run_lifecycle nulls on the parent when
+            # a resume is unavailable.
+            local_thread_id = (request.data.get("local_thread_id") or thread_id or "")[:128]
+            local_session_id = (request.data.get("local_session_id") or "")[:128]
+            agent_kind = (request.data.get("agent_kind") or "")[:24]
             updates = {
                 "status": AgentRunStatus.RUNNING,
                 "thread_id": thread_id,
                 "started_at": timezone.now(),
+                "agent_metadata": {
+                    "local_session_id": local_session_id,
+                    "local_thread_id": local_thread_id,
+                    "agent_kind": agent_kind,
+                },
             }
             model = str(request.data.get("model") or "").strip()
             if model:

@@ -30,8 +30,11 @@ KIND_DIRECT = "direct"
 RECIPES: dict[str, tuple[str, ...]] = {
     KIND_CODING_TASK: (
         "intro",
+        "repo-context",
+        "relationships",
         "session-framing",
         "pidash-cli",
+        "task-lifecycle",
         "default-posture",
         "autonomy",
         "state-routing",
@@ -43,19 +46,30 @@ RECIPES: dict[str, tuple[str, ...]] = {
         "workpad-template",
         "ending-run",
     ),
+    # Review and test share the lifecycle, the repo/PR block, the inlined
+    # workpad, and the blocking flow with the coding task — every section
+    # their own text cross-references (design §8.2).
     KIND_REVIEW: (
         "review-intro",
+        "repo-context",
         "session-framing",
         "pidash-cli",
+        "task-lifecycle",
+        "workpad-context",
         "review-cycle",
+        "blocking",
         "guardrails",
         "ending-run",
     ),
     KIND_TEST: (
         "test-intro",
+        "repo-context",
         "session-framing",
         "pidash-cli",
+        "task-lifecycle",
+        "workpad-context",
         "test-cycle",
+        "blocking",
         "guardrails",
         "ending-run",
     ),
@@ -138,9 +152,28 @@ def kind_for(template_name: str, work_kind: str = WORK_KIND_CODING) -> str:
     return template_name
 
 
-def recipe_for(kind: str) -> tuple[str, ...]:
+#: Recipes for the desktop-bundled managed runner.
+#:
+#: An **alias** of the local map, not a copy: a managed runner has exactly the
+#: same capabilities as a user-installed one (filesystem, shell, worktree, the
+#: ``pidash`` CLI), so it needs exactly the same sections. Keeping it a separate
+#: name means a future divergence is a one-key override here rather than a
+#: rewrite of every caller — and the startup check can prove completeness for
+#: all three executors independently.
+MANAGED_RECIPES: dict[str, tuple[str, ...]] = dict(RECIPES)
+
+
+def recipe_for(kind: str, *, executor_kind: str | None = None) -> tuple[str, ...]:
+    """Section keys for ``kind`` on ``executor_kind`` (default: local runner).
+
+    Cloud recipes are deliberately not reachable here — they are locked,
+    share no local-runner section, and have their own accessor.
+    """
+    from pi_dash.core.agent_execution import AgentExecutorKind
+
+    table = MANAGED_RECIPES if executor_kind == AgentExecutorKind.MANAGED_RUNNER else RECIPES
     try:
-        return RECIPES[kind]
+        return table[kind]
     except KeyError as exc:
         raise RecipeNotFound(f"no recipe for kind {kind!r}") from exc
 

@@ -10,8 +10,16 @@ import { X } from "lucide-react";
 import { useParams, useSearchParams } from "react-router";
 import useSWR from "swr";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
-import { RunnerService, getRunnerDetail } from "@pi-dash/services";
-import type { IAgentChatEvent, IAgentChatMessage, IAgentChatSession, IRunner } from "@pi-dash/types";
+import { getChatTransport, getRunnerDetail } from "@pi-dash/services";
+import type {
+  IAgentChatEvent,
+  IAgentChatMessage,
+  IAgentChatSession,
+  IRunner,
+  TApprovalDecision,
+  TApprovalKind,
+  TApprovalMode,
+} from "@pi-dash/types";
 import { Badge, Button } from "@pi-dash/ui";
 import { calculateTimeAgo, renderFormattedDate } from "@pi-dash/utils";
 import { ChatComposer } from "@/components/chat/composer";
@@ -20,8 +28,43 @@ import { type ChatHistoryItem, ChatHistoryPanel } from "@/components/chat/histor
 import { ChatMessage } from "@/components/chat/message";
 import { useAgentChatEvents } from "@/components/runners/chat/use-agent-chat-events";
 import { useWorkspace } from "@/hooks/store/use-workspace";
+import { ChatApprovalModeSelect, ChatApprovalPrompt, type PendingChatApproval } from "@/pi-dash-web/components/desktop";
 
-const service = new RunnerService();
+/**
+ * The additive, local-only transport verbs for built-in-engine approvals (see
+ * `local-chat-transport.ts`). Absent on the cloud transport — their presence is
+ * how the page decides to show the approval mode control and inline prompts.
+ */
+interface ApprovalCapableTransport {
+  setApprovalMode?: (sessionId: string, mode: TApprovalMode) => void;
+  getApprovalMode?: (sessionId: string) => TApprovalMode;
+  decideChatApproval?: (sessionId: string, localApprovalId: string, decision: TApprovalDecision) => Promise<void>;
+}
+
+const DEFAULT_APPROVAL_MODE: TApprovalMode = "full_access";
+
+/** Persisted per-runner so the chosen mode survives a reload. */
+function approvalModeStorageKey(runnerId: string | undefined): string {
+  return `pidash:chat-approval-mode:${runnerId ?? "unknown"}`;
+}
+
+/** Project a `chat_approval_request` event onto the prompt's shape. */
+function pendingApprovalFromEvent(event: IAgentChatEvent): PendingChatApproval | null {
+  const payload = event.payload as Record<string, unknown>;
+  const localApprovalId = payload.local_approval_id;
+  if (typeof localApprovalId !== "string") return null;
+  const kind = (typeof payload.approval_kind === "string" ? payload.approval_kind : "other") as TApprovalKind;
+  const { local_approval_id, approval_kind, reason, expires_at, ...rest } = payload;
+  void local_approval_id;
+  void approval_kind;
+  return {
+    localApprovalId,
+    kind,
+    reason: typeof reason === "string" ? reason : "",
+    payload: rest,
+    expiresAt: typeof expires_at === "string" ? expires_at : null,
+  };
+}
 
 function assistantDeltaText(payload: Record<string, unknown>): string {
   const params = payload.params;
@@ -83,9 +126,9 @@ function disabledReason(runner?: IRunner, session?: IAgentChatSession | null): s
   if (runner.status === "offline") return "Runner offline";
   if (runner.status === "revoked") return "Runner revoked";
   // "busy" no longer blocks chat: the runner serves chat concurrently with an
-  // issue run in a dedicated worktree, and "busy" is also reported while a chat
-  // turn is in flight. The mid-turn case is covered by the active_message check
-  // below. See design make_chat_issue_parallel_working §3.4.
+  // issue run, and "busy" is also reported while a chat turn is in flight. The
+  // mid-turn case is covered by the active_message check below.
+  // See design make_chat_issue_parallel_working §3.4.
   if (session?.status === "closed") return "Session closed";
   if (session?.active_message_id || session?.active_turn_id) return "Response in progress";
   return null;
@@ -102,13 +145,118 @@ function sessionHistoryItem(session: IAgentChatSession, activeId: string | undef
   return { id: session.id, title, subtitle, active: session.id === activeId };
 }
 
+/**
+ * What the agent is *doing*, for the activity strip — or `null` to show
+ * nothing.
+ *
+ * Only work the user would otherwise not see: commands run, files edited,
+ * approvals, failures, warnings. Lifecycle narration ("session started",
+ * "working…", "replying") is deliberately absent: a modern agent UI shows a
+ * busy indicator and its tool calls, not a running commentary, and the strip
+ * showing it was the original complaint in a prettier form.
+ *
+ * Engine frames the daemon does not classify arrive as `kind: "raw"` with the
+ * real method inside the payload, which is why this reads the payload rather
+ * than the kind.
+ */
+export function engineActivityLabel(event: IAgentChatEvent): string | null {
+  if (event.kind !== "raw") {
+    const named: Record<string, string | null> = {
+      chat_approval_request: "Waiting for your approval",
+      chat_failed: "Failed",
+      // Lifecycle — the composer's busy state already says this.
+      message_started: null,
+      turn_started: null,
+      run_started: null,
+    };
+    // `??` would treat a deliberate null as "absent" and fall back to the raw
+    // kind, which is exactly the narration this map exists to suppress.
+    return event.kind in named ? named[event.kind] : event.kind;
+  }
+  const payload = event.payload as { method?: string; params?: Record<string, unknown> } | undefined;
+  const method = payload?.method ?? "";
+  const params = (payload?.params ?? {}) as Record<string, unknown>;
+  const item = (params.item ?? {}) as Record<string, unknown>;
+  const itemType = typeof item.type === "string" ? item.type : "";
+  switch (method) {
+    case "warning":
+      return typeof params.message === "string" ? `Warning: ${params.message}` : "Warning";
+    case "item/started":
+    case "item/completed": {
+      const done = method === "item/completed";
+      switch (itemType) {
+        // The transcript renders these; the strip would only duplicate them.
+        case "userMessage":
+        case "agentMessage":
+        case "reasoning":
+          return null;
+        case "commandExecution": {
+          const command = typeof item.command === "string" ? item.command : "command";
+          return `${done ? "Ran" : "Running"}: ${command}`;
+        }
+        case "fileChange": {
+          const path = typeof item.path === "string" ? item.path : "a file";
+          return `${done ? "Edited" : "Editing"} ${path}`;
+        }
+        default:
+          return itemType ? `${done ? "Finished" : "Started"} ${itemType}` : null;
+      }
+    }
+    // Lifecycle, startup chatter and accounting — real, but not what a user is
+    // watching for.
+    case "thread/started":
+    case "turn/started":
+    case "turn/completed":
+    case "remoteControl/status/changed":
+    case "thread/status/changed":
+    case "thread/tokenUsage/updated":
+    case "account/rateLimits/updated":
+    case "mcpServer/startupStatus/updated":
+      return null;
+    default:
+      return method || null;
+  }
+}
+
 const RunnerChatPage = observer(function RunnerChatPage() {
   const { runnerId } = useParams<{ runnerId: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedSessionId = searchParams.get("sessionId");
   const { currentWorkspace } = useWorkspace();
   const workspaceId = currentWorkspace?.id;
+  // The active chat transport: cloud HTTP+SSE by default, or a local
+  // Tauri-IPC transport when a desktop build has registered one. Resolved
+  // once on mount — overrides are registered before the first UI mount
+  // (a mid-session swap needs an explicit SWR `mutate`, per the seam's
+  // contract) — so the reference is stable and effects can depend on it.
+  const transport = useMemo(() => getChatTransport(), []);
+  // Approvals + mode are a built-in-engine (local transport) capability; the
+  // cloud transport lacks these verbs and keeps its separate /approvals page.
+  const approvalsSupported = useMemo(
+    () => typeof (transport as ApprovalCapableTransport).decideChatApproval === "function",
+    [transport]
+  );
+  const [approvalMode, setApprovalModeState] = useState<TApprovalMode>(DEFAULT_APPROVAL_MODE);
+  const approvalModeRef = useRef(approvalMode);
+  useEffect(() => {
+    approvalModeRef.current = approvalMode;
+  }, [approvalMode]);
+  // Push the currently-selected mode into the transport's slot for a session
+  // right before it is warmed or sent to, so the runner captures it when it
+  // spawns the thread. A no-op on the cloud transport.
+  const applyApprovalMode = useCallback(
+    (sessionId: string) => {
+      (transport as ApprovalCapableTransport).setApprovalMode?.(sessionId, approvalModeRef.current);
+    },
+    [transport]
+  );
+  // The single open approval prompt (the engine asks one at a time). Cleared on
+  // a decision, on any terminal turn frame, and at the request's TTL.
+  const [pendingApproval, setPendingApproval] = useState<PendingChatApproval | null>(null);
+  const [decideBusy, setDecideBusy] = useState(false);
   const [draft, setDraft] = useState("");
+  // Last transport-level stream failure, rendered above the composer.
+  const [streamError, setStreamError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [creatingChat, setCreatingChat] = useState(false);
   // Bridges the gap between choosing a session (panel click / New chat) and
@@ -130,7 +278,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   );
   const { data: sessions, mutate: mutateSessions } = useSWR<IAgentChatSession[]>(
     workspaceId && runnerId ? ["runner-chat-sessions", workspaceId, runnerId] : null,
-    () => service.listChatSessions(workspaceId!, runnerId)
+    () => transport.listChatSessions(workspaceId!, runnerId)
   );
 
   const session = useMemo(() => {
@@ -180,13 +328,85 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     streamStartedAtRef.current = Date.now();
     setEvents([]);
     setLiveMessages([]);
+    setPendingApproval(null);
   }, [session?.id]);
+
+  // Load the persisted per-runner mode. Only meaningful on a transport that
+  // supports approvals; the cloud transport ignores the mode entirely.
+  useEffect(() => {
+    if (!approvalsSupported) return;
+    let stored: string | null = null;
+    try {
+      stored = window.localStorage.getItem(approvalModeStorageKey(runnerId));
+    } catch {
+      stored = null;
+    }
+    setApprovalModeState(
+      stored === "ask" || stored === "workspace" || stored === "full_access" ? stored : DEFAULT_APPROVAL_MODE
+    );
+  }, [runnerId, approvalsSupported]);
+
+  const changeApprovalMode = useCallback(
+    (mode: TApprovalMode) => {
+      setApprovalModeState(mode);
+      try {
+        window.localStorage.setItem(approvalModeStorageKey(runnerId), mode);
+      } catch {
+        /* private mode / storage disabled — the in-memory value still holds */
+      }
+      // Update the current session's slot too; the runner only honours it on
+      // the next thread, so a turn already running keeps the mode it started.
+      if (session?.id) (transport as ApprovalCapableTransport).setApprovalMode?.(session.id, mode);
+    },
+    [runnerId, session?.id, transport]
+  );
+
+  const decideApproval = useCallback(
+    async (decision: TApprovalDecision) => {
+      const request = pendingApproval;
+      if (!request || !session?.id) return;
+      setDecideBusy(true);
+      // Clear optimistically so the prompt doesn't linger on a slow round-trip;
+      // the turn continues and streams to completion either way.
+      setPendingApproval(null);
+      try {
+        await (transport as ApprovalCapableTransport).decideChatApproval?.(
+          session.id,
+          request.localApprovalId,
+          decision
+        );
+      } catch (e: unknown) {
+        const err = e as { error?: string; message?: string } | null;
+        setStreamError(err?.error ?? err?.message ?? "Could not send the approval decision");
+        // Restore the prompt so the user can retry the decision.
+        setPendingApproval(request);
+      } finally {
+        setDecideBusy(false);
+      }
+    },
+    [pendingApproval, session?.id, transport]
+  );
+
+  // The prompt expires with the request's TTL: the runner drops the approval
+  // and ends the turn at the deadline, so the UI must not keep offering a
+  // button that would answer a request the daemon has already discarded.
+  useEffect(() => {
+    if (!pendingApproval?.expiresAt) return;
+    const remaining = Date.parse(pendingApproval.expiresAt) - Date.now();
+    if (!Number.isFinite(remaining)) return;
+    if (remaining <= 0) {
+      setPendingApproval(null);
+      return;
+    }
+    const timer = window.setTimeout(() => setPendingApproval(null), remaining);
+    return () => window.clearTimeout(timer);
+  }, [pendingApproval]);
 
   useEffect(() => {
     let cancelled = false;
     async function warmSelectedRunner() {
       // A "busy" runner (running an issue and/or already chatting) can still be
-      // warmed: chat runs concurrently in a dedicated worktree. Only offline /
+      // warmed: chat runs concurrently with issue work. Only offline /
       // revoked runners can't serve chat (the server also rejects those). Not
       // warming a busy runner would skip the warm step that seeds
       // local_thread_id/local_session_id and break revive continuity.
@@ -196,7 +416,8 @@ const RunnerChatPage = observer(function RunnerChatPage() {
         if (warmSessionRef.current === session.id) return;
         warmSessionRef.current = session.id;
         try {
-          await service.warmChatSession(session.id);
+          applyApprovalMode(session.id);
+          await transport.warmChatSession(session.id);
         } catch {
           return;
         }
@@ -211,7 +432,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
       if (createWarmKeyRef.current === key) return;
       createWarmKeyRef.current = key;
       try {
-        const created = await service.createChatSession({
+        const created = await transport.createChatSession({
           workspace: workspaceId,
           runner: runnerId,
         });
@@ -224,7 +445,8 @@ const RunnerChatPage = observer(function RunnerChatPage() {
             ? currentSessions
             : [created, ...currentSessions];
         }, false);
-        await service.warmChatSession(created.id);
+        applyApprovalMode(created.id);
+        await transport.warmChatSession(created.id);
         mutateSessions();
       } catch {
         return;
@@ -234,11 +456,22 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [mutateSessions, pendingSessionId, requestedSessionId, runner, runnerId, session, sessions, workspaceId]);
+  }, [
+    applyApprovalMode,
+    mutateSessions,
+    pendingSessionId,
+    requestedSessionId,
+    runner,
+    runnerId,
+    session,
+    sessions,
+    transport,
+    workspaceId,
+  ]);
 
   const { data: messages, mutate: mutateMessages } = useSWR<IAgentChatMessage[]>(
     session?.id ? ["runner-chat-messages", session.id] : null,
-    () => service.listChatMessages(session!.id)
+    () => transport.listChatMessages(session!.id)
   );
 
   useEffect(() => {
@@ -247,6 +480,8 @@ const RunnerChatPage = observer(function RunnerChatPage() {
 
   const handleEvent = useCallback(
     (event: IAgentChatEvent) => {
+      // Any frame means the stream is alive again.
+      setStreamError(null);
       setEvents((prev) => (prev.some((item) => item.seq === event.seq) ? prev : [...prev, event]));
       if (event.kind === "assistant_delta") {
         if (!appliedDeltaSeqsRef.current.has(event.seq)) {
@@ -258,6 +493,17 @@ const RunnerChatPage = observer(function RunnerChatPage() {
         }
         return;
       }
+      if (event.kind === "chat_approval_request") {
+        const request = pendingApprovalFromEvent(event);
+        if (request) setPendingApproval(request);
+        return;
+      }
+      // Any terminal turn frame resolves the parked approval — approve/deny let
+      // the turn continue to turn_completed, a TTL/cancel ends it as failed or
+      // cancelled. Clearing here covers the cases the click handler doesn't.
+      if (["turn_completed", "chat_failed", "chat_closed"].includes(event.kind)) {
+        setPendingApproval(null);
+      }
       if (["turn_started", "turn_completed", "chat_failed", "chat_closed", "chat_warmed"].includes(event.kind)) {
         mutateSessions();
         mutateMessages();
@@ -265,10 +511,21 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     },
     [mutateMessages, mutateSessions, session?.id]
   );
-  const handleEventError = useCallback(() => {
-    mutateSessions();
-    mutateMessages();
-  }, [mutateMessages, mutateSessions]);
+  const handleEventError = useCallback(
+    (error: unknown) => {
+      mutateSessions();
+      mutateMessages();
+      // Surface only errors that carry a message. The cloud transport forwards
+      // raw `EventSource` error events (no message) on every transient
+      // reconnect, and those must stay silent as they always have; a local
+      // transport failure — daemon not running, socket dropped mid-turn —
+      // arrives as a real `Error` and used to be swallowed here, leaving the
+      // user with a sent message and no reply and no explanation.
+      const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+      if (message) setStreamError(message);
+    },
+    [mutateMessages, mutateSessions]
+  );
   useAgentChatEvents(session?.id, handleEvent, handleEventError);
 
   async function ensureSession(): Promise<IAgentChatSession> {
@@ -282,7 +539,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
       }
       precreatedSessionRef.current = null;
     }
-    const created = await service.createChatSession({
+    const created = await transport.createChatSession({
       workspace: workspaceId!,
       runner: runnerId!,
     });
@@ -301,16 +558,23 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     setDraft("");
     try {
       const target = await ensureSession();
-      await service.sendChatMessage(target.id, content);
+      applyApprovalMode(target.id);
+      await transport.sendChatMessage(target.id, content);
       mutateMessages();
       mutateSessions();
     } catch (e: unknown) {
-      const err = e as { error?: string } | null;
+      // `error` is the API's field; `message` is what a thrown `Error` carries.
+      // Reading only the former flattened every local-transport failure —
+      // "Pi Dash Agent is not enabled on this server", "connecting to managed
+      // daemon" — into a generic "Unable to send message".
+      const err = e as { error?: string; message?: string } | null;
+      const reason = err?.error ?? err?.message;
       setDraft(content);
+      setStreamError(reason ?? null);
       setToast({
         type: TOAST_TYPE.ERROR,
         title: "Chat failed",
-        message: err?.error ?? "Unable to send message",
+        message: reason ?? "Unable to send message",
       });
     } finally {
       setSending(false);
@@ -319,13 +583,16 @@ const RunnerChatPage = observer(function RunnerChatPage() {
 
   async function stop() {
     if (!session) return;
-    await service.cancelChat(session.id, "user_cancelled");
+    // Interrupting cancels the turn; the open prompt (if any) is answered by
+    // that cancel, so clear it immediately rather than leaving a dead button.
+    setPendingApproval(null);
+    await transport.cancelChat(session.id, "user_cancelled");
     mutateSessions();
   }
 
   async function close() {
     if (!session) return;
-    await service.closeChat(session.id);
+    await transport.closeChat(session.id);
     mutateSessions();
   }
 
@@ -345,7 +612,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     if (!workspaceId || !runnerId || creatingChat) return;
     setCreatingChat(true);
     try {
-      const created = await service.createChatSession({ workspace: workspaceId, runner: runnerId });
+      const created = await transport.createChatSession({ workspace: workspaceId, runner: runnerId });
       precreatedSessionRef.current = created;
       warmSessionRef.current = created.id;
       // Select before mutating so no render can resolve (and re-warm) the old
@@ -356,7 +623,8 @@ const RunnerChatPage = observer(function RunnerChatPage() {
         return currentSessions.some((item) => item.id === created.id) ? currentSessions : [created, ...currentSessions];
       }, false);
       // Warm in the background; the session is usable without waiting for it.
-      service.warmChatSession(created.id).catch(() => {});
+      applyApprovalMode(created.id);
+      transport.warmChatSession(created.id).catch(() => {});
       selectSession(created.id);
     } catch (e: unknown) {
       const err = e as { error?: string } | null;
@@ -389,10 +657,15 @@ const RunnerChatPage = observer(function RunnerChatPage() {
       (event) =>
         !["assistant_delta", "turn_completed", "chat_closed", "chat_warmed", "chat_timing"].includes(event.kind)
     )
+    .map((event) => ({ event, label: engineActivityLabel(event) }))
+    .filter((row): row is { event: IAgentChatEvent; label: string } => row.label !== null)
+    // A started/completed pair for the same command reads as a duplicate;
+    // keep the latest wording only.
+    .filter((row, index, labelled) => index === labelled.length - 1 || labelled[index + 1].label !== row.label)
     .slice(-6)
-    .map((event) => (
+    .map(({ event, label }) => (
       <div key={event.seq} className="rounded border border-subtle bg-surface-1 px-3 py-2 text-11 text-secondary">
-        <span className="font-mono">{event.kind}</span>
+        <span className="font-mono truncate">{label}</span>
       </div>
     ));
 
@@ -417,9 +690,15 @@ const RunnerChatPage = observer(function RunnerChatPage() {
             <div className="flex h-12 shrink-0 items-center justify-between border-b border-subtle">
               <div className="min-w-0">
                 <div className="text-15 truncate font-semibold text-primary">{runner?.name ?? "Runner"}</div>
-                <div className="text-12 text-secondary">{runner?.pod_detail?.name ?? runner?.status ?? ""}</div>
+                {/* Working directory the chat operates in, when the session
+                    reports one (the desktop built-in agent runs in its own
+                    working copy). Falls back to pod/status for cloud runners. */}
+                <div className="truncate text-12 text-secondary" title={session?.cwd || undefined}>
+                  {session?.cwd || runner?.pod_detail?.name || runner?.status || ""}
+                </div>
               </div>
               <div className="flex items-center gap-2">
+                {approvalsSupported && <ChatApprovalModeSelect value={approvalMode} onChange={changeApprovalMode} />}
                 {runner && (
                   <Badge variant={runner.status === "online" ? "accent-success" : "accent-neutral"}>
                     {runner.status}
@@ -438,16 +717,34 @@ const RunnerChatPage = observer(function RunnerChatPage() {
           emptyState={<div className="py-16 text-center text-13 text-secondary">No messages</div>}
           listFooter={eventStrip.length > 0 ? <>{eventStrip}</> : undefined}
           composer={
-            <ChatComposer
-              draft={draft}
-              onDraftChange={setDraft}
-              onSend={send}
-              onStop={stop}
-              busy={busy}
-              sending={sending}
-              disabledReason={reason}
-              placeholder="Message this runner…"
-            />
+            <>
+              {pendingApproval && (
+                <div className="mb-2">
+                  <ChatApprovalPrompt request={pendingApproval} onDecide={decideApproval} busy={decideBusy} />
+                </div>
+              )}
+              {streamError && (
+                <div
+                  role="alert"
+                  className="border-danger/40 bg-danger/5 text-danger mb-2 flex items-start justify-between gap-2 rounded-md border px-3 py-2 text-12"
+                >
+                  <span className="min-w-0">{streamError}</span>
+                  <button type="button" className="shrink-0 text-11 underline" onClick={() => setStreamError(null)}>
+                    Dismiss
+                  </button>
+                </div>
+              )}
+              <ChatComposer
+                draft={draft}
+                onDraftChange={setDraft}
+                onSend={send}
+                onStop={stop}
+                busy={busy}
+                sending={sending}
+                disabledReason={reason}
+                placeholder="Message this runner…"
+              />
+            </>
           }
         />
       </div>

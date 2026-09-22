@@ -5,6 +5,7 @@
 from unittest import mock
 
 import pytest
+from django.utils import timezone
 from crum import impersonate
 
 from pi_dash.db.models import Issue, Project, State
@@ -118,8 +119,16 @@ def test_no_op_when_active_run_exists(seeded, issue, states, workspace, create_u
         from_state=states["todo"],
         to_state=states["in_progress"],
     )
-    assert outcome.reason == "active-run-exists"
+    # A human move while a run is active does not create a second run; the
+    # entry is queued on the clock and fires when the issue is free (§4.5).
+    assert outcome.reason == "entry-queued"
     assert outcome.created_run is None
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    ticker = IssueAgentTicker.objects.get(issue=issue)
+    assert ticker.pending_entry is True
+    assert ticker.pending_entry_free is True
+    assert ticker.next_run_at <= timezone.now()
 
 
 @pytest.mark.unit
@@ -140,7 +149,7 @@ def test_no_op_when_waiting_for_worktree_run_exists(
         from_state=states["todo"],
         to_state=states["in_progress"],
     )
-    assert outcome.reason == "active-run-exists"
+    assert outcome.reason == "entry-queued"
     assert outcome.created_run is None
 
 
@@ -458,8 +467,15 @@ def test_comment_during_active_run_returns_prior_run_active(
     )
     comment = _make_comment(issue, create_user, "fyi")
     outcome = service.handle_issue_comment(comment)
-    assert outcome.reason == "prior-run-active"
+    # The follow-up is queued on the clock (free, human-started) and fires
+    # as soon as the active run ends — no second concurrent run.
+    assert outcome.reason == "entry-queued"
     assert outcome.created_run is None
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    ticker = IssueAgentTicker.objects.get(issue=issue)
+    assert ticker.pending_entry is True
+    assert ticker.pending_entry_free is True
 
 
 @pytest.mark.unit
@@ -512,8 +528,8 @@ def test_comment_rearms_terminally_disarmed_ticker(
     sched = IssueAgentTicker.objects.get(issue=issue)
     sched.enabled = False
     sched.disarm_reason = TickerDisarmReason.TERMINAL_SIGNAL
-    sched.tick_count = 5
-    sched.save(update_fields=["enabled", "disarm_reason", "tick_count"])
+    sched.used = 5
+    sched.save(update_fields=["enabled", "disarm_reason", "used"])
 
     comment = _make_comment(issue, create_user, "I disagree, look again")
     service.handle_issue_comment(comment)
@@ -521,7 +537,8 @@ def test_comment_rearms_terminally_disarmed_ticker(
     sched.refresh_from_db()
     assert sched.enabled is True
     assert sched.disarm_reason == TickerDisarmReason.NONE
-    assert sched.tick_count == 0
+    # Human-started runs are free and never reset the pool (design §5.2).
+    assert sched.used == 5
 
 
 @pytest.mark.unit
@@ -561,7 +578,9 @@ def test_comment_rearms_even_when_continuation_coalesces(
     outcome = service.handle_issue_comment(comment)
     assert outcome.reason == "coalesced"
     sched.refresh_from_db()
-    assert sched.enabled is True
+    # Coalescing means the queued follow-up already covers the comment; the
+    # clock is left as the run-ended hook set it until that run reports.
+    assert sched.enabled is False
 
 
 @pytest.mark.unit

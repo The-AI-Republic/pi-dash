@@ -2,7 +2,11 @@
 
 from django.conf import settings
 
-from pi_dash.core.agent_execution import AgentExecutorKind, cloud_agent_is_configured
+from pi_dash.core.agent_execution import (
+    AgentExecutorKind,
+    cloud_agent_is_configured,
+    managed_runner_is_enabled,
+)
 
 READ_TOOLS = (
     "pidash_get_current_issue",
@@ -11,6 +15,7 @@ READ_TOOLS = (
     "pidash_search_project_issues",
     "pidash_get_project_issue",
     "pidash_list_linked_code_reviews",
+    "pidash_list_issue_relations",
     "github_get_file",
     "github_get_linked_pull_request",
 )
@@ -19,6 +24,21 @@ WRITE_TOOLS = (
     "pidash_update_current_issue_workpad",
     "pidash_transition_current_issue",
     "pidash_create_project_issue",
+    "pidash_relate_issues",
+    "pidash_unrelate_issues",
+)
+#: Writes that are idempotent by construction (relating an already-related
+#: pair is a no-op), so a run may call them more than once — a split needs one
+#: ``blocked_by`` call per dependent child. Still bounded by the per-run write
+#: limit. Every other write tool is single-use per run.
+REPEATABLE_WRITE_TOOLS = frozenset({"pidash_relate_issues", "pidash_unrelate_issues"})
+#: Writes aimed at the run's bound issue; meaningless without one.
+CURRENT_ISSUE_WRITE_TOOLS = frozenset(
+    {
+        "pidash_add_current_issue_comment",
+        "pidash_update_current_issue_workpad",
+        "pidash_transition_current_issue",
+    }
 )
 
 
@@ -40,6 +60,15 @@ def resolve_executor_kind(*, project, requested=None) -> str:
         raise ValueError("unknown agent executor")
     if value == AgentExecutorKind.CLOUD_AGENT and not cloud_agent_is_configured():
         raise CloudAgentUnavailable("Pi Dash Cloud Agent is not currently available")
+    if value == AgentExecutorKind.MANAGED_RUNNER and not managed_runner_is_enabled():
+        # Instance-level only. Whether *this* viewer's desktop can take the run
+        # is a per-viewer question answered in ``execution_fields``.
+        from pi_dash.managed_runner.errors import ManagedRunnerReason, ManagedRunnerUnavailable
+
+        raise ManagedRunnerUnavailable(
+            ManagedRunnerReason.DISABLED,
+            "Pi Dash Agent is not enabled on this instance",
+        )
     return value
 
 
@@ -96,7 +125,7 @@ def build_tool_plan(
         if run_kind != "scheduler":
             tools.discard("pidash_create_project_issue")
         if not has_issue:
-            tools -= set(WRITE_TOOLS) - {"pidash_create_project_issue"}
+            tools -= CURRENT_ISSUE_WRITE_TOOLS
     tools -= disabled
     requested = set(required_capabilities)
     unavailable = sorted(requested - tools)

@@ -173,6 +173,10 @@ def _register_settings_backed_beat_entries(sender, **_kwargs):
                 "task": "cloud_agent.sweep_stale_runs",
                 "schedule": timedelta(seconds=settings.CLOUD_AGENT_SWEEP_INTERVAL_SECONDS),
             },
+            "managed-runner-expire-waiting-runs": {
+                "task": "managed_runner.expire_waiting_runs",
+                "schedule": timedelta(seconds=settings.MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS),
+            },
             "agent-run-reconcile-terminal-effects": {
                 "task": "runner.reconcile_agent_run_terminal_effects",
                 "schedule": timedelta(seconds=settings.AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS),

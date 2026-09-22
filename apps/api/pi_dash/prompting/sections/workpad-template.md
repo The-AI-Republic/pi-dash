@@ -12,6 +12,17 @@ Use this exact structure for the workpad body (the document you write via `pidas
 <hostname>:<abs-path>@<short-sha>
 ```
 
+### Path to done
+
+- **Goal**: <one line — what "finished" means for this issue>
+- **Stage**: In Progress | In Review | In Test
+- **History**: <append one entry per stage move, e.g. `In Progress (3 runs) → In Review (1) → In Progress`>
+- **Next state**: <the state you are leaving the issue in — because: <why>>
+- **Open items**:
+  - [ ] <hand-off list for the next run, in any stage — review findings, failed criteria, unfinished work>
+- **Acceptance criteria**: (canonical copy; the hand-off comment mirrors it for humans)
+  - [ ] Criterion 1
+
 ### Phase
 
 - investigating | designing | implementing | validating | opening_pr | addressing_review
@@ -32,6 +43,7 @@ Use this exact structure for the workpad body (the document you write via `pidas
 - Safe to continue: true
 - Reason: <why this assessment is appropriate>
 - Awaiting human reply: <`null`, or a one-line reminder of the question you posted as a comment and when>
+- Waiting on: <`none`, or the open blocker IDs you chose to wait for, comma-separated>
 
 ### Analysis
 
@@ -69,5 +81,7 @@ Use this exact structure for the workpad body (the document you write via `pidas
 
 Notes on the structure:
 
+- `### Path to done` is shared by every stage — review and test runs edit *only* that block and carry the rest forward; an In Progress run **consumes** `Open items` (checks off / removes what it addressed) and **appends** to `History`, never regenerating the block from scratch or dropping items it did not address.
 - The body has **no** outer `## Agent Workpad` heading — that was needed when the workpad was an in-thread comment; it isn't anymore.
+- `Waiting on` is the one line Pi Dash reads back: when you decide to wait for open blockers, list their identifiers there (e.g. `Waiting on: PROJ-12, PROJ-13`) and yield `waiting_on_external`. Pi Dash then skips the timed ticks while those items stay open and wakes the issue as soon as one of them is completed or cancelled — so keep the line current, list only issues this one is recorded as blocked by, and set it back to `none` once you stop waiting.
 - `Awaiting human reply` replaces the old `Question for human` field. The actual question text now lives in the comment you posted to the human; the workpad just records that you're waiting on a reply so the next run knows not to re-ask.

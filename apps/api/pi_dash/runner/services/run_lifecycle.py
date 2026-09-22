@@ -32,6 +32,7 @@ from pi_dash.runner.models import (
     RunnerLiveState,
     RunnerStatus,
 )
+from pi_dash.runner.services.usage import merge_usage
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,6 @@ TERMINAL_RUN_STATUSES = (
     AgentRunStatus.BLOCKED,
     AgentRunStatus.REFUSED,
 )
-BIGINT_MAX = 2**63 - 1
 
 _VALID_REFUSAL_CATEGORIES = frozenset(c.value for c in RefusalCategory)
 
@@ -64,29 +64,6 @@ def _normalize_refusal_category(raw: Any) -> str:
     return value if value in _VALID_REFUSAL_CATEGORIES else RefusalCategory.UNKNOWN.value
 
 
-def _coerce_token(raw: Any) -> Optional[int]:
-    if raw is None or raw == "":
-        return None
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return None
-    if value < 0 or value > BIGINT_MAX:
-        return None
-    return value
-
-
-def _token_updates(tokens: Any) -> Dict[str, int]:
-    if not isinstance(tokens, dict):
-        return {}
-    fields = {
-        "input_tokens": _coerce_token(tokens.get("input", tokens.get("input_tokens"))),
-        "output_tokens": _coerce_token(tokens.get("output", tokens.get("output_tokens"))),
-        "total_tokens": _coerce_token(tokens.get("total", tokens.get("total_tokens"))),
-    }
-    return {key: value for key, value in fields.items() if value is not None}
-
-
 def _payload_usage(payload: Any) -> Any:
     if isinstance(payload, dict):
         return payload.get("usage")
@@ -100,17 +77,25 @@ def _matching_live_state(runner: Runner, run_id: UUID | str) -> Optional[RunnerL
     ).first()
 
 
-def _usage_updates_from_live_state(state: Optional[RunnerLiveState]) -> Dict[str, Any]:
-    if state is None:
-        return {}
+def _usage_updates(
+    state: Optional[RunnerLiveState],
+    *,
+    payload_usage: Any = None,
+    tokens: Any = None,
+) -> Dict[str, Any]:
+    """``AgentRun`` updates for the run's token usage and model.
+
+    Three sources, fresher winning per counter: the live-state snapshot
+    (the only record for a run that crashed without reporting), the done
+    payload's ``usage`` (Claude reports its final usage there), and the
+    terminal frame's ``tokens``. ``usage`` is only written when at least
+    one source reported something, so an unreported run keeps ``{}``.
+    """
     updates: Dict[str, Any] = {}
-    if state.input_tokens is not None:
-        updates["input_tokens"] = state.input_tokens
-    if state.output_tokens is not None:
-        updates["output_tokens"] = state.output_tokens
-    if state.total_tokens is not None:
-        updates["total_tokens"] = state.total_tokens
-    if state.llm_model:
+    usage = merge_usage(state.usage if state is not None else None, payload_usage, tokens)
+    if usage:
+        updates["usage"] = usage
+    if state is not None and state.llm_model:
         updates["llm_model"] = state.llm_model[:128]
     return updates
 
@@ -123,12 +108,11 @@ def _apply_post_run_orchestration(run: AgentRun) -> None:
     "post-run" rather than "terminal" — paused runs are not terminal
     but still need the same hooks.
 
-    Order matters: terminal-disarm must run before deferred-pause so the
-    deferred-pause hook sees the latest disarm reason. Both helpers are
-    idempotent and safe to call on paused runs — the payload-status
-    gate inside ``maybe_disarm_on_terminal_signal`` only fires on
-    completed/blocked, and the CAP_HIT gate inside
-    ``maybe_apply_deferred_pause`` skips terminal-signal disarms.
+    Order matters: the run's outcome (``RUN_ENDED`` → ``reconcile``) must
+    be applied before the deferred pause so that hook sees the latest
+    disarm reason. Both are idempotent: ``reconcile`` ignores a run whose
+    stage the issue has already left (design §7 guard), and the CAP_HIT
+    gate inside ``maybe_apply_deferred_pause`` skips terminal-signal stops.
 
     Each side-effect is wrapped in its own try/except so a failure in one
     does not block the other or the surrounding drain.
@@ -141,11 +125,34 @@ def _apply_post_run_orchestration(run: AgentRun) -> None:
     try:
         maybe_disarm_on_terminal_signal(run)
     except Exception:
-        logger.exception("orchestration.error: terminal-disarm failed for run %s", run.pk)
+        logger.exception("orchestration.error: run-ended reconcile failed for run %s", run.pk)
     try:
         maybe_apply_deferred_pause(run)
     except Exception:
         logger.exception("orchestration.error: deferred-pause failed for run %s", run.pk)
+    # A queued entry run (design §4.5) is due *now*; don't make it wait for
+    # the scanner's next pass.
+    try:
+        _fire_pending_entry(run)
+    except Exception:
+        logger.exception("orchestration.error: pending-entry fire failed for run %s", run.pk)
+
+
+def _fire_pending_entry(run: AgentRun) -> None:
+    """Sub-minute pickup for an entry run the clock is holding (design §4.5)."""
+    if run.work_item_id is None:
+        return
+    from pi_dash.bgtasks.agent_ticker import fire_tick
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    ticker_id = (
+        IssueAgentTicker.objects.filter(issue_id=run.work_item_id, enabled=True, pending_entry=True)
+        .values_list("id", flat=True)
+        .first()
+    )
+    if ticker_id is None:
+        return
+    transaction.on_commit(lambda: fire_tick.delay(str(ticker_id)))
 
 
 def apply_run_paused(
@@ -162,25 +169,30 @@ def apply_run_paused(
     See legacy ``RunnerConsumer._handle_run_paused``.
     """
     live_state = _matching_live_state(runner, run_id)
-    usage_updates = _usage_updates_from_live_state(live_state)
-    usage_updates.update(_token_updates(_payload_usage(payload)))
-    usage_updates.update(_token_updates(tokens))
+    usage_updates = _usage_updates(live_state, payload_usage=_payload_usage(payload), tokens=tokens)
     model_value = _normalize_model(model)
     if model_value:
         usage_updates["llm_model"] = model_value
 
-    updated = (
-        AgentRun.objects.filter(id=run_id, runner=runner)
-        .exclude(status__in=TERMINAL_RUN_STATUSES)
-        .exclude(status=AgentRunStatus.CANCEL_REQUESTED)
-        .update(
+    from pi_dash.runner.services.agent_run_finalization import merge_done_payload
+
+    with transaction.atomic():
+        pausing = (
+            AgentRun.objects.select_for_update()
+            .filter(id=run_id, runner=runner)
+            .exclude(status__in=TERMINAL_RUN_STATUSES)
+            .exclude(status=AgentRunStatus.CANCEL_REQUESTED)
+            .first()
+        )
+        if pausing is None:
+            return
+        # Keep a ``pidash run yield`` the agent already made; the pause
+        # payload carries the question, not the stage outcome.
+        AgentRun.objects.filter(pk=pausing.pk).update(
             status=AgentRunStatus.PAUSED_AWAITING_INPUT,
-            done_payload=payload,
+            done_payload=merge_done_payload(pausing.done_payload, payload),
             **usage_updates,
         )
-    )
-    if not updated:
-        return
     try:
         run = AgentRun.objects.select_related("work_item").get(id=run_id)
     except AgentRun.DoesNotExist:
@@ -431,9 +443,7 @@ def finalize_run_terminal(
         if error_detail:
             updates["error"] = error_detail[:16000]
     live_state = _matching_live_state(runner, run_id)
-    updates.update(_usage_updates_from_live_state(live_state))
-    updates.update(_token_updates(_payload_usage(done_payload)))
-    updates.update(_token_updates(tokens))
+    updates.update(_usage_updates(live_state, payload_usage=_payload_usage(done_payload), tokens=tokens))
     model_value = _normalize_model(model)
     if model_value:
         updates["llm_model"] = model_value
