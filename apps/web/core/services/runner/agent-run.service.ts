@@ -49,7 +49,7 @@ export type TAgentRun = {
 };
 
 /**
- * Re-tick dispatch — re-grants a fresh phase-sized ticking budget to an
+ * Re-tick dispatch — re-grants a fresh pool-sized ticking budget to an
  * issue whose agent-ticker budget is exhausted, and re-arms the ticker.
  * The server enforces the guardrails (issue must be in a ticking state and
  * its budget exhausted); when they don't hold it responds ``granted:
