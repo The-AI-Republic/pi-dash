@@ -6,6 +6,7 @@
 import uuid
 
 # Django imports
+from django.http import QueryDict
 from django.utils import timezone
 from lxml import html
 from django.db import IntegrityError
@@ -37,6 +38,7 @@ from pi_dash.utils.content_validator import (
     validate_binary_data,
 )
 from pi_dash.utils.host import issue_web_url
+from pi_dash.utils.markdown_converter import markdown_to_html
 
 from .base import BaseSerializer
 from .cycle import CycleLiteSerializer, CycleSerializer
@@ -61,6 +63,47 @@ def _same_uuid(a, b) -> bool:
         return uuid.UUID(str(a)) == uuid.UUID(str(b))
     except (ValueError, TypeError, AttributeError):
         return str(a) == str(b)
+
+
+def normalize_description_input(data):
+    """Resolve a work-item write body's description to ``description_html``.
+
+    Clients can send the description three ways, in order of precedence:
+
+    * ``description_markdown`` — converted server-side with the shared
+      markdown -> Tiptap HTML converter (the one the page endpoints use), so
+      headings, nested and task lists, code blocks and tables keep their
+      structure. What current ``pidash`` CLIs send.
+    * ``description_html`` — stored as given (after the usual sanitising).
+    * ``description`` — legacy plain-text/markdown key from older clients,
+      converted like ``description_markdown`` when neither key above is set.
+      Previously it was silently dropped because ``Issue`` has no such column.
+
+    Returns ``(data, from_markdown)``. ``data`` is unchanged when neither
+    markdown key is present, otherwise a copy with both markdown keys removed
+    and, when one was used, ``description_html`` set to the converted body;
+    ``from_markdown`` says whether that happened. The views call this before
+    building the serializer so activity tracking sees the converted HTML, and
+    pass ``from_markdown`` as the ``description_from_markdown`` context key;
+    :meth:`IssueSerializer.to_internal_value` calls it too, for the other
+    write paths.
+    """
+    if "description_markdown" not in data and "description" not in data:
+        return data, False
+    data = data.dict() if isinstance(data, QueryDict) else dict(data)
+    markdown = data.pop("description_markdown", None)
+    legacy = data.pop("description", None)
+    if markdown is None and "description_html" not in data and isinstance(legacy, str):
+        markdown = legacy
+    if markdown is None:
+        return data, False
+    if not isinstance(markdown, str):
+        raise serializers.ValidationError({"description_markdown": "Must be a string."})
+    try:
+        data["description_html"] = markdown_to_html(markdown)
+    except ValueError as exc:
+        raise serializers.ValidationError({"description_markdown": str(exc)})
+    return data, True
 
 
 class IssueSerializer(BaseSerializer):
@@ -93,6 +136,20 @@ class IssueSerializer(BaseSerializer):
     # one is not).
     url = serializers.SerializerMethodField()
 
+    # Write-only: resolved into ``description_html`` by
+    # ``normalize_description_input`` before field validation, so it never
+    # reaches ``validated_data``. Declared so the OpenAPI schema documents it.
+    description_markdown = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+        trim_whitespace=False,
+        help_text=(
+            "Description as markdown, converted server-side to rich text. Takes "
+            "precedence over description_html when both are sent."
+        ),
+    )
+
     class Meta:
         model = Issue
         read_only_fields = ["id", "workspace", "project", "updated_by", "updated_at"]
@@ -117,6 +174,10 @@ class IssueSerializer(BaseSerializer):
         # were requested so the computed blocker keys honour ``?fields=`` too.
         self._requested_fields = {f for f in (kwargs.get("fields") or []) if isinstance(f, str)}
         super().__init__(*args, **kwargs)
+    def to_internal_value(self, data):
+        data, from_markdown = normalize_description_input(data)
+        self._description_from_markdown = from_markdown or self.context.get("description_from_markdown", False)
+        return super().to_internal_value(data)
 
     def validate(self, data):
         if (
@@ -154,8 +215,12 @@ class IssueSerializer(BaseSerializer):
                         {"assigned_pod": "cannot reassign pod while the issue has an active run"}
                     )
 
+        # HTML converted from markdown is already sanitised by
+        # ``markdown_to_html``; the lxml round-trip below would only wrap it in
+        # a ``<div>`` and blank boolean attributes such as task-item ``checked``.
+        from_markdown = getattr(self, "_description_from_markdown", False)
         try:
-            if data.get("description_html", None) is not None:
+            if data.get("description_html", None) is not None and not from_markdown:
                 parsed = html.fromstring(data["description_html"])
                 parsed_str = html.tostring(parsed, encoding="unicode")
                 data["description_html"] = parsed_str
@@ -164,7 +229,7 @@ class IssueSerializer(BaseSerializer):
             raise serializers.ValidationError("Invalid HTML passed")
 
         # Validate description content for security
-        if data.get("description_html"):
+        if data.get("description_html") and not from_markdown:
             is_valid, error_msg, sanitized_html = validate_html_content(data["description_html"])
             if not is_valid:
                 raise serializers.ValidationError({"error": "html content is not valid"})

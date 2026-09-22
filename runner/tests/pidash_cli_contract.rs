@@ -1447,3 +1447,189 @@ async fn page_update_non_uuid_page_id_exits_2_without_a_request() {
     assert_eq!(out.code, Some(EXIT_INVALID), "stderr: {}", out.stderr);
     assert!(fake.recorded.lock().unwrap().is_empty());
 }
+
+// ---- issue create|patch --description-file ------------------------------
+//
+// Driven through the real binary for the same reason as the page tests:
+// `--description-file -`, the clap conflict, and the exit code are only
+// observable end to end.
+
+const ISSUE_ID: &str = "00000000-0000-0000-0000-000000000001";
+const ISSUE_PROJECT_ID: &str = "00000000-0000-0000-0000-0000000000aa";
+const ISSUE_DETAIL: &str = r#"{"id":"00000000-0000-0000-0000-000000000001","project":"00000000-0000-0000-0000-0000000000aa","name":"demo"}"#;
+const LONG_BODY: &str = "# Cold start\n\n- [ ] fixtures\n  - nested\n\n```rust\nfn main() {}\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+
+/// An issue patch makes the by-identifier GET, then the PATCH; both can be
+/// answered with the same issue payload.
+fn issue_patch_handler() -> Handler {
+    Box::new(|_req| CannedResponse::ok(ISSUE_DETAIL))
+}
+
+#[tokio::test]
+async fn issue_create_description_file_sends_the_file_as_markdown() {
+    let fake = start_fake(Box::new(|_req| created(ISSUE_DETAIL))).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("body.md");
+    std::fs::write(&path, LONG_BODY).unwrap();
+
+    let out = run_pidash(
+        &fake,
+        &[
+            "issue",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--description-file",
+            path.to_str().unwrap(),
+        ],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].method, "POST");
+    assert_eq!(recorded[0].path, "/api/v1/workspaces/acme/projects/ENG/work-items/");
+    assert_eq!(
+        body_json(&recorded[0]),
+        serde_json::json!({"name": "X", "description_markdown": LONG_BODY})
+    );
+}
+
+#[tokio::test]
+async fn issue_create_description_file_dash_reads_stdin() {
+    let fake = start_fake(Box::new(|_req| created(ISSUE_DETAIL))).await;
+
+    let out = run_pidash(
+        &fake,
+        &[
+            "issue", "create", "--project", "ENG", "--title", "X", "--description-file", "-",
+        ],
+        LONG_BODY,
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(
+        body_json(&recorded[0]),
+        serde_json::json!({"name": "X", "description_markdown": LONG_BODY})
+    );
+}
+
+#[tokio::test]
+async fn issue_create_inline_description_is_sent_as_markdown() {
+    let fake = start_fake(Box::new(|_req| created(ISSUE_DETAIL))).await;
+
+    let out = run_pidash(
+        &fake,
+        &[
+            "issue", "create", "--project", "ENG", "--title", "X", "--description", "## Hi",
+        ],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(
+        body_json(&recorded[0]),
+        serde_json::json!({"name": "X", "description_markdown": "## Hi"})
+    );
+}
+
+#[tokio::test]
+async fn issue_patch_description_file_sends_the_file_as_markdown() {
+    let fake = start_fake(issue_patch_handler()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("body.md");
+    std::fs::write(&path, LONG_BODY).unwrap();
+
+    let out = run_pidash(
+        &fake,
+        &["issue", "patch", "ENG-1", "--description-file", path.to_str().unwrap()],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 2);
+    assert_eq!(recorded[1].method, "PATCH");
+    assert_eq!(
+        recorded[1].path,
+        format!("/api/v1/workspaces/acme/projects/{ISSUE_PROJECT_ID}/work-items/{ISSUE_ID}/")
+    );
+    assert_eq!(
+        body_json(&recorded[1]),
+        serde_json::json!({"description_markdown": LONG_BODY})
+    );
+}
+
+#[tokio::test]
+async fn issue_patch_description_file_dash_reads_stdin() {
+    let fake = start_fake(issue_patch_handler()).await;
+
+    let out = run_pidash(
+        &fake,
+        &["issue", "patch", "ENG-1", "--description-file", "-"],
+        "- [x] piped\n",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(
+        body_json(&recorded[1]),
+        serde_json::json!({"description_markdown": "- [x] piped\n"})
+    );
+}
+
+#[tokio::test]
+async fn issue_description_and_description_file_conflict_at_the_cli() {
+    for args in [
+        &[
+            "issue", "create", "--project", "ENG", "--title", "X", "--description", "x",
+            "--description-file", "-",
+        ][..],
+        &["issue", "patch", "ENG-1", "--description", "x", "--description-file", "-"][..],
+    ] {
+        let fake = start_fake(Box::new(|_req| created(ISSUE_DETAIL))).await;
+        let out = run_pidash(&fake, args, "body").await;
+
+        assert_ne!(out.code, Some(0), "{args:?}");
+        assert!(out.stderr.contains("cannot be used with"), "stderr: {}", out.stderr);
+        assert!(fake.recorded.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn issue_empty_description_file_or_stdin_exits_2_without_a_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let empty = dir.path().join("empty.md");
+    std::fs::write(&empty, "\n  \n").unwrap();
+    let empty = empty.to_str().unwrap().to_string();
+
+    for (args, stdin) in [
+        (
+            vec!["issue", "create", "--project", "ENG", "--title", "X", "--description-file", "-"],
+            "",
+        ),
+        (
+            vec!["issue", "create", "--project", "ENG", "--title", "X", "--description-file", &empty],
+            "",
+        ),
+        (vec!["issue", "patch", "ENG-1", "--description-file", "-"], "   \n"),
+        (vec!["issue", "patch", "ENG-1", "--description-file", &empty], ""),
+    ] {
+        let fake = start_fake(issue_patch_handler()).await;
+        let out = run_pidash(&fake, &args, stdin).await;
+
+        assert_eq!(out.code, Some(EXIT_INVALID), "{args:?} stderr: {}", out.stderr);
+        assert!(out.stderr.contains("is empty"), "stderr: {}", out.stderr);
+        assert!(fake.recorded.lock().unwrap().is_empty(), "{args:?}");
+    }
+}

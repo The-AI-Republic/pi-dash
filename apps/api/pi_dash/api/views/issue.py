@@ -45,6 +45,7 @@ from drf_spectacular.utils import (
 )
 
 # Module imports
+from pi_dash.api.serializers.issue import normalize_description_input
 from pi_dash.api.serializers import (
     IssueAttachmentSerializer,
     IssueActivitySerializer,
@@ -468,13 +469,17 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
         Supports external ID tracking for integration purposes.
         """
         project = Project.objects.get(pk=project_id)
+        # Convert ``description_markdown`` (and legacy ``description``) up front
+        # so activity tracking below records the stored ``description_html``.
+        data, from_markdown = normalize_description_input(request.data)
 
         serializer = IssueSerializer(
-            data=request.data,
+            data=data,
             context={
                 "project_id": project_id,
                 "workspace_id": project.workspace_id,
                 "default_assignee_id": project.default_assignee_id,
+                "description_from_markdown": from_markdown,
             },
         )
 
@@ -513,7 +518,7 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
             # Track the issue
             issue_activity.delay(
                 type="issue.activity.created",
-                requested_data=json.dumps(self.request.data, cls=DjangoJSONEncoder),
+                requested_data=json.dumps(data, cls=DjangoJSONEncoder),
                 actor_id=str(request.user.id),
                 issue_id=str(serializer.data.get("id", None)),
                 project_id=str(project_id),
@@ -525,7 +530,7 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
             model_activity.delay(
                 model_name="issue",
                 model_id=str(serializer.data["id"]),
-                requested_data=request.data,
+                requested_data=data,
                 current_instance=None,
                 actor_id=request.user.id,
                 slug=slug,
@@ -802,11 +807,17 @@ class IssueDetailAPIEndpoint(BaseAPIView):
 
             setattr(issue, MOVED_BY_RUN_ATTR, moved_by_run)
         current_instance = json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder)
-        requested_data = json.dumps(self.request.data, cls=DjangoJSONEncoder)
+        # See ``post``: activity tracking must see the converted HTML.
+        data, from_markdown = normalize_description_input(request.data)
+        requested_data = json.dumps(data, cls=DjangoJSONEncoder)
         serializer = IssueSerializer(
             issue,
-            data=request.data,
-            context={"project_id": project_id, "workspace_id": project.workspace_id},
+            data=data,
+            context={
+                "project_id": project_id,
+                "workspace_id": project.workspace_id,
+                "description_from_markdown": from_markdown,
+            },
             partial=True,
         )
         if serializer.is_valid():
@@ -842,7 +853,7 @@ class IssueDetailAPIEndpoint(BaseAPIView):
             model_activity.delay(
                 model_name="issue",
                 model_id=str(pk),
-                requested_data=request.data,
+                requested_data=data,
                 current_instance=current_instance,
                 actor_id=request.user.id,
                 slug=slug,

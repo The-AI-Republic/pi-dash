@@ -275,17 +275,25 @@ pidash issue get ENG-42
 Create a work item under a project.
 
 ```
-pidash issue create --title <TITLE> [--project <P>] [--description <D>]
+pidash issue create --title <TITLE> [--project <P>]
+                    [--description <D> | --description-file <PATH>]
                     [--priority <P>] [--state <S>]
 ```
 
-| Flag                | Purpose                                                                                                        |
-| ------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `--title <T>`       | **Required.**                                                                                                  |
-| `--project <P>`     | Project identifier or UUID. If omitted: `PIDASH_PROJECT_ID` env → local `default_project` → workspace default. |
-| `--description <D>` | Plain text or markdown.                                                                                        |
-| `--priority <P>`    | `none` \| `low` \| `medium` \| `high` \| `urgent`.                                                             |
-| `--state <S>`       | Initial state — name (case-insensitive) or UUID.                                                               |
+| Flag                        | Purpose                                                                                                                         |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `--title <T>`               | **Required.**                                                                                                                   |
+| `--project <P>`             | Project identifier or UUID. If omitted: `PIDASH_PROJECT_ID` env → local `default_project` → workspace default.                  |
+| `--description <D>`         | Description as markdown.                                                                                                        |
+| `--description-file <PATH>` | Read the markdown description from a file; `-` reads stdin. Conflicts with `--description`. Empty input is an error (exit `2`). |
+| `--priority <P>`            | `none` \| `low` \| `medium` \| `high` \| `urgent`.                                                                              |
+| `--state <S>`               | Initial state — name (case-insensitive) or UUID.                                                                                |
+
+**How descriptions land.** The CLI sends the markdown as `description_markdown`, and the server converts it with the same markdown → rich-text converter the page commands use. Headings, nested lists, task-list checkboxes, fenced code blocks (with language) and tables keep their structure in the web editor. For a long or multi-line body, write it to a file or pipe it instead of quoting it on the command line:
+
+```
+generate-body | pidash issue create --project ENG --title "Cold start: crate foo" --description-file -
+```
 
 ### `pidash issue list --project <P>`
 
@@ -323,15 +331,19 @@ The same filters are available as query parameters on `GET /api/v1/workspaces/<s
 Update fields. Pass only the fields you want to change.
 
 ```
-pidash issue patch ENG-42 [--state <S>] [--title <T>] [--description <D>] [--priority <P>]
+pidash issue patch ENG-42 [--state <S>] [--title <T>]
+                          [--description <D> | --description-file <PATH>] [--priority <P>]
 ```
 
-| Flag                | Purpose                                            |
-| ------------------- | -------------------------------------------------- |
-| `--state <S>`       | State name (case-insensitive) or UUID.             |
-| `--title <T>`       | New title.                                         |
-| `--description <D>` | New description.                                   |
-| `--priority <P>`    | `none` \| `low` \| `medium` \| `high` \| `urgent`. |
+| Flag                        | Purpose                                                                                  |
+| --------------------------- | ---------------------------------------------------------------------------------------- |
+| `--state <S>`               | State name (case-insensitive) or UUID.                                                   |
+| `--title <T>`               | New title.                                                                               |
+| `--description <D>`         | New description as markdown. `--description ""` clears it.                               |
+| `--description-file <PATH>` | Read the new markdown description from a file; `-` reads stdin. Empty input is an error. |
+| `--priority <P>`            | `none` \| `low` \| `medium` \| `high` \| `urgent`.                                       |
+
+A description flag replaces the whole body. It is converted server-side, the same way as for `issue create`.
 
 ### `pidash issue move <IDENTIFIER> --project <P>`
 

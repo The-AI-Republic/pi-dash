@@ -7,6 +7,9 @@
 //! Thin wrappers around the `/api/v1/` REST surface. JSON on stdout, JSON on
 //! stderr for errors, exit codes per `api_client::EXIT_*`.
 
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
 use clap::{Args, Subcommand};
 use serde_json::{Map, Value};
 
@@ -206,9 +209,8 @@ pub struct CreateArgs {
     #[arg(long)]
     pub title: String,
 
-    /// Description (plain text or markdown).
-    #[arg(long)]
-    pub description: Option<String>,
+    #[command(flatten)]
+    pub description: DescriptionArgs,
 
     /// Priority: `none|low|medium|high|urgent`.
     #[arg(long)]
@@ -222,6 +224,22 @@ pub struct CreateArgs {
     /// Attaches the new work item as a sub-issue of the given parent.
     #[arg(long)]
     pub parent: Option<String>,
+}
+
+/// The description source shared by `create` and `patch`: inline or from a
+/// file (`-` = stdin). Both are markdown; the server converts it to the
+/// editor's rich text, so headings, lists, task lists, code and tables keep
+/// their structure.
+#[derive(Debug, Args)]
+pub struct DescriptionArgs {
+    /// Description as markdown. `--description ""` clears it.
+    #[arg(long, conflicts_with = "description_file")]
+    pub description: Option<String>,
+
+    /// Read the markdown description from a file; `-` reads it from stdin.
+    /// Prefer this for long or multi-line bodies. An empty file is an error.
+    #[arg(long = "description-file", value_name = "PATH")]
+    pub description_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Args)]
@@ -287,9 +305,8 @@ pub struct PatchArgs {
     #[arg(long)]
     pub title: Option<String>,
 
-    /// New description (plain text or markdown).
-    #[arg(long)]
-    pub description: Option<String>,
+    #[command(flatten)]
+    pub description: DescriptionArgs,
 
     /// Priority: `none|low|medium|high|urgent`.
     #[arg(long)]
@@ -416,6 +433,9 @@ async fn cmd_create(
         return Err(CliError::new(EXIT_INVALID, "--title must not be empty"));
     }
 
+    // Read the body before any network call so a bad path or empty stdin
+    // fails fast without resolving the project.
+    let description = load_description(&args.description, std::io::stdin())?;
     let project_ref = resolve_create_project(client, paths, args.project.as_deref()).await?;
 
     // Resolve the network-dependent fields first, then hand the already-resolved
@@ -432,7 +452,7 @@ async fn cmd_create(
 
     let body = build_create_body(
         args.title,
-        args.description.as_deref(),
+        description.as_deref(),
         args.priority,
         state_uuid,
         parent_uuid,
@@ -451,7 +471,7 @@ async fn cmd_create(
 }
 
 /// Assemble the `work-items` POST body from already-resolved values. Kept pure
-/// (no network) so the field contract — including the rich-text `description_html`
+/// (no network) so the field contract — including the `description_markdown`
 /// key and the `parent` FK the MCP path also sends — is unit-testable.
 fn build_create_body(
     title: String,
@@ -463,15 +483,12 @@ fn build_create_body(
     let mut body: Map<String, Value> = Map::new();
     body.insert("name".into(), Value::String(title));
     if let Some(desc) = description {
-        // Issue descriptions are stored as rich text: the API's serializer is a
-        // ModelSerializer over the `Issue` model, whose only description column
-        // is `description_html` (it has no plain `description` field). Sending a
-        // bare `description` key was silently dropped, so CLI-created issues had
-        // an empty body. Convert the plain-text/markdown input to minimal HTML
-        // and send it under the key the server actually persists.
+        // Send the raw markdown; the server converts it with the same
+        // markdown -> Tiptap HTML converter pages use and stores the result in
+        // `description_html`, so there is one converter for CLI and MCP.
         body.insert(
-            "description_html".into(),
-            Value::String(description_to_html(desc)),
+            "description_markdown".into(),
+            Value::String(desc.to_string()),
         );
     }
     if let Some(prio) = priority {
@@ -637,44 +654,45 @@ fn percent_encode_value(v: &str) -> String {
     out
 }
 
-/// Convert the CLI's plain-text/markdown `--description` into the minimal HTML
-/// the web API stores in `description_html`.
-///
-/// Mirrors the server-side renderer
-/// (`apps/api/pi_dash/assistant/runtime/markdown.py::markdown_to_html`) so a
-/// description filed via the CLI reads identically to one filed by the in-app AI
-/// assistant: a blank line starts a new paragraph, a single newline becomes a
-/// `<br/>`, and empty input yields the model's default empty body. The server
-/// re-sanitizes the result via `validate_html_content`, so this only needs to be
-/// correct, not defensive.
-fn description_to_html(body: &str) -> String {
-    let paragraphs: Vec<String> = body
-        .split("\n\n")
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(|p| format!("<p>{}</p>", html_escape(p).replace('\n', "<br/>")))
-        .collect();
-    if paragraphs.is_empty() {
-        return "<p></p>".to_string();
-    }
-    paragraphs.join("")
-}
-
-/// Escape the five HTML-significant characters, matching Python's
-/// `html.escape(s, quote=True)` used by the server renderer.
-fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#x27;"),
-            _ => out.push(c),
+/// Resolve the description source. `--description-file -` reads `stdin`;
+/// `None` when neither flag was given. An inline `--description ""` is passed
+/// through (it clears the body), but an empty file or empty stdin is an error:
+/// it almost always means a failed pipe or a wrong path, not an intent to
+/// clear the description.
+fn load_description(
+    args: &DescriptionArgs,
+    mut stdin: impl Read,
+) -> Result<Option<String>, CliError> {
+    let (body, source) = match (&args.description, &args.description_file) {
+        (Some(body), _) => return Ok(Some(body.clone())),
+        (None, None) => return Ok(None),
+        (None, Some(path)) if path == Path::new("-") => {
+            let mut buf = String::new();
+            stdin.read_to_string(&mut buf).map_err(|e| {
+                CliError::new(
+                    EXIT_UNKNOWN,
+                    format!("failed reading description from stdin: {e}"),
+                )
+            })?;
+            (buf, "stdin".to_string())
         }
+        (None, Some(path)) => {
+            let body = std::fs::read_to_string(path).map_err(|e| {
+                CliError::new(
+                    EXIT_INVALID,
+                    format!("failed reading description file {}: {e}", path.display()),
+                )
+            })?;
+            (body, path.display().to_string())
+        }
+    };
+    if body.trim().is_empty() {
+        return Err(CliError::new(
+            EXIT_INVALID,
+            format!("--description-file {source} is empty"),
+        ));
     }
-    out
+    Ok(Some(body))
 }
 
 /// The `parent`-field mutation requested by a `pidash issue patch`.
@@ -691,6 +709,7 @@ enum ParentPatch {
 }
 
 async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> {
+    let description = load_description(&args.description, std::io::stdin())?;
     // Resolve issue first — we always need project_id for the mutating PATCH URL.
     let issue = resolve_issue(client, &args.identifier).await?;
 
@@ -710,7 +729,7 @@ async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> 
 
     let body = build_patch_body(
         args.title.as_deref(),
-        args.description.as_deref(),
+        description.as_deref(),
         args.priority.as_deref(),
         state_uuid,
         parent,
@@ -745,15 +764,11 @@ fn build_patch_body(
         body.insert("name".into(), Value::String(title.to_string()));
     }
     if let Some(desc) = description {
-        // Same rich-text contract as `build_create_body`: the server stores the
-        // body in `description_html`, and the PATCH view keys the
-        // description-version bookkeeping off `request.data.get("description_html")`.
-        // Convert the plain-text/markdown input and send it under that key; the
-        // model re-derives `description_stripped` and the serializer re-sanitizes
-        // the HTML on save.
+        // Same contract as `build_create_body`: the server converts the
+        // markdown and stores it in `description_html`.
         body.insert(
-            "description_html".into(),
-            Value::String(description_to_html(desc)),
+            "description_markdown".into(),
+            Value::String(desc.to_string()),
         );
     }
     if let Some(prio) = priority {
@@ -775,7 +790,7 @@ fn build_patch_body(
     if body.is_empty() {
         return Err(CliError::new(
             EXIT_INVALID,
-            "at least one of --state/--title/--description/--priority/--parent/--clear-parent is required",
+            "at least one of --state/--title/--description/--description-file/--priority/--parent/--clear-parent is required",
         ));
     }
 
@@ -1002,47 +1017,162 @@ mod tests {
         assert_eq!(build_query_string(&[]), "");
     }
 
-    #[test]
-    fn description_to_html_empty_yields_empty_paragraph() {
-        // Matches the model's default empty body so `--description ""` clears it.
-        assert_eq!(description_to_html(""), "<p></p>");
-        assert_eq!(description_to_html("   \n  "), "<p></p>");
+    // --- description source ----------------------------------------------
+
+    const NO_STDIN: &[u8] = b"";
+
+    fn desc_file(path: impl Into<PathBuf>) -> DescriptionArgs {
+        DescriptionArgs {
+            description: None,
+            description_file: Some(path.into()),
+        }
     }
 
     #[test]
-    fn description_to_html_single_paragraph() {
-        assert_eq!(description_to_html("hello world"), "<p>hello world</p>");
+    fn load_description_none_when_no_flag() {
+        let args = DescriptionArgs {
+            description: None,
+            description_file: None,
+        };
+        assert_eq!(load_description(&args, NO_STDIN).expect("ok"), None);
     }
 
     #[test]
-    fn description_to_html_blank_line_splits_paragraphs() {
+    fn load_description_inline_passes_through_even_when_empty() {
+        // `--description ""` is the documented way to clear a body.
+        let args = DescriptionArgs {
+            description: Some(String::new()),
+            description_file: None,
+        };
         assert_eq!(
-            description_to_html("first para\n\nsecond para"),
-            "<p>first para</p><p>second para</p>"
+            load_description(&args, NO_STDIN).expect("ok").as_deref(),
+            Some("")
         );
     }
 
     #[test]
-    fn description_to_html_single_newline_becomes_br() {
+    fn load_description_reads_the_named_file_verbatim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("body.md");
+        let md = "# Heading\n\n- [ ] one\n  - nested\n";
+        std::fs::write(&path, md).expect("write");
         assert_eq!(
-            description_to_html("line one\nline two"),
-            "<p>line one<br/>line two</p>"
+            load_description(&desc_file(path), NO_STDIN)
+                .expect("body")
+                .as_deref(),
+            Some(md)
         );
     }
 
     #[test]
-    fn description_to_html_escapes_html_significant_chars() {
-        // Without escaping, `<`/`&` would corrupt the stored HTML (or be stripped
-        // by the server sanitizer), which is exactly how descriptions went missing.
-        assert_eq!(
-            description_to_html("a < b && c > d \"q\" 'x'"),
-            "<p>a &lt; b &amp;&amp; c &gt; d &quot;q&quot; &#x27;x&#x27;</p>"
-        );
+    fn load_description_dash_reads_stdin() {
+        let body = load_description(&desc_file("-"), &b"## From stdin\n"[..]).expect("body");
+        assert_eq!(body.as_deref(), Some("## From stdin\n"));
     }
 
     #[test]
-    fn description_to_html_collapses_extra_blank_lines_and_trims() {
-        assert_eq!(description_to_html("  a  \n\n\n  b  "), "<p>a</p><p>b</p>");
+    fn load_description_empty_file_is_invalid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("empty.md");
+        std::fs::write(&path, "  \n\n").expect("write");
+        let err = load_description(&desc_file(path), NO_STDIN).expect_err("empty file");
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert!(err.message.contains("is empty"), "{}", err.message);
+    }
+
+    #[test]
+    fn load_description_empty_stdin_is_invalid() {
+        let err = load_description(&desc_file("-"), NO_STDIN).expect_err("empty stdin");
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert!(err.message.contains("stdin is empty"), "{}", err.message);
+    }
+
+    #[test]
+    fn load_description_missing_file_is_invalid() {
+        let err = load_description(&desc_file("/nonexistent/pidash/body.md"), NO_STDIN)
+            .expect_err("missing file");
+        assert_eq!(err.exit_code, EXIT_INVALID);
+    }
+
+    #[test]
+    fn build_create_body_sends_description_markdown_verbatim() {
+        let md = "# Title\n\n- [x] done";
+        let body = build_create_body("T".to_string(), Some(md), None, None, None);
+        assert_eq!(
+            body.get("description_markdown").and_then(Value::as_str),
+            Some(md)
+        );
+        // The server owns conversion; the CLI must not also send HTML.
+        assert!(!body.contains_key("description_html"));
+    }
+
+    #[test]
+    fn build_patch_body_sends_description_markdown_and_satisfies_guard() {
+        let body = build_patch_body(
+            None,
+            Some("| a |\n|---|\n| 1 |"),
+            None,
+            None,
+            ParentPatch::Unchanged,
+        )
+        .expect("description alone is a valid mutation");
+        assert_eq!(
+            body.get("description_markdown").and_then(Value::as_str),
+            Some("| a |\n|---|\n| 1 |")
+        );
+        assert!(!body.contains_key("description_html"));
+    }
+
+    #[derive(Debug, clap::Parser)]
+    struct CreateArgsHarness {
+        #[command(flatten)]
+        args: CreateArgs,
+    }
+
+    #[test]
+    fn create_description_and_description_file_conflict() {
+        let err = CreateArgsHarness::try_parse_from([
+            "create",
+            "--title",
+            "T",
+            "--description",
+            "x",
+            "--description-file",
+            "-",
+        ])
+        .expect_err("--description and --description-file are mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn create_description_file_parses() {
+        let parsed = CreateArgsHarness::try_parse_from([
+            "create",
+            "--title",
+            "T",
+            "--description-file",
+            "-",
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed.args.description.description_file.as_deref(),
+            Some(Path::new("-"))
+        );
+        assert!(parsed.args.description.description.is_none());
+    }
+
+    #[test]
+    fn patch_description_and_description_file_conflict() {
+        let err = PatchArgsHarness::try_parse_from([
+            "patch",
+            "PROJ-1",
+            "--description-file",
+            "body.md",
+            "--description",
+            "x",
+        ])
+        .expect_err("--description and --description-file are mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
