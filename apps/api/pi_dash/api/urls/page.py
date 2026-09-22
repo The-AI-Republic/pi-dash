@@ -7,17 +7,23 @@ from django.urls import path
 from pi_dash.api.views import (
     PageListAPIEndpoint,
     PageDetailAPIEndpoint,
+    PageArchiveAPIEndpoint,
 )
 
 urlpatterns = [
     path(
         "workspaces/<str:slug>/projects/<str:project_id>/pages/",
-        PageListAPIEndpoint.as_view(http_method_names=["get"]),
+        PageListAPIEndpoint.as_view(http_method_names=["get", "post"]),
         name="pages",
     ),
     path(
         "workspaces/<str:slug>/projects/<str:project_id>/pages/<uuid:page_id>/",
-        PageDetailAPIEndpoint.as_view(http_method_names=["get"]),
+        PageDetailAPIEndpoint.as_view(http_method_names=["get", "patch"]),
         name="pages-detail",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/pages/<uuid:page_id>/archive/",
+        PageArchiveAPIEndpoint.as_view(http_method_names=["post", "delete"]),
+        name="pages-archive",
     ),
 ]
