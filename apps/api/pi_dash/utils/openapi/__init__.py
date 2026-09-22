@@ -54,6 +54,8 @@ from .parameters import (
     WORK_ITEM_LABELS_FILTER_PARAMETER,
     WORK_ITEM_PRIORITY_FILTER_PARAMETER,
     WORK_ITEM_ASSIGNEES_FILTER_PARAMETER,
+    PAGE_ID_PARAMETER,
+    INCLUDE_ARCHIVED_PARAMETER,
 )
 
 # Responses
@@ -144,6 +146,8 @@ from .examples import (
     TRANSFER_CYCLE_COMPLETED_ERROR_EXAMPLE,
     MODULE_EXAMPLE,
     STATE_EXAMPLE,
+    PAGE_EXAMPLE,
+    PAGE_DETAIL_EXAMPLE,
     LABEL_EXAMPLE,
     ISSUE_LINK_EXAMPLE,
     ISSUE_COMMENT_EXAMPLE,
@@ -179,6 +183,7 @@ from .decorators import (
     module_docs,
     module_issue_docs,
     state_docs,
+    page_docs,
     estimate_docs,
     estimate_point_docs,
 )
@@ -229,6 +234,8 @@ __all__ = [
     "WORK_ITEM_LABELS_FILTER_PARAMETER",
     "WORK_ITEM_PRIORITY_FILTER_PARAMETER",
     "WORK_ITEM_ASSIGNEES_FILTER_PARAMETER",
+    "PAGE_ID_PARAMETER",
+    "INCLUDE_ARCHIVED_PARAMETER",
     # Responses
     "UNAUTHORIZED_RESPONSE",
     "FORBIDDEN_RESPONSE",
@@ -313,6 +320,8 @@ __all__ = [
     "TRANSFER_CYCLE_COMPLETED_ERROR_EXAMPLE",
     "MODULE_EXAMPLE",
     "STATE_EXAMPLE",
+    "PAGE_EXAMPLE",
+    "PAGE_DETAIL_EXAMPLE",
     "LABEL_EXAMPLE",
     "ISSUE_LINK_EXAMPLE",
     "ISSUE_COMMENT_EXAMPLE",
@@ -345,6 +354,7 @@ __all__ = [
     "module_docs",
     "module_issue_docs",
     "state_docs",
+    "page_docs",
     "estimate_docs",
     "estimate_point_docs",
     # Hooks

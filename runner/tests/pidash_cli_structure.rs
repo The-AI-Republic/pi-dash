@@ -42,6 +42,7 @@ fn non_service_commands_still_present() {
         "ai",
         "issue",
         "comment",
+        "page",
         "state",
         "workpad",
         "run",

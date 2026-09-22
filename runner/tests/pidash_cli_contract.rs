@@ -872,3 +872,168 @@ async fn issue_list_unknown_state_400_maps_to_exit_invalid() {
     assert_eq!(err.exit_code, EXIT_INVALID);
     assert!(err.detail.unwrap_or_default().contains("Valid states"));
 }
+
+
+// ---------------------------------------------------------------------------
+// `pidash page …` — the read path into project pages (PDASHOSS01-185).
+// ---------------------------------------------------------------------------
+
+const PAGE_ENVELOPE: &str = r#"{"count":1,"next_cursor":"20:1:0","prev_cursor":"20:-1:1","results":[{"id":"00000000-0000-0000-0000-0000000000f1","name":"Conventions"}]}"#;
+
+const PAGE_DETAIL: &str = r##"{"id":"00000000-0000-0000-0000-0000000000f1","name":"Conventions","description_html":"<h1>Rules</h1>","description_stripped":"Rules","description_markdown":"# Rules"}"##;
+
+#[tokio::test]
+async fn page_list_hits_the_project_pages_route() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PAGE_ENVELOPE))).await;
+
+    pidash::cli::page::cmd_list(
+        &client(&fake),
+        pidash::cli::page::ListArgs {
+            project: "ENG".into(),
+            cursor: None,
+            per_page: None,
+            include_archived: false,
+        },
+    )
+    .await
+    .expect("page list");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded[0].method, "GET");
+    assert_eq!(recorded[0].path, "/api/v1/workspaces/acme/projects/ENG/pages/");
+    assert_eq!(recorded[0].api_key.as_deref(), Some("test-token"));
+}
+
+#[tokio::test]
+async fn page_list_forwards_pagination_and_include_archived() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PAGE_ENVELOPE))).await;
+
+    pidash::cli::page::cmd_list(
+        &client(&fake),
+        pidash::cli::page::ListArgs {
+            project: "00000000-0000-0000-0000-0000000000aa".into(),
+            cursor: Some("20:1:0".into()),
+            per_page: Some(50),
+            include_archived: true,
+        },
+    )
+    .await
+    .expect("page list");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(
+        recorded[0].path,
+        "/api/v1/workspaces/acme/projects/00000000-0000-0000-0000-0000000000aa/pages/\
+         ?cursor=20%3A1%3A0&per_page=50&include_archived=true"
+    );
+}
+
+#[tokio::test]
+async fn page_list_maps_a_non_member_403_to_the_auth_exit_code() {
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 403,
+        status_text: "Forbidden",
+        body: r#"{"error":"You don't have the required permissions."}"#.into(),
+    }))
+    .await;
+
+    let err = pidash::cli::page::cmd_list(
+        &client(&fake),
+        pidash::cli::page::ListArgs {
+            project: "ENG".into(),
+            cursor: None,
+            per_page: None,
+            include_archived: false,
+        },
+    )
+    .await
+    .expect_err("403 must not be silently swallowed");
+
+    assert_eq!(err.exit_code, EXIT_AUTH);
+}
+
+#[tokio::test]
+async fn page_get_hits_the_page_detail_route() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PAGE_DETAIL))).await;
+
+    pidash::cli::page::cmd_get(
+        &client(&fake),
+        pidash::cli::page::GetArgs {
+            page_id: "00000000-0000-0000-0000-0000000000f1".into(),
+            project: "ENG".into(),
+            body_only: false,
+        },
+    )
+    .await
+    .expect("page get");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded[0].method, "GET");
+    assert_eq!(
+        recorded[0].path,
+        "/api/v1/workspaces/acme/projects/ENG/pages/00000000-0000-0000-0000-0000000000f1/"
+    );
+}
+
+#[tokio::test]
+async fn page_get_body_only_uses_the_same_route_and_succeeds() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PAGE_DETAIL))).await;
+
+    pidash::cli::page::cmd_get(
+        &client(&fake),
+        pidash::cli::page::GetArgs {
+            page_id: "00000000-0000-0000-0000-0000000000f1".into(),
+            project: "ENG".into(),
+            body_only: true,
+        },
+    )
+    .await
+    .expect("page get --body-only");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0].path,
+        "/api/v1/workspaces/acme/projects/ENG/pages/00000000-0000-0000-0000-0000000000f1/"
+    );
+}
+
+#[tokio::test]
+async fn page_get_body_only_errors_when_the_server_omits_markdown() {
+    let fake = start_fake(Box::new(|_req| {
+        CannedResponse::ok(r#"{"id":"00000000-0000-0000-0000-0000000000f1","description_html":"<p>x</p>"}"#)
+    }))
+    .await;
+
+    let err = pidash::cli::page::cmd_get(
+        &client(&fake),
+        pidash::cli::page::GetArgs {
+            page_id: "00000000-0000-0000-0000-0000000000f1".into(),
+            project: "ENG".into(),
+            body_only: true,
+        },
+    )
+    .await
+    .expect_err("a server without page markdown must be reported");
+
+    assert_eq!(err.exit_code, EXIT_SERVER);
+}
+
+#[tokio::test]
+async fn page_get_rejects_a_non_uuid_page_id_before_any_request() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PAGE_DETAIL))).await;
+
+    let err = pidash::cli::page::cmd_get(
+        &client(&fake),
+        pidash::cli::page::GetArgs {
+            page_id: "release-checklist".into(),
+            project: "ENG".into(),
+            body_only: false,
+        },
+    )
+    .await
+    .expect_err("a slug is not a page id");
+
+    assert_eq!(err.exit_code, EXIT_INVALID);
+    assert!(fake.recorded.lock().unwrap().is_empty());
+}

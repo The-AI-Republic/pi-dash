@@ -574,3 +574,34 @@ ESTIMATE_ID_PARAMETER = OpenApiParameter(
     type=OpenApiTypes.UUID,
     location=OpenApiParameter.PATH,
 )
+
+# Page Parameters
+PAGE_ID_PARAMETER = OpenApiParameter(
+    name="page_id",
+    description="Page ID",
+    required=True,
+    type=OpenApiTypes.UUID,
+    location=OpenApiParameter.PATH,
+    examples=[
+        OpenApiExample(
+            name="Example page ID",
+            value="550e8400-e29b-41d4-a716-446655440000",
+            description="A typical page UUID",
+        )
+    ],
+)
+
+INCLUDE_ARCHIVED_PARAMETER = OpenApiParameter(
+    name="include_archived",
+    description="Include archived records in the results. Excluded by default.",
+    required=False,
+    type=OpenApiTypes.BOOL,
+    location=OpenApiParameter.QUERY,
+    examples=[
+        OpenApiExample(
+            name="Include archived",
+            value=True,
+            description="Return archived records alongside active ones",
+        )
+    ],
+)

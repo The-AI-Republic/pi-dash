@@ -810,6 +810,18 @@ SAMPLE_STATE = {
     "sequence": 2,
 }
 
+SAMPLE_PAGE = {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "name": "Release checklist",
+    "parent": None,
+    "owned_by": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "access": 0,
+    "is_locked": False,
+    "archived_at": None,
+    "created_at": "2024-01-01T10:30:00Z",
+    "updated_at": "2024-01-10T15:45:00Z",
+}
+
 SAMPLE_COMMENT = {
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "comment_html": "<p>This issue needs more investigation. I'll look into the database connection timeout.</p>",  # noqa: E501
@@ -894,6 +906,7 @@ SCHEMA_EXAMPLES = {
     "Module": SAMPLE_MODULE,
     "Project": SAMPLE_PROJECT,
     "State": SAMPLE_STATE,
+    "Page": SAMPLE_PAGE,
     "Comment": SAMPLE_COMMENT,
     "Link": SAMPLE_LINK,
     "Activity": SAMPLE_ACTIVITY,
@@ -921,3 +934,17 @@ def get_sample_for_schema(schema_name):
         return SCHEMA_EXAMPLES.get(base_name, SAMPLE_GENERIC)
 
     return SCHEMA_EXAMPLES.get(schema_name, SAMPLE_GENERIC)
+
+
+# Page Response Examples
+PAGE_EXAMPLE = OpenApiExample(name="Page", value=SAMPLE_PAGE)
+
+PAGE_DETAIL_EXAMPLE = OpenApiExample(
+    name="Page detail",
+    value={
+        **SAMPLE_PAGE,
+        "description_html": "<h1>Release checklist</h1><p>Tag the release <strong>first</strong>.</p>",
+        "description_stripped": "Release checklistTag the release first.",
+        "description_markdown": "# Release checklist\n\nTag the release **first**.",
+    },
+)

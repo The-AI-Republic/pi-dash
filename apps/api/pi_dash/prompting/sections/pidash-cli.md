@@ -54,7 +54,15 @@ The workpad is your durable per-issue scratchpad — a single markdown document 
 - `pidash workpad get [<identifier>]` — fetch the current workpad body. Returns `{body, updated_at}`. Defaults `<identifier>` to `PIDASH_ISSUE_IDENTIFIER` so you can call it bare.
 - `pidash workpad update [<identifier>] --body-file <path>` — overwrite the workpad body from a file. Defaults `<identifier>` to `PIDASH_ISSUE_IDENTIFIER`. An empty file clears it. There is no "append" — always write the full body.
 
-{% endif %}#### States
+{% endif %}#### Pages
+
+Project pages are the project's wiki: decisions, conventions, stage plans a human wrote down for you. Read them **before** you re-derive a convention from the code — a page is cheaper and more authoritative than a guess. Read-only; there is no command to create or edit a page.
+
+- `pidash page list --project <PROJ-or-UUID> [--cursor <c>] [--per-page <N>] [--include-archived]` — list the project's pages. Returns the usual paginated envelope (`{count, next_cursor, prev_cursor, results: [...]}`) with **metadata only** — `id`, `name`, `parent`, `owned_by`, `access`, `is_locked`, `archived_at`, timestamps. Archived pages are omitted unless you pass `--include-archived`. A page another member marked private is not listed.
+- `pidash page get <page-id> --project <PROJ-or-UUID>` — fetch one page by its UUID (take it from the list output). Prints the JSON envelope: the metadata above plus `description_html`, `description_stripped`, and `description_markdown`. Prefer `description_markdown`.
+- `pidash page get <page-id> --project <PROJ-or-UUID> --body-only` — print just the markdown body, so you can redirect it to a file: `pidash page get <page-id> --project ENG --body-only > ./page.md`.
+
+#### States
 
 - `pidash state list{% if run.kind == "scheduler" %} --project {{ project.identifier }}{% endif %}` — list the states available in {% if run.kind == "scheduler" %}this project{% else %}this issue's project{% endif %} with `name`, `group` (`backlog | unstarted | started | review | test | completed | cancelled`), and `description`.{% if run.kind != "scheduler" %} Uses `PIDASH_ISSUE_IDENTIFIER` by default; pass `pidash state list <issue-identifier>` or `pidash state list <project-uuid>` to override. Already rendered below under "Available states"; only call again if something looks stale.{% endif %}
 

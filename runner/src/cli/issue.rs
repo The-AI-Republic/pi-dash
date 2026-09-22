@@ -608,7 +608,10 @@ fn build_list_query(args: &ListArgs, parent: Option<String>) -> Result<String, C
 
 /// Build a query-string suffix (`?k=v&...`) with percent-encoded values.
 /// Returns an empty string when there are no params.
-fn build_query_string(params: &[(&str, String)]) -> String {
+///
+/// `pub(super)` so sibling subcommands (`page`) build their list query the
+/// same way rather than re-implementing the encoding.
+pub(super) fn build_query_string(params: &[(&str, String)]) -> String {
     if params.is_empty() {
         return String::new();
     }

@@ -11,6 +11,8 @@ pub mod doctor;
 mod install;
 pub mod managed;
 pub mod issue;
+// `pub` so the CLI contract tests can drive the page subcommands directly.
+pub mod page;
 mod project;
 mod remove;
 pub mod resolve;
@@ -128,6 +130,9 @@ pub enum Command {
     /// List, post, or edit work-item comments.
     Comment(comment::CommentArgs),
 
+    /// Read project pages — the project-scoped wiki (`page list` / `page get`).
+    Page(page::PageArgs),
+
     /// Inspect workflow states on a project.
     State(state::StateArgs),
 
@@ -184,6 +189,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Ai(args) => ai::run(args, &paths).await,
         Command::Issue(args) => run_crud(issue::run(args, &paths).await),
         Command::Comment(args) => run_crud(comment::run(args, &paths).await),
+        Command::Page(args) => run_crud(page::run(args, &paths).await),
         Command::State(args) => run_crud(state::run(args, &paths).await),
         Command::Workpad(args) => run_crud(workpad::run(args, &paths).await),
         Command::Workspace(args) => run_crud(workspace::run(args, &paths).await),
