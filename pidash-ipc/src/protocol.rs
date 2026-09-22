@@ -691,6 +691,8 @@ mod tests {
                         input: 10,
                         output: 20,
                         total: 30,
+                        cache_read: Some(4),
+                        ..Default::default()
                     }),
                     model: Some("gpt-5.1-codex".into()),
                     turn_count: Some(2),
@@ -706,7 +708,8 @@ mod tests {
             .expect("observability field lost on roundtrip");
         assert_eq!(obs.turn_count, Some(2));
         assert_eq!(obs.agent_pid, Some(12345));
-        assert_eq!(obs.tokens.map(|t| t.total), Some(30));
+        assert_eq!(obs.tokens.as_ref().map(|t| t.total), Some(30));
+        assert_eq!(obs.tokens.as_ref().and_then(|t| t.cache_read), Some(4));
     }
 
     #[test]

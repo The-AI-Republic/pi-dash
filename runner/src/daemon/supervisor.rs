@@ -2645,11 +2645,7 @@ impl AssignWorker {
     async fn run_metadata(&self) -> RunMetadata {
         let snapshot = self.state.observability_snapshot().await;
         RunMetadata {
-            tokens: snapshot.tokens.map(|t| WireTokenUsage {
-                input: t.input,
-                output: t.output,
-                total: t.total,
-            }),
+            tokens: snapshot.tokens,
             model: snapshot.model,
         }
     }
@@ -2952,6 +2948,7 @@ impl AssignWorker {
         let cancel = self.cancel.clone();
         let mut cancelled = false;
         let mut run_events = RunEventMirror::new(cursor.run_id());
+        let mut token_meter = crate::daemon::observability::RunTokenMeter::default();
         loop {
             // Re-evaluate at every loop entry: an approval that opened on
             // the previous iteration disarms the watchdog; one that just
@@ -3019,7 +3016,14 @@ impl AssignWorker {
                     };
                     for ev in events {
                         if let Some(out) = self
-                            .handle_bridge_event(ev, bridge, hist, workspace_root, &mut run_events)
+                            .handle_bridge_event(
+                                ev,
+                                bridge,
+                                hist,
+                                workspace_root,
+                                &mut run_events,
+                                &mut token_meter,
+                            )
                             .await?
                         {
                             return Ok(out);
@@ -3082,6 +3086,7 @@ impl AssignWorker {
         hist: &mut HistoryWriter,
         workspace_root: &std::path::Path,
         run_events: &mut RunEventMirror,
+        token_meter: &mut crate::daemon::observability::RunTokenMeter,
     ) -> Result<Option<Outcome>> {
         self.state.incr_current_run_events().await;
         // Observability: every bridge event bumps last_event_at + stamps
@@ -3120,11 +3125,11 @@ impl AssignWorker {
         }
         if let BridgeEvent::Raw { method, params, .. } = &ev {
             match method.as_str() {
-                "codex/event/token_count" => {
-                    if let Some(usage) =
-                        crate::daemon::observability::parse_codex_token_count(params)
+                "thread/tokenUsage/updated" | "codex/event/token_count" => {
+                    if let Some(frame) =
+                        crate::daemon::observability::parse_token_usage(method, params)
                     {
-                        self.state.set_tokens(usage).await;
+                        self.state.set_tokens(token_meter.observe(frame)).await;
                     }
                 }
                 "turn/started" => {

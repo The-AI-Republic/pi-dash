@@ -687,6 +687,7 @@ mod tests {
                 input: 1,
                 output: 2,
                 total: 3,
+                ..Default::default()
             })
             .await;
         state.incr_turn().await;

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
@@ -11,6 +12,7 @@ from pi_dash.cloud_agent import events
 from pi_dash.cloud_agent.output import CloudAgentOutput
 from pi_dash.cloud_agent.tools import build_tools
 from pi_dash.cloud_agent.github_mcp import GITHUB_TOOL_NAMES, build_github_toolset
+from pi_dash.runner.services.usage import normalize_usage
 
 
 async def execute(run):
@@ -68,10 +70,19 @@ async def execute(run):
                 "timeout": settings.CLOUD_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS,
             },
         )
-    usage = result.usage()
     return result.output, {
         "llm_model": model_name,
-        "input_tokens": getattr(usage, "input_tokens", None),
-        "output_tokens": getattr(usage, "output_tokens", None),
-        "total_tokens": getattr(usage, "total_tokens", None),
+        "usage": normalize_usage(_usage_report(result.usage())),
     }
+
+
+def _usage_report(usage) -> dict:
+    """pydantic-ai's ``RunUsage`` as a plain dict — every counter it tracks,
+    plus its derived ``total_tokens`` — so the normaliser can map the known
+    ones and keep the rest under ``raw``."""
+    report = dataclasses.asdict(usage) if dataclasses.is_dataclass(usage) else {}
+    for key in ("input_tokens", "output_tokens", "total_tokens"):
+        value = getattr(usage, key, None)
+        if value is not None:
+            report[key] = value
+    return report

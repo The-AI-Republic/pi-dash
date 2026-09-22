@@ -83,12 +83,10 @@ pub struct RunEventRecord {
     pub payload: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenUsage {
-    pub input: u64,
-    pub output: u64,
-    pub total: u64,
-}
+// Same shape as the daemon's observability snapshot — including the
+// cache / reasoning breakdown and the verbatim `raw` usage object — so the
+// terminal run frames carry everything the agent reported (PDASHOSS01-188).
+pub use pidash_ipc::dto::TokenUsage;
 
 /// Messages the runner sends to the cloud.
 #[derive(Debug, Clone, Serialize, Deserialize)]
