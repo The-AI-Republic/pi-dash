@@ -948,3 +948,19 @@ PAGE_DETAIL_EXAMPLE = OpenApiExample(
         "description_markdown": "# Release checklist\n\nTag the release **first**.",
     },
 )
+
+PAGE_CREATE_EXAMPLE = OpenApiExample(
+    name="Create page",
+    value={
+        "name": "Release checklist",
+        "description_markdown": "# Release checklist\n\n- [ ] Tag the release\n- [ ] Publish notes",
+        "access": 0,
+    },
+    request_only=True,
+)
+
+PAGE_UPDATE_EXAMPLE = OpenApiExample(
+    name="Update page body",
+    value={"description_markdown": "# Release checklist\n\n- [x] Tag the release\n- [ ] Publish notes"},
+    request_only=True,
+)

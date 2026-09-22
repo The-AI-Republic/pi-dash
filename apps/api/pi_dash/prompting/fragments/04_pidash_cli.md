@@ -49,11 +49,14 @@ The workpad is your durable per-issue scratchpad — a single markdown document 
 
 #### Pages
 
-Project pages are the project's wiki: decisions, conventions, stage plans a human wrote down for you. Read them **before** you re-derive a convention from the code — a page is cheaper and more authoritative than a guess. Read-only; there is no command to create or edit a page.
+Project pages are the project's wiki: durable shared knowledge — decisions, conventions, plans — that humans and future runs read. A workpad is different: scratch state for one issue's runs. Read pages **before** you re-derive a convention from the code — a page is cheaper and more authoritative than a guess. Write one only when you have knowledge worth keeping for the project, not progress notes.
 
 - `pidash page list --project <PROJ-or-UUID> [--cursor <c>] [--per-page <N>] [--include-archived]` — list the project's pages. Returns the usual paginated envelope (`{count, next_cursor, prev_cursor, results: [...]}`) with **metadata only** — `id`, `name`, `parent`, `owned_by`, `access`, `is_locked`, `archived_at`, timestamps. Archived pages are omitted unless you pass `--include-archived`. A page another member marked private is not listed.
 - `pidash page get <page-id> --project <PROJ-or-UUID>` — fetch one page by its UUID (take it from the list output). Prints the JSON envelope: the metadata above plus `description_html`, `description_stripped`, and `description_markdown`. Prefer `description_markdown`.
 - `pidash page get <page-id> --project <PROJ-or-UUID> --body-only` — print just the markdown body, so you can redirect it to a file: `pidash page get <page-id> --project ENG --body-only > ./page.md`.
+- `pidash page create --project <PROJ-or-UUID> --title "<title>" [--body <md> | --body-file <path>] [--parent <page-id>] [--access public|private]` — create a page; the body is markdown. `--body-file -` reads stdin. **List first** and prefer updating an existing page over creating a near-duplicate.
+- `pidash page update <page-id> --project <PROJ-or-UUID> [--title <s>] [--body <md> | --body-file <path>] [--parent <page-id> | --clear-parent] [--access public|private]` — change only the fields you pass (at least one). A body flag replaces the whole body — `page get --body-only` first, edit, then write it back. Exit 2 with a 409 means the page is locked or archived; exit 5 with a 503 means the live document service is down — retry later, do not work around it.
+- `pidash page archive <page-id> --project <PROJ-or-UUID>` / `pidash page unarchive …` — archive or restore a page. Do **not** archive a page you did not create unless the issue asks you to.
 
 #### States
 

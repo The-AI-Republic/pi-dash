@@ -25,7 +25,6 @@ struct RecordedRequest {
     path: String,
     api_key: Option<String>,
     run_id: Option<String>,
-    #[allow(dead_code)]
     body: String,
 }
 
@@ -1035,5 +1034,416 @@ async fn page_get_rejects_a_non_uuid_page_id_before_any_request() {
     .expect_err("a slug is not a page id");
 
     assert_eq!(err.exit_code, EXIT_INVALID);
+    assert!(fake.recorded.lock().unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// `pidash page create|update|archive|unarchive` — the write path
+// (PDASHOSS01-200).
+// ---------------------------------------------------------------------------
+
+const PAGE_ID: &str = "00000000-0000-0000-0000-0000000000f1";
+const PARENT_PAGE_ID: &str = "00000000-0000-0000-0000-0000000000f2";
+
+fn created(body: &str) -> CannedResponse {
+    CannedResponse {
+        status: 201,
+        status_text: "Created",
+        body: body.into(),
+    }
+}
+
+fn body_json(req: &RecordedRequest) -> serde_json::Value {
+    serde_json::from_str(&req.body).expect("request body is JSON")
+}
+
+fn no_page_body() -> pidash::cli::page::PageBodyArgs {
+    pidash::cli::page::PageBodyArgs {
+        body: None,
+        body_file: None,
+    }
+}
+
+fn update_args() -> pidash::cli::page::UpdateArgs {
+    pidash::cli::page::UpdateArgs {
+        page_id: PAGE_ID.into(),
+        project: "ENG".into(),
+        title: None,
+        body: no_page_body(),
+        parent: None,
+        clear_parent: false,
+        access: None,
+    }
+}
+
+#[tokio::test]
+async fn page_create_posts_to_the_project_pages_route() {
+    let fake = start_fake(Box::new(|_req| created(PAGE_DETAIL))).await;
+
+    pidash::cli::page::cmd_create(
+        &client_for_run(&fake, "run-7"),
+        pidash::cli::page::CreateArgs {
+            project: "ENG".into(),
+            title: "Conventions".into(),
+            body: pidash::cli::page::PageBodyArgs {
+                body: Some("# Rules".into()),
+                body_file: None,
+            },
+            parent: Some(PARENT_PAGE_ID.into()),
+            access: Some(pidash::cli::page::PageAccess::Private),
+        },
+    )
+    .await
+    .expect("page create");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded[0].method, "POST");
+    assert_eq!(recorded[0].path, "/api/v1/workspaces/acme/projects/ENG/pages/");
+    assert_eq!(recorded[0].run_id.as_deref(), Some("run-7"));
+    assert_eq!(
+        body_json(&recorded[0]),
+        serde_json::json!({
+            "name": "Conventions",
+            "description_markdown": "# Rules",
+            "parent": PARENT_PAGE_ID,
+            "access": 1,
+        })
+    );
+}
+
+#[tokio::test]
+async fn page_create_reads_the_body_from_a_file() {
+    let fake = start_fake(Box::new(|_req| created(PAGE_DETAIL))).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("page.md");
+    std::fs::write(&path, "# From a file\n\n- one\n").unwrap();
+
+    pidash::cli::page::cmd_create(
+        &client(&fake),
+        pidash::cli::page::CreateArgs {
+            project: "ENG".into(),
+            title: "Conventions".into(),
+            body: pidash::cli::page::PageBodyArgs {
+                body: None,
+                body_file: Some(path),
+            },
+            parent: None,
+            access: None,
+        },
+    )
+    .await
+    .expect("page create --body-file");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(
+        body_json(&recorded[0]),
+        serde_json::json!({"name": "Conventions", "description_markdown": "# From a file\n\n- one\n"})
+    );
+}
+
+#[tokio::test]
+async fn page_update_sends_only_the_provided_keys() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PAGE_DETAIL))).await;
+
+    pidash::cli::page::cmd_update(
+        &client(&fake),
+        pidash::cli::page::UpdateArgs {
+            body: pidash::cli::page::PageBodyArgs {
+                body: Some("# New body".into()),
+                body_file: None,
+            },
+            ..update_args()
+        },
+    )
+    .await
+    .expect("page update");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded[0].method, "PATCH");
+    assert_eq!(
+        recorded[0].path,
+        format!("/api/v1/workspaces/acme/projects/ENG/pages/{PAGE_ID}/")
+    );
+    assert_eq!(
+        body_json(&recorded[0]),
+        serde_json::json!({"description_markdown": "# New body"})
+    );
+}
+
+#[tokio::test]
+async fn page_update_clear_parent_sends_null() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PAGE_DETAIL))).await;
+
+    pidash::cli::page::cmd_update(
+        &client(&fake),
+        pidash::cli::page::UpdateArgs {
+            title: Some("Renamed".into()),
+            clear_parent: true,
+            ..update_args()
+        },
+    )
+    .await
+    .expect("page update --clear-parent");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(
+        body_json(&recorded[0]),
+        serde_json::json!({"name": "Renamed", "parent": null})
+    );
+}
+
+#[tokio::test]
+async fn page_update_without_fields_fails_before_any_request() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PAGE_DETAIL))).await;
+
+    let err = pidash::cli::page::cmd_update(&client(&fake), update_args())
+        .await
+        .expect_err("an update with nothing to change is invalid");
+
+    assert_eq!(err.exit_code, EXIT_INVALID);
+    assert!(fake.recorded.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn page_update_rejects_a_non_uuid_page_id_before_any_request() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PAGE_DETAIL))).await;
+
+    let err = pidash::cli::page::cmd_update(
+        &client(&fake),
+        pidash::cli::page::UpdateArgs {
+            page_id: "conventions".into(),
+            title: Some("Renamed".into()),
+            ..update_args()
+        },
+    )
+    .await
+    .expect_err("a slug is not a page id");
+
+    assert_eq!(err.exit_code, EXIT_INVALID);
+    assert!(fake.recorded.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn page_update_maps_a_locked_page_409_to_invalid() {
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 409,
+        status_text: "Conflict",
+        body: r#"{"error":"Page is locked"}"#.into(),
+    }))
+    .await;
+
+    let err = pidash::cli::page::cmd_update(
+        &client(&fake),
+        pidash::cli::page::UpdateArgs {
+            title: Some("Renamed".into()),
+            ..update_args()
+        },
+    )
+    .await
+    .expect_err("409 must surface");
+
+    assert_eq!(err.exit_code, EXIT_INVALID);
+}
+
+#[tokio::test]
+async fn page_update_maps_a_live_service_503_to_server() {
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 503,
+        status_text: "Service Unavailable",
+        body: r#"{"error":"live document service unavailable"}"#.into(),
+    }))
+    .await;
+
+    let err = pidash::cli::page::cmd_update(
+        &client(&fake),
+        pidash::cli::page::UpdateArgs {
+            body: pidash::cli::page::PageBodyArgs {
+                body: Some("# x".into()),
+                body_file: None,
+            },
+            ..update_args()
+        },
+    )
+    .await
+    .expect_err("503 must surface");
+
+    assert_eq!(err.exit_code, EXIT_SERVER);
+}
+
+#[tokio::test]
+async fn page_archive_posts_to_the_archive_route() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PAGE_DETAIL))).await;
+
+    pidash::cli::page::cmd_archive(
+        &client(&fake),
+        pidash::cli::page::ArchiveArgs {
+            page_id: PAGE_ID.into(),
+            project: "ENG".into(),
+        },
+    )
+    .await
+    .expect("page archive");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded[0].method, "POST");
+    assert_eq!(
+        recorded[0].path,
+        format!("/api/v1/workspaces/acme/projects/ENG/pages/{PAGE_ID}/archive/")
+    );
+}
+
+#[tokio::test]
+async fn page_unarchive_deletes_the_archive_route() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PAGE_DETAIL))).await;
+
+    pidash::cli::page::cmd_unarchive(
+        &client_for_run(&fake, "run-8"),
+        pidash::cli::page::ArchiveArgs {
+            page_id: PAGE_ID.into(),
+            project: "ENG".into(),
+        },
+    )
+    .await
+    .expect("page unarchive");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded[0].method, "DELETE");
+    assert_eq!(
+        recorded[0].path,
+        format!("/api/v1/workspaces/acme/projects/ENG/pages/{PAGE_ID}/archive/")
+    );
+    assert_eq!(recorded[0].run_id.as_deref(), Some("run-8"));
+}
+
+#[tokio::test]
+async fn page_archive_rejects_a_non_uuid_page_id_before_any_request() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PAGE_DETAIL))).await;
+
+    let err = pidash::cli::page::cmd_archive(
+        &client(&fake),
+        pidash::cli::page::ArchiveArgs {
+            page_id: "conventions".into(),
+            project: "ENG".into(),
+        },
+    )
+    .await
+    .expect_err("a slug is not a page id");
+
+    assert_eq!(err.exit_code, EXIT_INVALID);
+    assert!(fake.recorded.lock().unwrap().is_empty());
+}
+
+// The remaining page tests drive the real `pidash` binary, because stdin
+// (`--body-file -`), clap conflicts, and the process exit code are only
+// observable end to end. An empty config dir makes `CliEnv::resolve` fall
+// through to the env vars pointing at the fake.
+
+struct BinOutput {
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+async fn run_pidash(fake: &Fake, args: &[&str], stdin: &str) -> BinOutput {
+    let config_dir = tempfile::tempdir().unwrap();
+    let api_url = format!("http://{}", fake.addr);
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let stdin = stdin.to_string();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(env!("CARGO_BIN_EXE_pidash"))
+            .env("PIDASH_CONFIG_DIR", config_dir.path())
+            .env("PIDASH_DATA_DIR", config_dir.path().join("data"))
+            .env("PIDASH_API_URL", api_url)
+            .env("PIDASH_WORKSPACE_SLUG", "acme")
+            .env("PIDASH_TOKEN", "test-token")
+            .env_remove("PIDASH_RUN_ID")
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn pidash");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().expect("wait pidash");
+        BinOutput {
+            code: out.status.code(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn page_create_body_file_dash_reads_stdin() {
+    let fake = start_fake(Box::new(|_req| created(PAGE_DETAIL))).await;
+
+    let out = run_pidash(
+        &fake,
+        &["page", "create", "--project", "ENG", "--title", "X", "--body-file", "-"],
+        "# Piped\n\nfrom stdin\n",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(printed["id"], PAGE_ID);
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded[0].method, "POST");
+    assert_eq!(
+        body_json(&recorded[0]),
+        serde_json::json!({"name": "X", "description_markdown": "# Piped\n\nfrom stdin\n"})
+    );
+}
+
+#[tokio::test]
+async fn page_body_and_body_file_conflict_at_the_cli() {
+    let fake = start_fake(Box::new(|_req| created(PAGE_DETAIL))).await;
+
+    let out = run_pidash(
+        &fake,
+        &[
+            "page", "create", "--project", "ENG", "--title", "X", "--body", "x", "--body-file", "-",
+        ],
+        "",
+    )
+    .await;
+
+    assert_ne!(out.code, Some(0));
+    assert!(out.stderr.contains("cannot be used with"), "stderr: {}", out.stderr);
+    assert!(fake.recorded.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn page_update_without_fields_exits_2_without_a_request() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PAGE_DETAIL))).await;
+
+    let out = run_pidash(&fake, &["page", "update", PAGE_ID, "--project", "ENG"], "").await;
+
+    assert_eq!(out.code, Some(EXIT_INVALID), "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("nothing to update"));
+    assert!(fake.recorded.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn page_update_non_uuid_page_id_exits_2_without_a_request() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PAGE_DETAIL))).await;
+
+    let out = run_pidash(
+        &fake,
+        &["page", "update", "conventions", "--project", "ENG", "--title", "Y"],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(EXIT_INVALID), "stderr: {}", out.stderr);
     assert!(fake.recorded.lock().unwrap().is_empty());
 }
