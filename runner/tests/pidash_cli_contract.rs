@@ -1633,3 +1633,306 @@ async fn issue_empty_description_file_or_stdin_exits_2_without_a_request() {
         assert!(fake.recorded.lock().unwrap().is_empty(), "{args:?}");
     }
 }
+
+// --- labels --------------------------------------------------------------
+
+const PROJECT: &str = "00000000-0000-0000-0000-0000000000aa";
+const ENG_LABELS: &str =
+    "/api/v1/workspaces/acme/projects/00000000-0000-0000-0000-0000000000aa/labels/";
+
+/// A project label list, as the paginated endpoint returns it.
+fn labels_page() -> String {
+    r#"{"count":2,"next_cursor":null,"prev_cursor":null,"results":[
+         {"id":"00000000-0000-0000-0000-00000000b001","name":"bug"},
+         {"id":"00000000-0000-0000-0000-00000000b002","name":"Frontend"}]}"#
+        .to_string()
+}
+
+#[tokio::test]
+async fn label_names_resolve_against_the_project_label_list() {
+    // `--label bug,Frontend` costs exactly one list fetch, and matching is
+    // case-insensitive — the same contract `--state` already has.
+    let fake = start_fake(Box::new(|req| {
+        assert_eq!(req.method, "GET");
+        assert!(
+            req.path.starts_with(ENG_LABELS),
+            "unexpected path: {}",
+            req.path
+        );
+        CannedResponse::ok(labels_page())
+    }))
+    .await;
+    let client = client(&fake);
+    let ids = pidash::cli::resolve::resolve_label_refs(&client, PROJECT, "bug, frontend")
+        .await
+        .expect("resolve labels");
+    assert_eq!(
+        ids,
+        vec![
+            "00000000-0000-0000-0000-00000000b001".to_string(),
+            "00000000-0000-0000-0000-00000000b002".to_string(),
+        ]
+    );
+    assert_eq!(
+        fake.recorded.lock().unwrap().len(),
+        1,
+        "resolving several names must not cost one request each",
+    );
+}
+
+#[tokio::test]
+async fn label_uuids_skip_the_list_fetch_entirely() {
+    let fake = start_fake(Box::new(|_req| {
+        panic!("a UUID-only --label must not hit the labels endpoint")
+    }))
+    .await;
+    let client = client(&fake);
+    let ids = pidash::cli::resolve::resolve_label_refs(
+        &client,
+        PROJECT,
+        "00000000-0000-0000-0000-00000000b001",
+    )
+    .await
+    .expect("resolve labels");
+    assert_eq!(
+        ids,
+        vec!["00000000-0000-0000-0000-00000000b001".to_string()]
+    );
+    assert!(fake.recorded.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unknown_label_name_is_not_found_and_lists_the_alternatives() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(labels_page()))).await;
+    let client = client(&fake);
+    let err = pidash::cli::resolve::resolve_label_refs(&client, PROJECT, "chore")
+        .await
+        .expect_err("unknown label");
+    assert_eq!(err.exit_code, EXIT_NOT_FOUND);
+    assert_eq!(err.detail.as_deref(), Some("available: bug, Frontend"));
+}
+
+#[tokio::test]
+async fn fetch_project_labels_walks_every_page() {
+    // A project with more labels than one page must still resolve a name that
+    // lives on the second page.
+    let fake = start_fake(Box::new(|req| {
+        if req.path.contains("cursor=p2") {
+            CannedResponse::ok(
+                r#"{"count":2,"next_cursor":null,"results":[
+                     {"id":"l-2","name":"frontend"}]}"#,
+            )
+        } else {
+            CannedResponse::ok(
+                r#"{"count":2,"next_cursor":"p2","results":[
+                     {"id":"l-1","name":"bug"}]}"#,
+            )
+        }
+    }))
+    .await;
+    let client = client(&fake);
+    let labels = pidash::cli::resolve::fetch_project_labels(&client, PROJECT)
+        .await
+        .expect("fetch labels");
+    let names: Vec<&str> = labels.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, vec!["bug", "frontend"]);
+    assert_eq!(fake.recorded.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn label_create_posts_to_the_project_label_endpoint() {
+    let fake = start_fake(Box::new(|req| {
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.path, ENG_LABELS);
+        let body: serde_json::Value = serde_json::from_str(&req.body).expect("json body");
+        assert_eq!(body, serde_json::json!({"name": "bug", "color": "#ff5630"}),);
+        CannedResponse::ok(r#"{"id":"l-1","name":"bug"}"#)
+    }))
+    .await;
+    let client = client(&fake);
+    let args = pidash::cli::label::CreateArgs {
+        project: pidash::cli::label::ProjectArg { project: None },
+        name: "  bug  ".into(),
+        color: Some("#ff5630".into()),
+        description: None,
+        parent: None,
+    };
+    pidash::cli::label::cmd_create(&client, PROJECT, args)
+        .await
+        .expect("create label");
+    assert_eq!(
+        fake.recorded.lock().unwrap()[0].api_key.as_deref(),
+        Some("test-token")
+    );
+}
+
+#[tokio::test]
+async fn label_delete_resolves_the_name_then_deletes_by_uuid() {
+    // The REST route is UUID-keyed, so a name costs one list fetch first.
+    let fake = start_fake(Box::new(|req| {
+        if req.method == "GET" {
+            return CannedResponse::ok(labels_page());
+        }
+        assert_eq!(req.method, "DELETE");
+        assert_eq!(
+            req.path,
+            format!("{ENG_LABELS}00000000-0000-0000-0000-00000000b001/"),
+        );
+        CannedResponse {
+            status: 204,
+            status_text: "No Content",
+            body: String::new(),
+        }
+    }))
+    .await;
+    let client = client(&fake);
+    let args = pidash::cli::label::DeleteArgs {
+        label: "BUG".into(),
+        project: pidash::cli::label::ProjectArg { project: None },
+    };
+    pidash::cli::label::cmd_delete(&client, PROJECT, args)
+        .await
+        .expect("delete label");
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 2);
+    assert_eq!(recorded[1].method, "DELETE");
+}
+
+#[tokio::test]
+async fn issue_patch_add_label_merges_with_the_issues_current_labels() {
+    // `--add-label` is relative, but the API replaces the whole set — so the
+    // PATCH must carry the existing labels plus the new one, taken from the
+    // by-identifier GET the patch already makes.
+    let fake = start_fake(Box::new(|req| {
+        if req.method == "GET" && req.path.ends_with("/work-items/ENG-7/") {
+            return CannedResponse::ok(
+                r#"{"id":"00000000-0000-0000-0000-000000000007",
+                    "project":"00000000-0000-0000-0000-0000000000aa",
+                    "name":"handler",
+                    "labels":["00000000-0000-0000-0000-00000000b002"]}"#,
+            );
+        }
+        if req.method == "GET" {
+            return CannedResponse::ok(labels_page());
+        }
+        assert_eq!(req.method, "PATCH");
+        let body: serde_json::Value = serde_json::from_str(&req.body).expect("json body");
+        assert_eq!(
+            body["labels"],
+            serde_json::json!([
+                "00000000-0000-0000-0000-00000000b002",
+                "00000000-0000-0000-0000-00000000b001",
+            ]),
+            "existing labels must survive an --add-label",
+        );
+        CannedResponse::ok(r#"{"id":"00000000-0000-0000-0000-000000000007"}"#)
+    }))
+    .await;
+    let client = client(&fake);
+    pidash::cli::issue::cmd_patch(
+        &client,
+        pidash::cli::issue::PatchArgs {
+            identifier: "ENG-7".into(),
+            state: None,
+            title: None,
+            description: Default::default(),
+            priority: None,
+            parent: None,
+            clear_parent: false,
+            label: None,
+            add_label: vec!["bug".into()],
+            remove_label: vec![],
+            clear_labels: false,
+        },
+    )
+    .await
+    .expect("patch");
+}
+
+#[tokio::test]
+async fn issue_patch_clear_labels_sends_an_empty_array() {
+    let fake = start_fake(Box::new(|req| {
+        if req.method == "GET" {
+            return CannedResponse::ok(
+                r#"{"id":"00000000-0000-0000-0000-000000000007",
+                    "project":"00000000-0000-0000-0000-0000000000aa",
+                    "labels":["l-1"]}"#,
+            );
+        }
+        let body: serde_json::Value = serde_json::from_str(&req.body).expect("json body");
+        assert_eq!(body["labels"], serde_json::json!([]));
+        CannedResponse::ok(r#"{"id":"00000000-0000-0000-0000-000000000007"}"#)
+    }))
+    .await;
+    let client = client(&fake);
+    pidash::cli::issue::cmd_patch(
+        &client,
+        pidash::cli::issue::PatchArgs {
+            identifier: "ENG-7".into(),
+            state: None,
+            title: None,
+            description: Default::default(),
+            priority: None,
+            parent: None,
+            clear_parent: false,
+            label: None,
+            add_label: vec![],
+            remove_label: vec![],
+            clear_labels: true,
+        },
+    )
+    .await
+    .expect("patch");
+}
+
+#[tokio::test]
+async fn issue_patch_add_and_remove_share_one_label_lookup() {
+    // Both flags resolve against a single label-list fetch: one GET for the
+    // issue, one GET for the labels, one PATCH.
+    let fake = start_fake(Box::new(|req| {
+        if req.method == "GET" && req.path.ends_with("/work-items/ENG-7/") {
+            return CannedResponse::ok(
+                r#"{"id":"00000000-0000-0000-0000-000000000007",
+                    "project":"00000000-0000-0000-0000-0000000000aa",
+                    "labels":["00000000-0000-0000-0000-00000000b002"]}"#,
+            );
+        }
+        if req.method == "GET" {
+            return CannedResponse::ok(labels_page());
+        }
+        let body: serde_json::Value = serde_json::from_str(&req.body).expect("json body");
+        assert_eq!(
+            body["labels"],
+            serde_json::json!(["00000000-0000-0000-0000-00000000b001"]),
+            "remove must drop the old label and add must append the new one",
+        );
+        CannedResponse::ok(r#"{"id":"00000000-0000-0000-0000-000000000007"}"#)
+    }))
+    .await;
+    let client = client(&fake);
+    pidash::cli::issue::cmd_patch(
+        &client,
+        pidash::cli::issue::PatchArgs {
+            identifier: "ENG-7".into(),
+            state: None,
+            title: None,
+            description: Default::default(),
+            priority: None,
+            parent: None,
+            clear_parent: false,
+            label: None,
+            add_label: vec!["bug".into()],
+            remove_label: vec!["Frontend".into()],
+            clear_labels: false,
+        },
+    )
+    .await
+    .expect("patch");
+    let recorded = fake.recorded.lock().unwrap();
+    let label_gets = recorded
+        .iter()
+        .filter(|r| r.method == "GET" && r.path.contains("/labels/"))
+        .count();
+    assert_eq!(label_gets, 1, "add + remove must share one label lookup");
+    assert_eq!(recorded.len(), 3, "expected issue GET, labels GET, PATCH");
+}
