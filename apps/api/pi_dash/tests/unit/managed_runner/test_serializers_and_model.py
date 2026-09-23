@@ -285,14 +285,32 @@ def test_engine_version_event_reaches_a_handler_under_real_logging_config(bundle
     for logger_config in config["loggers"].values():
         logger_config["handlers"] = ["capture"]
 
-    event_logger = logging.getLogger("pi_dash.managed_runner")
+    # ``dictConfig`` rewires *every* logger the config declares, not just ours,
+    # and there is no "undo". Snapshot them all so the capture handler and the
+    # ``propagate=False`` it sets cannot leak into the rest of the pytest
+    # process — a later test using ``caplog`` on e.g. ``pi_dash.api`` would
+    # otherwise capture nothing, because caplog's handler lives on the root
+    # logger and ``propagate=False`` stops records from ever reaching it.
+    saved = {}
+    for name in config["loggers"]:
+        existing = logging.getLogger(name)
+        saved[name] = (
+            existing.level,
+            existing.handlers[:],
+            existing.propagate,
+            existing.disabled,
+        )
+
     try:
         logging.config.dictConfig(config)
         apply_hello(bundled_runner, {"os": "linux", "engine_version": "codex 1.2.3"})
     finally:
-        event_logger.handlers = []
-        event_logger.setLevel(logging.NOTSET)
-        event_logger.propagate = True
+        for name, (level, handlers, propagate, disabled) in saved.items():
+            restored = logging.getLogger(name)
+            restored.setLevel(level)
+            restored.handlers = handlers
+            restored.propagate = propagate
+            restored.disabled = disabled
 
     messages = [r.getMessage() for r in records if "managed_runner.engine_version" in r.getMessage()]
     assert len(messages) == 1, "the engine_version event never reached a handler"
