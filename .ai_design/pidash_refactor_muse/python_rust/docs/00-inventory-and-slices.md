@@ -418,21 +418,32 @@ This section is the filer's contract. Filing is done by a human or an agent run 
 `pidash` CLI (`issue create --parent --description-file`, `issue relate`) or the MCP connector,
 reading §6a/§6b directly. Nothing is generated from a spreadsheet.
 
-**Foundation issues (F-01 … F-10) and pilots** are filed by hand, one at a time, in Backlog under
+**File everything at once.** Foundation issues, pilots, and all 38 domain epics are
+filed in a single session, in Backlog under `PIDASHCONV-1` — not per stage. Filing is
+cheap; release is gated. Nothing is released (moved to In Progress) until its content
+prerequisites are green: the Release scheduler moves work only under epics carrying the
+`open` label, which Rich adds per stage, and only when every `blocked_by` edge is Done.
+
+**Foundation issues (F-01 … F-10) and pilots** are filed in the same session, in Backlog under
 `PIDASHCONV-1`, with `blocked_by` as in §6a. They are single issues; agents do not split them.
 
-**Domain epics (D-nn)** are filed per stage (stage 4: three; stage 5: the rest), in Backlog under
-`PIDASHCONV-1`, one epic per §6b row. The epic body carries, verbatim from the row plus the
-stage context:
+**Domain epics (D-nn)**, one epic per §6b row, filed in the same session. The epic body carries,
+verbatim from the row plus the filing context:
 
 - `Domain:` id and name; `Slice:` number; `Prefix / routes:`; `Disposition:` (`minimal` rows
   say what is narrowed).
-- `Ported from:` the OSS `main` sha at filing (the drift record).
+- `Ported from:` the OSS `main` sha at filing (the drift record). Filing early means this sha
+  goes stale — that is expected and self-healing: the Drift scheduler diffs `main` since
+  `Ported from` and files re-syncs for anything that moved, so staleness only enlarges the
+  first re-sync, never silently skips code.
 - `Python sources:` the row's paths; `Rust output:` the module paths under `rust-api/` this
   domain owns — the only paths its sub-issues may touch; foundation crates are read-only.
-- `Contract tests:` the stage-1 contract-test issue id for this domain (the gate).
-- `Reference:` the wiki pages to read (Start here, Porting guide, Semantic traps) with their
-  `updated_at`, and the pilot files that show each pattern.
+- `Contract tests:` the stage-1 contract-test issue for this domain's group (the gate) — by
+  group name where the issue id is not yet known, replaced with the id when both are filed
+  in the same session.
+- `Reference:` the wiki pages to read (Start here, Porting guide, Semantic traps) — by name
+  where pages are not yet binding; the epic description plus frozen repo copies are the
+  fallback until page-read lands, and the filer records which fallback each epic uses.
 - `Split instructions:` see below.
 - `Depends on:` the epics or foundation issues this one is `blocked_by` (§6 order), mirrored as
   `blocked_by` edges with `pidash issue relate`.
