@@ -18,13 +18,13 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from asgiref.sync import sync_to_async
-from channels.db import database_sync_to_async
 from celery import shared_task
 from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
-from django.db import close_old_connections, transaction
+from django.db import transaction
 from django.utils import timezone
 
+from pi_dash.utils.db_async import close_idle_connections, db_sync_to_async
 from pi_dash.assistant.errors import AssistantError
 from pi_dash.assistant.models import (
     AssistantMessage,
@@ -65,7 +65,7 @@ class _Ctx:
 
 
 # --------------------------------------------------------------------------- #
-# Sync DB helpers (called from async via database_sync_to_async, which closes
+# Sync DB helpers (called from async via db_sync_to_async, which closes
 # the Django connection around each call so a long agent turn does not park an
 # idle Postgres connection for its whole duration).
 # --------------------------------------------------------------------------- #
@@ -229,7 +229,7 @@ class _Streamer:
         from pydantic_ai.messages import PartDeltaEvent, PartStartEvent, TextPart, TextPartDelta
 
         async for event in event_stream:
-            if await database_sync_to_async(_is_cancelled)(self.ctx.turn.id):
+            if await db_sync_to_async(_is_cancelled)(self.ctx.turn.id):
                 raise _Cancelled()
             if isinstance(event, PartStartEvent):
                 part = getattr(event, "part", None)
@@ -245,7 +245,7 @@ class _Streamer:
         await self._finalize()
 
     async def _start(self, initial: str):
-        self.message = await database_sync_to_async(_start_assistant_row)(self.ctx)
+        self.message = await db_sync_to_async(_start_assistant_row)(self.ctx)
         self.text = ""
         self.pending = ""
         self.last_flush = asyncio.get_running_loop().time()
@@ -267,9 +267,9 @@ class _Streamer:
         if self.message is not None and self.pending:
             chunk, self.pending = self.pending, ""
             # Deliberately a bare ``sync_to_async`` while every other ORM call
-            # in this module uses ``database_sync_to_async``. This is the hot
+            # in this module uses ``db_sync_to_async``. This is the hot
             # streaming path — it fires every DELTA_FLUSH_MS (100ms) for the
-            # length of a turn — and ``database_sync_to_async`` closes the
+            # length of a turn — and ``db_sync_to_async`` closes the
             # connection after each call, so using it here would mean a fresh
             # connect + auth round-trip to the (remote) database ten times a
             # second. The connection this leaves open is the worker's single
@@ -282,13 +282,13 @@ class _Streamer:
         if self.message is None:
             return
         await self._flush()
-        await database_sync_to_async(_finalize_row)(self.ctx, self.message, self.text, MessageStatus.COMPLETED)
+        await db_sync_to_async(_finalize_row)(self.ctx, self.message, self.text, MessageStatus.COMPLETED)
         self.message = None
         self.text = ""
 
     async def fail_open_row(self, status: str):
         if self.message is not None:
-            await database_sync_to_async(_finalize_row)(self.ctx, self.message, self.text, status)
+            await db_sync_to_async(_finalize_row)(self.ctx, self.message, self.text, status)
             self.message = None
 
 
@@ -305,28 +305,28 @@ async def _run_turn(turn_id: str):
         resolve_toolsets_for_user,
     )
 
-    ctx = await database_sync_to_async(_load_context)(turn_id)
+    ctx = await db_sync_to_async(_load_context)(turn_id)
     if ctx is None:
         return
-    if not await database_sync_to_async(_mark_running)(ctx):
+    if not await db_sync_to_async(_mark_running)(ctx):
         return  # turn was already taken, cancelled, or swept
 
     try:
-        model = await database_sync_to_async(resolve_model_for_user)(ctx.user)
+        model = await db_sync_to_async(resolve_model_for_user)(ctx.user)
     except AssistantError as exc:
-        await database_sync_to_async(_fail_turn)(ctx, exc.code, exc.detail)
+        await db_sync_to_async(_fail_turn)(ctx, exc.code, exc.detail)
         return
 
     # Tool servers are additive: a failure to build them degrades the turn's
     # capabilities but never fails it, so this is deliberately outside the
     # model-resolution try/except above.
-    toolsets, skipped = await database_sync_to_async(_resolve_toolsets)(
+    toolsets, skipped = await db_sync_to_async(_resolve_toolsets)(
         ctx, resolve_toolsets_for_user
     )
 
-    hist = await database_sync_to_async(history.load_history)(ctx.thread)
+    hist = await db_sync_to_async(history.load_history)(ctx.thread)
     streamer = _Streamer(ctx)
-    model_label = await database_sync_to_async(_model_label)(ctx.user)
+    model_label = await db_sync_to_async(_model_label)(ctx.user)
 
     # Servers that dropped out mid-run were absorbed to keep the turn alive;
     # report them however the turn ends. On the failure paths this matters
@@ -344,27 +344,27 @@ async def _run_turn(turn_id: str):
             event_stream_handler=streamer.handle,
         )
     except _Cancelled:
-        await database_sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
+        await db_sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
         await streamer.fail_open_row(MessageStatus.CANCELLED)
-        await database_sync_to_async(_cancel_turn)(ctx)
+        await db_sync_to_async(_cancel_turn)(ctx)
         return
     except UsageLimitExceeded as exc:
-        await database_sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
+        await db_sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
         await streamer.fail_open_row(MessageStatus.FAILED)
-        await database_sync_to_async(_fail_turn)(ctx, "iteration_limit", str(exc))
+        await db_sync_to_async(_fail_turn)(ctx, "iteration_limit", str(exc))
         return
     except Exception as exc:  # noqa: BLE001 — classify provider failures
-        await database_sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
+        await db_sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
         await streamer.fail_open_row(MessageStatus.FAILED)
         code, detail = _classify_error(exc)
-        await database_sync_to_async(_fail_turn)(ctx, code, detail)
+        await db_sync_to_async(_fail_turn)(ctx, code, detail)
         return
 
-    await database_sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
+    await db_sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
 
-    model_messages = await database_sync_to_async(history.dump_new_messages)(result)
+    model_messages = await db_sync_to_async(history.dump_new_messages)(result)
     usage = _extract_usage(result)
-    await database_sync_to_async(_complete_turn)(ctx, model_messages, usage, model_label)
+    await db_sync_to_async(_complete_turn)(ctx, model_messages, usage, model_label)
 
 
 def _resolve_toolsets(ctx, resolver) -> tuple[list, list]:
@@ -501,11 +501,11 @@ async def _close_turn_connection() -> None:
     host with home-page.
 
     This has to run *on that thread*: Django connections are thread-local, so
-    calling ``close_old_connections()`` from the Celery main thread would not
+    calling ``close_idle_connections()`` from the Celery main thread would not
     reach it. ``sync_to_async(thread_sensitive=True)`` routes back to the same
     process-wide executor the turn used, even from this second event loop.
     """
-    await sync_to_async(close_old_connections)()
+    await sync_to_async(close_idle_connections)()
 
 
 @shared_task(name="assistant.sweep_stale_turns")

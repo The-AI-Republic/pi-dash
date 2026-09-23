@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
-from channels.db import database_sync_to_async
 from django.conf import settings
+from pi_dash.utils.db_async import db_sync_to_async
 
 GITHUB_TOOL_NAMES = frozenset({"github_get_file", "github_get_linked_pull_request"})
 
@@ -35,7 +35,7 @@ def build_github_mcp(run_id, allowed_names):
         )
         async def github_get_file(path: str, ref: str = ""):
             """Read a bounded UTF-8 file from the run's verified project repository."""
-            return await database_sync_to_async(sync_tools["github_get_file"])(path, ref)
+            return await db_sync_to_async(sync_tools["github_get_file"])(path, ref)
 
     if "github_get_linked_pull_request" in sync_tools:
 
@@ -47,7 +47,7 @@ def build_github_mcp(run_id, allowed_names):
         )
         async def github_get_linked_pull_request(aspect: str = "summary"):
             """Read one bounded aspect of the GitHub PR already linked to the run's issue."""
-            return await database_sync_to_async(sync_tools["github_get_linked_pull_request"])(aspect)
+            return await db_sync_to_async(sync_tools["github_get_linked_pull_request"])(aspect)
 
     return server
 
