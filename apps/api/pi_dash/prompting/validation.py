@@ -148,6 +148,8 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
                 "count": 5,
                 "cap": 10,
                 "remaining": 5,
+                "waited": 2,
+                "wait_allowance": 8,
                 "spent": False,
                 "clock_live": True,
                 "interval_seconds": 10800,

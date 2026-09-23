@@ -1296,10 +1296,14 @@ class IssueDetailSerializer(IssueSerializer):
             "enabled": ticker.enabled,
             "user_disabled": ticker.user_disabled,
             # One pool per issue: ``used`` of ``max_ticks`` (project pool +
-            # Re-tick grants). ``tick_count`` is the pre-pool spelling.
+            # Re-tick grants + waits). ``tick_count`` is the pre-pool
+            # spelling. ``waited`` is reported separately and must not be
+            # folded into the pool for display — a high wait count is how a
+            # human tells a stuck issue from a busy one (PDASHOSS01-204).
             "used": ticker.used,
             "tick_count": ticker.used,
             "granted": ticker.granted,
+            "waited": ticker.waited,
             "max_ticks": ticker.effective_max_ticks(),
             "remaining": ticker.remaining(),
             "interval_seconds": ticker.effective_interval_seconds(),

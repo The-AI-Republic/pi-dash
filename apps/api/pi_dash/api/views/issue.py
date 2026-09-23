@@ -984,6 +984,86 @@ class IssueReTickAPIEndpoint(BaseAPIView):
         return Response(payload, status=status.HTTP_200_OK)
 
 
+class IssueWaitAPIEndpoint(BaseAPIView):
+    """Buy back one tick so an agent can wait on a blocker for free.
+
+    The agent already sees its open blockers and their states in every tick's
+    prompt. When it reads them and decides it cannot safely proceed, it
+    records why in its workpad, calls this, and yields. The wait raises the
+    issue's cap by one, so the run that is ending costs no net budget, and
+    the next cadence tick re-asks. The platform does not interpret
+    ``blocked_by`` semantics, read the workpad, or decide when the wait ends
+    — that judgement is the agent's (PDASHOSS01-204).
+
+    Unlike Re-tick and Run AI this is deliberately **not** guarded against
+    agent callers: the agent is the intended caller. One call adds at most
+    one tick and the per-issue allowance (one extra pool) bounds the total,
+    so a wrong caller can do little; the activity entry records who called.
+
+    Responses (always 200 — a refusal is a no-op, not an error):
+    ``{applied, reason, used, granted, waited, cap}``. ``reason`` is
+    ``waited`` on success, else ``wait_cap_reached`` (allowance spent),
+    ``infinite_pool`` (no budget to buy back) or ``no_ticker``.
+    """
+
+    model = Issue
+    permission_classes = [ProjectEntityPermission]
+
+    @extend_schema(
+        operation_id="wait_work_item",
+        summary="Wait on a blocker",
+        description=(
+            "Record that this work item's agent has chosen to wait on an open blocker. "
+            "Raises the issue's tick cap by one so the run that is ending costs no net "
+            "budget. Bounded by one extra pool; past that the call is a no-op reporting "
+            "`wait_cap_reached`. Always 200 — check `applied` and `reason`."
+        ),
+        tags=["Work Items"],
+        request=None,
+        parameters=[
+            WORKSPACE_SLUG_PARAMETER,
+            PROJECT_ID_PARAMETER,
+            ISSUE_ID_PARAMETER,
+        ],
+        responses={
+            200: OpenApiResponse(description="Wait applied, or refused with a reason"),
+            404: WORK_ITEM_NOT_FOUND_RESPONSE,
+        },
+    )
+    def post(self, request, slug, project_id, pk):
+        from pi_dash.orchestration import scheduling
+
+        issue = (
+            Issue.objects.select_related("project", "workspace", "state")
+            .filter(workspace__slug=slug, project_id=project_id, pk=pk)
+            .first()
+        )
+        if issue is None:
+            return Response({"error": "Work item not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Best-effort attribution only: an unparseable or foreign run id
+        # leaves ``run`` None and the wait still applies. Refusing here would
+        # make the cheap path fragile for the one caller it exists for.
+        run, _ = resolve_moved_by_run(request, issue)
+        result = scheduling.wait_ticker(issue, run=run, actor=request.user)
+        ticker = result["ticker"]
+        payload = {
+            "applied": result["applied"],
+            "reason": result["reason"],
+        }
+        if ticker is not None:
+            payload.update(
+                {
+                    "used": ticker.used,
+                    "granted": ticker.granted,
+                    "waited": ticker.waited,
+                    "cap": ticker.effective_max_ticks(),
+                    "wait_allowance_remaining": ticker.wait_allowance(),
+                }
+            )
+        return Response(payload, status=status.HTTP_200_OK)
+
+
 RUN_ID_HEADER = "X-Pi-Dash-Run-Id"
 
 

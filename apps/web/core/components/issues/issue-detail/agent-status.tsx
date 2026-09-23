@@ -92,13 +92,25 @@ function formatRunDone(count: number, t: TranslationFn): string {
   });
 }
 
-function formatTickBudget(ticker: TIssueAgentTicker | null | undefined, t: TranslationFn): string | null {
+/** Exported for tests — the wait arithmetic below is easy to get subtly wrong. */
+export function formatTickBudget(ticker: TIssueAgentTicker | null | undefined, t: TranslationFn): string | null {
   if (!ticker) return null;
   // One pool per issue, spent in any stage; ``used`` falls back to the
   // pre-pool ``tick_count`` spelling for older payloads.
   const used = ticker.used ?? ticker.tick_count;
+  const waited = ticker.waited ?? 0;
   if (ticker.max_ticks === -1) return t("{count} runs used, no cap", { count: used });
-  return t("{count} of {max} runs used", { count: used, max: ticker.max_ticks });
+  // Waits are never folded into the pool. Each `pidash issue wait` adds one
+  // to both `used` (the run it ended) and `max_ticks` (the tick it bought
+  // back), so subtracting `waited` from both sides recovers the pool as the
+  // human set it and the runs that actually did work: 6 work runs and 4
+  // waits read "6 of 10 runs used, 4 waits", not "10 of 14".
+  const workRuns = Math.max(0, used - waited);
+  const pool = Math.max(0, ticker.max_ticks - waited);
+  const budget = t("{count} of {max} runs used", { count: workRuns, max: pool });
+  if (waited === 0) return budget;
+  // Same singular/plural shape as formatRunDone above.
+  return `${budget}, ${t(waited === 1 ? "{count} wait" : "{count} waits", { count: waited })}`;
 }
 
 function getPayloadString(payload: Record<string, unknown> | null | undefined, key: string): string | null {

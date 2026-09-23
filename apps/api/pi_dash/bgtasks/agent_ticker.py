@@ -47,10 +47,13 @@ def scan_due_tickers() -> int:
     Returns the number of fan-outs (mostly for logging / tests).
     """
     now = timezone.now()
-    # One pool per issue: cap = project pool + Re-tick grants; ``-1`` means
-    # infinite. A row owing a *pending entry* (design §4.5) is admitted
-    # regardless of cap — a human's free run must fire even on a spent
-    # pool; ``fire_tick`` re-evaluates the cap after the claim.
+    # One pool per issue: cap = project pool + Re-tick grants + the ticks
+    # bought back by ``pidash issue wait``; ``-1`` means infinite. This
+    # mirrors ``IssueAgentTicker.effective_max_ticks`` in SQL — the two must
+    # agree, or a waited issue is admitted here and refused there (or worse,
+    # never re-ticks). A row owing a *pending entry* (design §4.5) is
+    # admitted regardless of cap — a human's free run must fire even on a
+    # spent pool; ``fire_tick`` re-evaluates the cap after the claim.
     due_ids = list(
         IssueAgentTicker.objects.filter(
             enabled=True,
@@ -59,7 +62,7 @@ def scan_due_tickers() -> int:
         .filter(
             Q(pending_entry=True)
             | Q(issue__project__agent_default_max_ticks=INFINITE_MAX_TICKS)
-            | Q(used__lt=F("issue__project__agent_default_max_ticks") + F("granted"))
+            | Q(used__lt=F("issue__project__agent_default_max_ticks") + F("granted") + F("waited"))
         )
         .order_by("next_run_at")
         .values_list("id", flat=True)
@@ -72,17 +75,18 @@ def scan_due_tickers() -> int:
 
 
 @shared_task(name="pi_dash.bgtasks.agent_ticker.fire_tick")
-def fire_tick(ticker_id: str, trigger: str | None = None) -> bool:
+def fire_tick(ticker_id: str) -> bool:
     """Per-ticker worker. Atomically claims and dispatches.
-
-    ``trigger`` set means a forced tick fired *now* regardless of cadence
-    (the blocker-completed wake, ``orchestration.wake``): it skips the
-    ``next_run_at`` check and the waiting-on-blockers pause, labels the run
-    with ``trigger``, and otherwise claims like a timer tick (it counts).
 
     Returns ``True`` if a continuation run was dispatched, ``False`` if the
     fire was skipped (race lost, ticker changed, no active In Progress
-    state, run already in flight, agent waiting on open blockers, etc.).
+    state, run already in flight, etc.).
+
+    The clock is never paused on the agent's behalf: an agent that wants to
+    wait for a blocker says so explicitly with ``pidash issue wait``
+    (:func:`pi_dash.orchestration.scheduling.wait_ticker`), which buys back
+    the tick rather than skipping it. The scheduler reads no relation
+    semantics and no workpad prose (PDASHOSS01-204).
     """
     from pi_dash.orchestration.scheduling import (
         TRIGGER_RUN_AI,
@@ -105,17 +109,7 @@ def fire_tick(ticker_id: str, trigger: str | None = None) -> bool:
         if not ticker.enabled:
             return False
         now = timezone.now()
-        forced = bool(trigger)
-        if not forced and (ticker.next_run_at is None or ticker.next_run_at > now):
-            return False
-        if forced and ticker.pending_entry:
-            # An entry run is already owed (next_run_at = now); it fires on
-            # the next scan and serves the wake too.
-            logger.info(
-                "agent_ticker.fire_tick: skip ticker=%s trigger=%s reason=pending-entry",
-                ticker_id,
-                trigger,
-            )
+        if ticker.next_run_at is None or ticker.next_run_at > now:
             return False
 
         # A pending entry (design §4.5) fires even on a spent pool when it
@@ -175,30 +169,6 @@ def fire_tick(ticker_id: str, trigger: str | None = None) -> bool:
                 issue.pk,
             )
             return False
-        if not forced and not ticker.pending_entry:
-            # The agent chose to wait on open blockers (``Waiting on:`` in
-            # the workpad): skip this cadence tick without spending budget
-            # and look again one interval later. A blocker closing wakes
-            # the issue straight away (``orchestration.wake``).
-            from pi_dash.orchestration.wake import SKIP_WAITING_ON_BLOCKERS, waiting_pause
-
-            waiting_on = waiting_pause(issue, now=now)
-            if waiting_on:
-                from datetime import timedelta
-
-                from pi_dash.db.models.issue_agent_ticker import jitter_seconds
-
-                interval = ticker.effective_interval_seconds()
-                ticker.next_run_at = now + timedelta(seconds=interval + jitter_seconds(interval))
-                ticker.save(update_fields=["next_run_at", "updated_at"])
-                logger.info(
-                    "agent_ticker.fire_tick: skip issue=%s reason=%s waiting_on=%s",
-                    issue.pk,
-                    SKIP_WAITING_ON_BLOCKERS,
-                    ",".join(waiting_on),
-                )
-                return False
-
         # Claim: advance the clock first, then dispatch. We capture the
         # pre-claim values so we can roll back below if dispatch returns
         # None for a reason the pre-claim skips didn't catch (no-pod,
@@ -217,10 +187,7 @@ def fire_tick(ticker_id: str, trigger: str | None = None) -> bool:
         # The queued human lever, if any — who asked and how — so the run
         # is created as that person and labelled with their trigger.
         claim_actor = ticker.pending_entry_actor if free_claim else None
-        if free_claim:
-            claim_trigger = ticker.pending_entry_trigger or TRIGGER_RUN_AI
-        else:
-            claim_trigger = trigger or TRIGGER_TICK
+        claim_trigger = (ticker.pending_entry_trigger or TRIGGER_RUN_AI) if free_claim else TRIGGER_TICK
 
         # Only machine-started runs spend the pool: a timer tick, or an
         # entry an agent's own move queued. A human's free entry does not.

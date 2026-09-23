@@ -348,6 +348,11 @@ def _tick_context(issue: Issue) -> Optional[Dict[str, Any]]:
     ``cap`` / ``remaining`` are ``None`` for an infinite (``-1``) pool so
     templates can branch with ``{% if tick.cap is not none %}``.
 
+    ``count`` / ``cap`` are net of ``waited``, which is reported on its own:
+    a run the agent ended with ``pidash issue wait`` bought back the tick it
+    spent, so folding waits into the pool would tell the agent its budget is
+    draining when it is not.
+
     Returns ``None`` only when no ticker row exists (the issue has never
     entered the ticking bucket) or when the configured cadence is nonsense
     (the project fields are API-writable with no validation; "every 0
@@ -368,10 +373,20 @@ def _tick_context(issue: Issue) -> Optional[Dict[str, Any]]:
         return None
     unlimited = cap == INFINITE_MAX_TICKS
     remaining = None if unlimited else max(0, cap - ticker.used)
+    # Waits are reported separately and never folded into the pool
+    # (PDASHOSS01-204). A ``pidash issue wait`` adds one to both ``used``
+    # (the run it ended) and ``cap`` (the tick it bought back), so netting
+    # them out recovers the pool as the human set it and the runs that
+    # actually did work — the same arithmetic the web budget line uses.
+    waited = ticker.waited
     return {
-        "count": ticker.used,
-        "cap": None if unlimited else cap,
+        "count": ticker.used if unlimited else max(0, ticker.used - waited),
+        "cap": None if unlimited else max(0, cap - waited),
         "remaining": remaining,
+        # How many times this issue has ended a run by waiting on a blocker,
+        # and how many such waits it may still make for free.
+        "waited": waited,
+        "wait_allowance": ticker.wait_allowance(),
         # ``used`` already counts this run when the ticker started it, so
         # ``remaining == 0`` means "no machine-started run follows this one".
         "spent": (not unlimited) and remaining == 0,
