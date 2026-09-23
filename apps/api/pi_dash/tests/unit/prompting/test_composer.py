@@ -401,10 +401,15 @@ def test_session_framing_renders_tick_guidance_and_schedule():
         "coding-task", workspace=None, project=None, user=None, context=ctx
     ).text
     assert "automatically by the issue's ticker" in out
-    assert "used 5 of 10 agent runs" in out
-    assert "(5 remaining)" in out
-    # The lifecycle section carries the budget line and the pool rules.
-    assert "Runs used on this issue: **5 of 10** (5 remaining)" in out
+    # The sample carries two waits, and a wait run is a run (PDASHOSS01-211):
+    # the cap is the pool plus those two, so 5 of 12 with 7 remaining.
+    assert "used 5 of 12 agent runs (7 remaining)" in out
+    # The lifecycle section carries the budget line and the pool rules, and
+    # must agree with the framing line above — that consistency is the point
+    # of PDASHOSS01-211.
+    assert "Runs used on this issue: **5 of 12** (7 remaining)" in out
+    # Waits are named alongside the count, not excluded from it.
+    assert "counted above and cost no net budget" in out
     assert "about every 3 hours" in out
 
 

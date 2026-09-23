@@ -32,6 +32,7 @@ import {
   IssueAttachmentActivity,
   IssueArchivedAtActivity,
   IssueAgentWaitActivity,
+  IssueAgentWakeActivity,
   IssueInboxActivity,
 } from "./actions";
 
@@ -91,6 +92,11 @@ export const IssueActivityItem = observer(function IssueActivityItem(props: TIss
       return <IssueArchivedAtActivity {...componentDefaultProps} />;
     case "agent_wait":
       return <IssueAgentWaitActivity {...componentDefaultProps} />;
+    // PDASHOSS01-198 wrote these rows before its wake listener was removed in
+    // PDASHOSS01-204. Nothing writes them now, but they are history: without a
+    // case here the default branch renders nothing and they vanish from the feed.
+    case "agent_wake":
+      return <IssueAgentWakeActivity {...componentDefaultProps} />;
     case "intake":
     case "inbox":
       return <IssueInboxActivity {...componentDefaultProps} />;

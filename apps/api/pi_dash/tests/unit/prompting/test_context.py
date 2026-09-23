@@ -734,6 +734,40 @@ def test_context_tick_populated_from_ticker(issue, run, project):
 
 
 @pytest.mark.unit
+def test_context_tick_counts_a_wait_run_as_a_run(issue, run, project):
+    """PDASHOSS01-211: a wait run is a run — nothing is netted out.
+
+    One tick fired and the agent waited on a blocker, so the pool of 10 has
+    one run against a cap raised to 11. The line reads "1 of 11", not the
+    "0 of 10" the old netting produced by subtracting ``waited`` from both
+    ``count`` and ``cap`` while ``remaining`` kept the raw figure.
+    """
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    project.agent_default_max_ticks = 10
+    project.save(update_fields=["agent_default_max_ticks"])
+    IssueAgentTicker.objects.create(issue=issue, used=1, waited=1)
+    tick = build_context(issue, run)["tick"]
+    assert (tick["count"], tick["cap"], tick["remaining"], tick["waited"]) == (1, 11, 10, 1)
+
+
+@pytest.mark.unit
+def test_context_tick_does_not_clamp_when_waits_lead_used(issue, run, project):
+    """Free runs (Run AI, Comment & Run, a human move) spend no tick, so an
+    agent waiting on them leaves ``waited`` ahead of ``used``. The old clamp
+    reported "0 of 10 used" next to 15 remaining, which cannot both be true.
+    """
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    project.agent_default_max_ticks = 10
+    project.save(update_fields=["agent_default_max_ticks"])
+    IssueAgentTicker.objects.create(issue=issue, used=0, waited=5)
+    tick = build_context(issue, run)["tick"]
+    assert (tick["count"], tick["cap"], tick["remaining"], tick["waited"]) == (0, 15, 15, 5)
+    assert tick["cap"] - tick["count"] == tick["remaining"]
+
+
+@pytest.mark.unit
 def test_context_tick_counts_retick_grants(issue, run, project):
     from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
 

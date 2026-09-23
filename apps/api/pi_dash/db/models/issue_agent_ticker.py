@@ -102,9 +102,10 @@ class IssueAgentTicker(BaseModel):
     #: Ticks bought back by ``pidash issue wait`` — the agent read its open
     #: blockers, decided it could not proceed, and yielded. Each call raises
     #: the cap by one, so the run that ends by waiting costs no net budget.
-    #: Counted separately from ``used`` and never folded into the pool for
-    #: display: a high ``waited`` is how a human tells a stuck issue from a
-    #: busy one. Bounded by :meth:`wait_allowance` (PDASHOSS01-204).
+    #: A wait run is a run: it is included in ``used`` and in the displayed
+    #: cap (PDASHOSS01-211). ``waited`` is reported alongside them, because a
+    #: high wait count is how a human tells a stuck issue from a busy one.
+    #: Bounded by :meth:`wait_allowance` (PDASHOSS01-204).
     waited = models.IntegerField(default=0)
 
     user_disabled = models.BooleanField(default=False)
