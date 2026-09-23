@@ -441,9 +441,8 @@ verbatim from the row plus the filing context:
 - `Contract tests:` the stage-1 contract-test issue for this domain's group (the gate) — by
   group name where the issue id is not yet known, replaced with the id when both are filed
   in the same session.
-- `Reference:` the wiki pages to read (Start here, Porting guide, Semantic traps) — by name
-  where pages are not yet binding; the epic description plus frozen repo copies are the
-  fallback until page-read lands, and the filer records which fallback each epic uses.
+- `Reference:` pilot files that show each pattern. Wiki pointers live in the project
+  description (auto-included every run) and are not repeated in epic bodies.
 - `Split instructions:` see below.
 - `Depends on:` the epics or foundation issues this one is `blocked_by` (§6 order), mirrored as
   `blocked_by` edges with `pidash issue relate`.
