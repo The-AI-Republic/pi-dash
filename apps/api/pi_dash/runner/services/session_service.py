@@ -29,6 +29,18 @@ from pi_dash.runner.models import (
 
 logger = logging.getLogger(__name__)
 
+# Structured product events for the managed-runner feature (design §15.1).
+#
+# Deliberately NOT ``getLogger(__name__)``: the project's ``LOGGING`` sets
+# ``disable_existing_loggers: True`` and declares no ``root`` logger, so a
+# module logger such as ``pi_dash.runner.services.session_service`` resolves
+# to level WARNING with zero handlers and its INFO records go nowhere. The
+# ``managed_runner.*`` events are support-facing signals that must actually
+# reach the log stream, so they are emitted on a name the settings configure
+# (see ``pi_dash/settings/local.py`` and ``production.py``). The repo-wide
+# version of this gap is tracked separately in PDASHOSS01-208.
+event_logger = logging.getLogger("pi_dash.managed_runner")
+
 OFFLINE_GRACE_SECS = 60
 
 # Grace window protecting freshly-assigned runs from the reaper.
@@ -133,7 +145,7 @@ def apply_hello(runner: Runner, body: Dict[str, Any]) -> None:
     # legacy or non-managed daemon that never sends it produces no noise.
     reported_engine_version = body.get("engine_version")
     if isinstance(reported_engine_version, str) and reported_engine_version:
-        logger.info(
+        event_logger.info(
             "managed_runner.engine_version runner=%s version=%s",
             runner.id,
             reported_engine_version[:64],

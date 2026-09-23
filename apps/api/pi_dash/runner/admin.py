@@ -4,6 +4,14 @@
 
 from django.contrib import admin
 
+# NOTE: ``django.contrib.admin`` is not in ``INSTALLED_APPS`` and the root
+# URLconf mounts no ``admin/`` route, so Django never autodiscovers this
+# module and nothing here is reachable at runtime (``/admin/runner/runner/``
+# returns 404). ``manage.py check`` registers no ``admin.E###`` checks either,
+# so it cannot validate these classes. The declarations are kept because they
+# encode the intended columns/filters, but treat any acceptance criterion
+# phrased as "visible in admin" as unmet until an admin surface is mounted.
+
 from pi_dash.runner.models import (
     AgentChatApprovalRequest,
     AgentChatEvent,
