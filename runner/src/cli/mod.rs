@@ -9,8 +9,10 @@ pub mod connect;
 pub mod context;
 pub mod doctor;
 mod install;
-pub mod managed;
 pub mod issue;
+pub mod managed;
+// `pub` so the CLI contract tests can drive the label subcommands directly.
+pub mod label;
 // `pub` so the CLI contract tests can drive the page subcommands directly.
 pub mod page;
 mod project;
@@ -127,6 +129,10 @@ pub enum Command {
     /// Read or update a Pi Dash work item (fetch, change state, edit fields).
     Issue(issue::IssueArgs),
 
+    /// Manage a project's labels (`label list` / `create` / `update` /
+    /// `delete`). Attaching a label to a work item lives on `pidash issue`.
+    Label(label::LabelArgs),
+
     /// List, post, or edit work-item comments.
     Comment(comment::CommentArgs),
 
@@ -188,6 +194,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Remove(args) => remove::run(args, &paths).await,
         Command::Ai(args) => ai::run(args, &paths).await,
         Command::Issue(args) => run_crud(issue::run(args, &paths).await),
+        Command::Label(args) => run_crud(label::run(args, &paths).await),
         Command::Comment(args) => run_crud(comment::run(args, &paths).await),
         Command::Page(args) => run_crud(page::run(args, &paths).await),
         Command::State(args) => run_crud(state::run(args, &paths).await),

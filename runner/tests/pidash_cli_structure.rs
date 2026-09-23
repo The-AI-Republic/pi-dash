@@ -41,6 +41,7 @@ fn non_service_commands_still_present() {
         "remove",
         "ai",
         "issue",
+        "label",
         "comment",
         "page",
         "state",

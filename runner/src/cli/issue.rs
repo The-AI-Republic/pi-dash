@@ -13,11 +13,16 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Subcommand};
 use serde_json::{Map, Value};
 
-use crate::api_client::{ApiClient, CliEnv, CliError, EXIT_INVALID, EXIT_UNKNOWN, report_error};
+use crate::api_client::{
+    ApiClient, CliEnv, CliError, EXIT_INVALID, EXIT_SERVER, EXIT_UNKNOWN, report_error,
+};
 use crate::cli::runner_ops;
 
 use super::project;
-use super::resolve::{looks_like_uuid, resolve_issue, resolve_state_name};
+use super::resolve::{
+    ResolvedIssue, looks_like_uuid, resolve_issue, resolve_label_ref_groups, resolve_label_refs,
+    resolve_state_name,
+};
 
 #[derive(Debug, Args)]
 pub struct IssueArgs {
@@ -239,13 +244,20 @@ pub struct CreateArgs {
     /// Attaches the new work item as a sub-issue of the given parent.
     #[arg(long)]
     pub parent: Option<String>,
+
+    /// Labels to attach — comma-separated names (case-insensitive) and/or
+    /// UUIDs, e.g. `--label bug,frontend`. Every label must already exist in
+    /// the project; list them with `pidash label list` and create missing
+    /// ones with `pidash label create`.
+    #[arg(long)]
+    pub label: Option<String>,
 }
 
 /// The description source shared by `create` and `patch`: inline or from a
 /// file (`-` = stdin). Both are markdown; the server converts it to the
 /// editor's rich text, so headings, lists, task lists, code and tables keep
 /// their structure.
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub struct DescriptionArgs {
     /// Description as markdown. `--description ""` clears it.
     #[arg(long, conflicts_with = "description_file")]
@@ -336,6 +348,29 @@ pub struct PatchArgs {
     /// `parent: null`). Mutually exclusive with `--parent`.
     #[arg(long)]
     pub clear_parent: bool,
+
+    /// Replace the issue's labels with exactly these — comma-separated names
+    /// (case-insensitive) and/or UUIDs. Labels not listed are detached. To
+    /// change one label without restating the rest, use `--add-label` /
+    /// `--remove-label`.
+    #[arg(long, conflicts_with_all = ["add_label", "remove_label", "clear_labels"])]
+    pub label: Option<String>,
+
+    /// Attach these labels, keeping the ones already on the issue. Repeatable,
+    /// and each use may be comma-separated. Attaching a label the issue
+    /// already carries is a no-op, not an error.
+    #[arg(long = "add-label", value_name = "LABELS")]
+    pub add_label: Vec<String>,
+
+    /// Detach these labels, keeping the rest. Repeatable, and each use may be
+    /// comma-separated. Detaching a label the issue does not carry is a no-op.
+    #[arg(long = "remove-label", value_name = "LABELS")]
+    pub remove_label: Vec<String>,
+
+    /// Detach every label (sends `labels: []`). Mutually exclusive with the
+    /// other label flags.
+    #[arg(long, conflicts_with_all = ["add_label", "remove_label"])]
+    pub clear_labels: bool,
 }
 
 #[derive(Debug, Args)]
@@ -452,7 +487,7 @@ async fn cmd_create(
     // Read the body before any network call so a bad path or empty stdin
     // fails fast without resolving the project.
     let description = load_description(&args.description, std::io::stdin())?;
-    let project_ref = resolve_create_project(client, paths, args.project.as_deref()).await?;
+    let project_ref = resolve_project_ref(client, paths, args.project.as_deref()).await?;
 
     // Resolve the network-dependent fields first, then hand the already-resolved
     // values to the pure body builder so the URL/body contract is unit-testable.
@@ -465,6 +500,10 @@ async fn cmd_create(
         Some(parent) => Some(resolve_parent_id(client, parent).await?),
         None => None,
     };
+    let label_uuids = match args.label.as_deref() {
+        Some(labels) => Some(resolve_label_refs(client, &project_ref, labels).await?),
+        None => None,
+    };
 
     let body = build_create_body(
         args.title,
@@ -472,6 +511,7 @@ async fn cmd_create(
         args.priority,
         state_uuid,
         parent_uuid,
+        label_uuids,
     );
 
     let path = format!(
@@ -495,6 +535,7 @@ fn build_create_body(
     priority: Option<String>,
     state_uuid: Option<String>,
     parent_uuid: Option<String>,
+    label_uuids: Option<Vec<String>>,
 ) -> Map<String, Value> {
     let mut body: Map<String, Value> = Map::new();
     body.insert("name".into(), Value::String(title));
@@ -516,7 +557,17 @@ fn build_create_body(
     if let Some(uuid) = parent_uuid {
         body.insert("parent".into(), Value::String(uuid));
     }
+    if let Some(uuids) = label_uuids {
+        body.insert("labels".into(), label_array(uuids));
+    }
     body
+}
+
+/// The `labels` field both write paths send: a JSON array of label UUIDs. The
+/// server replaces the issue's whole label set with it, so an empty array
+/// detaches every label.
+fn label_array(uuids: Vec<String>) -> Value {
+    Value::Array(uuids.into_iter().map(Value::String).collect())
 }
 
 /// Resolve a `--parent` value to an issue UUID. A raw UUID is accepted as-is
@@ -536,7 +587,11 @@ async fn resolve_parent_id(client: &ApiClient, parent: &str) -> Result<String, C
     }
 }
 
-async fn resolve_create_project(
+/// Resolve the project a command operates on: the explicit `--project`, else
+/// `PIDASH_PROJECT_ID`, else the local config default, else the workspace
+/// default project. `pub(super)` so the sibling `label` subcommands default
+/// `--project` the same way rather than re-implementing the chain.
+pub(super) async fn resolve_project_ref(
     client: &ApiClient,
     paths: &crate::util::paths::Paths,
     explicit: Option<&str>,
@@ -724,7 +779,7 @@ enum ParentPatch {
     Unchanged,
 }
 
-async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> {
+pub async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> {
     let description = load_description(&args.description, std::io::stdin())?;
     // Resolve issue first — we always need project_id for the mutating PATCH URL.
     let issue = resolve_issue(client, &args.identifier).await?;
@@ -743,12 +798,15 @@ async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> 
         ParentPatch::Unchanged
     };
 
+    let labels = resolve_label_patch(client, &issue, &args).await?;
+
     let body = build_patch_body(
         args.title.as_deref(),
         description.as_deref(),
         args.priority.as_deref(),
         state_uuid,
         parent,
+        labels,
     )?;
 
     let path = format!(
@@ -763,16 +821,114 @@ async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> 
     Ok(())
 }
 
+/// Work out the final label set a `pidash issue patch` should send, or `None`
+/// when no label flag was given.
+///
+/// `--label` / `--clear-labels` state the set outright. `--add-label` /
+/// `--remove-label` are relative, so they need the issue's current labels:
+/// the API replaces the whole set on every write, and there is no
+/// add-one/remove-one route. The current set comes from the by-identifier GET
+/// `cmd_patch` already made, so the merge costs no extra request.
+async fn resolve_label_patch(
+    client: &ApiClient,
+    issue: &ResolvedIssue,
+    args: &PatchArgs,
+) -> Result<Option<Vec<String>>, CliError> {
+    if args.clear_labels {
+        return Ok(Some(Vec::new()));
+    }
+    if let Some(labels) = args.label.as_deref() {
+        return Ok(Some(
+            resolve_label_refs(client, &issue.project_id, labels).await?,
+        ));
+    }
+    if args.add_label.is_empty() && args.remove_label.is_empty() {
+        return Ok(None);
+    }
+
+    let current = current_label_ids(&issue.raw)?;
+    // Each flag is repeatable and each occurrence may itself be
+    // comma-separated, so `--add-label bug --add-label a,b` and
+    // `--add-label bug,a,b` mean the same thing. Both flags resolve against a
+    // single label-list fetch.
+    let mut resolved = resolve_label_ref_groups(
+        client,
+        &issue.project_id,
+        &[&args.add_label.join(","), &args.remove_label.join(",")],
+    )
+    .await?;
+    let remove = resolved.remove(1);
+    let add = resolved.remove(0);
+    Ok(Some(merge_labels(&current, &add, &remove)?))
+}
+
+/// Read the issue's current label UUIDs out of the by-identifier payload.
+///
+/// The serializer emits `labels` as a list of UUID strings. If it is missing
+/// we refuse rather than defaulting to "no labels": treating an unknown set as
+/// empty would let `--remove-label` silently strip every other label off the
+/// issue.
+fn current_label_ids(raw: &Value) -> Result<Vec<String>, CliError> {
+    let labels = raw.get("labels").and_then(Value::as_array).ok_or_else(|| {
+        CliError::new(
+            EXIT_SERVER,
+            "work item payload carries no 'labels' list, so --add-label/--remove-label cannot tell what is already attached",
+        )
+        .with_detail("pass --label with the full set instead".to_string())
+    })?;
+    Ok(labels
+        .iter()
+        .filter_map(|l| {
+            // Non-expanded payloads are plain UUID strings; an `expand=labels`
+            // payload would be objects. Accept both.
+            l.as_str()
+                .map(str::to_string)
+                .or_else(|| l.get("id").and_then(Value::as_str).map(str::to_string))
+        })
+        .collect())
+}
+
+/// Apply `--add-label` / `--remove-label` to the current set, preserving the
+/// issue's existing label order so an unrelated reorder never shows up in the
+/// activity feed. Pure so the merge rules are unit-testable.
+fn merge_labels(
+    current: &[String],
+    add: &[String],
+    remove: &[String],
+) -> Result<Vec<String>, CliError> {
+    // A label in both flags has no defensible outcome — whichever we applied
+    // last would be a silent coin flip on the caller's intent.
+    if let Some(conflict) = add.iter().find(|id| remove.contains(id)) {
+        return Err(CliError::new(
+            EXIT_INVALID,
+            format!("label {conflict} is in both --add-label and --remove-label"),
+        ));
+    }
+    let mut out: Vec<String> = current
+        .iter()
+        .filter(|id| !remove.contains(id))
+        .cloned()
+        .collect();
+    for id in add {
+        if !out.contains(id) {
+            out.push(id.clone());
+        }
+    }
+    Ok(out)
+}
+
 /// Assemble the `work-items` PATCH body from already-resolved values, enforcing
 /// the "at least one mutation" guard. Kept pure (no network) so the body
-/// contract — including `parent: null` for `--clear-parent` and the fact that a
-/// parent mutation satisfies the guard — is unit-testable.
+/// contract — including `parent: null` for `--clear-parent`, `labels: []` for
+/// `--clear-labels`, and the fact that either alone satisfies the guard — is
+/// unit-testable.
 fn build_patch_body(
     title: Option<&str>,
     description: Option<&str>,
     priority: Option<&str>,
     state_uuid: Option<String>,
     parent: ParentPatch,
+    label_uuids: Option<Vec<String>>,
 ) -> Result<Map<String, Value>, CliError> {
     let mut body: Map<String, Value> = Map::new();
 
@@ -802,11 +958,16 @@ fn build_patch_body(
         }
         ParentPatch::Unchanged => {}
     }
+    // An empty array is a real mutation (`--clear-labels` detaches everything),
+    // so it must land in the body and satisfy the guard below.
+    if let Some(uuids) = label_uuids {
+        body.insert("labels".into(), label_array(uuids));
+    }
 
     if body.is_empty() {
         return Err(CliError::new(
             EXIT_INVALID,
-            "at least one of --state/--title/--description/--description-file/--priority/--parent/--clear-parent is required",
+            "at least one of --state/--title/--description/--description-file/--priority/--parent/--clear-parent/--label/--add-label/--remove-label/--clear-labels is required",
         ));
     }
 
@@ -1030,6 +1191,7 @@ pub async fn issue_relations(client: &ApiClient, identifier: &str) -> Result<Val
 mod tests {
     use super::*;
     use clap::Parser;
+    use serde_json::json;
 
     #[test]
     fn percent_encode_value_passes_unreserved() {
@@ -1133,7 +1295,7 @@ mod tests {
     #[test]
     fn build_create_body_sends_description_markdown_verbatim() {
         let md = "# Title\n\n- [x] done";
-        let body = build_create_body("T".to_string(), Some(md), None, None, None);
+        let body = build_create_body("T".to_string(), Some(md), None, None, None, None);
         assert_eq!(
             body.get("description_markdown").and_then(Value::as_str),
             Some(md)
@@ -1150,6 +1312,7 @@ mod tests {
             None,
             None,
             ParentPatch::Unchanged,
+            None,
         )
         .expect("description alone is a valid mutation");
         assert_eq!(
@@ -1377,6 +1540,7 @@ mod tests {
             None,
             None,
             Some("11111111-2222-3333-4444-555555555555".to_string()),
+            None,
         );
         assert_eq!(
             body.get("parent").and_then(Value::as_str),
@@ -1387,7 +1551,7 @@ mod tests {
 
     #[test]
     fn build_create_body_omits_parent_when_absent() {
-        let body = build_create_body("Top-level".to_string(), None, None, None, None);
+        let body = build_create_body("Top-level".to_string(), None, None, None, None, None);
         assert!(!body.contains_key("parent"));
     }
 
@@ -1399,6 +1563,7 @@ mod tests {
             None,
             None,
             ParentPatch::Set("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string()),
+            None,
         )
         .expect("parent is a valid mutation");
         assert_eq!(
@@ -1409,7 +1574,7 @@ mod tests {
 
     #[test]
     fn build_patch_body_clear_parent_sends_null() {
-        let body = build_patch_body(None, None, None, None, ParentPatch::Clear)
+        let body = build_patch_body(None, None, None, None, ParentPatch::Clear, None)
             .expect("clear-parent is a valid mutation");
         // `--clear-parent` must emit an explicit JSON null (detach), not omit
         // the key — omitting it would leave the parent unchanged server-side.
@@ -1421,14 +1586,22 @@ mod tests {
         // A parent mutation with no other flag must not trip the
         // "at least one of ..." guard.
         assert!(
-            build_patch_body(None, None, None, None, ParentPatch::Set("x".to_string())).is_ok()
+            build_patch_body(
+                None,
+                None,
+                None,
+                None,
+                ParentPatch::Set("x".to_string()),
+                None
+            )
+            .is_ok()
         );
-        assert!(build_patch_body(None, None, None, None, ParentPatch::Clear).is_ok());
+        assert!(build_patch_body(None, None, None, None, ParentPatch::Clear, None).is_ok());
     }
 
     #[test]
     fn build_patch_body_empty_is_rejected() {
-        let err = build_patch_body(None, None, None, None, ParentPatch::Unchanged)
+        let err = build_patch_body(None, None, None, None, ParentPatch::Unchanged, None)
             .expect_err("no mutations must be rejected");
         assert_eq!(err.exit_code, EXIT_INVALID);
         // The guard message advertises the parent flags so agents can discover them.
@@ -1586,5 +1759,169 @@ mod tests {
             IssueCommand::Relations { identifier } => assert_eq!(identifier, "ENG-7"),
             other => panic!("expected relations, got {other:?}"),
         }
+    }
+    // --- label support ---------------------------------------------------
+
+    #[test]
+    fn build_create_body_sends_resolved_label_uuids() {
+        let body = build_create_body(
+            "Crash on save".to_string(),
+            None,
+            None,
+            None,
+            None,
+            Some(vec!["l-bug".to_string(), "l-fe".to_string()]),
+        );
+        assert_eq!(body.get("labels"), Some(&json!(["l-bug", "l-fe"])));
+    }
+
+    #[test]
+    fn build_create_body_omits_labels_when_absent() {
+        let body = build_create_body("T".to_string(), None, None, None, None, None);
+        assert!(!body.contains_key("labels"));
+    }
+
+    #[test]
+    fn build_patch_body_replaces_the_whole_label_set() {
+        let body = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            Some(vec!["l-bug".to_string()]),
+        )
+        .expect("labels alone is a valid mutation");
+        assert_eq!(body.get("labels"), Some(&json!(["l-bug"])));
+    }
+
+    #[test]
+    fn build_patch_body_clear_labels_sends_an_empty_array() {
+        // `--clear-labels` must emit `[]` (detach all), not omit the key —
+        // omitting it would leave the labels untouched server-side.
+        let body = build_patch_body(None, None, None, None, ParentPatch::Unchanged, Some(vec![]))
+            .expect("clear-labels is a valid mutation");
+        assert_eq!(body.get("labels"), Some(&json!([])));
+    }
+
+    #[test]
+    fn build_patch_body_guard_advertises_the_label_flags() {
+        let err = build_patch_body(None, None, None, None, ParentPatch::Unchanged, None)
+            .expect_err("no mutations must be rejected");
+        for flag in ["--label", "--add-label", "--remove-label", "--clear-labels"] {
+            assert!(
+                err.message.contains(flag),
+                "{flag} missing from {}",
+                err.message
+            );
+        }
+    }
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn merge_labels_appends_additions_after_the_existing_order() {
+        let out = merge_labels(&ids(&["a", "b"]), &ids(&["c"]), &[]).expect("merge");
+        assert_eq!(out, ids(&["a", "b", "c"]));
+    }
+
+    #[test]
+    fn merge_labels_is_idempotent_for_an_already_attached_label() {
+        // Adding a label the issue carries is a no-op, not a duplicate row.
+        let out = merge_labels(&ids(&["a", "b"]), &ids(&["b"]), &[]).expect("merge");
+        assert_eq!(out, ids(&["a", "b"]));
+    }
+
+    #[test]
+    fn merge_labels_drops_removals_and_ignores_unattached_ones() {
+        let out = merge_labels(&ids(&["a", "b"]), &[], &ids(&["b", "zz"])).expect("merge");
+        assert_eq!(out, ids(&["a"]));
+    }
+
+    #[test]
+    fn merge_labels_refuses_a_label_in_both_flags() {
+        let err = merge_labels(&ids(&["a"]), &ids(&["b"]), &ids(&["b"])).expect_err("conflict");
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert!(err.message.contains("--add-label"));
+        assert!(err.message.contains("--remove-label"));
+    }
+
+    #[test]
+    fn current_label_ids_reads_plain_uuid_strings() {
+        let raw = json!({"id": "i-1", "labels": ["l-a", "l-b"]});
+        assert_eq!(current_label_ids(&raw).unwrap(), ids(&["l-a", "l-b"]));
+    }
+
+    #[test]
+    fn current_label_ids_reads_an_expanded_label_payload() {
+        let raw = json!({"id": "i-1", "labels": [{"id": "l-a", "name": "bug"}]});
+        assert_eq!(current_label_ids(&raw).unwrap(), ids(&["l-a"]));
+    }
+
+    #[test]
+    fn current_label_ids_refuses_to_assume_an_empty_set() {
+        // A payload without `labels` must not be read as "no labels": a
+        // --remove-label merge would then strip every other label off the issue.
+        let err = current_label_ids(&json!({"id": "i-1"})).expect_err("missing labels");
+        assert_eq!(err.exit_code, EXIT_SERVER);
+        assert!(err.message.contains("--add-label"));
+    }
+
+    #[test]
+    fn patch_parses_every_label_flag() {
+        let cli = crate::cli::Cli::try_parse_from([
+            "pidash",
+            "issue",
+            "patch",
+            "ENG-7",
+            "--add-label",
+            "bug",
+            "--add-label",
+            "a,b",
+            "--remove-label",
+            "stale",
+        ])
+        .expect("repeatable label flags should parse");
+        let Some(crate::cli::Command::Issue(args)) = cli.command else {
+            panic!("expected an issue command");
+        };
+        let IssueCommand::Patch(patch) = args.command else {
+            panic!("expected patch");
+        };
+        assert_eq!(patch.add_label, ids(&["bug", "a,b"]));
+        assert_eq!(patch.remove_label, ids(&["stale"]));
+    }
+
+    #[test]
+    fn patch_rejects_label_combined_with_add_label() {
+        // `--label` states the whole set; mixing it with a relative flag has
+        // no single defensible meaning, so clap must reject it up front.
+        crate::cli::Cli::try_parse_from([
+            "pidash",
+            "issue",
+            "patch",
+            "ENG-7",
+            "--label",
+            "bug",
+            "--add-label",
+            "chore",
+        ])
+        .expect_err("--label and --add-label must conflict");
+    }
+
+    #[test]
+    fn patch_rejects_clear_labels_combined_with_add_label() {
+        crate::cli::Cli::try_parse_from([
+            "pidash",
+            "issue",
+            "patch",
+            "ENG-7",
+            "--clear-labels",
+            "--add-label",
+            "chore",
+        ])
+        .expect_err("--clear-labels and --add-label must conflict");
     }
 }
