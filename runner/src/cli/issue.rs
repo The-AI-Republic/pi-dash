@@ -75,9 +75,11 @@ pub enum IssueCommand {
     /// the next cadence tick re-asks. Raises the issue's tick cap by 1, so
     /// the ending run costs no net budget. Bounded by one extra pool
     /// (`Project.agent_default_max_ticks`): past that it is a no-op reporting
-    /// `wait_cap_reached`, and waiting then spends normal budget. Always
-    /// exits 0 — check `applied` and `reason` in the printed JSON
-    /// (`waited` | `wait_cap_reached` | `infinite_pool` | `no_ticker`).
+    /// `wait_cap_reached`, and waiting then spends normal budget. A refusal
+    /// is a normal exit 0 — check `applied` and `reason` in the printed JSON
+    /// (`waited` | `wait_cap_reached` | `infinite_pool` | `no_ticker`). A
+    /// transport or permission error exits non-zero like any other call;
+    /// yield anyway rather than retrying in a loop.
     Wait {
         /// Project-scoped identifier, e.g. `ENG-42`.
         identifier: String,

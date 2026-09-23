@@ -373,15 +373,16 @@ def _tick_context(issue: Issue) -> Optional[Dict[str, Any]]:
         return None
     unlimited = cap == INFINITE_MAX_TICKS
     remaining = None if unlimited else max(0, cap - ticker.used)
-    # Waits are reported separately and never folded into the pool
-    # (PDASHOSS01-204). A ``pidash issue wait`` adds one to both ``used``
-    # (the run it ended) and ``cap`` (the tick it bought back), so netting
-    # them out recovers the pool as the human set it and the runs that
-    # actually did work — the same arithmetic the web budget line uses.
+    # A wait run is a run (PDASHOSS01-211). Report the counters as they
+    # stand: ``cap`` already carries the ticks waits bought back, so an
+    # issue that spent one run discovering a blocker reads "1 of 11", not
+    # "0 of 10". Netting waits out of ``count``/``cap`` while ``remaining``
+    # kept the raw figure made the three numbers disagree, and the clamps
+    # hid a real run once ``waited`` ran ahead of ``used``.
     waited = ticker.waited
     return {
-        "count": ticker.used if unlimited else max(0, ticker.used - waited),
-        "cap": None if unlimited else max(0, cap - waited),
+        "count": ticker.used,
+        "cap": None if unlimited else cap,
         "remaining": remaining,
         # How many times this issue has ended a run by waiting on a blocker,
         # and how many such waits it may still make for free.

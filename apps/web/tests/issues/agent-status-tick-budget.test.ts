@@ -48,19 +48,25 @@ describe("formatTickBudget", () => {
     expect(formatTickBudget(ticker({ used: 6, max_ticks: 10 }), t)).toBe("6 of 10 runs used");
   });
 
-  it("shows waits separately and never folds them into the pool", () => {
-    // Six runs of work and four waits. Each wait added one to `used` (the run
-    // it ended) and one to `max_ticks` (the tick it bought back), so the raw
-    // payload is 10 of 14 — which would wrongly read as a nearly-spent pool.
+  it("counts a wait run as a run and reports the raised cap", () => {
+    // A wait run is a run (PDASHOSS01-211). Each wait added one to `used` (the
+    // run it ended) and one to `max_ticks` (the tick it bought back), so ten
+    // runs against a raised cap of fourteen read exactly that, with the waits
+    // named alongside rather than subtracted out of both sides.
     const budget = formatTickBudget(ticker({ used: 10, waited: 4, max_ticks: 14 }), t);
-    expect(budget).toBe("6 of 10 runs used, 4 waits");
-    expect(budget).not.toContain("14");
+    expect(budget).toBe("10 of 14 runs used, 4 waits");
   });
 
-  it("keeps the pool steady as waits accumulate", () => {
-    // The whole point of the wait budget: waiting does not eat the pool.
-    expect(formatTickBudget(ticker({ used: 3, waited: 1, max_ticks: 11 }), t)).toBe("2 of 10 runs used, 1 wait");
-    expect(formatTickBudget(ticker({ used: 12, waited: 10, max_ticks: 20 }), t)).toBe("2 of 10 runs used, 10 waits");
+  it("keeps the numbers honest as waits accumulate", () => {
+    expect(formatTickBudget(ticker({ used: 1, waited: 1, max_ticks: 11 }), t)).toBe("1 of 11 runs used, 1 wait");
+    expect(formatTickBudget(ticker({ used: 12, waited: 10, max_ticks: 20 }), t)).toBe("12 of 20 runs used, 10 waits");
+  });
+
+  it("does not clamp when waits run ahead of used runs", () => {
+    // Free runs (Run AI, Comment & Run, a human move) do not spend a tick, so
+    // an agent that waits on them leaves `waited` above `used`. The old
+    // netting clamped to "0 of 10" while still reporting headroom.
+    expect(formatTickBudget(ticker({ used: 0, waited: 5, max_ticks: 15 }), t)).toBe("0 of 15 runs used, 5 waits");
   });
 
   it("falls back to the pre-pool tick_count spelling", () => {
