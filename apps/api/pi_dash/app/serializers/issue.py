@@ -87,6 +87,21 @@ def _comment_is_actively_synced(comment) -> bool:
     )
 
 
+#: User-facing copy for a refused ``managed_runner`` pin, keyed by the reason
+#: code ``managed_runner_availability`` returned. The picker shows the same
+#: strings, so a user never sees two different explanations for one situation.
+_MANAGED_UNAVAILABLE_DETAIL = {
+    "managed_runner_disabled": "Pi Dash Agent is not enabled on this instance",
+    "desktop_not_connected": "Open the Pi Dash desktop app to run on this computer",
+    "llm_config_missing": "Configure an AI provider in Pi Dash AI settings first",
+    "gateway_scopes_missing": "Sign in to Pi Dash again to refresh your AI access",
+    "byok_not_supported_on_desktop": (
+        "Pi Dash Agent on desktop uses OpenHub. Switch your AI provider to OpenHub to run here; "
+        "Pi Dash AI and the Cloud Agent keep using your own key."
+    ),
+}
+
+
 class IssueFlatSerializer(BaseSerializer):
     ## Contain only flat fields
 
@@ -270,6 +285,29 @@ class IssueCreateSerializer(BaseSerializer):
                     raise serializers.ValidationError(
                         {"agent_executor": "Pi Dash Cloud Agent is not available on this instance"}
                     )
+                if executor == AgentExecutorKind.MANAGED_RUNNER:
+                    # Pinning to the desktop is viewer-specific: the check is
+                    # "can the person making this request run it on their own
+                    # machine", which is exactly what the picker showed them.
+                    from pi_dash.managed_runner.errors import ManagedRunnerReason
+                    from pi_dash.managed_runner.policy import managed_runner_availability
+
+                    project = self.instance.project if self.instance is not None else attrs.get("project")
+                    if project is None:
+                        from pi_dash.db.models import Project
+
+                        project = Project.objects.filter(pk=self.context.get("project_id")).first()
+                    if project is None:
+                        raise serializers.ValidationError({"agent_executor": "A project is required for desktop runs"})
+                    viewer = getattr(self.context.get("request"), "user", None)
+                    available, reason = managed_runner_availability(project, viewer)
+                    # A desktop that has not enrolled this project yet fixes
+                    # itself the moment the app opens it, so accept the pin
+                    # rather than blocking on a race the client will resolve.
+                    if not available and reason != ManagedRunnerReason.NO_RUNNER_FOR_PROJECT:
+                        raise serializers.ValidationError(
+                            {"agent_executor": _MANAGED_UNAVAILABLE_DETAIL.get(reason, reason)}
+                        )
             # Same mid-flight rule as the pod: ``AgentRun.executor_kind`` is
             # snapshotted at creation, so switching targets under a live run
             # would silently apply only to the next dispatch.
@@ -1038,6 +1076,7 @@ class IssueSerializer(DynamicBaseSerializer):
             "parent_id",
             "cycle_id",
             "assigned_pod_id",
+            "agent_executor",
             "module_ids",
             "label_ids",
             "assignee_ids",
@@ -1190,6 +1229,8 @@ class IssueDetailSerializer(IssueSerializer):
     is_intake = serializers.BooleanField(read_only=True)
     agent_ticker = serializers.SerializerMethodField()
     agent_status = serializers.SerializerMethodField()
+    relations_summary = serializers.SerializerMethodField()
+    has_open_blockers = serializers.SerializerMethodField()
 
     class Meta(IssueSerializer.Meta):
         fields = IssueSerializer.Meta.fields + [
@@ -1198,11 +1239,31 @@ class IssueDetailSerializer(IssueSerializer):
             "is_intake",
             "agent_ticker",
             "agent_status",
+            "relations_summary",
+            "has_open_blockers",
         ]
         read_only_fields = fields
 
     def _serialize_datetime(self, value):
         return value.isoformat() if value else None
+
+    def _blocker_summary(self, obj):
+        # Both fields come from one ``relations_summary`` call; cache it per
+        # issue so serializing the detail doesn't query the relations twice.
+        from pi_dash.orchestration.blockers import relations_summary
+
+        cache = self.__dict__.setdefault("_blocker_summary_cache", {})
+        if obj.pk not in cache:
+            cache[obj.pk] = relations_summary(obj)
+        return cache[obj.pk]
+
+    def get_relations_summary(self, obj):
+        """``{blocked_by, blocking}`` lists of ``{identifier, state, state_group}``
+        — the same blocker picture the agent prompt carries (PDASHOSS01-197)."""
+        return self._blocker_summary(obj)["relations_summary"]
+
+    def get_has_open_blockers(self, obj):
+        return self._blocker_summary(obj)["has_open_blockers"]
 
     def get_agent_ticker(self, obj):
         """Surface the per-issue continuation ticker for the issue detail UI.
@@ -1226,17 +1287,28 @@ class IssueDetailSerializer(IssueSerializer):
         # server would no-op (e.g. a cap-hit issue already auto-paused out
         # of a ticking state).
         from pi_dash.orchestration.agent_phases import is_ticking_state
+        from pi_dash.orchestration.scheduling import is_paused_state
 
-        can_re_tick = is_ticking_state(obj.state) and ticker.cap_reached()
+        # Re-tick is offered wherever the grant is honoured: in the bucket,
+        # and on the Paused state the cap-hit auto-pause parks issues in.
+        can_re_tick = (is_ticking_state(obj.state) or is_paused_state(obj.state)) and ticker.cap_reached()
         return {
             "enabled": ticker.enabled,
             "user_disabled": ticker.user_disabled,
-            "tick_count": ticker.tick_count,
+            # One pool per issue: ``used`` of ``max_ticks`` (project pool +
+            # Re-tick grants). ``tick_count`` is the pre-pool spelling.
+            "used": ticker.used,
+            "tick_count": ticker.used,
+            "granted": ticker.granted,
             "max_ticks": ticker.effective_max_ticks(),
+            "remaining": ticker.remaining(),
             "interval_seconds": ticker.effective_interval_seconds(),
             "next_run_at": ticker.next_run_at.isoformat() if ticker.next_run_at else None,
             "last_tick_at": ticker.last_tick_at.isoformat() if ticker.last_tick_at else None,
             "disarm_reason": ticker.disarm_reason,
+            # An entry run is owed and fires as soon as the issue is free
+            # (design §4.5) — the card shows "next run queued".
+            "pending_entry": ticker.pending_entry,
             "can_re_tick": can_re_tick,
         }
 

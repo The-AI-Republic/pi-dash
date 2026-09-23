@@ -44,9 +44,9 @@ export interface IPartialProject {
 }
 
 export interface IProject extends IPartialProject {
-  default_agent_executor?: "local_runner" | "cloud_agent";
+  default_agent_executor?: "local_runner" | "cloud_agent" | "managed_runner";
   agent_executor_options?: {
-    kind: "local_runner" | "cloud_agent";
+    kind: "local_runner" | "cloud_agent" | "managed_runner";
     available: boolean;
     reason_code: string;
   }[];

@@ -144,7 +144,6 @@ export interface IRunner {
 export type TAgentRunStatus =
   | "queued"
   | "assigned"
-  | "waiting_for_worktree"
   | "running"
   | "cancel_requested"
   | "awaiting_approval"
@@ -164,7 +163,7 @@ export const AGENT_RUN_TERMINAL_STATUSES: readonly TAgentRunStatus[] = [
   "refused",
 ] as const;
 
-export type TAgentExecutorKind = "local_runner" | "cloud_agent";
+export type TAgentExecutorKind = "local_runner" | "cloud_agent" | "managed_runner";
 
 export interface IAgentRunToolCall {
   id: string;
@@ -233,9 +232,6 @@ export interface IAgentRun {
     limits?: Record<string, number>;
   };
   tool_calls: IAgentRunToolCall[];
-  /** Place in the runner's local worktree queue while
-   * ``waiting_for_worktree``; ``null`` otherwise (display only). */
-  queue_position?: number | null;
   events?: IAgentRunEvent[];
 }
 
@@ -256,6 +252,14 @@ export interface IAgentRunPage {
 export type TApprovalKind = "command_execution" | "file_change" | "network_access" | "other";
 export type TApprovalDecision = "accept" | "decline" | "accept_for_session";
 export type TApprovalStatus = "pending" | "accepted" | "declined" | "expired";
+
+/**
+ * The approval *mode* a local (built-in engine) chat runs under — the spectrum
+ * the engine supports, chosen by the user per chat. Wire values match the
+ * runner's `ApprovalMode` serde (`pidash-ipc`). `full_access` is the default so
+ * an absent value preserves the engine's historical no-prompt posture.
+ */
+export type TApprovalMode = "ask" | "workspace" | "full_access";
 
 export interface IApprovalRequest {
   id: string;

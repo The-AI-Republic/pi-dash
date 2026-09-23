@@ -33,6 +33,7 @@ from django.conf import settings
 
 # Third party imports
 from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 # drf-spectacular imports
@@ -44,6 +45,7 @@ from drf_spectacular.utils import (
 )
 
 # Module imports
+from pi_dash.api.serializers.issue import normalize_description_input
 from pi_dash.api.serializers import (
     IssueAttachmentSerializer,
     IssueActivitySerializer,
@@ -89,6 +91,7 @@ from .base import BaseAPIView
 from pi_dash.utils.host import base_host, issue_web_url
 from pi_dash.utils.constants import CLOSED_STATE_GROUPS, OPEN_STATE_GROUPS, STATE_GROUP_ORDER
 from pi_dash.utils.issue_relation_mapper import get_actual_relation
+from pi_dash.utils.issue_filters import IssueFilterError, work_item_list_filters
 from pi_dash.search.issue import extract_snippet, issue_search_queryset
 from pi_dash.utils.issue_move import move_work_item_to_project, IssueMoveError
 from pi_dash.bgtasks.webhook_task import model_activity
@@ -122,6 +125,12 @@ from pi_dash.utils.openapi import (
     WORKSPACE_SEARCH_PARAMETER,
     FIELDS_PARAMETER,
     EXPAND_PARAMETER,
+    WORK_ITEM_STATE_FILTER_PARAMETER,
+    WORK_ITEM_STATE_GROUP_FILTER_PARAMETER,
+    WORK_ITEM_PARENT_FILTER_PARAMETER,
+    WORK_ITEM_LABELS_FILTER_PARAMETER,
+    WORK_ITEM_PRIORITY_FILTER_PARAMETER,
+    WORK_ITEM_ASSIGNEES_FILTER_PARAMETER,
     create_paginated_response,
     # Request Examples
     ISSUE_CREATE_EXAMPLE,
@@ -250,7 +259,12 @@ class WorkspaceIssueAPIEndpoint(BaseAPIView):
                 sequence_id=issue_identifier,
             )
             return Response(
-                IssueSerializer(issue, fields=self.fields, expand=self.expand).data,
+                IssueSerializer(
+                    issue,
+                    fields=self.fields,
+                    expand=self.expand,
+                    context={IssueSerializer.RELATIONS_VIEWER_CONTEXT: request.user},
+                ).data,
                 status=status.HTTP_200_OK,
             )
 
@@ -288,7 +302,14 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
     @work_item_docs(
         operation_id="list_work_items",
         summary="List work items",
-        description="Retrieve a paginated list of all work items in a project. Supports filtering, ordering, and field selection through query parameters.",  # noqa: E501
+        description=(
+            "Retrieve a paginated list of all work items in a project. Supports filtering by state "
+            "(UUID or name), state_group, parent (UUID, identifier, or `null` for top-level), labels "
+            "(UUID or name), priority, and assignees; values within a filter are comma-separated and "
+            "OR together, different filters AND together. Use `fields` (e.g. "
+            "`fields=id,sequence_id,name,state,parent`) to return a smaller payload, and `order_by` "
+            "and the cursor as usual."
+        ),
         parameters=[
             CURSOR_PARAMETER,
             PER_PAGE_PARAMETER,
@@ -297,6 +318,12 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
             ORDER_BY_PARAMETER,
             FIELDS_PARAMETER,
             EXPAND_PARAMETER,
+            WORK_ITEM_STATE_FILTER_PARAMETER,
+            WORK_ITEM_STATE_GROUP_FILTER_PARAMETER,
+            WORK_ITEM_PARENT_FILTER_PARAMETER,
+            WORK_ITEM_LABELS_FILTER_PARAMETER,
+            WORK_ITEM_PRIORITY_FILTER_PARAMETER,
+            WORK_ITEM_ASSIGNEES_FILTER_PARAMETER,
         ],
         responses={
             200: create_paginated_response(
@@ -337,8 +364,14 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
 
         order_by_param = request.GET.get("order_by", "-created_at")
 
+        try:
+            filters = work_item_list_filters(request.query_params, project_id=project_id, workspace_slug=slug)
+        except IssueFilterError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
         issue_queryset = (
             self.get_queryset()
+            .filter(**filters)
             .annotate(
                 cycle_id=Subquery(
                     CycleIssue.objects.filter(issue=OuterRef("id"), deleted_at__isnull=True).values("cycle_id")[:1]
@@ -362,6 +395,8 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
         )
 
         total_issue_queryset = Issue.issue_objects.filter(project_id=project_id, workspace__slug=slug)
+        if filters:
+            total_issue_queryset = total_issue_queryset.filter(**filters).distinct()
 
         # Priority Ordering
         if order_by_param == "priority" or order_by_param == "-priority":
@@ -434,13 +469,17 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
         Supports external ID tracking for integration purposes.
         """
         project = Project.objects.get(pk=project_id)
+        # Convert ``description_markdown`` (and legacy ``description``) up front
+        # so activity tracking below records the stored ``description_html``.
+        data, from_markdown = normalize_description_input(request.data)
 
         serializer = IssueSerializer(
-            data=request.data,
+            data=data,
             context={
                 "project_id": project_id,
                 "workspace_id": project.workspace_id,
                 "default_assignee_id": project.default_assignee_id,
+                "description_from_markdown": from_markdown,
             },
         )
 
@@ -479,7 +518,7 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
             # Track the issue
             issue_activity.delay(
                 type="issue.activity.created",
-                requested_data=json.dumps(self.request.data, cls=DjangoJSONEncoder),
+                requested_data=json.dumps(data, cls=DjangoJSONEncoder),
                 actor_id=str(request.user.id),
                 issue_id=str(serializer.data.get("id", None)),
                 project_id=str(project_id),
@@ -491,7 +530,7 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
             model_activity.delay(
                 model_name="issue",
                 model_id=str(serializer.data["id"]),
-                requested_data=request.data,
+                requested_data=data,
                 current_instance=None,
                 actor_id=request.user.id,
                 slug=slug,
@@ -565,7 +604,12 @@ class IssueDetailAPIEndpoint(BaseAPIView):
             .values("count")
         ).get(workspace__slug=slug, project_id=project_id, pk=pk)
         return Response(
-            IssueSerializer(issue, fields=self.fields, expand=self.expand).data,
+            IssueSerializer(
+                issue,
+                fields=self.fields,
+                expand=self.expand,
+                context={IssueSerializer.RELATIONS_VIEWER_CONTEXT: request.user},
+            ).data,
             status=status.HTTP_200_OK,
         )
 
@@ -751,12 +795,29 @@ class IssueDetailAPIEndpoint(BaseAPIView):
         """
         issue = Issue.objects.get(workspace__slug=slug, project_id=project_id, pk=pk)
         project = Project.objects.get(pk=project_id)
+        # A state change made from inside an agent run carries the run's id
+        # (``pidash issue patch`` sends ``X-Pi-Dash-Run-Id``). Stamp it on the
+        # instance so the orchestration signal can tell an agent's move from
+        # a human's — see ``.ai_design/ticking_relevance/design.md`` §5.6.
+        moved_by_run, header_error = resolve_moved_by_run(request, issue)
+        if header_error is not None:
+            return Response({"error": header_error}, status=status.HTTP_400_BAD_REQUEST)
+        if moved_by_run is not None:
+            from pi_dash.orchestration.signals import MOVED_BY_RUN_ATTR
+
+            setattr(issue, MOVED_BY_RUN_ATTR, moved_by_run)
         current_instance = json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder)
-        requested_data = json.dumps(self.request.data, cls=DjangoJSONEncoder)
+        # See ``post``: activity tracking must see the converted HTML.
+        data, from_markdown = normalize_description_input(request.data)
+        requested_data = json.dumps(data, cls=DjangoJSONEncoder)
         serializer = IssueSerializer(
             issue,
-            data=request.data,
-            context={"project_id": project_id, "workspace_id": project.workspace_id},
+            data=data,
+            context={
+                "project_id": project_id,
+                "workspace_id": project.workspace_id,
+                "description_from_markdown": from_markdown,
+            },
             partial=True,
         )
         if serializer.is_valid():
@@ -792,7 +853,7 @@ class IssueDetailAPIEndpoint(BaseAPIView):
             model_activity.delay(
                 model_name="issue",
                 model_id=str(pk),
-                requested_data=request.data,
+                requested_data=data,
                 current_instance=current_instance,
                 actor_id=request.user.id,
                 slug=slug,
@@ -877,12 +938,12 @@ class IssueMoveAPIEndpoint(BaseAPIView):
 
 
 class IssueReTickAPIEndpoint(BaseAPIView):
-    """Re-grant a fresh tick budget to an exhausted issue ticker.
+    """Re-grant budget to an issue whose pool is spent, and start a run now.
 
-    The CLI-facing sibling of the web ``AgentReTickEndpoint``. Grants an
-    extra phase-sized budget and re-arms the ticker **only** when the
-    issue is still in a ticking state (In Progress / In Review / In Test) and the
-    current budget is exhausted; otherwise it is a no-op that reports
+    The CLI-facing sibling of the web ``AgentReTickEndpoint``. Adds the
+    project's Re-tick grant to the issue's pool and fires a run **only**
+    when the issue is still in a ticking state (In Progress / In Review /
+    In Test) and the pool is exhausted; otherwise it is a no-op that reports
     ``granted = false`` with a machine-readable ``reason``. See
     ``pi_dash.orchestration.scheduling.re_tick_ticker`` for the rules.
     """
@@ -900,21 +961,274 @@ class IssueReTickAPIEndpoint(BaseAPIView):
         )
         if issue is None:
             return Response({"error": "Work item not found"}, status=status.HTTP_404_NOT_FOUND)
+        refused = _refuse_agent_retick(request, issue)
+        if refused is not None:
+            return refused
 
-        result = scheduling.re_tick_ticker(issue)
+        result = scheduling.re_tick_ticker(issue, actor=request.user)
         ticker = result["ticker"]
         payload = {
             "granted": result["granted"],
             "reason": result["reason"],
+            "run_id": str(result["run"].id) if result.get("run") is not None else None,
         }
         if ticker is not None:
-            payload["tick_count"] = ticker.tick_count
+            payload["used"] = ticker.used
+            payload["tick_count"] = ticker.used
             payload["max_ticks"] = ticker.effective_max_ticks()
             payload["enabled"] = ticker.enabled
+            payload["pending_entry"] = ticker.pending_entry
             payload["next_run_at"] = (
                 ticker.next_run_at.isoformat() if ticker.next_run_at else None
             )
         return Response(payload, status=status.HTTP_200_OK)
+
+
+RUN_ID_HEADER = "X-Pi-Dash-Run-Id"
+
+
+def run_belongs_to(user, run) -> bool:
+    """May ``user`` speak for ``run``?
+
+    The agent's CLI authenticates as the runner owner (or, for Run AI /
+    Comment & Run, the person who asked), so a run is the caller's when
+    they created it, own the runner it executes on, or own the run itself.
+    Workspace membership alone is not enough — another member must not be
+    able to yield on, or move issues as, someone else's run.
+    """
+    if user is None or run is None:
+        return False
+    if run.created_by_id == user.id or run.owner_id == user.id:
+        return True
+    return run.runner_id is not None and run.runner.owner_id == user.id
+
+
+def resolve_moved_by_run(request, issue):
+    """Return ``(run, error)`` for the ``X-Pi-Dash-Run-Id`` header.
+
+    ``(None, None)`` when the header is absent — a human (or a client that
+    is not an agent run) made the request. The agent's CLI sends the header
+    on *every* write for the life of its run, so a run that is active on a
+    **different** issue (the agent patching a sub-issue), or one that has
+    just been finalized, is not an error: the request is simply not an
+    agent move *on this issue* and is treated as a plain one. Only a
+    malformed id, or a run the caller may not speak for, is refused.
+    """
+    from pi_dash.runner.models import AgentRun
+
+    raw = (request.headers.get(RUN_ID_HEADER) or "").strip()
+    if not raw:
+        # No header. An older ``pidash`` binary (pre ``PIDASH_RUN_ID``) sends
+        # none, yet its moves must still be agent moves — otherwise a mixed
+        # fleet gets free, uncounted entries on every stage move. This is
+        # the external (API-key) surface the agent's CLI uses; a run that is
+        # active on this issue and belongs to the caller is that agent.
+        inferred = _active_run_of_caller(request.user, issue)
+        return inferred, None
+    try:
+        run_id = uuid.UUID(raw)
+    except (ValueError, TypeError):
+        return None, f"{RUN_ID_HEADER} is not a UUID"
+
+    run = AgentRun.objects.select_related("runner").filter(pk=run_id).first()
+    if run is None:
+        return None, None
+    if not run_belongs_to(request.user, run):
+        return None, f"{RUN_ID_HEADER} names a run that is not yours"
+    if run.work_item_id != issue.pk or not run.is_active:
+        return None, None
+    return run, None
+
+
+def _active_run_of_caller(user, issue):
+    """The active run on ``issue`` the caller may speak for, if any."""
+    from pi_dash.runner.models import AgentRun
+
+    for run in AgentRun.objects.select_related("runner").filter(work_item_id=issue.pk).order_by("-created_at")[:5]:
+        if run.is_active and run_belongs_to(user, run):
+            return run
+    return None
+
+
+def _refuse_agent_action(request, issue, *, action):
+    """Refuse a human-only lever requested from inside an agent run.
+
+    Re-tick and Run AI are both human levers on the ticking budget: a
+    request that carries an active run of *this* issue in ``X-Pi-Dash-Run-Id``
+    (the agent's CLI header) is refused with 403 — otherwise an agent could
+    grant itself budget or restart itself indefinitely, bypassing the pool.
+    A header naming a run on a different issue, a finished run, or an unknown
+    id is not this issue's agent and is allowed through. ``action`` is the
+    human-readable lever name used in the error message.
+    """
+    raw = (request.headers.get(RUN_ID_HEADER) or "").strip()
+    if not raw:
+        return None
+    try:
+        run_id = uuid.UUID(raw)
+    except (ValueError, TypeError):
+        return None
+    from pi_dash.runner.models import AgentRun
+
+    run = AgentRun.objects.filter(pk=run_id, work_item_id=issue.pk).first()
+    if run is not None and run.is_active:
+        return Response(
+            {"error": f"{action} is a human action; it cannot be requested from inside an agent run"},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    return None
+
+
+def _refuse_agent_retick(request, issue):
+    """Backwards-compatible alias — see :func:`_refuse_agent_action`."""
+    return _refuse_agent_action(request, issue, action="re-tick")
+
+
+# Human-readable message for each machine-readable Run AI refusal reason.
+_RUN_AI_REASON_MESSAGES = {
+    "active_run_exists": "the work item already has an active or queued run",
+    "no_pod": "no pod is available to run this work item",
+    "no_eligible_runner": "no eligible runner or execution principal is available for this work item",
+}
+
+
+class IssueRunAiAPIEndpoint(BaseAPIView):
+    """Token-facing sibling of the web "Run AI" button.
+
+    Dispatches an agent run identical to clicking Run AI in the web app —
+    same templated prompt, ticker re-time, and runner pinning — via
+    ``scheduling.run_ai_for_human``, which shares
+    ``dispatch_run_ai_run_with_reason`` with ``_post_run_ai`` so the two
+    surfaces cannot drift. Lets an operator (or an MCP tool) kick a stalled
+    agent from a terminal instead of opening the browser.
+
+    Responses:
+    - 201 with ``{id, status, executor}`` when a run was dispatched.
+    - 409 with a machine-readable ``reason`` (``active_run_exists`` |
+      ``no_pod`` | ``no_eligible_runner``) when nothing was created; the
+      ticker re-time is rolled back so the clock is untouched.
+    - 403 when ``X-Pi-Dash-Run-Id`` names an active run on this issue — an
+      agent cannot restart itself and bypass the ticking budget (mirrors
+      re-tick's ``_refuse_agent_action``).
+    """
+
+    model = Issue
+    permission_classes = [ProjectEntityPermission]
+
+    @extend_schema(
+        operation_id="run_ai_work_item",
+        summary="Run AI on a work item",
+        description=(
+            "Start an agent run on a work item, identical to the web \"Run AI\" button "
+            "(same prompt, ticker reset, and runner pinning). Returns 201 with the run "
+            "when dispatched, 409 with a machine-readable `reason` when nothing could be "
+            "dispatched, or 403 when requested from inside an active agent run on the "
+            "same work item."
+        ),
+        tags=["Work Items"],
+        request=None,
+        parameters=[
+            WORKSPACE_SLUG_PARAMETER,
+            PROJECT_ID_PARAMETER,
+            ISSUE_ID_PARAMETER,
+        ],
+        responses={
+            201: OpenApiResponse(description="Run dispatched"),
+            403: FORBIDDEN_RESPONSE,
+            404: WORK_ITEM_NOT_FOUND_RESPONSE,
+            409: OpenApiResponse(description="No run could be dispatched (see `reason`)"),
+        },
+    )
+    def post(self, request, slug, project_id, pk):
+        from pi_dash.orchestration import scheduling
+
+        issue = (
+            Issue.objects.select_related("project", "workspace", "state")
+            .filter(workspace__slug=slug, project_id=project_id, pk=pk)
+            .first()
+        )
+        if issue is None:
+            return Response({"error": "Work item not found"}, status=status.HTTP_404_NOT_FOUND)
+        refused = _refuse_agent_action(request, issue, action="Run AI")
+        if refused is not None:
+            return refused
+
+        run, reason = scheduling.run_ai_for_human(issue, actor=request.user)
+        if run is None:
+            return Response(
+                {
+                    "error": _RUN_AI_REASON_MESSAGES.get(reason, "could not dispatch a run"),
+                    "reason": reason,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response(
+            {
+                "id": str(run.id),
+                "status": run.status,
+                "executor": run.executor_kind,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AgentRunYieldAPIEndpoint(BaseAPIView):
+    """``POST /workspaces/<slug>/agent-runs/<run_id>/yield/`` — the run's outcome.
+
+    The last thing a run does: ``pidash run yield --outcome <…>``. Writes
+    ``done_payload.status`` on the run so the ticker (``reconcile``, event
+    ``RUN_ENDED``) knows whether to tick again, wait for a human, or stop.
+    The run must be active and belong to this workspace; the caller must be
+    a workspace member (the agent's CLI token resolves to the runner owner).
+    See ``.ai_design/ticking_relevance/design.md`` §7.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, slug, run_id):
+        from pi_dash.core.permissions import is_workspace_member
+        from pi_dash.orchestration.scheduling import RUN_OUTCOMES, normalize_outcome
+        from pi_dash.runner.models import AgentRun
+
+        outcome = normalize_outcome(request.data.get("outcome"))
+        if outcome is None:
+            return Response(
+                {"error": "outcome is required", "allowed": sorted(RUN_OUTCOMES)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        header_run = (request.headers.get(RUN_ID_HEADER) or "").strip()
+        if header_run and header_run.lower() != str(run_id).lower():
+            return Response(
+                {"error": f"{RUN_ID_HEADER} does not match the run in the URL"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        run = (
+            AgentRun.objects.select_related("workspace", "work_item", "runner")
+            .filter(pk=run_id, workspace__slug=slug)
+            .first()
+        )
+        if run is None or run.work_item_id is None:
+            return Response({"error": "run not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not is_workspace_member(request.user, run.workspace_id):
+            return Response({"error": "run not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not run_belongs_to(request.user, run):
+            # Membership is not authority over someone else's run.
+            return Response({"error": "run not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not run.is_active:
+            return Response({"error": "run is not active"}, status=status.HTTP_409_CONFLICT)
+
+        note = request.data.get("note")
+        payload = dict(run.done_payload or {}) if isinstance(run.done_payload, dict) else {}
+        payload["status"] = outcome
+        payload["yielded_at"] = timezone.now().isoformat()
+        if isinstance(note, str) and note.strip():
+            payload["note"] = note.strip()[:2000]
+        run.done_payload = payload
+        run.save(update_fields=["done_payload"])
+        return Response(
+            {"ok": True, "run_id": str(run.id), "work_item_id": str(run.work_item_id), "outcome": outcome},
+            status=status.HTTP_200_OK,
+        )
 
 
 class LabelListCreateAPIEndpoint(BaseAPIView):
@@ -2740,6 +3054,123 @@ class IssueRelationListCreateAPIEndpoint(BaseAPIView):
             serializer_class(refetched_relations, many=True).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+class _IssueRelationAgentBase(BaseAPIView):
+    """Shared plumbing for the agent-facing relation endpoints (PDASHOSS01-199).
+
+    Unlike :class:`IssueRelationListCreateAPIEndpoint` these speak the shared
+    :mod:`pi_dash.orchestration.relations` vocabulary: targets may be given
+    as ``PROJ-123`` identifiers or UUIDs, every target must be a work item the
+    caller can see (active member of its project), writes are idempotent and
+    report ``created`` / ``unchanged`` / ``conflicts``, and every response
+    carries the source issue's grouped ``relations``.
+    """
+
+    model = IssueRelation
+    permission_classes = [ProjectEntityPermission]
+
+    def _source(self, slug, project_id, issue_id):
+        return Issue.issue_objects.select_related("project", "state", "workspace").get(
+            workspace__slug=slug, project_id=project_id, pk=issue_id
+        )
+
+    def _visible(self, request, slug):
+        from pi_dash.core.querysets import member_project_issues
+
+        return member_project_issues(request.user, slug)
+
+    def _write(self, request, slug, project_id, issue_id, operation):
+        from pi_dash.orchestration import relations
+
+        issue = self._source(slug, project_id, issue_id)
+        refs = request.data.get("issues")
+        if isinstance(refs, str):
+            refs = [refs]
+        if not isinstance(refs, list) or not refs:
+            return Response(
+                {"error": "issues must be a non-empty list of work item identifiers or UUIDs"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            relation_type = relations.validate_relation_type(request.data.get("relation_type"))
+        except relations.RelationError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        visible = self._visible(request, slug)
+        targets, unresolved = relations.resolve_refs(refs, visible)
+        if unresolved:
+            return Response(
+                {
+                    "error": "work items not found or not accessible: " + ", ".join(unresolved),
+                    "unresolved": unresolved,
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        try:
+            result = operation(issue, relation_type, targets, request.user)
+        except relations.RelationError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        result["relations"] = relations.grouped_relations(issue, visible)
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class IssueRelationGroupedAPIEndpoint(_IssueRelationAgentBase):
+    use_read_replica = True
+
+    @work_item_relation_docs(
+        operation_id="list_work_item_relations_grouped",
+        summary="List work item relations with details",
+        description="Every relation of a work item grouped by type (blocked_by, blocking, relates_to, duplicate, start_before, start_after, finish_before, finish_after, implemented_by, implements), each item carrying id, identifier, name, state and state_group. Items in projects the caller is not a member of are omitted.",  # noqa E501
+        parameters=[ISSUE_ID_PARAMETER],
+        responses={200: OpenApiResponse(description="Grouped relations"), 404: ISSUE_NOT_FOUND_RESPONSE},
+    )
+    def get(self, request, slug, project_id, issue_id):
+        from pi_dash.orchestration import relations
+
+        issue = self._source(slug, project_id, issue_id)
+        return Response(
+            {
+                "issue": relations.identifier(issue),
+                "relations": relations.grouped_relations(issue, self._visible(request, slug)),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class IssueRelationRelateAPIEndpoint(_IssueRelationAgentBase):
+    @work_item_relation_docs(
+        operation_id="relate_work_items",
+        summary="Relate work items (idempotent)",
+        description="Record `<issue> <relation_type> <each of issues>`. `issues` accepts identifiers (PROJ-123) or UUIDs. A pair that already has this relation is reported under `unchanged`; a pair that already has a different relation is reported under `conflicts` and left as is.",  # noqa E501
+        parameters=[ISSUE_ID_PARAMETER],
+        responses={
+            200: OpenApiResponse(description="created / unchanged / conflicts plus grouped relations"),
+            400: INVALID_REQUEST_RESPONSE,
+            404: ISSUE_NOT_FOUND_RESPONSE,
+        },
+    )
+    def post(self, request, slug, project_id, issue_id):
+        from pi_dash.orchestration import relations
+
+        return self._write(request, slug, project_id, issue_id, relations.relate)
+
+
+class IssueRelationUnrelateAPIEndpoint(_IssueRelationAgentBase):
+    @work_item_relation_docs(
+        operation_id="unrelate_work_items",
+        summary="Remove work item relations (idempotent)",
+        description="Remove `<issue> <relation_type> <each of issues>`. Only a relation of exactly that type is removed; a pair without it is reported under `not_related`.",  # noqa E501
+        parameters=[ISSUE_ID_PARAMETER],
+        responses={
+            200: OpenApiResponse(description="removed / not_related plus grouped relations"),
+            400: INVALID_REQUEST_RESPONSE,
+            404: ISSUE_NOT_FOUND_RESPONSE,
+        },
+    )
+    def post(self, request, slug, project_id, issue_id):
+        from pi_dash.orchestration import relations
+
+        return self._write(request, slug, project_id, issue_id, relations.unrelate)
 
 
 class IssueWorkpadAPIEndpoint(BaseAPIView):

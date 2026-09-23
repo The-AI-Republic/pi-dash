@@ -21,6 +21,7 @@ from .chat import (
     ChatStartedEndpoint,
     chat_event_stream,
 )
+from .desktop import DesktopEnrollEndpoint
 from .enrollment import (
     MachineTokenRedeemEndpoint,
     MachineTokenTicketEndpoint,
@@ -50,6 +51,7 @@ from .run_endpoints import (
     RunStreamUpgradeEndpoint,
 )
 from .runners import (
+    DevMachineDeleteEndpoint,
     DevMachineListEndpoint,
     DevMachineRevokeEndpoint,
     DevMachineRotateEndpoint,
@@ -101,6 +103,7 @@ __all__ = [
     "chat_event_stream",
     "MachineTokenRedeemEndpoint",
     "MachineTokenTicketEndpoint",
+    "DesktopEnrollEndpoint",
     "RunnerCreateEndpoint",
     "RunnerEnrollEndpoint",
     "RunnerInviteEndpoint",
@@ -113,6 +116,7 @@ __all__ = [
     "PodDetailEndpoint",
     "PodListEndpoint",
     "ProjectListEndpoint",
+    "DevMachineDeleteEndpoint",
     "DevMachineListEndpoint",
     "DevMachineRevokeEndpoint",
     "DevMachineRotateEndpoint",

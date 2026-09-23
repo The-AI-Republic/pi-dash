@@ -14,16 +14,21 @@ from pi_dash.prompting.renderer import validate_syntax
 
 @pytest.mark.unit
 def test_registry_loaded_with_expected_sections():
-    # 20 local sections (13 ported + 2 review + 2 test + 3 scheduler)
+    # 24 local sections (13 ported + relationships + 2 review + 2 test
+    # + 3 scheduler + task-lifecycle + repo-context + workpad-context)
     # plus 14 locked Cloud Agent sections.
-    assert len(registry.REGISTRY) == 34
+    assert len(registry.REGISTRY) == 38
     for key in (
         "intro",
+        "relationships",
         "pidash-cli",
         "review-cycle",
         "test-intro",
         "test-cycle",
         "scheduler-task",
+        "task-lifecycle",
+        "repo-context",
+        "workpad-context",
     ):
         assert key in registry.REGISTRY
 
@@ -52,6 +57,14 @@ def test_pidash_cli_documents_folded_comments():
     assert "--fold" in body
     assert "omitted from future agent-run task prompts" in body
     assert "never folds comments automatically" in body
+
+
+@pytest.mark.unit
+def test_pidash_cli_documents_page_writes():
+    body = registry.get_section("pidash-cli").default_body
+    for command in ("pidash page create", "pidash page update", "pidash page archive"):
+        assert command in body
+    assert "--body-file -" in body
 
 
 @pytest.mark.unit

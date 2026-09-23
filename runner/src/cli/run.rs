@@ -131,7 +131,6 @@ mod tests {
                 ..DaemonConfig::default()
             },
             runners: Vec::new(),
-            workdirs: vec![],
             cli: token.map(|token| crate::config::schema::CliSection {
                 token: Some(token.into()),
                 workspace_slug: Some("acme".into()),

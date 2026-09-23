@@ -2,6 +2,20 @@
 
 Local daemon + TUI (`pidash` binary) that connects a developer machine to the Pi Dash cloud and drives `codex app-server` for assigned tasks.
 
+## Developer-owned agent packages
+
+OSS exposes an optional [agent package seam](docs/agent-packages.md) for
+developers who supply their own executable or protocol adapter:
+
+```bash
+pidash runner use-package my-runner --manifest /path/to/agent-package.toml
+```
+
+The manifest selects an existing bridge protocol and a local executable. OSS
+does not bundle, download, install, authenticate, or update the agent package.
+The developer owns those responsibilities and restarts the owning daemon when
+idle. Ordinary task folders do not require Git.
+
 ## Install
 
 Prebuilt binaries for macOS (arm64, x86_64), Linux (arm64, x86_64 — glibc and musl), and Windows (x86_64) are published to GitHub Releases. The one-liners below download the installer, verify checksums, drop `pidash` into the standard install path, and immediately start the device-code login so the host is registered with your Pi Dash cloud before you leave the terminal.
@@ -96,7 +110,7 @@ Two properties of that flow are deliberate:
 - **Silent installs spawn nothing.** `msiexec /qn` (Group Policy, Intune, SCCM) skips the installer UI entirely, so the checkbox never runs. Unattended IT deploys are unaffected.
 - **Sign-in runs as the installing user, not SYSTEM.** The package is per-machine and its execute sequence runs elevated, but the ExitDialog runs unelevated — which matters, because `auth login` writes the CLI token and workspace binding into the current user's profile.
 
-For silent installs, or if you clear the checkbox, sign in from a terminal: bare `pidash` with no config drops straight into `auth login`, as does `pidash auth login`. (A discoverable Start Menu shortcut for this step is tracked as a follow-up.)
+For silent installs, or if you clear the checkbox, sign in from a terminal: bare `pidash` with no config drops straight into `auth login`, as does `pidash auth login`. The MSI also installs a **Start Menu → Pi Dash → "Sign in to Pi Dash"** shortcut that runs the same flow — the discoverable path for silent/Group-Policy deploys where the ExitDialog never appears.
 
 Windows release assets also include a `pidash-x86_64-pc-windows-msvc.zip` archive with `pidash.exe` for advanced/manual installs.
 
@@ -105,8 +119,9 @@ Then run the setup steps manually:
 ```bash
 # 1. Log in as your user. Opens a browser to approve a short code shown in
 #    the terminal — same idea as `gh auth login` or `stripe login`. Stores
-#    a CLI token at ~/.config/pidash/config.toml.
-pidash auth login --url https://pidash.example.com
+#    a CLI token at ~/.config/pidash/config.toml. (`pidash auth login` is
+#    the same command; `pidash auth status` / `logout` live under `auth`.)
+pidash login --url https://pidash.example.com
 
 # 2. Register this host as a runner. Uses the token from step 1 to mint
 #    runner credentials cloud-side; no enrollment-token paste needed. On
@@ -118,7 +133,7 @@ pidash runner add --project WEB
 pidash tui
 ```
 
-`pidash auth login` prompts to add a runner inline when no runner exists yet on the host — for the dev-laptop case, that single command is enough. Bare `pidash` with no subcommand also drops into the login flow when no config exists, so if you installed via the MSI or skipped auto-auth, you can re-trigger setup just by typing `pidash`.
+`pidash login` prompts to add a runner inline when no runner exists yet on the host — for the dev-laptop case, that single command is enough. Bare `pidash` with no subcommand also drops into the login flow when no config exists, so if you installed via the MSI or skipped auto-auth, you can re-trigger setup just by typing `pidash`.
 
 Useful follow-ups:
 
@@ -128,6 +143,19 @@ pidash auth logout               # revoke the CLI token server-side
 pidash runner add --project X    # add another runner
 pidash runner list / remove      # manage runners
 ```
+
+## Task folders and Git
+
+Direct-mode runners can execute coding and non-coding tasks in an ordinary
+working directory. No Git repository or project repository URL is required;
+existing files are preserved, and the runner does not initialize Git for you.
+This applies to user-connected agents and the built-in desktop agent alike.
+
+When a repository URL is supplied, the runner still clones into an empty
+directory or reuses an existing repository. It refuses to clone over files in
+a non-repository directory. Branch checkout only applies to repositories.
+Explicit worktree pools remain Git-based; use a direct working directory for
+repo-free tasks.
 
 ## Auto-update
 

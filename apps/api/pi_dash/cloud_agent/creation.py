@@ -84,7 +84,65 @@ def execution_fields(
         if admission_error:
             fields["_cloud_admission_error"] = admission_error
         return fields
+    if executor == AgentExecutorKind.MANAGED_RUNNER:
+        return _managed_execution_fields(project=project, actor=actor, automatic=automatic)
     return {"executor_kind": executor, "tool_plan": {}}
+
+
+def _managed_execution_fields(*, project, actor, automatic: bool):
+    """Executor fields for a run on the creator's own desktop.
+
+    Managed runs are always **pinned**: the run is created for one specific
+    machine and must never drift to a teammate's bundled runner that happens to
+    share the pod. ``matcher.next_queued_run_for_pod`` already excludes pinned
+    runs, so delivery happens only through ``drain_for_runner`` when that
+    machine heartbeats — which is exactly the wanted behaviour.
+
+    User-triggered runs are refused outright when the desktop cannot take them:
+    the click came *from* the desktop, so an immediate, specific error beats a
+    row that waits. Automatic runs (ticker, scheduler) are created anyway when
+    a runner is merely offline, carrying ``desktop_not_connected`` so the wait
+    is visible; the periodic sweep fails them if the machine never returns.
+    """
+    from pi_dash.managed_runner.errors import ManagedRunnerReason, ManagedRunnerUnavailable
+    from pi_dash.managed_runner.policy import (
+        enrolled_managed_runners,
+        managed_runner_availability,
+        online_managed_runner,
+    )
+
+    available, reason = managed_runner_availability(project, actor)
+    fields = {"executor_kind": AgentExecutorKind.MANAGED_RUNNER, "tool_plan": {}, "pinned_runner": None}
+    if available:
+        fields["pinned_runner"] = online_managed_runner(project, actor)
+        return fields
+
+    # "Offline right now" is the only transient failure; everything else is
+    # structural and refused for automatic runs too, since waiting could not
+    # fix it.
+    transient = reason == ManagedRunnerReason.NOT_CONNECTED and enrolled_managed_runners(project, actor).exists()
+    if automatic and transient:
+        fields["pinned_runner"] = enrolled_managed_runners(project, actor).order_by("-last_heartbeat_at").first()
+        # ``error_code`` is a real AgentRun field and every creation site
+        # splats these fields into ``objects.create``, so the waiting reason
+        # lands on the row itself and renders as "Waiting for your desktop"
+        # without a bespoke channel. The sweep reads it back.
+        fields["error_code"] = ManagedRunnerReason.NOT_CONNECTED
+        return fields
+    raise ManagedRunnerUnavailable(reason, _MANAGED_REFUSAL_DETAIL.get(reason, "Pi Dash Agent is not available"))
+
+
+_MANAGED_REFUSAL_DETAIL = {
+    "managed_runner_disabled": "Pi Dash Agent is not enabled on this instance.",
+    "desktop_not_connected": "Open the Pi Dash desktop app on the machine you want this to run on.",
+    "llm_config_missing": "The run creator has no AI provider configured. Configure one in Pi Dash AI settings.",
+    "gateway_scopes_missing": "Sign in to Pi Dash again to refresh your AI access.",
+    "byok_not_supported_on_desktop": (
+        "Pi Dash Agent on desktop uses OpenHub. Switch your AI provider to OpenHub to run here; "
+        "Pi Dash AI and the Cloud Agent keep using your own key."
+    ),
+    "no_managed_runner_for_project": "This project has no Pi Dash Agent on your desktop yet.",
+}
 
 
 def dispatch_after_commit(run_id):

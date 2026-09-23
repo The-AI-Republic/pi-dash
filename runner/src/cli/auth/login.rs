@@ -45,6 +45,18 @@ pub struct Args {
     /// Workspace slug to bind this CLI install to after login.
     #[arg(long, hide = true)]
     pub workspace: Option<String>,
+
+    /// Internal: finish a device-code grant that has *already* been approved,
+    /// rather than starting one and asking the user to type a code.
+    ///
+    /// The Pi Dash desktop app uses this. It is signed in already, so it can
+    /// start the grant and approve it with its own session
+    /// (`POST /api/v1/auth/device/approve/`), then hand the device code here.
+    /// Everything after the exchange — the machine token, the workspace
+    /// binding, the config file — stays here rather than being reimplemented
+    /// in the app.
+    #[arg(long, hide = true, value_name = "CODE")]
+    pub device_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,14 +116,30 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         .build()
         .context("building HTTP client")?;
 
-    let start = start_device_code(&client, &cloud_url).await?;
+    let start = match args.device_code.as_deref() {
+        // Pre-approved by the desktop app: nothing to show and nobody to ask,
+        // just the exchange. `expires_in` bounds the polling; the server is
+        // authoritative and ends the poll with a terminal error if the grant
+        // is already gone.
+        Some(code) => StartResponse {
+            device_code: code.to_string(),
+            user_code: String::new(),
+            verification_uri: format!("{cloud_url}/auth/device/"),
+            expires_in: 300,
+            interval: 1,
+        },
+        None => {
+            let start = start_device_code(&client, &cloud_url).await?;
 
-    print_user_code_block(&start);
+            print_user_code_block(&start);
 
-    if !args.no_browser {
-        let with_code = format!("{}?code={}", start.verification_uri, start.user_code);
-        let _ = crate::util::browser::open_url(&with_code);
-    }
+            if !args.no_browser {
+                let with_code = format!("{}?code={}", start.verification_uri, start.user_code);
+                let _ = crate::util::browser::open_url(&with_code);
+            }
+            start
+        }
+    };
 
     let token = poll_for_token(&client, &cloud_url, &start).await?;
 

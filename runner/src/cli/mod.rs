@@ -9,12 +9,16 @@ pub mod connect;
 pub mod context;
 pub mod doctor;
 mod install;
-mod issue;
+pub mod managed;
+pub mod issue;
+// `pub` so the CLI contract tests can drive the page subcommands directly.
+pub mod page;
 mod project;
 mod remove;
 pub mod resolve;
 mod restart;
 mod run;
+pub mod run_cmd;
 // `runner` is `pub` so the TUI can call its library functions
 // (`add`, `remove`) directly without going through clap.
 pub mod runner;
@@ -26,7 +30,6 @@ mod stop;
 mod tui;
 mod uninstall;
 pub mod update;
-mod workdir;
 mod workpad;
 mod workspace;
 
@@ -60,6 +63,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Log this host in to Pi Dash (same as `pidash auth login`; see
+    /// `pidash auth` for status and logout).
+    Login(auth::login::Args),
+
     /// Authenticate this host as a user (`auth login` / `status` /
     /// `logout`). Mints a CLI token used by `pidash` commands and by
     /// `pidash runner add` to register runners.
@@ -74,10 +81,6 @@ pub enum Command {
 
     /// Manage runners under the active connection (add / list / remove).
     Runner(runner::RunnerArgs),
-
-    /// Manage shared work directories (worktree pools): `workdir add` /
-    /// `list` / `remove`. Lets multiple runners share one repo checkout.
-    Workdir(workdir::WorkdirArgs),
 
     /// Read Pi Dash projects in the active workspace.
     Project(project::ProjectArgs),
@@ -127,6 +130,9 @@ pub enum Command {
     /// List, post, or edit work-item comments.
     Comment(comment::CommentArgs),
 
+    /// Read project pages — the project-scoped wiki (`page list` / `page get`).
+    Page(page::PageArgs),
+
     /// Inspect workflow states on a project.
     State(state::StateArgs),
 
@@ -136,10 +142,21 @@ pub enum Command {
     /// Verify the CLI's Pi Dash credentials end-to-end.
     Workspace(workspace::WorkspaceArgs),
 
+    /// Report this agent run's outcome to Pi Dash (`run yield`). Used by
+    /// the agent from inside a run; reads the run id from `PIDASH_RUN_ID`.
+    #[command(name = "run")]
+    RunCmd(run_cmd::RunCmdArgs),
+
     /// Internal: run the daemon in the foreground. Invoked by systemd/launchd
     /// via the generated unit file. Not a user-facing verb.
     #[command(name = "__run", hide = true)]
     Run(run::Args),
+
+    /// Internal: provisioning verbs driven by the Pi Dash desktop app, which
+    /// owns the config directory these operate on. Not a user-facing verb —
+    /// configure a runner with `pidash runner add` instead.
+    #[command(name = "__managed", hide = true)]
+    Managed(managed::ManagedArgs),
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -152,11 +169,11 @@ pub async fn run(cli: Cli) -> Result<()> {
     };
 
     match command {
+        Command::Login(args) => auth::login::run(args, &paths).await,
         Command::Auth(args) => auth::run(args, &paths).await,
         Command::Connect(args) => connect::run(args, &paths).await,
         Command::Config(args) => config_cmd::run(args, &paths).await,
         Command::Runner(args) => runner::run(args, &paths).await,
-        Command::Workdir(args) => workdir::run(args, &paths).await,
         Command::Project(args) => run_crud(project::run(args, &paths).await),
         Command::Context(args) => run_crud(context::run(args, &paths).await),
         Command::Install(args) => install::run(args, &paths).await,
@@ -172,10 +189,13 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Ai(args) => ai::run(args, &paths).await,
         Command::Issue(args) => run_crud(issue::run(args, &paths).await),
         Command::Comment(args) => run_crud(comment::run(args, &paths).await),
+        Command::Page(args) => run_crud(page::run(args, &paths).await),
         Command::State(args) => run_crud(state::run(args, &paths).await),
         Command::Workpad(args) => run_crud(workpad::run(args, &paths).await),
         Command::Workspace(args) => run_crud(workspace::run(args, &paths).await),
+        Command::RunCmd(args) => run_crud(run_cmd::run(args, &paths).await),
         Command::Run(args) => run::run(args, &paths).await,
+        Command::Managed(args) => managed::run(args, &paths).await,
     }
 }
 
@@ -192,6 +212,7 @@ async fn run_default(paths: &crate::util::paths::Paths) -> Result<()> {
                 no_browser: false,
                 workspace: None,
                 force: false,
+                device_code: None,
             }),
         };
         return auth::run(args, paths).await;

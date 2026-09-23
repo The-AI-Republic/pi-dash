@@ -15,6 +15,7 @@ The CLI reads the following from the process environment — never pass them as 
 - `PIDASH_WORKSPACE_SLUG` — the workspace the issue lives in.
 - `PIDASH_TOKEN` — session-scoped credential. Treat it like any other secret.
 {% if run.kind != "scheduler" %}- `PIDASH_ISSUE_IDENTIFIER` — the current issue identifier (`{{ issue.identifier }}`). When set, `pidash state list` defaults to this issue's project so you can call it with no args.
+- `PIDASH_RUN_ID` — this agent run (`{{ run.id }}`). The CLI sends it with every write so Pi Dash knows a state move or an outcome report came from *this run* rather than from a human. Never unset or override it.
 {% else %}- `PIDASH_PROJECT` — the project (`{{ project.identifier }}`) this scheduled run is scoped to. There is no single current issue — you operate across the project. Pass `--project {{ project.identifier }}` explicitly to commands that need it.
 {% endif %}
 ### Output contract
@@ -25,11 +26,15 @@ On success every command prints a single JSON document to stdout and exits `0`. 
 
 #### Issues
 
-- `pidash issue get <identifier>` — fetch a work item. Returns the full payload including `id`, `name` (title), `description`, `state` (UUID — pair with `pidash state list` to map back to a name), `priority`, `labels`, `assignees`, and timestamps.
+- `pidash issue get <identifier>` — fetch a work item. Returns the full payload including `id`, `name` (title), `description`, `state` (UUID — pair with `pidash state list` to map back to a name), `priority`, `labels`, `assignees`, timestamps, and a blocker summary: `relations_summary` (`blocked_by` / `blocking` lists of `{identifier, state, state_group}`) plus `has_open_blockers` (true while any `blocked_by` item is not in a `completed` / `cancelled` group). Single-item reads also carry `relations`: every relation grouped by type, each `{id, identifier, name, state, state_group}` (see `pidash issue relations`).
 - `pidash issue list --project <PROJ-or-UUID> [--cursor <c>] [--per-page <N>] [--order-by <field>]` — list work items in a project. `--project` accepts either the workspace-scoped slug (e.g. `ENG`) or a project UUID. Returns the server's paginated envelope `{count, next_cursor, prev_cursor, results: [...]}`; pass `--cursor` from a prior page to walk pages. Use this to find related/duplicate issues in the same project before creating new ones.
-- `pidash issue create --project <PROJ-or-UUID> --title "<title>" [--description <s>] [--priority <none|low|medium|high|urgent>] [--state "<state-name-or-UUID>"]` — file a new work item under the named project. Use this only for capturing **discovered scope that does not belong on the current issue** (a follow-up bug, a separated task, a missing prerequisite). Do **not** create an issue to track sub-steps of the current run — use the workpad comment for that. Record the new issue's identifier in the workpad so the operator can find it.
+  - Filters (each comma-separated; values OR within a flag, flags AND together): `--state <name-or-UUID>` (unknown names fail and list the valid ones), `--state-group <backlog|unstarted|started|review|test|completed|cancelled>`, `--parent <PROJ-123|UUID|none>` (`none` = top-level only), `--label <name-or-UUID>`, `--priority <urgent|high|medium|low|none>`. Add `--fields id,sequence_id,name,state,parent` for a small payload. Example: `pidash issue list --project ENG --parent ENG-12 --state Backlog --fields id,sequence_id,name,state` lists the Backlog sub-issues of `ENG-12` in one call — prefer this over paging the whole project and calling `issue get` on each item. `--parent` is also how a later run finds the children an earlier run already created, so a split never files duplicates.
+- `pidash issue create --project <PROJ-or-UUID> --title "<title>" [--description <md> | --description-file <path>] [--priority <none|low|medium|high|urgent>] [--state "<state-name-or-UUID>"] [--parent <PROJ-123-or-UUID>]` — file a new work item under the named project. Use this for capturing **discovered scope that does not belong on the current issue** (a follow-up bug, a separated task, a missing prerequisite), or — with `--parent` — for filing a **child issue** when you split an issue into genuinely separate tasks (see the "Split into child issues" outcome in "Analyze & scope"). Do **not** create an issue to track sub-steps of the current run — use the workpad comment for that. `--parent` attaches the new item as a sub-issue of the given issue (project-scoped identifier like `PROJ-123`, or a raw UUID); the server validates the parent. Record the new issue's identifier in the workpad so the operator can find it. The description is markdown and keeps its structure (headings, nested and task lists, code blocks, tables). For a long or multi-line body, write it to a file or pipe it with `--description-file -` instead of quoting it inline, since shell quoting of long markdown is error-prone. Empty input is an error.
 - `pidash issue patch <identifier> --state "<state-name>"` — move the issue to a different state. The name is case-insensitive; the CLI resolves it to a UUID for you. You can also pass a state UUID directly.
-- `pidash issue patch <identifier> [--title <s>] [--description <s>] [--priority <none|low|medium|high|urgent>]` — update other fields. At least one flag is required. Do **not** edit title or description for planning or progress tracking — use the workpad comment instead.
+- `pidash issue patch <identifier> [--title <s>] [--description <md> | --description-file <path>] [--priority <none|low|medium|high|urgent>] [--parent <PROJ-123-or-UUID>] [--clear-parent]` — update other fields. At least one flag is required. `--parent` re-parents the issue under the given issue (identifier or UUID), e.g. to attach an existing issue to a tracking parent; `--clear-parent` detaches it to top-level. `--parent` and `--clear-parent` are mutually exclusive. Do **not** edit title or description for planning or progress tracking — use the workpad comment instead. The one case where `--description` is correct is recording the child list on a **tracking parent** after a split (see "Split into child issues" in "Analyze & scope").
+- `pidash issue relate <identifier> --blocked-by <ID>[,<ID>...]` — record that `<identifier>` cannot finish until each listed issue does. Other flags (exactly one per call): `--blocking`, `--relates-to`, `--duplicate`, `--start-before`, `--start-after`, `--finish-before`, `--finish-after`, `--implemented-by`, `--implements`; each names the relation from `<identifier>`'s side, so `relate B --blocked-by A` and `relate A --blocking B` are the same edge. IDs are identifiers or UUIDs. Idempotent: already-related pairs come back under `unchanged`, and a pair that already has a *different* relation comes back under `conflicts` untouched (unrelate it first if you mean to change it). Prints `{issue, relation_type, created, unchanged, conflicts, relations}`.
+- `pidash issue unrelate <identifier> --blocked-by <ID>[,<ID>...]` — remove that exact relation (same flags as `relate`). Pairs without it come back under `not_related`; that is not an error.
+- `pidash issue relations <identifier>` — list the issue's relations grouped by type from its side (`blocked_by`, `blocking`, `relates_to`, …), each `{id, identifier, name, state, state_group}`. `pidash issue get` carries the same block as `relations`.
 - `pidash issue search "<query>" [--project <PROJ-or-UUID>] [--status open|closed|all] [--since <iso8601>] [--limit <N>] [--sort rank|-created|-updated]` — full-text search across work item titles, descriptions, **and** comments. Use this to recover historical context: check whether a similar issue has been filed before, look up the *resolution* of a past task (the answer usually lives in a comment, not the title), or find anything that touched a given component. **This is search, not grep**: `<query>` is parsed as websearch syntax (quoted phrases, `OR`, `-exclude`) and is stem-aware (`color` finds `colors`/`colored`); regex / glob will not work. `--since` accepts ISO 8601 — either a full datetime (`2025-01-01T00:00:00Z`) or a bare date (`2025-01-01`, treated as midnight that day); malformed strings produce a 400. `--sort` accepts only `rank` (default), `-created`, `-updated`; other values 400. Returns `{query, count, results: [{id, identifier (e.g. PROJ-42), name, snippet, state, project, created_at, updated_at, completed_at, rank, url}]}`. `snippet` is empty when the match was in the title or in a comment (the snippet excerpt only covers the description body). Default `--limit` is 10, server max is 50 — tuned for your context window, not bulk export. Cast a broad net first, then read promising hits with `pidash issue get`. **Backwards-compatibility note:** if the local `pidash` is older than the version that shipped this subcommand, stderr will be a clap parser error (`error: unrecognized subcommand 'search'`) instead of the usual `{"error": ...}` JSON envelope, with exit code 2. Treat that case as "historical-context search is unavailable on this operator's runner" — silently skip the lookup and continue with the rest of the run; do **not** retry the command and do **not** treat it as a blocker.
 
 #### Comments
@@ -47,28 +52,45 @@ Use `--fold` only for low-value status/noop updates that should remain available
 The workpad is your durable per-issue scratchpad — a single markdown document the agent owns. It is the only carrier of state between runs. It is **not** visible to humans in the comment thread; treat it as your own working memory, not a message to the operator.
 
 - `pidash workpad get [<identifier>]` — fetch the current workpad body. Returns `{body, updated_at}`. Defaults `<identifier>` to `PIDASH_ISSUE_IDENTIFIER` so you can call it bare.
-- `pidash workpad update [<identifier>] --body-file <path>` — overwrite the workpad body from a file. Defaults `<identifier>` to `PIDASH_ISSUE_IDENTIFIER`. An empty file clears it. There is no "append" — always write the full body.
+- `pidash workpad update [<identifier>] --body-file <path>` — overwrite the workpad body from a file. Defaults `<identifier>` to `PIDASH_ISSUE_IDENTIFIER`. An empty file clears it. There is no "append" — always write the full body. **On a successful upload the `--body-file` is deleted** so a stale local copy can't clobber newer server content on a later run; pass `--keep` to retain it. The next edit re-fetches with `pidash workpad get` (below), so a missing file after an update is expected, not an error.
 
-{% endif %}#### States
+{% endif %}#### Pages
+
+Project pages are the project's wiki: durable shared knowledge — decisions, conventions, plans — that humans and future runs read. A workpad is different: scratch state for one issue's runs. Read pages **before** you re-derive a convention from the code — a page is cheaper and more authoritative than a guess. Write one only when you have knowledge worth keeping for the project, not progress notes.
+
+- `pidash page list --project <PROJ-or-UUID> [--cursor <c>] [--per-page <N>] [--include-archived]` — list the project's pages. Returns the usual paginated envelope (`{count, next_cursor, prev_cursor, results: [...]}`) with **metadata only** — `id`, `name`, `parent`, `owned_by`, `access`, `is_locked`, `archived_at`, timestamps. Archived pages are omitted unless you pass `--include-archived`. A page another member marked private is not listed.
+- `pidash page get <page-id> --project <PROJ-or-UUID>` — fetch one page by its UUID (take it from the list output). Prints the JSON envelope: the metadata above plus `description_html`, `description_stripped`, and `description_markdown`. Prefer `description_markdown`.
+- `pidash page get <page-id> --project <PROJ-or-UUID> --body-only` — print just the markdown body, so you can redirect it to a file: `pidash page get <page-id> --project ENG --body-only > ./page.md`.
+- `pidash page create --project <PROJ-or-UUID> --title "<title>" [--body <md> | --body-file <path>] [--parent <page-id>] [--access public|private]` — create a page; the body is markdown. `--body-file -` reads stdin. **List first** and prefer updating an existing page over creating a near-duplicate.
+- `pidash page update <page-id> --project <PROJ-or-UUID> [--title <s>] [--body <md> | --body-file <path>] [--parent <page-id> | --clear-parent] [--access public|private]` — change only the fields you pass (at least one). A body flag replaces the whole body — `page get --body-only` first, edit, then write it back. Exit 2 with a 409 means the page is locked or archived; exit 5 with a 503 means the live document service is down — retry later, do not work around it.
+- `pidash page archive <page-id> --project <PROJ-or-UUID>` / `pidash page unarchive …` — archive or restore a page. Do **not** archive a page you did not create unless the issue asks you to.
+
+#### States
 
 - `pidash state list{% if run.kind == "scheduler" %} --project {{ project.identifier }}{% endif %}` — list the states available in {% if run.kind == "scheduler" %}this project{% else %}this issue's project{% endif %} with `name`, `group` (`backlog | unstarted | started | review | test | completed | cancelled`), and `description`.{% if run.kind != "scheduler" %} Uses `PIDASH_ISSUE_IDENTIFIER` by default; pass `pidash state list <issue-identifier>` or `pidash state list <project-uuid>` to override. Already rendered below under "Available states"; only call again if something looks stale.{% endif %}
 
-#### Debugging
+{% if run.kind != "scheduler" %}#### Run outcome
+
+- `pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--note "<one line>"]` — report this run's outcome to the ticking clock. Call it once, as your **last** `pidash` command, after any state move. See "Ending the run" for what each outcome means. Without it the clock guesses.
+
+{% endif %}#### Debugging
 
 - `pidash workspace me` — print the authenticated user. For sanity-checking credentials only; you should not need this in normal flow.
 
 ### Not for you
 
+- `pidash issue re-tick` — adds runs to the issue's budget. That is a **human** decision; the agent reports a spent pool and stops (see "Task lifecycle"). Pi Dash refuses a re-tick that comes from inside an agent run.
+
 The remaining `pidash` subcommands (`configure`, `install`, `uninstall`, `start`, `stop`, `restart`, `status`, `tui`, `doctor`, `remove`, `rotate`) manage the runner daemon itself — they are run by the human operator before your session starts. Do not invoke them. If any of them appears necessary, your run is blocked: follow "Blocking the run".
 
 ### Typical recipes
 
-Read your workpad, edit it, write it back:
+Read your workpad, edit it, write it back. Always start each edit by re-fetching from the server, then write back — `update` removes the file on success, so the next edit begins fresh from the authoritative copy:
 
 ```sh
 pidash workpad get | jq -r .body > ./.pidash-workpad.md
 # …edit the file in place…
-pidash workpad update --body-file ./.pidash-workpad.md
+pidash workpad update --body-file ./.pidash-workpad.md   # file is removed on success
 ```
 
 {% if run.kind != "scheduler" %}Post a blocker and move the issue to "Blocked":
@@ -78,20 +100,30 @@ pidash comment add {{ issue.identifier }} --body-file ./.pidash-blocked.md --as-
 pidash issue patch {{ issue.identifier }} --state "Blocked"
 ```
 
-{% if run.kind == "coding-task" %}End a successful run (workpad already written via `pidash workpad update`) — whether you opened a PR or finished a `noncode` task (investigation, status check, comment-only response), move to the `review` group. The runner never moves an issue to `completed`/Done; a human closes it:
+{% if run.kind == "coding-task" %}End a successful run (workpad already written via `pidash workpad update`) — whether you opened a PR or finished a `noncode` task (investigation, status check, comment-only response), move to the `review` group and report the outcome. The runner never moves an issue to `completed`/Done; a human closes it:
 
 ```sh
 pidash issue patch {{ issue.identifier }} --state "In Review"
+pidash run yield --outcome done
 ```
-{% else %}End a successful review pass (workpad already written via `pidash workpad update`) — an **approved** review posts its summary and leaves the issue In Review; the runner never moves it to `completed`/Done (see "Review cycle" and "Available states"). If the issue is not already In Review, move it there; otherwise leave it in place:
+{% elif run.kind == "review" %}End a review pass (workpad `### Path to done` already written) — **approved** moves the issue on to In Test; **changes needed** sends it back to In Progress with the open items listed; the runner never moves it to `completed`/Done (see "Review cycle" and "Available states"):
 
 ```sh
-pidash issue patch {{ issue.identifier }} --state "In Review"
+pidash issue patch {{ issue.identifier }} --state "In Test"      # approved
+pidash issue patch {{ issue.identifier }} --state "In Progress"  # changes needed
+pidash run yield --outcome done
+```
+{% else %}End a test pass (workpad `### Path to done` already written) — a **pass** leaves the issue In Test for a human to close; **defects** send it back to In Progress with the open items listed (see "Test cycle" and "Available states"):
+
+```sh
+pidash issue patch {{ issue.identifier }} --state "In Progress"  # defects only
+pidash run yield --outcome done
 ```
 {% endif %}{% else %}File a finding as a new issue under this project:
 
 ```sh
-pidash issue create --project {{ project.identifier }} --title "<short summary>" --description "<evidence, file path, severity, suggested fix>"
+# ./.pidash-finding.md: evidence, file path, severity, suggested fix (markdown)
+pidash issue create --project {{ project.identifier }} --title "<short summary>" --description-file ./.pidash-finding.md
 ```
 {% endif %}
 ### Available states

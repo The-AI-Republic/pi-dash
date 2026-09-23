@@ -73,7 +73,7 @@ export type TBaseIssue = {
   // `default_agent_executor`. "local_runner" routes to `assigned_pod_id`;
   // "cloud_agent" has no pod. Changing it is rejected by the backend once the
   // issue has an active run, same as the pod.
-  agent_executor?: "local_runner" | "cloud_agent" | null;
+  agent_executor?: "local_runner" | "cloud_agent" | "managed_runner" | null;
 
   created_at: string;
   updated_at: string;
@@ -112,16 +112,26 @@ type IssueRelation = {
 export type TIssueAgentTicker = {
   enabled: boolean;
   user_disabled: boolean;
+  /** Machine-started runs used from this issue's pool (any stage, for the
+   * life of the issue). ``tick_count`` is the pre-pool spelling. */
+  used: number;
   tick_count: number;
+  /** Extra runs a human added with Re-tick. */
+  granted?: number;
+  /** Pool cap: project default + ``granted``; -1 means no cap. */
   max_ticks: number;
+  /** Runs left in the pool; null when there is no cap. */
+  remaining?: number | null;
   interval_seconds: number;
+  /** An entry run is owed and starts as soon as the active run ends. */
+  pending_entry?: boolean;
   next_run_at: string | null;
   last_tick_at: string | null;
-  disarm_reason?: "" | "left_ticking_state" | "cap_hit" | "terminal_signal" | "user_disabled";
+  disarm_reason?: "" | "left_ticking_state" | "cap_hit" | "pool_spent" | "terminal_signal" | "user_disabled";
   /** True only when re-ticking would actually do something: the issue is
-   * still in a ticking state (In Progress / In Review) AND its current tick
-   * budget is exhausted. Gates the "re-tick" button so it never appears
-   * when the server would no-op. */
+   * still in a ticking state (In Progress / In Review / In Test) AND its
+   * pool is spent. Gates the "re-tick" button so it never appears when the
+   * server would no-op. */
   can_re_tick?: boolean;
 };
 
@@ -143,9 +153,6 @@ export type TIssueAgentRunSummary = {
   input_tokens: number | null;
   output_tokens: number | null;
   total_tokens: number | null;
-  /** Place in the runner's local worktree queue while
-   * ``waiting_for_worktree``; ``null`` otherwise (display only). */
-  queue_position?: number | null;
   live_state?: IRunnerLiveState | null;
 };
 

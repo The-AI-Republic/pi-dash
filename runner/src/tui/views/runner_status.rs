@@ -687,13 +687,13 @@ mod tests {
             workspace: WorkspaceSection {
                 working_dir: PathBuf::from("/tmp/pidash-test"),
             },
-            workdir: None,
             agent: Default::default(),
             codex: Default::default(),
             claude_code: Default::default(),
             cursor_agent: Default::default(),
             openclaw: Default::default(),
             grok: Default::default(),
+            muse_code: Default::default(),
             approval_policy: Default::default(),
         }
     }
@@ -710,7 +710,6 @@ mod tests {
                 auto_update: true,
             },
             runners,
-            workdirs: vec![],
             cli: None,
         }
     }
@@ -741,7 +740,6 @@ mod tests {
                 update: None,
             },
             runners: names.iter().map(|name| snapshot(name)).collect(),
-            pools: vec![],
         }
     }
 

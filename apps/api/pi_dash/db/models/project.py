@@ -138,33 +138,32 @@ class Project(BaseModel):
             ),
         ],
     )
-    # Periodic agent re-invocation defaults — see
-    # ``.ai_design/issue_ticking_system/design.md`` §7.2 and
-    # ``.ai_design/create_review_state/design.md`` §6.4 for the
-    # phase split.
+    # Periodic agent re-invocation policy — see
+    # ``.ai_design/ticking_relevance/design.md`` §5 and §9.
     #
-    # One field pair per ticking phase. The phases are siblings — a
-    # pair is read and written only by its own phase, so a cap grant or
-    # cadence tweak in one never leaks into another. The mapping from
-    # phase to pair lives in ``orchestration.agent_phases.CADENCE_FIELDS``.
+    # One budget **pool** per issue (``agent_default_max_ticks``), spent by
+    # machine-started runs in any of the three ticking stages. A Re-tick
+    # grants a fresh pool of this same size (there is no separate grant knob),
+    # so pool = 10 means each Re-tick adds 10. Cadence is kept per stage
+    # (``agent_*_interval_seconds``) so rhythms can diverge again in the
+    # future, but the three defaults are currently unified at 3 h (10800 s)
+    # per PDASHOSS01-167 — every ticking stage fires on the same rhythm.
+    # Budget is per issue, not per stage. The mapping from stage to
+    # interval field lives in
+    # ``orchestration.agent_phases.CADENCE_FIELDS``.
     #
-    # ``agent_default_*`` are the **In Progress phase** defaults.
-    # ``agent_review_default_*`` are the **In Review phase** defaults
-    # (review iterations are bounded shorter — see design §3.2).
-    # ``agent_test_default_*`` are the **In Test phase** defaults: a
-    # test cycle is a slower, heavier loop than a review pass — boot an
-    # environment, execute, collect evidence — so it ticks every 12 h
-    # and is capped at 3 passes (a 36 h window). See
-    # ``.ai_design/create_test_state/design.md`` §3.2.
-    # ``agent_ticking_enabled`` gates the project globally; every
-    # phase respects it.
-    agent_default_interval_seconds = models.IntegerField(default=43200)  # 12 h
-    agent_default_max_ticks = models.IntegerField(default=24)            # 3 days
-    agent_review_default_interval_seconds = models.IntegerField(default=28800)  # 8 h
-    agent_review_default_max_ticks = models.IntegerField(default=4)             # 32 h window
-    agent_test_default_interval_seconds = models.IntegerField(default=43200)  # 12 h
-    agent_test_default_max_ticks = models.IntegerField(default=3)             # 36 h window
+    # ``agent_ticking_enabled`` gates the project globally; every stage
+    # respects it.
+    agent_default_interval_seconds = models.IntegerField(default=10800)  # In Progress, 3 h
+    agent_default_max_ticks = models.IntegerField(default=10)            # pool per issue; also Re-tick grant size
+    agent_review_default_interval_seconds = models.IntegerField(default=10800)  # In Review, 3 h
+    agent_test_default_interval_seconds = models.IntegerField(default=10800)    # In Test, 3 h
     agent_ticking_enabled = models.BooleanField(default=True)
+    # Longest an agent's ``Waiting on:`` marker may hold cadence ticks off
+    # (PDASHOSS01-198, ``orchestration.wake``); after it elapses since the
+    # waiting run ended, ticks resume so a stale marker cannot park an issue
+    # forever. ``0`` turns the pause off.
+    agent_wait_max_pause_seconds = models.IntegerField(default=604800)  # 7 d
     # Execution policy for future runs. Existing runs retain their snapshotted
     # executor even when this setting changes.
     default_agent_executor = models.CharField(

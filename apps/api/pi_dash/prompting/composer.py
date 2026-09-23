@@ -291,6 +291,7 @@ def compose(
     user,
     context: Dict[str, Any],
     draft_overrides: Optional[Dict[str, str]] = None,
+    executor_kind: Optional[str] = None,
 ) -> ComposedPrompt:
     """Resolve, assemble, and render the recipe for ``kind``.
 
@@ -301,7 +302,7 @@ def compose(
     the resolved one before assembly, so a preview can render a draft the admin
     hasn't committed yet. Keys outside this recipe are ignored.
     """
-    recipe = recipes.recipe_for(kind)
+    recipe = recipes.recipe_for(kind, executor_kind=executor_kind)
     override_index = load_override_index(workspace, user)
     resolved = [
         resolve_section(key, workspace=workspace, project=project, user=user, override_index=override_index)
@@ -403,7 +404,12 @@ def build_first_turn(issue, run) -> str:
         }
     else:
         composed = compose(
-            kind, workspace=issue.workspace, project=issue.project, user=_user_for_run(run), context=context
+            kind,
+            workspace=issue.workspace,
+            project=issue.project,
+            user=_user_for_run(run),
+            context=context,
+            executor_kind=getattr(run, "executor_kind", None),
         )
         run.prompt_manifest = composed.manifest_dicts
     return composed.text
@@ -438,7 +444,14 @@ def build_scheduler_turn(binding, run) -> str:
             "sections": composed.manifest_dicts,
         }
     else:
-        composed = compose(recipes.KIND_SCHEDULER, workspace=workspace, project=project, user=None, context=context)
+        composed = compose(
+            recipes.KIND_SCHEDULER,
+            workspace=workspace,
+            project=project,
+            user=None,
+            context=context,
+            executor_kind=getattr(run, "executor_kind", None),
+        )
         run.prompt_manifest = composed.manifest_dicts
     return composed.text
 

@@ -83,6 +83,28 @@ pub struct CliEnv {
     pub api_url: String,
     pub workspace_slug: String,
     pub token: String,
+    /// The agent run this CLI invocation belongs to, from `PIDASH_RUN_ID`
+    /// (set by the daemon on the agent process). Sent as
+    /// [`RUN_ID_HEADER`] on every mutating request so the cloud can tell a
+    /// state move made from inside a run apart from a human's — account
+    /// identity cannot, since the token resolves to the runner owner's
+    /// account. `None` for operator / scripted use.
+    pub run_id: Option<String>,
+}
+
+/// Header carrying [`CliEnv::run_id`]. Mirrors
+/// `pi_dash.api.views.issue.RUN_ID_HEADER` on the cloud.
+pub const RUN_ID_HEADER: &str = "X-Pi-Dash-Run-Id";
+
+/// Environment variable the daemon sets on the agent process with the
+/// current `AgentRun` id. See `util::shell::RunEnv`.
+pub const RUN_ID_ENV: &str = "PIDASH_RUN_ID";
+
+fn run_id_from_env() -> Option<String> {
+    std::env::var(RUN_ID_ENV)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 impl CliEnv {
@@ -99,6 +121,7 @@ impl CliEnv {
             api_url: api_url.trim_end_matches('/').to_string(),
             workspace_slug,
             token,
+            run_id: run_id_from_env(),
         })
     }
 
@@ -167,6 +190,7 @@ impl CliEnv {
             api_url: api_url.trim_end_matches('/').to_string(),
             workspace_slug,
             token,
+            run_id: run_id_from_env(),
         })
     }
 
@@ -213,6 +237,61 @@ impl ApiClient {
         self.request(Method::POST, path, Some(body)).await
     }
 
+    /// Bodiless DELETE. The server's JSON response (if any) is returned the
+    /// same way as for the other verbs.
+    pub async fn delete(&self, path: &str) -> Result<Value, CliError> {
+        self.request(Method::DELETE, path, None::<&()>).await
+    }
+
+    /// POST a multipart/form-data upload to an **absolute** URL (not under
+    /// `/api/v1/`), sending no Pi Dash credentials.
+    ///
+    /// This is the S3/MinIO presigned-POST step of an asset upload: the
+    /// `fields` returned by the asset endpoint are appended first, then the
+    /// binary as a `file` part last (S3 requires `key`/policy fields to
+    /// precede the file). The presigned policy is the only authorization S3
+    /// needs, so the `X-Api-Key` header is deliberately omitted.
+    pub async fn post_multipart(
+        &self,
+        url: &str,
+        fields: &serde_json::Map<String, Value>,
+        filename: &str,
+        content_type: &str,
+        bytes: Vec<u8>,
+    ) -> Result<(), CliError> {
+        let mut form = reqwest::multipart::Form::new();
+        for (key, value) in fields {
+            // Presigned POST fields are strings; anything else is a malformed
+            // response from our own asset endpoint.
+            let text = value.as_str().ok_or_else(|| {
+                CliError::new(
+                    EXIT_SERVER,
+                    format!("presigned upload field {key} was not a string"),
+                )
+            })?;
+            form = form.text(key.clone(), text.to_string());
+        }
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(filename.to_string())
+            .mime_str(content_type)
+            .map_err(|e| CliError::new(EXIT_INVALID, format!("invalid content type: {e}")))?;
+        form = form.part("file", part);
+
+        let resp = self
+            .http
+            .post(url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| CliError::new(EXIT_UNKNOWN, format!("POST {url}: {e}")))?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let text = resp.text().await.unwrap_or_default();
+        Err(map_error_status(status, text))
+    }
+
     async fn request<B: Serialize + ?Sized>(
         &self,
         method: Method,
@@ -225,6 +304,13 @@ impl ApiClient {
             .request(method.clone(), &url)
             .header("X-Api-Key", &self.env.token)
             .header("Accept", "application/json");
+        // Reads are attributed to nobody; every write carries the run id so
+        // the cloud knows it came from inside this agent run.
+        if method != Method::GET
+            && let Some(run_id) = &self.env.run_id
+        {
+            req = req.header(RUN_ID_HEADER, run_id);
+        }
         if let Some(payload) = body {
             req = req.json(payload);
         }
@@ -324,16 +410,15 @@ mod resolve_tests {
                 workspace: WorkspaceSection {
                     working_dir: std::path::PathBuf::from("/tmp/wd"),
                 },
-                workdir: None,
                 agent: AgentSection::default(),
                 codex: CodexSection::default(),
                 claude_code: ClaudeCodeSection::default(),
                 cursor_agent: CursorAgentSection::default(),
                 openclaw: Default::default(),
                 grok: Default::default(),
+                muse_code: Default::default(),
                 approval_policy: ApprovalPolicySection::default(),
             }],
-            workdirs: vec![],
             cli: Some(CliSection {
                 token: Some(token.into()),
                 workspace_slug: None,

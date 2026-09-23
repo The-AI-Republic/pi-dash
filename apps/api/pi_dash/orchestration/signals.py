@@ -14,17 +14,23 @@ receiver here. The agent is woken by the per-issue ticker
 (``pi_dash.bgtasks.agent_ticker``) or by the explicit Comment & Run
 button, which calls into ``orchestration.service.handle_issue_comment``
 directly. See ``.ai_design/issue_ticking_system/design.md`` §9.
+
+A transition *into* a ``completed`` / ``cancelled`` group also enqueues
+``orchestration.wake.wake_dependents`` so issues blocked by this one get a
+tick now instead of at their next cadence (PDASHOSS01-198).
 """
 
 from __future__ import annotations
 
 import logging
 
+from django.db import transaction
 from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 
 from pi_dash.db.models.issue import Issue
 from pi_dash.db.models.state import State
+from pi_dash.orchestration.blockers import CLOSED_STATE_GROUPS
 from pi_dash.orchestration.service import handle_issue_state_transition
 
 logger = logging.getLogger(__name__)
@@ -36,6 +42,15 @@ _PREVIOUS_STATE = "_orchestration_prev_state_id"
 #: Run on a Paused issue) sets ``issue._orchestration_dispatch_immediate
 #: = False`` before calling ``Issue.save()``.
 _DISPATCH_IMMEDIATE_ATTR = "_orchestration_dispatch_immediate"
+
+#: Per-instance carrier for "this state change was made from inside an
+#: agent run". The work-item PATCH view sets
+#: ``issue._orchestration_moved_by_run = <AgentRun>`` (verified from the
+#: ``X-Pi-Dash-Run-Id`` header) before ``Issue.save()``; the handler uses it
+#: to tell an agent's move from a human's — account identity cannot, because
+#: the agent's CLI token resolves to the runner owner's account. See
+#: ``.ai_design/ticking_relevance/design.md`` §5.6.
+MOVED_BY_RUN_ATTR = "_orchestration_moved_by_run"
 
 #: Process-local counter of swallowed orchestration errors. We catch and log
 #: every exception in `fire_state_transition` so a broken trigger can't crash
@@ -59,6 +74,7 @@ def capture_prior_state(sender, instance: Issue, **kwargs) -> None:
 
 @receiver(post_save, sender=Issue, dispatch_uid="orchestration.issue_postsave")
 def fire_state_transition(sender, instance: Issue, created: bool, **kwargs) -> None:
+    global orchestration_error_count
     prev_state_id = getattr(instance, _PREVIOUS_STATE, None)
     current_state_id = instance.state_id
     if prev_state_id == current_state_id:
@@ -69,6 +85,7 @@ def fire_state_transition(sender, instance: Issue, created: bool, **kwargs) -> N
     dispatch_immediate = bool(
         getattr(instance, _DISPATCH_IMMEDIATE_ATTR, True)
     )
+    moved_by_run = getattr(instance, MOVED_BY_RUN_ATTR, None)
 
     try:
         handle_issue_state_transition(
@@ -77,9 +94,9 @@ def fire_state_transition(sender, instance: Issue, created: bool, **kwargs) -> N
             to_state=to_state,
             actor=None,
             dispatch_immediate=dispatch_immediate,
+            moved_by_run=moved_by_run,
         )
     except Exception:  # noqa: BLE001 — never let orchestration crash issue save
-        global orchestration_error_count
         orchestration_error_count += 1
         logger.exception(
             "orchestration.error: handle_issue_state_transition failed "
@@ -89,6 +106,41 @@ def fire_state_transition(sender, instance: Issue, created: bool, **kwargs) -> N
             current_state_id,
             orchestration_error_count,
         )
+
+    if _closed(to_state) and not _closed(from_state):
+        try:
+            _enqueue_wake_dependents(instance)
+        except Exception:  # noqa: BLE001 — never let orchestration crash issue save
+            orchestration_error_count += 1
+            logger.exception(
+                "orchestration.error: wake_dependents enqueue failed for issue=%s (total_errors=%d)",
+                instance.pk,
+                orchestration_error_count,
+            )
+
+
+def _closed(state: State | None) -> bool:
+    return state is not None and state.group in CLOSED_STATE_GROUPS
+
+
+def _enqueue_wake_dependents(issue: Issue) -> None:
+    """Queue the dependents wake once the blocker's new state is committed."""
+    issue_id = str(issue.pk)
+    transaction.on_commit(lambda: _send_wake_dependents(issue_id))
+
+
+def _send_wake_dependents(issue_id: str) -> None:
+    # Runs after commit, outside the save's error handling: a broker hiccup
+    # must not surface as a failed save. The dependents fall back to their
+    # cadence tick.
+    from pi_dash.orchestration.wake import wake_dependents
+
+    try:
+        wake_dependents.delay(issue_id)
+    except Exception:  # noqa: BLE001
+        global orchestration_error_count
+        orchestration_error_count += 1
+        logger.exception("orchestration.error: wake_dependents send failed for issue=%s", issue_id)
 
 
 def _lookup_state(state_id) -> State | None:

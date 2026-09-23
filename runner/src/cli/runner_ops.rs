@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 use crate::cloud::http::{EnrollResponse, RunnerCredentials, write_runner_credentials};
 use crate::config::file;
 use crate::config::schema::{
-    AgentKind, AgentSection, ApprovalPolicySection, ClaudeCodeSection, CleanMode, CliSection,
-    CodexSection, Config, CursorAgentSection, DEFAULT_POOL_SIZE, DaemonConfig, GrokSection,
-    OpenClawSection, RunnerConfig, WorkdirConfig, WorkspaceSection, canonical_for_compare,
+    AgentKind, AgentSection, ApprovalPolicySection, ClaudeCodeSection, CliSection, CodexSection,
+    Config, CursorAgentSection, DaemonConfig, GrokSection, MuseCodeSection, OpenClawSection,
+    RunnerConfig, WorkspaceSection,
 };
 use crate::util::paths::Paths;
 use std::io::IsTerminal;
@@ -70,10 +70,12 @@ fn model_applies_to_agent(kind: AgentKind, model: &str) -> bool {
         AgentKind::Codex => {
             has("gpt-") || m == "o3" || m == "o4" || has("o3-") || has("o4-") || has("codex")
         }
-        // Cursor, OpenClaw, and Grok pull their model slug from their own
-        // provider's catalog; accept any non-empty value and let the agent
-        // reject unknown slugs.
-        AgentKind::CursorAgent | AgentKind::OpenClaw | AgentKind::Grok => !m.is_empty(),
+        // Cursor, OpenClaw, Grok, and Muse Code pull their model slug from
+        // their own provider's catalog; accept any non-empty value and let the
+        // agent reject unknown slugs.
+        AgentKind::CursorAgent | AgentKind::OpenClaw | AgentKind::Grok | AgentKind::MuseCode => {
+            !m.is_empty()
+        }
     }
 }
 
@@ -93,6 +95,7 @@ pub fn agent_sections_for(
     CursorAgentSection,
     OpenClawSection,
     GrokSection,
+    MuseCodeSection,
 ) {
     let model = model.map(str::trim).filter(|s| !s.is_empty());
     let effort = reasoning_effort.map(str::trim).filter(|s| !s.is_empty());
@@ -150,6 +153,7 @@ pub fn agent_sections_for(
     let mut cursor_agent = CursorAgentSection::default();
     let mut openclaw = OpenClawSection::default();
     let mut grok = GrokSection::default();
+    let mut muse_code = MuseCodeSection::default();
     match agent_kind {
         AgentKind::Codex => {
             codex.model_default = model;
@@ -159,8 +163,9 @@ pub fn agent_sections_for(
         AgentKind::CursorAgent => cursor_agent.model_default = model,
         AgentKind::OpenClaw => openclaw.model_default = model,
         AgentKind::Grok => grok.model_default = model,
+        AgentKind::MuseCode => muse_code.model_default = model,
     }
-    (codex, claude_code, cursor_agent, openclaw, grok)
+    (codex, claude_code, cursor_agent, openclaw, grok, muse_code)
 }
 
 /// Read the user's CLI token from `[cli].token` in `config.toml`.
@@ -206,7 +211,6 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str, force: bool)
                 auto_update: true,
             },
             runners: vec![],
-            workdirs: vec![],
             cli: None,
         }
     };
@@ -329,36 +333,6 @@ pub fn clear_cli_token(paths: &Paths) -> Result<()> {
 pub struct AppliedRunner {
     pub runner: RunnerConfig,
     pub is_first_runner: bool,
-    pub workdir: Option<AppliedWorkdir>,
-}
-
-/// How `pidash runner add` wants the new runner bound locally.
-#[derive(Debug, Clone, Default)]
-pub enum RunnerWorkdirPlan {
-    /// Legacy mode: the runner executes directly in `workspace.working_dir`.
-    #[default]
-    Legacy,
-    /// Bind to an already configured `[[workdir]]`.
-    Existing { name: String },
-    /// If `workspace.working_dir` is already a git repo, create or reuse a
-    /// pool for it and bind the new runner to that pool. Non-git paths stay
-    /// legacy so first-run bootstrap remains permissive.
-    AutoPoolIfGit,
-}
-
-/// Workdir binding that was actually written to config.toml.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AppliedWorkdir {
-    Existing {
-        name: String,
-        migrated_legacy_runners: Vec<String>,
-    },
-    AutoPool {
-        name: String,
-        path: PathBuf,
-        created: bool,
-        migrated_legacy_runners: Vec<String>,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -367,7 +341,58 @@ pub struct ApplyEnrollOptions<'a> {
     pub agent_kind: AgentKind,
     pub model: Option<&'a str>,
     pub reasoning_effort: Option<&'a str>,
-    pub workdir_plan: RunnerWorkdirPlan,
+}
+
+/// The exclusive working directory for a runner created without an explicit
+/// `--working-dir`. One dir per runner, under the data dir, named
+/// `<project_slug>_<runner_slug>` with a short runner-id suffix so two runners
+/// — even in workspaces whose project slugs collide — can never resolve to the
+/// same path. Config validation ([`Config::validate`]) rejects any remaining
+/// collision. See PDASHOSS01-134.
+pub fn default_working_dir(
+    paths: &Paths,
+    project_slug: &str,
+    runner_name: &str,
+    runner_id: Uuid,
+) -> PathBuf {
+    default_working_dir_in(&paths.data_dir, project_slug, runner_name, runner_id)
+}
+
+/// [`default_working_dir`] against a bare `data_dir` rather than a full
+/// [`Paths`]. Kept separate so the legacy-pool migration
+/// ([`crate::config::migrate`]), which only has the data dir in hand, can
+/// assign a displaced runner exactly the directory a fresh `runner add` would
+/// have — the naming rule lives in one place.
+pub fn default_working_dir_in(
+    data_dir: &Path,
+    project_slug: &str,
+    runner_name: &str,
+    runner_id: Uuid,
+) -> PathBuf {
+    fn slug(s: &str, fallback: &str) -> String {
+        let out: String = s
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let out = out.trim_matches('-').to_string();
+        if out.is_empty() {
+            fallback.to_string()
+        } else {
+            out
+        }
+    }
+    let proj = slug(project_slug, "project");
+    let name = slug(runner_name, "runner");
+    let short: String = runner_id.simple().to_string().chars().take(8).collect();
+    data_dir
+        .join("workspaces")
+        .join(format!("{proj}_{name}_{short}"))
 }
 
 /// Apply an `EnrollResponse` (from either the legacy enroll endpoint or
@@ -387,11 +412,16 @@ pub async fn apply_enroll_response(
     cloud_url: &str,
     options: ApplyEnrollOptions<'_>,
 ) -> Result<AppliedRunner> {
-    let working_dir = options
-        .working_dir
-        .unwrap_or_else(|| paths.runner_dir(resp.runner_id).join("workspace"));
+    let working_dir = options.working_dir.unwrap_or_else(|| {
+        default_working_dir(
+            paths,
+            &resp.project_identifier,
+            &resp.runner_name,
+            resp.runner_id,
+        )
+    });
 
-    let (codex, claude_code, cursor_agent, openclaw, grok) =
+    let (codex, claude_code, cursor_agent, openclaw, grok, muse_code) =
         agent_sections_for(options.agent_kind, options.model, options.reasoning_effort);
     let new_runner = RunnerConfig {
         name: resp.runner_name.clone(),
@@ -400,7 +430,6 @@ pub async fn apply_enroll_response(
         project_slug: Some(resp.project_identifier.clone()),
         pod_id: None,
         workspace: WorkspaceSection { working_dir },
-        workdir: None,
         agent: AgentSection {
             kind: options.agent_kind,
         },
@@ -409,6 +438,7 @@ pub async fn apply_enroll_response(
         cursor_agent,
         openclaw,
         grok,
+        muse_code,
         approval_policy: ApprovalPolicySection::default(),
     };
 
@@ -428,7 +458,6 @@ pub async fn apply_enroll_response(
                 auto_update: true,
             },
             runners: vec![],
-            workdirs: vec![],
             cli: None,
         })
     };
@@ -442,7 +471,6 @@ pub async fn apply_enroll_response(
     let new_runner_for_closure = new_runner.clone();
     let runner_id = new_runner.runner_id;
     let mut is_first_runner = false;
-    let mut applied_workdir = None;
     let cfg_after = file::mutate_config_or_init(paths, init_cfg, |cfg| {
         if !cfg.daemon.cloud_url.is_empty() && cfg.daemon.cloud_url != cloud_url {
             anyhow::bail!(
@@ -455,9 +483,7 @@ pub async fn apply_enroll_response(
             cfg.daemon.cloud_url = cloud_url.to_string();
         }
         is_first_runner = cfg.runners.is_empty();
-        let mut runner = new_runner_for_closure;
-        applied_workdir = apply_workdir_plan(cfg, &mut runner, &options.workdir_plan)?;
-        cfg.runners.push(runner);
+        cfg.runners.push(new_runner_for_closure);
         Ok(())
     })
     .context("persisting [[runner]] block under config lock")?;
@@ -500,7 +526,6 @@ pub async fn apply_enroll_response(
         return Ok(AppliedRunner {
             runner: new_runner,
             is_first_runner,
-            workdir: applied_workdir,
         });
     }
     write_runner_credentials(
@@ -518,121 +543,7 @@ pub async fn apply_enroll_response(
     Ok(AppliedRunner {
         runner: new_runner,
         is_first_runner,
-        workdir: applied_workdir,
     })
-}
-
-fn apply_workdir_plan(
-    cfg: &mut Config,
-    runner: &mut RunnerConfig,
-    plan: &RunnerWorkdirPlan,
-) -> Result<Option<AppliedWorkdir>> {
-    match plan {
-        RunnerWorkdirPlan::Legacy => Ok(None),
-        RunnerWorkdirPlan::Existing { name } => {
-            let path = cfg
-                .workdirs
-                .iter()
-                .find(|w| w.name == *name)
-                .map(|w| w.path.clone())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "no work dir named {name:?}; add it first with `pidash workdir add --name {name} --path <repo>`"
-                    )
-                })?;
-            let migrated_legacy_runners = migrate_exact_legacy_runners(cfg, &path, name);
-            runner.workdir = Some(name.clone());
-            Ok(Some(AppliedWorkdir::Existing {
-                name: name.clone(),
-                migrated_legacy_runners,
-            }))
-        }
-        RunnerWorkdirPlan::AutoPoolIfGit => {
-            let path = absolute_path(&runner.workspace.working_dir);
-            if !crate::workspace::git::is_git_repo(&path) {
-                return Ok(None);
-            }
-            let (name, created) = match cfg.workdirs.iter().find(|w| same_path(&w.path, &path)) {
-                Some(existing) => (existing.name.clone(), false),
-                None => {
-                    let name = unique_workdir_name(cfg, &runner.name);
-                    cfg.workdirs.push(WorkdirConfig {
-                        name: name.clone(),
-                        path: path.clone(),
-                        pool_size: DEFAULT_POOL_SIZE,
-                        clean_mode: CleanMode::default(),
-                        keep_paths: Vec::new(),
-                        setup_command: None,
-                        worktrees_dir: None,
-                    });
-                    (name, true)
-                }
-            };
-            let migrated_legacy_runners = migrate_exact_legacy_runners(cfg, &path, &name);
-            runner.workdir = Some(name.clone());
-            Ok(Some(AppliedWorkdir::AutoPool {
-                name,
-                path,
-                created,
-                migrated_legacy_runners,
-            }))
-        }
-    }
-}
-
-fn migrate_exact_legacy_runners(
-    cfg: &mut Config,
-    workdir_path: &Path,
-    workdir_name: &str,
-) -> Vec<String> {
-    let mut migrated = Vec::new();
-    for runner in &mut cfg.runners {
-        if runner.workdir.is_none() && same_path(&runner.workspace.working_dir, workdir_path) {
-            runner.workdir = Some(workdir_name.to_string());
-            migrated.push(runner.name.clone());
-        }
-    }
-    migrated
-}
-
-fn same_path(a: &Path, b: &Path) -> bool {
-    canonical_for_compare(a) == canonical_for_compare(b)
-}
-
-fn absolute_path(path: &Path) -> PathBuf {
-    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-/// Derive a unique `[[workdir]]` name for an auto-provisioned pool, seeded from
-/// the runner's name. Non-identifier chars are folded to `-`; collisions get a
-/// numeric suffix so repeated `runner add`s never clash.
-fn unique_workdir_name(cfg: &Config, seed: &str) -> String {
-    let base: String = seed
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let base = base.trim_matches('-').to_string();
-    let base = if base.is_empty() {
-        "pool".to_string()
-    } else {
-        base
-    };
-    if !cfg.workdirs.iter().any(|w| w.name == base) {
-        return base;
-    }
-    for n in 2.. {
-        let cand = format!("{base}-{n}");
-        if !cfg.workdirs.iter().any(|w| w.name == cand) {
-            return cand;
-        }
-    }
-    unreachable!("an unbounded search always finds a free name")
 }
 
 #[cfg(test)]
@@ -644,7 +555,7 @@ mod tests {
 
     #[test]
     fn model_routes_to_selected_agent_section() {
-        let (codex, claude, cursor, openclaw, _) =
+        let (codex, claude, cursor, openclaw, _, _) =
             agent_sections_for(AgentKind::ClaudeCode, Some("claude-opus-4-8"), None);
         assert_eq!(claude.model_default.as_deref(), Some("claude-opus-4-8"));
         assert_eq!(codex.model_default, None);
@@ -654,7 +565,8 @@ mod tests {
 
     #[test]
     fn codex_model_and_effort_are_applied_together() {
-        let (codex, _, _, _, _) = agent_sections_for(AgentKind::Codex, Some("gpt-5.5"), Some("High"));
+        let (codex, _, _, _, _, _) =
+            agent_sections_for(AgentKind::Codex, Some("gpt-5.5"), Some("High"));
         assert_eq!(codex.model_default.as_deref(), Some("gpt-5.5"));
         // Effort is normalized to lowercase.
         assert_eq!(codex.effort_default.as_deref(), Some("high"));
@@ -665,14 +577,14 @@ mod tests {
         // The user's example: a Codex model handed to the Claude agent.
         // Non-fatal — the model is dropped (warning printed) and the
         // section is left at its default (None).
-        let (_, claude, _, _, _) =
- agent_sections_for(AgentKind::ClaudeCode, Some("gpt-5.5"), None);
+        let (_, claude, _, _, _, _) =
+            agent_sections_for(AgentKind::ClaudeCode, Some("gpt-5.5"), None);
         assert_eq!(claude.model_default, None);
     }
 
     #[test]
     fn effort_ignored_for_non_codex_agents() {
-        let (_, claude, _, _, _) =
+        let (_, claude, _, _, _, _) =
             agent_sections_for(AgentKind::ClaudeCode, Some("claude-opus-4-8"), Some("high"));
         // Model still applies; effort has no home on the claude section.
         assert_eq!(claude.model_default.as_deref(), Some("claude-opus-4-8"));
@@ -680,14 +592,15 @@ mod tests {
 
     #[test]
     fn unknown_codex_effort_is_dropped() {
-        let (codex, _, _, _, _) = agent_sections_for(AgentKind::Codex, Some("gpt-5.5"), Some("turbo"));
+        let (codex, _, _, _, _, _) =
+            agent_sections_for(AgentKind::Codex, Some("gpt-5.5"), Some("turbo"));
         assert_eq!(codex.model_default.as_deref(), Some("gpt-5.5"));
         assert_eq!(codex.effort_default, None);
     }
 
     #[test]
     fn cursor_accepts_any_nonempty_slug() {
-        let (_, _, cursor, _, _) = agent_sections_for(
+        let (_, _, cursor, _, _, _) = agent_sections_for(
             AgentKind::CursorAgent,
             Some("claude-opus-4-8-thinking-high"),
             None,
@@ -702,7 +615,7 @@ mod tests {
     fn openclaw_accepts_any_nonempty_slug() {
         // OpenClaw's model space is provider-agnostic (resolved by the
         // Gateway), so any non-empty slug routes to its section.
-        let (codex, claude, cursor, openclaw, _) =
+        let (codex, claude, cursor, openclaw, _, _) =
             agent_sections_for(AgentKind::OpenClaw, Some("anthropic/claude-opus-4-8"), None);
         assert_eq!(
             openclaw.model_default.as_deref(),
@@ -715,7 +628,7 @@ mod tests {
 
     #[test]
     fn blank_model_is_treated_as_unset() {
-        let (codex, _, _, _, _) = agent_sections_for(AgentKind::Codex, Some("   "), None);
+        let (codex, _, _, _, _, _) = agent_sections_for(AgentKind::Codex, Some("   "), None);
         assert_eq!(codex.model_default, None);
     }
 
@@ -723,7 +636,7 @@ mod tests {
     fn codex_effort_dropped_when_model_inapplicable() {
         // A Claude model handed to codex: the model is dropped, and the
         // effort meant for it must not survive onto codex's default model.
-        let (codex, _, _, _, _) =
+        let (codex, _, _, _, _, _) =
             agent_sections_for(AgentKind::Codex, Some("claude-opus-4-8"), Some("high"));
         assert_eq!(codex.model_default, None);
         assert_eq!(codex.effort_default, None);
@@ -733,7 +646,7 @@ mod tests {
     fn codex_effort_dropped_without_a_model() {
         // Effort is meaningless without an explicit model (see the
         // CodexSection::effort_default contract).
-        let (codex, _, _, _, _) = agent_sections_for(AgentKind::Codex, None, Some("high"));
+        let (codex, _, _, _, _, _) = agent_sections_for(AgentKind::Codex, None, Some("high"));
         assert_eq!(codex.model_default, None);
         assert_eq!(codex.effort_default, None);
     }
@@ -742,10 +655,10 @@ mod tests {
     fn bare_prefix_models_are_rejected() {
         // A dash-terminated prefix with nothing after it is an incomplete
         // slug, not a model — it must not become a bogus model_default.
-        let (_, claude, _, _, _) =
- agent_sections_for(AgentKind::ClaudeCode, Some("claude-"), None);
+        let (_, claude, _, _, _, _) =
+            agent_sections_for(AgentKind::ClaudeCode, Some("claude-"), None);
         assert_eq!(claude.model_default, None);
-        let (codex, _, _, _, _) = agent_sections_for(AgentKind::Codex, Some("gpt-"), None);
+        let (codex, _, _, _, _, _) = agent_sections_for(AgentKind::Codex, Some("gpt-"), None);
         assert_eq!(codex.model_default, None);
     }
 
@@ -753,7 +666,7 @@ mod tests {
     fn bare_openai_reasoning_models_are_accepted() {
         // `o3` / `o4` are valid bare model names; the bare-prefix guard
         // must not reject them.
-        let (codex, _, _, _, _) = agent_sections_for(AgentKind::Codex, Some("o3"), None);
+        let (codex, _, _, _, _, _) = agent_sections_for(AgentKind::Codex, Some("o3"), None);
         assert_eq!(codex.model_default.as_deref(), Some("o3"));
     }
 
@@ -765,22 +678,13 @@ mod tests {
         }
     }
 
-    fn enroll_options(
-        working_dir: PathBuf,
-        agent_kind: AgentKind,
-        workdir_plan: RunnerWorkdirPlan,
-    ) -> ApplyEnrollOptions<'static> {
+    fn enroll_options(working_dir: PathBuf, agent_kind: AgentKind) -> ApplyEnrollOptions<'static> {
         ApplyEnrollOptions {
             working_dir: Some(working_dir),
             agent_kind,
             model: None,
             reasoning_effort: None,
-            workdir_plan,
         }
-    }
-
-    fn mark_git_repo(path: &std::path::Path) {
-        std::fs::create_dir_all(path.join(".git")).unwrap();
     }
 
     fn sample_response(runner_name: &str) -> EnrollResponse {
@@ -810,11 +714,7 @@ mod tests {
             &paths,
             &resp,
             "https://example.com",
-            enroll_options(
-                tmp.path().join("wd"),
-                AgentKind::Codex,
-                RunnerWorkdirPlan::Legacy,
-            ),
+            enroll_options(tmp.path().join("wd"), AgentKind::Codex),
         )
         .await
         .unwrap();
@@ -834,11 +734,7 @@ mod tests {
             &paths,
             &r1,
             "https://example.com",
-            enroll_options(
-                tmp.path().join("wd1"),
-                AgentKind::Codex,
-                RunnerWorkdirPlan::Legacy,
-            ),
+            enroll_options(tmp.path().join("wd1"), AgentKind::Codex),
         )
         .await
         .unwrap();
@@ -848,11 +744,7 @@ mod tests {
             &paths,
             &r2,
             "https://example.com",
-            enroll_options(
-                tmp.path().join("wd2"),
-                AgentKind::Codex,
-                RunnerWorkdirPlan::Legacy,
-            ),
+            enroll_options(tmp.path().join("wd2"), AgentKind::Codex),
         )
         .await
         .unwrap();
@@ -861,90 +753,69 @@ mod tests {
         assert_eq!(cfg.runners.len(), 2);
     }
 
-    #[tokio::test]
-    async fn auto_pool_migrates_existing_legacy_runner_with_same_working_dir() {
+    #[test]
+    fn default_working_dir_is_named_and_exclusive_per_runner() {
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
-        let repo = tmp.path().join("repo");
-        mark_git_repo(&repo);
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
+        let a = default_working_dir(&paths, "WEB", "codex-runner", id_a);
+        let b = default_working_dir(&paths, "WEB", "codex-runner", id_b);
+        // Both land under <data_dir>/workspaces and carry the project + runner
+        // slug, lowercased.
+        assert!(a.starts_with(paths.data_dir.join("workspaces")));
+        let a_name = a.file_name().unwrap().to_string_lossy();
+        assert!(a_name.starts_with("web_codex-runner_"), "name: {a_name}");
+        // Two runners with an identical project+name still resolve to distinct
+        // directories because of the runner-id suffix.
+        assert_ne!(a, b);
+    }
 
-        let existing = sample_response("existing_claude");
-        apply_enroll_response(
-            &paths,
-            &existing,
-            "https://example.com",
-            enroll_options(
-                repo.clone(),
-                AgentKind::ClaudeCode,
-                RunnerWorkdirPlan::Legacy,
-            ),
-        )
-        .await
-        .unwrap();
-
-        let added = sample_response("new_codex");
-        let applied = apply_enroll_response(
-            &paths,
-            &added,
-            "https://example.com",
-            enroll_options(
-                repo.clone(),
-                AgentKind::Codex,
-                RunnerWorkdirPlan::AutoPoolIfGit,
-            ),
-        )
-        .await
-        .unwrap();
-
-        let AppliedWorkdir::AutoPool {
-            name,
-            created,
-            migrated_legacy_runners,
-            ..
-        } = applied.workdir.expect("new runner should be auto-pooled")
-        else {
-            panic!("expected auto-pool binding");
-        };
-        assert_eq!(name, "new_codex");
-        assert!(created);
-        assert_eq!(migrated_legacy_runners, vec!["existing_claude"]);
-
-        let cfg = file::load_config(&paths).unwrap();
-        cfg.validate().unwrap();
-        assert_eq!(cfg.workdirs.len(), 1);
-        assert_eq!(
-            cfg.workdirs[0].path,
-            std::path::absolute(&repo).unwrap_or(repo)
-        );
-        assert_eq!(
-            cfg.runners
-                .iter()
-                .find(|r| r.runner_id == existing.runner_id)
-                .and_then(|r| r.workdir.as_deref()),
-            Some("new_codex")
-        );
-        assert_eq!(
-            cfg.runners
-                .iter()
-                .find(|r| r.runner_id == added.runner_id)
-                .and_then(|r| r.workdir.as_deref()),
-            Some("new_codex")
-        );
+    #[test]
+    fn default_working_dir_handles_empty_slugs() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let dir = default_working_dir(&paths, "***", "", Uuid::new_v4());
+        let name = dir.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("project_runner_"), "name: {name}");
     }
 
     #[tokio::test]
-    async fn legacy_add_still_rejects_duplicate_working_dir() {
+    async fn add_without_working_dir_auto_creates_an_exclusive_dir() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let resp = sample_response("codex");
+        let applied = apply_enroll_response(
+            &paths,
+            &resp,
+            "https://example.com",
+            ApplyEnrollOptions {
+                working_dir: None,
+                agent_kind: AgentKind::Codex,
+                model: None,
+                reasoning_effort: None,
+            },
+        )
+        .await
+        .unwrap();
+        let wd = &applied.runner.workspace.working_dir;
+        assert!(wd.starts_with(paths.data_dir.join("workspaces")), "wd: {wd:?}");
+        // The persisted config validates (exclusive dir, no collision).
+        file::load_config(&paths).unwrap().validate().unwrap();
+    }
+
+    #[tokio::test]
+    async fn add_rejects_duplicate_working_dir() {
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         let repo = tmp.path().join("repo");
-        mark_git_repo(&repo);
 
         let r1 = sample_response("r1");
         apply_enroll_response(
             &paths,
             &r1,
             "https://example.com",
-            enroll_options(repo.clone(), AgentKind::Codex, RunnerWorkdirPlan::Legacy),
+            enroll_options(repo.clone(), AgentKind::Codex),
         )
         .await
         .unwrap();
@@ -954,7 +825,7 @@ mod tests {
             &paths,
             &r2,
             "https://example.com",
-            enroll_options(repo, AgentKind::Codex, RunnerWorkdirPlan::Legacy),
+            enroll_options(repo, AgentKind::Codex),
         )
         .await
         .unwrap_err();
@@ -978,11 +849,7 @@ mod tests {
             &paths,
             &r1,
             "https://cloud-a.example.com",
-            enroll_options(
-                tmp.path().join("wd1"),
-                AgentKind::Codex,
-                RunnerWorkdirPlan::Legacy,
-            ),
+            enroll_options(tmp.path().join("wd1"), AgentKind::Codex),
         )
         .await
         .unwrap();
@@ -992,11 +859,7 @@ mod tests {
             &paths,
             &r2,
             "https://cloud-b.example.com",
-            enroll_options(
-                tmp.path().join("wd2"),
-                AgentKind::Codex,
-                RunnerWorkdirPlan::Legacy,
-            ),
+            enroll_options(tmp.path().join("wd2"), AgentKind::Codex),
         )
         .await
         .unwrap_err();
@@ -1125,13 +988,13 @@ mod tests {
             workspace: WorkspaceSection {
                 working_dir: tmp.path().join("wd"),
             },
-            workdir: None,
             agent: AgentSection::default(),
             codex: CodexSection::default(),
             claude_code: ClaudeCodeSection::default(),
             cursor_agent: CursorAgentSection::default(),
             openclaw: OpenClawSection::default(),
             grok: GrokSection::default(),
+            muse_code: MuseCodeSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         });
         file::write_config(&paths, &cfg).unwrap();

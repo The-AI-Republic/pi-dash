@@ -22,7 +22,11 @@ from django.db import models, transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from pi_dash.core.agent_execution import AgentExecutorKind
+from pi_dash.core.agent_execution import (
+    MACHINE_EXECUTORS,
+    AgentExecutorKind,
+    effective_executor_for_issue,
+)
 
 from pi_dash.runner.models import (
     AgentRun,
@@ -50,9 +54,10 @@ HEARTBEAT_GRACE = timedelta(seconds=90)
 NON_TERMINAL_STATUSES = (
     AgentRunStatus.QUEUED,
     AgentRunStatus.ASSIGNED,
-    # A run waiting on a worktree lease still occupies its single-tenant
-    # runner and must block pod deletion exactly like ASSIGNED. See
-    # .ai_design/worktree_pooling/design.md §6.2.
+    # WAITING_FOR_WORKTREE is retired (PDASHOSS01-137): no new run enters it,
+    # but historical rows may still hold it, and while non-terminal such a run
+    # must block pod deletion exactly like ASSIGNED. Kept in the set so those
+    # rows keep gating correctly. See .ai_design/worktree_pooling/design.md §6.2.
     AgentRunStatus.WAITING_FOR_WORKTREE,
     AgentRunStatus.RUNNING,
     AgentRunStatus.CANCEL_REQUESTED,
@@ -64,11 +69,10 @@ NON_TERMINAL_STATUSES = (
 # Statuses that indicate a runner is currently serving a run.
 BUSY_STATUSES = (
     AgentRunStatus.ASSIGNED,
-    # The runner has accepted the run and is queueing it locally for a
-    # worktree — it is committed to this run and cannot take other work.
-    # The single-tenant runner reports it as ``in_flight_run`` while it
-    # waits, so the heartbeat reaper (which fails BUSY runs the runner no
-    # longer claims) needs no change beyond this membership.
+    # Retired (PDASHOSS01-137): no new run enters WAITING_FOR_WORKTREE, but a
+    # historical row still occupies its runner and reports as ``in_flight_run``
+    # while active, so the heartbeat reaper keeps treating it as busy. Kept in
+    # the set for those rows.
     AgentRunStatus.WAITING_FOR_WORKTREE,
     AgentRunStatus.RUNNING,
     AgentRunStatus.CANCEL_REQUESTED,
@@ -89,6 +93,8 @@ def select_runner_in_pod(pod: Pod) -> Optional[Runner]:
     row-level lock (``SELECT … FOR UPDATE SKIP LOCKED``) so concurrent drains
     can't both pick the same runner.
     """
+    from pi_dash.runner.models import RunnerProvisioning
+
     alive_threshold = timezone.now() - HEARTBEAT_GRACE
     return (
         Runner.objects.select_for_update(skip_locked=True)
@@ -97,34 +103,20 @@ def select_runner_in_pod(pod: Pod) -> Optional[Runner]:
             status=RunnerStatus.ONLINE,
             last_heartbeat_at__gte=alive_threshold,
         )
+        # Desktop-bundled runners serve only work pinned to them. Handing them
+        # unpinned pod work would make one person's laptop the team's build
+        # server, and it would vanish when they close the lid.
+        .exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
         .exclude(agent_runs__status__in=BUSY_STATUSES)
         # An active chat no longer excludes a runner from issue assignment:
         # chat and issue runs are concurrent (design §3.4). BUSY_STATUSES still
         # keeps the assign lane single-tenant (one issue at a time).
-        # Capacity hint (design §6.4): among equally-eligible idle runners,
-        # prefer one whose work-dir pool reports a free desk. This is a
-        # PREFERENCE, never a gate — runners with ``free_worktrees`` of 0 or
-        # ``None`` (a runner that predates the hint) stay eligible and sort
-        # after free-desk runners, then fall back to freshest-heartbeat
-        # (``-last_heartbeat_at``, newest first). A
-        # stale hint costs at most some local queue time, never a stuck run.
-        .annotate(_has_free_desk=_free_desk_rank())
-        .order_by("_has_free_desk", "-last_heartbeat_at")
+        # The worktree pool is retired (PDASHOSS01-137): there is no per-runner
+        # desk capacity to prefer, so among equally-eligible idle runners the
+        # only ranking left is freshest heartbeat (``-last_heartbeat_at``,
+        # newest first). ``Runner.free_worktrees`` is no longer written or read.
+        .order_by("-last_heartbeat_at")
         .first()
-    )
-
-
-def _free_desk_rank() -> models.Case:
-    """Rank annotation: 0 when the runner reports a free desk, else 1.
-
-    ``free_worktrees > 0`` sorts first (rank 0); 0 and ``NULL`` share the
-    no-free-desk group (rank 1), so old runners without the hint never lose
-    eligibility. ``order_by`` ascending puts the free-desk group ahead.
-    """
-    return models.Case(
-        models.When(free_worktrees__gt=0, then=models.Value(0)),
-        default=models.Value(1),
-        output_field=models.IntegerField(),
     )
 
 
@@ -142,7 +134,9 @@ def next_queued_run_for_pod(pod: Pod) -> Optional[AgentRun]:
         .filter(
             pod=pod,
             status=AgentRunStatus.QUEUED,
-            executor_kind=AgentExecutorKind.LOCAL_RUNNER,
+            # Both machine executors run through this daemon path; a
+            # managed run is a local run whose install Pi Dash owns.
+            executor_kind__in=MACHINE_EXECUTORS,
             pinned_runner__isnull=True,
         )
         .order_by("created_at")
@@ -165,13 +159,21 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
         .filter(
             pod=runner.pod,
             status=AgentRunStatus.QUEUED,
-            executor_kind=AgentExecutorKind.LOCAL_RUNNER,
+            # Both machine executors run through this daemon path; a
+            # managed run is a local run whose install Pi Dash owns.
+            executor_kind__in=MACHINE_EXECUTORS,
         )
         .filter(
             Q(pinned_runner=runner) | Q(pinned_runner__isnull=True),
         )
     )
     qs = filter_runs_usable_by_runner(qs, runner)
+    from pi_dash.runner.models import RunnerProvisioning
+
+    if runner.provisioning == RunnerProvisioning.DESKTOP_BUNDLED:
+        qs = qs.filter(executor_kind=AgentExecutorKind.MANAGED_RUNNER, pinned_runner=runner)
+    else:
+        qs = qs.filter(executor_kind=AgentExecutorKind.LOCAL_RUNNER)
     return (
         qs
         # Pinned-to-me sorts before unpinned via an integer rank: 0 for the
@@ -359,12 +361,15 @@ def select_runner_for_run(run: AgentRun) -> Optional[Runner]:
 
 
 def can_register_another(user_id, workspace_id) -> bool:
-    """Enforce the per-user runner cap."""
-    active = Runner.objects.filter(
-        owner_id=user_id,
-        workspace_id=workspace_id,
-    ).exclude(status=RunnerStatus.REVOKED)
-    return active.count() < Runner.MAX_PER_USER
+    """Enforce the per-user runner cap.
+
+    Desktop-bundled runners are provisioned by Pi Dash, one per project the
+    user opens, and are capped separately by
+    ``MANAGED_RUNNER_MAX_PER_USER_PROJECT``. Counting them here would let the
+    desktop silently consume a user's allowance for machines they installed
+    themselves.
+    """
+    return count_active(user_id, workspace_id) < Runner.MAX_PER_USER
 
 
 def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
@@ -378,11 +383,14 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
 
     - ``run_creator_id`` (the user the dispatch is being attributed to),
     - ``issue.created_by_id`` (the issue creator),
-    - any current ``issue.assignees``.
+    - any current (non-soft-deleted) issue assignee.
 
-    ``issue.assignees`` is the M2M live manager; the existing matcher
-    (``filter_runs_usable_by_runner``) traverses it the same way, so
-    the preflight stays consistent with the dispatch gate it shadows.
+    Assignees are read through ``IssueAssignee.objects`` — the soft-delete
+    manager — rather than the ``Issue.assignees`` M2M. The un-assign path
+    only stamps ``deleted_at`` on the through row, and a plain M2M join does
+    not honour that, so the M2M would report every user ever assigned. The
+    dispatch gate it shadows (``filter_runs_usable_by_runner``) applies the
+    same ``deleted_at`` condition, so preflight and dispatch stay consistent.
 
     Transient status is **deliberately ignored** — OFFLINE / BUSY runners
     still count as "registered" because the owner can flip them back on and
@@ -395,13 +403,37 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
     The intent is to detect the structural "nobody on this pod could ever
     serve this" case, not transient unavailability. See
     ``.ai_design/issue_runner/design.md`` §6.6.
+
+    For ``managed_runner`` issues the eligibility set is narrower: a managed
+    run is pinned to its creator's own desktop, so only a desktop-bundled
+    runner owned by the run creator could ever serve it. Transient status is
+    ignored here for the same reason as above — a closed laptop is not a
+    structural failure, and the creation path (§8.5) decides whether to wait.
     """
+    from pi_dash.db.models.issue import IssueAssignee
+    from pi_dash.runner.models import RunnerProvisioning
+
+    if effective_executor_for_issue(issue) == AgentExecutorKind.MANAGED_RUNNER:
+        if run_creator_id is None:
+            return False
+        return (
+            Runner.objects.filter(
+                pod=pod,
+                owner_id=run_creator_id,
+                provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
+            )
+            .exclude(status=RunnerStatus.REVOKED)
+            .exists()
+        )
+
     eligible_owner_ids: set = set()
     if run_creator_id is not None:
         eligible_owner_ids.add(run_creator_id)
     if issue.created_by_id is not None:
         eligible_owner_ids.add(issue.created_by_id)
-    eligible_owner_ids.update(issue.assignees.values_list("id", flat=True))
+    eligible_owner_ids.update(
+        IssueAssignee.objects.filter(issue=issue).values_list("assignee_id", flat=True)
+    )
     eligible_owner_ids.discard(None)
     if not eligible_owner_ids:
         return False
@@ -411,13 +443,20 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
             owner_id__in=eligible_owner_ids,
         )
         .exclude(status=RunnerStatus.REVOKED)
+        .exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
         .exists()
     )
 
 
 def count_active(user_id, workspace_id) -> int:
+    """Manually-enrolled, non-revoked runners this user holds in a workspace."""
+    from pi_dash.runner.models import RunnerProvisioning
+
     return (
-        Runner.objects.filter(owner_id=user_id, workspace_id=workspace_id).exclude(status=RunnerStatus.REVOKED).count()
+        Runner.objects.filter(owner_id=user_id, workspace_id=workspace_id)
+        .exclude(status=RunnerStatus.REVOKED)
+        .exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
+        .count()
     )
 
 

@@ -19,7 +19,7 @@ from botocore.exceptions import ClientError
 from django.utils import timezone
 
 from pi_dash.assistant import crypto
-from pi_dash.assistant.models import UserLLMConfig
+from pi_dash.assistant.models import UserLLMConfig, UserSTTConfig
 from pi_dash.assistant.runtime.deps import AssistantDeps
 from pi_dash.db.models import (
     Issue,
@@ -213,5 +213,16 @@ def configure_llm(user, *, model="gpt-test", base_url="https://api.example.com/v
         model_name=model,
         api_key_encrypted=crypto.encrypt("sk-test-key-123456"),
         last_verified_at=timezone.now(),
+    )
+    return cfg
+
+
+def configure_stt(user, *, model="whisper-1", base_url="https://api.example.com/v1", verified=True):
+    cfg = UserSTTConfig.objects.create(
+        user=user,
+        base_url=base_url,
+        model_name=model,
+        api_key_encrypted=crypto.encrypt("sk-test-key-123456"),
+        last_verified_at=timezone.now() if verified else None,
     )
     return cfg
