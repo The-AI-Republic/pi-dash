@@ -189,9 +189,26 @@ else:
 # locks indefinitely — Postgres only releases them at COMMIT/ROLLBACK or
 # when the backend dies. Caps idle time only; statement time (incl.
 # migrations) is unaffected.
+#
+# ``idle_session_timeout`` is the backstop for plain-``idle`` backends, which
+# ``idle_in_transaction_session_timeout`` does NOT cover. With CONN_MAX_AGE=0
+# Django closes a connection only when ``close_old_connections`` runs on the
+# thread that opened it, so any connection opened on a thread that signal
+# never reaches is leaked for the life of the worker (prod 2026-09-23: ~85
+# such backends, some idle 85+ min, exhausting a Postgres host shared with
+# home-page). Call sites are fixed to use ``database_sync_to_async``; this is
+# the belt to that pair of braces, so a future regression self-heals in 10min
+# instead of taking the shared instance down.
+#
+# 10min is deliberately far above any legitimate in-request idle gap: because
+# CONN_MAX_AGE=0, a connection is closed after each request/ORM call rather
+# than parked for reuse, so nothing healthy sits idle anywhere near this long.
+# Long migrations are unaffected — DDL is "active", not "idle".
 DATABASES["default"].setdefault("OPTIONS", {})
 DATABASES["default"]["OPTIONS"]["options"] = (
-    DATABASES["default"]["OPTIONS"].get("options", "") + " -c idle_in_transaction_session_timeout=60000"
+    DATABASES["default"]["OPTIONS"].get("options", "")
+    + " -c idle_in_transaction_session_timeout=60000"
+    + " -c idle_session_timeout=600000"
 ).strip()
 
 
