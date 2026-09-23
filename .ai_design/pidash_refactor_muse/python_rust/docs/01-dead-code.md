@@ -20,7 +20,7 @@ product decision are listed separately and are NOT dead.
 - Nothing imports it: the only references to `pi_dash.analytics` repo-wide are
   its own `apps.py` (`name = "pi_dash.analytics"`) and its
   `INSTALLED_APPS` entry (`settings/common.py:50`).
-- Action: delete the directory, remove the `INSTALLED_APPS` entry.
+- Action: do not port. Nothing is deleted in this project (parent rule 1): the file stays in place, unrouted and untested, and removal belongs to the post-switchover follow-up plan. (That plan also drops the `INSTALLED_APPS` entry.)
 - Exception — `tests/unit/analytics/test_advance_analytics.py` is a **live test
   in a misleading directory**: it exercises `Project`/`ProjectMember` and
   `AgentRun`/`Pod`, not the analytics app. Relocate it (project/runner tests),
@@ -34,8 +34,7 @@ product decision are listed separately and are NOT dead.
   `AgentChatApprovalRequest` via `django.contrib.admin`.
 - `django.contrib.admin` appears nowhere in `settings/` or `urls.py`; no
   `autodiscover()` call; nothing imports `pi_dash.runner.admin`.
-- Action: delete. The runner surfaces it pretends to administer are covered by
-  REST endpoints (D-13…D-15).
+- Action: do not port. Nothing is deleted in this project (parent rule 1): the file stays in place, unrouted and untested, and removal belongs to the post-switchover follow-up plan. The runner surfaces it pretends to administer are covered by REST endpoints (D-13…D-15).
 
 ### 3. `prompting/admin.py` — same, with one stale claim
 
@@ -47,14 +46,17 @@ product decision are listed separately and are NOT dead.
   editing today goes through shell/management (`reseed_*`) or the template
   admin UI; the `updated_by` audit path for templates must be re-decided in
   slice D-04, not inherited from this file.
-- Action: delete.
+- Action: do not port. Nothing is deleted in this project (parent rule 1): the file stays in place, unrouted and untested, and removal belongs to the post-switchover follow-up plan.
 
 ### 4. Control-plane WebSocket — already a reject stub
 
 - `runner/routing.py` (`ws/runner/`), `runner/consumers.py` (stub rejects all
-  traffic with close code 1008), `runner/urls.py` comment. No other producers
-  or consumers of the WS path exist.
-- Action: delete the stub; do not port. The replacement realtime path (D-14)
+  traffic with close code 1008), `runner/urls.py` comment. No producers or
+  consumers of the WS path exist, but the stub is **not import-free**:
+  `pi_dash/asgi.py` imports `pi_dash.runner.routing.websocket_urlpatterns`
+  into `ProtocolTypeRouter`, so it must stay until the follow-up removal
+  plan edits `asgi.py` in the same change.
+- Action: do not port. Nothing is deleted in this project (parent rule 1): the file stays in place, unrouted and untested, and removal belongs to the post-switchover follow-up plan. The replacement realtime path (D-14)
   must preserve the close-code-1008 behavior old runners rely on.
 
 ### 5. `debug_toolbar` wiring — dev-only
@@ -65,10 +67,10 @@ product decision are listed separately and are NOT dead.
 
 ### 6. Unused dependencies — zero imports repo-wide
 
-| Package | Manifest | Evidence |
-|---|---|---|
-| `slack-sdk==3.27.1` | `requirements/base.txt:58` | no `import slack` / `from slack` anywhere |
-| `jsonmodels==2.7.0` | `requirements/base.txt:32` | no `jsonmodels` reference anywhere |
+| Package                        | Manifest                   | Evidence                                                         |
+| ------------------------------ | -------------------------- | ---------------------------------------------------------------- |
+| `slack-sdk==3.27.1`            | `requirements/base.txt:58` | no `import slack` / `from slack` anywhere                        |
+| `jsonmodels==2.7.0`            | `requirements/base.txt:32` | no `jsonmodels` reference anywhere                               |
 | `django-celery-results==2.5.1` | `requirements/base.txt:22` | no `django_celery_results` / `celery_results` reference anywhere |
 
 - Action: remove from requirements (ops tail, D-37). No code change needed —
