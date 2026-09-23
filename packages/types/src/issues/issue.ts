@@ -161,6 +161,11 @@ export type TIssueAgentStatus = {
   active_run: TIssueAgentRunSummary | null;
   latest_run: TIssueAgentRunSummary | null;
   run_count: number;
+  /** Cumulative tokens across every run this issue has had, summed server
+   * side. A floor rather than an audited total: a run that died before
+   * reporting usage contributes nothing. 0 when nothing was ever reported;
+   * optional only so older payloads still type-check. */
+  total_tokens?: number;
 };
 
 export type TIssue = TBaseIssue & {
