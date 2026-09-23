@@ -21,16 +21,13 @@ to a live desktop carries none.
 
 from __future__ import annotations
 
-import logging
-
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
 from pi_dash.core.agent_execution import AgentExecutorKind
 from pi_dash.managed_runner.errors import ManagedRunnerReason
+from pi_dash.managed_runner.events import event_logger
 from pi_dash.runner.models import AgentRun
-
-logger = logging.getLogger(__name__)
 
 
 @receiver(post_save, sender=AgentRun)
@@ -43,13 +40,13 @@ def log_managed_run_pinning(sender, instance: AgentRun, created: bool, **kwargs)
     if not created or instance.executor_kind != AgentExecutorKind.MANAGED_RUNNER:
         return
     if instance.error_code == ManagedRunnerReason.NOT_CONNECTED:
-        logger.info(
+        event_logger.info(
             "managed_runner.queued_waiting run=%s runner=%s",
             instance.id,
             instance.pinned_runner_id,
         )
     elif instance.pinned_runner_id is not None:
-        logger.info(
+        event_logger.info(
             "managed_runner.run_pinned run=%s runner=%s",
             instance.id,
             instance.pinned_runner_id,

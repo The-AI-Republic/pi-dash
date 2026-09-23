@@ -16,8 +16,6 @@ rate-limited and audited.
 
 from __future__ import annotations
 
-import logging
-
 from django.conf import settings
 from rest_framework import status
 from rest_framework.response import Response
@@ -26,9 +24,8 @@ from rest_framework.throttling import UserRateThrottle
 from pi_dash.app.views.base import BaseAPIView
 from pi_dash.core.agent_execution import managed_runner_is_enabled
 from pi_dash.managed_runner.errors import ManagedRunnerUnavailable
+from pi_dash.managed_runner.events import event_logger
 from pi_dash.managed_runner.permissions import IsDesktopSession
-
-logger = logging.getLogger(__name__)
 
 
 class AgentModelProfileEndpoint(BaseAPIView):
@@ -95,11 +92,11 @@ class AgentModelTokenEndpoint(BaseAPIView):
             )
         except Exception as exc:  # noqa: BLE001 — classified below, never echoed raw
             code, http_status = _classify_credential_error(exc)
-            logger.warning("managed_runner.token_refresh_failed user=%s code=%s", request.user.id, code)
+            event_logger.warning("managed_runner.token_refresh_failed user=%s code=%s", request.user.id, code)
             return Response({"error": code}, status=http_status)
 
         # Audit the issuance, never the token.
-        logger.info(
+        event_logger.info(
             "managed_runner.token_issued user=%s expires_at=%s",
             request.user.id,
             getattr(expires_at, "isoformat", lambda: expires_at)(),
