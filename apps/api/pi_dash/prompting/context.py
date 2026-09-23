@@ -348,10 +348,11 @@ def _tick_context(issue: Issue) -> Optional[Dict[str, Any]]:
     ``cap`` / ``remaining`` are ``None`` for an infinite (``-1``) pool so
     templates can branch with ``{% if tick.cap is not none %}``.
 
-    ``count`` / ``cap`` are net of ``waited``, which is reported on its own:
-    a run the agent ended with ``pidash issue wait`` bought back the tick it
-    spent, so folding waits into the pool would tell the agent its budget is
-    draining when it is not.
+    ``count`` / ``cap`` are the raw counters: a wait run is a run
+    (PDASHOSS01-211). ``pidash issue wait`` adds one to ``used`` (the run it
+    ended) and one to the cap (the tick it bought back), so waiting costs no
+    net budget and still shows up. ``waited`` is reported alongside so a
+    reader can tell how much of the count went on discovering a blocker.
 
     Returns ``None`` only when no ticker row exists (the issue has never
     entered the ticking bucket) or when the configured cadence is nonsense

@@ -145,9 +145,12 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
             "extra_toolsets_schema_tool": "sample_get_tool_schema",
             "limits": {},
             "tick": {
+                # A wait run is a run (PDASHOSS01-211): with two waits the cap
+                # is the pool plus those two, so 5 of 12 with 7 remaining. The
+                # netted shape this used to carry is no longer producible.
                 "count": 5,
-                "cap": 10,
-                "remaining": 5,
+                "cap": 12,
+                "remaining": 7,
                 "waited": 2,
                 "wait_allowance": 8,
                 "spent": False,
