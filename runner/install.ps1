@@ -46,8 +46,9 @@ Write-Host ''
 # login` still reads keystrokes from the user's console.
 if (-not [Environment]::UserInteractive) {
     Write-Host 'No interactive console detected — skipping auto-auth.'
-    Write-Host 'Run `pidash auth login --no-browser --url <URL>`, approve the printed'
-    Write-Host 'URL from another browser, then run `pidash runner add --project <PROJECT>`.'
+    Write-Host 'Run `pidash auth login --no-browser`, approve the printed URL from'
+    Write-Host 'another browser, then run `pidash runner add --project <PROJECT>`.'
+    Write-Host '(Self-hosted Pi Dash? Add `--url <YOUR-URL>` to the login command.)'
     exit 0
 }
 
