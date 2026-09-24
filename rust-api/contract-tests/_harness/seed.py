@@ -71,6 +71,33 @@ class Seed:
                     "DELETE FROM dev_machine WHERE owner_id = ANY(%s)",
                     (users,),
                 )
+            # Domain rows the server (or the suite via the API) may have
+            # created without Seed tracking them: views POSTed then
+            # soft-deleted via the API still carry the workspace FK, as do
+            # favorites. Sweep them so the tracked deletes below never hit
+            # foreign keys. (Projects/members stay tracked-only: other
+            # suites hang pods/runners off them.)
+            if workspaces:
+                cur.execute(
+                    "DELETE FROM user_favorites WHERE workspace_id = ANY(%s)",
+                    (workspaces,),
+                )
+                cur.execute(
+                    "DELETE FROM user_recent_visits WHERE workspace_id = ANY(%s)",
+                    (workspaces,),
+                )
+                cur.execute(
+                    "DELETE FROM issue_comments WHERE workspace_id = ANY(%s)",
+                    (workspaces,),
+                )
+                cur.execute(
+                    "DELETE FROM issues WHERE workspace_id = ANY(%s)",
+                    (workspaces,),
+                )
+                cur.execute(
+                    "DELETE FROM issue_views WHERE workspace_id = ANY(%s)",
+                    (workspaces,),
+                )
             for table, idcol, row_id in reversed(self._rows):
                 if table == "sessions":
                     # Forged sessions may already be flushed server-side.
@@ -335,6 +362,109 @@ class Seed:
             pod_id=pod_id,
             dev_machine_id=dev_machine_id,
             visibility=0,
+            created_at=_now(),
+            updated_at=_now(),
+        )
+
+    # -- app views + search (PIDASHCONV-87) -------------------------------
+    def project_member(self, project_id, workspace_id, user_id, *, role=20,
+                       active=True):
+        """Project membership row. Roles mirror ROLE: 20 admin, 15 member,
+        5 guest."""
+        return self._insert(
+            "project_members",
+            role=role,
+            member_id=user_id,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            view_props="{}",
+            default_props="{}",
+            sort_order=65535,
+            preferences="{}",
+            is_active=active,
+            created_at=_now(),
+            updated_at=_now(),
+        )
+
+    def issue_view(self, workspace_id, owner_id, *, project_id=None,
+                   name=None, access=1, locked=False):
+        """An IssueView row. created_by_id mirrors owned_by_id the way
+        API-created rows look (crum stamps the request user)."""
+        return self._insert(
+            "issue_views",
+            name=name or f"CT87 view {uuid.uuid4().hex[:6]}",
+            description="",
+            query="{}",
+            filters="{}",
+            display_filters="{}",
+            display_properties="{}",
+            logo_props="{}",
+            rich_filters="{}",
+            access=access,
+            sort_order=65535,
+            is_locked=locked,
+            owned_by_id=owner_id,
+            created_by_id=owner_id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            created_at=_now(),
+            updated_at=_now(),
+        )
+
+    def issue(self, workspace_id, project_id, *, name=None,
+              description="", sequence_id=None):
+        """A minimal issue row with FTS-visible text columns set."""
+        return self._insert(
+            "issues",
+            name=name or f"CT87 issue {uuid.uuid4().hex[:6]}",
+            description_json="{}",
+            description_html=f"<p>{description}</p>" if description else "<p></p>",
+            description_stripped=description or None,
+            priority="none",
+            sequence_id=sequence_id if sequence_id is not None else 1,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            sort_order=65535,
+            is_draft=False,
+            git_work_branch="",
+            workpad="",
+            complexity_score=0,
+            created_at=_now(),
+            updated_at=_now(),
+        )
+
+    def favorite_view(self, workspace_id, user_id, view_id, *,
+                      project_id=None):
+        """A UserFavorite row pointing at a view (entity_type='view')."""
+        return self._insert(
+            "user_favorites",
+            entity_type="view",
+            entity_identifier=view_id,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            is_folder=False,
+            sequence=65535,
+            created_at=_now(),
+            updated_at=_now(),
+        )
+
+    def issue_comment(self, workspace_id, project_id, issue_id, *,
+                      text="contract comment", actor_id=None):
+        return self._insert(
+            "issue_comments",
+            comment_stripped=text,
+            comment_json="{}",
+            comment_html=f"<p>{text}</p>",
+            attachments="{}",
+            labels="{}",
+            access="EXTERNAL",
+            issue_id=issue_id,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+            speaker_type="human",
+            speaker_label="",
             created_at=_now(),
             updated_at=_now(),
         )

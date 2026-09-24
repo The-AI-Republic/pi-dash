@@ -11,6 +11,10 @@ through the proxy tomorrow. No Django imports, no Django test client:
   plumbing), `seed.py` (row factories + cleanup), `djangocrypto.py`
   (stdlib-only session/machine-token forging).
 - `v1_cli_auth/` — PIDASHCONV-80: api-v1 CLI auth + runner v1.
+- `app_views_search/` — PIDASHCONV-87: app-tier views (project/global
+  CRUD, view issues, favorites) + search (global, issue, entity) with
+  FTS EXPLAIN parity on `issues_fts_idx`. Same env contract; any free
+  port works (this suite was validated on 8124).
 
 ## Run against Django
 
