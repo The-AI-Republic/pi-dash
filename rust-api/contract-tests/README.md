@@ -15,7 +15,10 @@ copies).
   plumbing), `seed.py` (row factories + cleanup), `djangocrypto.py`
   (stdlib-only session/machine-token forging), `client.py`, `db.py`,
   `broker.py` (Celery protocol-v2 publish), `sinks.py` (recording
-  HTTP stub).
+  HTTP stub), plus `config.py` (BASE_URL/DATABASE_URL env config),
+  `auth.py` (HTTP session login), `factory.py`
+  (user/workspace/notification factories) first added for
+  PIDASHCONV-92.
 - `web_edge/` — PIDASHCONV-14: web edge (`/`, `/robots.txt`).
 - `v1_cli_auth/` — PIDASHCONV-80: api-v1 CLI auth + runner v1.
 - `app_views_search/` — PIDASHCONV-87: app-tier views (project/global
@@ -31,6 +34,16 @@ copies).
 - `integrations/` — PIDASHCONV-19 (D-05 task oracle): black-box
   Celery-task oracle for the integrations library + git sync domain
   (file layout below).
+- `app_notifications/` — PIDASHCONV-92 (D-34): app-tier notification
+  list/detail/partial-update/destroy, read/unread, archive/unarchive,
+  unread counts, mark-all-read, preferences get/patch. Same env
+  contract, except no `CONTRACT_SECRET_KEY`/`CONTRACT_WEB_URL`: app
+  endpoints use Django session auth (`session-id` cookie), so the
+  harness logs in through the public flow — `GET /auth/get-csrf-token/`
+  then `POST /auth/sign-in/` with a seeded `pbkdf2_sha256` password
+  hash — and sends the session cookie as an explicit `Cookie` header.
+  Seeded users get `user_timezone = "UTC"`; every run seeds under a
+  unique tag (`ctn<hex8>`) and deletes its rows at teardown.
 
 ## Run: web_edge
 
