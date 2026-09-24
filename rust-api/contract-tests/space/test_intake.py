@@ -80,7 +80,11 @@ def test_create_requires_auth(anon_client, world):
 
 
 def test_create_without_intake_is_400(user_client, world, seeder):
-    board = seeder.create_board(world["workspace"]["id"], world["project"]["id"])
+    # One live project board per project (unique constraint on
+    # deploy_boards(entity_name, entity_identifier) where deleted_at is null),
+    # so the intake-less board lives on a fresh project, not world's.
+    project = seeder.create_project(world["workspace"]["id"])
+    board = seeder.create_board(world["workspace"]["id"], project["id"])
     url = f"{BASE}/anchor/{board['anchor']}/intakes/{world['intake']['id']}/intake-issues/"
     response = user_client.post(url, json={"issue": {"name": "no intake"}})
     assert response.status_code == 400

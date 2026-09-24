@@ -5,9 +5,14 @@ retrieve, comment list/create/retrieve/patch/delete, issue-reaction
 list/create/delete, comment-reaction list/create/delete, vote list/create/delete.
 
 Permission split under test: retrieve and comment list/retrieve are ``AllowAny``;
-every write goes through ``IsAuthenticated`` (session cookie). The
-unauthenticated-write cases are the suite's denied-permission tripwire: remove
-the permission class and they flip from 401/403 to success.
+every write goes through ``IsAuthenticated`` (session cookie), enforced twice:
+the global ``DEFAULT_PERMISSION_CLASSES`` and ``BaseViewSet.permission_classes``
+(which is redundant with it). The unauthenticated-write cases
+(``test_list_requires_auth``, ``test_create_requires_auth``,
+``test_issue_reaction_list_requires_auth``) are the suite's
+denied-permission tripwire: remove both ``IsAuthenticated`` layers and they
+flip from 401/403 to 200. Removing only the ``BaseViewSet`` line is a no-op —
+the global default still denies — so the tripwire demo must cover both.
 """
 
 import pytest
@@ -70,9 +75,10 @@ def test_issue_retrieve_other_tenant_is_not_found(anon_client, world, seeder):
     issue2 = seeder.create_issue(workspace2["id"], project2["id"], state2["id"])
     response = anon_client.get(f"{BASE}/anchor/{world['anchor']}/issues/{issue2['id']}/")
     assert response.status_code == 200
-    # Scoped to the anchor's board: another tenant's issue renders as null,
-    # never as their data.
-    assert response.json() is None
+    # Scoped to the anchor's board: another tenant's issue renders as an
+    # empty body — the view returns ``Response(None)``, which DRF renders
+    # with no content rather than JSON null — never as their data.
+    assert response.content == b""
     own = anon_client.get(f"{BASE}/anchor/{board2['anchor']}/issues/{issue2['id']}/")
     assert own.status_code == 200
     assert own.json()["id"] == issue2["id"]
@@ -139,8 +145,15 @@ def test_comment_patch_by_other_user_is_not_found(other_client, world):
 
 
 def test_comment_write_when_disabled_is_400(user_client, world, seeder):
-    board = seeder.create_board(world["workspace"]["id"], world["project"]["id"], comments=False)
-    url = f"{BASE}/anchor/{board['anchor']}/issues/{world['issue']['id']}/comments/"
+    # One live project board per project (unique constraint on
+    # deploy_boards(entity_name, entity_identifier) where deleted_at is null),
+    # so the comments-disabled board lives on a fresh project with its own
+    # state and issue — the 400 fires before the issue is even read.
+    project = seeder.create_project(world["workspace"]["id"])
+    board = seeder.create_board(world["workspace"]["id"], project["id"], comments=False)
+    state = seeder.create_state(world["workspace"]["id"], project["id"])
+    issue = seeder.create_issue(world["workspace"]["id"], project["id"], state["id"])
+    url = f"{BASE}/anchor/{board['anchor']}/issues/{issue['id']}/comments/"
     response = user_client.post(url, json={"comment_html": "<p>x</p>"})
     assert response.status_code == 400
     assert response.json() == {"error": "Comments are not enabled for this project"}
