@@ -99,6 +99,26 @@ def create_project(
     return {"id": pid, "identifier": identifier}
 
 
+def create_api_token(conn, *, user_id: str, workspace_id: str | None = None) -> str:
+    """Insert an ``api_tokens`` row; return the raw ``X-Api-Key`` value.
+
+    api-v1 (``pi_dash.api``) authenticates only via ``APIKeyAuthentication``,
+    so contract suites for those endpoints auth with per-user tokens rather
+    than session cookies.
+    """
+    tok = "pi_dash_api_" + uuid.uuid4().hex
+    now = now_iso()
+    conn.execute(
+        """INSERT INTO api_tokens (id, token, label, description, is_active,
+            user_type, user_id, workspace_id, is_service, allowed_rate_limit,
+            created_at, updated_at)
+        VALUES (%s,%s,'contract-test','seeded for contract tests',true,
+            0,%s,%s,false,'100000/min',%s,%s)""",
+        (new_id(), tok, user_id, workspace_id, now, now),
+    )
+    return tok
+
+
 def add_project_member(
     conn,
     *,
