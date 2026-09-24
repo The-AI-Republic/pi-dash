@@ -112,8 +112,19 @@ CELERY_BROKER_URL=amqp://pidash:<pw>@mq:5672/pidash \
 ```
 
 In this repo's docker dev stack the suite runs from a container on the
-stack network (`docker run --rm --network localpidash-s3_default ...`)
-so `db`/`mq`/`api` resolve; from the host use the published ports.
+stack network so `db`/`mq`/`api` resolve; from the host use the published
+ports. The checkout is mounted read-only at `/repo` for the static pins in
+`test_beat.py`:
+
+```sh
+docker run --rm --network <stack>_default \
+  -v $PWD/rust-api/contract-tests:/suite:ro -v $PWD:/repo:ro \
+  -e DATABASE_URL=postgresql://pidash:<pw>@db:5432/pidash \
+  -e CELERY_BROKER_URL=amqp://pidash:<pw>@mq:5672/pidash \
+  -e BASE_URL=http://api:8000 \
+  python:3.12-slim bash -c "pip install -q 'pika>=1.3' 'psycopg[binary]>=3.1' 'pytest>=8' \
+    && cd /suite && python -m pytest integrations -q -p no:cacheprovider"
+```
 
 ## Layout
 
@@ -123,7 +134,13 @@ so `db`/`mq`/`api` resolve; from the host use the published ports.
 - `integrations/conftest.py` — env, read-only anchor rows, per-test `Scope`
   teardown that deletes every seeded row.
 - `integrations/seed.py` — raw-SQL seed builders.
-- `integrations/test_fanout.py` — beat fan-out tasks.
+- `integrations/test_fanout.py` — beat fan-out tasks (payload/ack parity,
+  disabled/empty no-ops, 4xx error-record + degrade).
+- `integrations/test_single.py` — unknown-id no-ops (both providers),
+  completion-comment idempotency + auth-failure error record, setup-ordering
+  pin (unsupported provider fails silently), redelivery guards.
+- `integrations/test_beat.py` — static pins read from the `/repo` checkout:
+  beat entry identity, retry schedule, signal-hook wiring.
 
 ## Known oracle limits (pinned in stage 1)
 
@@ -131,8 +148,20 @@ so `db`/`mq`/`api` resolve; from the host use the published ports.
   `api.github.com`; GitLab requires https + an allowlisted host. Happy-path
   sync diffs (mirror rows created from listings) cannot run hermetically, so
   the suite pins the deterministic surface: fan-out set, no-op cases, 4xx
-  error recording (no retry), retry wire format on transient faults,
-  signal→broker delivery, completion-comment idempotency, beat entry identity.
+  error recording (no retry), completion-comment idempotency, beat entry
+  identity, redelivery guards.
+- Live retry needs a real transient (e.g. provider 5xx → generic-except →
+  `self.retry` with countdown 60 * 2^retries, max_retries=3), which has no
+  hermetic trigger from outside; the schedule is pinned statically in
+  `test_beat.py`. Probing the unknown-provider path instead revealed a real
+  ordering behavior the suite now pins: adapter lookup runs before the
+  guarded `try`, so an unsupported provider fails with no record and no
+  retry — in-try faults record + retry. The Rust port must keep this order.
+- The completion-hook signal (`github_signals`) fires only via an
+  authenticated HTTP state transition (SessionAuthentication), so firing is
+  pinned on the source (dispatch_uids, completed-group transition check,
+  already-commented skip, one `.delay()` per mirror type) while the delayed
+  tasks themselves are proven executable via the broker in `test_single.py`.
 - The domain beat entry (`github-issue-sync-every-4h`, 4h cadence) is not
   wall-clock observable in a test run: parity is pinned on entry identity
   (name → task → crontab) plus the target task being registered/executable.

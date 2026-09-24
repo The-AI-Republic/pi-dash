@@ -170,3 +170,68 @@ def github_binding(database_url: str, anchor: dict, scope: Scope, *, token: str)
         database_url, anchor, scope, account_id=account_id, repository_id=repo_id
     )
     return {"account_id": account_id, "repository_id": repo_id, "binding_id": binding_id}
+
+
+def unknown_provider_binding(
+    database_url: str, anchor: dict, scope: Scope, *, token: str = "contract-test-invalid-token"
+) -> dict:
+    """Binding whose repository provider has no registered adapter.
+
+    `get_adapter` raises KeyError before any provider HTTP, so
+    `sync_one_binding` lands on the generic-except branch and calls
+    `self.retry` — the black-box transient path (error recorded + retry
+    re-queued with countdown 60 * 2^retries, max_retries=3).
+    """
+    account_id = provider_account(database_url, anchor, scope, token=token)
+    unique = db.new_uuid()[:8]
+    repo_id = repository(
+        database_url, scope, provider="contract-test-unknown", suffix=f"ct-unknown-{unique}"
+    )
+    binding_id = binding(
+        database_url, anchor, scope, account_id=account_id, repository_id=repo_id
+    )
+    return {"account_id": account_id, "repository_id": repo_id, "binding_id": binding_id}
+
+
+def find_borrowed_issue(database_url: str) -> dict:
+    """Borrow one existing issue read-only (completion-comment sync rows hang off it)."""
+    row = db.fetchone(
+        database_url,
+        "SELECT id, workspace_id, project_id FROM issues ORDER BY created_at DESC LIMIT 1",
+    )
+    assert row, "target DB has no issue to anchor completion rows on"
+    return row
+
+
+def git_issue_sync(
+    database_url: str,
+    anchor: dict,
+    scope: Scope,
+    *,
+    binding_id: str,
+    issue_id: str,
+    external_iid: str = "ct-4242",
+    metadata: dict | None = None,
+) -> str:
+    """Insert one GitIssueSync row for post_completion_comment probes."""
+    project = anchor["projects"][0]
+    row_id = db.fetchone(
+        database_url,
+        "INSERT INTO git_issue_syncs (id, created_at, updated_at, provider,"
+        " external_id, external_iid, web_url, remote_state, metadata,"
+        " binding_id, issue_id, project_id, workspace_id)"
+        " VALUES (%s, now(), now(), 'github', %s, %s, %s, 'open', %s, %s, %s, %s, %s)"
+        " RETURNING id",
+        (
+            db.new_uuid(),
+            f"ct-ext-{external_iid}",
+            external_iid,
+            f"https://github.com/contract-test/ct/issues/{external_iid}",
+            Jsonb(metadata or {}),
+            binding_id,
+            issue_id,
+            str(project["id"]),
+            str(project["workspace_id"]),
+        ),
+    )["id"]
+    return scope.track("git_issue_syncs", str(row_id))
