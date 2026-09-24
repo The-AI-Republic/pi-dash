@@ -18,6 +18,10 @@ pub async fn clone(url: &str, target: &Path) -> Result<()> {
         .arg("--")
         .arg(url)
         .arg(target)
+        // The daemon has no terminal to answer a credential prompt on. Without
+        // this, cloning a private repo the host has no credentials for blocks
+        // forever instead of failing, and takes the run with it.
+        .env("GIT_TERMINAL_PROMPT", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -35,13 +39,6 @@ pub async fn clone(url: &str, target: &Path) -> Result<()> {
 
 pub fn is_git_repo(path: &Path) -> bool {
     path.join(".git").exists()
-}
-
-pub fn is_empty_dir(path: &Path) -> bool {
-    match std::fs::read_dir(path) {
-        Ok(mut rd) => rd.next().is_none(),
-        Err(_) => false,
-    }
 }
 
 /// Read-only snapshot of the working directory reported to the cloud on
