@@ -205,7 +205,11 @@ def test_cross_workspace_list_isolation(user_client, world, world2):
 def test_partial_update_shape(user_client, world, db):
     response = user_client.patch(page_url(world, world["page"]["id"]), json={"name": "Renamed page"})
     assert response.status_code == 200
-    assert response.json()["name"] == "Renamed page"
+    body = response.json()
+    # partial_update returns the same PageDetailSerializer as create (no
+    # issue_ids — only retrieve adds those), so pin the exact key set.
+    assert set(body) == DETAIL_ROW_KEYS, f"patch keys drifted: {sorted(body)}"
+    assert body["name"] == "Renamed page"
     assert db.fetchval("SELECT name FROM pages WHERE id=%s", (world["page"]["id"],)) == "Renamed page"
 
 
