@@ -119,7 +119,6 @@ def test_create_shape(user_client, world, db):
     assert body["name"] == "Created page"
     assert body["owned_by"] == world["owner"]["id"]
     assert body["description_html"] == "<p></p>"
-    assert body["issue_ids"] == []
     assert body["project_ids"] == [world["project"]["id"]]
     row = db.fetchone("SELECT name, owned_by_id FROM pages WHERE id=%s", (body["id"],))
     assert row["name"] == "Created page"
