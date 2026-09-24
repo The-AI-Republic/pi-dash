@@ -81,6 +81,13 @@ sign-in endpoint (black box).
   suites, except session auth uses forged DB rows (`_harness.auth`
   stdlib-only HMACs keyed by `SECRET_KEY`, which must equal the server's
   pinned test secret) instead of the public login flow.
+- `app_assets/` — PIDASHCONV-89 (D-31): app-tier assets (v1 workspace and
+  user file-assets plus v2 S3/MinIO presigned flows, static, restore,
+  check, project assets, bulk, duplicate, downloads; 18 routes in
+  `pi_dash/app/urls/asset.py`). Same env contract as the other DB-backed
+  suites, except session auth uses forged DB rows (`_harness.sessions`
+  stdlib-only HMACs keyed by `SECRET_KEY`, which must equal the server's
+  pinned test secret) instead of the public login flow.
 
 ## Run: web_edge
 
@@ -160,6 +167,20 @@ it (stdlib only, no Django import), so rotating server keys would
 invalidate seeded sessions. `AMQP_URL=memory://` lets the export
 endpoints enqueue their Celery tasks without a broker; no worker
 consumes them.
+
+## Run: app_assets (PIDASHCONV-89)
+
+Same shape as above, except session auth uses forged DB rows instead of
+the public login flow, so `SECRET_KEY` (not `CONTRACT_SECRET_KEY`) must
+equal the server's pinned test secret:
+
+```sh
+cd rust-api/contract-tests
+BASE_URL=http://127.0.0.1:8123 \
+DATABASE_URL="postgresql://<user>@/pidash_contract_89?host=/tmp" \
+SECRET_KEY=<same SECRET_KEY as the server> \
+.venv/bin/pytest app_assets -q
+```
 
 ## Throttle budget
 
