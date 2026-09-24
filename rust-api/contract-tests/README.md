@@ -12,13 +12,13 @@ copies). Python `pytest` + `httpx` suites, one directory per domain
 (created on first use; extend it, never fork it).
 copies). Layout:
 
-- `_harness/`   shared helpers (created once, extended per domain, never forked)
-- `<domain>/`   one pytest package per ported domain (e.g. ``space/``)
+- `_harness/` shared helpers (created once, extended per domain, never forked)
+- `<domain>/` one pytest package per ported domain (e.g. `space/`)
 
 The same suite runs against Django today and against the Rust server
 through the proxy tomorrow. Nothing here may import Django or touch its
 test client: HTTP goes through httpx, seeding goes straight into
-Postgres via ``psycopg``, and authenticated sessions come from the real
+Postgres via `psycopg`, and authenticated sessions come from the real
 sign-in endpoint (black box).
 
 ## Layout
@@ -169,12 +169,12 @@ CONTRACT_WEB_URL=http://127.0.0.1:8123 \
 
 Env contract:
 
-| var | meaning |
-|---|---|
-| `BASE_URL` | server under test (default `http://127.0.0.1:8000`) |
-| `DATABASE_URL` | psycopg conninfo for seeding (required) |
+| var                   | meaning                                                                                                                 |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `BASE_URL`            | server under test (default `http://127.0.0.1:8000`)                                                                     |
+| `DATABASE_URL`        | psycopg conninfo for seeding (required)                                                                                 |
 | `CONTRACT_SECRET_KEY` | must equal the server's `SECRET_KEY`; only used to forge session cookies / machine-token hashes when seeding (required) |
-| `CONTRACT_WEB_URL` | must equal the server's `WEB_URL`; expected `verification_uri` base (required) |
+| `CONTRACT_WEB_URL`    | must equal the server's `WEB_URL`; expected `verification_uri` base (required)                                          |
 
 ## Run: app_issues (PIDASHCONV-84)
 
@@ -274,7 +274,7 @@ docker run --rm --network <stack>_default \
   error recording (no retry), completion-comment idempotency, beat entry
   identity, redelivery guards.
 - Live retry needs a real transient (e.g. provider 5xx → generic-except →
-  `self.retry` with countdown 60 * 2^retries, max_retries=3), which has no
+  `self.retry` with countdown 60 \* 2^retries, max_retries=3), which has no
   hermetic trigger from outside; the schedule is pinned statically in
   `test_beat.py`. Probing the unknown-provider path instead revealed a real
   ordering behavior the suite now pins: adapter lookup runs before the
@@ -300,7 +300,7 @@ consumes them.
 Domains that mint auth sessions also require `SECRET_KEY` (`CONTRACT_SECRET_KEY`
 on suites using the newer `_harness.env` contract — same value, same meaning):
 
-```sh
+````sh
 cd rust-api/contract-tests
 pip install -r requirements.txt
 BASE_URL=http://127.0.0.1:8000 \
@@ -316,7 +316,7 @@ BASE_URL=http://127.0.0.1:8000 \
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/pidash \
 SECRET_KEY=<the backend's Django SECRET_KEY> \
   pytest <domain>
-```
+````
 
 The suite runs against a **live** backend and seeds rows straight into
 Postgres over `DATABASE_URL`. It never imports Django and never uses its
@@ -368,14 +368,14 @@ Redis + a Celery worker (write endpoints enqueue activity tasks), and S3
 credentials sufficient to mint presigned URLs offline (asset GET/POST pin
 the redirect/upload-data shapes, never real objects).
 
-Task-oracle suites (e.g. ``dispatch/``) additionally need:
+Task-oracle suites (e.g. `dispatch/`) additionally need:
 
 ```sh
 CELERY_BROKER_URL=redis://localhost:6379/0  # or AMQP_URL; redis scheme only
 ```
 
 pointing at the same broker the worker consumes, and the server must run
-with ``CLOUD_AGENT_ENABLED=true`` (dispatch execution branches and the
+with `CLOUD_AGENT_ENABLED=true` (dispatch execution branches and the
 queue scanner are kill-switched otherwise).
 
 ## Backend under test (assistant domain)
@@ -517,3 +517,143 @@ BASE_URL=http://127.0.0.1:8481 DATABASE_URL=$DATABASE_URL \
 Expected: all green (38 passed here, twice). First run on a cold throttle
 cache takes ~25 s; a re-run within a minute waits out the shared 30/min
 anonymous window (up to ~75 s) and still passes.
+
+---
+
+# Union note (PIDASHCONV-21 worker-plane oracle + PIDASHCONV-83 D-25 HTTP oracle).
+
+# The sections below were written on a sibling branch against the same
+
+# scaffolding and are kept verbatim so the second merger holds the union.
+
+# Worker-plane contract tests (PIDASHCONV-21)
+
+Task-only oracle for D-07 (mail + notifications), D-08 (webhooks + activity +
+logging), D-09 (cleanup, versions, exports, deletion), D-10 (agent ticker +
+scheduler + loop workers). The domain gates of PIDASHCONV-44…47 accept this
+suite.
+
+Shape per task: publish the job in Celery wire format (protocol v2, JSON) to
+the broker named by `CELERY_BROKER_URL`, let the live Django worker execute
+it, diff Postgres before/after via `DATABASE_URL`, and capture side effects
+in sinks (SMTP sink for mail, local HTTP sink for webhooks). Nothing in the
+suite imports Django — not even for parsing: task options and the beat
+schedule are pinned by AST comparison in `_harness/taskspec.py`.
+
+## Layout
+
+- `_harness/` — shared helpers, created once here and extended, never forked:
+  `config.py` (env contract), `celery_wire.py` (v2 publisher + wire-structure
+  assertions, memory-mode needs no broker), `db.py` (snapshot/diff/wait,
+  metadata-driven `insert_row`), `sinks.py` (SMTP + webhook sinks as
+  pytest fixtures), `taskspec.py` (AST parity for decorator options, fan-out
+  call sites, beat entries), `broker_probe.py` (worker registration via
+  Celery inspect, queue depth/drain, requeue-safe fan-out collection),
+  `seed.py` (canonical FK-chain builders).
+- `tasks_mail/`, `tasks_webhooks/`, `tasks_cleanup/`, `tasks_ticker/` — one
+  suite per stage-5 epic gate (`pytest tasks_mail`, …).
+
+## Running
+
+```sh
+cd rust-api/contract-tests
+pip install -r requirements.txt
+pytest tasks_mail tasks_webhooks tasks_cleanup tasks_ticker
+```
+
+Static tests (wire structure, options/beat parity) need only
+`PI_DASH_SOURCE_DIR` (defaults to `../../apps/api` — the Django checkout).
+Live tests additionally need, all pointing at one dedicated contract stack:
+
+| Variable                                                             | Meaning                                                                                               |
+| -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `BASE_URL`                                                           | Django API base (health gate)                                                                         |
+| `DATABASE_URL`                                                       | psycopg URL of the contract database                                                                  |
+| `CELERY_BROKER_URL`                                                  | broker URL the Django worker consumes                                                                 |
+| `EMAIL_HOST` / `EMAIL_PORT` (+ `EMAIL_USE_TLS=0`, `EMAIL_USE_SSL=0`) | Django-side delivery into the SMTP sink (`SMTP_SINK_HOST`/`SMTP_SINK_PORT`, default `127.0.0.1:1025`) |
+| `HARD_DELETE_AFTER_DAYS=0`, `UNUPLOADED_ASSET_DELETE_DAYS=0`         | Django-side cleanup eligibility                                                                       |
+| `USE_MINIO=1` + `AWS_*`                                              | Django-side object storage for export tests                                                           |
+| `CONTRACT_TASK_TIMEOUT`                                              | seconds to wait per worker effect (default 60)                                                        |
+
+Run the suite against a **dedicated** worker and beat: the oracle drains and
+requeues broker messages and seeds rows straight into Postgres.
+
+## Coverage floor (task analogue of the HTTP floor)
+
+Every task gets wire-payload + worker-registration + decorator-options
+assertions. Behavioural DB/sink coverage per group:
+
+- mail: stack fan-out + `processed_at` diff + SMTP receipt; pure mail tasks
+  via the SMTP sink; stack redelivery sends nothing twice.
+- webhooks: POST success (headers, HMAC signature, `create` mapping,
+  `webhook_logs` row), first-failure `retry_count=0` row, redelivery with
+  distinct `X-Pi Dash-Delivery` ids, `model_activity → webhook_activity →
+webhook_send_task` chain, deactivation mail, `process_logs` Postgres
+  fallback row; `track_event` and light tasks consumed + acked.
+- cleanup: all five deletes behaviourally (page versions keep newest 20),
+  unuploaded-asset delete, expired-exporter URL clear, tombstone hard
+  delete, countdown ETA through the real worker, redelivery no-op.
+- ticker: ticker/scheduler scan fan-out observed on the broker (messages are
+  collected, never executed — firing a real tick would dispatch live agent
+  runs), not-due skips, unknown-id `fire_tick` dispatches nothing,
+  redelivery fans out once per scan.
+
+Known non-goals, pinned rather than skipped: full `retry_backoff=600`
+multi-attempt timing (pinned by options parity; a cycle would take ~1h),
+`crawl_work_item_link_title` against the live web, and S3-multipart export
+beyond the minio-backed path.
+
+## Deliberate-break check
+
+The suite must fail when the contract is broken. Demonstrated per PR with a
+one-line local patch that is reverted before merge, e.g. renaming the
+`scan-due-agent-tickers` beat task in `pi_dash/celery.py` must fail
+`tasks_ticker/test_ticker_scheduler_tasks.py::test_beat_entry_parity`.
+
+---
+
+# HTTP contract tests (PIDASHCONV-83, D-25 oracle)
+
+Black-box HTTP suites for app-surface domains: pytest + httpx in
+`rust-api/contract-tests/app_project/` (`test_project.py`, `test_state.py`,
+`test_estimate.py`, `test_permissions.py` — 79 tests pinning all 29 routes
+of the `project` (20), `state` (4) and `estimate` (5) URL modules).
+
+```sh
+cd rust-api/contract-tests
+pip install -r requirements.txt
+pytest app_project
+```
+
+Live tests need, all pointing at one dedicated contract stack:
+
+| Variable              | Meaning                                        |
+| --------------------- | ---------------------------------------------- |
+| `BASE_URL`            | Django API base (e.g. `http://localhost:8000`) |
+| `DATABASE_URL`        | psycopg URL of the contract database           |
+| `SECRET_KEY`          | fixed key the contract Django runs with        |
+| `CONTRACT_SECRET_KEY` | same value (read by `_harness/http.py`)        |
+
+Auth: app views accept only session cookies (`BaseSessionAuthentication`,
+CSRF disabled). The harness seeds users straight into Postgres and forges
+`session-id` cookie rows with stdlib crypto (`_harness/http.py`), mirroring
+Django 4.2's session signing over the project's custom `sessions` table —
+no Django import anywhere. `CELERY_BROKER_URL` is needed only so the
+`.delay()` side-calls inside the views (model/recent-visit activity) can
+publish; no worker must consume.
+
+Coverage floor per domain: every endpoint gets a response-shape assertion
+(exact key sets), plus denied-permission cases (guest/member gates,
+401/403 layering) and tenant-isolation cases (cross-workspace 403, SECRET
+vs PUBLIC retrieve) in `test_permissions.py`. The suite must fail when a
+permission class is deliberately removed: project create is gated only by
+its `allow_permission` decorator, so deleting that line turns
+`test_guest_cannot_create_project` from 403 to 201 (demonstrated per PR
+with a one-line local patch, reverted).
+
+Known bugs pinned, not fixed (the Rust port must reproduce them):
+project-invitations create 500s (`.delay` called on the `bulk_create`
+list); favorites list 500s; estimate bulk retrieve of a missing id 404s
+via the shared `ObjectDoesNotExist` handler while project retrieve uses
+its own 404 body.
+(PIDASHCONV-83 contract tests: app project + states + estimates)

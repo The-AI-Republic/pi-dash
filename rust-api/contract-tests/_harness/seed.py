@@ -22,6 +22,8 @@ from typing import Any
 
 from . import djangocrypto
 
+from .db import insert_row
+
 
 def _now():
     return datetime.now(timezone.utc)
@@ -1661,3 +1663,253 @@ class Seeder:
         )
         self._put("agent_run", run_id)
         return {"id": run_id}
+
+
+# --- PIDASHCONV-83 (app project/state/estimate oracle) ---
+# Union with the baseline above (see workpad for the full rationale).
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _tag8() -> str:
+    return uuid.uuid4().hex[:8]
+
+
+# 600000 matches Django 4.2's PBKDF2PasswordHasher. Task suites seed unusable
+# passwords; HTTP suites seed a known one (sessions are forged, never verified).
+PBKDF2_ITERATIONS = 600000
+
+
+def password_hash(password: str) -> str:
+    salt = secrets.token_hex(11)[:22]
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), PBKDF2_ITERATIONS)
+    return "pbkdf2_sha256$%d$%s$%s" % (
+        PBKDF2_ITERATIONS, salt, base64.b64encode(digest).decode("ascii").strip())
+
+
+def user(conn, username: str, **over) -> dict:
+    tag = _tag8()
+    values = {
+        "username": f"{username}-{tag}",
+        "email": f"{username}-{tag}@example.com",
+        "password": password_hash("contract-suite-password"),
+        "display_name": username,
+        "first_name": "",
+        "last_name": "",
+        "avatar": "",
+        "date_joined": _now_iso(),
+        "is_active": True,
+        "last_location": "",
+        "created_location": "",
+        "is_superuser": False,
+        "is_managed": False,
+        "is_password_expired": False,
+        "is_staff": False,
+        "is_email_verified": False,
+        "is_password_autoset": False,
+        "token": "",
+        "user_timezone": "UTC",
+        "last_login_ip": "127.0.0.1",
+        "last_logout_ip": "127.0.0.1",
+        "last_login_medium": "email",
+        "last_login_uagent": "",
+        "is_bot": False,
+        "is_email_valid": True,
+        "is_password_reset_required": False,
+    }
+    values.update(over)
+    return insert_row(conn, "users", values)
+
+
+def workspace(conn, slug: str, owner_id, **over) -> dict:
+    values = {
+        "name": f"contract {slug}",
+        "slug": f"{slug}-{uuid.uuid4().hex[:8]}",
+        "owner_id": str(owner_id),
+        "timezone": "UTC",
+        "background_color": "#FFFFFF",
+    }
+    values.update(over)
+    return insert_row(conn, "workspaces", values)
+
+
+def webhook(conn, workspace_id, url: str, **flags) -> dict:
+    values = {
+        "workspace_id": str(workspace_id),
+        "url": url,
+        "is_active": True,
+        "secret_key": uuid.uuid4().hex,
+        "project": False,
+        "issue": False,
+        "module": False,
+        "cycle": False,
+        "issue_comment": False,
+        "is_internal": False,
+        "version": "v1",
+    }
+    values.update(flags)
+    return insert_row(conn, "webhooks", values)
+
+
+def email_log(conn, receiver_id, actor_id, entity_id: str, **extra) -> dict:
+    values = {
+        "receiver_id": str(receiver_id),
+        "triggered_by_id": str(actor_id),
+        "entity_identifier": entity_id,
+        "entity_name": "issue",
+        "entity": "issue",
+        "data": {
+            "issue_activity": {"field": "state", "old_value": "a", "new_value": "b"}
+        },
+    }
+    values.update(extra)
+    return insert_row(conn, "email_notification_logs", values)
+
+
+def workspace_member(conn, workspace_id, user_id, role: int = 20, **over) -> dict:
+    values = {
+        "workspace_id": str(workspace_id),
+        "member_id": str(user_id),
+        "role": role,
+        "is_active": True,
+        "view_props": {},
+        "default_props": {},
+        "issue_props": {},
+        "explored_features": {},
+        "getting_started_checklist": {},
+        "tips": {},
+    }
+    values.update(over)
+    return insert_row(conn, "workspace_members", values)
+
+
+def project(conn, workspace_id, name: str = "Contract Project", **over) -> dict:
+    tag = _tag8()
+    values = {
+        "name": "%s %s" % (name, tag),
+        "identifier": "CP%s" % tag.upper(),
+        "description": "",
+        "network": 0,
+        "workspace_id": str(workspace_id),
+        "cycle_view": False,
+        "module_view": False,
+        "issue_views_view": False,
+        "page_view": False,
+        "intake_view": False,
+        "archive_in": 0,
+        "close_in": 0,
+        "logo_props": {},
+        "is_time_tracking_enabled": False,
+        "is_issue_type_enabled": False,
+        "guest_view_all_features": False,
+        "timezone": "UTC",
+        "members_can_edit_states": False,
+        "repo_url": "",
+        "base_branch": "",
+        "agent_default_interval_seconds": 0,
+        "agent_default_max_ticks": 0,
+        "agent_ticking_enabled": False,
+        "is_default": False,
+        "agent_review_default_interval_seconds": 0,
+        "default_agent_executor": "",
+        "agent_test_default_interval_seconds": 0,
+    }
+    values.update(over)
+    return insert_row(conn, "projects", values)
+
+
+def project_member(
+    conn, project_id, workspace_id, user_id, role: int = 20, **over
+) -> dict:
+    values = {
+        "project_id": str(project_id),
+        "workspace_id": str(workspace_id),
+        "member_id": str(user_id),
+        "role": role,
+        "is_active": True,
+        "view_props": {},
+        "default_props": {},
+        "preferences": {},
+        "sort_order": 0.0,
+    }
+    values.update(over)
+    return insert_row(conn, "project_members", values)
+
+
+def project_user_property(conn, project_id, workspace_id, user_id, **over) -> dict:
+    values = {
+        "project_id": str(project_id),
+        "workspace_id": str(workspace_id),
+        "user_id": str(user_id),
+        "display_properties": {},
+        "display_filters": {},
+        "filters": {},
+        "rich_filters": {},
+        "preferences": {},
+        "sort_order": 0.0,
+    }
+    values.update(over)
+    return insert_row(conn, "project_user_properties", values)
+
+
+def state(
+    conn, project_id, workspace_id, name: str = "Contract State", **over
+) -> dict:
+    tag = _tag8()
+    values = {
+        "name": "%s %s" % (name, tag),
+        "description": "",
+        "color": "#000000",
+        "slug": "ct-state-%s" % tag,
+        "project_id": str(project_id),
+        "workspace_id": str(workspace_id),
+        "sequence": 1.0,
+        "group": "unstarted",
+        "default": False,
+        "is_triage": False,
+    }
+    values.update(over)
+    return insert_row(conn, "states", values)
+
+
+def estimate(conn, project_id, workspace_id, name: str = "Contract Estimate", **over) -> dict:
+    tag = _tag8()
+    values = {
+        "name": "%s %s" % (name, tag),
+        "description": "",
+        "project_id": str(project_id),
+        "workspace_id": str(workspace_id),
+        "type": "points",
+        "last_used": False,
+    }
+    values.update(over)
+    return insert_row(conn, "estimates", values)
+
+
+def estimate_point(
+    conn, estimate_id, project_id, workspace_id, key: int = 1, value: str = "1", **over
+) -> dict:
+    values = {
+        "estimate_id": str(estimate_id),
+        "project_id": str(project_id),
+        "workspace_id": str(workspace_id),
+        "key": key,
+        "value": value,
+        "description": "",
+    }
+    values.update(over)
+    return insert_row(conn, "estimate_points", values)
+
+
+def project_invite(conn, project_id, workspace_id, email: str | None = None, **over) -> dict:
+    tag = _tag8()
+    values = {
+        "email": email or "invite-%s@example.com" % tag,
+        "accepted": False,
+        "token": uuid.uuid4().hex,
+        "role": 15,
+        "project_id": str(project_id),
+        "workspace_id": str(workspace_id),
+    }
+    values.update(over)
+    return insert_row(conn, "project_member_invites", values)

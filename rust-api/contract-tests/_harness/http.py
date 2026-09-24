@@ -4,7 +4,13 @@
 
 """HTTP client factories for contract suites."""
 
+import base64
+import hashlib
+import hmac
+import json
+import secrets
 import time
+import zlib
 
 import httpx
 
@@ -113,4 +119,83 @@ def delete(api_key, path, *, expect=204):
         f"DELETE {path}: want {expect}, got {r.status_code}: {r.text[:400]!r}"
     )
     return r
+
+
+# --- PIDASHCONV-83 (app project/state/estimate oracle) ---
+# Union with the baseline above (see workpad for the full rationale).
+SESSION_COOKIE_NAME = "session-id"
+SESSION_KEY_SALT = "django.contrib.sessions.SessionStore"
+AUTH_BACKEND = "django.contrib.auth.backends.ModelBackend"
+AUTH_HASH_SALT = (
+    "django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash"
+)
+SESSION_AGE_DAYS = 7
+
+_B62_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+
+def _b62_encode(value: int) -> str:
+    if value == 0:
+        return "0"
+    out = ""
+    while value > 0:
+        value, remainder = divmod(value, 62)
+        out = _B62_ALPHABET[remainder] + out
+    return out
+
+
+def _b64_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def _salted_hmac(key_salt: str, value: str, secret: str):
+    key = hashlib.sha256((key_salt + secret).encode()).digest()
+    return hmac.new(key, msg=value.encode(), digestmod=hashlib.sha256)
+
+
+def forge_session_data(session_dict: dict, secret: str) -> str:
+    """Serialize + sign a session dict exactly like Django's SessionBase.encode."""
+    data = json.dumps(session_dict, separators=(",", ":")).encode("latin-1")
+    compressed = zlib.compress(data)
+    if len(compressed) < (len(data) - 1):
+        data = compressed
+        base64d = "." + _b64_encode(data)
+    else:
+        base64d = _b64_encode(data)
+    value = "%s:%s" % (base64d, _b62_encode(int(time.time())))
+    sig = _b64_encode(_salted_hmac(SESSION_KEY_SALT + "signer", value, secret).digest())
+    return "%s:%s" % (value, sig)
+
+
+def session_auth_hash(password_db_value: str, secret: str) -> str:
+    """Replicate ``AbstractBaseUser.get_session_auth_hash`` for a seeded user."""
+    return _salted_hmac(AUTH_HASH_SALT, password_db_value, secret).hexdigest()
+
+
+def login(conn, user: dict, secret: str | None = None) -> str:
+    """Create a live session row for a seeded user; return the session key."""
+    secret = secret or config.required(config.CONTRACT_SECRET_KEY)
+    payload = {
+        "_auth_user_id": str(user["id"]),
+        "_auth_user_backend": AUTH_BACKEND,
+        "_auth_user_hash": session_auth_hash(user["password"], secret),
+    }
+    session_key = secrets.token_hex(16)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO sessions (session_key, session_data, expire_date)"
+            " VALUES (%s, %s, now() + make_interval(days => %s))",
+            (session_key, forge_session_data(payload, secret), SESSION_AGE_DAYS),
+        )
+    conn.commit()
+    return session_key
+
+
+def authed_client(base_url: str, session_key: str) -> httpx.Client:
+    """httpx client carrying the forged session cookie."""
+    return httpx.Client(
+        base_url=base_url,
+        cookies={SESSION_COOKIE_NAME: session_key},
+        timeout=30.0,
+    )
 

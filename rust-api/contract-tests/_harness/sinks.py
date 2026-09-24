@@ -3,7 +3,13 @@ from __future__ import annotations
 
 import json
 import threading
+from email import message_from_bytes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
+
+from . import config
+from .db import wait_for_condition
 
 
 class RecordingHandler(BaseHTTPRequestHandler):
@@ -166,3 +172,158 @@ class WebhookSink:
 
     def __exit__(self, *exc):
         self.stop()
+
+
+# --- PIDASHCONV-83: worker-plane side-effect sinks ---
+# PIDASHCONV-81 (above) owns the canonical ``SmtpSink``/``WebhookSink``
+# names (ephemeral-port, context-manager style, with live consumers), so
+# this block's fixed-port variants for the worker-plane oracle (Django
+# EMAIL settings point at a fixed host:port; webhooks need fail_next
+# injection) live under ``Worker*`` names with ``smtp_sink``/
+# ``webhook_sink`` session fixtures. Extend, never fork.
+class WorkerSmtpSink:
+    """Collects every message delivered to it. Plain SMTP, no auth/TLS."""
+
+    def __init__(self):
+        self.messages = []
+        self._lock = threading.Lock()
+        self._controller = None
+
+    def start(self, host: str, port: int) -> None:
+        from aiosmtpd.controller import Controller
+
+        sink = self
+
+        class Handler:
+            async def handle_DATA(self, server, session, envelope):
+                parsed = message_from_bytes(envelope.content)
+                with sink._lock:
+                    sink.messages.append(
+                        {
+                            "mail_from": envelope.mail_from,
+                            "rcpt_tos": list(envelope.rcpt_tos),
+                            "subject": parsed.get("Subject"),
+                            "raw": envelope.content.decode("utf-8", "replace"),
+                        }
+                    )
+                return "250 OK"
+
+        self._controller = Controller(Handler(), hostname=host, port=port)
+        self._controller.start()
+
+    def stop(self) -> None:
+        if self._controller is not None:
+            self._controller.stop()
+            self._controller = None
+
+    def clear(self) -> None:
+        with self._lock:
+            self.messages = []
+
+    def snapshot(self) -> list:
+        with self._lock:
+            return list(self.messages)
+
+    def wait_for_count(self, n: int, what: str = "smtp deliveries") -> list:
+        return wait_for_condition(
+            lambda: self.snapshot() if len(self.snapshot()) >= n else None,
+            what=what,
+        )
+
+
+class WorkerWebhookSinkHandler(BaseHTTPRequestHandler):
+    sink = None  # set per server instance
+    failures_remaining = 0
+
+    def log_message(self, *args):  # keep test output clean
+        pass
+
+    def _reply(self, code: int, payload: dict) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length else b""
+        with self.sink._lock:
+            self.sink.deliveries.append(
+                {
+                    "path": self.path,
+                    "headers": dict(self.headers),
+                    "body": raw.decode("utf-8", "replace"),
+                }
+            )
+        if type(self).failures_remaining > 0:
+            type(self).failures_remaining -= 1
+            self._reply(500, {"ok": False})
+        else:
+            self._reply(200, {"ok": True})
+
+
+class WorkerWebhookSink:
+    """Collects webhook POSTs; ``fail_next(n)`` forces n 500s (retry tests)."""
+
+    def __init__(self):
+        self.deliveries = []
+        self._lock = threading.Lock()
+        self._server = None
+        self._thread = None
+
+    def start(self, base_url: str) -> None:
+        from urllib.parse import urlparse
+
+        parts = urlparse(base_url)
+        handler = type(
+            "BoundHandler",
+            (WorkerWebhookSinkHandler,),
+            {"sink": self, "failures_remaining": 0},
+        )
+        self._handler = handler
+        self._server = ThreadingHTTPServer((parts.hostname, parts.port), handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._thread.join(timeout=10)
+            self._server.server_close()
+            self._server = None
+
+    def clear(self) -> None:
+        with self._lock:
+            self.deliveries = []
+        self._handler.failures_remaining = 0
+
+    def fail_next(self, n: int) -> None:
+        self._handler.failures_remaining = n
+
+    def snapshot(self) -> list:
+        with self._lock:
+            return list(self.deliveries)
+
+    def wait_for_count(self, n: int, what: str = "webhook deliveries") -> list:
+        return wait_for_condition(
+            lambda: self.snapshot() if len(self.snapshot()) >= n else None,
+            what=what,
+        )
+
+
+@pytest.fixture(scope="session")
+def smtp_sink():
+    sink = WorkerSmtpSink()
+    sink.start(config.SMTP_SINK_HOST, config.SMTP_SINK_PORT)
+    yield sink
+    sink.stop()
+
+
+@pytest.fixture(scope="session")
+def webhook_sink():
+    sink = WorkerWebhookSink()
+    sink.start(config.WEBHOOK_SINK_BASE)
+    yield sink
+    sink.stop()

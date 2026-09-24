@@ -16,3 +16,6 @@ pyyaml>=6  # v1_openapi: parse the default YAML rendering of the schema doc
 # Rules (from PIDASHCONV-1, binding):
 # - Never import Django or use its test client. HTTP via httpx, seeding via SQL.
 # - Extend ``_harness/``, never fork it per domain.
+
+# PIDASHCONV-83: SMTP sink backend (lazy import in _harness/sinks.py).
+aiosmtpd==1.4.6

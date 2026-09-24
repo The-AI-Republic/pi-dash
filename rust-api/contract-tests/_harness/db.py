@@ -31,7 +31,10 @@ from typing import Iterator
 
 import psycopg
 import pytest
+from psycopg.rows import dict_row
+from psycopg.types.json import Json
 
+from . import config
 from . import signing
 
 from _harness.config import database_url
@@ -973,3 +976,129 @@ def fetch_one(conn, query, params=()):
         if row is None:
             return None
         return dict(zip([d.name for d in cur.description], row))
+
+
+# --- PIDASHCONV-83 (app project/state/estimate oracle) ---
+# Union with the baseline above (see workpad for the full rationale).
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def insert_row(conn, table: str, values: dict) -> dict:
+    """Insert one row, filling audit columns from live table metadata.
+
+    ``values`` carries the columns the test cares about. ``id`` (uuid PK),
+    ``created_at`` / ``updated_at`` (timestamptz), and ``deleted_at`` (NULL,
+    so the row is visible to Django's default soft-delete-scoped managers)
+    are filled automatically when those columns exist. Any other NOT NULL
+    column without a database default must be supplied explicitly — a missing
+    one raises a descriptive error instead of a bare IntegrityError.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT column_name, is_nullable, column_default, data_type
+            FROM information_schema.columns WHERE table_name = %s
+            """,
+            (table,),
+        )
+        meta = {row["column_name"]: row for row in cur.fetchall()}
+    if not meta:
+        raise RuntimeError(f"insert_row: unknown table {table!r}")
+
+    row = dict(values)
+    if "id" in meta and "id" not in row and "uuid" in meta["id"]["data_type"]:
+        row["id"] = str(uuid.uuid4())
+    for stamp in ("created_at", "updated_at"):
+        if stamp in meta and stamp not in row:
+            row[stamp] = _utcnow_iso()
+    if "deleted_at" in meta and "deleted_at" not in row:
+        row["deleted_at"] = None
+
+    unknown = [c for c in row if c not in meta]
+    assert not unknown, f"insert_row({table}): unknown columns {unknown}"
+
+    missing = [
+        name
+        for name, col in meta.items()
+        if name not in row
+        and col["is_nullable"] == "NO"
+        and col["column_default"] is None
+    ]
+    assert not missing, (
+        f"insert_row({table}): missing NOT NULL columns without defaults: "
+        f"{missing} — extend the test's values dict"
+    )
+
+    columns = list(row)
+    params = [Json(v) if isinstance(v, (dict, list)) else v for v in (row[c] for c in columns)]
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f'INSERT INTO "{table}" ({", ".join(chr(34) + c + chr(34) for c in columns)}) '
+            f'VALUES ({", ".join(["%s"] * len(columns))}) RETURNING *',
+            params,
+        )
+        inserted = cur.fetchone()
+    conn.commit()
+    return inserted
+
+
+def snapshot(conn, tables: list[str], where: dict[str, str] | None = None) -> dict:
+    """Dump ``{table: {pk: row}}`` for the named tables (test-scoped WHEREs)."""
+    where = where or {}
+    snap = {}
+    with conn.cursor(row_factory=dict_row) as cur:
+        for table in tables:
+            clause = f"WHERE {where[table]}" if table in where else ""
+            cur.execute(f'SELECT * FROM "{table}" {clause} ORDER BY 1')
+            rows = cur.fetchall()
+            keyed = {}
+            for row in rows:
+                pk = row.get("id", object())
+                keyed[str(pk)] = {k: _freeze(v) for k, v in row.items()}
+            snap[table] = keyed
+    return snap
+
+
+def _freeze(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, memoryview):
+        return value.tobytes().hex()
+    return value
+
+
+def diff(before: dict, after: dict) -> dict:
+    """Return ``{table: {"added": {...}, "removed": {...}, "changed": {...}}}``."""
+    report = {}
+    for table in before:
+        b, a = before[table], after.get(table, {})
+        added = {k: v for k, v in a.items() if k not in b}
+        removed = {k: v for k, v in b.items() if k not in a}
+        changed = {
+            k: {"before": b[k], "after": a[k]}
+            for k in b
+            if k in a and b[k] != a[k]
+        }
+        if added or removed or changed:
+            report[table] = {"added": added, "removed": removed, "changed": changed}
+    return report
+
+
+def wait_for_condition(predicate, timeout: float | None = None, what: str = "condition"):
+    """Poll ``predicate()`` until truthy; raise with ``what`` on timeout."""
+    deadline = time.monotonic() + (
+        timeout if timeout is not None else config.TASK_TIMEOUT_SECONDS
+    )
+    last = None
+    while time.monotonic() < deadline:
+        last = predicate()
+        if last:
+            return last
+        time.sleep(config.POLL_INTERVAL_SECONDS)
+    raise TimeoutError(
+        f"timed out waiting for {what} "
+        f"after {config.TASK_TIMEOUT_SECONDS}s (last={last!r})"
+    )
