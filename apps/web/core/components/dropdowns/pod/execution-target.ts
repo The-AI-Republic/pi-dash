@@ -60,3 +60,46 @@ export function managedAgentOption(project: IProject | undefined | null) {
   const option = project?.agent_executor_options?.find((o) => o.kind === MANAGED_AGENT_VALUE);
   return { available: option?.available ?? false, reasonCode: option?.reason_code ?? "desktop_not_connected" };
 }
+
+type TranslateFn = (key: string) => string;
+
+/**
+ * Why the managed runner ("Pi Dash Agent") is unavailable, keyed by the
+ * `reason_code` the server returned. `null` means render nothing: the desktop
+ * fixes `no_managed_runner_for_project` silently the moment it opens the
+ * project, so nagging the viewer about it would be noise. Copy mirrors the
+ * server-side detail map (`app/serializers/issue.py`) so the picker and a
+ * refused pin never explain one situation two different ways. Overlay-friendly:
+ * the desktop overlay imports this rather than re-deriving the copy.
+ */
+export function managedRunnerReasonCopy(reasonCode: string, t: TranslateFn): string | null {
+  switch (reasonCode) {
+    case "no_managed_runner_for_project":
+      return null;
+    case "byok_not_supported_on_desktop":
+      return t(
+        "Pi Dash Agent on desktop uses OpenHub; switch your AI provider to OpenHub to use it here. Pi Dash AI and the Cloud Agent keep using your own key."
+      );
+    case "managed_runner_disabled":
+      return t("Pi Dash Agent is not enabled on this server.");
+    case "llm_config_missing":
+      return t("Configure your AI provider in Pi Dash AI settings to run on your desktop.");
+    case "gateway_scopes_missing":
+      return t("Sign in to Pi Dash again to refresh your AI access.");
+    case "desktop_not_connected":
+    default:
+      return t("Open Pi Dash Desktop to run here.");
+  }
+}
+
+/** Human label for an executor kind, shared by the run list and issue panels. */
+export function executorKindLabel(kind: TAgentExecutorKind, t: TranslateFn): string {
+  switch (kind) {
+    case CLOUD_AGENT_VALUE:
+      return t("Pi Dash Cloud Agent");
+    case MANAGED_AGENT_VALUE:
+      return t("Pi Dash Agent");
+    default:
+      return t("Local Runner");
+  }
+}
