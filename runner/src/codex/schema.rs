@@ -75,6 +75,27 @@ pub struct ThreadStartParams {
     pub approval_policy: String,
 }
 
+/// Parameters for `thread/resume` — reattach to a codex thread that already
+/// exists (persisted under `CODEX_HOME`) by its id, so a conversation survives
+/// the app-server process being replaced (crash/respawn on the shared engine).
+///
+/// NOTE: the exact wire shape accepted by the bundled codex app-server
+/// (upstream rust-v0.153.4) is verified live in the In Test stage, not here —
+/// the fake app-server harness proves the runner *sends* resume-by-stored-id
+/// and continues the session, but not the real protocol's field names. Mirrors
+/// [`ThreadStartParams`] (cwd + sandbox/approval posture) plus the `thread_id`
+/// to resume; `cwd` is re-sent because a respawned process has no memory of it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadResumeParams {
+    pub thread_id: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub sandbox: String,
+    pub approval_policy: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnStartParams {

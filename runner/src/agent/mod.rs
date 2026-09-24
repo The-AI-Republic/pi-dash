@@ -11,8 +11,10 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, mpsc, watch};
 use uuid::Uuid;
+
+use crate::codex::engine::EngineHandle;
 
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, FailureReason};
 use crate::config::schema::{AgentKind, RunnerConfig};
@@ -297,8 +299,37 @@ pub fn agent_env_for_config(runner: &RunnerConfig) -> crate::util::shell::AgentE
     }
 }
 
-/// Enum dispatch over the concrete bridges. Each variant owns the agent's
-/// subprocess; the supervisor treats them uniformly.
+/// A session on the shared, always-on codex engine, presented through the
+/// `AgentBridge` surface. Unlike every other variant this does **not** own a
+/// subprocess: the engine process is shared across every session and outlives
+/// any one of them. `shutdown` therefore *releases this session's thread* and
+/// leaves the process running, so closing a chat or ending a run keeps the
+/// engine warm for the next one. Built by the supervisor with
+/// [`AgentBridge::shared_codex`]; only the codex kind ever takes this path
+/// (local runners stay one-process-per-session by design).
+pub struct SharedCodexBridge {
+    handle: EngineHandle,
+    /// Stable key for this session's thread on the engine (a chat session id or
+    /// an issue run id). `run`/`warm` acquire the thread for it; `shutdown`
+    /// releases it.
+    session_key: String,
+}
+
+/// Per-turn cursor for a [`SharedCodexBridge`]. The engine actor demultiplexes
+/// the process's frames by `threadId` and fans this session's already-translated
+/// [`BridgeEvent`]s onto `events`, so the cursor is just the drained receiver
+/// plus the identity fields the supervisor reports.
+pub struct SharedCodexCursor {
+    run_id: Uuid,
+    thread_id: String,
+    model: Option<String>,
+    events: mpsc::UnboundedReceiver<BridgeEvent>,
+}
+
+/// Enum dispatch over the concrete bridges. Every variant except
+/// [`AgentBridge::SharedCodex`] owns the agent's subprocess; `SharedCodex` is a
+/// handle onto one shared, long-lived codex engine process. The supervisor
+/// treats them uniformly.
 pub enum AgentBridge {
     Codex(crate::codex::bridge::Bridge),
     ClaudeCode(crate::claude_code::bridge::Bridge),
@@ -306,6 +337,7 @@ pub enum AgentBridge {
     OpenClaw(crate::openclaw::bridge::Bridge),
     Grok(crate::grok::bridge::Bridge),
     MuseCode(crate::muse_code::bridge::Bridge),
+    SharedCodex(SharedCodexBridge),
 }
 
 /// Per-run cursor, paired with an `AgentBridge`. Holds agent-specific frame
@@ -317,6 +349,7 @@ pub enum AgentCursor {
     OpenClaw(crate::openclaw::bridge::BridgeCursor),
     Grok(crate::grok::bridge::BridgeCursor),
     MuseCode(crate::muse_code::bridge::BridgeCursor),
+    SharedCodex(SharedCodexCursor),
 }
 
 impl AgentCursor {
@@ -328,6 +361,7 @@ impl AgentCursor {
             AgentCursor::OpenClaw(c) => c.run_id,
             AgentCursor::Grok(c) => c.run_id,
             AgentCursor::MuseCode(c) => c.run_id,
+            AgentCursor::SharedCodex(c) => c.run_id,
         }
     }
 
@@ -339,6 +373,7 @@ impl AgentCursor {
             AgentCursor::OpenClaw(c) => &c.thread_id,
             AgentCursor::Grok(c) => &c.thread_id,
             AgentCursor::MuseCode(c) => &c.thread_id,
+            AgentCursor::SharedCodex(c) => &c.thread_id,
         }
     }
 
@@ -357,6 +392,10 @@ impl AgentCursor {
             AgentCursor::OpenClaw(_) => "openclaw",
             AgentCursor::Grok(_) => "grok",
             AgentCursor::MuseCode(_) => "muse_code",
+            // The shared engine is codex; report it as such so the cloud
+            // interprets thread_id / local_session_id the same as the per-lane
+            // codex bridge.
+            AgentCursor::SharedCodex(_) => "codex",
         }
     }
 
@@ -368,11 +407,23 @@ impl AgentCursor {
             AgentCursor::OpenClaw(c) => c.model.as_deref(),
             AgentCursor::Grok(c) => c.model.as_deref(),
             AgentCursor::MuseCode(c) => c.model.as_deref(),
+            AgentCursor::SharedCodex(c) => c.model.as_deref(),
         }
     }
 }
 
 impl AgentBridge {
+    /// Present the shared codex engine as an `AgentBridge` for one session.
+    /// Cheap and synchronous — no subprocess is spawned; the thread is acquired
+    /// lazily by the first `warm`/`run`. `session_key` is the chat session id or
+    /// issue run id whose thread this bridge drives.
+    pub fn shared_codex(handle: EngineHandle, session_key: impl Into<String>) -> Self {
+        AgentBridge::SharedCodex(SharedCodexBridge {
+            handle,
+            session_key: session_key.into(),
+        })
+    }
+
     /// Spawn the agent subprocess selected by the runner's config. Always
     /// starts a fresh agent session — see
     /// `.ai_design/ticking_optimization/design.md`.
@@ -473,6 +524,7 @@ impl AgentBridge {
             AgentBridge::OpenClaw(b) => Ok(AgentCursor::OpenClaw(b.run(payload, cwd).await?)),
             AgentBridge::Grok(b) => Ok(AgentCursor::Grok(b.run(payload, cwd).await?)),
             AgentBridge::MuseCode(b) => Ok(AgentCursor::MuseCode(b.run(payload, cwd).await?)),
+            AgentBridge::SharedCodex(b) => Ok(AgentCursor::SharedCodex(b.run(payload, cwd).await?)),
         }
     }
 
@@ -492,6 +544,9 @@ impl AgentBridge {
             AgentBridge::MuseCode(b) => {
                 Ok(AgentCursor::MuseCode(b.run_one_shot(payload, cwd).await?))
             }
+            // The shared engine multiplexes every session as a thread; a "one
+            // shot" issue run is just a thread whose turn ends and is released.
+            AgentBridge::SharedCodex(b) => Ok(AgentCursor::SharedCodex(b.run(payload, cwd).await?)),
         }
     }
 
@@ -508,6 +563,7 @@ impl AgentBridge {
             AgentBridge::OpenClaw(b) => b.warm(cwd).await,
             AgentBridge::Grok(b) => b.warm(cwd).await,
             AgentBridge::MuseCode(b) => b.warm(cwd).await,
+            AgentBridge::SharedCodex(b) => Ok(Some(b.warm(cwd).await?)),
         }
     }
 
@@ -525,6 +581,13 @@ impl AgentBridge {
             (AgentBridge::OpenClaw(b), AgentCursor::OpenClaw(c)) => b.next_events(c).await,
             (AgentBridge::Grok(b), AgentCursor::Grok(c)) => b.next_events(c).await,
             (AgentBridge::MuseCode(b), AgentCursor::MuseCode(c)) => b.next_events(c).await,
+            // The shared engine's actor already demultiplexed and translated
+            // this session's frames; the cursor just drains them. `None` closes
+            // the stream (session released or engine exited), matching every
+            // other variant's "subprocess closed its output" contract.
+            (AgentBridge::SharedCodex(_), AgentCursor::SharedCodex(c)) => {
+                c.events.recv().await.map(|e| vec![e])
+            }
             // These pairings are constructed together by `run`, so a mismatch
             // is a programmer error — fail loudly.
             _ => panic!("agent bridge and cursor variants mismatched"),
@@ -543,6 +606,7 @@ impl AgentBridge {
             AgentBridge::OpenClaw(b) => b.send_approval(approval_id, decision).await,
             AgentBridge::Grok(b) => b.send_approval(approval_id, decision).await,
             AgentBridge::MuseCode(b) => b.send_approval(approval_id, decision).await,
+            AgentBridge::SharedCodex(b) => b.handle.send_approval(approval_id, decision).await,
         }
     }
 
@@ -554,6 +618,12 @@ impl AgentBridge {
             AgentBridge::OpenClaw(b) => b.interrupt().await,
             AgentBridge::Grok(b) => b.interrupt().await,
             AgentBridge::MuseCode(b) => b.interrupt().await,
+            // NOTE: codex's `turn/interrupt` is not yet thread-scoped, so on the
+            // shared engine an interrupt targets the process's current turn, not
+            // strictly this session's. Cross-session cancel isolation is a
+            // follow-up tied to per-thread confinement (PDASHOSS01-162); event
+            // streaming stays fully isolated regardless.
+            AgentBridge::SharedCodex(b) => b.handle.interrupt().await,
         }
     }
 
@@ -565,7 +635,26 @@ impl AgentBridge {
             AgentBridge::OpenClaw(b) => b.shutdown(grace).await,
             AgentBridge::Grok(b) => b.shutdown(grace).await,
             AgentBridge::MuseCode(b) => b.shutdown(grace).await,
+            // Not a subprocess: release this session's thread and leave the
+            // shared engine process running for the next chat / run. `grace` is
+            // irrelevant — nothing is being killed.
+            AgentBridge::SharedCodex(b) => {
+                b.handle.release_session(&b.session_key).await;
+                Ok(())
+            }
         }
+    }
+
+    /// True when this bridge is backed by the shared, always-on codex engine,
+    /// whose process outlives any one session and self-heals (respawn + resume
+    /// by stored thread id) after a crash. Every other variant owns a
+    /// per-session subprocess whose exit ends the session for good.
+    ///
+    /// The chat lane consults this so that an `agent stdout closed` mid-turn is
+    /// treated as a failed *turn* — keep the runtime warm; the next message
+    /// respawns the engine and resumes this thread — rather than a lost runtime.
+    pub fn survives_process_exit(&self) -> bool {
+        matches!(self, AgentBridge::SharedCodex(_))
     }
 
     /// Bridge-owned observability handle: the agent subprocess's PID and a
@@ -580,6 +669,9 @@ impl AgentBridge {
             AgentBridge::OpenClaw(b) => b.process_handle(),
             AgentBridge::Grok(b) => b.process_handle(),
             AgentBridge::MuseCode(b) => b.process_handle(),
+            // The shared engine process's handle — one pid / exit-watch shared
+            // by every session (an accepted shared crash domain).
+            AgentBridge::SharedCodex(b) => b.handle.process_handle(),
         }
     }
 
@@ -596,7 +688,32 @@ impl AgentBridge {
             AgentBridge::OpenClaw(b) => b.recent_stderr().await,
             AgentBridge::Grok(b) => b.recent_stderr().await,
             AgentBridge::MuseCode(b) => b.recent_stderr().await,
+            AgentBridge::SharedCodex(b) => b.handle.recent_stderr().await,
         }
+    }
+}
+
+impl SharedCodexBridge {
+    async fn run(&self, payload: &RunPayload, cwd: &Path) -> Result<SharedCodexCursor> {
+        let session = self
+            .handle
+            .run_session(&self.session_key, payload, cwd)
+            .await?;
+        Ok(SharedCodexCursor {
+            run_id: payload.run_id,
+            thread_id: session.thread_id,
+            // Resolve the model the same way `Bridge::run_session` does: the
+            // per-turn override, else the engine-wide default.
+            model: payload
+                .model
+                .clone()
+                .or_else(|| self.handle.model_default().map(ToOwned::to_owned)),
+            events: session.events,
+        })
+    }
+
+    async fn warm(&self, cwd: &Path) -> Result<String> {
+        self.handle.warm_session(&self.session_key, cwd).await
     }
 }
 

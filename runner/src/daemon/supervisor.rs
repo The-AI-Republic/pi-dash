@@ -464,6 +464,7 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
             current_run: None,
             current_chat: None,
             local_chat_active: inst_chat_active,
+            codex_engine: None,
         };
         if let Err(e) = run.run().await {
             tracing::error!("runner loop exited: {e:#}");
@@ -812,6 +813,12 @@ struct RunnerLoop {
     /// assign lane consults it so a managed run and a local chat never modify
     /// the same working copy at the same time (issue AC6).
     local_chat_active: Arc<std::sync::atomic::AtomicBool>,
+    /// The one long-lived codex engine this runner shares across its chat lane
+    /// and its issue-run lane (PDASHOSS01-172). Spawned lazily on first codex
+    /// use via [`RunnerLoop::ensure_codex_engine`]; `None` for non-codex
+    /// runners and until first use. Dropping it (on loop exit) aborts the actor
+    /// and reaps the engine process.
+    codex_engine: Option<crate::codex::engine::SharedCodexEngine>,
 }
 
 struct CurrentRun {
@@ -919,6 +926,40 @@ impl RunnerLoop {
         let _ = tokio::time::timeout(Duration::from_secs(5), &mut chat.done_rx).await;
     }
 
+    /// Acquire a handle to this runner's shared codex engine, spawning it once
+    /// on first use. Returns `None` for a non-codex runner (local runners stay
+    /// one-process-per-session by design — PDASHOSS01-172), in which case the
+    /// caller falls back to spawning a per-lane `AgentBridge`. A spawn failure
+    /// is logged and also yields `None` so the lane degrades to a per-lane
+    /// bridge rather than failing the run outright.
+    async fn ensure_codex_engine(&mut self) -> Option<crate::codex::engine::EngineHandle> {
+        if self.runner_config.agent.kind != AgentKind::Codex {
+            return None;
+        }
+        if self.codex_engine.is_none() {
+            let codex = &self.runner_config.codex;
+            match crate::codex::engine::SharedCodexEngine::spawn_with_env(
+                &codex.binary,
+                &self.runner_config.workspace.working_dir,
+                codex.model_default.clone(),
+                codex.effort_default.clone(),
+                &crate::agent::agent_env_for_config(&self.runner_config),
+            )
+            .await
+            {
+                Ok(engine) => self.codex_engine = Some(engine),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to spawn shared codex engine; falling back to per-lane bridge"
+                    );
+                    return None;
+                }
+            }
+        }
+        self.codex_engine.as_ref().map(|e| e.handle())
+    }
+
     async fn start_chat_runtime(
         &mut self,
         chat_session_id: uuid::Uuid,
@@ -926,6 +967,8 @@ impl RunnerLoop {
         let (tx, rx) = mpsc::channel(8);
         let (active_tx, active_rx) = watch::channel(false);
         let (done_tx, done_rx) = oneshot::channel();
+        // Share this runner's one codex engine with the chat lane (codex only).
+        let codex_engine = self.ensure_codex_engine().await;
         self.current_chat = Some(CurrentChat {
             chat_session_id,
             tx: tx.clone(),
@@ -939,6 +982,7 @@ impl RunnerLoop {
             out: self.out.clone(),
             command_rx: rx,
             active_tx,
+            codex_engine,
         };
         tokio::spawn(async move {
             worker.run(chat_session_id).await;
@@ -1149,6 +1193,10 @@ impl RunnerLoop {
                     let state = self.state.clone();
                     let approvals = self.approvals.clone();
                     let out = self.out.clone();
+                    // Share this runner's one codex engine with the issue-run
+                    // lane (codex only); non-codex falls back to a per-run
+                    // subprocess inside the worker.
+                    let codex_engine = self.ensure_codex_engine().await;
                     tokio::spawn(async move {
                         let mut worker = AssignWorker {
                             runner_paths,
@@ -1158,6 +1206,7 @@ impl RunnerLoop {
                             approvals,
                             out,
                             cancel,
+                            codex_engine,
                         };
                         if let Err(e) = worker
                             .run(run_id, prompt, repo_url, expected_codex_model)
@@ -1662,6 +1711,11 @@ struct ChatWorker {
     out: RunnerOut,
     command_rx: mpsc::Receiver<ChatCommand>,
     active_tx: watch::Sender<bool>,
+    /// A clone of this runner's shared codex engine handle, for the codex kind.
+    /// `Some` → chat turns run as threads on the shared engine (no per-turn
+    /// subprocess spawn); `None` → the legacy per-session `AgentBridge` path
+    /// (non-codex runners, or a shared-engine spawn failure).
+    codex_engine: Option<crate::codex::engine::EngineHandle>,
 }
 
 impl ChatWorker {
@@ -1866,6 +1920,35 @@ impl ChatWorker {
         });
     }
 
+    /// Build the chat bridge for this session: a thread on this runner's shared
+    /// codex engine when one is available, else the legacy per-session
+    /// `AgentBridge` (non-codex runners, or a shared-engine spawn failure).
+    /// `model`/`resume_id` only reach the per-session path — the shared engine
+    /// carries the model per turn and codex ignores `--resume`.
+    async fn build_chat_bridge(
+        &self,
+        chat_session_id: uuid::Uuid,
+        workspace_path: &std::path::Path,
+        model: Option<String>,
+        resume_id: Option<&str>,
+    ) -> Result<AgentBridge> {
+        match &self.codex_engine {
+            Some(handle) => Ok(AgentBridge::shared_codex(
+                handle.clone(),
+                chat_session_id.to_string(),
+            )),
+            None => {
+                AgentBridge::spawn_from_config_with_resume(
+                    &self.runner_config,
+                    workspace_path,
+                    model,
+                    resume_id,
+                )
+                .await
+            }
+        }
+    }
+
     async fn handle_warm(
         &mut self,
         chat_session_id: uuid::Uuid,
@@ -1896,7 +1979,16 @@ impl ChatWorker {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("chat workspace missing"))?;
 
-        if bridge.as_ref().is_some_and(bridge_has_exited) {
+        // Only tear the bridge down here when the process is gone for good. The
+        // shared codex engine self-heals — its process outlives a crash and the
+        // next warm/run respawns it and resumes this thread from its stored id —
+        // so tearing it down would call `release_session` and drop the engine's
+        // resume entry, forcing a fresh thread and losing the conversation. A
+        // per-session subprocess does not survive its exit, so it must close.
+        if bridge
+            .as_ref()
+            .is_some_and(|b| bridge_has_exited(b) && !b.survives_process_exit())
+        {
             if let Some(bridge) = bridge.take() {
                 bridge.shutdown(Duration::from_secs(1)).await.ok();
             }
@@ -1911,8 +2003,8 @@ impl ChatWorker {
         if bridge.is_none() {
             let spawn_started = Instant::now();
             *bridge = Some(
-                AgentBridge::spawn_from_config_with_resume(
-                    &self.runner_config,
+                self.build_chat_bridge(
+                    chat_session_id,
                     workspace_path,
                     warm.model,
                     resume_id.as_deref(),
@@ -2015,7 +2107,16 @@ impl ChatWorker {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("chat workspace missing"))?;
 
-        if bridge.as_ref().is_some_and(bridge_has_exited) {
+        // Only tear the bridge down here when the process is gone for good. The
+        // shared codex engine self-heals — its process outlives a crash and the
+        // next warm/run respawns it and resumes this thread from its stored id —
+        // so tearing it down would call `release_session` and drop the engine's
+        // resume entry, forcing a fresh thread and losing the conversation. A
+        // per-session subprocess does not survive its exit, so it must close.
+        if bridge
+            .as_ref()
+            .is_some_and(|b| bridge_has_exited(b) && !b.survives_process_exit())
+        {
             if let Some(bridge) = bridge.take() {
                 bridge.shutdown(Duration::from_secs(1)).await.ok();
             }
@@ -2029,8 +2130,8 @@ impl ChatWorker {
         if bridge.is_none() {
             let spawn_started = Instant::now();
             *bridge = Some(
-                AgentBridge::spawn_from_config_with_resume(
-                    &self.runner_config,
+                self.build_chat_bridge(
+                    chat_session_id,
                     workspace_path,
                     turn.model.clone(),
                     resume_id.as_deref(),
@@ -2162,7 +2263,15 @@ impl ChatWorker {
                             failed_at: Utc::now(),
                         }).await.ok();
                         self.state.set_chat_active(false).await;
-                        return Ok(true);
+                        // The shared codex engine self-heals: its process
+                        // outlives this crash and the next message respawns it
+                        // and resumes this thread from its stored id. Keep the
+                        // runtime warm (return `false`) so the session isn't
+                        // released — releasing would drop the engine's resume
+                        // entry and the next message would start a fresh thread,
+                        // losing the conversation. A per-session subprocess is
+                        // gone for good, so its runtime must still close.
+                        return Ok(!bridge.survives_process_exit());
                     };
                     let mut done = false;
                     for ev in events {
@@ -2634,6 +2743,11 @@ struct AssignWorker {
     approvals: ApprovalRouter,
     out: RunnerOut,
     cancel: tokio_util::sync::CancellationToken,
+    /// A clone of this runner's shared codex engine handle, for the codex kind.
+    /// `Some` → the run executes as a thread on the shared engine; `None` → the
+    /// legacy per-run `AgentBridge` subprocess (non-codex runners, or a
+    /// shared-engine spawn failure).
+    codex_engine: Option<crate::codex::engine::EngineHandle>,
 }
 
 struct RunMetadata {
@@ -2663,6 +2777,24 @@ impl AssignWorker {
             | AgentKind::OpenClaw
             | AgentKind::Grok
             | AgentKind::MuseCode => FailureReason::AgentCrash,
+        }
+    }
+
+    /// Build the bridge for this run: a thread on this runner's shared codex
+    /// engine when one is available, else the legacy per-run `AgentBridge`
+    /// subprocess. `model` only reaches the per-run path — the shared engine
+    /// carries the model on the turn.
+    async fn build_run_bridge(
+        &self,
+        run_id: uuid::Uuid,
+        workspace_path: &std::path::Path,
+        model: Option<String>,
+    ) -> Result<AgentBridge> {
+        match &self.codex_engine {
+            Some(handle) => Ok(AgentBridge::shared_codex(handle.clone(), run_id.to_string())),
+            None => {
+                AgentBridge::spawn_from_config(&self.runner_config, workspace_path, model).await
+            }
         }
     }
 
@@ -2794,12 +2926,9 @@ impl AssignWorker {
         // Bridge to the configured agent (Codex or Claude Code). `AgentBridge`
         // hides which CLI is actually being driven from the rest of this
         // worker; the event flow below is identical for both.
-        let mut bridge = match AgentBridge::spawn_from_config(
-            &self.runner_config,
-            &workspace_path,
-            expected_codex_model.clone(),
-        )
-        .await
+        let mut bridge = match self
+            .build_run_bridge(run_id, &workspace_path, expected_codex_model.clone())
+            .await
         {
             Ok(b) => b,
             Err(e) => {
@@ -3499,6 +3628,7 @@ mod tests {
                 approvals: ApprovalRouter::new(),
                 out: RunnerOut::new(config.runner_id, tx),
                 cancel: tokio_util::sync::CancellationToken::new(),
+                codex_engine: None,
             };
             worker
                 .run(
@@ -3554,6 +3684,7 @@ mod tests {
             out: RunnerOut::new(config.runner_id, tx),
             command_rx: cmd_rx,
             active_tx,
+            codex_engine: None,
         };
         let chat_dir = chat
             .resolve_chat_workspace(uuid::Uuid::new_v4(), None)
@@ -3571,6 +3702,196 @@ mod tests {
             | crate::workspace::Resolution::Cloned(p) => p,
         };
         assert_eq!(run_dir, chat_dir);
+    }
+
+    #[tokio::test]
+    async fn shared_engine_chat_crash_keeps_session_and_resumes_same_thread() {
+        // Regression for the ungated pre-operation teardown in `handle_turn`
+        // (mirrored in `handle_warm`): after the shared codex engine crashes
+        // mid-turn, the NEXT chat message must NOT tear the bridge down — doing
+        // so calls `SharedCodex::shutdown` → `release_session`, which drops the
+        // engine's resume entry, so the message starts a FRESH thread and the
+        // conversation is lost. Slice 3 gated only the *in-loop* crash branch on
+        // `!survives_process_exit()`; the two pre-operation guards were left
+        // ungated, and the fake engine tests miss it because they drive the
+        // engine actor directly, not the supervisor's turn flow.
+        //
+        // Two fake app-servers: A streams a partial delta on `th1` then dies
+        // mid-turn; B honours `thread/resume` (continuing `th1`), but if instead
+        // asked for a fresh `thread/start` — exactly what a wrongly-released
+        // session forces — hands back a DIFFERENT id `th_fresh`. Asserting the
+        // follow-up turn ran on `th1` therefore fails loudly if either guard is
+        // ever un-gated.
+        const SCRIPT_CRASH_MID_TURN: &str = r#"
+            set -e
+            read _                                  # initialize
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+            read _                                  # initialized (no response)
+            read _                                  # thread/start (id 2)
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th1"}}'
+            read _                                  # turn/start (id 3, no response)
+            printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"th1","text":"a1"}}'
+            # crash: exit mid-turn, before turn/completed
+        "#;
+        const SCRIPT_RESUME_OR_FRESH: &str = r#"
+            set -e
+            read _                                  # initialize
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+            read _                                  # initialized (no response)
+            read req                                # thread/resume OR thread/start (id 2)
+            case "$req" in
+              *thread/resume*)
+                printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
+                TID=th1 ;;
+              *)
+                printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_fresh"}}'
+                TID=th_fresh ;;
+            esac
+            read _                                  # turn/start (id 3, no response)
+            printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"'"$TID"'","text":"b1"}}'
+            printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"'"$TID"'","conclusion":"success","done":{"status":"ok"}}}'
+            sleep 0.5
+        "#;
+
+        async fn spawn_fake(script: &str) -> crate::codex::app_server::AppServer {
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.arg("-c").arg(script);
+            crate::codex::app_server::AppServer::spawn_command(cmd)
+                .await
+                .expect("spawn fake codex")
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("the-one-dir");
+        let config = runner_config("main", "WEB", wd.clone());
+
+        // Initial process crashes mid-turn; the factory brings up a
+        // resume-capable replacement on the next warm/run.
+        let server_a = spawn_fake(SCRIPT_CRASH_MID_TURN).await;
+        let engine = crate::codex::engine::SharedCodexEngine::from_bridge_with_factory(
+            crate::codex::bridge::Bridge::from_server(server_a, None),
+            || async {
+                let server = spawn_fake(SCRIPT_RESUME_OR_FRESH).await;
+                Ok(crate::codex::bridge::Bridge::from_server(server, None))
+            },
+        );
+
+        let (tx, mut rx) = mpsc::channel::<Envelope<ClientMsg>>(1024);
+        // Hold a live command sender so `command_rx.recv()` pends under the
+        // biased select and the event arm wins; dropping it would surface as a
+        // spurious "cancelled" and break the turn before it can crash/resume.
+        let (_cmd_tx, cmd_rx) = mpsc::channel(4);
+        let (active_tx, _active_rx) = watch::channel(false);
+        let mut chat = ChatWorker {
+            runner_config: config.clone(),
+            state: StateHandle::new(Config {
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![config.clone()],
+                cli: None,
+            }),
+            approvals: ApprovalRouter::new(),
+            out: RunnerOut::new(config.runner_id, tx),
+            command_rx: cmd_rx,
+            active_tx,
+            codex_engine: Some(engine.handle()),
+        };
+
+        // The chat lane's per-runtime locals, threaded across both turns exactly
+        // as `ChatWorker::run` threads them across `handle_turn` calls.
+        let chat_session_id = uuid::Uuid::new_v4();
+        let mut bridge: Option<AgentBridge> = None;
+        let mut workspace_path: Option<std::path::PathBuf> = None;
+        let mut bridge_seq = 0u64;
+        let mut started_sent = false;
+
+        let turn1 = ChatTurn {
+            message_id: uuid::Uuid::new_v4(),
+            content: "hi".into(),
+            cwd: None,
+            model: None,
+            local_thread_id: None,
+            local_session_id: None,
+        };
+        let close1 = chat
+            .handle_turn(
+                chat_session_id,
+                turn1,
+                &mut bridge,
+                &mut workspace_path,
+                &mut bridge_seq,
+                &mut started_sent,
+            )
+            .await
+            .expect("turn 1 handled");
+        // A shared-engine mid-turn crash is a failed turn, not a lost runtime:
+        // handle_turn returns `false` (keep warm) and retains the bridge.
+        assert!(
+            !close1,
+            "shared-engine crash must keep the chat runtime warm, not close it"
+        );
+        assert!(
+            bridge.is_some(),
+            "the bridge must be retained across the crash — not torn down and released"
+        );
+        // The exact predicate both pre-operation teardown guards evaluate: the
+        // process has exited, but a shared engine *survives* that exit, so the
+        // guard must NOT tear the bridge down (which would release the session).
+        // This is the deterministic mirror of the guard; the resume assertion
+        // below exercises the guard's real code path end to end.
+        let retained = bridge.as_ref().unwrap();
+        assert!(
+            bridge_has_exited(retained),
+            "the shared engine's process should have exited on the mid-turn crash"
+        );
+        assert!(
+            retained.survives_process_exit(),
+            "a shared codex engine must report it survives its process exit"
+        );
+
+        let turn2_id = uuid::Uuid::new_v4();
+        let turn2 = ChatTurn {
+            message_id: turn2_id,
+            content: "again".into(),
+            cwd: None,
+            model: None,
+            local_thread_id: None,
+            local_session_id: None,
+        };
+        chat
+            .handle_turn(
+                chat_session_id,
+                turn2,
+                &mut bridge,
+                &mut workspace_path,
+                &mut bridge_seq,
+                &mut started_sent,
+            )
+            .await
+            .expect("turn 2 handled");
+
+        // The follow-up turn's `ChatMessageStarted` names the thread it ran on;
+        // it must be the resumed `th1`. A `th_fresh` here means the pre-op guard
+        // released the session and the engine started a brand-new thread — the
+        // very conversation-loss this fix prevents.
+        let mut resumed_thread = None;
+        while let Ok(env) = rx.try_recv() {
+            if let ClientMsg::ChatMessageStarted {
+                message_id,
+                turn_id,
+                ..
+            } = env.body
+            {
+                if message_id == turn2_id {
+                    resumed_thread = turn_id;
+                }
+            }
+        }
+        assert_eq!(
+            resumed_thread.as_deref(),
+            Some("th1"),
+            "follow-up turn must resume th1; a fresh thread means the session was wrongly released"
+        );
     }
 
     #[tokio::test]
