@@ -7,6 +7,7 @@ from django.utils import timezone
 from django.core.validators import URLValidator
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import IntegrityError
+from django.db.models import Sum
 
 # Third Party imports
 from rest_framework import serializers
@@ -1409,6 +1410,13 @@ class IssueDetailSerializer(IssueSerializer):
             "active_run": self._serialize_agent_run(active_run, include_live_state=True),
             "latest_run": self._serialize_agent_run(latest_run, include_live_state=active_run is None),
             "run_count": runs.count(),
+            # Cumulative tokens across every run this issue has had.
+            # ``total_tokens`` is a generated column over ``AgentRun.usage``
+            # (PDASHOSS01-188), so this is a plain column aggregate. It is a
+            # floor, not an audited total: a run that died before reporting
+            # usage stores NULL and ``Sum`` skips it. 0, never None, so the
+            # tile never has to render a blank.
+            "total_tokens": runs.aggregate(total=Sum("total_tokens"))["total"] or 0,
         }
 
 

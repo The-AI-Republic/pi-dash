@@ -12,9 +12,18 @@ import { useTranslation } from "@pi-dash/i18n";
 import { Badge } from "@pi-dash/propel/badge";
 import type { TBadgeVariant } from "@pi-dash/propel/badge";
 import { Button } from "@pi-dash/propel/button";
-import type { TAgentRunStatus, TIssue, TIssueAgentRunSummary, TIssueAgentTicker } from "@pi-dash/types";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type {
+  TAgentRunStatus,
+  TIssue,
+  TIssueAgentRunSummary,
+  TIssueAgentStatus,
+  TIssueAgentTicker,
+} from "@pi-dash/types";
 import { AlertModalCore } from "@pi-dash/ui";
 import { cn } from "@pi-dash/utils";
+// hooks
+import { usePlatformOS } from "@/hooks/use-platform-os";
 // local imports
 import type { TIssueOperations } from "./root";
 import { useAbortRun } from "./use-abort-run";
@@ -109,6 +118,43 @@ export function formatTickBudget(ticker: TIssueAgentTicker | null | undefined, t
   if (waited === 0) return budget;
   // Same singular/plural shape as formatRunDone above.
   return `${budget}, ${t(waited === 1 ? "{count} wait" : "{count} waits", { count: waited })}`;
+}
+
+/** Tokens, abbreviated the way ``RunnerAgentStatusPanel`` abbreviates them:
+ * verbatim below a thousand, then ``12.8k`` / ``1.2M``. */
+export function formatTokenCount(total: number): string {
+  if (!Number.isFinite(total) || total <= 0) return "0";
+  const rounded = Math.round(total);
+  if (rounded < 1000) return String(rounded);
+  // Pick the unit against the *rounded* value so 999,950 reads "1.0M"
+  // rather than "1000.0k".
+  if (rounded < 999_950) return `${(rounded / 1000).toFixed(1)}k`;
+  return `${(rounded / 1_000_000).toFixed(1)}M`;
+}
+
+/** The issue's cumulative token total, including a run still in flight.
+ *
+ * ``status.total_tokens`` is summed server side over the issue's run rows,
+ * but a run's usage is only written to its row when it pauses or ends — so
+ * mid-run the sum usually omits the active run entirely, and for a *resumed*
+ * run the row carries a stale total while the live state races ahead. Adding
+ * only what the live state has beyond the row's own contribution covers both:
+ * the whole live total when the row is unwritten, just the delta when it is
+ * stale, and nothing once the row has caught up.
+ *
+ * Returns ``null`` when there is no figure at all (an older payload with no
+ * ``total_tokens`` and no live state), so the caller can drop the tile rather
+ * than assert a false zero.
+ */
+export function resolveIssueTokenTotal(status: TIssueAgentStatus | null | undefined): number | null {
+  if (!status) return null;
+  const stored =
+    typeof status.total_tokens === "number" && Number.isFinite(status.total_tokens) ? status.total_tokens : null;
+  const counted = status.active_run?.total_tokens ?? 0;
+  const live = status.active_run?.live_state?.total_tokens;
+  const liveDelta = typeof live === "number" && Number.isFinite(live) ? Math.max(0, live - counted) : 0;
+  if (stored === null) return liveDelta > 0 ? liveDelta : null;
+  return stored + liveDelta;
 }
 
 function getPayloadString(payload: Record<string, unknown> | null | undefined, key: string): string | null {
@@ -371,6 +417,7 @@ function getAgentStatusView(issue: TIssue, now: number, t: TranslationFn): Agent
 
 export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue, issueOperations }: Props) {
   const { t } = useTranslation();
+  const { isMobile } = usePlatformOS();
   const [now, setNow] = useState(() => Date.now());
   const status = issue.agent_status;
   const ticker = status?.ticker ?? issue.agent_ticker;
@@ -432,6 +479,7 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
   // active run ends — say so instead of "due now".
   const nextTick = ticker?.pending_entry ? t("queued") : formatUntil(ticker?.next_run_at, now, t);
   const tickBudget = formatTickBudget(ticker, t);
+  const tokenTotal = resolveIssueTokenTotal(status);
 
   return (
     <section className="mt-5 rounded border border-subtle bg-surface-2 px-3 py-3">
@@ -450,7 +498,7 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
         </div>
       </div>
 
-      {(status?.run_count || nextTick || tickBudget) && (
+      {(status?.run_count || nextTick || tickBudget || tokenTotal !== null) && (
         <div className="mt-3 grid grid-cols-2 gap-2 text-caption-sm-medium text-tertiary">
           {status?.run_count ? (
             <div className="rounded-sm bg-layer-2 px-2 py-1">
@@ -477,6 +525,19 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
               <span className="block text-placeholder">{t("Budget")}</span>
               <span className="text-primary">{tickBudget}</span>
             </div>
+          ) : null}
+          {tokenTotal !== null ? (
+            <Tooltip
+              tooltipContent={t(
+                "Tokens reported across this issue's runs, including one still in progress. A run that ended before reporting usage counts as nothing, so treat this as a floor rather than a billing figure."
+              )}
+              isMobile={isMobile}
+            >
+              <div className="rounded-sm bg-layer-2 px-2 py-1">
+                <span className="block text-placeholder">{t("Tokens")}</span>
+                <span className="text-primary">{formatTokenCount(tokenTotal)}</span>
+              </div>
+            </Tooltip>
           ) : null}
         </div>
       )}
