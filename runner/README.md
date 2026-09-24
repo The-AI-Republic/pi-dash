@@ -151,11 +151,27 @@ working directory. No Git repository or project repository URL is required;
 existing files are preserved, and the runner does not initialize Git for you.
 This applies to user-connected agents and the built-in desktop agent alike.
 
-When a repository URL is supplied, the runner still clones into an empty
-directory or reuses an existing repository. It refuses to clone over files in
-a non-repository directory. Branch checkout only applies to repositories.
-Explicit worktree pools remain Git-based; use a direct working directory for
-repo-free tasks.
+Git is **context, not a gate**. The platform tells the agent what it knows
+about the repository — url, base branch, work branch — and the agent decides
+what, if anything, to do with Git. The platform performs no Git operation on
+the agent's behalf beyond one convenience, and never fails a run over Git.
+
+That convenience is clone bootstrap: when a repository URL is supplied **and**
+the working directory is empty, the runner clones it so a fresh runner starts
+on a checkout. Every other case runs the directory as an ordinary task folder:
+
+| working dir           | repository URL | behaviour                                                         |
+| --------------------- | -------------- | ----------------------------------------------------------------- |
+| is a Git repo         | anything       | used as-is; the URL is never verified against the remote          |
+| not a repo, empty     | none           | ordinary task folder                                              |
+| not a repo, empty     | supplied       | cloned (best effort — a failed clone falls back to a task folder) |
+| not a repo, has files | anything       | ordinary task folder; **never** cloned over                       |
+
+The last row matters for multi-repo layouts: pointing a runner at a directory
+that _contains_ clones (rather than at a clone) is supported — it runs there
+and the agent drives Git itself. Files are always preserved, and the runner
+never initializes Git for you. Branch checkout is the agent's job, not the
+platform's (PDASHOSS01-136).
 
 ## Auto-update
 

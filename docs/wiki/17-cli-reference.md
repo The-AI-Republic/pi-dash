@@ -83,14 +83,14 @@ pidash runner add --project <PROJECT> [--name <NAME>] [--workspace <SLUG>]
                   [--pod <POD>] [--working-dir <PATH>] [--agent codex|claude-code]
 ```
 
-| Flag                | Purpose                                                            |
-| ------------------- | ------------------------------------------------------------------ |
-| `--project <P>`     | Project identifier (slug or UUID). **Required.**                   |
-| `--name <N>`        | Human-friendly runner name. Auto-generated if omitted.             |
-| `--workspace <S>`   | Workspace slug. Required if you belong to multiple workspaces.     |
-| `--pod <P>`         | Pod within the project. Defaults to project's default pod.         |
-| `--working-dir <P>` | Local working dir for clones. Defaults to a path under `data_dir`. |
-| `--agent <K>`       | `codex` (default) or `claude-code`.                                |
+| Flag                | Purpose                                                                                                                                |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `--project <P>`     | Project identifier (slug or UUID). **Required.**                                                                                       |
+| `--name <N>`        | Human-friendly runner name. Auto-generated if omitted.                                                                                 |
+| `--workspace <S>`   | Workspace slug. Required if you belong to multiple workspaces.                                                                         |
+| `--pod <P>`         | Pod within the project. Defaults to project's default pod.                                                                             |
+| `--working-dir <P>` | Working dir for this runner. A repo, an empty dir (cloned into on first run), or any task folder. Defaults to a path under `data_dir`. |
+| `--agent <K>`       | `codex` (default) or `claude-code`.                                                                                                    |
 
 On the first runner: installs the OS service (systemd user unit / launchd agent / Windows scheduled task) and starts the daemon.
 
