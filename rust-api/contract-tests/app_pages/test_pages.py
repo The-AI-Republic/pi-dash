@@ -41,6 +41,14 @@ LIST_ROW_KEYS = {
 
 DETAIL_ROW_KEYS = LIST_ROW_KEYS | {"description_html"}
 
+# partial_update answers with the update-bound PageDetailSerializer over a
+# plain Page.objects.get() instance, while create re-fetches through the
+# annotated get_queryset(). The annotation-backed keys (is_favorite Exists,
+# label_ids/project_ids Coalesce) have no attribute on the plain instance,
+# and all three fields are required=False, so DRF drops them (SkipField) —
+# the PATCH body is always DETAIL minus exactly those three keys.
+PATCH_ROW_KEYS = DETAIL_ROW_KEYS - {"is_favorite", "label_ids", "project_ids"}
+
 
 def test_list_shape(user_client, world):
     response = user_client.get(page_url(world))
@@ -206,9 +214,10 @@ def test_partial_update_shape(user_client, world, db):
     response = user_client.patch(page_url(world, world["page"]["id"]), json={"name": "Renamed page"})
     assert response.status_code == 200
     body = response.json()
-    # partial_update returns the same PageDetailSerializer as create (no
-    # issue_ids — only retrieve adds those), so pin the exact key set.
-    assert set(body) == DETAIL_ROW_KEYS, f"patch keys drifted: {sorted(body)}"
+    # partial_update returns the update-bound PageDetailSerializer (no
+    # issue_ids — only retrieve adds those; no annotation-backed keys either,
+    # see PATCH_ROW_KEYS), so pin that exact key set.
+    assert set(body) == PATCH_ROW_KEYS, f"patch keys drifted: {sorted(body)}"
     assert body["name"] == "Renamed page"
     assert db.fetchval("SELECT name FROM pages WHERE id=%s", (world["page"]["id"],)) == "Renamed page"
 
