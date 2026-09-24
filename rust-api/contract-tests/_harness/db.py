@@ -121,6 +121,8 @@ class Database:
         tables = [
             "schedulers",
             "sessions",
+            "workspace_join_requests",
+            "workspace_member_invites",
             "workspace_members",
             "workspaces",
             "api_tokens",
@@ -323,6 +325,38 @@ class Database:
                 )
             conn.commit()
         return {"id": wid, "name": name, "slug": slug}
+
+    def make_invite(self, workspace_id, email, *, role=15, token="tok-contract-1",
+                    created_by_id=None, accepted=False, responded_at=None):
+        iid = str(uuid.uuid4())
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """insert into workspace_member_invites
+                       (created_at, updated_at, id, email, accepted, token,
+                        role, workspace_id, created_by_id, responded_at)
+                       values (now(), now(), %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (iid, email, accepted, token, role, workspace_id,
+                     created_by_id, responded_at),
+                )
+            conn.commit()
+        return {"id": iid, "email": email, "token": token}
+
+    def make_join_request(self, requester_id, admin_email, *, workspace_id=None,
+                          message=None, role=15, status="PENDING"):
+        jid = str(uuid.uuid4())
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """insert into workspace_join_requests
+                       (created_at, updated_at, id, admin_email, message, role,
+                        status, requester_id, workspace_id, created_by_id)
+                       values (now(), now(), %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (jid, admin_email, message, role, status,
+                     requester_id, workspace_id, requester_id),
+                )
+            conn.commit()
+        return {"id": jid}
 
     def make_workspace_member(self, workspace_id, user_id, *, role=20):
         mid = str(uuid.uuid4())
