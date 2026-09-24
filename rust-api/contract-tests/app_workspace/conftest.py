@@ -37,6 +37,10 @@ def world(db):
     user = db.make_user("user@example.com")
     other = db.make_user("other@example.com", first_name="Other", last_name="User")
     bot = db.make_user("bot@example.com", first_name="Bot", last_name="User", is_bot=True)
+    # Signup creates one profile row per user with model defaults; the
+    # profile/settings/onboard/tour endpoints 404 without it.
+    for u in (user, other, bot):
+        db.make_profile(u["id"])
     secret = secret_key()
     return {
         "db": db,

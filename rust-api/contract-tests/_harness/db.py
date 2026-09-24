@@ -124,6 +124,8 @@ class Database:
             "workspace_members",
             "workspaces",
             "api_tokens",
+            "accounts",
+            "profiles",
             "instance_admins",
             "instance_configurations",
             "instances",
@@ -231,6 +233,60 @@ class Database:
                 )
             conn.commit()
         return {"id": tid, "label": label}
+
+    def make_profile(self, user_id):
+        # Mirrors the signup path (authentication/adapter/base.py), which
+        # creates the profile with model defaults; raw-SQL users bypass it,
+        # and the profile endpoints 404 without this row.
+        pid = str(uuid.uuid4())
+        now = _now()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """insert into profiles
+                       (created_at, updated_at, id, theme, is_tour_completed,
+                        onboarding_step, is_onboarded, billing_address_country,
+                        has_billing_address, company_name, user_id,
+                        is_mobile_onboarded, mobile_onboarding_step,
+                        mobile_timezone_auto_set, language, is_smooth_cursor_enabled,
+                        start_of_the_week, is_app_rail_docked, background_color, goals,
+                        has_marketing_email_consent, is_navigation_tour_completed,
+                        is_subscribed_to_changelog, notification_view_mode,
+                        product_tour, settings)
+                       values (now(), now(), %s, %s, false, %s, false, 'INDIA',
+                        false, '', %s, false, %s, false, 'en', false, 0, true,
+                        '#ffffff', %s, false, false, false, 'full', %s, %s)""",
+                    (
+                        pid, json.dumps({}),
+                        json.dumps({"profile_complete": False, "workspace_create": False,
+                                    "workspace_invite": False, "workspace_join": False}),
+                        user_id,
+                        json.dumps({"profile_complete": False, "workspace_create": False,
+                                    "workspace_join": False}),
+                        json.dumps({}),
+                        json.dumps({"work_items": False, "cycles": False, "modules": False,
+                                    "intake": False, "pages": False}),
+                        json.dumps({}),
+                    ),
+                )
+            conn.commit()
+        return {"id": pid}
+
+    def make_account(self, user_id, *, provider="google", provider_account_id="p-acc-1"):
+        aid = str(uuid.uuid4())
+        now = _now()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """insert into accounts
+                       (created_at, updated_at, id, user_id, provider_account_id,
+                        provider, access_token, id_token, metadata, last_connected_at)
+                       values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (now, now, aid, user_id, provider_account_id, provider,
+                     "access-token", "", json.dumps({}), now),
+                )
+            conn.commit()
+        return {"id": aid}
 
     def mint_user_session(self, user, secret, *, max_age=3600):
         # App-tree auth (`session-id` cookie) reads the same `sessions` rows
