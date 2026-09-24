@@ -37,6 +37,17 @@ def admin_client(session_key, **kwargs):
     )
 
 
+def user_client(session_key, **kwargs):
+    """App (`/api/...`) session auth: DRF SessionAuthentication over the
+    `session-id` cookie (SESSION_COOKIE_NAME), same `sessions` rows as admin."""
+    return httpx.Client(
+        base_url=base_url(),
+        cookies={signing.USER_SESSION_COOKIE: session_key},
+        timeout=15,
+        **kwargs,
+    )
+
+
 # The stock `anon` throttle is 30/min and only unauthenticated traffic counts
 # against it — but the pre-login CSRF/sign-in hits plus the anon-client cases
 # still burst past it over a full-file run. A 429 is the server asking us to

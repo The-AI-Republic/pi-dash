@@ -123,6 +123,7 @@ class Database:
             "sessions",
             "workspace_members",
             "workspaces",
+            "api_tokens",
             "instance_admins",
             "instance_configurations",
             "instances",
@@ -134,7 +135,7 @@ class Database:
                     cur.execute(f"delete from {table};")
             conn.commit()
 
-    def make_user(self, email, *, password=KNOWN_PASSWORD, first_name="Contract", last_name="User", is_active=True):
+    def make_user(self, email, *, password=KNOWN_PASSWORD, first_name="Contract", last_name="User", is_active=True, is_bot=False):
         uid = str(uuid.uuid4())
         now = _now()
         with self.connect() as conn:
@@ -153,7 +154,7 @@ class Database:
                         signing.make_password_hash(password), uid, f"u-{uid[:8]}", email,
                         first_name, last_name, "", now, now, now, "", "", False, False,
                         False, is_active, False, True, False, secrets.token_hex(32),
-                        "UTC", "", "", "email", "", False, f"{first_name} {last_name}",
+                        "UTC", "", "", "email", "", is_bot, f"{first_name} {last_name}",
                         True, False,
                     ),
                 )
@@ -209,6 +210,32 @@ class Database:
                 )
             conn.commit()
         return {"id": cid}
+
+    def make_api_token(self, user_id, *, label="Contract Token", description="",
+                       user_type=0, is_service=False, token=None, expired_at=None):
+        tid = str(uuid.uuid4())
+        now = _now()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """insert into api_tokens
+                       (created_at, updated_at, id, label, description, is_active,
+                        token, user_id, user_type, expired_at, is_service,
+                        allowed_rate_limit)
+                       values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (
+                        now, now, tid, label, description, True,
+                        token or secrets.token_hex(32), user_id, user_type,
+                        expired_at, is_service, "60/min",
+                    ),
+                )
+            conn.commit()
+        return {"id": tid, "label": label}
+
+    def mint_user_session(self, user, secret, *, max_age=3600):
+        # App-tree auth (`session-id` cookie) reads the same `sessions` rows
+        # as the admin cookie; only the cookie name differs (see http.user_client).
+        return self.mint_admin_session(user, secret, max_age=max_age)
 
     def mint_admin_session(self, user, secret, *, max_age=3600):
         payload = signing.session_payload(user["id"], user["password_hash"], secret)
