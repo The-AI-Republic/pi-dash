@@ -101,6 +101,22 @@ sign-in endpoint (black box).
   upstream bugs for the port: POST intakes/inboxes always 500
   (`@allow_permission` on `perform_create`), and creates require explicit
   `deleted_at`.
+- `v1_openapi/` — PIDASHCONV-81 (D-23): api-v1 OpenAPI schema oracle —
+  the three served drf-spectacular routes (`/api/schema/`,
+  `/api/schema/swagger-ui/`, `/api/schema/redoc/`): document shape, hook
+  invariants, exact route coverage via `routes_golden.json` (121 paths /
+  189 ops), method denials, tenant-invariance, and the anonymous
+  throttle. Same env contract (`BASE_URL` + `DATABASE_URL`; the latter
+  only seeds the two tenant worlds in the isolation tests), except the
+  schema routes only exist with spectacular enabled (`ENABLE_DRF_SPECTACULAR=1`
+  in the migrate/runserver environment) and no worker is needed (the
+  domain serves static introspection, publishes no jobs). Own database
+  `pidash_contract_81`, port `8481`; see "Run: v1_openapi" below. The
+  schema views take session auth only, so every request counts toward the
+  global `AnonRateThrottle` (30/minute per IP, Redis-backed and therefore
+  shared by every suite on the machine); the suite fetches the 1.4 MB
+  document through session fixtures and waits out stale `429`s
+  (`client.get_patient`, at most ~75 s).
 
 ## Run: web_edge
 
@@ -477,3 +493,27 @@ BASE_URL=http://127.0.0.1:8471 DATABASE_URL=$DATABASE_URL \
 - `PATCH` on a completed cycle with `{"sort_order": N}` → 200 but the
   value is silently dropped (serializer has no `sort_order` field).
 - Deletes are soft (`deleted_at` set, row retained).
+
+## Run: v1_openapi (PIDASHCONV-81)
+
+Same shape as "Run against Django (DB-backed domains)" above, except the
+schema routes only exist with spectacular enabled and no worker is needed:
+
+```sh
+export DATABASE_URL=postgresql://<user>@localhost:5432/pidash_contract_81
+export REDIS_URL=redis://localhost:6379/8 AMQP_URL=redis://localhost:6379/8
+export WEB_URL=http://127.0.0.1:8481 APP_BASE_URL=http://127.0.0.1:8481
+export EMAIL_HOST=localhost API_KEY_RATE_LIMIT=100000/minute
+export ENABLE_DRF_SPECTACULAR=1
+export DJANGO_SETTINGS_MODULE=pi_dash.settings.test PYTHONPATH=apps/api
+python apps/api/manage.py migrate --no-input
+python apps/api/manage.py runserver 127.0.0.1:8481 --noreload
+
+cd rust-api/contract-tests
+BASE_URL=http://127.0.0.1:8481 DATABASE_URL=$DATABASE_URL \
+  .venv/bin/pytest v1_openapi -q
+```
+
+Expected: all green (38 passed here, twice). First run on a cold throttle
+cache takes ~25 s; a re-run within a minute waits out the shared 30/min
+anonymous window (up to ~75 s) and still passes.

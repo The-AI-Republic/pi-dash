@@ -62,3 +62,107 @@ class StubSink:
     @property
     def requests(self) -> list[dict]:
         return list(RecordingHandler.requests)
+
+
+# -- SMTP + webhook sinks (PIDASHCONV-81). Kept alongside StubSink above
+# (never a fork): distinct classes for mail / webhook side effects.
+class SmtpSink:
+    """In-memory SMTP server. `messages` is a list of dicts
+    {peer, mail_from, rcpt_tos, data: str}."""
+
+    def __init__(self):
+        import socket
+
+        from aiosmtpd.controller import Controller
+
+        self.messages: list[dict] = []
+        # aiosmtpd cannot start on port 0 itself; pre-allocate an ephemeral
+        # loopback port and hand it over explicitly.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            free_port = s.getsockname()[1]
+        outer = self
+
+        class Handler:
+            async def handle_DATA(self, server, session, envelope):
+                outer.messages.append(
+                    {
+                        "peer": session.peer,
+                        "mail_from": envelope.mail_from,
+                        "rcpt_tos": list(envelope.rcpt_tos),
+                        "data": envelope.content.decode("utf8", "replace"),
+                    }
+                )
+                return "250 OK"
+
+        self._controller = Controller(Handler(), hostname="127.0.0.1", port=free_port)
+        self._controller.start()
+        self.host, self.port = "127.0.0.1", free_port
+
+    def stop(self):
+        self._controller.stop()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.stop()
+
+
+class WebhookSink:
+    """In-memory HTTP server. `requests` is a list of dicts
+    {method, path, headers, body: bytes, json}."""
+
+    def __init__(self):
+        outer = self
+        self.requests: list[dict] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def _capture(self):
+                length = int(self.headers.get("Content-Length", 0) or 0)
+                body = self.rfile.read(length) if length else b""
+                try:
+                    parsed = json.loads(body) if body else None
+                except ValueError:
+                    parsed = None
+                outer.requests.append(
+                    {
+                        "method": self.command,
+                        "path": self.path,
+                        "headers": dict(self.headers),
+                        "body": body,
+                        "json": parsed,
+                    }
+                )
+                payload = b'{"ok": true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            do_POST = _capture
+            do_PUT = _capture
+            do_PATCH = _capture
+
+            def log_message(self, *args):
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.host, self.port = self._server.server_address[:2]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    @property
+    def url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+    def stop(self):
+        self._server.shutdown()
+        self._thread.join(timeout=10)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.stop()

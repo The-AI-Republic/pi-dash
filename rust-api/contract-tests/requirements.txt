@@ -9,6 +9,10 @@ redis
 
 pytest==9.0.3
 
+# PIDASHCONV-81 (v1_openapi domain + _harness/tests/test_sinks.py):
+aiosmtpd>=1.4.5
+pyyaml>=6  # v1_openapi: parse the default YAML rendering of the schema doc
+
 # Rules (from PIDASHCONV-1, binding):
 # - Never import Django or use its test client. HTTP via httpx, seeding via SQL.
 # - Extend ``_harness/``, never fork it per domain.
