@@ -133,7 +133,7 @@ def test_llm_test_missing_config(world, member):
 
 
 def test_llm_test_requires_auth(world, anon):
-    assert anon.post(TEST_URL).status_code in (401, 403)
+    assert anon.post(TEST_URL).status_code == 401
 
 
 def test_generate_title_requires_llm_config(world, member):

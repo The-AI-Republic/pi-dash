@@ -116,7 +116,7 @@ def test_transcribe_requires_a_file(world, member):
 
 
 def test_transcribe_requires_auth(world, anon):
-    assert anon.post(TRANSCRIBE_URL, files={"file": AUDIO}).status_code in (401, 403)
+    assert anon.post(TRANSCRIBE_URL, files={"file": AUDIO}).status_code == 401
 
 
 def test_transcribe_rejects_oversize_upload(world, member):

@@ -67,7 +67,7 @@ def test_non_member_cannot_list_threads(world, outsider_client):
 
 
 def test_anonymous_cannot_list_threads(world, anon):
-    assert anon.get(f"{threads_url(world)}/threads/").status_code in (401, 403)
+    assert anon.get(f"{threads_url(world)}/threads/").status_code == 401
 
 
 def test_member_cannot_touch_another_users_thread(world, member, admin):

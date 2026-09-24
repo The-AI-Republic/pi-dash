@@ -127,4 +127,4 @@ def test_blocked_url_is_rejected(world, member):
 
 
 def test_anonymous_access_is_refused(world, anon):
-    assert anon.get(MCP_URL).status_code in (401, 403)
+    assert anon.get(MCP_URL).status_code == 401

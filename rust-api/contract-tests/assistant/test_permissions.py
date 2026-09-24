@@ -39,8 +39,8 @@ def test_agent_token_shape_for_browser_session(world, member):
 
 
 def test_agent_endpoints_reject_anonymous(world, anon):
-    assert anon.get(PROFILE_URL).status_code in (401, 403)
-    assert anon.post(TOKEN_URL).status_code in (401, 403)
+    assert anon.get(PROFILE_URL).status_code == 401
+    assert anon.post(TOKEN_URL).status_code == 401
 
 
 def test_workspace_role_ladder_on_threads(world, admin, project_outsider):
