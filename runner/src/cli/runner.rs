@@ -286,7 +286,7 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
             );
         }
     } else {
-        println!("Workspace context will be written after the runner resolves its git workspace.");
+        println!("Workspace context will be written when this runner resolves its working directory on the first run.");
     }
     if applied.is_first_runner {
         println!(

@@ -17,7 +17,7 @@ runner/src/
 ├── claude_code/          ← Claude Code adapter
 ├── agent/                ← generic agent trait (so new agents can be wired in)
 ├── approval/             ← policy engine + first-writer-wins router
-├── workspace/            ← per-project working dir + `git clone` on first task
+├── workspace/            ← per-runner working dir; `git clone` only to bootstrap an empty one
 ├── ipc/                  ← Unix socket / Windows named pipe between daemon and TUI/CLI
 ├── history/              ← JSONL per-run transcripts + recent-runs index
 ├── service/              ← systemd / launchd / Windows scheduled-task installers
@@ -81,7 +81,7 @@ Decisions race; **first writer wins**. The router enforces this. The policy engi
 
 ## Workspace (`workspace/`)
 
-A runner can be registered to a project. On the first run for that project, the runner `git clone`s the project's repo into a configured working dir. Subsequent runs reuse the clone (fetch + checkout, not re-clone).
+A runner is registered to a project and works in one exclusive directory. Git is context, not a gate: the platform never fails a run over Git and performs no Git operation on the agent's behalf beyond a single convenience — if the project supplies a repo URL and the working dir is **empty**, the first run clones into it so a fresh runner starts on a checkout. A working dir that is already a repo is used as-is; one that already holds files (including a directory _containing_ clones) runs as an ordinary task folder and is never cloned over. Fetch, checkout, branch, and commit are all the agent's decisions, driven from the repository facts in its prompt (PDASHOSS01-136).
 
 This is also where path constraints live — the runner refuses to operate on paths outside the configured workspace root.
 

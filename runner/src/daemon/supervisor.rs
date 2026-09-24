@@ -2712,17 +2712,16 @@ impl AssignWorker {
                 | Ok(crate::workspace::Resolution::Cloned(p))
                 | Ok(crate::workspace::Resolution::Directory(p)) => p,
                 Err(e) => {
-                    let reason = match &e {
-                        crate::workspace::ResolveError::Clone(_) => FailureReason::GitAuth,
-                        crate::workspace::ResolveError::NonEmptyNonRepo(_)
-                        | crate::workspace::ResolveError::UnsupportedScheme(_) => {
-                            FailureReason::WorkspaceSetup
-                        }
-                        crate::workspace::ResolveError::Io(_) => FailureReason::WorkspaceSetup,
-                    };
+                    // Git never fails a run: `workspace::resolve` degrades every
+                    // repo-related problem to an ordinary task folder and the
+                    // agent decides what to do about git. What is left is a
+                    // working dir that cannot be used as a directory at all
+                    // (a file in its place, permissions), which is not
+                    // recoverable — the agent has nowhere to run.
+                    let crate::workspace::ResolveError::Io(_) = &e;
                     self.send(ClientMsg::RunFailed {
                         run_id,
-                        reason,
+                        reason: FailureReason::WorkspaceSetup,
                         detail: Some(e.to_string()),
                         ended_at: Utc::now(),
                         tokens: None,
