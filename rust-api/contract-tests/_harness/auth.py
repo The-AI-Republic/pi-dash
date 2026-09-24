@@ -35,6 +35,8 @@ Flow (all public endpoints, identical on Django and the Rust port):
 1. ``GET /auth/get-csrf-token/`` -> ``{"csrf_token": ...}`` + ``csrftoken`` cookie.
 2. ``POST /auth/sign-in/`` (form) with the token -> 302 + ``session-id`` cookie.
 """
+from __future__ import annotations
+
 import base64
 import hashlib
 import hmac
@@ -192,3 +194,26 @@ def authed_client(base_url: str, session_key: str) -> httpx.Client:
         follow_redirects=False,
         headers=cookie_header(session_key),
     )
+
+def login_session(client: "httpx.Client", *, email: str, password: str) -> "httpx.Client":
+    """POST the app sign-in form and assert a session cookie was set.
+
+    Both sign-in views are redirect flows (``HttpResponseRedirect``), so the
+    client must follow redirects; success lands on a session cookie rather
+    than a JSON body, hence the cookie assertion instead of a status one.
+    """
+    token_response = client.get("/auth/get-csrf-token/")
+    token_response.raise_for_status()
+    csrf_token = token_response.json()["csrf_token"]
+
+    response = client.post(
+        "/auth/sign-in/",
+        data={"email": email, "password": password},
+        headers={"X-CSRFToken": csrf_token, "Referer": str(client.base_url)},
+    )
+    session_cookie = client.cookies.get("sessionid")
+    assert session_cookie, (
+        f"sign-in for {email} set no session cookie "
+        f"(status={response.status_code}, location={response.headers.get('location')})"
+    )
+    return client

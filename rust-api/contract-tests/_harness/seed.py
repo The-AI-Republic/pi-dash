@@ -1,10 +1,24 @@
-"""Raw-SQL row factories for contract suites. No ORM, no Django imports."""
+"""Raw-SQL row factories for contract suites. No ORM, no Django imports.
 
+``Seed`` tracks created rows so a test can delete exactly what it made;
+``Seeder``/``SeedTracker`` are the newer factories (every ``create_*``
+registers its row with the tracker so teardown deletes exactly what the
+suite created, in reverse order). Column lists mirror the Django models;
+if a model gains a NOT NULL column without a database default, the
+matching factory must grow a value.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from . import djangocrypto
+
 
 def _now():
     return datetime.now(timezone.utc)
@@ -16,6 +30,16 @@ def _uid() -> str:
 
 def _tag(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:10]}"
+
+
+PASSWORD = "contract-test-pass-1"
+
+
+def make_password(password: str = PASSWORD, iterations: int = 600000) -> str:
+    """Django-compatible ``pbkdf2_sha256`` hash built with stdlib only."""
+    salt = secrets.token_hex(12)[:22]
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), iterations)
+    return f"pbkdf2_sha256${iterations}${salt}${base64.b64encode(digest).decode()}"
 
 
 class Seed:
@@ -717,3 +741,446 @@ def add_project_member(
         (mid, role, project_id, workspace_id, user_id, active, now, now),
     )
     return mid
+class SeedTracker:
+    """Remembers (table, id) pairs in creation order for teardown."""
+
+    def __init__(self, db):
+        self.db = db
+        self.rows: list[tuple[str, str]] = []
+
+    def add(self, table: str, row_id: str):
+        self.rows.append((table, row_id))
+
+    # Rows Django creates as side effects of the black-box flow (never seeded,
+    # so never tracked): signing a user in through /auth/sign-in/ creates
+    # their profile row, which FK-blocks the tracked user delete. Purge them
+    # first so teardown leaves zero orphans.
+    _DEPENDENTS = {"users": [("profiles", "user_id")]}
+
+    def cleanup(self):
+        for table, row_id in reversed(self.rows):
+            for dependent, column in self._DEPENDENTS.get(table, ()):
+                try:
+                    self.db.execute(f"DELETE FROM {dependent} WHERE {column} = %s", (row_id,))
+                except Exception:
+                    pass
+            try:
+                self.db.execute(f"DELETE FROM {table} WHERE id = %s", (row_id,))
+            except Exception:
+                pass
+        self.rows.clear()
+
+
+class Seeder:
+    def __init__(self, db, tracker: SeedTracker, tag: str):
+        self.db = db
+        self.track = tracker
+        self.tag = tag
+        self._n = 0
+
+    def _slug(self, prefix: str) -> str:
+        self._n += 1
+        return f"{prefix}-{self.tag}-{self._n}".lower().replace("_", "-")[:44]
+
+    def _put(self, table: str, row_id: str):
+        self.track.add(table, row_id)
+        return row_id
+
+    # -- foundation ------------------------------------------------------
+    def ensure_instance(self):
+        """The sign-in views refuse when no set-up Instance exists.
+
+        Never modifies an existing row: on a real checkout the instance is
+        already there; on a fresh one we insert a minimal set-up marker.
+        """
+        if self.db.fetchval("SELECT COUNT(*) FROM instances") == 0:
+            self.db.execute(
+                """INSERT INTO instances
+                   (id, instance_name, instance_id, current_version, edition,
+                    domain, last_checked_at, is_telemetry_enabled,
+                    is_support_required, is_setup_done, is_signup_screen_visited,
+                    is_verified, is_test, is_current_version_deprecated,
+                    created_at, updated_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,now(),false,false,true,false,false,false,false,now(),now())""",
+                (_uid(), f"contract-{self.tag}", f"contract-{self.tag}", "0.0.0-contract", "PI_DASH_COMMUNITY", ""),
+            )
+
+    def create_user(self, *, email: str | None = None, password: str = PASSWORD) -> dict[str, Any]:
+        self._n += 1
+        email = email or f"contract-{self.tag}-{self._n}@example.com"
+        user_id = _uid()
+        self.db.execute(
+            """INSERT INTO users
+               (id, password, email, username, display_name, first_name, last_name,
+                avatar, date_joined, created_at, updated_at, last_location,
+                created_location, is_superuser, is_managed, is_password_expired,
+                is_active, is_staff, is_email_verified, is_password_autoset,
+                is_password_reset_required, token, last_active, last_login_ip,
+                last_logout_ip, last_login_medium, last_login_uagent, is_bot,
+                user_timezone, is_email_valid)
+               VALUES (%s,%s,%s,%s,'','','','',now(),now(),now(),'','',
+                       false,false,false,true,false,false,false,false,'',now(),'','',
+                       'email','',false,'UTC',true)""",
+            (user_id, make_password(password), email, f"contract_{self.tag}_{self._n}"),
+        )
+        self._put("users", user_id)
+        return {"id": user_id, "email": email, "password": password}
+
+    def create_workspace(self, owner_id: str, *, name: str | None = None) -> dict[str, Any]:
+        ws_id = _uid()
+        slug = self._slug("ws")
+        self.db.execute(
+            """INSERT INTO workspaces
+               (id, name, owner_id, slug, timezone, background_color, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,'UTC','#ffffff',now(),now())""",
+            (ws_id, name or f"Contract WS {self.tag}", owner_id, slug),
+        )
+        self._put("workspaces", ws_id)
+        return {"id": ws_id, "slug": slug}
+
+    def create_project(self, workspace_id: str, *, name: str | None = None) -> dict[str, Any]:
+        project_id = _uid()
+        self._n += 1
+        self.db.execute(
+            """INSERT INTO projects
+               (id, name, description, network, workspace_id, identifier,
+                module_view, cycle_view, issue_views_view, page_view, intake_view,
+                is_time_tracking_enabled, is_issue_type_enabled, is_default,
+                guest_view_all_features, members_can_edit_states,
+                archive_in, close_in, logo_props, timezone, repo_url, base_branch,
+                agent_default_interval_seconds, agent_default_max_ticks,
+                agent_review_default_interval_seconds, agent_test_default_interval_seconds,
+                agent_ticking_enabled, default_agent_executor,
+                created_at, updated_at)
+               VALUES (%s,%s,'',2,%s,%s,
+                       false,false,false,true,false,
+                       false,false,false,
+                       false,true,
+                       0,0,'{}','UTC','','main',
+                       10800,10,10800,10800,
+                       true,'local_runner',
+                       now(),now())""",
+            (project_id, name or f"Contract Project {self.tag}", workspace_id, f"CT{self._n % 100000:05d}"),
+        )
+        self._put("projects", project_id)
+        return {"id": project_id}
+
+    # -- space domain ----------------------------------------------------
+    def create_board(
+        self,
+        workspace_id: str,
+        project_id: str,
+        anchor: str | None = None,
+        *,
+        comments: bool = True,
+        reactions: bool = True,
+        votes: bool = True,
+        intake_id: str | None = None,
+    ) -> dict[str, Any]:
+        board_id = _uid()
+        anchor = anchor or secrets.token_hex(16)
+        self.db.execute(
+            """INSERT INTO deploy_boards
+               (id, workspace_id, project_id, entity_identifier, entity_name, anchor,
+                is_comments_enabled, is_reactions_enabled, intake_id, is_votes_enabled,
+                view_props, is_activity_enabled, is_disabled, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,'project',%s,%s,%s,%s,%s,'{}',true,false,now(),now())""",
+            (board_id, workspace_id, project_id, project_id, anchor, comments, reactions, intake_id, votes),
+        )
+        self._put("deploy_boards", board_id)
+        return {"id": board_id, "anchor": anchor}
+
+    def create_state(self, workspace_id: str, project_id: str, *, name: str = "Backlog", group: str = "backlog") -> dict[str, Any]:
+        state_id = _uid()
+        self.db.execute(
+            """INSERT INTO states
+               (id, workspace_id, project_id, name, description, color, slug,
+                sequence, "group", is_triage, "default", created_at, updated_at)
+               VALUES (%s,%s,%s,%s,'','#ff0000','',65535,%s,false,false,now(),now())""",
+            (state_id, workspace_id, project_id, name, group),
+        )
+        self._put("states", state_id)
+        return {"id": state_id}
+
+    def create_issue(
+        self,
+        workspace_id: str,
+        project_id: str,
+        state_id: str | None = None,
+        *,
+        name: str = "Contract issue",
+        priority: str = "none",
+        sequence_id: int = 1,
+    ) -> dict[str, Any]:
+        issue_id = _uid()
+        self.db.execute(
+            """INSERT INTO issues
+               (id, workspace_id, project_id, state_id, name, description_json,
+                description_html, priority, complexity_score, sequence_id, sort_order,
+                is_draft, git_work_branch, workpad, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,'{}','<p></p>',%s,0,%s,65535,false,'','',now(),now())""",
+            (issue_id, workspace_id, project_id, state_id, name, priority, sequence_id),
+        )
+        self._put("issues", issue_id)
+        return {"id": issue_id}
+
+    def create_comment(
+        self, workspace_id: str, project_id: str, issue_id: str, actor_id: str, *, access: str = "EXTERNAL"
+    ) -> dict[str, Any]:
+        comment_id = _uid()
+        self.db.execute(
+            """INSERT INTO issue_comments
+               (id, workspace_id, project_id, comment_stripped, comment_json, comment_html,
+                attachments, labels, issue_id, actor_id, access, speaker_type, speaker_label,
+                created_at, updated_at)
+               VALUES (%s,%s,%s,'test comment','{}','<p>test comment</p>',
+                       '{}','{}',%s,%s,%s,'human','',now(),now())""",
+            (comment_id, workspace_id, project_id, issue_id, actor_id, access),
+        )
+        self._put("issue_comments", comment_id)
+        return {"id": comment_id}
+
+    def create_issue_reaction(self, workspace_id: str, project_id: str, issue_id: str, actor_id: str, *, reaction: str = "heart") -> dict[str, Any]:
+        reaction_id = _uid()
+        self.db.execute(
+            """INSERT INTO issue_reactions
+               (id, workspace_id, project_id, actor_id, issue_id, reaction, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,now(),now())""",
+            (reaction_id, workspace_id, project_id, actor_id, issue_id, reaction),
+        )
+        self._put("issue_reactions", reaction_id)
+        return {"id": reaction_id}
+
+    def create_comment_reaction(
+        self, workspace_id: str, project_id: str, comment_id: str, actor_id: str, *, reaction: str = "heart"
+    ) -> dict[str, Any]:
+        reaction_id = _uid()
+        self.db.execute(
+            """INSERT INTO comment_reactions
+               (id, workspace_id, project_id, actor_id, comment_id, reaction, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,now(),now())""",
+            (reaction_id, workspace_id, project_id, actor_id, comment_id, reaction),
+        )
+        self._put("comment_reactions", reaction_id)
+        return {"id": reaction_id}
+
+    def create_vote(self, workspace_id: str, project_id: str, issue_id: str, actor_id: str, *, vote: int = 1) -> dict[str, Any]:
+        vote_id = _uid()
+        self.db.execute(
+            """INSERT INTO issue_votes
+               (id, workspace_id, project_id, issue_id, actor_id, vote, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,now(),now())""",
+            (vote_id, workspace_id, project_id, issue_id, actor_id, vote),
+        )
+        self._put("issue_votes", vote_id)
+        return {"id": vote_id}
+
+    def create_cycle(
+        self, workspace_id: str, project_id: str, owner_id: str, *, name: str = "Contract cycle"
+    ) -> dict[str, Any]:
+        cycle_id = _uid()
+        self.db.execute(
+            """INSERT INTO cycles
+               (id, workspace_id, project_id, name, description, owned_by_id, view_props,
+                sort_order, progress_snapshot, logo_props, timezone, version, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,'',%s,'{}',65535,'{}','{}','UTC',1,now(),now())""",
+            (cycle_id, workspace_id, project_id, name, owner_id),
+        )
+        self._put("cycles", cycle_id)
+        return {"id": cycle_id}
+
+    def create_module(self, workspace_id: str, project_id: str, *, name: str = "Contract module") -> dict[str, Any]:
+        module_id = _uid()
+        self.db.execute(
+            """INSERT INTO modules
+               (id, workspace_id, project_id, name, description, status, view_props,
+                sort_order, logo_props, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,'','planned','{}',65535,'{}',now(),now())""",
+            (module_id, workspace_id, project_id, name),
+        )
+        self._put("modules", module_id)
+        return {"id": module_id}
+
+    def create_label(self, workspace_id: str, project_id: str, *, name: str = "bug") -> dict[str, Any]:
+        label_id = _uid()
+        self.db.execute(
+            """INSERT INTO labels
+               (id, workspace_id, project_id, name, description, color, sort_order,
+                created_at, updated_at)
+               VALUES (%s,%s,%s,%s,'','',65535,now(),now())""",
+            (label_id, workspace_id, project_id, name),
+        )
+        self._put("labels", label_id)
+        return {"id": label_id}
+
+    def create_asset(
+        self,
+        workspace_id: str,
+        project_id: str,
+        user_id: str,
+        *,
+        entity_type: str = "ISSUE_DESCRIPTION",
+        uploaded: bool = True,
+    ) -> dict[str, Any]:
+        asset_id = _uid()
+        key = f"{workspace_id}/{asset_id}-contract.png"
+        self.db.execute(
+            """INSERT INTO file_assets
+               (id, attributes, asset, user_id, workspace_id, project_id,
+                entity_type, is_deleted, is_archived, size, is_uploaded,
+                created_at, updated_at)
+               VALUES (%s,'{}',%s,%s,%s,%s,%s,false,false,10,%s,now(),now())""",
+            (asset_id, key, user_id, workspace_id, project_id, entity_type, uploaded),
+        )
+        self._put("file_assets", asset_id)
+        return {"id": asset_id, "key": key}
+
+    def create_intake(self, workspace_id: str, project_id: str, *, name: str = "Contract intake") -> dict[str, Any]:
+        intake_id = _uid()
+        self.db.execute(
+            """INSERT INTO intakes
+               (id, workspace_id, project_id, name, description, is_default,
+                view_props, logo_props, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,'',false,'{}','{}',now(),now())""",
+            (intake_id, workspace_id, project_id, name),
+        )
+        self._put("intakes", intake_id)
+        return {"id": intake_id}
+
+    def create_intake_issue(
+        self, workspace_id: str, project_id: str, intake_id: str, issue_id: str, *, status: int = -2
+    ) -> dict[str, Any]:
+        bridge_id = _uid()
+        self.db.execute(
+            """INSERT INTO intake_issues
+               (id, workspace_id, project_id, intake_id, issue_id, status, source,
+                extra, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,'IN_APP','{}',now(),now())""",
+            (bridge_id, workspace_id, project_id, intake_id, issue_id, status),
+        )
+        self._put("intake_issues", bridge_id)
+        return {"id": bridge_id}
+
+    # -- pages domain (D-30, PIDASHCONV-88) ----------------------------------
+    # Column lists mirror apps/api/pi_dash/db/models/page.py,
+    # project.py (ProjectMember) and favorite.py (UserFavorite).
+    def create_project_member(
+        self, workspace_id: str, project_id: str, user_id: str, *, role: int = 20
+    ) -> dict[str, Any]:
+        """Project membership row: every authenticated pages case needs one.
+
+        ``role`` follows ``app/permissions/base.py`` ROLE: 20 ADMIN,
+        15 MEMBER, 5 GUEST.
+        """
+        member_id = _uid()
+        self.db.execute(
+            """INSERT INTO project_members
+               (id, workspace_id, project_id, member_id, role, view_props, default_props,
+                preferences, sort_order, is_active, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,'{}','{}','{}',65535,true,now(),now())""",
+            (member_id, workspace_id, project_id, user_id, role),
+        )
+        self._put("project_members", member_id)
+        return {"id": member_id, "role": role}
+
+    def create_page(
+        self,
+        workspace_id: str,
+        owner_id: str,
+        *,
+        name: str = "Contract page",
+        access: int = 0,
+        parent_id: str | None = None,
+        description_html: str = "<p></p>",
+        description_binary: bytes | None = None,
+        archived: bool = False,
+        locked: bool = False,
+    ) -> dict[str, Any]:
+        """A ``pages`` row. The caller links it to a project with
+        ``link_page_project`` — the list/retrieve querysets only see linked
+        pages (``.filter(project=True)``), so the link is part of the world.
+        """
+        page_id = _uid()
+        self.db.execute(
+            """INSERT INTO pages
+               (id, name, description_json, description_binary, description_html,
+                owned_by_id, access, workspace_id, color, parent_id, archived_at,
+                is_locked, view_props, logo_props, is_global, sort_order,
+                created_by_id, created_at, updated_at)
+               VALUES (%s,%s,'{}',%s,%s,%s,%s,%s,'',%s,
+                       CASE WHEN %s THEN CURRENT_DATE ELSE NULL END,
+                       %s,'{"full_width": false}','{}',false,65535,%s,now(),now())""",
+            (
+                page_id, name, description_binary, description_html,
+                owner_id, access, workspace_id, parent_id,
+                archived, locked, owner_id,
+            ),
+        )
+        self._put("pages", page_id)
+        return {"id": page_id, "name": name, "access": access}
+
+    def link_page_project(
+        self, workspace_id: str, project_id: str, page_id: str, *, by_id: str | None = None
+    ) -> dict[str, Any]:
+        bridge_id = _uid()
+        self.db.execute(
+            """INSERT INTO project_pages
+               (id, workspace_id, project_id, page_id, created_by_id, updated_by_id,
+                deleted_at, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,NULL,now(),now())""",
+            (bridge_id, workspace_id, project_id, page_id, by_id, by_id),
+        )
+        self._put("project_pages", bridge_id)
+        return {"id": bridge_id}
+
+    def create_favorite(
+        self, workspace_id: str, project_id: str, user_id: str, page_id: str
+    ) -> dict[str, Any]:
+        fav_id = _uid()
+        self.db.execute(
+            """INSERT INTO user_favorites
+               (id, entity_type, entity_identifier, user_id, workspace_id, project_id,
+                is_folder, sequence, created_at, updated_at)
+               VALUES (%s,'page',%s,%s,%s,%s,false,65535,now(),now())""",
+            (fav_id, page_id, user_id, workspace_id, project_id),
+        )
+        self._put("user_favorites", fav_id)
+        return {"id": fav_id}
+
+    def create_page_version(
+        self, workspace_id: str, page_id: str, owner_id: str, *, description_html: str = "<p>v1</p>"
+    ) -> dict[str, Any]:
+        version_id = _uid()
+        self.db.execute(
+            """INSERT INTO page_versions
+               (id, workspace_id, page_id, last_saved_at, description_html,
+                description_json, sub_pages_data, owned_by_id, created_at, updated_at)
+               VALUES (%s,%s,%s,now(),%s,'{}','{}',%s,now(),now())""",
+            (version_id, workspace_id, page_id, description_html, owner_id),
+        )
+        self._put("page_versions", version_id)
+        return {"id": version_id, "description_html": description_html}
+
+    # -- shared membership (dispatch D-11, PIDASHCONV-22) -----------------------
+    # Column lists mirror apps/api/pi_dash/db/models/workspace.py
+    # (WorkspaceMember).
+    def create_workspace_member(
+        self, workspace_id: str, user_id: str, *, role: int = 20
+    ) -> dict[str, Any]:
+        """Workspace membership row: ``is_workspace_member`` gates dispatch
+        execution on it (``core/permissions.py``).
+
+        ``role`` follows ``app/permissions/base.py`` ROLE: 20 ADMIN,
+        15 MEMBER, 5 GUEST.
+        """
+        member_id = _uid()
+        self.db.execute(
+            """INSERT INTO workspace_members
+               (id, workspace_id, member_id, role, company_role, view_props, default_props,
+                issue_props, is_active, deleted_at, explored_features,
+                getting_started_checklist, tips, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,NULL,'{}','{}','{}',true,NULL,'{}','{}','{}',now(),now())""",
+            (member_id, workspace_id, user_id, role),
+        )
+        self._put("workspace_members", member_id)
+        return {"id": member_id, "role": role}

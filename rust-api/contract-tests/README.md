@@ -1,6 +1,6 @@
 # Contract tests: Django behavior oracle for the Rust port
 
-Each `<domain>/` suite pins the live Django backend's HTTP behavior —
+Each `<domain>/` suite pins the live Django backend's behavior —
 same URL paths, same bytes — so the Rust server can be checked against
 the same suite through the proxy. Never import Django or use its test
 client here; the suite speaks HTTP (httpx) to a live server and seeds
@@ -10,6 +10,16 @@ Shared helpers live in `_harness/` (extend it, never fork per-domain
 copies). Python `pytest` + `httpx` suites, one directory per domain
 (`rust-api/contract-tests/<domain>/`), with shared helpers in `_harness/`
 (created on first use; extend it, never fork it).
+copies). Layout:
+
+- `_harness/`   shared helpers (created once, extended per domain, never forked)
+- `<domain>/`   one pytest package per ported domain (e.g. ``space/``)
+
+The same suite runs against Django today and against the Rust server
+through the proxy tomorrow. Nothing here may import Django or touch its
+test client: HTTP goes through httpx, seeding goes straight into
+Postgres via ``psycopg``, and authenticated sessions come from the real
+sign-in endpoint (black box).
 
 ## Layout
 
@@ -222,3 +232,18 @@ endpoints, so auth behaves identically on both backends.
   reruns against the same database are safe.
 - Raw-SQL seeding bypasses model signals (no builtin-scheduler seeding, no
   default-pod creation): each test sees exactly what it inserted.
+
+The server under test must be the full stack: Postgres (seeded directly),
+Redis + a Celery worker (write endpoints enqueue activity tasks), and S3
+credentials sufficient to mint presigned URLs offline (asset GET/POST pin
+the redirect/upload-data shapes, never real objects).
+
+Task-oracle suites (e.g. ``dispatch/``) additionally need:
+
+```sh
+CELERY_BROKER_URL=redis://localhost:6379/0  # or AMQP_URL; redis scheme only
+```
+
+pointing at the same broker the worker consumes, and the server must run
+with ``CLOUD_AGENT_ENABLED=true`` (dispatch execution branches and the
+queue scanner are kill-switched otherwise).
