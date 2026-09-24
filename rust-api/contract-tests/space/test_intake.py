@@ -83,7 +83,11 @@ def test_create_without_intake_is_400(user_client, world, seeder):
     # One live project board per project (unique constraint on
     # deploy_boards(entity_name, entity_identifier) where deleted_at is null),
     # so the intake-less board lives on a fresh project, not world's.
-    project = seeder.create_project(world["workspace"]["id"])
+    # The fresh project also needs a distinct name: project names are unique
+    # per workspace (project_unique_name_workspace_when_deleted_at_null).
+    project = seeder.create_project(
+        world["workspace"]["id"], name=f"Contract Project {seeder.tag} no-intake"
+    )
     board = seeder.create_board(world["workspace"]["id"], project["id"])
     url = f"{BASE}/anchor/{board['anchor']}/intakes/{world['intake']['id']}/intake-issues/"
     response = user_client.post(url, json={"issue": {"name": "no intake"}})

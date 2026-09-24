@@ -149,7 +149,11 @@ def test_comment_write_when_disabled_is_400(user_client, world, seeder):
     # deploy_boards(entity_name, entity_identifier) where deleted_at is null),
     # so the comments-disabled board lives on a fresh project with its own
     # state and issue — the 400 fires before the issue is even read.
-    project = seeder.create_project(world["workspace"]["id"])
+    # The fresh project also needs a distinct name: project names are unique
+    # per workspace (project_unique_name_workspace_when_deleted_at_null).
+    project = seeder.create_project(
+        world["workspace"]["id"], name=f"Contract Project {seeder.tag} no-comments"
+    )
     board = seeder.create_board(world["workspace"]["id"], project["id"], comments=False)
     state = seeder.create_state(world["workspace"]["id"], project["id"])
     issue = seeder.create_issue(world["workspace"]["id"], project["id"], state["id"])
