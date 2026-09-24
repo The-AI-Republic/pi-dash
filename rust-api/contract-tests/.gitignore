@@ -1,3 +1,4 @@
+# pytest cache
+.pytest_cache/
 .venv/
 __pycache__/
-.pytest_cache/
