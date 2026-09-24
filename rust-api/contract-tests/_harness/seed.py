@@ -1152,14 +1152,17 @@ class Seeder:
         self._put("file_assets", asset_id)
         return {"id": asset_id, "key": key}
 
-    def create_intake(self, workspace_id: str, project_id: str, *, name: str = "Contract intake") -> dict[str, Any]:
+    def create_intake(
+        self, workspace_id: str, project_id: str, *, name: str = "Contract intake",
+        is_default: bool = False,
+    ) -> dict[str, Any]:
         intake_id = _uid()
         self.db.execute(
             """INSERT INTO intakes
                (id, workspace_id, project_id, name, description, is_default,
                 view_props, logo_props, created_at, updated_at)
-               VALUES (%s,%s,%s,%s,'',false,'{}','{}',now(),now())""",
-            (intake_id, workspace_id, project_id, name),
+               VALUES (%s,%s,%s,%s,'',%s,'{}','{}',now(),now())""",
+            (intake_id, workspace_id, project_id, name, is_default),
         )
         self._put("intakes", intake_id)
         return {"id": intake_id}
