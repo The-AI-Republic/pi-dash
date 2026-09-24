@@ -51,8 +51,11 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/pidash_contract
       REDIS_URL: redis://localhost:6379/0
       AMQP_URL: redis://localhost:6379/1
-      WEB_URL: http://localhost
-      APP_BASE_URL: http://localhost
+      # Sign-in answers 302 to WEB_URL and the suite follows redirects, so this
+      # must point at the server under test (BASE_URL below), not bare
+      # http://localhost (port 80 has nothing listening in CI).
+      WEB_URL: http://127.0.0.1:8000
+      APP_BASE_URL: http://127.0.0.1:8000
       EMAIL_HOST: localhost
       API_KEY_RATE_LIMIT: 100000/minute
       LLM_API_KEY: dummy-contract-key

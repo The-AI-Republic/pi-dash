@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from .conftest import DENIED, proj_url
+from .conftest import ANON, DENIED, proj_url
 
 pytestmark = pytest.mark.contract
 
@@ -160,3 +160,14 @@ def test_delete_member_denied(member_client, world):
     response = member_client.delete(proj_url(world, "github"))
     assert response.status_code == 403
     assert response.json() == DENIED
+
+
+def test_anonymous_rejected(anon, world):
+    for response in (
+        anon.get(proj_url(world, "github")),
+        anon.post(proj_url(world, "github", "bind"), json={}),
+        anon.patch(proj_url(world, "github"), json={}),
+        anon.delete(proj_url(world, "github")),
+    ):
+        assert response.status_code == 401
+        assert response.json() == ANON

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from .conftest import DENIED, ws_url
+from .conftest import ANON, DENIED, ws_url
 
 pytestmark = pytest.mark.contract
 
@@ -120,3 +120,14 @@ def test_repos_member_denied_without_membership(outsider_client, world):
     response = outsider_client.get(ws_url(world, "integrations", "github", "repos"))
     assert response.status_code == 403
     assert response.json() == DENIED
+
+
+def test_anonymous_rejected(anon, world):
+    for response in (
+        anon.get(ws_url(world, "integrations", "github")),
+        anon.post(ws_url(world, "integrations", "github", "connect"), json={}),
+        anon.post(ws_url(world, "integrations", "github", "disconnect")),
+        anon.get(ws_url(world, "integrations", "github", "repos")),
+    ):
+        assert response.status_code == 401
+        assert response.json() == ANON
