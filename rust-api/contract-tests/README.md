@@ -229,6 +229,15 @@ BASE_URL=http://127.0.0.1:8000 \
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/pidash \
 SECRET_KEY=<the backend's Django SECRET_KEY> \
   pytest app_scheduler
+
+DB-seeding domains need the backend's Django `SECRET_KEY` as well:
+
+```sh
+cd rust-api/contract-tests
+BASE_URL=http://127.0.0.1:8000 \
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/pidash \
+SECRET_KEY=<the backend's Django SECRET_KEY> \
+  pytest <domain>
 ```
 
 The suite runs against a **live** backend and seeds rows straight into
@@ -238,6 +247,31 @@ test client. The same suite runs against the Rust server through the proxy.
 `SECRET_KEY` must match the backend under test: suites mint `session-id`
 cookies with the backend's session-signing format instead of calling login
 endpoints, so auth behaves identically on both backends.
+
+Worker-path suites (`loop`) need two more variables plus a live worker:
+
+- `RABBITMQ_URL` — AMQP URL of the backend's broker, e.g.
+  `amqp://pidash:secret@127.0.0.1:5672/pidash`. Tests publish Celery tasks
+  in wire format with a throwaway client and observe the effects over HTTP
+  and `DATABASE_URL`.
+- `RABBITMQ_MGMT_URL` — base URL of the broker's management API, e.g.
+  `http://127.0.0.1:15672`. Tests assert queued-task wire format
+  (task name, args) with peek-and-requeue reads that never consume.
+- The worker must consume a **dedicated queue** (the suite publishes to it;
+  default `ct17`, override with `WORKER_QUEUE`) and must **not** consume the
+  default `celery` queue, so downstream tasks the suite only observes
+  (`assistant.run_turn`) pile up instead of executing.
+- The backend runs with `LOOP_RECONCILE_EVERY_MINUTES=1` so the scanner's
+  reconcile branch runs on every tick instead of once per 15 minutes; the
+  throttle timing itself is Django-unit covered.
+
+```sh
+BASE_URL=... DATABASE_URL=... SECRET_KEY=... \
+RABBITMQ_URL=amqp://pidash:secret@127.0.0.1:5672/pidash \
+RABBITMQ_MGMT_URL=http://127.0.0.1:15672 \
+WORKER_QUEUE=ct17 \
+  pytest loop
+```
 
 ## Conventions
 
