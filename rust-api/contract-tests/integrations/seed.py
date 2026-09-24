@@ -177,10 +177,10 @@ def unknown_provider_binding(
 ) -> dict:
     """Binding whose repository provider has no registered adapter.
 
-    `get_adapter` raises KeyError before any provider HTTP, so
-    `sync_one_binding` lands on the generic-except branch and calls
-    `self.retry` — the black-box transient path (error recorded + retry
-    re-queued with countdown 60 * 2^retries, max_retries=3).
+    `get_adapter` runs before the guarded `try` in `sync_one_binding`
+    (git_sync_task.py), so the KeyError escapes as a silent task failure:
+    nothing is recorded on the binding and `self.retry` never runs. The
+    Rust port must keep that ordering (translate, don't redesign).
     """
     account_id = provider_account(database_url, anchor, scope, token=token)
     unique = db.new_uuid()[:8]
