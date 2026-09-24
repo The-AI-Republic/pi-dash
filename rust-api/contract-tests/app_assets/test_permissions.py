@@ -14,6 +14,8 @@ reverted) before the PR.
 
 import uuid
 
+from _harness import seed
+
 ANON = {"detail": "Authentication credentials were not provided."}
 DENIED = {"error": "You don't have the required permissions."}
 
@@ -91,10 +93,11 @@ def test_anonymous_denied_everywhere(org):
 
 def test_api_key_is_ignored_on_app_routes(org):
     # Unlike /api/v1/, the app tree authenticates sessions only: a caller
-    # presenting X-Api-Key is anonymous here.
+    # presenting even a REAL api token is anonymous here.
+    token = seed.create_api_token(org.conn, user_id=org.admin["id"])
     asset_id = "00000000-0000-0000-0000-000000000000"
     _, path = ws_paths(org, asset_id)["check"]
-    r = org.client(None).get(path, headers={"X-Api-Key": "pi_dash_api_nope"})
+    r = org.client(None).get(path, headers={"X-Api-Key": token})
     assert r.status_code == 401
     assert r.json() == ANON
 
