@@ -8,7 +8,9 @@
 suites that actually seed (web_edge needs no DB). Raw-SQL seeding,
 snapshots and polling live here (psycopg; no ORM, no Django imports).
 ``db_conn`` below imports psycopg lazily so DB-free domains never pay
-for it.
+for it; ``db_cursor`` offers a committing cursor for suites whose tests
+never clean up: every seeded row carries a random suffix, so suites are
+safe to re-run and to parallelise without cross-test interference.
 
 Suites that seed do so straight into Postgres with plain SQL (no ORM, no
 Django imports). Connections are autocommit; each test seeds
@@ -23,12 +25,16 @@ from typing import Any, Sequence
 import secrets
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
+from typing import Iterator
 
 import psycopg
 import pytest
 
 from . import signing
+
+from _harness.config import database_url
 
 KNOWN_PASSWORD = "ContractPass123!"
 
@@ -296,3 +302,12 @@ class LazyDatabase:
         if self._conn is not None and not self._conn.closed:
             self._conn.close()
         self._conn = None
+
+
+@contextmanager
+def db_cursor() -> Iterator[psycopg.Cursor]:
+    """Yield a cursor on the backend's database; commits on clean exit."""
+    with psycopg.connect(database_url()) as conn:
+        with conn.cursor() as cur:
+            yield cur
+        conn.commit()
