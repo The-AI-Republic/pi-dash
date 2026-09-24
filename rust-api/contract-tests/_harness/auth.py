@@ -227,3 +227,23 @@ def login_session(client: "httpx.Client", *, email: str, password: str) -> "http
         f"status={response.status_code}, location={response.headers.get('location')})"
     )
     return client
+
+
+# --- PIDASHCONV-97 (runner daemon API): session JSON POST helper ---
+# Union with the baseline above.
+
+
+def session_post(client, url: str, payload: dict):
+    """JSON POST with the session's CSRF token attached.
+
+    ``SessionAuthentication`` rejects unsafe methods without it (403
+    ``CSRF Failed``), which would mask the endpoint's real permission gate.
+    Mirrors exactly what the web client sends.
+    """
+    csrf = client.cookies.get("csrftoken")
+    assert csrf, "no csrftoken cookie on the session client"
+    return client.post(
+        url,
+        json=payload,
+        headers={"X-CSRFToken": csrf, "Referer": str(client.base_url)},
+    )

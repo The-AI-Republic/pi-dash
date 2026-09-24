@@ -34,6 +34,20 @@ sign-in endpoint (black box).
   PIDASHCONV-92.
 - `web_edge/` — PIDASHCONV-14: web edge (`/`, `/robots.txt`).
 - `v1_cli_auth/` — PIDASHCONV-80: api-v1 CLI auth + runner v1.
+- `runner/` — PIDASHCONV-97: daemon-facing runner API
+  (`/api/v1/runner/`: health, metrics, enroll/create/refresh/revoke,
+  desktop-enroll gate, projects, runner + machine sessions incl.
+  long-poll, command results, all `runs/*` and `chat/*` transitions,
+  machine-token redeem). Same env contract, plus the server under test
+  must run with a deterministic `SECRET_KEY` (the seed recomputes
+  enrollment/machine-token hashes; see `_harness/tokens.py`), `WEB_URL`
+  set (sign-in refuses without it), and Redis up (session open/poll,
+  stream-upgrade tickets, machine-token redeem, DRF anon throttle), e.g.
+  `SECRET_KEY=contract-test-secret WEB_URL=http://localhost:3000 python
+  apps/api/manage.py runserver 8000` after `manage.py migrate`. The anon
+  throttle (30/min per IP) is shared across runs: re-running the suite
+  within a minute of a previous run can 429 the AllowAny endpoints —
+  either wait out the window or clear this run's key in Redis.
 - `app_views_search/` — PIDASHCONV-87: app-tier views (project/global
   CRUD, view issues, favorites) + search (global, issue, entity) with
   FTS EXPLAIN parity on `issues_fts_idx`. Same env contract; any free

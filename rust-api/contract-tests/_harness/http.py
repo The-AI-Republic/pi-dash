@@ -210,3 +210,35 @@ def authed_client(base_url: str, session_key: str) -> httpx.Client:
         timeout=30.0,
     )
 
+
+# --- PIDASHCONV-97 (runner daemon API): daemon wire-format clients ---
+# Union with the baseline above: the runner daemon authenticates with
+# bearer tokens and X-Api-Key headers (see runner/authentication.py),
+# which no earlier suite needed.
+
+
+def bearer_client(
+    base_url: str, token: str, timeout: float = 30.0, headers: dict | None = None
+) -> httpx.Client:
+    """Client presenting ``Authorization: Bearer <token>``.
+
+    This is the daemon wire format byte for byte: runner access tokens,
+    runner refresh tokens (refresh endpoint) and ``mt_`` machine tokens all
+    travel in this header (see ``runner/authentication.py``). Extra headers
+    (e.g. ``X-Runner-Id``) ride along unchanged.
+    """
+    merged = {"Authorization": f"Bearer {token}"}
+    if headers:
+        merged.update(headers)
+    return httpx.Client(base_url=base_url, timeout=timeout, headers=merged)
+
+
+def api_key_client(base_url: str, token: str, timeout: float = 30.0) -> httpx.Client:
+    """Client presenting ``X-Api-Key: <token>`` — the installed CLI path
+    (``APIKeyAuthentication.auth_header_name``)."""
+    return httpx.Client(
+        base_url=base_url,
+        timeout=timeout,
+        headers={"X-Api-Key": token},
+    )
+

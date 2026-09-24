@@ -23,6 +23,8 @@ from typing import Any
 from . import djangocrypto
 
 from .db import insert_row
+from .tokens import fingerprint as token_fingerprint
+from .tokens import hash_token
 
 
 def _now():
@@ -987,10 +989,13 @@ class SeedTracker:
 
 
 class Seeder:
-    def __init__(self, db, tracker: SeedTracker, tag: str):
+    def __init__(self, db, tracker: SeedTracker, tag: str, secret_key: str = ""):
         self.db = db
         self.track = tracker
         self.tag = tag
+        # Django SECRET_KEY of the backend under test. Runner-domain
+        # factories (PIDASHCONV-97) recompute server-side token hashes.
+        self.secret_key = secret_key
         self._n = 0
 
     def _slug(self, prefix: str) -> str:
@@ -1056,6 +1061,7 @@ class Seeder:
     def create_project(self, workspace_id: str, *, name: str | None = None) -> dict[str, Any]:
         project_id = _uid()
         self._n += 1
+        project_identifier = f"CT{self._n % 100000:05d}"
         self.db.execute(
             """INSERT INTO projects
                (id, name, description, network, workspace_id, identifier,
@@ -1083,11 +1089,14 @@ class Seeder:
                 # disambiguates.
                 name or f"Contract Project {self.tag}-{self._n}",
                 workspace_id,
-                f"CT{self._n % 100000:05d}",
+                project_identifier,
             ),
         )
         self._put("projects", project_id)
-        return {"id": project_id}
+        # The identifier is part of the return (added for PIDASHCONV-97,
+        # whose daemon create-flow addresses projects by identifier);
+        # existing callers using only ["id"] are unaffected.
+        return {"id": project_id, "identifier": project_identifier}
 
     # -- space domain ----------------------------------------------------
     def create_board(
@@ -1732,17 +1741,29 @@ class Seeder:
         self._put("git_code_review_links", link_id)
         return {"id": link_id}
 
-    def create_pod(self, workspace_id: str, project_id: str, *, name: str = "Contract pod") -> dict[str, Any]:
+    def create_pod(
+        self,
+        workspace_id: str,
+        project_id: str,
+        *,
+        name: str = "Contract pod",
+        # The runner daemon (PIDASHCONV-97) routes RunnerCreate through the
+        # project's default pod; every other suite seeds non-default pods.
+        is_default: bool = False,
+    ) -> dict[str, Any]:
         pod_id = _uid()
         self.db.execute(
             """INSERT INTO pod
                (id, name, description, is_default, workspace_id, project_id,
                 created_at, updated_at)
-               VALUES (%s,%s,'',false,%s,%s,now(),now())""",
-            (pod_id, name, workspace_id, project_id),
+               VALUES (%s,%s,'',%s,%s,%s,now(),now())""",
+            (pod_id, name, is_default, workspace_id, project_id),
         )
         self._put("pod", pod_id)
-        return {"id": pod_id}
+        # "name" is part of the return (added for PIDASHCONV-97, whose
+        # suite pins daemon payloads against the seeded pod name);
+        # existing callers using only ["id"] are unaffected.
+        return {"id": pod_id, "name": name}
 
     def create_agent_run(
         self,
@@ -1768,6 +1789,191 @@ class Seeder:
         )
         self._put("agent_run", run_id)
         return {"id": run_id}
+
+    # -- runner daemon domain (PIDASHCONV-97) --------------------------------
+    # Factories for the daemon-facing runner API (``/api/v1/runner/``):
+    # runners, dev machines, machine tokens, daemon runs and chat rows.
+    # Column lists mirror the live schema; token hashes recompute the
+    # server-side scheme via ``_harness.tokens`` (needs ``secret_key``).
+    # Extended here, never a per-domain fork.
+
+    def create_member(self, workspace_id: str, user_id: str, *, role: int = 15) -> dict[str, Any]:
+        """Active workspace membership (``is_workspace_member`` requires it).
+
+        Same row as :meth:`create_workspace_member`, with the member-role
+        default the runner suite seeds with.
+        """
+        return self.create_workspace_member(workspace_id, user_id, role=role)
+
+    def create_dev_machine(
+        self, owner_id: str, *, host_label: str | None = None, provisioning: str = "manual"
+    ) -> dict[str, Any]:
+        machine_id = _uid()
+        host_label = host_label or f"host-{self.tag}"[:200]
+        self.db.execute(
+            """INSERT INTO dev_machine
+               (id, owner_id, host_label, label, visibility, provisioning,
+                created_at, updated_at)
+               VALUES (%s,%s,%s,%s,0,%s,now(),now())""",
+            (machine_id, owner_id, host_label, host_label[:128], provisioning),
+        )
+        self._put("dev_machine", machine_id)
+        return {"id": machine_id, "host_label": host_label}
+
+    def create_machine_token(
+        self,
+        user_id: str,
+        workspace_id: str,
+        raw: str,
+        *,
+        host_label: str = "contract-host",
+        dev_machine_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Seed an ``mt_`` token whose hash matches the server's scheme.
+
+        Requires the test ``SECRET_KEY`` to equal the server's (see
+        ``_harness.tokens``); the HTTP assertions that follow are still real.
+        """
+        token_id = _uid()
+        self.db.execute(
+            """INSERT INTO machine_token
+               (id, user_id, workspace_id, dev_machine_id, host_label,
+                token_hash, token_fingerprint, label, is_service, created_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,'contract-test',true,now())""",
+            (
+                token_id,
+                user_id,
+                workspace_id,
+                dev_machine_id,
+                host_label,
+                hash_token(raw, self.secret_key),
+                token_fingerprint(raw),
+                host_label,
+            ),
+        )
+        self._put("machine_token", token_id)
+        return {"id": token_id, "token": raw}
+
+    def enroll_runner(
+        self,
+        owner_id: str,
+        workspace_id: str,
+        pod_id: str,
+        enrollment_raw: str,
+        *,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        """An unenrolled runner row holding a known one-time enrollment token."""
+        self._n += 1
+        runner_id = _uid()
+        runner_name = name or f"runner-{self.tag}-{self._n}"[:120]
+        self.db.execute(
+            """INSERT INTO runner
+               (id, owner_id, workspace_id, pod_id, name, host_label,
+                provisioning, visibility, status, capabilities,
+                os, arch, runner_version,
+                refresh_token_hash, refresh_token_fingerprint,
+                refresh_token_generation, previous_refresh_token_hash,
+                access_token_signing_key_version,
+                enrollment_token_hash, enrollment_token_fingerprint,
+                enrolled_at, revoked_at, revoked_reason,
+                dev_machine_id, dev_metadata, protocol_version,
+                created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,'', 'manual',0,'offline','[]',
+                       '','','',
+                       '','',0,'',1,
+                       %s,%s,
+                       NULL,NULL,'',
+                       NULL,'{}',1,
+                       now(),now())""",
+            (
+                runner_id,
+                owner_id,
+                workspace_id,
+                pod_id,
+                runner_name,
+                hash_token(enrollment_raw, self.secret_key),
+                token_fingerprint(enrollment_raw),
+            ),
+        )
+        self._put("runner", runner_id)
+        return {"id": runner_id, "name": runner_name, "enrollment_token": enrollment_raw}
+
+    def create_daemon_run(
+        self,
+        owner_id: str,
+        workspace_id: str,
+        pod_id: str,
+        runner_id: str,
+        *,
+        status: str = "assigned",
+    ) -> dict[str, Any]:
+        """A daemon-owned run row (``agent_run`` with a runner binding).
+
+        Named apart from :meth:`create_agent_run` (the work-item-bound
+        factory owned by the dispatch suite): same table, disjoint columns.
+        """
+        run_id = _uid()
+        self.db.execute(
+            """INSERT INTO agent_run
+               (id, workspace_id, owner_id, created_by_id, pod_id, runner_id,
+                status, prompt, trigger, executor_kind, run_config,
+                required_capabilities, thread_id, agent_metadata, tool_plan,
+                usage, dispatch_attempts, error, refusal_category, llm_model,
+                cancel_reason, error_code, phase_kind,
+                created_at)
+               VALUES (%s,%s,%s,%s,%s,%s,
+                       %s,'','direct','local_runner','{}',
+                       '[]','{}','{}','{}',
+                       '{}',0,'','','',
+                       '','','',
+                       now())""",
+            (run_id, workspace_id, owner_id, owner_id, pod_id, runner_id, status),
+        )
+        self._put("agent_run", run_id)
+        return {"id": run_id, "status": status}
+
+    def create_chat_session(
+        self,
+        workspace_id: str,
+        runner_id: str,
+        pod_id: str,
+        created_by_id: str,
+        *,
+        status: str = "open",
+    ) -> dict[str, Any]:
+        session_id = _uid()
+        self.db.execute(
+            """INSERT INTO agent_chat_session
+               (id, workspace_id, runner_id, created_by_id, pod_id,
+                status, agent_kind, local_thread_id, local_session_id,
+                cwd, model, active_turn_id, close_requested, error,
+                created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,'','','','','','',false,'',now(),now())""",
+            (session_id, workspace_id, runner_id, created_by_id, pod_id, status),
+        )
+        self._put("agent_chat_session", session_id)
+        return {"id": session_id}
+
+    def create_chat_message(
+        self,
+        session_id: str,
+        *,
+        role: str = "user",
+        content: str = "hello",
+        msg_status: str = "completed",
+        seq: int = 1,
+    ) -> dict[str, Any]:
+        message_id = _uid()
+        self.db.execute(
+            """INSERT INTO agent_chat_message
+               (id, session_id, role, content, content_parts, status,
+                local_item_id, local_turn_id, seq, created_at)
+               VALUES (%s,%s,%s,%s,'[]',%s,'','',%s,now())""",
+            (message_id, session_id, role, content, msg_status, seq),
+        )
+        self._put("agent_chat_message", message_id)
+        return {"id": message_id}
 
 
 # --- PIDASHCONV-83 (app project/state/estimate oracle) ---
