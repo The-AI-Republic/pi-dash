@@ -243,7 +243,12 @@ jobs:
 
       - name: Run worker-plane oracle
         working-directory: rust-api/contract-tests
-        run: pytest tasks_mail tasks_webhooks tasks_cleanup tasks_ticker
+        # The job env exports DJANGO_SETTINGS_MODULE for the API steps and the
+        # API requirements install pytest-django into the same interpreter, so
+        # without this the django plugin tries to import pi_dash from this dir
+        # and collection fails before any test runs. The oracle never touches
+        # Django (wire format + DB diff + sinks only).
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django tasks_mail tasks_webhooks tasks_cleanup tasks_ticker
 
       - name: Upload service logs on failure
         if: failure()
