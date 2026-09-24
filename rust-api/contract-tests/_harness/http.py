@@ -4,8 +4,9 @@
 
 """HTTP client factories for contract suites."""
 
-import httpx
 import time
+
+import httpx
 
 from . import config
 from . import signing

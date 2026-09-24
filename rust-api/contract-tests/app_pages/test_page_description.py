@@ -87,6 +87,9 @@ def test_description_update_requires_auth(anon_client, world):
 
 
 def test_description_cross_workspace_isolation(user_client, world, world2):
-    # NOTE (ported behavior): same permission-lookup 500 as the other detail
-    # routes — another workspace's page id never resolves here.
-    assert user_client.get(_desc_url(world, world2["page"]["id"])).status_code >= 500
+    # NOTE (ported behavior): same permission-lookup 404 as the other detail
+    # routes (PagesDescriptionViewSet is a BaseViewSet) — another
+    # workspace's page id never resolves here.
+    response = user_client.get(_desc_url(world, world2["page"]["id"]))
+    assert response.status_code == 404
+    assert response.json() == {"error": "The required object does not exist."}

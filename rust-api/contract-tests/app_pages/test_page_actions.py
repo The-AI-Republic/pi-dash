@@ -28,7 +28,8 @@ def test_favorite_create(user_client, world, db):
         "SELECT user_id, deleted_at FROM user_favorites WHERE entity_type='page' AND entity_identifier=%s",
         (world["page"]["id"],),
     )
-    assert row["user_id"] == world["owner"]["id"]
+    # psycopg returns the uuid column as UUID, the seeder tracks it as str.
+    assert str(row["user_id"]) == world["owner"]["id"]
     assert row["deleted_at"] is None
 
 
@@ -44,11 +45,13 @@ def test_favorite_create_requires_auth(anon_client, world):
 def test_favorite_destroy(user_client, world, db):
     assert user_client.post(_fav_url(world, world["page"]["id"])).status_code == 204
     assert user_client.delete(_fav_url(world, world["page"]["id"])).status_code == 204
-    row = db.fetchval(
-        "SELECT deleted_at FROM user_favorites WHERE entity_type='page' AND entity_identifier=%s",
+    # NOTE (ported behavior): destroy hard-deletes (``.delete(soft=False)``),
+    # so the row is gone — there is no deleted_at timestamp to pin.
+    row = db.fetchone(
+        "SELECT id FROM user_favorites WHERE entity_type='page' AND entity_identifier=%s",
         (world["page"]["id"],),
     )
-    assert row is not None
+    assert row is None
 
 
 def test_archive_shape(user_client, world, db):
@@ -150,6 +153,9 @@ def test_access_requires_auth(anon_client, world):
 def test_cross_workspace_action_isolation(user_client, world, world2, db):
     # NOTE (ported behavior): the permission lookup scopes by the URL
     # workspace, so another workspace's page id raises DoesNotExist there —
-    # an uncaught 500. The foreign page must be left untouched either way.
-    assert user_client.post(f"{page_url(world, world2['page']['id'])}lock/").status_code >= 500
+    # mapped to 404 by BaseViewSet.handle_exception. The foreign page must
+    # be left untouched either way.
+    lock_response = user_client.post(f"{page_url(world, world2['page']['id'])}lock/")
+    assert lock_response.status_code == 404
+    assert lock_response.json() == {"error": "The required object does not exist."}
     assert db.fetchval("SELECT is_locked FROM pages WHERE id=%s", (world2["page"]["id"],)) is False

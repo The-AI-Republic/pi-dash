@@ -105,26 +105,32 @@ def _logged_in(settings, user):
 
 @pytest.fixture()
 def user_client(settings, world):
-    with _logged_in(settings, world["owner"]) as client:
-        yield client
+    # No `with` block: _logged_in already issues requests, and httpx >= 0.28
+    # raises on __enter__ after implicit open. Close explicitly instead.
+    client = _logged_in(settings, world["owner"])
+    yield client
+    client.close()
 
 
 @pytest.fixture()
 def member_client(settings, member_user):
-    with _logged_in(settings, member_user) as client:
-        yield client
+    client = _logged_in(settings, member_user)
+    yield client
+    client.close()
 
 
 @pytest.fixture()
 def guest_client(settings, guest_user):
-    with _logged_in(settings, guest_user) as client:
-        yield client
+    client = _logged_in(settings, guest_user)
+    yield client
+    client.close()
 
 
 @pytest.fixture()
 def outsider_client(settings, outsider_user):
-    with _logged_in(settings, outsider_user) as client:
-        yield client
+    client = _logged_in(settings, outsider_user)
+    yield client
+    client.close()
 
 
 @pytest.fixture()

@@ -157,12 +157,16 @@ def test_retrieve_unlinked_page_is_404(user_client, world, seeder):
     assert response.json() == {"error": "Page not found"}
 
 
-def test_retrieve_unknown_page_id_is_5xx(user_client, world):
+def test_retrieve_unknown_page_id_is_404(user_client, world):
     # NOTE (ported behavior): ProjectPagePermission.has_permission looks the
     # page up with Page.objects.get, so an id that exists nowhere raises
-    # DoesNotExist inside the permission check — an uncaught 500, never the
-    # view's 404. Pinned so the Rust port reproduces it instead of "fixing" it.
-    assert user_client.get(page_url(world, str(uuid.uuid4()))).status_code >= 500
+    # DoesNotExist inside the permission check — BaseViewSet.handle_exception
+    # maps ObjectDoesNotExist to 404 (never the view's "Page not found"
+    # body, which only the project-scoped queryset path returns). Pinned so
+    # the Rust port reproduces it instead of "fixing" it.
+    response = user_client.get(page_url(world, str(uuid.uuid4())))
+    assert response.status_code == 404
+    assert response.json() == {"error": "The required object does not exist."}
 
 
 def test_retrieve_requires_auth(anon_client, world):
@@ -184,9 +188,12 @@ def test_retrieve_guest_allowed_when_flag_on(guest_client, world, db):
 
 def test_cross_workspace_detail_isolation(user_client, world, world2):
     # NOTE (ported behavior): world2's page id is unknown under world1's
-    # slug, so the permission lookup raises DoesNotExist — an uncaught 500.
-    # Either way the foreign page must never render here.
-    assert user_client.get(page_url(world, world2["page"]["id"])).status_code >= 500
+    # slug, so the permission lookup raises DoesNotExist — mapped to 404 by
+    # BaseViewSet.handle_exception. Either way the foreign page must never
+    # render here.
+    response = user_client.get(page_url(world, world2["page"]["id"]))
+    assert response.status_code == 404
+    assert response.json() == {"error": "The required object does not exist."}
 
 
 def test_cross_workspace_list_isolation(user_client, world, world2):
@@ -224,7 +231,7 @@ def test_partial_update_unlinked_page_reports_owner_error(user_client, world, se
     # linked to the URL project surfaces the owner-access error, not a 404,
     # because partial_update catches DoesNotExist into that body. (A fully
     # unknown id never reaches the action: the permission lookup raises first,
-    # so it 500s like retrieve — see test_retrieve_unknown_page_id_is_5xx.)
+    # so it 404s like retrieve — see test_retrieve_unknown_page_id_is_404.)
     other_project = seeder.create_project(world["workspace"]["id"])
     seeder.create_project_member(
         world["workspace"]["id"], other_project["id"], world["owner"]["id"], role=20
@@ -252,8 +259,11 @@ def test_destroy_archived_page(user_client, world, db):
     )
     # NOTE (ported behavior): destroy soft-deletes, and the default manager
     # hides soft-deleted rows — so the permission lookup raises DoesNotExist
-    # and the detail view 500s instead of 404ing after a delete.
-    assert user_client.get(page_url(world, world["page"]["id"])).status_code >= 500
+    # and the detail view 404s (via BaseViewSet.handle_exception) after a
+    # delete instead of returning the view's "Page not found" body.
+    post_delete = user_client.get(page_url(world, world["page"]["id"]))
+    assert post_delete.status_code == 404
+    assert post_delete.json() == {"error": "The required object does not exist."}
 
 
 def test_destroy_forbidden_for_member_non_owner(member_client, world, seeder):
