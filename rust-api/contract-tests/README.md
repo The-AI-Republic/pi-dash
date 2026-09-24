@@ -57,6 +57,8 @@ cd apps/api
 DATABASE_URL="postgresql://postgres@/pidash_contract?host=/tmp&port=5434" \
   WEB_URL=http://localhost APP_BASE_URL=http://localhost \
   EMAIL_HOST=localhost API_KEY_RATE_LIMIT="100000/minute" \
+  SECRET_KEY=<a fixed test-only secret> \
+  AMQP_URL=memory:// \
   DJANGO_SETTINGS_MODULE=pi_dash.settings.test \
   python manage.py runserver 127.0.0.1:8000
 
@@ -180,3 +182,10 @@ docker run --rm --network <stack>_default \
   (name → task → crontab) plus the target task being registered/executable.
 - The deliberate-permission-removal check from the HTTP coverage floor has no
   library-domain equivalent (no permission classes); recorded as n/a.
+
+`SECRET_KEY` must be pinned to a fixed test-only value before the server
+starts: `_harness.auth` forges DB-backed session rows with HMACs keyed by
+it (stdlib only, no Django import), so rotating server keys would
+invalidate seeded sessions. `AMQP_URL=memory://` lets the export
+endpoints enqueue their Celery tasks without a broker; no worker
+consumes them.
