@@ -757,7 +757,74 @@ class SeedTracker:
     # first so teardown leaves zero orphans.
     _DEPENDENTS = {"users": [("profiles", "user_id")]}
 
+    def _tracked_ids(self, table: str) -> list[str]:
+        return [row_id for tracked_table, row_id in self.rows if tracked_table == table]
+
+    def _delete_untracked(self, sql: str, params: tuple):
+        # An empty IN list matches nothing: skip instead of emitting `IN ()`.
+        if not params:
+            return
+        try:
+            self.db.execute(sql, params)
+        except Exception:
+            pass
+
+    def _purge_side_rows(self):
+        """Delete server-created rows that belong to this test's world.
+
+        API writes (created pages, "(Copy)" duplicates and their
+        ``project_pages`` links, favorites, versions, ``page_logs``) reference the seeded
+        users/workspaces/projects/pages but are never tracked, so the
+        per-row delete below cannot see them — and their FKs can even block
+        it. Every world is unique per test (unique tag), so "untracked rows
+        referencing tracked ids" is exactly this test's side effects.
+        """
+        users = self._tracked_ids("users")
+        workspaces = self._tracked_ids("workspaces")
+        projects = self._tracked_ids("projects")
+        pages = self._tracked_ids("pages")
+        favorites = self._tracked_ids("user_favorites")
+        links = self._tracked_ids("project_pages")
+        versions = self._tracked_ids("page_versions")
+
+        def placeholders(ids: list[str]) -> str:
+            return ",".join(["%s"] * len(ids))
+
+        if projects:
+            self._delete_untracked(
+                f"DELETE FROM project_pages WHERE project_id IN ({placeholders(projects)})"
+                + (f" AND id NOT IN ({placeholders(links)})" if links else ""),
+                tuple(projects) + tuple(links),
+            )
+        if users or projects:
+            conditions: list[str] = []
+            params: list[str] = []
+            if users:
+                conditions.append(f"user_id IN ({placeholders(users)})")
+                params.extend(users)
+            if projects:
+                conditions.append(f"project_id IN ({placeholders(projects)})")
+                params.extend(projects)
+            not_tracked = f" AND id NOT IN ({placeholders(favorites)})" if favorites else ""
+            self._delete_untracked(
+                f"DELETE FROM user_favorites WHERE ({' OR '.join(conditions)}){not_tracked}",
+                tuple(params) + tuple(favorites),
+            )
+        if pages:
+            not_tracked = f" AND id NOT IN ({placeholders(versions)})" if versions else ""
+            self._delete_untracked(
+                f"DELETE FROM page_versions WHERE page_id IN ({placeholders(pages)}){not_tracked}",
+                tuple(pages) + tuple(versions),
+            )
+            # page_transaction (eager or worker) logs to page_logs, whose FK
+            # would otherwise block the page delete below.
+            self._delete_untracked(
+                f"DELETE FROM page_logs WHERE page_id IN ({placeholders(pages)})",
+                tuple(pages),
+            )
+
     def cleanup(self):
+        self._purge_side_rows()
         for table, row_id in reversed(self.rows):
             for dependent, column in self._DEPENDENTS.get(table, ()):
                 try:
@@ -860,7 +927,16 @@ class Seeder:
                        10800,10,10800,10800,
                        true,'local_runner',
                        now(),now())""",
-            (project_id, name or f"Contract Project {self.tag}", workspace_id, f"CT{self._n % 100000:05d}"),
+            (
+                project_id,
+                # Unique per project within a workspace (partial unique index
+                # on name where deleted_at is null): tests seeding a second
+                # project in the same workspace share one tag, so the counter
+                # disambiguates.
+                name or f"Contract Project {self.tag}-{self._n}",
+                workspace_id,
+                f"CT{self._n % 100000:05d}",
+            ),
         )
         self._put("projects", project_id)
         return {"id": project_id}
