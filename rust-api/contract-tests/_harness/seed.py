@@ -6,12 +6,15 @@ registers its row with the tracker so teardown deletes exactly what the
 suite created, in reverse order). Column lists mirror the Django models;
 if a model gains a NOT NULL column without a database default, the
 matching factory must grow a value.
+
+Extend this module; never fork per-domain copies.
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import random
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -1298,3 +1301,203 @@ class Seeder:
         )
         self._put("workspace_members", member_id)
         return {"id": member_id, "role": role}
+
+    # -- app integrations (D-33, PIDASHCONV-91) -------------------------------
+    # Column lists mirror apps/api/pi_dash/app/models/. Factories for the
+    # github PAT / github app / project-bind / generic-git / webhook surface.
+    # Extended here (never a per-domain fork).
+
+    def create_api_token(
+        self, user_id: str, workspace_id: str | None = None, *, label: str = "contract"
+    ) -> dict[str, Any]:
+        token_id = _uid()
+        token = f"contract-{self.tag}-{token_id[:8]}"
+        self.db.execute(
+            """INSERT INTO api_tokens
+               (id, token, label, user_type, user_id, workspace_id, description,
+                is_active, is_service, allowed_rate_limit, created_at, updated_at)
+               VALUES (%s,%s,%s,0,%s,%s,'',true,false,'100000/minute',now(),now())""",
+            (token_id, token, label, user_id, workspace_id),
+        )
+        self._put("api_tokens", token_id)
+        return {"id": token_id, "token": token}
+
+    def ensure_github_integration(self) -> dict[str, Any]:
+        """Shared ``integrations`` row (provider=github), never tracked.
+
+        The views get-or-create this row themselves; the suite only needs it
+        present for ``workspace_integrations`` seeds. Mirrors
+        ``ensure_instance``: leave the shared row behind.
+        """
+        row = self.db.fetchone("SELECT id FROM integrations WHERE provider = 'github'")
+        if row is not None:
+            return {"id": str(row["id"])}
+        integration_id = _uid()
+        self.db.execute(
+            """INSERT INTO integrations
+               (id, title, provider, network, description, author,
+                webhook_url, webhook_secret, redirect_url, metadata,
+                verified, created_at, updated_at)
+               VALUES (%s,'GitHub','github',2,
+                       '{"summary": "Mirror GitHub issues into Pi Dash projects."}',
+                       '','','','','{}',true,now(),now())""",
+            (integration_id,),
+        )
+        return {"id": integration_id}
+
+    def ensure_github_app_config(self) -> dict[str, str]:
+        """Upsert the db-sourced GitHub App identity keys, never tracked.
+
+        Secrets (private key, webhook secret, client secret) are env-sourced
+        and must be set on the server under test instead; without them the
+        app endpoints answer 409. Values here are inert dummies.
+        """
+        values = {
+            "GITHUB_APP_ID": "contract-91-app-id",
+            "GITHUB_APP_SLUG": "contract-91-app-slug",
+            "GITHUB_APP_CLIENT_ID": "contract-91-client-id",
+        }
+        for key, value in values.items():
+            self.db.execute(
+                """INSERT INTO instance_configurations
+                   (id, key, value, category, is_encrypted, created_at, updated_at)
+                   VALUES (%s,%s,%s,'GITHUB',false,now(),now())
+                   ON CONFLICT (key) DO UPDATE
+                   SET value = EXCLUDED.value, updated_at = now()""",
+                (_uid(), key, value),
+            )
+        return values
+
+    def create_workspace_integration(
+        self, workspace_id: str, actor_id: str, *, connected: bool = False
+    ) -> dict[str, Any]:
+        """Seed a ``workspace_integrations`` row for the github provider.
+
+        ``connected=True`` stores a non-empty token so status reads
+        ``connected:true`` without ever calling GitHub; the token is an inert
+        dummy (decrypting views are covered through their 409 paths instead).
+        """
+        integration = self.ensure_github_integration()
+        token = self.create_api_token(actor_id, workspace_id, label="github-integration-shim")
+        wi_id = _uid()
+        if connected:
+            config = (
+                '{"auth_type": "pat", "token": "contract91-seeded-token", '
+                '"github_user_login": "contract-octocat", '
+                '"verified_at": "2026-01-01T00:00:00+00:00"}'
+            )
+        else:
+            config = "{}"
+        self.db.execute(
+            """INSERT INTO workspace_integrations
+               (id, metadata, config, actor_id, api_token_id,
+                integration_id, workspace_id, created_at, updated_at)
+               VALUES (%s,'{}',%s,%s,%s,%s,%s,now(),now())""",
+            (wi_id, config, actor_id, token["id"], integration["id"], workspace_id),
+        )
+        self._put("workspace_integrations", wi_id)
+        return {"id": wi_id}
+
+    def create_webhook(
+        self, workspace_id: str, *, url: str | None = None, is_active: bool = True
+    ) -> dict[str, Any]:
+        hook_id = _uid()
+        hook_url = url or f"https://example.com/hook/{self.tag}-{self._n + 1}"
+        self.db.execute(
+            """INSERT INTO webhooks
+               (id, url, is_active, secret_key, project, issue, module, cycle,
+                issue_comment, is_internal, version, workspace_id,
+                created_at, updated_at)
+               VALUES (%s,%s,%s,%s,false,true,false,false,false,false,'v1',%s,now(),now())""",
+            (hook_id, hook_url, is_active, f"pi_dash_wh_contract{self._n + 1:06d}", workspace_id),
+        )
+        self._put("webhooks", hook_id)
+        return {"id": hook_id, "url": hook_url}
+
+    def create_webhook_log(self, workspace_id: str, webhook_id: str) -> dict[str, Any]:
+        log_id = _uid()
+        self.db.execute(
+            """INSERT INTO webhook_logs
+               (id, event_type, request_method, request_headers, request_body,
+                response_status, response_headers, response_body, retry_count,
+                webhook, workspace_id, created_at, updated_at)
+               VALUES (%s,'push','POST','{}','{}','200','{}','{}',0,%s,%s,now(),now())""",
+            (log_id, webhook_id, workspace_id),
+        )
+        self._put("webhook_logs", log_id)
+        return {"id": log_id}
+
+    def create_git_provider_account(
+        self, workspace_id: str, *, provider: str = "github", login: str = "contract-octocat"
+    ) -> dict[str, Any]:
+        account_id = _uid()
+        host = "https://github.com" if provider == "github" else "https://gitlab.com"
+        self.db.execute(
+            """INSERT INTO git_provider_accounts
+               (id, provider, host_url, auth_type, external_account_id,
+                external_account_login, display_name, capabilities,
+                credential_config, status, verified_at, last_check_error,
+                metadata, workspace_id, created_at, updated_at)
+               VALUES (%s,%s,%s,'pat',%s,%s,%s,'{}','{}','connected',now(),'', '{}',%s,now(),now())""",
+            (account_id, provider, host, f"contract:{account_id[:8]}", login, login, workspace_id),
+        )
+        self._put("git_provider_accounts", account_id)
+        return {"id": account_id}
+
+    def create_github_repo_sync(
+        self, workspace_id: str, project_id: str, actor_id: str, wi_id: str
+    ) -> dict[str, Any]:
+        """Seed a bound ``github_repositories`` + ``github_repository_syncs`` pair."""
+        repo_id = _uid()
+        repository_id = random.randint(10_000_000, 99_999_999)
+        owner, name = f"contract-owner-{self.tag[:6]}", f"contract-repo-{self._n + 1}"
+        self.db.execute(
+            """INSERT INTO github_repositories
+               (id, name, url, config, repository_id, owner,
+                project_id, workspace_id, created_at, updated_at)
+               VALUES (%s,%s,%s,'{}',%s,%s,%s,%s,now(),now())""",
+            (
+                repo_id,
+                name,
+                f"https://github.com/{owner}/{name}",
+                repository_id,
+                owner,
+                project_id,
+                workspace_id,
+            ),
+        )
+        self._put("github_repositories", repo_id)
+        sync_id = _uid()
+        self.db.execute(
+            """INSERT INTO github_repository_syncs
+               (id, credentials, actor_id, project_id, repository_id,
+                workspace_id, workspace_integration_id,
+                is_sync_enabled, last_sync_error, created_at, updated_at)
+               VALUES (%s,'{}',%s,%s,%s,%s,%s,false,'',now(),now())""",
+            (sync_id, actor_id, project_id, repo_id, workspace_id, wi_id),
+        )
+        self._put("github_repository_syncs", sync_id)
+        return {
+            "id": sync_id,
+            "repository_id": repository_id,
+            "owner": owner,
+            "name": name,
+            "url": f"https://github.com/{owner}/{name}",
+        }
+
+    def create_github_app_installation(self, wi_id: str) -> dict[str, Any]:
+        """Seed a ``github_app_installations`` row with a unique install id."""
+        installation_id = random.randint(1_000_000, 9_999_999)
+        row_id = _uid()
+        self.db.execute(
+            """INSERT INTO github_app_installations
+               (id, workspace_integration_id, installation_id,
+                account_login, account_type, repository_selection,
+                repository_count, permissions, events, last_check_error,
+                created_at, updated_at)
+               VALUES (%s,%s,%s,'contract-octocat','Organization','selected',
+                       3,'{}','[]','',now(),now())""",
+            (row_id, wi_id, installation_id),
+        )
+        self._put("github_app_installations", row_id)
+        return {"id": row_id, "installation_id": installation_id}
