@@ -13,7 +13,9 @@ copies).
 
 - `_harness/` — shared helpers. Extend, never fork: `env.py` (env
   plumbing), `seed.py` (row factories + cleanup), `djangocrypto.py`
-  (stdlib-only session/machine-token forging), `client.py`, `db.py`.
+  (stdlib-only session/machine-token forging), `client.py`, `db.py`,
+  `broker.py` (Celery protocol-v2 publish), `sinks.py` (recording
+  HTTP stub).
 - `web_edge/` — PIDASHCONV-14: web edge (`/`, `/robots.txt`).
 - `v1_cli_auth/` — PIDASHCONV-80: api-v1 CLI auth + runner v1.
 - `app_views_search/` — PIDASHCONV-87: app-tier views (project/global
@@ -26,8 +28,11 @@ copies).
   free port works (this suite was validated on 8126; the dev server
   needs a Celery broker — `AMQP_URL=redis://127.0.0.1:6379/<db>` —
   because module writes publish activity tasks).
+- `integrations/` — PIDASHCONV-19 (D-05 task oracle): black-box
+  Celery-task oracle for the integrations library + git sync domain
+  (file layout below).
 
-## Run
+## Run: web_edge
 
 ```sh
 python3 -m venv .venv
@@ -90,3 +95,47 @@ in one go: ~15 `device/start` calls (20/minute/IP), ~11 anonymous token
 polls (30/minute/IP), a handful of requests per API key (60/minute/key).
 Do not add start/token-poll calls casually; share fixtures instead.
 Re-running within the same minute can 429 — wait for the window to slide.
+
+## Run: integrations (D-05 task oracle, PIDASHCONV-19)
+
+Black-box Celery-task oracle for the integrations library + git sync domain.
+Nothing here imports Django. Tests publish jobs in Celery wire format to the
+broker named by `CELERY_BROKER_URL`, let the live Django worker execute them,
+and diff Postgres via `DATABASE_URL`.
+
+```sh
+cd rust-api/contract-tests
+BASE_URL=http://api:8000 \
+DATABASE_URL=postgresql://pidash:<pw>@db:5432/pidash \
+CELERY_BROKER_URL=amqp://pidash:<pw>@mq:5672/pidash \
+  pytest integrations -q
+```
+
+In this repo's docker dev stack the suite runs from a container on the
+stack network (`docker run --rm --network localpidash-s3_default ...`)
+so `db`/`mq`/`api` resolve; from the host use the published ports.
+
+## Layout
+
+- `_harness/` — shared helpers (first use; extend, never fork): `broker.py`
+  (protocol-v2 publish, passive depth, drain-wait), `db.py` (raw SQL,
+  `wait_for` polling), `sinks.py` (recording HTTP stub).
+- `integrations/conftest.py` — env, read-only anchor rows, per-test `Scope`
+  teardown that deletes every seeded row.
+- `integrations/seed.py` — raw-SQL seed builders.
+- `integrations/test_fanout.py` — beat fan-out tasks.
+
+## Known oracle limits (pinned in stage 1)
+
+- Provider HTTP has no black-box stub seam: the GitHub adapter hardcodes
+  `api.github.com`; GitLab requires https + an allowlisted host. Happy-path
+  sync diffs (mirror rows created from listings) cannot run hermetically, so
+  the suite pins the deterministic surface: fan-out set, no-op cases, 4xx
+  error recording (no retry), retry wire format on transient faults,
+  signal→broker delivery, completion-comment idempotency, beat entry identity.
+- The domain beat entry (`github-issue-sync-every-4h`, 4h cadence) is not
+  wall-clock observable in a test run: parity is pinned on entry identity
+  (name → task → crontab) plus the target task being registered/executable.
+- The deliberate-permission-removal check from the HTTP coverage floor has no
+  library-domain equivalent (no permission classes); recorded as n/a.
+>>>>>>> 6647290f (PIDASHCONV-19: stage-1 task oracle scaffold + fan-out tests (part 1))
