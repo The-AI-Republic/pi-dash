@@ -63,15 +63,11 @@ jobs:
           --health-interval 10s
           --health-timeout 10s
           --health-retries 10
-      minio:
-        image: minio/minio:latest
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        ports:
-          - 9000:9000
-        # No health check: the minio image ships no curl/shell probe tools.
-        # Bucket creation below retries until the server answers.
+    # No minio service container: Docker Hub no longer serves minio/minio,
+    # and service containers cannot pass the required `server /data`
+    # command. The "Start minio" step below runs quay.io/minio/minio
+    # (MinIO's canonical registry) with the same invocation as
+    # docker-compose.yml's pi-dash-minio service.
     env:
       DJANGO_SETTINGS_MODULE: pi_dash.settings.local
       POSTGRES_USER: pi_dash
@@ -139,6 +135,17 @@ jobs:
         working-directory: apps/api
         run: python manage.py migrate --no-input
 
+      - name: Start minio
+        run: |
+          docker run -d --name contract-minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:9000/minio/health/live && break
+            sleep 2
+          done
+
       - name: Create minio bucket
         run: |
           pip install minio
@@ -183,7 +190,13 @@ jobs:
 
       - name: Run worker-plane oracle
         working-directory: rust-api/contract-tests
-        run: pytest tasks_mail tasks_webhooks tasks_cleanup tasks_ticker
+        # Those suites land with the worker-plane PR; skip here until the
+        # union merge so this PR's CI reflects its own domains.
+        run: |
+          for suite in tasks_mail tasks_webhooks tasks_cleanup tasks_ticker; do
+            [ -d "$suite" ] || continue
+            pytest "$suite" || exit 1
+          done
 
       - name: Run app-project HTTP oracle (D-25)
         working-directory: rust-api/contract-tests

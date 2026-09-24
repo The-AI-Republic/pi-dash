@@ -294,7 +294,31 @@ def test_member_partial_update_role(world):
         f"/api/workspaces/{ws['slug']}/projects/{project['id']}/members/{member_id}/",
         json={"role": 5})
     assert resp.status_code == 200
+    # Partial update returns the full member serializer, same keys as retrieve.
+    assert_keys(resp.json(), MEMBER_ADMIN_KEYS, "member-partial")
     assert resp.json()["role"] == 5
+
+
+def test_member_destroy_deactivates(world, db):
+    client, _, ws, project = world.full_stack()
+    _, member_client = world.add_member(ws, project, ws_role=15, proj_role=15, name="doomed")
+    member_id = [m for m in client.get(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/members/").json()
+        if m["role"] == 15][0]["id"]
+    resp = client.delete(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/members/{member_id}/")
+    assert resp.status_code == 204
+    with db.cursor() as cur:
+        cur.execute("SELECT is_active FROM project_members WHERE id=%s", (member_id,))
+        assert cur.fetchone()["is_active"] is False
+    # An admin cannot remove themselves; leave is the only path out.
+    own_id = client.get(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/members/").json()[0]["id"]
+    resp = client.delete(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/members/{own_id}/")
+    assert resp.status_code == 400
+    assert resp.json() == {
+        "error": "You cannot remove yourself from the workspace. Please use leave workspace"}
 
 
 def test_member_destroy_and_leave(world, db):
@@ -479,6 +503,14 @@ BOARD_NONE_KEYS = [
     "is_reactions_enabled", "is_votes_enabled", "updated_by", "view_props",
 ]
 
+BOARD_KEYS = [
+    "anchor", "created_at", "created_by", "deleted_at", "entity_identifier",
+    "entity_name", "id", "intake", "is_activity_enabled",
+    "is_comments_enabled", "is_disabled", "is_reactions_enabled",
+    "is_votes_enabled", "project", "project_details", "updated_at",
+    "updated_by", "view_props", "workspace", "workspace_detail",
+]
+
 
 def test_deploy_boards_empty_shape(world):
     client, _, ws, project = world.full_stack()
@@ -492,23 +524,26 @@ def test_deploy_boards_crud(world, db):
     client, _, ws, project = world.full_stack()
     base = f"/api/workspaces/{ws['slug']}/projects/{project['id']}/project-deploy-boards/"
     resp = client.post(base, json={"is_comments_enabled": True, "is_votes_enabled": True})
-    assert resp.status_code in (200, 201)
+    # Create is get_or_create with an explicit 200 (never 201).
+    assert resp.status_code == 200
     created = resp.json()
+    assert_keys(created, BOARD_KEYS, "boards-create")
     assert created["is_comments_enabled"] is True
     assert created["is_votes_enabled"] is True
     assert created["entity_identifier"] == str(project["id"])
-    board_id = created.get("id")
+    board_id = created["id"]
     resp = client.get(base)
     assert resp.status_code == 200
+    assert_keys(resp.json(), BOARD_KEYS, "boards-get")
     assert resp.json()["entity_identifier"] == str(project["id"])
-    if board_id:
-        resp = client.get(f"{base}{board_id}/")
-        assert resp.status_code == 200
-        resp = client.patch(f"{base}{board_id}/", json={"is_reactions_enabled": True})
-        assert resp.status_code == 200
-        assert resp.json()["is_reactions_enabled"] is True
-        resp = client.delete(f"{base}{board_id}/")
-        assert resp.status_code == 204
+    resp = client.get(f"{base}{board_id}/")
+    assert resp.status_code == 200
+    assert_keys(resp.json(), BOARD_KEYS, "boards-retrieve")
+    resp = client.patch(f"{base}{board_id}/", json={"is_reactions_enabled": True})
+    assert resp.status_code == 200
+    assert resp.json()["is_reactions_enabled"] is True
+    resp = client.delete(f"{base}{board_id}/")
+    assert resp.status_code == 204
 
 
 def test_archive_unarchive_cycle(world, db):

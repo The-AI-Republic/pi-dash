@@ -86,9 +86,12 @@ def test_tenant_isolation_retrieve(world):
     ws_b = world.workspace(tenant, "tenantws2")
     world.ws_member(ws_b, tenant, 20)
     tenant_client = world.client(tenant)
+    # The workspace-membership gate rejects before the project lookup,
+    # so a cross-workspace retrieve is deterministically 403, never 404.
     resp = tenant_client.get(
         f"/api/workspaces/{ws_a['slug']}/projects/{project_a['id']}/")
-    assert resp.status_code in (403, 404)
+    assert resp.status_code == 403
+    assert resp.json() == {"error": "You don't have the required permissions."}
 
 
 def test_secret_project_nonmember(world):
