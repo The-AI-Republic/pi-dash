@@ -382,7 +382,7 @@ def test_fire_surfaces_render_failure_on_last_error(monkeypatch, binding, create
         pod=Pod.default_for_project_id(binding.project_id),
         scheduler_binding=binding,
         status=AgentRunStatus.FAILED,
-        error="prompt build failed: 'x' is undefined",
+        error_details={"message": "prompt build failed: 'x' is undefined"},
         prompt="",
     )
     monkeypatch.setattr(

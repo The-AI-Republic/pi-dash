@@ -154,7 +154,7 @@ def test_ingest_success_clears_prior_error_and_stamps_ended_at(
         workspace=workspace,
         prompt="",
         status=AgentRunStatus.RUNNING,
-        error="previous parse failure",
+        error_details={"message": "previous parse failure"},
     )
     ingest_into_run(run, VALID_BODY)
     run.refresh_from_db()
