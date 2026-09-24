@@ -204,7 +204,7 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
             </p>
           </div>
           <Button onClick={() => setAddOpen(true)} disabled={!workspaceId}>
-            {t("Add runner")}
+            {t("Add AI Worker")}
           </Button>
         </div>
         <div className="overflow-x-auto rounded-md border border-subtle">
