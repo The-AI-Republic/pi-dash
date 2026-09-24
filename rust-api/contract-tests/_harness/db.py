@@ -118,8 +118,24 @@ class Database:
     def reset(self):
         # Dependency order. `schedulers` rows are signal-created per
         # workspace; a missing table here fails loudly as an FK violation.
+        # Extras tables (workspace themes, favorites, stickies, quick links,
+        # drafts + M2M, visits, home/sidebar prefs, user properties) all carry
+        # a workspace FK, so they wipe before members/workspaces.
         tables = [
             "schedulers",
+            "draft_issue_assignees",
+            "draft_issue_cycles",
+            "draft_issue_labels",
+            "draft_issue_modules",
+            "draft_issues",
+            "stickies",
+            "user_favorites",
+            "user_recent_visits",
+            "workspace_home_preferences",
+            "workspace_themes",
+            "workspace_user_links",
+            "workspace_user_preferences",
+            "workspace_user_properties",
             "sessions",
             "workspace_join_requests",
             "workspace_member_invites",
