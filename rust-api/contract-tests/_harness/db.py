@@ -9,6 +9,11 @@ suites that actually seed (web_edge needs no DB). Raw-SQL seeding,
 snapshots and polling live here (psycopg; no ORM, no Django imports).
 ``db_conn`` below imports psycopg lazily so DB-free domains never pay
 for it.
+
+Suites that seed do so straight into Postgres with plain SQL (no ORM, no
+Django imports). Connections are autocommit; each test seeds
+uniquely-named rows so no cleanup pass is needed for repeat runs against
+the same database.
 """
 from __future__ import annotations
 
@@ -43,8 +48,9 @@ def db_conn():
         yield conn
 
 
-def connect(database_url: str) -> psycopg.Connection:
-    return psycopg.connect(database_url, autocommit=True)
+def connect(database_url: str | None = None) -> psycopg.Connection:
+    """Open an autocommit Postgres connection (``DATABASE_URL`` by default)."""
+    return psycopg.connect(database_url or get_database_url(), autocommit=True)
 
 
 def fetchone(database_url: str, sql: str, params: tuple = ()) -> dict | None:
@@ -87,7 +93,6 @@ def wait_for(
             return row
         time.sleep(poll)
     return None
-
 
 def _now():
     return datetime.now(timezone.utc)
@@ -245,3 +250,4 @@ class Database:
                 )
             conn.commit()
         return {"id": mid}
+

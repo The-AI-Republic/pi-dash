@@ -2,13 +2,18 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""httpx client factories. Auth is the admin session cookie the server sets
-for /instances paths (ADMIN_SESSION_COOKIE_NAME = "admin-session-id")."""
+"""HTTP client factories for contract suites."""
 
 import httpx
 
+from . import config
 from . import signing
 from .settings import base_url
+
+
+def make_client(cookies: dict | None = None) -> httpx.Client:
+    """Generic client against ``BASE_URL`` (from ``_harness.config``)."""
+    return httpx.Client(base_url=config.base_url(), cookies=cookies, timeout=30.0)
 
 
 def anon_client(**kwargs):
