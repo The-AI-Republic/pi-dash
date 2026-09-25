@@ -93,6 +93,14 @@ sign-in endpoint (black box).
   PR/review links, labels, pages). Same env contract as the other
   DB-backed suites, except auth is `X-Api-Key` (an `api_tokens` row seeded
   per user) and no `CONTRACT_SECRET_KEY`/`CONTRACT_WEB_URL` is needed.
+- `app_intake/` — PIDASHCONV-90 (D-32): app-tier intake (intakes,
+  intake-issues, the `inboxes`/`inbox-issues` aliases, intake-work-item
+  description-versions; 10 paths in `pi_dash/app/urls/intake.py`). Same
+  env contract as the other DB-backed suites; session auth goes through
+  the public sign-in flow (`login_session`), like `app_pages/`. Pins two
+  upstream bugs for the port: POST intakes/inboxes always 500
+  (`@allow_permission` on `perform_create`), and creates require explicit
+  `deleted_at`.
 
 ## Run: web_edge
 
