@@ -137,10 +137,25 @@ jobs:
 
       - name: Start minio
         run: |
-          docker run -d --name contract-minio -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+          # quay.io pulls flake on GH-hosted runners with transient daemon
+          # "unauthorized" errors; retry the pull before failing the job.
+          started=""
+          for attempt in 1 2 3; do
+            docker rm -f contract-minio >/dev/null 2>&1 || true
+            if docker run -d --name contract-minio -p 9000:9000 \
+              -e MINIO_ROOT_USER=minioadmin \
+              -e MINIO_ROOT_PASSWORD=minioadmin \
+              quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data; then
+              started=1
+              break
+            fi
+            echo "minio start attempt $attempt failed; retrying..."
+            sleep 15
+          done
+          if [ -z "$started" ]; then
+            echo "minio failed to start after 3 attempts"
+            exit 1
+          fi
           for i in $(seq 1 30); do
             curl -sf http://localhost:9000/minio/health/live && break
             sleep 2
