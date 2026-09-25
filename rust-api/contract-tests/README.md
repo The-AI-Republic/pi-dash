@@ -56,6 +56,12 @@ sign-in endpoint (black box).
   hash — and sends the session cookie as an explicit `Cookie` header.
   Seeded users get `user_timezone = "UTC"`; every run seeds under a
   unique tag (`ctn<hex8>`) and deletes its rows at teardown.
+- `assistant/` — PIDASHCONV-20: assistant + SSE (threads, messages, SSE
+  events, cancel, generate-title, BYOK/STT config + test, transcribe,
+  agent profile/token, MCP servers). Same env contract; this suite was
+  validated with a fernet BYOK key, a Redis-backed Celery broker, and
+  the SSRF guard on (see "Backend under test (assistant domain)"
+  below).
 
 ## Run: web_edge
 
@@ -247,3 +253,56 @@ CELERY_BROKER_URL=redis://localhost:6379/0  # or AMQP_URL; redis scheme only
 pointing at the same broker the worker consumes, and the server must run
 with ``CLOUD_AGENT_ENABLED=true`` (dispatch execution branches and the
 queue scanner are kill-switched otherwise).
+
+## Backend under test (assistant domain)
+
+The assistant suite needs a live backend plus the Postgres it reads/writes.
+Against Django (local run):
+
+```sh
+# Postgres + Redis running locally; then from apps/api:
+DJANGO_SETTINGS_MODULE=pi_dash.settings.local \
+DATABASE_URL=<same DATABASE_URL as above> \
+REDIS_URL=redis://localhost:6379/5 \
+SECRET_KEY=<fixed contract secret, see below> \
+ASSISTANT_CRYPTO_BACKEND=fernet \
+ASSISTANT_ENCRYPTION_KEY=<fernet key> \
+WEB_URL=<same origin as BASE_URL> \
+AMQP_URL=redis://localhost:6379/6 \
+ASSISTANT_BLOCK_PRIVATE_URLS=True \
+python -m uvicorn pi_dash.asgi:application --host 127.0.0.1 --port 8891
+```
+
+and for the suite itself:
+
+```sh
+export CONTRACT_DJANGO_SECRET_KEY=<same fixed contract secret>
+```
+
+Notes:
+
+- Use private Redis DB numbers: the default DB is shared with other local
+  services, which would merge throttle counters and pubsub traffic.
+- `SECRET_KEY` must be fixed (and mirrored in `CONTRACT_DJANGO_SECRET_KEY`)
+  because the harness mints session cookies with the backend's exact session
+  encoding instead of driving the sign-in form — hundreds of per-test form
+  logins would trip the 30/minute anonymous throttle. Sign-in itself is the
+  authentication domain's contract, not this suite's.
+- `AMQP_URL=redis://…` lets the message POST dispatch its Celery task without
+  a worker; the turn stays queued, which is exactly what the suite asserts.
+- `ASSISTANT_BLOCK_PRIVATE_URLS=True` is cloud parity; the SSRF cases pin
+  the guard, and all other saved URLs are literal public IPs so no DNS is
+  needed.
+- Every test seeds uniquely-suffixed rows and never tears down: the suite is
+  re-runnable and parallel-safe (`pytest -n auto` works).
+
+## Conventions for new domains
+
+- `BASE_URL` / `DATABASE_URL` from the environment; never hardcode hosts.
+- Seed with SQL via `_harness` (`build_world`, `login_client`); never import
+  Django or use its test client.
+- Every endpoint gets a response-shape assertion, plus one denied-permission
+  case and one tenant-isolation case per domain; the suite must fail if a
+  permission class is removed.
+- Outbound-provider behaviour that needs a live third party stays out;
+  cover those endpoints through their deterministic gates and error shapes.

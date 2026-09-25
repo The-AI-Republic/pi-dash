@@ -42,10 +42,12 @@ Nothing here imports Django. Tests talk to the system under test only via:
     through ORM signals (e.g. github_signals completion hook);
   * local stub sinks (sinks.py) — capture outbound side effects.
 """
-
 from .db import Database
 from .http import admin_client, anon_client
 from .settings import base_url, database_url, secret_key
+from _harness.db import db_cursor
+from _harness.worlds import World, build_world, ensure_instance
+from _harness.client import login_client
 
 __all__ = ["Database", "admin_client", "anon_client", "base_url", "database_url", "secret_key"]
 
@@ -65,4 +67,9 @@ __all__ += [
     "api_client",
     "get_settings",
     "login_session",
+    "db_cursor",
+    "World",
+    "build_world",
+    "ensure_instance",
+    "login_client",
 ]
