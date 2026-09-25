@@ -48,3 +48,21 @@ from .http import admin_client, anon_client
 from .settings import base_url, database_url, secret_key
 
 __all__ = ["Database", "admin_client", "anon_client", "base_url", "database_url", "secret_key"]
+
+# Re-exports for the HTTP suites (first use: space domain; extended by
+# dispatch, PIDASHCONV-22). Other domains extend these modules, never fork.
+from _harness.auth import login_session
+from _harness.config import Settings, get_settings
+from _harness.db import LazyDatabase
+from _harness.http import api_client, anonymous_client
+from _harness.seed import Seeder
+
+__all__ += [
+    "LazyDatabase",
+    "Seeder",
+    "Settings",
+    "anonymous_client",
+    "api_client",
+    "get_settings",
+    "login_session",
+]

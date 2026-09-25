@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+from typing import Any, Sequence
 import secrets
 import time
 import uuid
@@ -251,3 +252,47 @@ class Database:
             conn.commit()
         return {"id": mid}
 
+class LazyDatabase:
+    """Thin psycopg wrapper. Connections are lazy so ``pytest --collect-only``
+    works with no database around; fixtures connect on first use.
+
+    Named apart from ``Database`` (the/reset + make_* helper owned by the
+    license suite): same ``(dsn)`` constructor shape, disjoint methods.
+    """
+
+    def __init__(self, dsn: str):
+        self._dsn = dsn
+        self._conn = None
+
+    def connect(self):
+        if self._conn is None or self._conn.closed:
+            from psycopg.rows import dict_row
+
+            self._conn = psycopg.connect(self._dsn, row_factory=dict_row, autocommit=True)
+        return self._conn
+
+    def execute(self, sql: str, params: Sequence[Any] | None = None):
+        with self.connect().cursor() as cur:
+            cur.execute(sql, params or ())
+            return cur
+
+    def fetchone(self, sql: str, params: Sequence[Any] | None = None):
+        with self.connect().cursor() as cur:
+            cur.execute(sql, params or ())
+            return cur.fetchone()
+
+    def fetchall(self, sql: str, params: Sequence[Any] | None = None):
+        with self.connect().cursor() as cur:
+            cur.execute(sql, params or ())
+            return cur.fetchall()
+
+    def fetchval(self, sql: str, params: Sequence[Any] | None = None):
+        row = self.fetchone(sql, params)
+        if not row:
+            return None
+        return next(iter(row.values()))
+
+    def close(self):
+        if self._conn is not None and not self._conn.closed:
+            self._conn.close()
+        self._conn = None
