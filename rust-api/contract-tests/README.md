@@ -306,3 +306,66 @@ Notes:
   permission class is removed.
 - Outbound-provider behaviour that needs a live third party stays out;
   cover those endpoints through their deterministic gates and error shapes.
+
+## Domain: v1_cycles_modules (D-20 oracle, PIDASHCONV-78)
+
+- `v1_cycles_modules/` — D-20 oracle: api-v1 cycles (8 routes) + modules
+  (7 routes). Fixtures live in the domain `conftest.py` (following the
+  app_scheduler/ precedent); the root `conftest.py` stays a plain import
+  shim for every suite.
+- `_harness/api.py` — httpx clients + api-v1 URL builders (added here;
+  extend, never fork).
+- `_harness/db.py` — also carries the D-20 fixed-UUID seed set:
+  `reset()` / fixed-UUID seeds (same module as the baseline helpers, never
+  a per-domain fork).
+- `_harness/contract_eager_settings.py` — local-boot Django settings shim
+  (NOT imported by the suite): test settings plus eager Celery and
+  in-memory cache so `runserver` works with no RabbitMQ/Redis. CI uses
+  real services instead; HTTP behaviour is identical.
+
+## Run against local Django (eager shim, D-20)
+
+```sh
+# 1. Postgres (any instance; must be migrated — see 3.)
+export DATABASE_URL=postgres://postgres:postgres@localhost:5433/pidash_contract
+
+# 2. Python env with the API deps
+python3.12 -m venv /tmp/pidash-venv
+/tmp/pidash-venv/bin/pip install -r ../../apps/api/requirements/test.txt
+/tmp/pidash-venv/bin/pip install -r requirements.txt
+
+# 3. Migrate
+cd ../../apps/api
+DATABASE_URL=$DATABASE_URL DJANGO_SETTINGS_MODULE=pi_dash.settings.test \
+  /tmp/pidash-venv/bin/python manage.py migrate
+
+# 4. Serve (from the repo root; the shim lives in _harness/)
+cd ../..
+PYTHONPATH=apps/api:rust-api/contract-tests/_harness DATABASE_URL=$DATABASE_URL \
+  DJANGO_SETTINGS_MODULE=contract_eager_settings \
+  /tmp/pidash-venv/bin/python apps/api/manage.py runserver 127.0.0.1:8471 --noreload
+
+# 5. Run the suite (from THIS directory — paths assume that cwd)
+cd rust-api/contract-tests
+BASE_URL=http://127.0.0.1:8471 DATABASE_URL=$DATABASE_URL \
+  /tmp/pidash-venv/bin/python -m pytest v1_cycles_modules
+```
+
+## Coverage contract (every domain suite)
+
+1. A shape assertion for every routed drf-spectacular endpoint.
+2. One denied-permission case (expects 403).
+3. One tenant-isolation case (a valid token from another workspace, 403).
+4. The suite must fail when a permission class is deliberately removed —
+   demonstrated per domain by a one-line local patch (reverted, never
+   committed); see the domain PR for the transcript.
+
+## Ported upstream bugs (D-20, reproduced byte-for-byte)
+
+- `GET .../cycles/?cycle_view=current` returns a bare JSON list, every
+  other view returns the paginated envelope.
+- `POST .../cycles/<draft>/archive/` (null `end_date`) → 500
+  `{"error": "Something went wrong please try again later"}`.
+- `PATCH` on a completed cycle with `{"sort_order": N}` → 200 but the
+  value is silently dropped (serializer has no `sort_order` field).
+- Deletes are soft (`deleted_at` set, row retained).
