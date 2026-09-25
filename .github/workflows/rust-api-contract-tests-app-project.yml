@@ -1,0 +1,104 @@
+# Contract suite: app project + states + estimates (PIDASHCONV-83, D-25 oracle).
+# Boots the live Django backend (Postgres + Redis services) and runs the same
+# pytest+httpx suite that later runs against the Rust server through the proxy.
+#
+# Auth: app views accept only session cookies (BaseSessionAuthentication, CSRF
+# disabled). The harness seeds users straight into Postgres and forges
+# `session-id` cookie rows with stdlib crypto, so Django must run with a FIXED
+# SECRET_KEY (below) that matches CONTRACT_SECRET_KEY. No Django imports.
+#
+# Broker: views publish `.delay()` side-calls (activity signals) that no
+# worker consumes in this job; AMQP_URL points Celery at Redis so publishing
+# succeeds without a consumer. Do NOT start a worker/beat here: consumed
+# tasks have DB side effects the suite does not expect.
+name: rust-api contract tests — app project
+
+on:
+  pull_request:
+    paths:
+      - "rust-api/**"
+      - "apps/api/**"
+      - ".github/workflows/rust-api-contract-tests-app-project.yml"
+  push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - "apps/api/**"
+      - ".github/workflows/rust-api-contract-tests-app-project.yml"
+
+jobs:
+  app-project:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: pidash_contract
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/pidash_contract
+      REDIS_URL: redis://localhost:6379/0
+      AMQP_URL: redis://localhost:6379/1
+      WEB_URL: http://127.0.0.1:8000
+      APP_BASE_URL: http://127.0.0.1:8000
+      EMAIL_HOST: localhost
+      API_KEY_RATE_LIMIT: 100000/minute
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.test
+      BASE_URL: http://127.0.0.1:8000
+      # Fixed key so HTTP suites can forge session rows (see
+      # rust-api/contract-tests/_harness/http.py); must match
+      # CONTRACT_SECRET_KEY below.
+      SECRET_KEY: "contract-tests-fixed-secret"
+      CONTRACT_SECRET_KEY: "contract-tests-fixed-secret"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system deps for psycopg-c
+        run: sudo apt-get update -y && sudo apt-get install -y libpq-dev
+
+      - name: Install Django server and contract-test deps
+        run: >-
+          python -m pip install
+          -r apps/api/requirements/base.txt
+          -r rust-api/contract-tests/requirements.txt
+
+      - name: Migrate contract database
+        working-directory: apps/api
+        run: python manage.py migrate --noinput
+
+      - name: Start live Django server
+        working-directory: apps/api
+        run: |
+          python manage.py runserver 127.0.0.1:8000 --noreload > /tmp/django-contract.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null "$BASE_URL/"; then
+              echo "Django is up"; exit 0
+            fi
+            sleep 4
+          done
+          echo "Django did not start:"; tail -n 50 /tmp/django-contract.log; exit 1
+
+      - name: Run app_project contract suite
+        working-directory: rust-api/contract-tests
+        run: python -m pytest app_project -v

@@ -49,3 +49,43 @@ def get_settings() -> Settings:
             "DATABASE_URL=postgres://user:pass@localhost:5432/pidash"
         )
     return Settings(base_url=base_url_value, database_url=database_url_value)
+
+
+# --- PIDASHCONV-83 (app project/state/estimate oracle) ---
+# Union with the baseline above.
+def required(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(
+            f"contract-tests require {name} to be set "
+            "(see rust-api/contract-tests/README.md)"
+        )
+    return value
+
+
+def optional(name: str, default: str) -> str:
+    return os.environ.get(name, default)
+
+
+DATABASE_URL = "DATABASE_URL"
+CELERY_BROKER_URL = "CELERY_BROKER_URL"
+BASE_URL = "BASE_URL"
+PI_DASH_SOURCE_DIR = "PI_DASH_SOURCE_DIR"
+# Fixed SECRET_KEY the contract Django stack runs with. HTTP suites forge
+# session rows with it (see _harness/http.py); it must match the server.
+CONTRACT_SECRET_KEY = "CONTRACT_SECRET_KEY"
+
+# How long to wait for the Django worker to execute a published job.
+TASK_TIMEOUT_SECONDS = float(optional("CONTRACT_TASK_TIMEOUT", "60"))
+
+# Poll interval while waiting for worker effects.
+POLL_INTERVAL_SECONDS = float(optional("CONTRACT_POLL_INTERVAL", "0.5"))
+
+# SMTP sink the harness starts; the Django side must deliver to it via
+# EMAIL_HOST / EMAIL_PORT / EMAIL_USE_TLS=0 / EMAIL_USE_SSL=0.
+SMTP_SINK_HOST = optional("SMTP_SINK_HOST", "127.0.0.1")
+SMTP_SINK_PORT = int(optional("SMTP_SINK_PORT", "1025"))
+
+# Base URL of the webhook sink the harness starts. Tests seed Webhook rows
+# pointing at <base>/hook/<token>.
+WEBHOOK_SINK_BASE = optional("WEBHOOK_SINK_BASE", "http://127.0.0.1:18099")
