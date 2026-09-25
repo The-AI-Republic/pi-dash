@@ -198,9 +198,15 @@ def authed_client(base_url: str, session_key: str) -> httpx.Client:
 def login_session(client: "httpx.Client", *, email: str, password: str) -> "httpx.Client":
     """POST the app sign-in form and assert a session cookie was set.
 
-    Both sign-in views are redirect flows (``HttpResponseRedirect``), so the
-    client must follow redirects; success lands on a session cookie rather
-    than a JSON body, hence the cookie assertion instead of a status one.
+    Both sign-in views are redirect flows (``HttpResponseRedirect``): the
+    session cookie is set on the 302 itself, so this POST does not follow
+    redirects — the ``Location`` points at the app's ``APP_BASE_URL``/``WEB_URL``,
+    which need not resolve from the machine running the suite. Success lands
+    on a session cookie rather than a JSON body, hence the cookie assertion
+    instead of a status one.
+
+    The cookie name comes from ``SESSION_COOKIE_NAME`` (the app default is
+    ``session-id``); the legacy ``sessionid`` is accepted as a fallback.
     """
     token_response = client.get("/auth/get-csrf-token/")
     token_response.raise_for_status()
@@ -210,10 +216,14 @@ def login_session(client: "httpx.Client", *, email: str, password: str) -> "http
         "/auth/sign-in/",
         data={"email": email, "password": password},
         headers={"X-CSRFToken": csrf_token, "Referer": str(client.base_url)},
+        follow_redirects=False,
     )
-    session_cookie = client.cookies.get("sessionid")
+    cookie_name = os.environ.get("SESSION_COOKIE_NAME", "session-id")
+    session_cookie = client.cookies.get(cookie_name) or client.cookies.get("sessionid")
     assert session_cookie, (
         f"sign-in for {email} set no session cookie "
-        f"(status={response.status_code}, location={response.headers.get('location')})"
+        f"(looked for {cookie_name!r}/'sessionid'; "
+        f"have {sorted(cookie.name for cookie in client.cookies.jar)}, "
+        f"status={response.status_code}, location={response.headers.get('location')})"
     )
     return client
