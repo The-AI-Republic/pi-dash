@@ -167,4 +167,3 @@ docker run --rm --network <stack>_default \
   (name → task → crontab) plus the target task being registered/executable.
 - The deliberate-permission-removal check from the HTTP coverage floor has no
   library-domain equivalent (no permission classes); recorded as n/a.
->>>>>>> 6647290f (PIDASHCONV-19: stage-1 task oracle scaffold + fan-out tests (part 1))
