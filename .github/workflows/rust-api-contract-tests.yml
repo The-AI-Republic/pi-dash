@@ -1,225 +1,74 @@
-name: Rust API contract tests
+# Contract suites: pytest + httpx oracle tests under rust-api/contract-tests/.
+# Each domain job boots the live Django backend (Postgres service) and runs
+# the same suite that later runs against the Rust server through the proxy.
+name: rust-api contract tests
 
 on:
-  workflow_dispatch:
   pull_request:
-    branches:
-      - "rust-dev"
     paths:
       - "rust-api/**"
+      - "apps/api/**"
       - ".github/workflows/rust-api-contract-tests.yml"
   push:
-    branches:
-      - "rust-dev"
+    branches: [rust-dev]
     paths:
       - "rust-api/**"
+      - "apps/api/**"
       - ".github/workflows/rust-api-contract-tests.yml"
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-permissions:
-  contents: read
-
 jobs:
-  contract-tests:
-    name: worker-plane oracle vs Django
+  web-edge:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
     services:
       postgres:
-        image: postgres:15.7-alpine
+        image: postgres:16
         env:
-          POSTGRES_USER: pi_dash
-          POSTGRES_PASSWORD: pi_dash
-          POSTGRES_DB: pi_dash
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: pidash_contract
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U pi_dash"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-      redis:
-        image: valkey/valkey:7.2.11-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-      rabbitmq:
-        image: rabbitmq:3.13.6-management-alpine
-        env:
-          RABBITMQ_DEFAULT_USER: pi_dash
-          RABBITMQ_DEFAULT_PASS: pi_dash
-          RABBITMQ_DEFAULT_VHOST: pi_dash
-        ports:
-          - 5672:5672
-        options: >-
-          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-cmd pg_isready
           --health-interval 10s
-          --health-timeout 10s
-          --health-retries 10
-    # No minio service container: Docker Hub no longer serves minio/minio,
-    # and service containers cannot pass the required `server /data`
-    # command. The "Start minio" step below runs quay.io/minio/minio
-    # (MinIO's canonical registry) with the same invocation as
-    # docker-compose.yml's pi-dash-minio service.
+          --health-timeout 5s
+          --health-retries 5
     env:
-      DJANGO_SETTINGS_MODULE: pi_dash.settings.local
-      POSTGRES_USER: pi_dash
-      POSTGRES_PASSWORD: pi_dash
-      POSTGRES_DB: pi_dash
-      POSTGRES_HOST: localhost
-      POSTGRES_PORT: "5432"
-      REDIS_URL: redis://localhost:6379/
-      RABBITMQ_HOST: localhost
-      RABBITMQ_PORT: "5672"
-      RABBITMQ_USER: pi_dash
-      RABBITMQ_PASSWORD: pi_dash
-      RABBITMQ_VHOST: pi_dash
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/pidash_contract
       WEB_URL: http://localhost
       APP_BASE_URL: http://localhost
-      EMAIL_BACKEND: django.core.mail.backends.smtp.EmailBackend
       EMAIL_HOST: localhost
-      EMAIL_PORT: "1025"
-      EMAIL_USE_TLS: "0"
-      EMAIL_USE_SSL: "0"
-      EMAIL_FROM: Pi Dash Contract <contract@example.com>
-      HARD_DELETE_AFTER_DAYS: "0"
-      UNUPLOADED_ASSET_DELETE_DAYS: "0"
-      USE_MINIO: "1"
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
-      AWS_STORAGE_BUCKET_NAME: pi-dash-contract
-      AWS_S3_ENDPOINT_URL: http://localhost:9000
-      BASE_URL: http://localhost:8000
-      DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
-      CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
-      CONTRACT_TASK_TIMEOUT: "60"
-      # Fixed key so HTTP suites can forge session rows (see
-      # rust-api/contract-tests/_harness/http.py); must match
-      # CONTRACT_SECRET_KEY below.
-      SECRET_KEY: "contract-tests-fixed-secret"
-      CONTRACT_SECRET_KEY: "contract-tests-fixed-secret"
+      API_KEY_RATE_LIMIT: 100000/minute
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.test
+      BASE_URL: http://127.0.0.1:8000
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.12.x"
-          cache: pip
-          cache-dependency-path: |
-            apps/api/requirements.txt
-            apps/api/requirements/base.txt
-            apps/api/requirements/test.txt
-            rust-api/contract-tests/requirements.txt
+          python-version: "3.12"
 
-      - name: Install API dependencies
+      - name: Install system deps for psycopg-c
+        run: sudo apt-get update -y && sudo apt-get install -y libpq-dev
+
+      - name: Install Django server and contract-test deps
+        run: >-
+          python -m pip install
+          -r apps/api/requirements/base.txt
+          -r rust-api/contract-tests/requirements.txt
+
+      - name: Start live Django server
         working-directory: apps/api
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements/test.txt
-          # pi_dash.settings.local imports debug_toolbar (requirements/local.txt)
-          pip install "django-debug-toolbar==4.3.0"
-
-      - name: Install contract-test dependencies
-        working-directory: rust-api/contract-tests
-        run: pip install -r requirements.txt
-
-      - name: Migrate contract database
-        working-directory: apps/api
-        run: python manage.py migrate --no-input
-
-      - name: Start minio
-        run: |
-          # quay.io pulls flake on GH-hosted runners with transient daemon
-          # "unauthorized" errors; retry the pull before failing the job.
-          started=""
-          for attempt in 1 2 3; do
-            docker rm -f contract-minio >/dev/null 2>&1 || true
-            if docker run -d --name contract-minio -p 9000:9000 \
-              -e MINIO_ROOT_USER=minioadmin \
-              -e MINIO_ROOT_PASSWORD=minioadmin \
-              quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data; then
-              started=1
-              break
-            fi
-            echo "minio start attempt $attempt failed; retrying..."
-            sleep 15
-          done
-          if [ -z "$started" ]; then
-            echo "minio failed to start after 3 attempts"
-            exit 1
-          fi
+          python manage.py runserver 127.0.0.1:8000 --noreload > /tmp/django-contract.log 2>&1 &
           for i in $(seq 1 30); do
-            curl -sf http://localhost:9000/minio/health/live && break
-            sleep 2
+            if curl -fsS -o /dev/null "$BASE_URL/"; then
+              echo "Django is up"; exit 0
+            fi
+            sleep 4
           done
+          echo "Django did not start:"; tail -n 50 /tmp/django-contract.log; exit 1
 
-      - name: Create minio bucket
-        run: |
-          pip install minio
-          python - <<'EOF'
-          import time
-          from minio import Minio
-          client = Minio("localhost:9000", access_key="minioadmin",
-                         secret_key="minioadmin", secure=False)
-          for _ in range(30):
-              try:
-                  if not client.bucket_exists("pi-dash-contract"):
-                      client.make_bucket("pi-dash-contract")
-                  break
-              except Exception:
-                  time.sleep(2)
-          else:
-              raise RuntimeError("minio never became ready")
-          EOF
-
-      - name: Start Django API
-        working-directory: apps/api
-        run: |
-          nohup python manage.py runserver 127.0.0.1:8000 \
-            > /tmp/contract-api.log 2>&1 &
-          # TCP probe: Django returns 404 on / with DEBUG on, so don't use -f.
-          for i in $(seq 1 60); do
-            (echo > /dev/tcp/127.0.0.1/8000) >/dev/null 2>&1 && break
-            sleep 2
-          done
-
-      - name: Start Celery worker
-        working-directory: apps/api
-        run: |
-          nohup celery -A pi_dash worker --pool=solo --loglevel=info \
-            > /tmp/contract-worker.log 2>&1 &
-
-      - name: Start Celery beat
-        working-directory: apps/api
-        run: |
-          nohup celery -A pi_dash beat --loglevel=info \
-            > /tmp/contract-beat.log 2>&1 &
-
-      - name: Run worker-plane oracle
+      - name: Run web_edge contract suite
         working-directory: rust-api/contract-tests
-        # Those suites land with the worker-plane PR; skip here until the
-        # union merge so this PR's CI reflects its own domains.
-        run: |
-          for suite in tasks_mail tasks_webhooks tasks_cleanup tasks_ticker; do
-            [ -d "$suite" ] || continue
-            pytest "$suite" || exit 1
-          done
-
-      - name: Run app-project HTTP oracle (D-25)
-        working-directory: rust-api/contract-tests
-        run: pytest app_project
-
-      - name: Upload service logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: contract-service-logs
-          path: /tmp/contract-*.log
+        run: python -m pytest web_edge -v

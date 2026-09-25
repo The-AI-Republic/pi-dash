@@ -8,7 +8,7 @@ from celery import Celery
 
 from . import config
 from .celery_wire import make_app
-from .db import wait_for
+from .db import wait_for_condition
 
 
 def registered_tasks(app: Celery | None = None, timeout: float = 10.0) -> set[str]:
@@ -23,7 +23,7 @@ def registered_tasks(app: Celery | None = None, timeout: float = 10.0) -> set[st
 
 
 def wait_for_registration(task_names: set[str], what: str = "worker registration") -> set[str]:
-    found = wait_for(
+    found = wait_for_condition(
         lambda: registered_tasks() or None,
         what=f"{what} (any worker answering inspect)",
     )
@@ -76,9 +76,9 @@ def drain_queue(queue: str = "celery", limit: int = 100) -> list:
 
 def wait_for_queue_drain(baseline: int = 0, what: str = "queue drain") -> None:
     """Wait until the worker has consumed every published job (no drop)."""
-    from .db import wait_for
+    from .db import wait_for_condition
 
-    wait_for(lambda: queue_depth() <= baseline or None, what=what)
+    wait_for_condition(lambda: queue_depth() <= baseline or None, what=what)
 
 
 def collect_matching(predicate, queue: str = "celery", timeout: float | None = None) -> list:
