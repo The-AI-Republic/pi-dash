@@ -760,3 +760,216 @@ def fetch_module(conn, module_id):
             "SELECT id, name, deleted_at FROM modules WHERE id = %s", [module_id]
         )
         return cur.fetchone()
+
+# --- D-19 (PIDASHCONV-77) seeding helpers ---
+# Union with the baseline above: same module, no fork. ``connect`` is
+# the baseline's (its no-arg call is identical); everything below is
+# added verbatim from the domain suite's first-use harness.
+
+# Workspace / project roles (pi_dash.db.models.project.ROLE).
+ADMIN = 20
+MEMBER = 15
+GUEST = 5
+
+# Project network (pi_dash.db.models.project.ProjectNetwork).
+NETWORK_SECRET = 0
+NETWORK_PUBLIC = 2
+
+
+def new_tag():
+    return uuid.uuid4().hex[:8]
+
+
+def create_user(conn, tag, *, first_name="Ct", last_name="User", is_bot=False):
+    uid = str(uuid.uuid4())
+    email = f"ct-{tag}@example.com"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO users (id, password, username, email, first_name, last_name,
+                avatar, date_joined, created_at, updated_at, last_location,
+                created_location, is_superuser, is_managed, is_password_expired,
+                is_active, is_staff, is_email_verified, is_password_autoset, token,
+                user_timezone, last_login_ip, last_logout_ip, last_login_medium,
+                last_login_uagent, is_bot, display_name, is_email_valid,
+                is_password_reset_required)
+            VALUES (%s, '!', %s, %s, %s, %s,
+                '', now(), now(), now(), '',
+                '', false, false, false,
+                true, false, true, false, '',
+                'UTC', '', '', '',
+                '', %s, %s, true,
+                false)
+            """,
+            (uid, email, email, first_name, last_name, is_bot, f"{first_name} {last_name}"),
+        )
+    conn.commit()
+    return {"id": uid, "email": email}
+
+
+def create_workspace(conn, tag, owner_id, *, name=None, slug=None):
+    wid = str(uuid.uuid4())
+    slug = slug or f"ct-{tag}"
+    name = name or f"CT {tag}"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO workspaces (id, name, slug, owner_id, created_by_id,
+                updated_by_id, timezone, background_color, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, 'UTC', '', now(), now())
+            """,
+            (wid, name, slug, owner_id, owner_id, owner_id),
+        )
+    conn.commit()
+    return {"id": wid, "slug": slug, "name": name}
+
+
+def add_workspace_member(conn, workspace_id, user_id, role=MEMBER):
+    mid = str(uuid.uuid4())
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO workspace_members (id, workspace_id, member_id, role,
+                is_active, view_props, default_props, issue_props,
+                explored_features, getting_started_checklist, tips,
+                created_at, updated_at)
+            VALUES (%s, %s, %s, %s,
+                true, '{}', '{}', '{}',
+                '{}', '{}', '{}',
+                now(), now())
+            """,
+            (mid, workspace_id, user_id, role),
+        )
+    conn.commit()
+    return {"id": mid}
+
+
+def create_api_token(conn, user_id, tag, *, label=None):
+    tid = str(uuid.uuid4())
+    token = f"ct-{tag}-{uuid.uuid4().hex[:12]}"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO api_tokens (id, token, label, user_type, user_id,
+                description, is_active, is_service, allowed_rate_limit,
+                created_at, updated_at)
+            VALUES (%s, %s, %s, 0, %s, '', true, false, '', now(), now())
+            """,
+            (tid, token, label or f"ct-{tag}", user_id),
+        )
+    conn.commit()
+    return {"id": tid, "token": token}
+
+
+def create_project(conn, workspace_id, tag, *, name=None, identifier=None, created_by_id=None):
+    pid = str(uuid.uuid4())
+    name = name or f"CT Project {tag}"
+    identifier = identifier or f"CT{tag.upper()}"[:12]
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO projects (id, name, description, network, identifier,
+                workspace_id, created_by_id, cycle_view, module_view,
+                issue_views_view, page_view, intake_view, archive_in, close_in,
+                logo_props, is_time_tracking_enabled, is_issue_type_enabled,
+                guest_view_all_features, timezone, members_can_edit_states,
+                repo_url, base_branch, agent_default_interval_seconds,
+                agent_default_max_ticks, agent_ticking_enabled, is_default,
+                agent_review_default_interval_seconds, default_agent_executor,
+                agent_test_default_interval_seconds, created_at, updated_at)
+            VALUES (%s, %s, '', %s, %s,
+                %s, %s, true, true,
+                true, true, false, 0, 0,
+                '{}', true, true,
+                false, 'UTC', false,
+                '', '', 0,
+                0, false, false,
+                0, '', 0, now(), now())
+            """,
+            (pid, name, NETWORK_SECRET, identifier, workspace_id, created_by_id),
+        )
+        cur.execute(
+            """
+            INSERT INTO project_identifiers (name, project_id, workspace_id,
+                created_by_id, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, now(), now())
+            """,
+            (identifier, pid, workspace_id, created_by_id),
+        )
+    conn.commit()
+    return {"id": pid, "name": name, "identifier": identifier}
+
+
+def add_project_member(conn, workspace_id, project_id, user_id, role=MEMBER):
+    mid = str(uuid.uuid4())
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO project_members (id, workspace_id, project_id, member_id,
+                role, is_active, view_props, default_props, preferences,
+                sort_order, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, true, '{}', '{}', '{}', 0, now(), now())
+            """,
+            (mid, workspace_id, project_id, user_id, role),
+        )
+    conn.commit()
+    return {"id": mid}
+
+
+def create_state(conn, workspace_id, project_id, tag, *, name=None, group="backlog",
+                 sequence=100.0, default=False, color="#ff0000", created_by_id=None):
+    sid = str(uuid.uuid4())
+    name = name or f"CT State {tag}"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO states (id, name, description, color, slug, project_id,
+                workspace_id, sequence, "group", "default", is_triage,
+                created_by_id, created_at, updated_at)
+            VALUES (%s, %s, '', %s, %s, %s, %s, %s, %s, %s, false, %s, now(), now())
+            """,
+            (sid, name, color, f"ct-{tag}", project_id, workspace_id,
+             sequence, group, default, created_by_id),
+        )
+    conn.commit()
+    return {"id": sid, "name": name}
+
+
+def create_invite(conn, workspace_id, tag, *, email=None, role=MEMBER,
+                  created_by_id=None, accepted=False, responded_at=None):
+    iid = str(uuid.uuid4())
+    email = email or f"ct-invite-{tag}@example.com"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO workspace_member_invites (id, email, accepted, token,
+                role, workspace_id, created_by_id, responded_at,
+                created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+            """,
+            (iid, email, accepted, f"ct-invite-token-{tag}", role,
+             workspace_id, created_by_id, responded_at),
+        )
+    conn.commit()
+    return {"id": iid, "email": email}
+
+
+def ensure_not_default(conn, project_id):
+    """Clear the default flag so the row can be deleted.
+
+    The first project per workspace is auto-defaulted on save(), and exactly
+    one default may exist (partial unique index), so a throwaway created when
+    the workspace has no default becomes undeletable. Tests clear the flag
+    before deleting their own throwaways.
+    """
+    with conn.cursor() as cur:
+        cur.execute("UPDATE projects SET is_default = false WHERE id = %s", (project_id,))
+
+
+def fetch_one(conn, query, params=()):
+    with conn.cursor() as cur:
+        cur.execute(query, params)
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return dict(zip([d.name for d in cur.description], row))

@@ -43,3 +43,45 @@ def api_client(base_url: str, timeout: float = 30.0, **kwargs) -> httpx.Client:
     jar here is what carries the session cookie afterwards.
     """
     return httpx.Client(base_url=base_url, timeout=timeout, follow_redirects=True, **kwargs)
+
+
+# --- D-19 (PIDASHCONV-77) API-key helpers ---
+# Union with the baseline above: ``base_url`` is the baseline's
+# ``settings.base_url`` (identical semantics); the X-Api-Key client
+# and asserting verbs below are added verbatim.
+
+def client(api_key=None):
+    headers = {}
+    if api_key:
+        headers["X-Api-Key"] = api_key
+    return httpx.Client(base_url=base_url(), headers=headers, timeout=30)
+
+
+def get(api_key, path, *, expect=200, params=None):
+    with client(api_key) as c:
+        r = c.get(path, params=params)
+    assert r.status_code == expect, f"GET {path}: want {expect}, got {r.status_code}: {r.text[:400]!r}"
+    return r
+
+
+def post(api_key, path, *, expect=201, json=None):
+    with client(api_key) as c:
+        r = c.post(path, json=json)
+    assert r.status_code == expect, f"POST {path}: want {expect}, got {r.status_code}: {r.text[:400]!r}"
+    return r
+
+
+def patch(api_key, path, *, expect=200, json=None):
+    with client(api_key) as c:
+        r = c.patch(path, json=json)
+    assert r.status_code == expect, f"PATCH {path}: want {expect}, got {r.status_code}: {r.text[:400]!r}"
+    return r
+
+
+def delete(api_key, path, *, expect=204):
+    with client(api_key) as c:
+        r = c.delete(path)
+    assert r.status_code == expect, (
+        f"DELETE {path}: want {expect}, got {r.status_code}: {r.text[:400]!r}"
+    )
+    return r
