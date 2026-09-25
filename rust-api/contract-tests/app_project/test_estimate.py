@@ -1,5 +1,7 @@
 """Contract tests: estimate URL module (5 routes)."""
 
+from psycopg.rows import dict_row
+
 from conftest import assert_keys
 
 ESTIMATE_KEYS = [
@@ -43,7 +45,7 @@ def test_bulk_create_shape(world, db):
     assert len(created["points"]) == 2
     for point in created["points"]:
         assert_keys(point, POINT_KEYS, "estimate-create-point")
-    with db.cursor() as cur:
+    with db.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT COUNT(*) AS n FROM estimate_points WHERE estimate_id=%s",
                     (created["id"],))
         assert cur.fetchone()["n"] == 2
@@ -133,7 +135,7 @@ def test_bulk_destroy(world, db):
         f"/api/workspaces/{ws['slug']}/projects/{project['id']}/estimates/{created['id']}/")
     assert resp.status_code == 204
     # Deletes are soft: the row stays with deleted_at set.
-    with db.cursor() as cur:
+    with db.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT deleted_at FROM estimates WHERE id=%s", (created["id"],))
         assert cur.fetchone()["deleted_at"] is not None
 

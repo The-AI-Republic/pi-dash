@@ -4,6 +4,8 @@ Every test pins the live Django wire shape: status code plus the exact
 response key set. Value assertions only where the test controls the value.
 """
 
+from psycopg.rows import dict_row
+
 from conftest import assert_keys
 
 LIST_KEYS = [
@@ -98,7 +100,7 @@ def test_create_project_shape_and_side_effects(world, db):
     assert resp.status_code == 201
     assert_keys(resp.json(), DETAIL_KEYS, "create")
     pid = resp.json()["id"]
-    with db.cursor() as cur:
+    with db.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT COUNT(*) AS n FROM states WHERE project_id=%s", (pid,))
         assert cur.fetchone()["n"] == 8
         # The triage row carries group='triage' (is_triage stays False;
@@ -157,7 +159,7 @@ def test_destroy_project(world, db):
     resp = client.delete(f"/api/workspaces/{ws['slug']}/projects/{second['id']}/")
     assert resp.status_code == 204
     # Deletes are soft: the row stays with deleted_at set.
-    with db.cursor() as cur:
+    with db.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT deleted_at FROM projects WHERE id=%s", (str(second["id"]),))
         assert cur.fetchone()["deleted_at"] is not None
 
@@ -245,7 +247,7 @@ def test_members_create_shape(world, db):
     assert isinstance(body, list) and len(body) == 1
     assert_keys(body[0], MEMBER_ROLE_KEYS, "members-create")
     assert body[0]["role"] == 15
-    with db.cursor() as cur:
+    with db.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT COUNT(*) AS n FROM project_user_properties "
             "WHERE project_id=%s AND user_id=%s",
@@ -308,7 +310,7 @@ def test_member_destroy_deactivates(world, db):
     resp = client.delete(
         f"/api/workspaces/{ws['slug']}/projects/{project['id']}/members/{member_id}/")
     assert resp.status_code == 204
-    with db.cursor() as cur:
+    with db.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT is_active FROM project_members WHERE id=%s", (member_id,))
         assert cur.fetchone()["is_active"] is False
     # An admin cannot remove themselves; leave is the only path out.
@@ -330,7 +332,7 @@ def test_member_destroy_and_leave(world, db):
     resp = member_client.post(
         f"/api/workspaces/{ws['slug']}/projects/{project['id']}/members/leave/")
     assert resp.status_code == 204
-    with db.cursor() as cur:
+    with db.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT is_active FROM project_members WHERE id=%s", (member_id,))
         assert cur.fetchone()["is_active"] is False
     # Sole admin cannot leave: re-login as the admin and try
@@ -353,7 +355,7 @@ def test_project_views_update_204(world, db):
         f"/api/workspaces/{ws['slug']}/projects/{project['id']}/project-views/",
         json={"view_props": {"kanban": True}, "sort_order": 3})
     assert resp.status_code == 204
-    with db.cursor() as cur:
+    with db.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT sort_order FROM project_members WHERE project_id=%s",
             (str(project["id"]),))
@@ -429,7 +431,7 @@ def test_user_invitations_join_public_project(world, db):
         json={"project_ids": [str(project["id"])]})
     assert resp.status_code == 201
     assert resp.json() == {"message": "Projects joined successfully"}
-    with db.cursor() as cur:
+    with db.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT role FROM project_members WHERE project_id=%s AND member_id=%s",
             (str(project["id"]), str(joiner["id"])))
@@ -465,7 +467,7 @@ def test_join_accept_creates_memberships(world, db):
         json={"email": newcomer["email"], "accepted": True})
     assert resp.status_code == 200
     assert resp.json() == {"message": "Project Invitation Accepted"}
-    with db.cursor() as cur:
+    with db.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT is_active FROM workspace_members WHERE workspace_id=%s AND member_id=%s",
             (str(ws["id"]), str(newcomer["id"])))
@@ -552,12 +554,12 @@ def test_archive_unarchive_cycle(world, db):
     resp = client.post(url)
     assert resp.status_code == 200
     assert_keys(resp.json(), ["archived_at"], "archive")
-    with db.cursor() as cur:
+    with db.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT archived_at FROM projects WHERE id=%s", (str(project["id"]),))
         assert cur.fetchone()["archived_at"] is not None
     resp = client.delete(url)
     assert resp.status_code == 204
-    with db.cursor() as cur:
+    with db.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT archived_at FROM projects WHERE id=%s", (str(project["id"]),))
         assert cur.fetchone()["archived_at"] is None
 
@@ -576,7 +578,7 @@ def test_favorites_create_and_destroy(world, db):
     resp = client.post(f"/api/workspaces/{ws['slug']}/user-favorite-projects/",
                        json={"project": str(project["id"])})
     assert resp.status_code == 204
-    with db.cursor() as cur:
+    with db.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT COUNT(*) AS n FROM user_favorites WHERE project_id=%s",
             (str(project["id"]),))
@@ -584,7 +586,7 @@ def test_favorites_create_and_destroy(world, db):
     resp = client.delete(
         f"/api/workspaces/{ws['slug']}/user-favorite-projects/{project['id']}/")
     assert resp.status_code == 204
-    with db.cursor() as cur:
+    with db.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT COUNT(*) AS n FROM user_favorites WHERE project_id=%s",
             (str(project["id"]),))

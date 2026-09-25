@@ -1,5 +1,7 @@
 """Contract tests: state URL module (4 routes)."""
 
+from psycopg.rows import dict_row
+
 from conftest import assert_keys
 
 STATE_KEYS = [
@@ -67,7 +69,7 @@ def test_create_state_shape(world, db):
     assert resp.status_code == 200
     assert_keys(resp.json(), STATE_KEYS, "state-create")
     assert resp.json()["name"] == "Contract New"
-    with db.cursor() as cur:
+    with db.cursor(row_factory=dict_row) as cur:
         cur.execute('SELECT "group" FROM states WHERE id=%s', (resp.json()["id"],))
         assert cur.fetchone()["group"] == "unstarted"
 
@@ -109,7 +111,7 @@ def test_mark_default_flips(world, db):
         f"/api/workspaces/{ws['slug']}/projects/{project['id']}/states/{target['id']}/"
         "mark-default/")
     assert resp.status_code == 204
-    with db.cursor() as cur:
+    with db.cursor(row_factory=dict_row) as cur:
         cur.execute('SELECT "default" FROM states WHERE id=%s', (target["id"],))
         assert cur.fetchone()["default"] is True
         cur.execute('SELECT "default" FROM states WHERE id=%s', (current["id"],))
@@ -124,7 +126,7 @@ def test_destroy_state(world, db):
         f"/api/workspaces/{ws['slug']}/projects/{project['id']}/states/{extra['id']}/")
     assert resp.status_code == 204
     # Deletes are soft: the row stays with deleted_at set.
-    with db.cursor() as cur:
+    with db.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT deleted_at FROM states WHERE id=%s", (str(extra["id"]),))
         assert cur.fetchone()["deleted_at"] is not None
 
@@ -142,7 +144,7 @@ def test_destroy_nonempty_state_400(world, db):
     client, _, ws, project = world.full_stack()
     extra = _seed_state(world, ws, project)
     import uuid as _uuid
-    with db.cursor() as cur:
+    with db.cursor(row_factory=dict_row) as cur:
         cur.execute(
             'INSERT INTO issues (id, name, description_json, priority, sequence_id,'
             ' project_id, workspace_id, description_html, sort_order, is_draft,'
