@@ -89,3 +89,10 @@ __all__ += [
     "ensure_instance",
     "login_client",
 ]
+
+# Submodule surface (PIDASHCONV-81): `from _harness import env` (module
+# constants) and the api/broker/db/sinks/world modules. Kept alongside the
+# re-exports above, never a fork.
+from . import api, broker, db, env, sinks, world  # noqa: F401,E402
+
+__all__ += ["api", "broker", "db", "env", "sinks", "world"]
