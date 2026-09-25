@@ -39,7 +39,10 @@ import pytest
 
 from _harness.auth import login_session
 from _harness.config import get_settings
-from _harness.db import Database
+# NOTE (rebase onto rust-dev tip): the lazy fetch-helper wrapper is now
+# named ``LazyDatabase`` — ``Database`` is the license suite's
+# connect/reset/make_* helper with a disjoint API.
+from _harness.db import LazyDatabase
 from _harness.http import anonymous_client, api_client
 from _harness.seed import Seeder, SeedTracker
 
@@ -59,7 +62,7 @@ def ssettings():
 
 @pytest.fixture(scope="session")
 def sdb(ssettings):
-    database = Database(ssettings.database_url)
+    database = LazyDatabase(ssettings.database_url)
     yield database
     database.close()
 
@@ -127,7 +130,7 @@ def settings(ssettings):
 
 @pytest.fixture()
 def db(settings):
-    database = Database(settings.database_url)
+    database = LazyDatabase(settings.database_url)
     yield database
     database.close()
 
