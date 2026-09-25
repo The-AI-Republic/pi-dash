@@ -116,6 +116,10 @@ def _seed_issue_chain(db_conn, slug: str):
     """user → workspace → project → state → issue. Returns dict of rows."""
     owner = seed_helpers.user(db_conn, f"contract-{slug}-owner")
     workspace = seed_helpers.workspace(db_conn, f"contract{slug}", owner["id"])
+    # Every NOT NULL projects/states/issues column without a database
+    # default must be present (Django field ``default=`` is Python-side
+    # only). Values mirror the model defaults in db/models/{project,
+    # state, issue}.py.
     project = insert_row(
         db_conn,
         "projects",
@@ -125,7 +129,28 @@ def _seed_issue_chain(db_conn, slug: str):
             "description": "",
             "identifier": "CT",
             "network": 2,
+            "module_view": False,
+            "cycle_view": False,
+            "issue_views_view": False,
+            "page_view": True,
+            "intake_view": False,
+            "is_time_tracking_enabled": False,
+            "is_issue_type_enabled": False,
+            "is_default": False,
+            "guest_view_all_features": False,
+            "members_can_edit_states": True,
+            "archive_in": 0,
+            "close_in": 0,
+            "logo_props": {},
+            "timezone": "UTC",
+            "repo_url": "",
+            "base_branch": "main",
+            "agent_default_interval_seconds": 10800,
             "agent_default_max_ticks": 10,
+            "agent_review_default_interval_seconds": 10800,
+            "agent_test_default_interval_seconds": 10800,
+            "agent_ticking_enabled": True,
+            "default_agent_executor": "local_runner",
         },
     )
     state = insert_row(
@@ -137,8 +162,11 @@ def _seed_issue_chain(db_conn, slug: str):
             "name": "Contract",
             "description": "",
             "color": "#000000",
+            "slug": "",
             "group": "backlog",
             "sequence": 65535,
+            "is_triage": False,
+            "default": False,
         },
     )
     issue = insert_row(
@@ -152,8 +180,11 @@ def _seed_issue_chain(db_conn, slug: str):
             "description_json": {},
             "description_html": "<p></p>",
             "priority": "none",
+            "complexity_score": 0,
+            "sequence_id": 1,
             "is_draft": False,
             "sort_order": 65535,
+            "git_work_branch": "",
             "workpad": "",
         },
     )
@@ -197,7 +228,12 @@ def test_scan_due_tickers_fans_out_fire_tick(db_conn, broker_url):
             "used": 0,
             "granted": 0,
             "waited": 0,
+            "user_disabled": False,
             "enabled": True,
+            "disarm_reason": "",
+            "pending_entry": False,
+            "pending_entry_free": False,
+            "pending_entry_trigger": "",
             "next_run_at": _past(),
         },
     )
@@ -224,7 +260,12 @@ def test_scan_due_tickers_skips_not_due(db_conn, broker_url):
             "used": 0,
             "granted": 0,
             "waited": 0,
+            "user_disabled": False,
             "enabled": True,
+            "disarm_reason": "",
+            "pending_entry": False,
+            "pending_entry_free": False,
+            "pending_entry_trigger": "",
             "next_run_at": future,
         },
     )
@@ -288,6 +329,7 @@ def test_scan_due_bindings_fans_out_fire(db_conn, broker_url):
             "extra_context": "",
             "enabled": True,
             "outcome_mode": "create_issue",
+            "last_error": "",
             "next_run_at": None,
         },
     )
@@ -330,8 +372,12 @@ def test_redelivered_scan_fans_out_once_per_run(db_conn, broker_url):
             "used": 0,
             "granted": 0,
             "waited": 0,
-            "pending_entry": True,
+            "user_disabled": False,
             "enabled": True,
+            "disarm_reason": "",
+            "pending_entry": True,
+            "pending_entry_free": False,
+            "pending_entry_trigger": "",
             "next_run_at": _past(),
         },
     )

@@ -3,8 +3,8 @@
 Django sources: pi_dash/bgtasks/{email_notification_task, notification_task,
 magic_link_code_task, forgot_password_task, user_activation_email_task,
 user_deactivation_email_task, user_email_update_task,
-project_add_user_email_task, project_invitation_task,
-workspace_invitation_task}.py
+project_add_user_email_task, workspace_invitation_task}.py
+(project_invitation_task.py is dead code — see NOTE on MAIL_TASKS.)
 """
 
 import uuid
@@ -93,12 +93,13 @@ MAIL_TASKS = {
         ["example.com", str(uuid.uuid4()), str(uuid.uuid4())],
         {},
     ),
-    f"{M}.project_invitation_task.project_invitation": (
-        "pi_dash/bgtasks/project_invitation_task.py",
-        "project_invitation",
-        ["contract@example.com", str(uuid.uuid4()), "token", "example.com", "invitor"],
-        {},
-    ),
+    # NOTE: pi_dash/bgtasks/project_invitation_task.py::project_invitation is
+    # deliberately absent. It is dead code: nothing imports the module, no
+    # beat entry or send_task names it, and the live worker does not register
+    # it (worker-plane CI 2026-09-24: 74 registered tasks, this one missing).
+    # The apparent call site (app/views/project/invite.py:105) calls .delay()
+    # on the list returned by bulk_create, not on the task. Per the Dead
+    # Python Code page it stays unported and untested here.
     f"{M}.workspace_invitation_task.workspace_invitation": (
         "pi_dash/bgtasks/workspace_invitation_task.py",
         "workspace_invitation",
@@ -162,7 +163,7 @@ def test_stack_fans_out_and_marks_processed(db_conn, broker_url, smtp_sink):
 
     # The fan-out enqueues real send tasks: the worker must deliver the mail.
     delivered = smtp_sink.wait_for_count(1, what="stacked notification mail")
-    assert any("contract-receiver@example.com" in m["rcpt_tos"] for m in delivered)
+    assert any(receiver["email"] in m["rcpt_tos"] for m in delivered)
 
 
 def test_stack_redelivery_is_idempotent(db_conn, broker_url, smtp_sink):

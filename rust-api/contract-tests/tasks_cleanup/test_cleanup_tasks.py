@@ -272,6 +272,8 @@ def test_delete_page_versions_keeps_newest_20(db_conn, broker_url):
             "is_locked": False,
             "view_props": {},
             "logo_props": {},
+            "is_global": False,
+            "sort_order": 65535,
         },
     )
     base = datetime.now(timezone.utc) - timedelta(days=90)
@@ -305,6 +307,8 @@ def test_delete_unuploaded_file_asset(db_conn, broker_url):
         {
             "asset": "contract/stale.bin",
             "is_uploaded": False,
+            "is_deleted": False,
+            "is_archived": False,
             "size": 0,
             "attributes": {},
             "created_at": _old(),
@@ -326,8 +330,10 @@ def test_delete_old_s3_link_clears_expired_url(db_conn, broker_url):
         "exporters",
         {
             "workspace_id": str(workspace["id"]),
+            "type": "issue_exports",
             "provider": "csv",
             "status": "completed",
+            "reason": "",
             "url": "https://example.com/expired.zip",
             "key": "",
             "token": f"contract-{uuid.uuid4().hex}",

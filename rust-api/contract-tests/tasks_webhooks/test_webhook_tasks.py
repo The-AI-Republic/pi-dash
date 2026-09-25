@@ -256,7 +256,7 @@ def test_deactivation_email_delivers(db_conn, broker_url, smtp_sink):
         args=[str(hook["id"]), str(receiver["id"]), "example.com", "contract reason"],
     )
     delivered = smtp_sink.wait_for_count(1, what="deactivation mail")
-    assert any("contract-deact-receiver@example.com" in m["rcpt_tos"] for m in delivered)
+    assert any(receiver["email"] in m["rcpt_tos"] for m in delivered)
 
 
 def test_process_logs_writes_postgres_row(db_conn, broker_url):
