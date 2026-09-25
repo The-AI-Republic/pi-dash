@@ -11,7 +11,7 @@ list action raises into the generic 500 handler. Create/destroy are
 custom actions and work.
 """
 
-from conftest import modules_url
+from .conftest import modules_url
 
 SERVER_ERROR = {"error": "Something went wrong please try again later"}
 

@@ -1,6 +1,6 @@
 """POST /api/v1/auth/device/token/ — CLI polls the grant for an APIToken."""
 
-from conftest import approve, device_start, poll_token
+from .conftest import approve, device_start, poll_token
 
 
 def _approved_codes(api, seed, tenant, secret):

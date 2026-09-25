@@ -12,7 +12,7 @@ URL names the kwargs module_id/issue_id but DRF's default
 retrieve/update look for `pk`. DELETE is a custom action and works.
 """
 
-from conftest import module_url, modules_url
+from .conftest import module_url, modules_url
 
 SERVER_ERROR = {"error": "Something went wrong please try again later"}
 

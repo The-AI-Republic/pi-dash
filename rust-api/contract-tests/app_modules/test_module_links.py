@@ -10,7 +10,7 @@ PATCH without a url is rejected with {"error": "Invalid URL format."}
 module.
 """
 
-from conftest import modules_url
+from .conftest import modules_url
 
 LINK_KEYS = {
     "id", "created_at", "updated_at", "deleted_at", "title", "url",

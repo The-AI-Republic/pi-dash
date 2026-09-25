@@ -15,7 +15,7 @@ and fails the suite); the cases below are the tripwires:
 
 import os
 
-from conftest import module_url, modules_url, session_headers
+from .conftest import module_url, modules_url, session_headers
 
 
 def test_create_denied_without_project_membership(api, seed, tenant_a, project_a):

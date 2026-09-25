@@ -9,7 +9,7 @@ ModuleWriteSerializer, so its key set differs from the annotated
 create/PATCH shapes. Pinned here on purpose.
 """
 
-from conftest import (
+from .conftest import (
     MODULE_DETAIL_KEYS as DETAIL_KEYS,
     MODULE_ROW_KEYS,
     module_url,

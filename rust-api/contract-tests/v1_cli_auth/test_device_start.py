@@ -2,7 +2,7 @@
 
 import re
 
-from conftest import device_start
+from .conftest import device_start
 
 USER_CODE_RE = re.compile(r"^[BCDFGHJKLMNPQRSTVWXZ23456789]{4}-[BCDFGHJKLMNPQRSTVWXZ23456789]{4}$")
 
