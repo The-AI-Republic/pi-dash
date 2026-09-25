@@ -51,8 +51,12 @@ def test_member_denied_on_cycle_delete(admin, make_tenant):
             cur.execute(
                 "delete from workspace_members where member_id=%s", (member_id,)
             )
-        admin["seed"].member(admin["workspace"]["id"], member_id, role=MEMBER)
-        admin["seed"].project_member(
+        # Tracked on the per-test seed (not the session admin seed) so
+        # teardown removes them before the member's user row (FK order).
+        member_tenant["seed"].member(
+            admin["workspace"]["id"], member_id, role=MEMBER
+        )
+        member_tenant["seed"].project_member(
             admin["project"]["id"], admin["workspace"]["id"], member_id,
             role=MEMBER,
         )
