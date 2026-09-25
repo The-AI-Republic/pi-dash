@@ -1,17 +1,30 @@
+# Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# See the LICENSE file for details.
+
 """Direct-Postgres helpers for domains that seed data for the live backend.
 
 ``DATABASE_URL`` comes from the environment and is only required by
 suites that actually seed (web_edge needs no DB). Raw-SQL seeding,
-snapshots and polling live here (psycopg; no ORM).
+snapshots and polling live here (psycopg; no ORM, no Django imports).
+``db_conn`` below imports psycopg lazily so DB-free domains never pay
+for it.
 """
 from __future__ import annotations
 
+import json
 import os
+import secrets
 import time
 import uuid
+from datetime import datetime, timezone, timedelta
 
 import psycopg
 import pytest
+
+from . import signing
+
+KNOWN_PASSWORD = "ContractPass123!"
 
 
 def get_database_url() -> str:
@@ -74,3 +87,161 @@ def wait_for(
             return row
         time.sleep(poll)
     return None
+
+
+def _now():
+    return datetime.now(timezone.utc)
+
+
+class Database:
+    def __init__(self, conninfo):
+        self.conninfo = conninfo
+
+    def connect(self):
+        return psycopg.connect(self.conninfo)
+
+    def reset(self):
+        # Dependency order. `schedulers` rows are signal-created per
+        # workspace; a missing table here fails loudly as an FK violation.
+        tables = [
+            "schedulers",
+            "sessions",
+            "workspace_members",
+            "workspaces",
+            "instance_admins",
+            "instance_configurations",
+            "instances",
+            "users",
+        ]
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                for table in tables:
+                    cur.execute(f"delete from {table};")
+            conn.commit()
+
+    def make_user(self, email, *, password=KNOWN_PASSWORD, first_name="Contract", last_name="User", is_active=True):
+        uid = str(uuid.uuid4())
+        now = _now()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """insert into users (password, id, username, email, first_name, last_name,
+                        avatar, date_joined, created_at, updated_at, last_location,
+                        created_location, is_superuser, is_managed, is_password_expired,
+                        is_active, is_staff, is_email_verified, is_password_autoset,
+                        token, user_timezone, last_login_ip, last_logout_ip,
+                        last_login_medium, last_login_uagent, is_bot, display_name,
+                        is_email_valid, is_password_reset_required)
+                       values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       returning password""",
+                    (
+                        signing.make_password_hash(password), uid, f"u-{uid[:8]}", email,
+                        first_name, last_name, "", now, now, now, "", "", False, False,
+                        False, is_active, False, True, False, secrets.token_hex(32),
+                        "UTC", "", "", "email", "", False, f"{first_name} {last_name}",
+                        True, False,
+                    ),
+                )
+                password_hash = cur.fetchone()[0]
+            conn.commit()
+        return {"id": uid, "email": email, "password": password, "password_hash": password_hash}
+
+    def make_instance(self, *, name="Contract Instance", is_setup_done=True):
+        iid = str(uuid.uuid4())
+        now = _now()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """insert into instances (created_at, updated_at, id, instance_name,
+                        instance_id, current_version, last_checked_at,
+                        is_telemetry_enabled, is_support_required, is_setup_done,
+                        is_signup_screen_visited, is_verified, domain, edition,
+                        is_test, is_current_version_deprecated)
+                       values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (
+                        now, now, iid, name, f"instance-{iid[:8]}", "1.0.0", now,
+                        True, True, is_setup_done, False, False, "", "PI_DASH_COMMUNITY",
+                        False, False,
+                    ),
+                )
+            conn.commit()
+        return {"id": iid, "name": name}
+
+    def make_admin(self, instance_id, user_id, *, role=20):
+        aid = str(uuid.uuid4())
+        now = _now()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """insert into instance_admins
+                       (created_at, updated_at, id, role, is_verified, instance_id, user_id)
+                       values (%s,%s,%s,%s,%s,%s,%s)""",
+                    (now, now, aid, role, True, instance_id, user_id),
+                )
+            conn.commit()
+        return {"id": aid}
+
+    def make_config(self, key, value, *, category="general", is_encrypted=False):
+        cid = str(uuid.uuid4())
+        now = _now()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """insert into instance_configurations
+                       (created_at, updated_at, id, key, value, category, is_encrypted)
+                       values (%s,%s,%s,%s,%s,%s,%s)""",
+                    (now, now, cid, key, value, category, is_encrypted),
+                )
+            conn.commit()
+        return {"id": cid}
+
+    def mint_admin_session(self, user, secret, *, max_age=3600):
+        payload = signing.session_payload(user["id"], user["password_hash"], secret)
+        data = signing.encode_session(payload, secret)
+        key = signing.new_session_key()
+        expires = _now() + timedelta(seconds=max_age)
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("delete from sessions where user_id = %s;", (user["id"],))
+                cur.execute(
+                    """insert into sessions
+                       (session_key, session_data, expire_date, user_id, device_info)
+                       values (%s,%s,%s,%s,%s::jsonb)""",
+                    (key, data, expires, user["id"], json.dumps(payload["device_info"])),
+                )
+            conn.commit()
+        return key
+
+    def make_workspace(self, name, slug, owner_id, *, timezone="UTC"):
+        wid = str(uuid.uuid4())
+        now = _now()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """insert into workspaces
+                       (created_at, updated_at, id, name, slug, owner_id, timezone, background_color)
+                       values (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (now, now, wid, name, slug, owner_id, timezone, "#ffffff"),
+                )
+            conn.commit()
+        return {"id": wid, "name": name, "slug": slug}
+
+    def make_workspace_member(self, workspace_id, user_id, *, role=20):
+        mid = str(uuid.uuid4())
+        now = _now()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """insert into workspace_members
+                       (created_at, updated_at, id, role, member_id, workspace_id,
+                        view_props, default_props, issue_props, is_active,
+                        explored_features, getting_started_checklist, tips)
+                       values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (
+                        now, now, mid, role, user_id, workspace_id,
+                        json.dumps({}), json.dumps({}), json.dumps({}), True,
+                        json.dumps({}), json.dumps({}), json.dumps({}),
+                    ),
+                )
+            conn.commit()
+        return {"id": mid}
