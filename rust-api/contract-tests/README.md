@@ -28,7 +28,8 @@ sign-in endpoint (black box).
   (stdlib-only session/machine-token forging), `client.py`, `db.py`,
   `broker.py` (Celery protocol-v2 publish), `sinks.py` (recording
   HTTP stub), plus `config.py` (BASE_URL/DATABASE_URL env config),
-  `auth.py` (HTTP session login), `factory.py`
+  `auth.py` (HTTP session login, plus forged DB sessions first added for
+  PIDASHCONV-84), `factory.py`
   (user/workspace/notification factories) first added for
   PIDASHCONV-92.
 - `web_edge/` — PIDASHCONV-14: web edge (`/`, `/robots.txt`).
@@ -74,6 +75,12 @@ sign-in endpoint (black box).
   which is DB-only, so eager is faithful); the harness rides out the
   stock `anon` 30/min throttle with a bounded Retry-After-honoring
   retry, so a full run goes green against stock settings.
+- `app_issues/` — PIDASHCONV-84 (D-26): app-tier issues (list, detail,
+  sub-issues, relations, activity, drafts, archive; 45 paths in
+  `pi_dash/app/urls/issue.py`). Same env contract as the other DB-backed
+  suites, except session auth uses forged DB rows (`_harness.auth`
+  stdlib-only HMACs keyed by `SECRET_KEY`, which must equal the server's
+  pinned test secret) instead of the public login flow.
 
 ## Run: web_edge
 
@@ -132,6 +139,27 @@ Env contract:
 | `DATABASE_URL` | psycopg conninfo for seeding (required) |
 | `CONTRACT_SECRET_KEY` | must equal the server's `SECRET_KEY`; only used to forge session cookies / machine-token hashes when seeding (required) |
 | `CONTRACT_WEB_URL` | must equal the server's `WEB_URL`; expected `verification_uri` base (required) |
+
+## Run: app_issues (PIDASHCONV-84)
+
+Same shape as above, except session auth uses forged DB rows instead of
+the public login flow, so `SECRET_KEY` (not `CONTRACT_SECRET_KEY`) must
+equal the server's pinned test secret:
+
+```sh
+cd rust-api/contract-tests
+BASE_URL=http://127.0.0.1:8123 \
+DATABASE_URL="postgresql://<user>@/pidash_contract_84?host=/tmp" \
+SECRET_KEY=<same SECRET_KEY as the server> \
+.venv/bin/pytest app_issues -q
+```
+
+`SECRET_KEY` must be pinned to a fixed test-only value before the server
+starts: `_harness.auth` forges DB-backed session rows with HMACs keyed by
+it (stdlib only, no Django import), so rotating server keys would
+invalidate seeded sessions. `AMQP_URL=memory://` lets the export
+endpoints enqueue their Celery tasks without a broker; no worker
+consumes them.
 
 ## Throttle budget
 
