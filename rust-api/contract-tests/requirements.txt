@@ -8,3 +8,7 @@ requests>=2.31
 redis
 
 pytest==9.0.3
+
+# Rules (from PIDASHCONV-1, binding):
+# - Never import Django or use its test client. HTTP via httpx, seeding via SQL.
+# - Extend ``_harness/``, never fork it per domain.

@@ -1,0 +1,101 @@
+# Contract suite: app integrations + webhooks (PIDASHCONV-91). Boots the live
+# Django backend (Postgres + Redis services) and runs the same pytest+httpx
+# suite that later runs against the Rust server through the proxy.
+#
+# The GitHub App secrets and LLM_API_KEY are inert dummies: with them set the
+# suite exercises the configured paths (signed webhook deliveries, install
+# sessions, task validation) instead of the 409/400 fallbacks. No test calls
+# a real provider — live calls are pinned through deterministic error shapes.
+name: rust-api contract tests — app integrations
+
+on:
+  pull_request:
+    paths:
+      - "rust-api/**"
+      - "apps/api/**"
+      - ".github/workflows/rust-api-contract-tests-app-integrations.yml"
+  push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - "apps/api/**"
+      - ".github/workflows/rust-api-contract-tests-app-integrations.yml"
+
+jobs:
+  app-integrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: pidash_contract
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/pidash_contract
+      REDIS_URL: redis://localhost:6379/0
+      AMQP_URL: redis://localhost:6379/1
+      # Sign-in answers 302 to WEB_URL and the suite follows redirects, so this
+      # must point at the server under test (BASE_URL below), not bare
+      # http://localhost (port 80 has nothing listening in CI).
+      WEB_URL: http://127.0.0.1:8000
+      APP_BASE_URL: http://127.0.0.1:8000
+      EMAIL_HOST: localhost
+      API_KEY_RATE_LIMIT: 100000/minute
+      LLM_API_KEY: dummy-contract-key
+      GITHUB_APP_PRIVATE_KEY: dummy-private-key
+      GITHUB_APP_WEBHOOK_SECRET: contract91-webhook-secret
+      GITHUB_APP_CLIENT_SECRET: dummy-client-secret
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.test
+      BASE_URL: http://127.0.0.1:8000
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system deps for psycopg-c
+        run: sudo apt-get update -y && sudo apt-get install -y libpq-dev
+
+      - name: Install Django server and contract-test deps
+        run: >-
+          python -m pip install
+          -r apps/api/requirements/base.txt
+          -r rust-api/contract-tests/requirements.txt
+
+      - name: Migrate contract database
+        working-directory: apps/api
+        run: python manage.py migrate --noinput
+
+      - name: Start live Django server
+        working-directory: apps/api
+        run: |
+          python manage.py runserver 127.0.0.1:8000 --noreload > /tmp/django-contract.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null "$BASE_URL/"; then
+              echo "Django is up"; exit 0
+            fi
+            sleep 4
+          done
+          echo "Django did not start:"; tail -n 50 /tmp/django-contract.log; exit 1
+
+      - name: Run app_integrations contract suite
+        working-directory: rust-api/contract-tests
+        run: python -m pytest app_integrations -v
