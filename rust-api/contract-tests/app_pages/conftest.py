@@ -21,7 +21,7 @@ import pytest
 
 from _harness.auth import login_session
 from _harness.config import get_settings
-from _harness.db import Database
+from _harness.db import LazyDatabase
 from _harness.http import anonymous_client, api_client
 from _harness.seed import Seeder, SeedTracker
 
@@ -33,7 +33,9 @@ def settings():
 
 @pytest.fixture()
 def db(settings):
-    database = Database(settings.database_url)
+    # LazyDatabase is the shared thin psycopg wrapper (lazy connect so
+    # ``pytest --collect-only`` works with no database around).
+    database = LazyDatabase(settings.database_url)
     yield database
     database.close()
 

@@ -62,6 +62,18 @@ sign-in endpoint (black box).
   validated with a fernet BYOK key, a Redis-backed Celery broker, and
   the SSRF guard on (see "Backend under test (assistant domain)"
   below).
+- `app_pages/` — PIDASHCONV-88 (D-30): app-tier pages (summary,
+  list/create, retrieve/partial-update/destroy, favorite create/destroy,
+  archive/unarchive, lock/unlock, access, description retrieve/patch,
+  versions list/detail, duplicate). Same env contract, except no
+  `CONTRACT_SECRET_KEY`/`CONTRACT_WEB_URL`: app endpoints use Django
+  session auth (`session-id` cookie) via the public sign-in flow.
+  Server knobs: `WEB_URL`/`APP_BASE_URL` must point at the server under
+  test (sign-in redirects there); `CELERY_TASK_ALWAYS_EAGER=True` when
+  no broker/worker is available (page writes enqueue `page_transaction`,
+  which is DB-only, so eager is faithful); the harness rides out the
+  stock `anon` 30/min throttle with a bounded Retry-After-honoring
+  retry, so a full run goes green against stock settings.
 
 ## Run: web_edge
 
