@@ -822,6 +822,24 @@ class SeedTracker:
                 f"DELETE FROM page_logs WHERE page_id IN ({placeholders(pages)})",
                 tuple(pages),
             )
+        if workspaces or users:
+            # API-created pages ("Created page", "(Copy)" duplicates) belong to
+            # this test's workspace / users but are never tracked; their
+            # owned_by FK would otherwise block the tracked user deletes.
+            conditions, params = [], []
+            if workspaces:
+                conditions.append(f"workspace_id IN ({placeholders(workspaces)})")
+                params.extend(workspaces)
+            if users:
+                conditions.append(f"owned_by_id IN ({placeholders(users)})")
+                params.extend(users)
+                conditions.append(f"created_by_id IN ({placeholders(users)})")
+                params.extend(users)
+            not_tracked = f" AND id NOT IN ({placeholders(pages)})" if pages else ""
+            self._delete_untracked(
+                f"DELETE FROM pages WHERE ({' OR '.join(conditions)}){not_tracked}",
+                tuple(params) + tuple(pages),
+            )
 
     def cleanup(self):
         self._purge_side_rows()
