@@ -13,7 +13,9 @@ copies).
 
 - `_harness/` — shared helpers. Extend, never fork: `env.py` (env
   plumbing), `seed.py` (row factories + cleanup), `djangocrypto.py`
-  (stdlib-only session/machine-token forging), `client.py`, `db.py`.
+  (stdlib-only session/machine-token forging), `client.py`, `db.py`,
+  `broker.py` (Celery protocol-v2 publish), `sinks.py` (recording
+  HTTP stub).
 - `web_edge/` — PIDASHCONV-14: web edge (`/`, `/robots.txt`).
 - `v1_cli_auth/` — PIDASHCONV-80: api-v1 CLI auth + runner v1.
 - `app_views_search/` — PIDASHCONV-87: app-tier views (project/global
@@ -26,8 +28,11 @@ copies).
   free port works (this suite was validated on 8126; the dev server
   needs a Celery broker — `AMQP_URL=redis://127.0.0.1:6379/<db>` —
   because module writes publish activity tasks).
+- `integrations/` — PIDASHCONV-19 (D-05 task oracle): black-box
+  Celery-task oracle for the integrations library + git sync domain
+  (file layout below).
 
-## Run
+## Run: web_edge
 
 ```sh
 python3 -m venv .venv
@@ -90,3 +95,75 @@ in one go: ~15 `device/start` calls (20/minute/IP), ~11 anonymous token
 polls (30/minute/IP), a handful of requests per API key (60/minute/key).
 Do not add start/token-poll calls casually; share fixtures instead.
 Re-running within the same minute can 429 — wait for the window to slide.
+
+## Run: integrations (D-05 task oracle, PIDASHCONV-19)
+
+Black-box Celery-task oracle for the integrations library + git sync domain.
+Nothing here imports Django. Tests publish jobs in Celery wire format to the
+broker named by `CELERY_BROKER_URL`, let the live Django worker execute them,
+and diff Postgres via `DATABASE_URL`.
+
+```sh
+cd rust-api/contract-tests
+BASE_URL=http://api:8000 \
+DATABASE_URL=postgresql://pidash:<pw>@db:5432/pidash \
+CELERY_BROKER_URL=amqp://pidash:<pw>@mq:5672/pidash \
+  pytest integrations -q
+```
+
+In this repo's docker dev stack the suite runs from a container on the
+stack network so `db`/`mq`/`api` resolve; from the host use the published
+ports. The checkout is mounted read-only at `/repo` for the static pins in
+`test_beat.py`:
+
+```sh
+docker run --rm --network <stack>_default \
+  -v $PWD/rust-api/contract-tests:/suite:ro -v $PWD:/repo:ro \
+  -e DATABASE_URL=postgresql://pidash:<pw>@db:5432/pidash \
+  -e CELERY_BROKER_URL=amqp://pidash:<pw>@mq:5672/pidash \
+  -e BASE_URL=http://api:8000 \
+  python:3.12-slim bash -c "pip install -q 'pika>=1.3' 'psycopg[binary]>=3.1' 'pytest>=8' \
+    && cd /suite && python -m pytest integrations -q -p no:cacheprovider"
+```
+
+## Layout
+
+- `_harness/` — shared helpers (first use; extend, never fork): `broker.py`
+  (protocol-v2 publish, passive depth, drain-wait), `db.py` (raw SQL,
+  `wait_for` polling), `sinks.py` (recording HTTP stub).
+- `integrations/conftest.py` — env, read-only anchor rows, per-test `Scope`
+  teardown that deletes every seeded row.
+- `integrations/seed.py` — raw-SQL seed builders.
+- `integrations/test_fanout.py` — beat fan-out tasks (payload/ack parity,
+  disabled/empty no-ops, 4xx error-record + degrade).
+- `integrations/test_single.py` — unknown-id no-ops (both providers),
+  completion-comment idempotency + auth-failure error record, setup-ordering
+  pin (unsupported provider fails silently), redelivery guards.
+- `integrations/test_beat.py` — static pins read from the `/repo` checkout:
+  beat entry identity, retry schedule, signal-hook wiring.
+
+## Known oracle limits (pinned in stage 1)
+
+- Provider HTTP has no black-box stub seam: the GitHub adapter hardcodes
+  `api.github.com`; GitLab requires https + an allowlisted host. Happy-path
+  sync diffs (mirror rows created from listings) cannot run hermetically, so
+  the suite pins the deterministic surface: fan-out set, no-op cases, 4xx
+  error recording (no retry), completion-comment idempotency, beat entry
+  identity, redelivery guards.
+- Live retry needs a real transient (e.g. provider 5xx → generic-except →
+  `self.retry` with countdown 60 * 2^retries, max_retries=3), which has no
+  hermetic trigger from outside; the schedule is pinned statically in
+  `test_beat.py`. Probing the unknown-provider path instead revealed a real
+  ordering behavior the suite now pins: adapter lookup runs before the
+  guarded `try`, so an unsupported provider fails with no record and no
+  retry — in-try faults record + retry. The Rust port must keep this order.
+- The completion-hook signal (`github_signals`) fires only via an
+  authenticated HTTP state transition (SessionAuthentication), so firing is
+  pinned on the source (dispatch_uids, completed-group transition check,
+  already-commented skip, one `.delay()` per mirror type) while the delayed
+  tasks themselves are proven executable via the broker in `test_single.py`.
+- The domain beat entry (`github-issue-sync-every-4h`, 4h cadence) is not
+  wall-clock observable in a test run: parity is pinned on entry identity
+  (name → task → crontab) plus the target task being registered/executable.
+- The deliberate-permission-removal check from the HTTP coverage floor has no
+  library-domain equivalent (no permission classes); recorded as n/a.
