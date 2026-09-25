@@ -11,7 +11,7 @@ Django raises TypeError into the generic 500 handler. Archived modules
 vanish from the main list/retrieve and appear under archived-modules.
 """
 
-from conftest import module_url, modules_url
+from .conftest import module_url, modules_url
 
 SERVER_ERROR = {"error": "Something went wrong please try again later"}
 

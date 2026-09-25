@@ -2,7 +2,7 @@
 
 import pytest
 
-from conftest import approve, device_start
+from .conftest import approve, device_start
 
 
 @pytest.fixture()

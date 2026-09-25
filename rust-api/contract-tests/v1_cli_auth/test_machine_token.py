@@ -2,7 +2,7 @@
 
 import uuid
 
-from conftest import approve, device_start, poll_token
+from .conftest import approve, device_start, poll_token
 
 CLI_DESCRIPTION = "Issued by pidash auth login (device-code flow)."
 
