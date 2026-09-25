@@ -647,6 +647,32 @@ MEMBER = 15
 GUEST = 5
 
 
+def ensure_setup_done(conn) -> None:
+    """Upsert the ``instances`` row with ``is_setup_done=True``.
+
+    Auth endpoints refuse with ``INSTANCE_NOT_CONFIGURED`` until setup is
+    done; every auth suite ensures it per test so one suite's
+    not-configured case cannot leak into the next test.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM instances LIMIT 1")
+        if cur.fetchone() is None:
+            now = now_iso()
+            cur.execute(
+                """INSERT INTO instances (id, created_at, updated_at,
+                    instance_name, instance_id, current_version, domain,
+                    last_checked_at, is_telemetry_enabled, is_support_required,
+                    is_setup_done, is_signup_screen_visited, is_verified,
+                    is_test, is_current_version_deprecated, edition)
+                VALUES (%s,%s,%s,'contract-tests',%s,'1.0.0',
+                    'http://localhost',%s,true,true,true,false,false,false,
+                    false,'PI_DASH_COMMUNITY')""",
+                (new_id(), now, now, new_id(), now),
+            )
+        else:
+            cur.execute("UPDATE instances SET is_setup_done = true")
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
