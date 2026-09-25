@@ -1501,3 +1501,160 @@ class Seeder:
         )
         self._put("github_app_installations", row_id)
         return {"id": row_id, "installation_id": installation_id}
+
+    # -- api-v1 work items (PIDASHCONV-76) ---------------------------------
+    # api-v1 authenticates with ``X-Api-Key`` (APIKeyAuthentication against
+    # ``api_tokens``). These factories cover the work-items domain surface
+    # (links, relations, attachments, pages, activity, PR/review links,
+    # pods, agent runs); shared membership/token/page factories live above.
+    def create_issue_link(
+        self, workspace_id: str, project_id: str, issue_id: str, *, url: str = "https://example.com/spec"
+    ) -> dict[str, Any]:
+        link_id = _uid()
+        self.db.execute(
+            """INSERT INTO issue_links
+               (id, title, url, issue_id, project_id, workspace_id, metadata,
+                created_at, updated_at)
+               VALUES (%s,'Contract link',%s,%s,%s,%s,'{}',now(),now())""",
+            (link_id, url, issue_id, project_id, workspace_id),
+        )
+        self._put("issue_links", link_id)
+        return {"id": link_id}
+
+    def create_issue_relation(
+        self,
+        workspace_id: str,
+        project_id: str,
+        issue_id: str,
+        related_issue_id: str,
+        *,
+        relation_type: str = "relates_to",
+    ) -> dict[str, Any]:
+        relation_id = _uid()
+        self.db.execute(
+            """INSERT INTO issue_relations
+               (id, relation_type, issue_id, project_id, related_issue_id,
+                workspace_id, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,now(),now())""",
+            (relation_id, relation_type, issue_id, project_id, related_issue_id, workspace_id),
+        )
+        self._put("issue_relations", relation_id)
+        return {"id": relation_id}
+
+    def create_issue_attachment(
+        self, workspace_id: str, project_id: str, issue_id: str, *, asset: str = "contract-asset"
+    ) -> dict[str, Any]:
+        # The attachment endpoints read ``file_assets`` (entity
+        # ``ISSUE_ATTACHMENT``), not the legacy ``issue_attachments`` table.
+        attachment_id = _uid()
+        self.db.execute(
+            """INSERT INTO file_assets
+               (id, attributes, asset, entity_type, is_deleted, is_archived,
+                is_uploaded, issue_id, project_id, workspace_id, size,
+                created_at, updated_at)
+               VALUES (%s,'{}',%s,'ISSUE_ATTACHMENT',false,false,true,%s,%s,%s,10,now(),now())""",
+            (attachment_id, asset, issue_id, project_id, workspace_id),
+        )
+        self._put("file_assets", attachment_id)
+        return {"id": attachment_id}
+
+    def link_page_to_project(self, page_id: str, project_id: str, workspace_id: str) -> dict[str, Any]:
+        # Page reads scope to the project through ``project_pages``.
+        row_id = _uid()
+        self.db.execute(
+            """INSERT INTO project_pages
+               (id, page_id, project_id, workspace_id, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,now(),now())""",
+            (row_id, page_id, project_id, workspace_id),
+        )
+        self._put("project_pages", row_id)
+        return {"id": row_id}
+
+    def create_issue_activity(
+        self,
+        workspace_id: str,
+        project_id: str,
+        issue_id: str,
+        *,
+        verb: str = "created",
+        comment: str = "contract activity",
+    ) -> dict[str, Any]:
+        activity_id = _uid()
+        self.db.execute(
+            """INSERT INTO issue_activities
+               (id, verb, comment, attachments, issue_id, project_id, workspace_id,
+                created_at, updated_at)
+               VALUES (%s,%s,%s,'{}',%s,%s,%s,now(),now())""",
+            (activity_id, verb, comment, issue_id, project_id, workspace_id),
+        )
+        self._put("issue_activities", activity_id)
+        return {"id": activity_id}
+
+    def create_github_pr_link(
+        self, workspace_id: str, project_id: str, issue_id: str, *, pr_number: int = 7
+    ) -> dict[str, Any]:
+        link_id = _uid()
+        self.db.execute(
+            """INSERT INTO github_pull_request_links
+               (id, repo_owner, repo_name, pr_number, url, title, state, merged,
+                draft, issue_id, project_id, workspace_id, created_at, updated_at)
+               VALUES (%s,'contract-owner','contract-repo',%s,'https://github.com/contract-owner/contract-repo/pull/7',
+                       'Contract PR','open',false,false,%s,%s,%s,now(),now())""",
+            (link_id, pr_number, issue_id, project_id, workspace_id),
+        )
+        self._put("github_pull_request_links", link_id)
+        return {"id": link_id}
+
+    def create_code_review_link(
+        self, workspace_id: str, project_id: str, issue_id: str, *, external_iid: str = "7"
+    ) -> dict[str, Any]:
+        link_id = _uid()
+        self.db.execute(
+            """INSERT INTO git_code_review_links
+               (id, provider, host_url, namespace, repo_name, repo_external_id,
+                external_id, external_iid, url, title, state, merged, draft, metadata,
+                issue_id, project_id, workspace_id, created_at, updated_at)
+               VALUES (%s,'github','https://github.com','contract-owner','contract-repo','',
+                       'contract-e1',%s,'https://github.com/contract-owner/contract-repo/pull/7',
+                       'Contract review','open',false,false,'{}',%s,%s,%s,now(),now())""",
+            (link_id, external_iid, issue_id, project_id, workspace_id),
+        )
+        self._put("git_code_review_links", link_id)
+        return {"id": link_id}
+
+    def create_pod(self, workspace_id: str, project_id: str, *, name: str = "Contract pod") -> dict[str, Any]:
+        pod_id = _uid()
+        self.db.execute(
+            """INSERT INTO pod
+               (id, name, description, is_default, workspace_id, project_id,
+                created_at, updated_at)
+               VALUES (%s,%s,'',false,%s,%s,now(),now())""",
+            (pod_id, name, workspace_id, project_id),
+        )
+        self._put("pod", pod_id)
+        return {"id": pod_id}
+
+    def create_agent_run(
+        self,
+        workspace_id: str,
+        created_by_id: str,
+        pod_id: str,
+        work_item_id: str,
+        *,
+        status: str = "running",
+    ) -> dict[str, Any]:
+        run_id = _uid()
+        self.db.execute(
+            """INSERT INTO agent_run
+               (id, status, prompt, run_config, required_capabilities, thread_id,
+                error, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
+                refusal_category, trigger, executor_kind, dispatch_attempts,
+                cancel_reason, error_code, tool_plan, phase_kind, agent_metadata,
+                usage, created_at)
+               VALUES (%s,%s,'contract prompt','{}','{}','contract-thread','',
+                       %s,%s,%s,%s,'contract-model','', 'human', 'local_runner', 0,
+                       '','', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', now())""",
+            (run_id, status, workspace_id, work_item_id, pod_id, created_by_id),
+        )
+        self._put("agent_run", run_id)
+        return {"id": run_id}

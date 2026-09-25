@@ -88,6 +88,11 @@ sign-in endpoint (black box).
   suites, except session auth uses forged DB rows (`_harness.sessions`
   stdlib-only HMACs keyed by `SECRET_KEY`, which must equal the server's
   pinned test secret) instead of the public login flow.
+- `v1_work_items/` — PIDASHCONV-76: api-v1 work items (issue CRUD, move,
+  links, comments, activity, attachments, search, relations, workpad,
+  PR/review links, labels, pages). Same env contract as the other
+  DB-backed suites, except auth is `X-Api-Key` (an `api_tokens` row seeded
+  per user) and no `CONTRACT_SECRET_KEY`/`CONTRACT_WEB_URL` is needed.
 
 ## Run: web_edge
 
