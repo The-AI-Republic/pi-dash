@@ -269,14 +269,17 @@ describe("NewSchedulerModal", () => {
 
     it("maps a slug 400 from the serializer onto the slug field inline", async () => {
       const user = userEvent.setup();
-      createScheduler.mockRejectedValue({ slug: ["This slug is already in use."] });
+      // Real wire shape: SchedulerSerializer.validate_slug returns 400
+      // {"slug": ["This slug is already in use in this workspace."]} and the
+      // service rethrows err.response.data.
+      createScheduler.mockRejectedValue({ slug: ["This slug is already in use in this workspace."] });
       const { onClose } = renderModal({ availableSchedulers: [] });
 
       await user.type(screen.getByLabelText("Name"), "Weekly Review");
       await user.type(screen.getByLabelText("Prompt"), "Review the week");
       await user.click(screen.getByRole("button", { name: "Create & install" }));
 
-      expect(await screen.findByText("This slug is already in use.")).toBeInTheDocument();
+      expect(await screen.findByText("This slug is already in use in this workspace.")).toBeInTheDocument();
       expect(createBinding).not.toHaveBeenCalled();
       expect(setToast).not.toHaveBeenCalled();
       expect(onClose).not.toHaveBeenCalled();
