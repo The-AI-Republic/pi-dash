@@ -27,6 +27,24 @@ pub fn is_desktop_session(authenticated: bool, session_value: Option<&str>) -> b
     matches!(session_value, Some(value) if value == DESKTOP_CLIENT)
 }
 
+/// Overlay seam for `ee/authentication/desktop.py::request_is_desktop`.
+///
+/// The inputs are data, not a request: the caller extracts whatever its
+/// build's check needs (the CE session value, the cloud OIDC `client`
+/// claim) and the gate decides. The default implementation is the CE
+/// session-key check; the private crate replaces the gate, never the
+/// callers.
+pub trait DesktopGate {
+    fn is_desktop(&self, authenticated: bool, session_value: Option<&str>) -> bool {
+        is_desktop_session(authenticated, session_value)
+    }
+}
+
+/// CE gate: the session-key check, unchanged.
+pub struct SessionDesktopGate;
+
+impl DesktopGate for SessionDesktopGate {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42,5 +60,30 @@ mod tests {
     #[test]
     fn anonymous_never_desktop() {
         assert!(!is_desktop_session(false, Some("desktop")));
+    }
+
+    #[test]
+    fn default_gate_is_the_session_check() {
+        let gate = SessionDesktopGate;
+        assert!(gate.is_desktop(true, Some("desktop")));
+        assert!(!gate.is_desktop(true, None));
+        assert!(!gate.is_desktop(false, Some("desktop")));
+    }
+
+    /// The overlay replaces the gate (e.g. with the OIDC `client` claim);
+    /// callers behind the trait see the replacement without changing.
+    struct ClaimDesktopGate;
+
+    impl DesktopGate for ClaimDesktopGate {
+        fn is_desktop(&self, authenticated: bool, session_value: Option<&str>) -> bool {
+            authenticated && matches!(session_value, Some("desktop-oidc"))
+        }
+    }
+
+    #[test]
+    fn replacement_gate_wins_behind_the_trait() {
+        let gate = ClaimDesktopGate;
+        assert!(gate.is_desktop(true, Some("desktop-oidc")));
+        assert!(!gate.is_desktop(true, Some("desktop")));
     }
 }

@@ -14,6 +14,7 @@
 //! - [`issue_filters`]: the legacy `issue_filters` query-param compiler (F-07).
 //! - [`soft_delete`]: soft-delete read scope, write statements, view DDL.
 //! - [`tx`]: transaction wrapper with post-commit actions.
+//! - [`migrations`]: private migration directory convention (F-10).
 //!
 //! Write paths take a [`context::RequestContext`]; there is no unscoped
 //! handle for writes.
@@ -23,6 +24,7 @@ pub mod context;
 pub mod filter;
 pub mod filterset;
 pub mod issue_filters;
+pub mod migrations;
 pub mod pool;
 pub mod soft_delete;
 pub mod tx;

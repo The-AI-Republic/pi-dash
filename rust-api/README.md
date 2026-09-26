@@ -139,9 +139,37 @@ let app = pidash_api::build_app(state, Some(private_routes()));
 With an overlay: implement `SettingsOverlay` (`env_keys` to force keys to
 env, `apply` to mutate the resolved `Settings`), pre-install the registry
 with `try_init_global` when reclassification must be process-wide, and pass
-`Settings::from_map_with(&vars, Profile::Production, &overlay)`. Named
-route-group replacement arrives under F-10; until then `extra` merges whole
-routers.
+`Settings::from_map_with(&vars, Profile::Production, &overlay)`.
+
+## Extension seams (F-10)
+
+The six `ee/` stubs are traits with CE defaults; the private crate
+replaces the implementation, never the callers:
+
+| Trait | Module | CE default | Python source |
+|---|---|---|---|
+| `AssistantModelSeam` | `pidash-services::extensions` | `ByokAssistantSeam` | `ee/assistant/model_provider.py` |
+| `SttSeam` | `pidash-services::extensions` | `ByoSttSeam` | `ee/assistant/stt_provider.py` |
+| `CloudAgentModelSeam` | `pidash-services::extensions` | `CreatorModelSeam` | `ee/cloud_agent/model_provider.py` |
+| `CloudAgentToolsetsSeam` | `pidash-services::extensions` | `NoExtraToolsets` | `ee/cloud_agent/toolsets.py` |
+| `DesktopGate` | `pidash-auth::permissions::desktop` | `SessionDesktopGate` | `ee/authentication/desktop.py` |
+| `UserSettingsSchema` | `pidash-services::user_settings` | `CeUserSettings` | `ee/settings/user_settings.py` |
+
+Named route-group replacement (`crates/api/src/overlay.rs`, one group per
+§0 prefix): `Overlay::new().replace(RouteGroup::Auth, cloud_auth())` swaps
+a whole group (the cloud auth replacement), `.drop(RouteGroup::Auth)`
+removes every OSS mount in the group (`_strip_oss_auth`), and
+`.add_routes(router)` shadows individual OSS paths — additive routes sit in
+front of the OSS groups via fallback dispatch, the cloud pattern of placing
+paths ahead of the OSS include. Model/toolset *construction* extends the
+same traits when the assistant/cloud-agent runtimes are ported (D-06/D-11).
+
+Private migrations live in the private crate at
+`rust-api/private/migrations/` (`NNN_name.sql`, lexical order, applied
+after the OSS baseline; tables prefixed `private_`; see
+`crates/db/src/migrations.rs`). Private migrations never touch
+Django-owned or OSS `rust_*` tables — the same rule Django's own
+`pi_dash_cloud/*/migrations/` directories follow.
 
 ## Serializer + paginator kernel (F-07)
 

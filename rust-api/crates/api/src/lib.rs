@@ -14,11 +14,12 @@
 //! [`build_app`] is the composition point: the OSS binary and a private
 //! overlay crate's own `main.rs` both call it with an [`AppState`] built
 //! from their resolved [`Settings`](pidash_db::config::Settings) plus
-//! their extra routes. Named route-group replacement arrives under F-10;
-//! until then `extra` merges whole routers.
+//! their extra routes. Named route-group replacement lives in [`overlay`];
+//! `extra` stays the additive-only path.
 
 pub mod edge;
 pub mod middleware;
+pub mod overlay;
 pub mod paginator;
 pub mod permissions;
 pub mod routes;
@@ -34,13 +35,17 @@ pub use middleware::{
     SessionExpiry, SessionHandle, SessionLayer, SessionRow, SessionStore, StoreError,
     StoredSession, TokenLogLayer, TracingSink,
 };
+pub use overlay::{build_router_with_overlay, Overlay, RouteGroup};
 pub use routes::{build_router, with_routes};
 pub use state::AppState;
 
 /// Assemble the full application: foundation routes plus `extra`
 /// (domain routers from later issues, overlay routes from the private
 /// crate), wrapped in the F-08 middleware stack. `None` serves the
-/// foundation routes only.
+/// foundation routes only. For named group replacement (the private
+/// crate claiming or dropping whole groups), build an [`Overlay`] and
+/// call [`build_router_with_overlay`] instead, then wrap it in the same
+/// [`stack`].
 ///
 /// The stack reads its config from the state's F-03 `Settings`; the
 /// session layer persists through `PgSessionStore` when the state carries
