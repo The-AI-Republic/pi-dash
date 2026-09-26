@@ -6,7 +6,7 @@ response key set. Value assertions only where the test controls the value.
 
 from psycopg.rows import dict_row
 
-from conftest import assert_keys
+from .conftest import assert_keys
 
 LIST_KEYS = [
     "archived_at", "created_at", "created_by", "cycle_view",

@@ -2,7 +2,7 @@
 
 from psycopg.rows import dict_row
 
-from conftest import assert_keys
+from .conftest import assert_keys
 
 ESTIMATE_KEYS = [
     "created_at", "created_by", "deleted_at", "description", "id",

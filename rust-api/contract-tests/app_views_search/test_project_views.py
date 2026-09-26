@@ -7,7 +7,7 @@ Routes (apps/api/pi_dash/app/urls/views.py):
 
 import os
 
-from conftest import session_headers
+from .conftest import session_headers
 
 PROJECT_VIEW_KEYS = {
     "access", "archived_at", "created_at", "created_by", "deleted_at",
