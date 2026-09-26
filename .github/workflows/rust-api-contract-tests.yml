@@ -153,7 +153,7 @@ jobs:
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       AWS_STORAGE_BUCKET_NAME: pi-dash-contract
-      AWS_S3_ENDPOINT_URL: http://localhost:9000
+      AWS_S3_ENDPOINT_URL: http://localhost:4566
       BASE_URL: http://localhost:8000
       DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
       CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
@@ -188,24 +188,27 @@ jobs:
         working-directory: apps/api
         run: python manage.py migrate --no-input
 
-      - name: Start minio
+      # S3 is LocalStack, not MinIO: quay.io now rejects anonymous pulls
+      # ("unauthorized", verified 2026-09-26) and Docker Hub no longer
+      # serves minio/minio. Only bucket-exists/create + delete_object are
+      # exercised (the suite seeds exporters with an empty key).
+      - name: Start S3 (LocalStack)
         run: |
-          docker run -d --name contract-minio -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
-          for i in $(seq 1 30); do
-            curl -sf http://localhost:9000/minio/health/live && break
+          docker run -d --name contract-s3 -p 4566:4566 \
+            -e SERVICES=s3 \
+            localstack/localstack:4.5.0
+          for i in $(seq 1 45); do
+            curl -sf http://localhost:4566/_localstack/health && break
             sleep 2
           done
 
-      - name: Create minio bucket
+      - name: Create S3 bucket
         run: |
           pip install minio
           python - <<'EOF'
           import time
           from minio import Minio
-          client = Minio("localhost:9000", access_key="minioadmin",
+          client = Minio("localhost:4566", access_key="minioadmin",
                          secret_key="minioadmin", secure=False)
           for _ in range(30):
               try:
@@ -215,7 +218,7 @@ jobs:
               except Exception:
                   time.sleep(2)
           else:
-              raise RuntimeError("minio never became ready")
+              raise RuntimeError("S3 never became ready")
           EOF
 
       - name: Start Django API
