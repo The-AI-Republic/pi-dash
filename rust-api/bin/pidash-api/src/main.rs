@@ -6,11 +6,18 @@
 //! - `pidash-api worker` runs the background job loop (F-09 fills in the
 //!   queue polling; until then it ticks so the mode is exercisable).
 //!
+//! This `main` is deliberately thin: it resolves [`Settings`] from the
+//! environment, builds an [`AppState`], and delegates to
+//! [`pidash_api::build_app`]. A private overlay crate's own `main.rs`
+//! composes the same builder with its own settings and routes (see the
+//! runbook); named route-group replacement arrives under F-10.
+//!
 //! [`build_app`] is the application seam (F-10): tests and later issues wrap
 //! it with extra routes or layers without touching `main`.
 
 use clap::{Parser, Subcommand};
 use pidash_api::{with_routes, AppState, EdgeHandle};
+use pidash_db::config::Settings;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -39,7 +46,8 @@ enum Mode {
 
 /// Assemble the axum application. `extra` merges additional routes (domain
 /// routers from later issues); `None` serves the foundation routes only.
-/// Flags default off; use [`build_app_with_edge`] for a live edge.
+/// State is test-defaults; use [`build_app_with_edge`] for a live edge or
+/// [`build_app_from_env`] for the `serve` path (settings + edge from env).
 pub fn build_app(version: &'static str, extra: Option<axum::Router<AppState>>) -> axum::Router {
     build_router_with(version, extra.unwrap_or_default())
 }
@@ -62,6 +70,21 @@ fn build_router_with(version: &'static str, extra: axum::Router<AppState>) -> ax
     with_routes(AppState::new(version), extra)
 }
 
+/// Resolve settings plus the cutover edge from the environment and assemble
+/// the application (F-03 + F-02). `serve` uses this; tests that need a
+/// fixed state use [`build_app`] / [`build_app_with_edge`].
+fn build_app_from_env(
+    version: &'static str,
+    extra: Option<axum::Router<AppState>>,
+) -> MainResult<axum::Router> {
+    let settings = Settings::from_env()?;
+    let edge = EdgeHandle::from_env()?;
+    Ok(pidash_api::build_app(
+        AppState::with_settings_and_edge(version, settings, edge),
+        extra,
+    ))
+}
+
 async fn serve(bind: &str) -> MainResult {
     let addr: SocketAddr = bind.parse()?;
     let edge = EdgeHandle::from_env()?;
@@ -71,7 +94,7 @@ async fn serve(bind: &str) -> MainResult {
         flags = ?edge.flags(),
         "serving HTTP"
     );
-    let app = build_app_with_edge(env!("CARGO_PKG_VERSION"), None, edge);
+    let app = build_app_from_env(env!("CARGO_PKG_VERSION"), None)?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(
         listener,
@@ -104,7 +127,7 @@ async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-type MainResult = Result<(), Box<dyn std::error::Error>>;
+type MainResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn main() -> MainResult {
     tracing_subscriber::fmt()
@@ -131,7 +154,7 @@ mod tests {
 
     #[tokio::test]
     async fn built_app_serves_healthz() {
-        let app = build_app("test", None);
+        let app = build_app_from_env("test", None).expect("settings resolve");
         let response = app
             .oneshot(
                 axum::http::Request::get("/healthz")
@@ -147,7 +170,7 @@ mod tests {
     async fn built_app_accepts_extra_routes() {
         let extra: axum::Router<AppState> =
             axum::Router::new().route("/api/ping", axum::routing::get(|| async { "pong" }));
-        let app = build_app("test", Some(extra));
+        let app = build_app_from_env("test", Some(extra)).expect("settings resolve");
         let response = app
             .oneshot(
                 axum::http::Request::get("/api/ping")
