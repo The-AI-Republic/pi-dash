@@ -131,6 +131,25 @@ sign-in endpoint (black box).
   shared by every suite on the machine); the suite fetches the 1.4 MB
   document through session fixtures and waits out stale `429`s
   (`client.get_patient`, at most ~75 s).
+- `space/` — PIDASHCONV-16: space public API (`api/public/`, 25 paths:
+  project, issue, intake incl. inbox alias, asset incl. S3 presigned
+  flows). Same env contract (`BASE_URL` + `DATABASE_URL`); session auth
+  goes through the public sign-in flow (`login_session` in
+  `_harness/auth.py`, cookie name from `SESSION_COOKIE_NAME`, default
+  `session-id`, legacy `sessionid` fallback; the login POST never follows
+  the redirect so an unreachable `APP_BASE_URL` can't break it). Server
+  knobs: `CORS_ALLOWED_ORIGINS` must include an `http:` origin for the
+  host under test (else `Secure` cookies + CSRF 403 over `http`),
+  `APP_BASE_URL`/`WEB_URL` must point at the server under test, dummy
+  `AWS_*` creds suffice for offline presigning but `AWS_S3_BUCKET_NAME`
+  + `AWS_REGION` must also be set, one Redis db index per parallel run
+  (anon throttle 30/min — pace full runs). Tripwire: `BaseViewSet`
+  `permission_classes` is redundant with the global DRF
+  `DEFAULT_PERMISSION_CLASSES`, so the demo removes BOTH layers — then
+  `test_list_requires_auth`, `test_create_requires_auth`,
+  `test_issue_reaction_list_requires_auth` flip 401/403 → 200 (revert
+  afterwards). Pins two Django bugs for the port: project-boards 500 and
+  always-empty reaction/vote lists.
 
 ## Run: web_edge
 
