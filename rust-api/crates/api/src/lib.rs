@@ -9,6 +9,7 @@
 //! - [`serializer`]: DRF-compatible JSON kernel (F-07).
 //! - [`middleware`]: `MIDDLEWARE` equivalents (F-08), wrapping every app
 //!   [`build_app`] builds.
+//! - [`web`]: D-00 web edge handlers (`GET /`, `GET /robots.txt`).
 //!
 //! [`build_app`] is the composition point: the OSS binary and a private
 //! overlay crate's own `main.rs` both call it with an [`AppState`] built
@@ -23,6 +24,7 @@ pub mod permissions;
 pub mod routes;
 pub mod serializer;
 pub mod state;
+pub mod web;
 
 pub use edge::{EdgeFlags, EdgeHandle, Prefix, DEFAULT_UPSTREAM};
 pub use middleware::{

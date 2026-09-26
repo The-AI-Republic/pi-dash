@@ -13,10 +13,12 @@ use pidash_services::health_report;
 
 use crate::edge;
 use crate::state::AppState;
+use crate::web;
 
-/// Assemble the application router. `/` and `/robots.txt` are Rust-owned
-/// only while the web flag is on (otherwise they proxy like everything
-/// else); unmatched paths proxy to Django, whose own 404 is the contract.
+/// Assemble the application router. `/` and `/robots.txt` are served by the
+/// canonical D-00 handlers in [`crate::web`], Rust-owned only while the web
+/// flag is on (otherwise they proxy like everything else); unmatched paths
+/// proxy to Django, whose own 404 is the contract.
 pub fn build_router(state: AppState) -> Router {
     with_routes(state, Router::new())
 }
@@ -26,8 +28,8 @@ pub fn build_router(state: AppState) -> Router {
 pub fn with_routes(state: AppState, extra: Router<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        .route("/", any(edge::web_root))
-        .route("/robots.txt", any(edge::web_robots))
+        .route("/", any(web::health_check))
+        .route("/robots.txt", any(web::robots_txt))
         .merge(extra)
         .fallback(edge::proxy)
         .with_state(state)

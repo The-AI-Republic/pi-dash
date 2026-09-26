@@ -8,6 +8,8 @@
 //!
 //! The first Rust-owned prefix is `web`: `GET /` and `GET /robots.txt`,
 //! byte-identical to `pi_dash.web.views` (see the `web_edge` contract suite).
+//! The canonical handlers live in [`crate::web`]; this module keeps the
+//! routing table, flags, proxy, and the shared serve-or-proxy helper.
 //! Unsafe methods on those paths still proxy: Django's CSRF-failure page
 //! embeds the deployment root URL, so Rust cannot reproduce it byte for byte.
 
@@ -31,10 +33,9 @@ pub const FLAG_ENV_PREFIX: &str = "PIDASH_RUST_";
 /// Proxy timeout. Mirrors gunicorn's 30s worker timeout.
 const PROXY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Exact bytes Django renders for `GET /` (`JsonResponse({"status": "OK"})`).
-pub const HEALTH_BODY: &[u8] = b"{\"status\": \"OK\"}";
-/// Exact bytes Django renders for `GET /robots.txt`.
-pub const ROBOTS_BODY: &[u8] = b"User-agent: *\nDisallow: /";
+/// Exact web-edge bytes, canonical home [`crate::web`] (D-00 handlers).
+/// Re-exported here so existing `edge::HEALTH_BODY` paths keep working.
+pub use crate::web::{HEALTH_BODY, ROBOTS_BODY};
 
 /// One flippable row of the §0 prefix map. `api/` is shared by four rows;
 /// all four must be off for the prefix to stay on Django.
@@ -234,19 +235,12 @@ impl EdgeHandle {
     }
 }
 
-/// `GET /` when the web prefix is flipped; every other method, and every
-/// request while unflipped, proxies so Django's exact behavior (including
-/// the CSRF-failure page) is preserved.
-pub async fn web_root(State(state): State<AppState>, req: Request) -> Response {
-    edge_endpoint(&state, req, HEALTH_BODY, "application/json").await
-}
-
-/// `GET /robots.txt`, same ownership rule as [`web_root`].
-pub async fn web_robots(State(state): State<AppState>, req: Request) -> Response {
-    edge_endpoint(&state, req, ROBOTS_BODY, "text/plain").await
-}
-
-async fn edge_endpoint(
+/// Serve one Rust-owned web-edge response, or proxy when Django owns it.
+/// Shared by the canonical D-00 handlers in [`crate::web`]: owned only
+/// while the web prefix is flipped and only for `GET`/`HEAD`; every other
+/// method, and every request while unflipped, proxies so Django's exact
+/// behavior (including the CSRF-failure page) is preserved.
+pub(crate) async fn serve_web_bytes(
     state: &AppState,
     req: Request,
     body: &'static [u8],
