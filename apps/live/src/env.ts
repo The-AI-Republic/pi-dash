@@ -22,6 +22,11 @@ const envSchema = z.object({
   // Compression options
   COMPRESSION_LEVEL: z.string().default("6").transform(Number),
   COMPRESSION_THRESHOLD: z.string().default("5000").transform(Number),
+  // Max JSON request body. Express defaults to 100kb, which rejects (413)
+  // /convert-document calls for any page whose HTML plus base64 Yjs state
+  // exceeds it. Django accepts page bodies up to FILE_SIZE_LIMIT (5 MB);
+  // the Yjs history rides on top of that.
+  JSON_BODY_LIMIT: z.string().default("20mb"),
   // secret
   LIVE_SERVER_SECRET_KEY: z.string(),
   // Redis configuration
