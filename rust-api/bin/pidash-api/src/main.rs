@@ -3,8 +3,8 @@
 //! The `pidash-api` binary: one binary, two modes.
 //!
 //! - `pidash-api serve` runs the axum HTTP server.
-//! - `pidash-api worker` runs the background job loop (F-09 fills in the
-//!   queue polling; until then it ticks so the mode is exercisable).
+//! - `pidash-api worker` runs the job worker loop plus the beat-equivalent
+//!   scheduler loop (F-09: Postgres queue, Celery-format forwarding).
 //!
 //! This `main` is deliberately thin: it resolves [`Settings`] from the
 //! environment, builds an [`AppState`], and delegates to
@@ -106,21 +106,67 @@ async fn serve(bind: &str) -> MainResult {
 }
 
 async fn worker(concurrency: u32) -> MainResult {
-    tracing::info!(
-        concurrency,
-        "worker loop started (queue polling lands in F-09)"
-    );
-    loop {
-        tokio::select! {
-            _ = shutdown_signal() => {
-                tracing::info!("worker shutting down");
-                return Ok(());
+    let db = pidash_db::DbConfig::from_env()?;
+    let pools = pidash_db::Pools::connect(&db, None).await?;
+    tracing::info!(target = %db.redacted_url(), "connected postgres");
+    pidash_jobs::queue::ensure_schema(pools.primary()).await?;
+    // No broker in some environments (local dev without RabbitMQ): the
+    // worker still runs, and Python-owned jobs requeue with a delay
+    // instead of dropping. See `worker::forward`.
+    let publisher = match pidash_jobs::AmqpConfig::from_env() {
+        Ok(config) => match pidash_jobs::Publisher::connect(&config).await {
+            Ok(publisher) => Some(publisher),
+            Err(error) => {
+                tracing::warn!(%error, "broker unreachable; Python-owned jobs will requeue");
+                None
             }
-            _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                tracing::debug!("worker tick");
+        },
+        Err(error) => {
+            tracing::warn!(%error, "no broker configured; Python-owned jobs will requeue");
+            None
+        }
+    };
+    // Empty registry: no task group has a Rust handler yet (the D-07…D-10
+    // ports register theirs), so every claimed job forwards to Python.
+    let registry = pidash_jobs::Registry::new();
+    let worker_config = pidash_jobs::WorkerConfig {
+        concurrency: concurrency.max(1) as usize,
+        ..Default::default()
+    };
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    tracing::info!(concurrency, "worker + scheduler loops started");
+    let worker_fut = pidash_jobs::worker::run_worker(
+        pools.primary().clone(),
+        registry,
+        publisher,
+        worker_config,
+        shutdown_rx.clone(),
+    );
+    let scheduler_fut = pidash_jobs::scheduler::run_scheduler(
+        pools.primary().clone(),
+        pidash_jobs::default_schedule(),
+        shutdown_rx,
+    );
+    tokio::pin!(worker_fut);
+    tokio::pin!(scheduler_fut);
+    tokio::select! {
+        _ = &mut worker_fut => tracing::warn!("worker loop exited unexpectedly"),
+        _ = &mut scheduler_fut => tracing::warn!("scheduler loop exited unexpectedly"),
+        _ = shutdown_signal() => {
+            tracing::info!("worker shutting down");
+            let _ = shutdown_tx.send(true);
+            // Grace period for in-flight jobs to settle and the
+            // scheduler to release its lock.
+            tokio::select! {
+                _ = &mut worker_fut => {}
+                _ = &mut scheduler_fut => {}
+                _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                    tracing::warn!("shutdown grace period expired");
+                }
             }
         }
     }
+    Ok(())
 }
 
 async fn shutdown_signal() {
