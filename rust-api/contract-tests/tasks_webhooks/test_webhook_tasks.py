@@ -10,7 +10,6 @@ timing is pinned by options parity while the suite behaviorally covers the
 first-attempt failure log row, the success path, and redelivery.
 """
 
-import json
 import uuid
 
 import pytest
@@ -159,10 +158,10 @@ def test_webhook_send_success(db_conn, broker_url, webhook_sink):
     assert "X-Pi Dash-Event" not in delivery["headers"]
     assert "X-Pi Dash-Delivery" not in delivery["headers"]
     assert "X-Pi Dash-Signature" not in delivery["headers"]
-    payload = json.loads(delivery["body"])
-    assert payload["event"] == "issue"
-    assert payload["action"] == "create"  # POST maps to create
-    assert payload["data"] == {"id": "contract-probe"}
+    # The dropped headers take the body with them (verified wire-level):
+    # Django transmits an empty POST. The intended payload survives only
+    # in the logged request_body below.
+    assert delivery["body"] == ""
 
     new_rows = wait_for(
         lambda: _log_diff_rows(db_conn, before) or None,
@@ -174,6 +173,10 @@ def test_webhook_send_success(db_conn, broker_url, webhook_sink):
     # ...while the logged request_headers show the task did compute them
     # (dropped at transmission, not at construction).
     assert "X-Pi Dash-Event" in new_rows[0]["request_headers"]
+    # ...and the logged request_body carries the intended JSON payload
+    # (POST maps to create).
+    assert "contract-probe" in new_rows[0]["request_body"]
+    assert "create" in new_rows[0]["request_body"]
 
 
 def test_webhook_send_failure_logs_retry_count(db_conn, broker_url, webhook_sink):
@@ -225,12 +228,17 @@ def test_webhook_redelivery_posts_twice_with_identical_bodies(
         "current_site": "example.com",
         "activity": None,
     }
+    before = snapshot(db_conn, ["webhook_logs"])
     celery_wire.publish(f"{M}.webhook_task.webhook_send_task", kwargs=kwargs)
     celery_wire.publish(f"{M}.webhook_task.webhook_send_task", kwargs=kwargs)
     deliveries = webhook_sink.wait_for_count(2, what="redelivered webhook POSTs")
     assert all("X-Pi Dash-Delivery" not in d["headers"] for d in deliveries)
-    bodies = [json.loads(d["body"])["data"] for d in deliveries]
-    assert bodies == [{"id": "contract-redelivery"}] * 2
+    assert [d["body"] for d in deliveries] == [""] * 2
+    logged = wait_for(
+        lambda: _logs_with_count(db_conn, before, 2),
+        what="two redelivered webhook_logs rows",
+    )
+    assert all(str(r["response_status"]) == "200" for r in logged)
 
 
 def test_activity_chain_fans_out_to_sink(db_conn, broker_url, webhook_sink):
@@ -243,6 +251,7 @@ def test_activity_chain_fans_out_to_sink(db_conn, broker_url, webhook_sink):
     url = f"{config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
     seed_helpers.webhook(db_conn, workspace["id"], url, issue=True)
     webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
 
     celery_wire.publish(
         f"{M}.webhook_task.model_activity",
@@ -257,8 +266,12 @@ def test_activity_chain_fans_out_to_sink(db_conn, broker_url, webhook_sink):
         ],
     )
     deliveries = webhook_sink.wait_for_count(1, what="chained webhook POST")
-    payload = json.loads(deliveries[0]["body"])
-    assert payload["event"] == "issue"
+    assert deliveries[0]["body"] == ""
+    chained = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="chained webhook_logs row",
+    )
+    assert chained[0]["event_type"] == "issue"
 
 
 def test_deactivation_email_delivers(db_conn, broker_url, smtp_sink):
@@ -336,6 +349,11 @@ def test_light_tasks_consumed_without_crash(db_conn, broker_url):
     broker_probe.wait_for_queue_drain(
         baseline=baseline, what="light D-08 tasks consumed"
     )
+
+
+def _logs_with_count(conn, before, n):
+    rows = _log_diff_rows(conn, before)
+    return rows if len(rows) == n else None
 
 
 def _log_diff_rows(conn, before):

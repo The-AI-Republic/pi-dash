@@ -2071,12 +2071,12 @@ def issue_chain(conn, slug: str) -> dict:
     state, issue}.py.
     """
     owner = user(conn, f"contract-{slug}-owner")
-    workspace = workspace(conn, f"contract{slug}", owner["id"])
+    ws = workspace(conn, f"contract{slug}", owner["id"])
     project = insert_row(
         conn,
         "projects",
         {
-            "workspace_id": str(workspace["id"]),
+            "workspace_id": str(ws["id"]),
             "name": f"contract {slug}",
             "description": "",
             "identifier": "CT",
@@ -2110,7 +2110,7 @@ def issue_chain(conn, slug: str) -> dict:
         "states",
         {
             "project_id": str(project["id"]),
-            "workspace_id": str(workspace["id"]),
+            "workspace_id": str(ws["id"]),
             "name": "Contract",
             "description": "",
             "color": "#000000",
@@ -2125,7 +2125,7 @@ def issue_chain(conn, slug: str) -> dict:
         conn,
         "issues",
         {
-            "workspace_id": str(workspace["id"]),
+            "workspace_id": str(ws["id"]),
             "project_id": str(project["id"]),
             "state_id": str(state["id"]),
             "name": "contract issue",
@@ -2140,7 +2140,7 @@ def issue_chain(conn, slug: str) -> dict:
             "workpad": "",
         },
     )
-    return {"owner": owner, "workspace": workspace, "project": project,
+    return {"owner": owner, "workspace": ws, "project": project,
             "state": state, "issue": issue}
 
 
@@ -2151,8 +2151,15 @@ def email_log(conn, receiver_id, actor_id, entity_id: str, **extra) -> dict:
         "entity_identifier": entity_id,
         "entity_name": "issue",
         "entity": "issue",
+        # activity_time is required: the send task parses it for the
+        # template and raises without it.
         "data": {
-            "issue_activity": {"field": "state", "old_value": "a", "new_value": "b"}
+            "issue_activity": {
+                "field": "state",
+                "old_value": "a",
+                "new_value": "b",
+                "activity_time": _now(),
+            }
         },
     }
     values.update(extra)

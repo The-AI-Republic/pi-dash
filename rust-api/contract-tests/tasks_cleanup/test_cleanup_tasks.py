@@ -301,6 +301,10 @@ def test_delete_page_versions_keeps_newest_20(db_conn, broker_url):
 
 
 def test_delete_unuploaded_file_asset(db_conn, broker_url):
+    # NOTE: FileAsset.objects is a SoftDeletionQuerySet, so .delete()
+    # stamps deleted_at instead of removing the row — unlike the
+    # cleanup_task deletes, which go through all_objects for hard
+    # deletes. Pin the soft delete.
     row = insert_row(
         db_conn,
         "file_assets",
@@ -315,9 +319,9 @@ def test_delete_unuploaded_file_asset(db_conn, broker_url):
         },
     )
     celery_wire.publish(f"{M}.file_asset_task.delete_unuploaded_file_asset")
-    wait_for(
-        lambda: _missing(db_conn, "file_assets", row["id"]),
-        what="stale unuploaded file_assets row deleted",
+    assert wait_for(
+        lambda: _soft_deleted(db_conn, "file_assets", row["id"]),
+        what="stale unuploaded file_assets row soft-deleted",
     )
 
 
@@ -434,6 +438,13 @@ def test_storage_aware_tasks_consumed_without_crash(db_conn, broker_url):
     broker_probe.wait_for_queue_drain(
         baseline=baseline, what="storage-aware D-09 tasks consumed"
     )
+
+
+def _soft_deleted(conn, table: str, pk) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(f'SELECT deleted_at FROM "{table}" WHERE id = %s::uuid', (str(pk),))
+        row = cur.fetchone()
+        return row is not None and row["deleted_at"] is not None
 
 
 def _missing(conn, table: str, pk) -> bool:

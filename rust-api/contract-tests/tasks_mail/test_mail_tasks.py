@@ -11,7 +11,7 @@ import uuid
 
 import pytest
 
-from _harness import broker_probe, celery_wire, taskspec
+from _harness import broker_probe, celery_wire, redis_cache, taskspec
 from _harness import seed as seed_helpers
 from _harness.db import diff, snapshot, wait_for
 
@@ -141,13 +141,16 @@ def test_worker_registration(broker_url):
 
 def test_stack_fans_out_and_marks_processed(db_conn, broker_url, smtp_sink):
     """stack_email_notification: DB before/after diff + SMTP side effect."""
+    # The send task needs a real issue (Issue.objects.get) and the base
+    # URL primed in Redis under the issue id, else it silently returns.
+    chain = seed_helpers.issue_chain(db_conn, "mailstack")
     receiver = seed_helpers.user(db_conn, "contract-receiver")
-    actor = seed_helpers.user(db_conn, "contract-actor")
-    issue_id = str(uuid.uuid4())
+    issue_id = str(chain["issue"]["id"])
     log_ids = [
-        seed_helpers.email_log(db_conn, receiver["id"], actor["id"], issue_id)["id"]
+        seed_helpers.email_log(db_conn, receiver["id"], chain["owner"]["id"], issue_id)["id"]
         for _ in range(2)
     ]
+    redis_cache.setex(issue_id, "http://localhost")
     smtp_sink.clear()
     before = snapshot(db_conn, ["email_notification_logs"])
 
@@ -168,11 +171,13 @@ def test_stack_fans_out_and_marks_processed(db_conn, broker_url, smtp_sink):
 
 def test_stack_redelivery_is_idempotent(db_conn, broker_url, smtp_sink):
     """Redelivery: re-running the stack sends nothing twice."""
+    chain = seed_helpers.issue_chain(db_conn, "mailredel")
     receiver = seed_helpers.user(db_conn, "contract-redeliver")
-    actor = seed_helpers.user(db_conn, "contract-redeliver-actor")
+    issue_id = str(chain["issue"]["id"])
     log_id = seed_helpers.email_log(
-        db_conn, receiver["id"], actor["id"], str(uuid.uuid4())
+        db_conn, receiver["id"], chain["owner"]["id"], issue_id
     )["id"]
+    redis_cache.setex(issue_id, "http://localhost")
     smtp_sink.clear()
 
     celery_wire.publish(f"{M}.email_notification_task.stack_email_notification")
