@@ -11,8 +11,11 @@
 //!
 //! The journal closes that hole: every in-flight run is recorded here
 //! *before* the drain sends are attempted, successful sends are removed
-//! after, and whatever survives (timeout, crash, SIGKILL) is replayed by
-//! the next daemon start via [`supervisor`]'s replay pass.
+//! after, and whatever survives once journaled (a send timeout, a crash
+//! or SIGKILL mid-drain) is replayed by the next daemon start via
+//! [`supervisor`]'s replay pass. A death that never reaches the drain at
+//! all (panic, OOM-kill, power loss mid-run) journals nothing — the
+//! cloud's heartbeat reaper remains the only fallback for that class.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -44,8 +47,16 @@ pub struct PendingRunFailure {
 /// so redelivering the signal no longer adds information.
 pub const REPLAY_TTL: chrono::Duration = chrono::Duration::hours(24);
 
+/// Serializes every read-modify-write of the journal file. `record_all`
+/// and `remove` each do a load → mutate → save sequence; without this
+/// lock the shutdown drain's `record_all` can interleave with the
+/// background replay task's `remove` and one side's write silently
+/// clobbers the other's (atomic rename protects each write, not the
+/// sequence).
+static JOURNAL_MUTATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn journal_path(paths: &Paths) -> PathBuf {
-    paths.data_dir.join("pending_run_failures.json")
+    paths.drain_journal_path()
 }
 
 /// Load the journal. Missing file means an empty journal; a corrupt file
@@ -79,6 +90,7 @@ pub fn record_all(paths: &Paths, entries: &[PendingRunFailure]) -> Result<()> {
     if entries.is_empty() {
         return Ok(());
     }
+    let _guard = JOURNAL_MUTATION.lock().unwrap_or_else(|e| e.into_inner());
     let mut merged = load(paths);
     for entry in entries {
         merged.retain(|e| e.run_id != entry.run_id);
@@ -93,6 +105,7 @@ pub fn remove(paths: &Paths, run_ids: &[Uuid]) -> Result<()> {
     if run_ids.is_empty() {
         return Ok(());
     }
+    let _guard = JOURNAL_MUTATION.lock().unwrap_or_else(|e| e.into_inner());
     let mut entries = load(paths);
     let before = entries.len();
     entries.retain(|e| !run_ids.contains(&e.run_id));
@@ -119,7 +132,19 @@ fn save(paths: &Paths, entries: &[PendingRunFailure]) -> Result<()> {
     }
     let raw = serde_json::to_vec_pretty(entries).context("serialize drain journal")?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, raw).with_context(|| format!("write {}", tmp.display()))?;
+    {
+        use std::io::Write;
+        let mut f =
+            std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+        f.write_all(&raw)
+            .with_context(|| format!("write {}", tmp.display()))?;
+        // fsync before rename (matching config's `write_private`): without
+        // it a power loss right after the rename can leave a truncated
+        // journal, which `load` would then discard as corrupt — silently
+        // dropping the signals this file exists to preserve.
+        f.sync_all()
+            .with_context(|| format!("sync {}", tmp.display()))?;
+    }
     std::fs::rename(&tmp, &path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())

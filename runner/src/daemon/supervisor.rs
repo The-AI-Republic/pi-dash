@@ -186,14 +186,15 @@ impl Supervisor {
         // open yet, so the cloud cannot have redelivered one of these
         // runs and the replay cannot race live work. Leftovers (cloud
         // unreachable) are retried in the background.
+        let mut replay_retry_handle: Option<tokio::task::JoinHandle<()>> = None;
         if !opts.offline {
             replay_drain_journal_once(&paths, &hello_runners).await;
             if !drain_journal::load(&paths).is_empty() {
                 let replay_paths = paths.clone();
                 let replay_runners = hello_runners.clone();
-                tokio::spawn(async move {
+                replay_retry_handle = Some(tokio::spawn(async move {
                     replay_drain_journal_retry_loop(replay_paths, replay_runners).await;
-                });
+                }));
             }
         }
 
@@ -247,6 +248,17 @@ impl Supervisor {
             r = sig => {
                 if let Err(e) = r { tracing::warn!("signal watcher failed: {e:#}"); }
             }
+        }
+
+        // Stop the journal replay retry task BEFORE draining: a retry
+        // pass running concurrently with the drain could remove() an
+        // entry the drain just re-journaled for the same run_id (its
+        // "resolved" set was computed from a pre-drain snapshot),
+        // silently losing the signal. Await the handle so the task has
+        // fully stopped — abort() alone only lands at its next await.
+        if let Some(h) = replay_retry_handle {
+            h.abort();
+            let _ = h.await;
         }
 
         // Drain in-flight runs before tearing down: send RunFailed with
@@ -592,10 +604,27 @@ async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>, paths: &Path
             })
         })
         .collect();
-    if let Err(e) = drain_journal::record_all(paths, &pending) {
-        // Journal failure must not abort the drain itself — the sends
-        // below are still the primary delivery path.
-        tracing::warn!("failed to journal in-flight runs before drain: {e:#}");
+    // spawn_blocking keeps the sync fs I/O off the runtime workers and,
+    // more importantly, keeps the caller's 5s shutdown deadline honest:
+    // sync I/O has no await point for the timeout to fire at, so a
+    // wedged disk inlined here would hang shutdown until SIGKILL. As a
+    // bonus, a blocking task runs to completion even if the drain
+    // future is dropped at the deadline mid-write.
+    {
+        let journal_paths = paths.clone();
+        match tokio::task::spawn_blocking(move || {
+            drain_journal::record_all(&journal_paths, &pending)
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            // Journal failure must not abort the drain itself — the
+            // sends below are still the primary delivery path.
+            Ok(Err(e)) => {
+                tracing::warn!("failed to journal in-flight runs before drain: {e:#}");
+            }
+            Err(e) => tracing::warn!("drain journal task panicked: {e:#}"),
+        }
     }
     let drains = snapshot
         .into_iter()
@@ -612,19 +641,19 @@ async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>, paths: &Path
             Some(async move {
                 // Per-attempt timeout so one stuck cloud client can't keep
                 // a parallel sibling from completing in time.
-                match tokio::time::timeout(Duration::from_secs(2), out.send(msg)).await {
-                    Ok(Ok(())) => {
+                match send_run_failed_bounded(out, msg, Duration::from_secs(2)).await {
+                    RunFailedSend::Delivered => {
                         tracing::info!(%runner_id, %run_id, "drained in-flight run on shutdown");
                         Some(run_id)
                     }
-                    Ok(Err(e)) => {
+                    RunFailedSend::Failed(e) => {
                         tracing::warn!(
                             %runner_id, %run_id,
                             "drain send failed (journaled for replay on next start): {e:#}"
                         );
                         None
                     }
-                    Err(_) => {
+                    RunFailedSend::TimedOut => {
                         tracing::warn!(
                             %runner_id, %run_id,
                             "drain send timed out at 2s (journaled for replay on next start)"
@@ -639,10 +668,55 @@ async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>, paths: &Path
         .into_iter()
         .flatten()
         .collect();
-    if let Err(e) = drain_journal::remove(paths, &delivered) {
-        tracing::warn!("failed to clear delivered runs from drain journal: {e:#}");
+    // spawn_blocking for the same reasons as record_all above; it also
+    // means the cleanup completes even if the caller's 5s deadline
+    // drops this future between join_all and here.
+    {
+        let journal_paths = paths.clone();
+        let delivered_ids = delivered.clone();
+        match tokio::task::spawn_blocking(move || {
+            drain_journal::remove(&journal_paths, &delivered_ids)
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!("failed to clear delivered runs from drain journal: {e:#}");
+            }
+            Err(e) => tracing::warn!("drain journal cleanup task panicked: {e:#}"),
+        }
     }
     delivered.len()
+}
+
+/// Outcome of one bounded `RunFailed` send attempt. Shared by the
+/// shutdown drain and the journal replay so the two paths cannot drift
+/// in what counts as a confirmed send.
+enum RunFailedSend {
+    Delivered,
+    Failed(anyhow::Error),
+    TimedOut,
+}
+
+async fn send_run_failed_bounded(out: RunnerOut, msg: ClientMsg, bound: Duration) -> RunFailedSend {
+    match tokio::time::timeout(bound, out.send(msg)).await {
+        Ok(Ok(())) => RunFailedSend::Delivered,
+        Ok(Err(e)) => RunFailedSend::Failed(e),
+        Err(_) => RunFailedSend::TimedOut,
+    }
+}
+
+/// True when the cloud's reply to a replayed `RunFailed` says the signal
+/// can never be delivered: the run row is gone (404 `run_not_found`),
+/// owned by another runner after a re-assignment (403), or otherwise
+/// permanently gone (410). Retrying such an entry every pass until the
+/// TTL would only spam the log and the endpoint.
+fn is_permanent_run_failed_rejection(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<crate::cloud::http::TransportError>(),
+        Some(crate::cloud::http::TransportError::Server { status, .. })
+            if matches!(status, 403 | 404 | 410)
+    )
 }
 
 /// Replay `RunFailed` signals a previous daemon failed to deliver on
@@ -655,7 +729,12 @@ async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>, paths: &Path
 ///   reaper has long since failed the run);
 /// - entry whose run is in flight locally again → dropped WITHOUT
 ///   sending (the cloud redelivered the run to this daemon and it is
-///   legitimately running — failing it now would kill live work);
+///   legitimately running — failing it now would kill live work); the
+///   check runs both under the runners lock and again at the last
+///   instant before each send, since on retry-loop passes a redelivery
+///   can land between the two;
+/// - entry the cloud rejects permanently (run row gone, or owned by
+///   another runner after re-assignment) → dropped, not retried;
 /// - otherwise the signal is sent; confirmed sends are removed and
 ///   anything else is kept for the next pass.
 ///
@@ -701,7 +780,20 @@ async fn replay_drain_journal_once(paths: &Paths, runners: &Arc<RwLock<HelloRunn
                 continue;
             }
             let out = out.clone();
+            let in_flight = state.rx_in_flight.clone();
             sends.push(async move {
+                // Re-check at the last instant before sending: the guard
+                // above ran under the runners lock, but on retry-loop
+                // passes the cloud can redeliver this run between that
+                // check and now (rx_in_flight is stamped by the runner
+                // loop when it processes the Assign).
+                if *in_flight.borrow() == Some(entry.run_id) {
+                    tracing::info!(
+                        runner_id = %entry.runner_id, run_id = %entry.run_id,
+                        "dropping journaled RunFailed: run redelivered before send"
+                    );
+                    return ReplayOutcome::Resolved(entry.run_id);
+                }
                 let msg = ClientMsg::RunFailed {
                     run_id: entry.run_id,
                     reason: entry.reason,
@@ -710,42 +802,65 @@ async fn replay_drain_journal_once(paths: &Paths, runners: &Arc<RwLock<HelloRunn
                     tokens: None,
                     model: None,
                 };
-                match tokio::time::timeout(Duration::from_secs(10), out.send(msg)).await {
-                    Ok(Ok(())) => {
+                match send_run_failed_bounded(out, msg, Duration::from_secs(10)).await {
+                    RunFailedSend::Delivered => {
                         tracing::info!(
                             runner_id = %entry.runner_id, run_id = %entry.run_id,
                             "replayed journaled RunFailed from previous shutdown"
                         );
-                        Some(entry.run_id)
+                        ReplayOutcome::Delivered(entry.run_id)
                     }
-                    Ok(Err(e)) => {
+                    RunFailedSend::Failed(e) if is_permanent_run_failed_rejection(&e) => {
+                        tracing::warn!(
+                            runner_id = %entry.runner_id, run_id = %entry.run_id,
+                            "dropping journaled RunFailed: cloud rejected it permanently: {e:#}"
+                        );
+                        ReplayOutcome::Resolved(entry.run_id)
+                    }
+                    RunFailedSend::Failed(e) => {
                         tracing::warn!(
                             runner_id = %entry.runner_id, run_id = %entry.run_id,
                             "replaying journaled RunFailed failed, will retry: {e:#}"
                         );
-                        None
+                        ReplayOutcome::Retry
                     }
-                    Err(_) => {
+                    RunFailedSend::TimedOut => {
                         tracing::warn!(
                             runner_id = %entry.runner_id, run_id = %entry.run_id,
                             "replaying journaled RunFailed timed out, will retry"
                         );
-                        None
+                        ReplayOutcome::Retry
                     }
                 }
             });
         }
     }
-    let delivered: Vec<uuid::Uuid> = futures_util::future::join_all(sends)
-        .await
-        .into_iter()
-        .flatten()
-        .collect();
-    resolved.extend(delivered.iter().copied());
+    let mut delivered = 0usize;
+    for outcome in futures_util::future::join_all(sends).await {
+        match outcome {
+            ReplayOutcome::Delivered(run_id) => {
+                delivered += 1;
+                resolved.push(run_id);
+            }
+            ReplayOutcome::Resolved(run_id) => resolved.push(run_id),
+            ReplayOutcome::Retry => {}
+        }
+    }
     if let Err(e) = drain_journal::remove(paths, &resolved) {
         tracing::warn!("failed to update drain journal after replay: {e:#}");
     }
-    delivered.len()
+    delivered
+}
+
+/// How one replayed journal entry ended up.
+enum ReplayOutcome {
+    /// The `RunFailed` reached the cloud; the entry is done.
+    Delivered(uuid::Uuid),
+    /// The entry is finished without a delivery (run redelivered locally,
+    /// or the cloud rejected the signal permanently); drop it.
+    Resolved(uuid::Uuid),
+    /// Transient failure; keep the entry for the next pass.
+    Retry,
 }
 
 /// Background retry for journal entries the startup pass could not
