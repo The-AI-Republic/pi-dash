@@ -4,14 +4,19 @@
 //! later issues merge into it, and tests pass throwaway routers through
 //! `with_routes` to prove the seam holds.
 
-use axum::{http::StatusCode, response::IntoResponse, routing::get, Json, Router};
+use axum::{
+    response::IntoResponse,
+    routing::{any, get},
+    Json, Router,
+};
 use pidash_services::health_report;
-use pidash_types::Error;
 
+use crate::edge;
 use crate::state::AppState;
 
-/// Assemble the application router. Unknown paths fall back to a JSON 404
-/// with the same `error` shape every handler uses.
+/// Assemble the application router. `/` and `/robots.txt` are Rust-owned
+/// only while the web flag is on (otherwise they proxy like everything
+/// else); unmatched paths proxy to Django, whose own 404 is the contract.
 pub fn build_router(state: AppState) -> Router {
     with_routes(state, Router::new())
 }
@@ -21,8 +26,10 @@ pub fn build_router(state: AppState) -> Router {
 pub fn with_routes(state: AppState, extra: Router<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/", any(edge::web_root))
+        .route("/robots.txt", any(edge::web_robots))
         .merge(extra)
-        .fallback(not_found)
+        .fallback(edge::proxy)
         .with_state(state)
 }
 
@@ -30,22 +37,10 @@ async fn healthz(axum::extract::State(state): axum::extract::State<AppState>) ->
     Json(health_report(state.version()))
 }
 
-async fn not_found() -> impl IntoResponse {
-    let error = Error::NotFound("no route for this path".to_owned());
-    (
-        StatusCode::NOT_FOUND,
-        Json(serde_json::json!({
-            "error": {
-                "code": error.error_key(),
-                "message": error.to_string(),
-            }
-        })),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
     use tower::ServiceExt;
 
     fn app() -> Router {
@@ -74,8 +69,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_paths_return_json_404() {
-        let response = app()
+    async fn unmatched_paths_proxy_and_fail_closed_without_upstream() {
+        // Port 1 is never bound, so the proxy must fail closed with a 502 in
+        // the shared error shape — never a panic, never a Rust 404 that
+        // would mask Django's own 404 page. (The default upstream port 8000
+        // is not used here: a dev server may or may not listen on it.)
+        let app = build_router(AppState::with_edge(
+            "0.1.0",
+            edge::EdgeHandle::for_tests("http://127.0.0.1:1"),
+        ));
+        let response = app
             .oneshot(
                 axum::http::Request::get("/nope")
                     .body(axum::body::Body::empty())
@@ -83,12 +86,12 @@ mod tests {
             )
             .await
             .expect("serve");
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         let body = axum::body::to_bytes(response.into_body(), 1024)
             .await
             .expect("body");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
-        assert_eq!(json["error"]["code"], "not_found");
+        assert_eq!(json["error"]["code"], "bad_gateway");
     }
 
     #[tokio::test]

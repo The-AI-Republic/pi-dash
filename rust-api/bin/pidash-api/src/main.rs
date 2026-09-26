@@ -10,7 +10,7 @@
 //! it with extra routes or layers without touching `main`.
 
 use clap::{Parser, Subcommand};
-use pidash_api::{with_routes, AppState};
+use pidash_api::{with_routes, AppState, EdgeHandle};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -39,8 +39,23 @@ enum Mode {
 
 /// Assemble the axum application. `extra` merges additional routes (domain
 /// routers from later issues); `None` serves the foundation routes only.
+/// Flags default off; use [`build_app_with_edge`] for a live edge.
 pub fn build_app(version: &'static str, extra: Option<axum::Router<AppState>>) -> axum::Router {
     build_router_with(version, extra.unwrap_or_default())
+}
+
+/// Assemble the application with explicit cutover state (F-02): the Django
+/// upstream and per-prefix flags come from `PIDASH_DJANGO_UPSTREAM` and
+/// `PIDASH_RUST_*` in `serve`, or from the caller in tests.
+pub fn build_app_with_edge(
+    version: &'static str,
+    extra: Option<axum::Router<AppState>>,
+    edge: EdgeHandle,
+) -> axum::Router {
+    with_routes(
+        AppState::with_edge(version, edge),
+        extra.unwrap_or_default(),
+    )
 }
 
 fn build_router_with(version: &'static str, extra: axum::Router<AppState>) -> axum::Router {
@@ -49,12 +64,21 @@ fn build_router_with(version: &'static str, extra: axum::Router<AppState>) -> ax
 
 async fn serve(bind: &str) -> MainResult {
     let addr: SocketAddr = bind.parse()?;
-    let app = build_app(env!("CARGO_PKG_VERSION"), None);
-    tracing::info!(%addr, "serving HTTP");
+    let edge = EdgeHandle::from_env()?;
+    tracing::info!(
+        %addr,
+        upstream = edge.upstream(),
+        flags = ?edge.flags(),
+        "serving HTTP"
+    );
+    let app = build_app_with_edge(env!("CARGO_PKG_VERSION"), None, edge);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 

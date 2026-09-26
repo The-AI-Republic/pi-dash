@@ -70,6 +70,43 @@ cargo run -p pidash-api-bin -- worker --concurrency 4
 before any migrate, seed or destructive SQL and stop if it is not yours.
 Never touch the shared postgres database.
 
+## Cutover edge (F-02)
+
+`serve` sits in front of Django: every request is reverse-proxied to
+`PIDASH_DJANGO_UPSTREAM` (default `http://127.0.0.1:8000`) unless its URL
+prefix is flipped to Rust. The routing table in `crates/api/src/edge.rs`
+encodes the inventory §0 prefix map; each row has a flag, all default off:
+
+| Env var | Prefix | Django module |
+|---|---|---|
+| `PIDASH_RUST_WEB` | site root (`/`, `/robots.txt`) | `web.urls` |
+| `PIDASH_RUST_APP` / `ASSISTANT` / `LOOP` / `PROMPTING` | `api/` | `app`/`assistant`/`loop`/`prompting.urls` |
+| `PIDASH_RUST_SPACE` | `api/public/` | `space.urls` |
+| `PIDASH_RUST_LICENSE` | `api/instances/` | `license.urls` |
+| `PIDASH_RUST_RUNNER_WEB` | `api/runners/` | `runner.web_urls` |
+| `PIDASH_RUST_API_V1` | `api/v1/` | `api.urls` |
+| `PIDASH_RUST_RUNNER` | `api/v1/runner/` | `runner.urls` |
+| `PIDASH_RUST_AUTH` | `auth/` | `authentication.urls` |
+
+Values `1/true/yes/on` flip a prefix; anything else (or absent) proxies.
+Longest prefix wins (`api/v1/runner/` beats `api/v1/`). Today only `WEB`
+has Rust handlers (`GET /` → `{"status": "OK"}`, `GET /robots.txt`,
+byte-identical to Django); every other method on those paths still proxies
+so Django's CSRF-failure page is preserved exactly. Upstream outages answer
+`502 {"error": {"code": "bad_gateway", ...}}`.
+
+Rollback drill (recorded in the F-02 PR): with Django on `:8000`,
+
+```sh
+export PIDASH_DJANGO_UPSTREAM=http://127.0.0.1:8000
+cargo run -p pidash-api-bin -- serve --bind 127.0.0.1:8080 &  # all flags off
+curl localhost:8080/                # Django's bytes, via proxy
+export PIDASH_RUST_WEB=1            # + restart: Rust serves / and /robots.txt
+curl localhost:8080/                # {"status": "OK"}, identical bytes
+unset PIDASH_RUST_WEB               # + restart: traffic returns to Django
+curl localhost:8080/                # Django's bytes again
+```
+
 ## Reference
 
 - PIDASHCONV-1: the rulebook (rules, stages, issue types, where things live).
