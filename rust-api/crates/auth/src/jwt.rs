@@ -15,7 +15,8 @@
 //! `Runner` row (`rtg` freshness, force-refresh floor, URL runner match, live
 //! revocation), so the caller performs them on the returned [`AccessClaims`].
 
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use base64::Engine;
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error as ThisError;
@@ -132,16 +133,29 @@ pub struct AccessClaims {
 /// Error mapping follows `decode_access_token`: unparseable token or missing
 /// `kid` header → [`JwtError::Malformed`]; `kid` outside the ring →
 /// [`JwtError::UnknownKey`]; past `exp` → [`JwtError::Expired`]; bad
-/// signature or claim shape → [`JwtError::Invalid`].
+/// signature, unexpected algorithm, or claim shape → [`JwtError::Invalid`].
+/// Read the `kid` header the way `decode_access_token` does: base64url-decode
+/// the first segment as JSON (`jwt.get_unverified_header`), then apply its
+/// `if not kid` gate — a missing, non-string, or empty `kid` is malformed.
+/// Anything unparseable is malformed too; the algorithm itself is enforced
+/// later by `decode`, which folds a mismatch into [`JwtError::Invalid`].
+fn header_kid(raw: &str) -> Result<String, JwtError> {
+    let segment = raw.split('.').next().ok_or(JwtError::Malformed)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(segment)
+        .map_err(|_| JwtError::Malformed)?;
+    let header: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| JwtError::Malformed)?;
+    header
+        .get("kid")
+        .and_then(serde_json::Value::as_str)
+        .filter(|kid| !kid.is_empty())
+        .map(str::to_owned)
+        .ok_or(JwtError::Malformed)
+}
+
 pub fn decode_access_token(raw: &str, ring: &KeyRing) -> Result<AccessClaims, JwtError> {
-    let header = decode_header(raw).map_err(|_| JwtError::Malformed)?;
-    if header.alg != Algorithm::HS256 {
-        return Err(JwtError::Invalid(format!(
-            "unexpected algorithm {:?}",
-            header.alg
-        )));
-    }
-    let kid = header.kid.ok_or(JwtError::Malformed)?;
+    let kid = header_kid(raw)?;
     let secret = ring
         .secret_for(&kid)
         .ok_or_else(|| JwtError::UnknownKey(kid.clone()))?;
@@ -268,6 +282,53 @@ mod tests {
         .unwrap();
         assert!(matches!(
             decode_access_token(&token, &ring).unwrap_err(),
+            JwtError::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn empty_kid_is_malformed() {
+        // Python gates on `if not kid`, so "" is malformed, not unknown_key.
+        use jsonwebtoken::{encode, EncodingKey, Header};
+        let ring = ring();
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(String::new());
+        let claims = serde_json::json!({
+            "iss": ACCESS_TOKEN_ISS,
+            "sub": "11111111-2222-3333-4444-555555555555",
+            "uid": "u",
+            "wid": "w",
+            "iat": 2000000000,
+            "exp": 2000003600,
+            "rtg": 1,
+        });
+        let token = encode(
+            &header,
+            &claims,
+            &EncodingKey::from_secret(ring.secret_for("default").unwrap()),
+        )
+        .unwrap();
+        assert_eq!(
+            decode_access_token(&token, &ring).unwrap_err(),
+            JwtError::Malformed
+        );
+    }
+
+    #[test]
+    fn none_algorithm_is_invalid() {
+        // Python parses the header fine, then jwt.decode raises
+        // InvalidAlgorithmError, which folds into access_token_invalid.
+        use base64::Engine;
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let token = format!(
+            "{}.{}.",
+            engine.encode(br#"{"alg":"none","kid":"default"}"#),
+            engine.encode(
+                br#"{"iss":"pi-dash-cloud","sub":"s","uid":"u","wid":"w","iat":2000000000,"exp":2000003600,"rtg":1}"#
+            ),
+        );
+        assert!(matches!(
+            decode_access_token(&token, &ring()).unwrap_err(),
             JwtError::Invalid(_)
         ));
     }
