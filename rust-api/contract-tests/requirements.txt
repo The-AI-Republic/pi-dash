@@ -22,3 +22,7 @@ aiosmtpd==1.4.6
 
 # PIDASHCONV-75 (orchestration domain): redis-transport wire publisher.
 kombu>=5.3
+
+# PIDASHCONV-99 (runner websocket oracle): WS client for the ws/runner/
+# close-code suite (test_ws_close.py). Handshake-only; no Django imports.
+websockets>=15
