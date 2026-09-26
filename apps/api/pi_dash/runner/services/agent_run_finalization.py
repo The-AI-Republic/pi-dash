@@ -187,9 +187,19 @@ def apply_terminal_effects(run_id) -> bool:
 
             dispatch_waiting(run.workspace_id)
         else:
-            from pi_dash.runner.services.matcher import drain_for_runner_by_id, drain_pod_by_id
+            from pi_dash.runner.services.matcher import (
+                drain_for_runner_by_id,
+                drain_pod_by_id,
+                release_runner_if_idle,
+            )
 
             if run.runner_id:
+                # Every finalization path releases the runner, not just the
+                # normal lifecycle: a run failed by the daemon's shutdown
+                # drain (or its replayed RunFailed) otherwise leaves the row
+                # BUSY forever and the drains below can never assign it
+                # (PDASHOSS01-231).
+                release_runner_if_idle(run.runner_id)
                 drain_for_runner_by_id(run.runner_id)
             if run.pod_id:
                 drain_pod_by_id(run.pod_id)

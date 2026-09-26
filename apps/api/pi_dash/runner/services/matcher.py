@@ -303,6 +303,31 @@ def drain_for_runner_by_id(runner_id) -> bool:
     return drain_for_runner(runner)
 
 
+def release_runner_if_idle(runner_id) -> bool:
+    """Flip a BUSY runner back to ONLINE once no run occupies it.
+
+    The matcher only ever assigns ONLINE runners, and the poll self-report
+    is the only regular ONLINE writer — so a runner whose run was finalized
+    outside the normal lifecycle (daemon-shutdown failure, replayed
+    RunFailed, heartbeat reap) stays BUSY forever while heartbeating, and
+    runs pinned to it queue indefinitely (PDASHOSS01-231). Every
+    run-finalization path calls this before draining so the release happens
+    with the same signal that frees the capacity.
+
+    Strictly BUSY → ONLINE: OFFLINE and REVOKED are stronger states owned
+    by their own transitions, and a runner still holding a BUSY_STATUSES
+    run keeps its status. A daemon that is genuinely mid-wind-down and
+    re-reports ``busy`` on its next poll simply flips back; the
+    ``assign_rejected_busy`` NACK path already covers an assign that lands
+    in that window. Returns True when a row was updated.
+    """
+    return bool(
+        Runner.objects.filter(pk=runner_id, status=RunnerStatus.BUSY)
+        .exclude(agent_runs__status__in=BUSY_STATUSES)
+        .update(status=RunnerStatus.ONLINE)
+    )
+
+
 def _build_assign_msg(run: AgentRun) -> dict:
     """Compose the WS ``assign`` envelope sent to a runner daemon.
 

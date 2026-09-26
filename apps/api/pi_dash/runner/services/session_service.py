@@ -146,6 +146,23 @@ def apply_hello(runner: Runner, body: Dict[str, Any]) -> None:
     # the default: an alive daemon that lost such a run is still reaped.
     reap_stale_busy_runs(runner, body, exclude_redeliverable=True)
 
+    # Reconcile a stale BUSY against reality (PDASHOSS01-231): a daemon
+    # restart mid-run can leave the row BUSY with nothing in flight (the
+    # shutdown drain failed the run, but nothing released the runner), and
+    # the matcher then skips it forever — runs pinned to it queue while the
+    # rest of the pod idles. When the reopening daemon reports no in-flight
+    # run and no BUSY_STATUSES row remains, flip back to ONLINE. Dispatch
+    # itself still waits for the session's first poll (its ``use_zero``
+    # drain trigger): a session-open alone is not proof the daemon polls.
+    if not body.get("in_flight_run"):
+        from pi_dash.runner.services.matcher import release_runner_if_idle
+
+        if release_runner_if_idle(runner.id):
+            logger.info(
+                "session open released stale busy runner %s back to online",
+                runner.id,
+            )
+
 
 def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeliverable: bool = False) -> None:
     """Cancel BUSY runs the daemon no longer claims.
