@@ -1,2 +1,7 @@
-__pycache__/
+# pytest cache
 .pytest_cache/
+.venv/
+__pycache__/
+.hypothesis/
+*.pyc
+*.egg-info/

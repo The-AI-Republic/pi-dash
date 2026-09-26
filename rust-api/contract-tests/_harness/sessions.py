@@ -84,8 +84,25 @@ def make_password_hash(password: str, iterations: int = 600_000) -> str:
     )
 
 
+ADMIN_SESSION_COOKIE_NAME = "admin-session-id"
+
+
 def login(conn, user_id: str, password_field: str) -> dict:
     """Insert a session row for ``user_id``; return ``{cookie: key}`` for httpx."""
+    return {SESSION_COOKIE_NAME: _insert_session(conn, user_id, password_field)}
+
+
+def login_admin(conn, user_id: str, password_field: str) -> dict:
+    """Insert a session row and present it as the instance-admin cookie.
+
+    Paths containing ``instances`` read ``ADMIN_SESSION_COOKIE_NAME`` instead
+    of ``SESSION_COOKIE_NAME`` (see ``pi_dash/authentication/middleware``);
+    the payload format is identical, only the cookie name differs.
+    """
+    return {ADMIN_SESSION_COOKIE_NAME: _insert_session(conn, user_id, password_field)}
+
+
+def _insert_session(conn, user_id: str, password_field: str) -> str:
     secret = config.secret_key()
     payload = {
         "_auth_user_id": str(user_id),
@@ -99,4 +116,4 @@ def login(conn, user_id: str, password_field: str) -> dict:
         " VALUES (%s, %s, %s, %s)",
         (key, mint_session_data(payload, secret), expire.isoformat(), str(user_id)),
     )
-    return {SESSION_COOKIE_NAME: key}
+    return key

@@ -1,3 +1,24 @@
-httpx>=0.27
-psycopg[binary]>=3.1
-pytest>=8
+# Contract-test dependencies (test runner side only).
+# The Django server under test uses apps/api/requirements/*.txt.
+celery>=5.3
+httpx==0.28.1
+psycopg[binary]==3.3.0
+pika>=1.3
+requests>=2.31
+redis
+
+pytest==9.0.3
+
+# PIDASHCONV-81 (v1_openapi domain + _harness/tests/test_sinks.py):
+aiosmtpd>=1.4.5
+pyyaml>=6  # v1_openapi: parse the default YAML rendering of the schema doc
+
+# Rules (from PIDASHCONV-1, binding):
+# - Never import Django or use its test client. HTTP via httpx, seeding via SQL.
+# - Extend ``_harness/``, never fork it per domain.
+
+# PIDASHCONV-83: SMTP sink backend (lazy import in _harness/sinks.py).
+aiosmtpd==1.4.6
+
+# PIDASHCONV-75 (orchestration domain): redis-transport wire publisher.
+kombu>=5.3

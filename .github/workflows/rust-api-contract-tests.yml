@@ -1,0 +1,74 @@
+# Contract suites: pytest + httpx oracle tests under rust-api/contract-tests/.
+# Each domain job boots the live Django backend (Postgres service) and runs
+# the same suite that later runs against the Rust server through the proxy.
+name: rust-api contract tests
+
+on:
+  pull_request:
+    paths:
+      - "rust-api/**"
+      - "apps/api/**"
+      - ".github/workflows/rust-api-contract-tests.yml"
+  push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - "apps/api/**"
+      - ".github/workflows/rust-api-contract-tests.yml"
+
+jobs:
+  web-edge:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: pidash_contract
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/pidash_contract
+      WEB_URL: http://localhost
+      APP_BASE_URL: http://localhost
+      EMAIL_HOST: localhost
+      API_KEY_RATE_LIMIT: 100000/minute
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.test
+      BASE_URL: http://127.0.0.1:8000
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system deps for psycopg-c
+        run: sudo apt-get update -y && sudo apt-get install -y libpq-dev
+
+      - name: Install Django server and contract-test deps
+        run: >-
+          python -m pip install
+          -r apps/api/requirements/base.txt
+          -r rust-api/contract-tests/requirements.txt
+
+      - name: Start live Django server
+        working-directory: apps/api
+        run: |
+          python manage.py runserver 127.0.0.1:8000 --noreload > /tmp/django-contract.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null "$BASE_URL/"; then
+              echo "Django is up"; exit 0
+            fi
+            sleep 4
+          done
+          echo "Django did not start:"; tail -n 50 /tmp/django-contract.log; exit 1
+
+      - name: Run web_edge contract suite
+        working-directory: rust-api/contract-tests
+        run: python -m pytest web_edge -v
