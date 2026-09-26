@@ -45,7 +45,9 @@ const projectService = new ProjectService();
 
 // Agent ticking policy. The backend keeps one cadence column per ticking
 // stage so the rhythms can diverge later, but they are unified today, so this
-// form offers a single Cadence picker and writes it to all three.
+// form offers a single Cadence picker and writes it to all three — only when
+// the picker itself moved, so an out-of-band per-stage rhythm survives an
+// unrelated save.
 const TICKING_CADENCE_OPTIONS = [
   { seconds: 1800, i18n_label: "30 minutes" },
   { seconds: 3600, i18n_label: "1 hour" },
@@ -59,6 +61,13 @@ const DEFAULT_MAX_TICKS = 10;
 // Mirrors ``IssueAgentTicker.INFINITE_MAX_TICKS`` — the pool sentinel meaning
 // "never stop for budget".
 const INFINITE_MAX_TICKS = -1;
+
+/** The project's numeric budget, or the default when it is uncapped/unset. */
+function cappedBudgetOf(project: IProject): number {
+  return project.agent_default_max_ticks && project.agent_default_max_ticks > 0
+    ? project.agent_default_max_ticks
+    : DEFAULT_MAX_TICKS;
+}
 
 /** Label a cadence the presets don't cover, e.g. a hand-PATCHed 8h row. */
 function formatCadenceSeconds(seconds: number): string {
@@ -75,11 +84,10 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
   const [isLoading, setIsLoading] = useState(false);
   // Remembers the numeric budget while "No cap" is ticked, so unticking it
   // restores what the admin had typed rather than snapping back to the default.
-  const [lastCappedBudget, setLastCappedBudget] = useState(
-    project.agent_default_max_ticks && project.agent_default_max_ticks > 0
-      ? project.agent_default_max_ticks
-      : DEFAULT_MAX_TICKS
-  );
+  // Re-seeded by the reset effect below: this component is not remounted when
+  // the settings sidebar switches projects, so the initializer alone would
+  // carry the first project's budget over to every later one.
+  const [lastCappedBudget, setLastCappedBudget] = useState(cappedBudgetOf(project));
   // store hooks
   const { updateProject } = useProject();
   const { isMobile } = usePlatformOS();
@@ -92,7 +100,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
     setValue,
     setError,
     reset,
-    formState: { errors },
+    formState: { errors, dirtyFields },
     getValues,
   } = useForm<IProject>({
     defaultValues: {
@@ -114,6 +122,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
         ...project,
         workspace: (project.workspace as IWorkspace).id,
       });
+      setLastCappedBudget(cappedBudgetOf(project));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project, projectId]);
@@ -242,10 +251,18 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
     // the binding, and writes the canonical URL back). This keeps the field
     // and the actual provider binding from drifting apart.
     // One rhythm for every ticking stage: the model keeps a column per stage
-    // so they can diverge later, but this form sets a single cadence, so all
-    // three are written together.
+    // so they can diverge later, but this form sets a single cadence. The two
+    // stages without a control of their own are only written when the picker
+    // moved (see below).
     const cadenceSeconds = Number(formData.agent_default_interval_seconds ?? DEFAULT_CADENCE_SECONDS);
-    const budget = Number(formData.agent_default_max_ticks ?? DEFAULT_MAX_TICKS);
+    // The number input stores `""` when it is cleared, and `Number("")` is 0 —
+    // a budget that would arm a clock which can never fire. Treat a blank as
+    // "leave it at the default".
+    const rawBudget = formData.agent_default_max_ticks;
+    const budget =
+      rawBudget === undefined || rawBudget === null || String(rawBudget).trim() === ""
+        ? DEFAULT_MAX_TICKS
+        : Number(rawBudget);
     const payload: Partial<IProject> = {
       name: formData.name,
       network: formData.network,
@@ -259,9 +276,15 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
       agent_ticking_enabled: formData.agent_ticking_enabled ?? true,
       agent_default_max_ticks: budget,
       agent_default_interval_seconds: cadenceSeconds,
-      agent_review_default_interval_seconds: cadenceSeconds,
-      agent_test_default_interval_seconds: cadenceSeconds,
     };
+    // The review and test cadences have no control of their own, so they move
+    // only when the Cadence picker moves. Writing them on every save would
+    // silently collapse a per-stage rhythm that had been set elsewhere, just
+    // because someone renamed the project.
+    if (dirtyFields.agent_default_interval_seconds) {
+      payload.agent_review_default_interval_seconds = cadenceSeconds;
+      payload.agent_test_default_interval_seconds = cadenceSeconds;
+    }
 
     // Handle cover image changes
     try {
@@ -568,6 +591,12 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                 control={control}
                 rules={{
                   validate: (value) => {
+                    // Nothing to enforce while the clock is off: both this
+                    // input and the No cap checkbox are disabled, so a
+                    // half-typed budget could not be corrected without
+                    // turning ticking back on. onSubmit falls back to the
+                    // default for a blank field.
+                    if (!getValues("agent_ticking_enabled")) return true;
                     const parsed = Number(value ?? DEFAULT_MAX_TICKS);
                     if (parsed === INFINITE_MAX_TICKS) return true;
                     return (
@@ -652,7 +681,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
               />
               <p className="text-11 text-tertiary">
                 {t(
-                  "How long Pi Dash waits between automatic runs. One rhythm covers In Progress, In Review and In Test."
+                  "How long Pi Dash waits between automatic runs. One rhythm covers In Progress, In Review and In Test. A new cadence applies from the next tick — a work item already waiting keeps its scheduled time."
                 )}
               </p>
             </div>

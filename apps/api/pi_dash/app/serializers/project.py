@@ -22,14 +22,15 @@ from pi_dash.db.models import (
     ProjectPublicMember,
     IssueSequence,
 )
+from pi_dash.db.models.issue_agent_ticker import INFINITE_MAX_TICKS
 from pi_dash.utils.content_validator import (
     validate_html_content,
 )
 
-# Agent ticking policy bounds. ``-1`` is the infinite-pool sentinel; the floor
-# on cadence keeps a project from arming a clock that re-runs an agent faster
-# than the ticker's own one-minute scan can service it.
-INFINITE_MAX_TICKS = -1
+# Agent ticking policy bounds. ``INFINITE_MAX_TICKS`` (``-1``) is the
+# infinite-pool sentinel, imported from the ticker model so the two can never
+# drift; the floor on cadence keeps a project from arming a clock that re-runs
+# an agent faster than the ticker's own one-minute scan can service it.
 MIN_CADENCE_SECONDS = 60
 
 

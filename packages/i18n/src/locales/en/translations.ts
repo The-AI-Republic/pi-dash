@@ -1896,6 +1896,6 @@ export default {
   "12 hours": "12 hours",
   "24 hours": "24 hours",
   "Custom ({duration})": "Custom ({duration})",
-  "How long Pi Dash waits between automatic runs. One rhythm covers In Progress, In Review and In Test.":
-    "How long Pi Dash waits between automatic runs. One rhythm covers In Progress, In Review and In Test.",
+  "How long Pi Dash waits between automatic runs. One rhythm covers In Progress, In Review and In Test. A new cadence applies from the next tick — a work item already waiting keeps its scheduled time.":
+    "How long Pi Dash waits between automatic runs. One rhythm covers In Progress, In Review and In Test. A new cadence applies from the next tick — a work item already waiting keeps its scheduled time.",
 } as const;
