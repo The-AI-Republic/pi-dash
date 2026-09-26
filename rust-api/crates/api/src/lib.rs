@@ -7,8 +7,8 @@
 //!
 //! - [`paginator`]: cursor paginator kernel (F-07).
 //! - [`serializer`]: DRF-compatible JSON kernel (F-07).
-//!
-//! Middleware arrives under F-08.
+//! - [`middleware`]: `MIDDLEWARE` equivalents (F-08), wrapping every app
+//!   [`build_app`] builds.
 //!
 //! [`build_app`] is the composition point: the OSS binary and a private
 //! overlay crate's own `main.rs` both call it with an [`AppState`] built
@@ -17,6 +17,7 @@
 //! until then `extra` merges whole routers.
 
 pub mod edge;
+pub mod middleware;
 pub mod paginator;
 pub mod permissions;
 pub mod routes;
@@ -24,12 +25,25 @@ pub mod serializer;
 pub mod state;
 
 pub use edge::{EdgeFlags, EdgeHandle, Prefix, DEFAULT_UPSTREAM};
+pub use middleware::{
+    stack, ApiTokenLogRecord, BodyLimitLayer, CorsConfig, CorsLayer, GzipLayer, LogSink,
+    LoggerUserId, LoggingConfig, MemorySessionStore, PgSessionStore, RequestLogRecord,
+    RequestLoggerLayer, RequestSession, SecurityConfig, SecurityLayer, SessionConfig,
+    SessionExpiry, SessionHandle, SessionLayer, SessionRow, SessionStore, StoreError,
+    StoredSession, TokenLogLayer, TracingSink,
+};
 pub use routes::{build_router, with_routes};
 pub use state::AppState;
 
 /// Assemble the full application: foundation routes plus `extra`
 /// (domain routers from later issues, overlay routes from the private
-/// crate). `None` serves the foundation routes only.
+/// crate), wrapped in the F-08 middleware stack. `None` serves the
+/// foundation routes only.
+///
+/// The stack reads its config from the state's F-03 `Settings`; the
+/// session layer persists through `PgSessionStore` when the state carries
+/// pools and stays transparent otherwise (no pools yet in `serve`, so
+/// Django behind the proxy still owns sessions).
 ///
 /// A private `main.rs` composes it like this (with `from_env`; the doctest
 /// uses deterministic `test_defaults` so it runs hermetically):
@@ -43,7 +57,20 @@ pub use state::AppState;
 /// let _app: axum::Router = pidash_api::build_app(state, Some(private_routes()));
 /// ```
 pub fn build_app(state: AppState, extra: Option<axum::Router<AppState>>) -> axum::Router {
-    with_routes(state, extra.unwrap_or_default())
+    let settings = state.settings().clone();
+    let store = state
+        .pools()
+        .map(|pools| PgSessionStore::new(pools.primary().clone()));
+    let router = with_routes(state, extra.unwrap_or_default());
+    stack(
+        router,
+        &CorsConfig::from_settings(&settings),
+        &SecurityConfig::from_settings(&settings),
+        settings.file_size_limit.max(0) as u64,
+        &LoggingConfig::enabled(),
+        SessionConfig::from_settings(&settings, store),
+        TracingSink,
+    )
 }
 
 #[cfg(test)]

@@ -362,7 +362,9 @@ fn is_hop_by_hop(name: &header::HeaderName) -> bool {
         || *name == header::HeaderName::from_static("keep-alive")
 }
 
-fn bad_gateway() -> Response {
+/// Fail-closed 502 in the shared error shape. Also used by the F-08
+/// middleware layers when a proxied body truncates mid-read.
+pub(crate) fn bad_gateway() -> Response {
     (
         StatusCode::BAD_GATEWAY,
         Json(serde_json::json!({

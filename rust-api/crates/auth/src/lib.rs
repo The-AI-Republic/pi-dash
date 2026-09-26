@@ -6,7 +6,9 @@
 //!
 //! - [`signing`]: Django's TimestampSigner codec, shared by sessions.
 //! - [`session`]: DB-session reader (cookie routing, key screening,
-//!   `session_data` decoding, expiry predicate).
+//!   `session_data` decoding, expiry predicate) plus the F-08 response
+//!   half's pure pieces: `Set-Cookie` rendering, `http_date`, cookie
+//!   parsing, and session-key generation.
 //! - [`password`]: PBKDF2 password-hash verification.
 //! - [`token`]: `X-Api-Key` routing plus `APIToken` / `MachineToken` row
 //!   predicates, with the runner pepper hash and fingerprint helpers.
