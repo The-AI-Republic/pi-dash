@@ -16,7 +16,7 @@ import { SchedulerService } from "@pi-dash/services";
 import { Button, ToggleSwitch } from "@pi-dash/ui";
 // components
 import { EditSchedulerBindingModal } from "@/components/project/scheduler-bindings/edit-binding-modal";
-import { InstallSchedulerBindingModal } from "@/components/project/scheduler-bindings/install-binding-modal";
+import { NewSchedulerModal } from "@/components/project/scheduler-bindings/new-scheduler-modal";
 import { UninstallSchedulerBindingModal } from "@/components/project/scheduler-bindings/uninstall-binding-modal";
 // hooks
 import { useUserPermissions } from "@/hooks/store/user";
@@ -41,13 +41,16 @@ export const SchedulerBindingsPanel = observer(function SchedulerBindingsPanel(p
   const { t } = useTranslation();
 
   const canManage = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.PROJECT, workspaceSlug, projectId);
+  // Definition CRUD is workspace-admin territory; gates the modal's "Create new" path.
+  const canCreateScheduler = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.WORKSPACE, workspaceSlug);
 
   const { data: bindings, mutate: mutateBindings } = useSWR<ISchedulerBinding[]>(
     workspaceSlug && projectId ? ["scheduler-bindings", workspaceSlug, projectId] : null,
     () => schedulerService.listBindings(workspaceSlug, projectId)
   );
-  const { data: schedulers } = useSWR<IScheduler[]>(workspaceSlug ? ["schedulers", workspaceSlug] : null, () =>
-    schedulerService.listSchedulers(workspaceSlug)
+  const { data: schedulers, mutate: mutateSchedulers } = useSWR<IScheduler[]>(
+    workspaceSlug ? ["schedulers", workspaceSlug] : null,
+    () => schedulerService.listSchedulers(workspaceSlug)
   );
 
   const [installOpen, setInstallOpen] = useState(false);
@@ -62,9 +65,13 @@ export const SchedulerBindingsPanel = observer(function SchedulerBindingsPanel(p
         <header className="flex items-start justify-between gap-4">
           <div>
             <h1 className="text-16 font-semibold text-primary">{t("Schedulers")}</h1>
-            <p className="mt-1 text-13 text-secondary">{t("Schedulers installed on this project. Each install fires its prompt against the project on the configured cron.")}</p>
+            <p className="mt-1 text-13 text-secondary">
+              {t(
+                "Schedulers installed on this project. Each install fires its prompt against the project on the configured cron."
+              )}
+            </p>
           </div>
-          {canManage && <Button onClick={() => setInstallOpen(true)}>{t("Install scheduler")}</Button>}
+          {canManage && <Button onClick={() => setInstallOpen(true)}>{t("New Scheduler")}</Button>}
         </header>
 
         <section className="rounded-md border border-subtle">
@@ -135,7 +142,9 @@ export const SchedulerBindingsPanel = observer(function SchedulerBindingsPanel(p
               {rows.length === 0 && (
                 <tr>
                   <td colSpan={7} className="px-3 py-8 text-center text-secondary">
-                    {t("No schedulers installed on this project yet. Click “Install scheduler” to add one from the workspace catalog.")}
+                    {t(
+                      "No schedulers installed on this project yet. Click “New Scheduler” to install one from the workspace catalog or create your own."
+                    )}
                   </td>
                 </tr>
               )}
@@ -144,14 +153,16 @@ export const SchedulerBindingsPanel = observer(function SchedulerBindingsPanel(p
         </section>
       </div>
 
-      <InstallSchedulerBindingModal
+      <NewSchedulerModal
         isOpen={installOpen}
         onClose={() => setInstallOpen(false)}
         workspaceSlug={workspaceSlug}
         projectId={projectId}
         availableSchedulers={schedulers ?? []}
         existingBindings={rows}
+        canCreateScheduler={canCreateScheduler}
         onInstalled={() => mutateBindings()}
+        onSchedulersChanged={() => mutateSchedulers()}
       />
       <EditSchedulerBindingModal
         isOpen={!!editTarget}
@@ -233,13 +244,9 @@ function BindingRow({ binding, canManage, onEdit, onUninstall, onToggle }: RowPr
             value={binding.enabled}
             onChange={handleToggle}
             disabled={toggling || !canManage}
-            aria-label={
-              binding.enabled ? t("Disable scheduler") : t("Enable scheduler")
-            }
+            aria-label={binding.enabled ? t("Disable scheduler") : t("Enable scheduler")}
           />
-          <span className="text-12 text-secondary">
-            {binding.enabled ? t("Enabled") : t("Disabled")}
-          </span>
+          <span className="text-12 text-secondary">{binding.enabled ? t("Enabled") : t("Disabled")}</span>
         </div>
       </td>
       <td className="px-3 py-2 text-secondary">{new Date(binding.updated_at).toLocaleString()}</td>

@@ -196,6 +196,7 @@ export default {
   "Are you sure you want to leave the workspace? You will no longer have access to this workspace. This action cannot be undone.":
     "Are you sure you want to leave the workspace? You will no longer have access to this workspace. This action cannot be undone.",
   Ascending: "Ascending",
+  "Ask a workspace admin to add schedulers to the catalog.": "Ask a workspace admin to add schedulers to the catalog.",
   "Asset upload failed. Please try again later.": "Asset upload failed. Please try again later.",
   Assets: "Assets",
   "Assign to": "Assign to",
@@ -386,6 +387,7 @@ export default {
     "Couldn't remove the project from favorites. Please try again.",
   "Cover image upload skipped — using a default cover.": "Cover image upload skipped — using a default cover.",
   Create: "Create",
+  "Create & install": "Create & install",
   "Create a draft": "Create a draft",
   "Create and edit free-form content; notes, docs, anything.":
     "Create and edit free-form content; notes, docs, anything.",
@@ -432,6 +434,7 @@ export default {
   "Created date": "Created date",
   "Created on": "Created on",
   "Created vs Resolved": "Created vs Resolved",
+  "Creating & installing…": "Creating & installing…",
   Creating: "Creating",
   "Creating theme": "Creating theme",
   "Creating…": "Creating…",
@@ -553,8 +556,8 @@ export default {
   "Edit work item": "Edit work item",
   "Edited by": "Edited by",
   "Editor is not ready to discard changes": "Editor is not ready to discard changes",
-  "Either every workspace scheduler is already installed on this project, or your workspace admin hasn't enabled any. Visit Workspace → Schedulers to manage the catalog.":
-    "Either every workspace scheduler is already installed on this project, or your workspace admin hasn't enabled any. Visit Workspace → Schedulers to manage the catalog.",
+  "Either every workspace scheduler is already installed on this project, or none are enabled. Ask a workspace admin to add schedulers to the catalog.":
+    "Either every workspace scheduler is already installed on this project, or none are enabled. Ask a workspace admin to add schedulers to the catalog.",
   Email: "Email",
   "Email address": "Email address",
   "Email already exists. Please use a different one.": "Email already exists. Please use a different one.",
@@ -621,6 +624,8 @@ export default {
   "Estimates have been disabled.": "Estimates have been disabled.",
   "Estimates have been enabled.": "Estimates have been enabled.",
   "Events ({count})": "Events ({count})",
+  "Every enabled workspace scheduler is already installed on this project. Create a new one instead.":
+    "Every enabled workspace scheduler is already installed on this project. Create a new one instead.",
   Excel: "Excel",
   Execution: "Execution",
   "Expand sidebar": "Expand sidebar",
@@ -794,7 +799,7 @@ export default {
   "Install a scheduler from the List tab to see it here.": "Install a scheduler from the List tab to see it here.",
   "Install a scheduler from the List tab to see its occurrences on the calendar.":
     "Install a scheduler from the List tab to see its occurrences on the calendar.",
-  "Install scheduler": "Install scheduler",
+  "Install existing": "Install existing",
   "Install the pidash CLI": "Install the pidash CLI",
   "Install the pidash CLI and register dev machines as AI agent runners":
     "Install the pidash CLI and register dev machines as AI agent runners",
@@ -988,6 +993,7 @@ export default {
   "New password must be different from old password": "New password must be different from old password",
   "New project": "New project",
   "New scheduler": "New scheduler",
+  "New Scheduler": "New Scheduler",
   "New to Pi Dash?": "New to Pi Dash?",
   "New view": "New view",
   "New work item": "New work item",
@@ -1042,8 +1048,8 @@ export default {
   "No schedulers in this workspace yet. Click “New scheduler” to create one.":
     "No schedulers in this workspace yet. Click “New scheduler” to create one.",
   "No schedulers installed": "No schedulers installed",
-  "No schedulers installed on this project yet. Click “Install scheduler” to add one from the workspace catalog.":
-    "No schedulers installed on this project yet. Click “Install scheduler” to add one from the workspace catalog.",
+  "No schedulers installed on this project yet. Click “New Scheduler” to install one from the workspace catalog or create your own.":
+    "No schedulers installed on this project yet. Click “New Scheduler” to install one from the workspace catalog or create your own.",
   "No states available for the {groupKey} group": "No states available for the {groupKey} group",
   "No Views yet": "No Views yet",
   "No Webhook added yet": "No Webhook added yet",
@@ -1353,6 +1359,8 @@ export default {
   Scheduled: "Scheduled",
   Scheduler: "Scheduler",
   "Scheduler created": "Scheduler created",
+  "Scheduler created and installed": "Scheduler created and installed",
+  "Scheduler created but not installed": "Scheduler created but not installed",
   "Scheduler deleted": "Scheduler deleted",
   "Scheduler disabled — it will not fire until re-enabled.": "Scheduler disabled — it will not fire until re-enabled.",
   "Scheduler enabled — it will fire on the next scheduled tick.":
@@ -1522,6 +1530,8 @@ export default {
     "The base prompt the agent runs each tick. Per-project context is appended at install time, so keep this prompt project-agnostic.",
   "The command-line tool installed on each dev machine. Handles authentication with the cloud, manages local config (`~/.pidash/config.toml`), and exposes commands for issues, comments, and runner management (`pidash auth login`, `pidash runner add`, `pidash doctor`, …).":
     "The command-line tool installed on each dev machine. Handles authentication with the cloud, manages local config (`~/.pidash/config.toml`), and exposes commands for issues, comments, and runner management (`pidash auth login`, `pidash runner add`, `pidash doctor`, …).",
+  "The definition is in the workspace catalog — install it from the “Install existing” tab.":
+    "The definition is in the workspace catalog — install it from the “Install existing” tab.",
   "The cycle could not be restored. Please try again.": "The cycle could not be restored. Please try again.",
   "The cycle has been restored.": "The cycle has been restored.",
   "The estimate has been created successfully": "The estimate has been created successfully",
