@@ -71,7 +71,8 @@ pub fn render_datetime<Tz: TimeZone>(dt: &DateTime<Tz>) -> String {
 }
 
 /// Render an aware datetime in a caller-chosen zone (the request's zone).
-/// Non-UTC offsets are kept verbatim, as DRF does.
+/// Non-UTC offsets are kept verbatim; a `+00:00` offset is rewritten to `Z`,
+/// exactly like DRF does.
 pub fn render_datetime_in<TzFrom: TimeZone, TzTo: TimeZone>(
     dt: &DateTime<TzFrom>,
     tz: &TzTo,
@@ -80,19 +81,44 @@ where
     TzTo::Offset: std::fmt::Display,
 {
     let local = dt.with_timezone(tz);
+    let suffix = local.format("%:z").to_string();
+    let suffix = if suffix == "+00:00" {
+        "Z".to_owned()
+    } else {
+        suffix
+    };
     render_utc_parts(
         &local.format("%Y-%m-%dT%H:%M:%S").to_string(),
         local.timestamp_subsec_nanos(),
-        &local.format("%:z").to_string(),
+        &suffix,
     )
 }
 
-/// Render a naive datetime (no offset suffix), as DRF does for naive values.
-pub fn render_naive_datetime(dt: &NaiveDateTime) -> String {
+/// Render a naive datetime through the request's zone. Under the project's
+/// settings (`USE_TZ = True`) DRF makes naive values aware in the field's
+/// timezone before rendering, so a naive value renders exactly like the same
+/// wall time in `tz` (including the `Z` rewrite for `+00:00`).
+pub fn render_naive_datetime_in<TzTo: TimeZone>(dt: &NaiveDateTime, tz: &TzTo) -> String
+where
+    TzTo::Offset: std::fmt::Display,
+{
+    use chrono::MappedLocalTime;
+    let local = match tz.from_local_datetime(dt) {
+        MappedLocalTime::Single(local) | MappedLocalTime::Ambiguous(local, _) => local,
+        // A wall time inside a DST gap has no local offset; fall back to the
+        // same wall time read as UTC (Python's zoneinfo attach never raises).
+        MappedLocalTime::None => return render_datetime_in(&dt.and_utc(), tz),
+    };
+    let suffix = local.format("%:z").to_string();
+    let suffix = if suffix == "+00:00" {
+        "Z".to_owned()
+    } else {
+        suffix
+    };
     render_utc_parts(
         &dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
         dt.and_utc().timestamp_subsec_nanos(),
-        "",
+        &suffix,
     )
 }
 
@@ -325,12 +351,33 @@ mod tests {
     }
 
     #[test]
-    fn naive_datetime_has_no_suffix() {
+    fn utc_zone_renders_z_not_offset() {
+        // Oracle: DRF rewrites a trailing `+00:00` to `Z` for every zone,
+        // so the default request zone (UTC) takes the `Z` path.
+        let dt = chrono::Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap();
+        assert_eq!(
+            render_datetime_in(&dt, &chrono::Utc),
+            "2024-01-02T03:04:05Z"
+        );
+    }
+
+    #[test]
+    fn naive_datetime_renders_through_the_request_zone() {
+        // Oracle (DRF 3.15, USE_TZ=True): naive values are made aware in the
+        // field timezone before rendering.
         let dt = chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
             .unwrap()
             .and_hms_opt(3, 4, 5)
             .unwrap();
-        assert_eq!(render_naive_datetime(&dt), "2024-01-02T03:04:05");
+        assert_eq!(
+            render_naive_datetime_in(&dt, &chrono::Utc),
+            "2024-01-02T03:04:05Z"
+        );
+        let eastern: Tz = "America/New_York".parse().unwrap();
+        assert_eq!(
+            render_naive_datetime_in(&dt, &eastern),
+            "2024-01-02T03:04:05-05:00"
+        );
     }
 
     #[test]

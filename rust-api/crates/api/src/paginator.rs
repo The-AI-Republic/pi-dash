@@ -18,9 +18,10 @@
 //!   pages shift. [`grouped_window`] keeps the stride.
 //! - [`OffsetPaginator`] slices results to `limit`; the grouped paginators
 //!   do not (their `CursorResult` wraps the whole window).
-//! - The non-m2m groupers index the group map directly, so a row whose group
-//!   value is not in `group_by_fields` raises `KeyError` (500). Here that is
-//!   [`GroupError::UnknownGroup`].
+//! - The grouped non-m2m grouper guards with `in` and silently skips rows
+//!   whose group value is not in `group_by_fields`. Only the sub-grouped
+//!   plain grouper indexes cells directly, so only it raises `KeyError`
+//!   (500) on an undeclared group. Here that is [`GroupError::UnknownGroup`].
 //! - Group totals add `1 if count == 0 else count`, so an empty group counts
 //!   as one. Sub-group totals do not (plain overwrite).
 //! - m2m `group_ids` come from `list(set)` — nondeterministic across Python
@@ -199,12 +200,15 @@ impl std::fmt::Display for Cursor {
     }
 }
 
-/// Python `int()`: surrounding whitespace and `_` separators are accepted.
+/// Python `int()`: unbounded, so magnitudes past `i64` saturate instead of
+/// erroring (a huge cursor offset reads an empty page, exactly like slicing
+/// past the end in Python). Surrounding whitespace and `_` separators are
+/// accepted, like `int()`.
 fn parse_py_int(raw: &str) -> Result<i64, PageError> {
-    raw.trim()
-        .replace('_', "")
-        .parse::<i64>()
-        .map_err(|_| PageError::InvalidCursor)
+    match raw.trim().replace('_', "").parse::<i128>() {
+        Ok(value) => Ok(value.clamp(i64::MIN as i128, i64::MAX as i128) as i64),
+        Err(_) => Err(PageError::InvalidCursor),
+    }
 }
 
 /// Python `float()`: surrounding whitespace and `_` separators are accepted.
@@ -216,7 +220,17 @@ fn parse_py_float(raw: &str) -> Result<f64, PageError> {
 }
 
 /// Why pagination input was rejected. [`PageError::detail`] is the exact
-/// `ParseError` detail the views raise.
+/// `ParseError` detail the views raise for the 400-class variants
+/// ([`PageError::InvalidPerPage`], [`PageError::PerPageTooLarge`],
+/// [`PageError::InvalidCursor`], [`PageError::OffsetTooLarge`],
+/// [`PageError::NegativeOffset`]). The remaining variants mirror Python
+/// exceptions the views do not catch, so the handlers answer 500 for them:
+/// [`PageError::ZeroLimit`] is `ZeroDivisionError` from `max_hits`,
+/// [`PageError::NegativeSlice`] is the `ValueError` Django raises when a
+/// lazy queryset is sliced with a negative bound, [`PageError::NonFiniteCursor`]
+/// is the `ValueError`/`OverflowError` from `int()` field prep on a
+/// non-finite cursor stride, and [`PageError::MissingOrderKey`] is the
+/// `TypeError` from `F(*None)` in the grouped window builders.
 #[derive(Debug, Clone, PartialEq, Eq, ThisError)]
 pub enum PageError {
     #[error("Invalid per_page parameter.")]
@@ -230,9 +244,13 @@ pub enum PageError {
     #[error("Error in parsing")]
     NegativeOffset,
     #[error("Error in parsing")]
-    Overflow,
-    #[error("Error in parsing")]
     ZeroLimit,
+    #[error("negative slicing over a lazy queryset is not supported")]
+    NegativeSlice,
+    #[error("cursor value is not a finite number")]
+    NonFiniteCursor,
+    #[error("grouped pagination requires an order key")]
+    MissingOrderKey,
 }
 
 impl PageError {
@@ -244,6 +262,8 @@ impl PageError {
 
 /// `BasePaginator.get_per_page`: unparsable input is an error, the ceiling is
 /// `max(max_per_page, default_per_page)`, and negatives pass through.
+/// Python's `int()` is unbounded, so a huge magnitude parses fine and then
+/// trips the ceiling (`PerPageTooLarge`), instead of failing to parse.
 pub fn parse_per_page(
     raw: Option<&str>,
     default_per_page: i64,
@@ -255,13 +275,13 @@ pub fn parse_per_page(
     let per_page = text
         .trim()
         .replace('_', "")
-        .parse::<i64>()
+        .parse::<i128>()
         .map_err(|_| PageError::InvalidPerPage)?;
     let ceiling = max_per_page.max(default_per_page);
-    if per_page > ceiling {
+    if per_page > ceiling as i128 {
         return Err(PageError::PerPageTooLarge(ceiling));
     }
-    Ok(per_page)
+    Ok(per_page.clamp(i64::MIN as i128, i64::MAX as i128) as i64)
 }
 
 /// `limit = min(limit, max_limit)`.
@@ -295,16 +315,19 @@ pub fn max_hits(count: i64, limit: i64) -> Result<i64, PageError> {
     }
 }
 
-/// The fetch window `OffsetPaginator.get_result` reads:
-/// `[offset, stop)` plus whether the tail must be re-sliced for backwards
-/// walks (`results[-(limit + 1):]` when `cursor.value != limit` and `prev`).
+/// Saturate an exact `i128` offset into `i64`. Python offsets are unbounded;
+/// a saturated `MAX` reads an empty page (slicing past the end), exactly
+/// like the true huge value would.
+fn saturate_offset(value: i128) -> i64 {
+    value.clamp(i64::MIN as i128, i64::MAX as i128) as i64
+}
+
+/// The fetch window `OffsetPaginator.get_result` reads: `[offset, stop)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OffsetWindow {
     pub page: i64,
     pub offset: i64,
     pub stop: i64,
-    /// Take the last `limit + 1` fetched rows before the `[:limit]` trim.
-    pub back_take: Option<i64>,
 }
 
 pub fn offset_window(
@@ -314,7 +337,7 @@ pub fn offset_window(
     is_prev: bool,
     max_offset: Option<i64>,
 ) -> Result<OffsetWindow, PageError> {
-    let offset = page.checked_mul(limit).ok_or(PageError::Overflow)?;
+    let offset = saturate_offset(page as i128 * limit as i128);
     if let Some(max) = max_offset {
         if offset >= max {
             return Err(PageError::OffsetTooLarge);
@@ -323,56 +346,84 @@ pub fn offset_window(
     if offset < 0 {
         return Err(PageError::NegativeOffset);
     }
-    let stop = offset
-        .checked_add(limit)
-        .and_then(|s| s.checked_add(1))
-        .ok_or(PageError::Overflow)?;
-    let back_take = if !cursor_value.equals_limit(limit) && is_prev {
-        Some(limit.checked_add(1).ok_or(PageError::Overflow)?)
-    } else {
-        None
-    };
-    Ok(OffsetWindow {
-        page,
-        offset,
-        stop,
-        back_take,
-    })
+    let stop = saturate_offset(offset as i128 + limit as i128 + 1);
+    if stop < 0 {
+        // `queryset[offset:stop]` with a negative `stop`: Django raises
+        // `ValueError` on the lazy queryset (only reachable with `limit < 0`,
+        // since `offset >= 0` here).
+        return Err(PageError::NegativeSlice);
+    }
+    if !cursor_value.equals_limit(limit) && is_prev {
+        // `results[-(limit + 1):]` runs on the lazy queryset, whose negative
+        // indexing raises `ValueError` — the backwards walk never returns rows.
+        return Err(PageError::NegativeSlice);
+    }
+    Ok(OffsetWindow { page, offset, stop })
 }
 
-/// Apply the window to `fetched` rows (the `[offset, stop)` slice the
-/// handler read): the back-walk re-slice, then the `[:limit]` trim.
-/// A negative `limit` follows Python slice semantics (`rows[:-n]` drops the
-/// last `n`). Returns the page rows.
-pub fn apply_offset_window<T: Clone>(fetched: &[T], window: &OffsetWindow, limit: i64) -> Vec<T> {
-    let tail: &[T] = match window.back_take {
-        Some(take) if take >= 0 && (take as usize) < fetched.len() => {
-            &fetched[fetched.len() - take as usize..]
-        }
-        _ => fetched,
-    };
-    if limit >= 0 {
-        let n = (limit as usize).min(tail.len());
-        tail[..n].to_vec()
-    } else {
-        let keep = tail.len() as i64 + limit;
-        if keep <= 0 {
-            Vec::new()
-        } else {
-            tail[..keep as usize].to_vec()
-        }
+/// Trim `fetched` rows (the `[offset, stop)` slice the handler read) to the
+/// `[:limit]` page. A negative `limit` is Django's `ValueError` again
+/// (`results[:limit]` runs on the lazy queryset), so it errors.
+pub fn apply_offset_window<T: Clone>(fetched: &[T], limit: i64) -> Result<Vec<T>, PageError> {
+    if limit < 0 {
+        return Err(PageError::NegativeSlice);
     }
+    let n = (limit as usize).min(fetched.len());
+    Ok(fetched[..n].to_vec())
 }
 
 /// The fetch window the grouped paginators read: strides by the cursor's own
-/// value, with `(cursor.value or limit)` as the width. A fractional cursor
-/// value truncates toward zero; the server only ever issues integral
-/// cursors, so fractions arise solely from hand-crafted input.
+/// value, with `(cursor.value or limit)` as the width. `0` and `0.0` are
+/// falsy and fall back to `limit`; a fractional cursor value truncates toward
+/// zero after the multiply (Django's `int()` field prep does the same), so
+/// the server-issued integral cursors stay exact while hand-crafted fractions
+/// behave like Python instead of erroring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GroupedWindow {
     pub page: i64,
     pub offset: i64,
     pub stop: i64,
+}
+
+/// `(cursor.value or limit)` as an exact integer stride when the value is
+/// integral, or a float stride otherwise. `0`/`0.0` fall back to `limit`;
+/// NaN and infinities are Django's `ValueError`/`OverflowError` from the
+/// `int()` field prep.
+enum Stride {
+    Int(i128),
+    Float(f64),
+}
+
+fn stride_or_limit(value: CursorValue, limit: i64) -> Result<Stride, PageError> {
+    match value {
+        CursorValue::Int(0) => Ok(Stride::Int(limit as i128)),
+        CursorValue::Int(v) => Ok(Stride::Int(v as i128)),
+        CursorValue::Float(0.0) => Ok(Stride::Int(limit as i128)),
+        CursorValue::Float(f) if !f.is_finite() => Err(PageError::NonFiniteCursor),
+        CursorValue::Float(f)
+            if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 =>
+        {
+            Ok(Stride::Int(f as i128))
+        }
+        CursorValue::Float(f) => Ok(Stride::Float(f)),
+    }
+}
+
+/// Truncate a float window bound toward zero (like Django's `int()` prep)
+/// and saturate past-`i64` magnitudes to an empty-page offset. Overflow
+/// saturation (finite inputs overflowing `f64`) matches Python's unbounded
+/// ints; only a NaN bound — impossible from finite inputs — errors.
+fn trunc_saturate(bound: f64) -> Result<i64, PageError> {
+    if bound.is_nan() {
+        return Err(PageError::NonFiniteCursor);
+    }
+    if bound >= i64::MAX as f64 {
+        return Ok(i64::MAX);
+    }
+    if bound <= i64::MIN as f64 {
+        return Ok(i64::MIN);
+    }
+    Ok(bound.trunc() as i64)
 }
 
 pub fn grouped_window(
@@ -381,12 +432,11 @@ pub fn grouped_window(
     cursor_value: CursorValue,
     max_offset: Option<i64>,
 ) -> Result<GroupedWindow, PageError> {
-    let stride = match cursor_value {
-        CursorValue::Int(0) => limit,
-        CursorValue::Int(v) => v,
-        CursorValue::Float(f) => f as i64,
+    let stride = stride_or_limit(cursor_value, limit)?;
+    let offset = match stride {
+        Stride::Int(stride) => saturate_offset(page as i128 * stride),
+        Stride::Float(stride) => trunc_saturate(page as f64 * stride)?,
     };
-    let offset = page.checked_mul(stride).ok_or(PageError::Overflow)?;
     if let Some(max) = max_offset {
         if offset >= max {
             return Err(PageError::OffsetTooLarge);
@@ -395,15 +445,11 @@ pub fn grouped_window(
     if offset < 0 {
         return Err(PageError::NegativeOffset);
     }
-    let width = match cursor_value {
-        CursorValue::Int(0) => limit,
-        CursorValue::Int(v) => v,
-        CursorValue::Float(f) => f as i64,
+    let stop = match stride {
+        Stride::Int(stride) => saturate_offset(offset as i128 + stride + 1),
+        // Python adds the untruncated floats first and truncates once.
+        Stride::Float(stride) => trunc_saturate(page as f64 * stride + stride + 1.0)?,
     };
-    let stop = offset
-        .checked_add(width)
-        .and_then(|s| s.checked_add(1))
-        .ok_or(PageError::Overflow)?;
     Ok(GroupedWindow { page, offset, stop })
 }
 
@@ -467,8 +513,6 @@ pub enum GroupError {
     MissingId,
     #[error("row has no group field: {0}")]
     MissingGroupField(String),
-    #[error("no sub-group totals for group: {0}")]
-    MissingSubTotals(String),
     #[error("group cells are malformed")]
     MalformedCells,
 }
@@ -547,7 +591,7 @@ fn cell_results(cell: Option<&mut Value>) -> Result<&mut Vec<Value>, GroupError>
 
 /// `__query_grouper` (grouped, non-m2m): rows land in their declared group.
 /// The field reads via `.get` (missing → `"None"`); a value outside every
-/// declared group is Python's `KeyError`.
+/// declared group is silently skipped (`if group_value in processed_results`).
 pub fn query_grouper(
     rows: &[Row],
     group_field: &str,
@@ -560,10 +604,9 @@ pub fn query_grouper(
     };
     for row in rows {
         let group = row_group_value_or_none(row, group_field);
-        let entry = processed
-            .get_mut(&group)
-            .ok_or_else(|| GroupError::UnknownGroup(group.clone()))?;
-        cell_results(Some(entry))?.push(Value::Object(row.clone()));
+        if let Some(entry) = processed.get_mut(&group) {
+            cell_results(Some(entry))?.push(Value::Object(row.clone()));
+        }
     }
     Ok(Value::Object(processed))
 }
@@ -668,8 +711,8 @@ pub fn sub_total_dicts(
 }
 
 /// `__get_field_dict` (sub-grouped): for every declared group, every known
-/// sub-group starts empty with its total. A group with no sub-totals is
-/// Python's `AttributeError` (`None.get`).
+/// sub-group starts empty with its total. A group absent from the sub-totals
+/// yields an empty cell (`total_sub_group_dict.get(group, [])`).
 pub fn sub_field_dict(
     groups: &[String],
     totals: &std::collections::HashMap<String, i64>,
@@ -677,15 +720,14 @@ pub fn sub_field_dict(
 ) -> Result<Value, GroupError> {
     let mut map = serde_json::Map::new();
     for group in groups {
-        let subs = sub_totals
-            .get(group)
-            .ok_or_else(|| GroupError::MissingSubTotals(group.clone()))?;
         let mut results = serde_json::Map::new();
-        for (sub, total) in subs {
-            let mut entry = serde_json::Map::new();
-            entry.insert("results".to_owned(), Value::Array(Vec::new()));
-            entry.insert("total_results".to_owned(), Value::from(*total));
-            results.insert(sub.clone(), Value::Object(entry));
+        if let Some(subs) = sub_totals.get(group) {
+            for (sub, total) in subs {
+                let mut entry = serde_json::Map::new();
+                entry.insert("results".to_owned(), Value::Array(Vec::new()));
+                entry.insert("total_results".to_owned(), Value::from(*total));
+                results.insert(sub.clone(), Value::Object(entry));
+            }
         }
         let mut entry = serde_json::Map::new();
         entry.insert("results".to_owned(), Value::Object(results));
@@ -838,7 +880,9 @@ pub fn order_key(order_by: Option<&str>) -> (Option<String>, bool) {
 }
 
 /// `queryset.order_by(key [DESC|ASC] NULLS LAST, -created_at)[offset:stop]`:
-/// full rows, `LIMIT (stop - offset)` `OFFSET offset`.
+/// full rows, `LIMIT (stop - offset)` `OFFSET offset`. With `order_by=None`
+/// Python skips ordering entirely (`if self.key:` is false), not even
+/// `-created_at`.
 pub fn offset_query(
     table: &str,
     order_by: Option<&str>,
@@ -854,32 +898,36 @@ pub fn offset_query(
             if desc { Order::Desc } else { Order::Asc },
             NullOrdering::Last,
         );
+        query.order_by(Alias::new("created_at"), Order::Desc);
     }
-    query
-        .order_by(Alias::new("created_at"), Order::Desc)
-        .limit(fetch)
-        .offset(offset);
+    query.limit(fetch).offset(offset);
     query
 }
 
 /// The `PARTITION BY <group[, sub-group]> ORDER BY ...` window the grouped
 /// paginators annotate `ROW_NUMBER() OVER (...)` as `row_number`.
 /// `partition` holds one (grouped) or two (sub-grouped) field names.
-pub fn partition_window(partition: &[&str], order_by: Option<&str>) -> WindowStatement {
+/// With `order_by=None` Python crashes unpacking the key (`F(*None)`), so
+/// the builders error instead of emitting an unordered window.
+pub fn partition_window(
+    partition: &[&str],
+    order_by: Option<&str>,
+) -> Result<WindowStatement, PageError> {
     let (key, desc) = order_key(order_by);
+    let Some(key) = key else {
+        return Err(PageError::MissingOrderKey);
+    };
     let mut window = WindowStatement::partition_by(Alias::new(partition[0]));
     for extra in &partition[1..] {
         window.add_partition_by(SimpleExpr::Column(Alias::new(*extra).into_column_ref()));
     }
-    if let Some(key) = key {
-        window.order_by_with_nulls(
-            Alias::new(key),
-            if desc { Order::Desc } else { Order::Asc },
-            NullOrdering::Last,
-        );
-    }
+    window.order_by_with_nulls(
+        Alias::new(key),
+        if desc { Order::Desc } else { Order::Asc },
+        NullOrdering::Last,
+    );
     window.order_by(Alias::new("created_at"), Order::Desc);
-    window
+    Ok(window)
 }
 
 /// The grouped page: rows whose per-partition `row_number` falls in
@@ -891,15 +939,18 @@ pub fn grouped_page_query(
     order_by: Option<&str>,
     offset: i64,
     stop: i64,
-) -> SelectStatement {
+) -> Result<SelectStatement, PageError> {
     let (key, desc) = order_key(order_by);
+    let Some(key) = key else {
+        return Err(PageError::MissingOrderKey);
+    };
     let mut inner = Query::select();
     inner
         .from(Alias::new(table))
         .column(Asterisk)
         .expr_window_as(
             Func::cust("ROW_NUMBER"),
-            partition_window(partition, order_by),
+            partition_window(partition, order_by)?,
             Alias::new("row_number"),
         );
     let mut outer = Query::select();
@@ -908,15 +959,13 @@ pub fn grouped_page_query(
         .column(Asterisk)
         .and_where(Expr::col(Alias::new("row_number")).gt(offset))
         .and_where(Expr::col(Alias::new("row_number")).lt(stop));
-    if let Some(key) = key {
-        outer.order_by_with_nulls(
-            Alias::new(key),
-            if desc { Order::Desc } else { Order::Asc },
-            NullOrdering::Last,
-        );
-    }
+    outer.order_by_with_nulls(
+        Alias::new(key),
+        if desc { Order::Desc } else { Order::Asc },
+        NullOrdering::Last,
+    );
     outer.order_by(Alias::new("created_at"), Order::Desc);
-    outer
+    Ok(outer)
 }
 
 #[cfg(test)]
@@ -964,19 +1013,16 @@ mod tests {
     }
 
     #[test]
-    fn negative_limit_trims_like_a_python_slice() {
-        let window = OffsetWindow {
-            page: 0,
-            offset: 0,
-            stop: 1,
-            back_take: None,
-        };
+    fn negative_limit_is_a_server_error_like_python() {
+        // Oracle: `results[:limit]` with a negative limit runs on the lazy
+        // queryset, so Django raises `ValueError` — no slice-trim happens.
         let fetched: Vec<i64> = vec![1, 2, 3, 4, 5];
-        assert_eq!(apply_offset_window(&fetched, &window, -2), vec![1, 2, 3]);
         assert_eq!(
-            apply_offset_window(&fetched, &window, -99),
-            Vec::<i64>::new()
+            apply_offset_window(&fetched, -2),
+            Err(PageError::NegativeSlice)
         );
+        assert_eq!(apply_offset_window(&fetched, 2), Ok(vec![1, 2]));
+        assert_eq!(apply_offset_window(&fetched, 99), Ok(vec![1, 2, 3, 4, 5]));
     }
 
     #[test]
@@ -990,6 +1036,13 @@ mod tests {
 
         let float = Cursor::from_string("10.5:0:0").unwrap();
         assert_eq!(float.value, CursorValue::Float(10.5));
+
+        // Oracle: `int()` never overflows, so a huge offset saturates to an
+        // empty-page bound instead of rejecting the cursor.
+        let huge = Cursor::from_string("99999999999999999999999:0:0").unwrap();
+        assert_eq!(huge.value, CursorValue::Int(i64::MAX));
+        let huge_neg = Cursor::from_string("-99999999999999999999999:0:0").unwrap();
+        assert_eq!(huge_neg.value, CursorValue::Int(i64::MIN));
 
         for bad in ["50:0", "50:0:0:0", "x:0:0", "50:x:0", "50:0:x", ""] {
             assert_eq!(
@@ -1023,6 +1076,12 @@ mod tests {
         );
         // Ceiling is max(max_per_page, default_per_page).
         assert_eq!(parse_per_page(Some("1500"), 2000, 1000), Ok(1500));
+        // Oracle: `int()` is unbounded, so a huge magnitude parses fine and
+        // then trips the ceiling — it is `PerPageTooLarge`, not unparsable.
+        assert_eq!(
+            parse_per_page(Some("99999999999999999999999"), 100, 1000),
+            Err(PageError::PerPageTooLarge(1000))
+        );
         // Negatives pass the parser.
         assert_eq!(parse_per_page(Some("-5"), 100, 1000), Ok(-5));
         assert_eq!(
@@ -1051,7 +1110,6 @@ mod tests {
                 page: 0,
                 offset: 0,
                 stop: 51,
-                back_take: None
             }
         );
         assert_eq!(next_cursor(50, 0, true).to_string(), "50:1:0");
@@ -1060,14 +1118,23 @@ mod tests {
     }
 
     #[test]
-    fn offset_window_back_walk_reslices_when_value_differs() {
-        // cursor.value (25) != limit (50) with is_prev: take the last 51.
-        let window = offset_window(50, 2, CursorValue::Int(25), true, None).unwrap();
+    fn offset_window_back_walk_is_a_server_error() {
+        // Oracle: `results[-(limit + 1):]` runs on the lazy queryset, whose
+        // negative indexing raises `ValueError` — the walk never returns rows.
+        assert_eq!(
+            offset_window(50, 2, CursorValue::Int(25), true, None),
+            Err(PageError::NegativeSlice)
+        );
+        assert_eq!(
+            offset_window(50, 2, CursorValue::Float(25.0), true, None),
+            Err(PageError::NegativeSlice)
+        );
+        // A matching value walks forward normally.
+        let window = offset_window(50, 2, CursorValue::Int(50), true, None).unwrap();
         assert_eq!(window.offset, 100);
         assert_eq!(window.stop, 151);
-        assert_eq!(window.back_take, Some(51));
         let fetched: Vec<i64> = (0..51).collect();
-        assert_eq!(apply_offset_window(&fetched, &window, 50).len(), 50);
+        assert_eq!(apply_offset_window(&fetched, 50).unwrap().len(), 50);
     }
 
     #[test]
@@ -1080,10 +1147,26 @@ mod tests {
             offset_window(10, -1, CursorValue::Int(10), false, None),
             Err(PageError::NegativeOffset)
         );
+        // A negative stop (`limit < 0` with a non-negative offset) slices
+        // with a negative bound: Django `ValueError`, not rows.
+        assert_eq!(
+            offset_window(-5, 0, CursorValue::Int(-5), false, None),
+            Err(PageError::NegativeSlice)
+        );
         assert_eq!(max_hits(95, 50), Ok(2));
         assert_eq!(max_hits(100, 50), Ok(2));
         assert_eq!(max_hits(0, 50), Ok(0));
         assert_eq!(max_hits(10, 0), Err(PageError::ZeroLimit));
+    }
+
+    #[test]
+    fn offset_window_saturates_huge_products_to_an_empty_page() {
+        // Oracle: Python ints never overflow; a huge offset slices past the
+        // end and reads an empty 200 page.
+        let window =
+            offset_window(1000, i64::MAX, CursorValue::Int(i64::MAX), false, None).unwrap();
+        assert_eq!(window.offset, i64::MAX);
+        assert_eq!(window.stop, i64::MAX);
     }
 
     // -- grouped window ----------------------------------------------------
@@ -1112,6 +1195,37 @@ mod tests {
         );
         assert_eq!(grouped_max_hits(true, 999, 50), Ok(0));
         assert_eq!(grouped_max_hits(false, 95, 50), Ok(2));
+    }
+
+    #[test]
+    fn grouped_window_float_stride_matches_python_or_semantics() {
+        // Oracle: `(cursor.value or limit)` — `0.0` is falsy and falls back
+        // to `limit`, exactly like `0`.
+        let zero_float = grouped_window(50, 2, CursorValue::Float(0.0), None).unwrap();
+        assert_eq!(zero_float.offset, 100);
+        assert_eq!(zero_float.stop, 151);
+        // Oracle: finite fractions truncate toward zero after the multiply
+        // (Django's `int()` field prep), they do not error.
+        let frac = grouped_window(50, 2, CursorValue::Float(10.5), None).unwrap();
+        assert_eq!(frac.offset, 21);
+        assert_eq!(frac.stop, 32);
+        // Oracle: NaN poisons the multiply (`int()` raises `ValueError`) and
+        // infinities overflow it (`OverflowError`) — both are 500s.
+        for bad in [
+            CursorValue::Float(f64::NAN),
+            CursorValue::Float(f64::INFINITY),
+            CursorValue::Float(f64::NEG_INFINITY),
+        ] {
+            assert_eq!(
+                grouped_window(50, 0, bad, None),
+                Err(PageError::NonFiniteCursor),
+                "{bad:?}"
+            );
+        }
+        // Oracle: a huge integral stride is a huge offset, i.e. an empty page.
+        let huge = grouped_window(50, 1, CursorValue::Float(1e300), None).unwrap();
+        assert_eq!(huge.offset, i64::MAX);
+        assert_eq!(huge.stop, i64::MAX);
     }
 
     // -- envelope ----------------------------------------------------------
@@ -1182,19 +1296,29 @@ mod tests {
     }
 
     #[test]
-    fn plain_grouper_rejects_undeclared_groups() {
-        let rows = vec![row(&[
-            ("id", Value::from("a")),
-            ("state__group", Value::from("zzz")),
-        ])];
-        let err = query_grouper(
+    fn plain_grouper_skips_undeclared_groups() {
+        // `paginator.py` guards with `if group_value in processed_results`:
+        // rows outside every declared group vanish silently (only the
+        // sub-grouped plain grouper indexes cells directly and raises).
+        let rows = vec![
+            row(&[
+                ("id", Value::from("a")),
+                ("state__group", Value::from("zzz")),
+            ]),
+            row(&[
+                ("id", Value::from("b")),
+                ("state__group", Value::from("backlog")),
+            ]),
+        ];
+        let out = query_grouper(
             &rows,
             "state__group",
             &["backlog".to_owned()],
             &std::collections::HashMap::new(),
         )
-        .unwrap_err();
-        assert_eq!(err, GroupError::UnknownGroup("zzz".to_owned()));
+        .unwrap();
+        assert!(out.get("zzz").is_none());
+        assert_eq!(out["backlog"]["results"].as_array().unwrap().len(), 1);
     }
 
     #[test]
@@ -1237,14 +1361,17 @@ mod tests {
     }
 
     #[test]
-    fn sub_field_dict_requires_sub_totals() {
-        let err = sub_field_dict(
+    fn sub_field_dict_missing_group_is_an_empty_cell() {
+        // `total_sub_group_dict.get(group, [])`: a group with no sub-totals
+        // renders an empty results object and total 0, not an error.
+        let out = sub_field_dict(
             &["g".to_owned()],
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
         )
-        .unwrap_err();
-        assert_eq!(err, GroupError::MissingSubTotals("g".to_owned()));
+        .unwrap();
+        assert_eq!(out["g"]["results"], Value::Object(serde_json::Map::new()));
+        assert_eq!(out["g"]["total_results"], Value::from(0));
     }
 
     #[test]
@@ -1313,25 +1440,35 @@ mod tests {
             sql(&offset_query("issue", Some("-sequence_id"), 51, 100)),
             r#"SELECT * FROM "issue" ORDER BY "sequence_id" DESC NULLS LAST, "created_at" DESC LIMIT 51 OFFSET 100"#
         );
+        // Oracle: `order_by=None` skips ordering entirely (`if self.key:`
+        // is false) — not even `-created_at`.
         assert_eq!(
             sql(&offset_query("issue", None, 51, 0)),
-            r#"SELECT * FROM "issue" ORDER BY "created_at" DESC LIMIT 51 OFFSET 0"#
+            r#"SELECT * FROM "issue" LIMIT 51 OFFSET 0"#
         );
     }
 
     #[test]
     fn grouped_sql_partitions_and_bounds_rows() {
-        let rendered = sql(&grouped_page_query(
-            "issue",
-            &["state__group"],
-            Some("-sequence_id"),
-            100,
-            151,
-        ));
+        let rendered =
+            sql(
+                &grouped_page_query("issue", &["state__group"], Some("-sequence_id"), 100, 151)
+                    .unwrap(),
+            );
         assert!(rendered.contains(r#"ROW_NUMBER() OVER ( PARTITION BY "state__group" ORDER BY "sequence_id" DESC NULLS LAST, "created_at" DESC ) AS "row_number""#), "{rendered}");
         assert!(
             rendered.contains(r#""row_number" > 100 AND "row_number" < 151"#),
             "{rendered}"
+        );
+        // Oracle: the grouped builders unpack the key (`F(*None)`), so
+        // `order_by=None` is a `TypeError` — a 500, not an unordered window.
+        assert_eq!(
+            grouped_page_query("issue", &["state__group"], None, 100, 151),
+            Err(PageError::MissingOrderKey)
+        );
+        assert_eq!(
+            partition_window(&["state__group"], None),
+            Err(PageError::MissingOrderKey)
         );
     }
 }

@@ -72,18 +72,34 @@ pub enum FilterKind {
         column: &'static str,
         many: bool,
     },
-    /// A boolean equality on one column.
+    /// A boolean equality on one column (`NullBooleanField`: the
+    /// `NullBooleanSelect` spellings below, anything else cleans to `None`
+    /// and filters `IS NULL`).
     Flag {
         table: &'static str,
         column: &'static str,
     },
-    /// A date equality on one column.
+    /// A date equality on a `DATE` column. Accepts Django's
+    /// `DATE_INPUT_FORMATS` and normalizes to ISO; datetime strings are
+    /// rejected, like `DateField` does.
     Date {
         table: &'static str,
         column: &'static str,
     },
-    /// A two-element date range on one column.
+    /// A datetime equality on a `DateTimeField` column. Accepts ISO-8601,
+    /// `DATETIME_INPUT_FORMATS`, and date-only strings; passes the input
+    /// through verbatim.
+    Datetime {
+        table: &'static str,
+        column: &'static str,
+    },
+    /// A two-element date range on a `DATE` column.
     DateRange {
+        table: &'static str,
+        column: &'static str,
+    },
+    /// A two-element datetime range on a `DateTimeField` column.
+    DatetimeRange {
         table: &'static str,
         column: &'static str,
     },
@@ -423,14 +439,14 @@ pub const ISSUE_FILTERSET: &[FilterDecl] = &[
     ),
     decl!(
         "created_at",
-        FilterKind::Date {
+        FilterKind::Datetime {
             table: "issue",
             column: "created_at"
         }
     ),
     decl!(
         "created_at__exact",
-        FilterKind::Date {
+        FilterKind::Datetime {
             table: "issue",
             column: "created_at"
         },
@@ -438,21 +454,21 @@ pub const ISSUE_FILTERSET: &[FilterDecl] = &[
     ),
     decl!(
         "created_at__range",
-        FilterKind::DateRange {
+        FilterKind::DatetimeRange {
             table: "issue",
             column: "created_at"
         }
     ),
     decl!(
         "updated_at",
-        FilterKind::Date {
+        FilterKind::Datetime {
             table: "issue",
             column: "updated_at"
         }
     ),
     decl!(
         "updated_at__exact",
-        FilterKind::Date {
+        FilterKind::Datetime {
             table: "issue",
             column: "updated_at"
         },
@@ -460,7 +476,7 @@ pub const ISSUE_FILTERSET: &[FilterDecl] = &[
     ),
     decl!(
         "updated_at__range",
-        FilterKind::DateRange {
+        FilterKind::DatetimeRange {
             table: "issue",
             column: "updated_at"
         }
@@ -520,10 +536,10 @@ fn find_decl(name: &str) -> Option<&'static FilterDecl> {
 }
 
 /// The `QueryDict` round-trip `_build_leaf_q` puts every leaf value through:
-/// `None` → `""`, booleans → `"True"` / `"False"`, numbers render plainly,
-/// lists repeat the key. Every compiler below takes the stringified form,
-/// so validation matches the filterset's (e.g. `UUIDField("")` cleans to
-/// `None`, i.e. `IS NULL` — a JSON `null` never errors).
+/// lists repeat the key (`setlist`), scalars stringify (`None` → `""`,
+/// booleans → `"True"` / `"False"`, numbers render plainly). Widgets then
+/// read the LAST item (`QueryDict.get`), so a JSON list contributes only its
+/// tail — e.g. `{"priority__in": ["high", "urgent"]}` filters `urgent` only.
 fn stringify_scalar(value: &Value) -> Option<String> {
     match value {
         Value::Null => Some(String::new()),
@@ -535,7 +551,38 @@ fn stringify_scalar(value: &Value) -> Option<String> {
     }
 }
 
+/// The tail value every widget sees: a JSON list's last item, or the scalar
+/// itself, serialized like `_build_leaf_q` — with one asymmetry the backend
+/// has: a scalar `None` becomes `""`, but a `None` *inside* a list becomes
+/// `"None"` (`str(None)` in the `setlist` comprehension). An empty list
+/// reads as `""`.
+fn tail_text(field: &str, value: &Value) -> Result<String, FilterError> {
+    match value {
+        Value::Array(items) => match items.last() {
+            None => Ok(String::new()),
+            Some(Value::Null) => Ok("None".to_owned()),
+            Some(item) => stringify_scalar(item)
+                .ok_or_else(|| FilterError::InvalidLookupValue(field.to_owned())),
+        },
+        Value::Null => Ok(String::new()),
+        single => stringify_scalar(single)
+            .ok_or_else(|| FilterError::InvalidLookupValue(field.to_owned())),
+    }
+}
+
+/// A CSV-widget value: the tail item, comma-split. A wholly empty value
+/// cleans to `[]` before per-item cleaning runs (`BaseCSVWidget`).
+fn csv_parts(field: &str, value: &Value) -> Result<Vec<String>, FilterError> {
+    let tail = tail_text(field, value)?;
+    if tail.is_empty() {
+        Ok(Vec::new())
+    } else {
+        Ok(tail.split(',').map(str::to_owned).collect())
+    }
+}
+
 fn parse_uuid_field(field: &str, text: &str) -> Result<Option<uuid::Uuid>, FilterError> {
+    let text = text.trim();
     if text.is_empty() {
         return Ok(None);
     }
@@ -544,101 +591,194 @@ fn parse_uuid_field(field: &str, text: &str) -> Result<Option<uuid::Uuid>, Filte
         .map_err(|_| FilterError::InvalidLookupValue(field.to_owned()))
 }
 
-/// An `__in` list: items stringify like the `QueryDict` round-trip. Empty
-/// items clean to `None` (`IN (NULL)`), which never matches, so they are
-/// dropped — result-identical. A list left empty matches nothing, like
-/// Python's `IN (NULL)`.
-fn uuid_list(field: &str, value: &Value) -> Result<Vec<uuid::Uuid>, FilterError> {
-    let texts = match value {
-        Value::Array(items) => items
-            .iter()
-            .map(|item| {
-                stringify_scalar(item)
-                    .ok_or_else(|| FilterError::InvalidLookupValue(field.to_owned()))
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        single => vec![stringify_scalar(single)
-            .ok_or_else(|| FilterError::InvalidLookupValue(field.to_owned()))?],
-    };
-    texts
+/// An `__in` list of UUIDs: the tail item, comma-split, each part cleaned
+/// strictly — except `""`, which `UUIDField` keeps as `""` (it renders
+/// `IN ('')` and fails downstream, exactly like Python). Valid entries are
+/// canonicalized to lowercase, like the cleaned `UUID` objects.
+/// An empty list matches nothing for direct filters (`IN ()`); relation
+/// (method) filters skip the method instead — see [`compile_leaf`].
+fn uuid_in_list(field: &str, value: &Value) -> Result<Vec<String>, FilterError> {
+    csv_parts(field, value)?
         .iter()
-        .map(|text| parse_uuid_field(field, text))
-        .collect::<Result<Vec<_>, _>>()
-        .map(|ids| ids.into_iter().flatten().collect())
+        .map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                Ok(String::new())
+            } else {
+                uuid::Uuid::parse_str(part)
+                    .map(|id| id.to_string())
+                    .map_err(|_| FilterError::InvalidLookupValue(field.to_owned()))
+            }
+        })
+        .collect()
 }
 
-fn text_list(field: &str, value: &Value) -> Result<Vec<String>, FilterError> {
-    match value {
-        Value::Array(items) => items
-            .iter()
-            .map(|item| {
-                stringify_scalar(item)
-                    .ok_or_else(|| FilterError::InvalidLookupValue(field.to_owned()))
-            })
-            .collect(),
-        single => Ok(vec![stringify_scalar(single)
-            .ok_or_else(|| FilterError::InvalidLookupValue(field.to_owned()))?]),
+/// `NullBooleanSelect.value_from_datadict`: the exact widget map, including
+/// the Django<2.2 `"2"` / `"3"` backcompat spellings. Anything else cleans
+/// to `None`. No stripping: `" true "` misses the map and cleans to `None`.
+/// (The typed `True`/`False` map keys only matter for un-stringified data,
+/// which `_build_leaf_q` never sends — everything arrives stringified.)
+fn parse_null_boolean(text: &str) -> Option<bool> {
+    match text {
+        "True" | "true" | "2" => Some(true),
+        "False" | "false" | "3" => Some(false),
+        _ => None,
     }
 }
 
-/// `filter_is_archived` on the stringified value: truthy spellings →
-/// `archived_at IS NOT NULL`, falsy spellings → `IS NULL`, anything else →
-/// no filter (`Q()`). Note `"1.0"` is not truthy: the backend stringifies
-/// through `QueryDict` first, so only the exact spellings count.
+/// `filter_is_archived` on the tail value: `True` → `archived_at IS NOT
+/// NULL`, `False` → `IS NULL`, `None` (anything else) → the method is
+/// skipped, i.e. match-all (`Q(pk__in=qs)`), rendered here as `1 = 1`.
 pub fn archived_condition(value: &Value) -> SimpleExpr {
-    const TRUTHY: &[&str] = &["true", "True", "1"];
-    const FALSY: &[&str] = &["false", "False", "0"];
     let col = Expr::col((Alias::new("issue"), Alias::new("archived_at")));
-    let text = stringify_scalar(value).unwrap_or_default();
-    if TRUTHY.contains(&text.as_str()) {
-        col.is_not_null()
-    } else if FALSY.contains(&text.as_str()) {
-        col.is_null()
-    } else {
-        // `Q()`: no filter.
-        Expr::cust("1 = 1")
+    let text = tail_text("is_archived", value).unwrap_or_default();
+    match parse_null_boolean(&text) {
+        Some(true) => col.is_not_null(),
+        Some(false) => col.is_null(),
+        // Method skipped: no filter.
+        None => Expr::cust("1 = 1"),
     }
 }
 
-/// `BooleanFilter` on the stringified value. `""` (a JSON `null`) cleans to
-/// `False`. Anything outside the known spellings is rejected; Django's form
-/// field would coerce an unknown non-empty string to `True`, a garbage-input
-/// divergence documented here rather than copied.
-fn parse_flag(field: &str, value: &Value) -> Result<bool, FilterError> {
-    let text =
-        stringify_scalar(value).ok_or_else(|| FilterError::InvalidLookupValue(field.to_owned()))?;
-    match text.as_str() {
-        "true" | "True" | "1" => Ok(true),
-        "false" | "False" | "0" | "" => Ok(false),
-        _ => Err(FilterError::InvalidLookupValue(field.to_owned())),
+/// Django's `DATE_INPUT_FORMATS`: the only strings a `DATE` column accepts.
+/// Python's `strptime` is strict about digit runs (`%Y` is exactly 4 digits,
+/// `%y` exactly 2 with a 68/69 pivot), while chrono's `%Y`/`%y` accept any
+/// width without pivoting — so the shapes below are tokenized by hand and
+/// chrono only validates ranges and month names.
+fn is_digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn parse_iso_date(text: &str) -> Option<chrono::NaiveDate> {
+    let mut parts = text.split('-');
+    let (year, month, day) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some()
+        || year.len() != 4
+        || !is_digits(year)
+        || month.len() > 2
+        || !is_digits(month)
+        || day.len() > 2
+        || !is_digits(day)
+    {
+        return None;
+    }
+    chrono::NaiveDate::from_ymd_opt(year.parse().ok()?, month.parse().ok()?, day.parse().ok()?)
+}
+
+/// `%m/%d/%Y` and `%m/%d/%y` (pivot: 00-68 → 20xx, 69-99 → 19xx).
+fn parse_us_date(text: &str) -> Option<chrono::NaiveDate> {
+    let mut parts = text.split('/');
+    let (month, day, year) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some()
+        || month.len() > 2
+        || !is_digits(month)
+        || day.len() > 2
+        || !is_digits(day)
+        || !is_digits(year)
+    {
+        return None;
+    }
+    let year: i32 = match year.len() {
+        4 => year.parse().ok()?,
+        2 => {
+            let short: i32 = year.parse().ok()?;
+            if short >= 69 {
+                1900 + short
+            } else {
+                2000 + short
+            }
+        }
+        _ => return None,
+    };
+    chrono::NaiveDate::from_ymd_opt(year, month.parse().ok()?, day.parse().ok()?)
+}
+
+/// The month-name shapes (`%b`/`%B`, day first or month first, optional
+/// comma): the year always comes last and is 4 digits; commas and extra
+/// spaces are tolerated via tokenization.
+fn parse_named_date(text: &str) -> Option<chrono::NaiveDate> {
+    let cleaned = text.replace(',', " ");
+    let tokens: Vec<&str> = cleaned.split_whitespace().collect();
+    if tokens.len() != 3 {
+        return None;
+    }
+    let year = tokens[2];
+    if year.len() != 4 || !year.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let normalized = tokens.join(" ");
+    ["%b %d %Y", "%d %b %Y", "%B %d %Y", "%d %B %Y"]
+        .iter()
+        .find_map(|format| chrono::NaiveDate::parse_from_str(&normalized, format).ok())
+}
+
+/// A `DATE` column value, normalized to ISO (`%Y-%m-%d`). Non-ISO inputs
+/// (US, month-name) would be `DateStyle`-ambiguous or invalid as SQL
+/// literals, while Python binds real `date` objects — normalization keeps
+/// the comparison identical. Datetime strings are rejected, like
+/// `DateField` does.
+fn parse_date_normalized(field: &str, text: &str) -> Result<String, FilterError> {
+    let date = parse_iso_date(text)
+        .or_else(|| parse_us_date(text))
+        .or_else(|| parse_named_date(text));
+    match date {
+        Some(date) => Ok(date.format("%Y-%m-%d").to_string()),
+        None => Err(FilterError::InvalidLookupValue(field.to_owned())),
     }
 }
 
-/// A date/datetime the model field accepts, in the string form Postgres
-/// compares. Mirrors the form-field parse: invalid strings are a filterset
-/// error in Python, never a database error.
-fn parse_date_text(field: &str, text: &str) -> Result<String, FilterError> {
-    if text.is_empty() {
-        return Ok(String::new());
-    }
-    let invalid = || FilterError::InvalidLookupValue(field.to_owned());
-    if chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").is_ok() {
-        return Ok(text.to_owned());
-    }
+/// Django's `DATETIME_INPUT_FORMATS`, plus the `T`-separated ISO shapes
+/// `parse_datetime` accepts (offsets via `%:z` and `%z`).
+const DATETIME_INPUT_FORMATS: &[&str] = &[
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M:%S%.f",
+    "%Y-%m-%d %H:%M",
+    "%m/%d/%Y %H:%M:%S",
+    "%m/%d/%Y %H:%M:%S%.f",
+    "%m/%d/%Y %H:%M",
+    "%m/%d/%y %H:%M:%S",
+    "%m/%d/%y %H:%M:%S%.f",
+    "%m/%d/%y %H:%M",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S%.f",
+    "%Y-%m-%dT%H:%M",
+    "%Y-%m-%dT%H:%M:%S%:z",
+    "%Y-%m-%dT%H:%M:%S%.f%:z",
+    "%Y-%m-%dT%H:%M%:z",
+    "%Y-%m-%dT%H:%M:%S%z",
+    "%Y-%m-%dT%H:%M:%S%.f%z",
+    "%Y-%m-%d %H:%M:%S%:z",
+    "%Y-%m-%d %H:%M:%S%.f%:z",
+];
+
+/// Whether a `DateTimeField` column accepts the input. `DateTimeField`
+/// accepts ISO-8601 (via `parse_datetime`, incl. `Z` and offsets), the
+/// `DATETIME_INPUT_FORMATS`, and date-only strings (midnight); the input
+/// passes through verbatim, so only acceptance is checked here.
+fn is_datetime_text(text: &str) -> bool {
     if chrono::DateTime::parse_from_rfc3339(text).is_ok() {
-        return Ok(text.to_owned());
+        return true;
     }
-    for format in [
-        "%Y-%m-%d %H:%M:%S%.f",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d %H:%M",
-        "%Y-%m-%dT%H:%M:%S%.f",
-    ] {
-        if chrono::NaiveDateTime::parse_from_str(text, format).is_ok() {
-            return Ok(text.to_owned());
+    // `fromisoformat` (via the `datetime_re` fallback) accepts a lowercase
+    // `z`; chrono's RFC 3339 parser does not.
+    if text.len() > 1 && text.ends_with('z') {
+        let mut upper = text.to_owned();
+        upper.replace_range(text.len() - 1.., "Z");
+        if chrono::DateTime::parse_from_rfc3339(&upper).is_ok() {
+            return true;
         }
     }
-    Err(invalid())
+    for format in DATETIME_INPUT_FORMATS {
+        if chrono::NaiveDateTime::parse_from_str(text, format).is_ok() {
+            return true;
+        }
+    }
+    // Date-only strings clean to midnight (`DateTimeField` falls back to
+    // `parse_date`); strictness matches the `DATE` columns above.
+    parse_iso_date(text)
+        .or_else(|| parse_us_date(text))
+        .or_else(|| parse_named_date(text))
+        .is_some()
 }
 
 fn col(table: &'static str, column: &'static str) -> Expr {
@@ -647,7 +787,8 @@ fn col(table: &'static str, column: &'static str) -> Expr {
 
 /// Compile one `{name: value}` leaf against the declaration table.
 /// Mirrors `_validate_fields` (unknown names are rejected) plus
-/// `build_combined_q` for a single filter.
+/// `build_combined_q` for a single filter. Every value goes through the
+/// `QueryDict` tail model first ([`tail_text`]/[`csv_parts`]).
 pub fn compile_leaf(name: &str, value: &Value) -> Result<SimpleExpr, FilterError> {
     let decl = find_decl(name).ok_or_else(|| FilterError::InvalidField(name.to_owned()))?;
     let field = decl.alias_of.unwrap_or(decl.name);
@@ -659,16 +800,15 @@ pub fn compile_leaf(name: &str, value: &Value) -> Result<SimpleExpr, FilterError
         } => {
             let target = col(table, column);
             if many {
-                let ids = uuid_list(field, value)?;
+                let ids = uuid_in_list(field, value)?;
                 if ids.is_empty() {
-                    // `IN (NULL)`: matches nothing.
+                    // `Q(x__in=[])`: matches nothing.
                     Ok(Expr::cust("FALSE"))
                 } else {
                     Ok(target.is_in(ids))
                 }
             } else {
-                let text = stringify_scalar(value)
-                    .ok_or_else(|| FilterError::InvalidLookupValue(field.to_owned()))?;
+                let text = tail_text(field, value)?;
                 match parse_uuid_field(field, &text)? {
                     Some(id) => Ok(target.eq(id)),
                     // `UUIDField("")` cleans to None.
@@ -684,18 +824,20 @@ pub fn compile_leaf(name: &str, value: &Value) -> Result<SimpleExpr, FilterError
             let target = col(join_table, join_column);
             let guard = col(join_table, "deleted_at").is_null();
             if many {
-                let ids = uuid_list(field, value)?;
+                let ids = uuid_in_list(field, value)?;
                 if ids.is_empty() {
-                    Ok(Expr::cust("FALSE").and(guard))
+                    // The custom method is skipped on empty input
+                    // (`Filter.filter` empty-check): match-all, no guard.
+                    Ok(Expr::cust("1 = 1"))
                 } else {
                     Ok(target.is_in(ids).and(guard))
                 }
             } else {
-                let text = stringify_scalar(value)
-                    .ok_or_else(|| FilterError::InvalidLookupValue(field.to_owned()))?;
+                let text = tail_text(field, value)?;
                 match parse_uuid_field(field, &text)? {
                     Some(id) => Ok(target.eq(id).and(guard)),
-                    None => Ok(target.is_null().and(guard)),
+                    // The custom method is skipped: match-all, no guard.
+                    None => Ok(Expr::cust("1 = 1")),
                 }
             }
         }
@@ -706,40 +848,102 @@ pub fn compile_leaf(name: &str, value: &Value) -> Result<SimpleExpr, FilterError
         } => {
             let target = col(table, column);
             if many {
-                Ok(target.is_in(text_list(field, value)?))
+                // Items are verbatim (no stripping, `""` kept); an empty
+                // list is `Q(x__in=[])` and matches nothing.
+                let parts = csv_parts(field, value)?;
+                if parts.is_empty() {
+                    Ok(Expr::cust("FALSE"))
+                } else {
+                    Ok(target.is_in(parts))
+                }
             } else {
-                let text = stringify_scalar(value)
-                    .ok_or_else(|| FilterError::InvalidLookupValue(field.to_owned()))?;
-                Ok(target.eq(text))
+                // `CharField` strips.
+                Ok(target.eq(tail_text(field, value)?.trim().to_owned()))
             }
         }
-        FilterKind::Flag { table, column } => Ok(col(table, column).eq(parse_flag(field, value)?)),
+        FilterKind::Flag { table, column } => {
+            let text = tail_text(field, value)?;
+            match parse_null_boolean(&text) {
+                Some(flag) => Ok(col(table, column).eq(flag)),
+                // `NullBooleanField` cleans anything else to `None`.
+                None => Ok(col(table, column).is_null()),
+            }
+        }
         FilterKind::Date { table, column } => {
-            let text = stringify_scalar(value)
-                .ok_or_else(|| FilterError::InvalidLookupValue(field.to_owned()))?;
-            let bound = parse_date_text(field, &text)?;
-            if bound.is_empty() {
+            let text = tail_text(field, value)?;
+            let text = text.trim();
+            if text.is_empty() {
                 Ok(col(table, column).is_null())
             } else {
-                Ok(col(table, column).eq(bound))
+                Ok(col(table, column).eq(parse_date_normalized(field, text)?))
             }
         }
-        FilterKind::DateRange { table, column } => match value {
-            Value::Array(items) if items.len() == 2 => {
-                let bounds = items
-                    .iter()
-                    .map(|item| {
-                        let text = stringify_scalar(item)
-                            .ok_or_else(|| FilterError::InvalidLookupValue(field.to_owned()))?;
-                        parse_date_text(field, &text)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(col(table, column).between(bounds[0].clone(), bounds[1].clone()))
+        FilterKind::Datetime { table, column } => {
+            let text = tail_text(field, value)?;
+            let text = text.trim();
+            if text.is_empty() {
+                Ok(col(table, column).is_null())
+            } else if is_datetime_text(text) {
+                Ok(col(table, column).eq(text))
+            } else {
+                Err(FilterError::InvalidLookupValue(field.to_owned()))
             }
-            _ => Err(FilterError::InvalidLookupValue(field.to_owned())),
-        },
+        }
+        FilterKind::DateRange { table, column } => {
+            compile_range(field, value, col(table, column), RangeKind::Date)
+        }
+        FilterKind::DatetimeRange { table, column } => {
+            compile_range(field, value, col(table, column), RangeKind::Datetime)
+        }
         FilterKind::Archived => Ok(archived_condition(value)),
     }
+}
+
+/// Which column flavor a `__range` filter binds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeKind {
+    Date,
+    Datetime,
+}
+
+/// A `BaseRangeField`: the tail item, comma-split, exactly two parts
+/// (`BaseRangeField.clean`, else `Range query expects two values`). An empty
+/// whole value cleans to `[]` and only fails at SQL-compile time in Python
+/// ([`FilterError::EmptyRangeBounds`]); an empty *part* cleans to `None` and
+/// binds `NULL`.
+fn compile_range(
+    field: &str,
+    value: &Value,
+    target: Expr,
+    kind: RangeKind,
+) -> Result<SimpleExpr, FilterError> {
+    use sea_query::Value as SeaValue;
+    let tail = tail_text(field, value)?;
+    if tail.is_empty() {
+        return Err(FilterError::EmptyRangeBounds(field.to_owned()));
+    }
+    let parts: Vec<&str> = tail.split(',').collect();
+    if parts.len() != 2 {
+        return Err(FilterError::InvalidLookupValue(field.to_owned()));
+    }
+    let mut bounds = Vec::with_capacity(2);
+    for part in parts {
+        let part = part.trim();
+        if part.is_empty() {
+            bounds.push(SimpleExpr::Constant(SeaValue::String(None)));
+        } else if kind == RangeKind::Date {
+            bounds.push(SimpleExpr::Constant(SeaValue::String(Some(
+                parse_date_normalized(field, part)?.into(),
+            ))));
+        } else if is_datetime_text(part) {
+            bounds.push(SimpleExpr::Constant(SeaValue::String(Some(
+                part.to_owned().into(),
+            ))));
+        } else {
+            return Err(FilterError::InvalidLookupValue(field.to_owned()));
+        }
+    }
+    Ok(target.between(bounds[0].clone(), bounds[1].clone()))
 }
 
 /// Port of `build_combined_q`: AND the conditions for the filters actually
@@ -871,13 +1075,147 @@ mod tests {
         let falsy = select_where(compile_leaf("is_archived", &Value::Bool(false)).unwrap());
         assert!(falsy.contains(r#""archived_at" IS NULL"#), "{falsy}");
         assert!(!falsy.contains("IS NOT NULL"), "{falsy}");
-        // Unrecognized values filter nothing (Q()).
-        let noop = select_where(compile_leaf("is_archived", &Value::from("maybe")).unwrap());
-        assert!(noop.contains("1 = 1"), "{noop}");
-        // "1.0" is not truthy: the backend stringifies first, so only the
-        // exact spellings count.
+        // The Django<2.2 backcompat spellings ride along.
+        let two = select_where(compile_leaf("is_archived", &Value::from("2")).unwrap());
+        assert!(two.contains("IS NOT NULL"), "{two}");
+        let three = select_where(compile_leaf("is_archived", &Value::from("3")).unwrap());
+        assert!(three.contains(r#""archived_at" IS NULL"#), "{three}");
+        // Unrecognized values skip the method (match-all): the backend
+        // stringifies first, so `"1"`, `"1.0"` and `"maybe"` all miss the
+        // widget map — typed matching never happens on this path.
+        for raw in ["maybe", "1", "0", "TRUE", "1.0", ""] {
+            let noop = select_where(compile_leaf("is_archived", &Value::from(raw)).unwrap());
+            assert!(noop.contains("1 = 1"), "{raw}: {noop}");
+        }
         let one = select_where(compile_leaf("is_archived", &serde_json::json!(1.0)).unwrap());
         assert!(one.contains("1 = 1"), "{one}");
+        let null = select_where(compile_leaf("is_archived", &Value::Null).unwrap());
+        assert!(null.contains("1 = 1"), "{null}");
+    }
+
+    #[test]
+    fn in_filters_read_the_last_item_and_comma_split_it() {
+        // Oracle: the CSV widget reads `QueryDict.get` (the LAST item) and
+        // comma-splits it — a JSON list contributes only its tail.
+        let rendered = select_where(
+            compile_leaf(
+                "priority__in",
+                &Value::Array(vec![Value::from("high"), Value::from("urgent")]),
+            )
+            .unwrap(),
+        );
+        assert!(
+            rendered.contains(r#""issue"."priority" IN ('urgent')"#),
+            "{rendered}"
+        );
+        let rendered =
+            select_where(compile_leaf("priority__in", &Value::from("high,urgent")).unwrap());
+        assert!(
+            rendered.contains(r#""issue"."priority" IN ('high', 'urgent')"#),
+            "{rendered}"
+        );
+        // Items are verbatim: no stripping, `""` and `"None"` kept.
+        let rendered =
+            select_where(compile_leaf("priority__in", &Value::Array(vec![Value::Null])).unwrap());
+        assert!(
+            rendered.contains(r#""issue"."priority" IN ('None')"#),
+            "{rendered}"
+        );
+        // An empty tail is `Q(x__in=[])` and matches nothing.
+        let rendered = select_where(compile_leaf("priority__in", &Value::from("")).unwrap());
+        assert!(rendered.contains("FALSE"), "{rendered}");
+        // UUID entries canonicalize to lowercase; the tail wins.
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        let rendered = select_where(
+            compile_leaf(
+                "created_by_id__in",
+                &Value::Array(vec![
+                    Value::from("bogus-should-be-ignored"),
+                    Value::from(id),
+                ]),
+            )
+            .unwrap(),
+        );
+        assert!(rendered.contains(id), "{rendered}");
+        assert!(!rendered.contains("bogus"), "{rendered}");
+        // ...while a bad tail is a filterset error, even with a good head.
+        assert_eq!(
+            compile_leaf(
+                "created_by_id__in",
+                &Value::Array(vec![Value::from(id), Value::from("bogus")]),
+            ),
+            Err(FilterError::InvalidLookupValue(
+                "created_by_id__in".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn relation_empty_means_match_all_without_guard() {
+        // Oracle: the custom method is skipped on empty input
+        // (`Filter.filter` empty-check), so the soft-delete guard goes too.
+        for raw in [Value::Null, Value::from("")] {
+            let rendered = select_where(compile_leaf("assignee_id", &raw).unwrap());
+            assert!(rendered.contains("1 = 1"), "{rendered}");
+            assert!(!rendered.contains("deleted_at"), "{rendered}");
+            let rendered = select_where(compile_leaf("assignee_id__in", &raw).unwrap());
+            assert!(rendered.contains("1 = 1"), "{rendered}");
+            assert!(!rendered.contains("deleted_at"), "{rendered}");
+        }
+        // A literal "None" is not empty: UUID cleaning rejects it.
+        assert_eq!(
+            compile_leaf("assignee_id", &Value::from("None")),
+            Err(FilterError::InvalidLookupValue("assignee_id".to_owned()))
+        );
+        assert_eq!(
+            compile_leaf("assignee_id__in", &Value::Array(vec![Value::Null])),
+            Err(FilterError::InvalidLookupValue(
+                "assignee_id__in".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn null_boolean_spellings_match_the_widget_map() {
+        // Oracle (`NullBooleanSelect.value_from_datadict`): only these six
+        // spellings clean to a boolean; everything else (`"1"`, `"0"`,
+        // `"TRUE"`, `"1.0"`, `""`, null) cleans to `None` → `IS NULL`.
+        for raw in ["True", "true", "2"] {
+            let rendered = select_where(compile_leaf("is_draft", &Value::from(raw)).unwrap());
+            assert!(
+                rendered.contains(r#""issue"."is_draft" = TRUE"#),
+                "{raw}: {rendered}"
+            );
+        }
+        for raw in ["False", "false", "3"] {
+            let rendered = select_where(compile_leaf("is_draft", &Value::from(raw)).unwrap());
+            assert!(
+                rendered.contains(r#""issue"."is_draft" = FALSE"#),
+                "{raw}: {rendered}"
+            );
+        }
+        for raw in [
+            Value::from("1"),
+            Value::from("0"),
+            Value::from("TRUE"),
+            Value::from("maybe"),
+            Value::from(""),
+            Value::Null,
+            serde_json::json!(1.0),
+            serde_json::json!(0.0),
+        ] {
+            let rendered = select_where(compile_leaf("is_draft", &raw).unwrap());
+            assert!(
+                rendered.contains(r#""issue"."is_draft" IS NULL"#),
+                "{raw:?}: {rendered}"
+            );
+        }
+        // Booleans arrive stringified (`"True"`/`"False"`), like the backend.
+        let rendered = select_where(compile_leaf("is_draft", &Value::Bool(true)).unwrap());
+        assert!(
+            rendered.contains(r#""issue"."is_draft" = TRUE"#),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -898,20 +1236,58 @@ mod tests {
             rendered.contains(r#""issue"."priority" = 'urgent'"#),
             "{rendered}"
         );
+        // Exact text strips (`CharField`); the tail wins for lists.
+        let rendered = select_where(compile_leaf("priority", &Value::from(" high ")).unwrap());
+        assert!(
+            rendered.contains(r#""issue"."priority" = 'high'"#),
+            "{rendered}"
+        );
         let rendered = select_where(
             compile_leaf(
-                "start_date__range",
-                &Value::Array(vec![Value::from("2024-01-01"), Value::from("2024-02-01")]),
+                "priority",
+                &Value::Array(vec![Value::from("high"), Value::from("urgent")]),
             )
             .unwrap(),
         );
+        assert!(
+            rendered.contains(r#""issue"."priority" = 'urgent'"#),
+            "{rendered}"
+        );
+        // A comma string ranges; a two-list is one value too many.
+        let rendered = select_where(
+            compile_leaf("start_date__range", &Value::from("2024-01-01,2024-02-01")).unwrap(),
+        );
         assert!(rendered.contains("BETWEEN"), "{rendered}");
+        assert!(rendered.contains("2024-01-01"), "{rendered}");
+        assert!(rendered.contains("2024-02-01"), "{rendered}");
+        assert_eq!(
+            compile_leaf(
+                "start_date__range",
+                &Value::Array(vec![Value::from("2024-01-01"), Value::from("2024-02-01")]),
+            ),
+            Err(FilterError::InvalidLookupValue(
+                "start_date__range".to_owned()
+            ))
+        );
         assert_eq!(
             compile_leaf("start_date__range", &Value::from("2024-01-01")),
             Err(FilterError::InvalidLookupValue(
                 "start_date__range".to_owned()
             ))
         );
+        // An empty range stays valid in Python and fails at SQL-compile
+        // time — a 500, unlike the 400 above.
+        assert_eq!(
+            compile_leaf("start_date__range", &Value::from("")),
+            Err(FilterError::EmptyRangeBounds(
+                "start_date__range".to_owned()
+            ))
+        );
+        // An empty part binds NULL.
+        let rendered =
+            select_where(compile_leaf("start_date__range", &Value::from("2024-01-01,")).unwrap());
+        assert!(rendered.contains("BETWEEN"), "{rendered}");
+        assert!(rendered.contains("NULL"), "{rendered}");
         let rendered = select_where(compile_leaf("is_draft", &Value::Bool(true)).unwrap());
         assert!(
             rendered.contains(r#""issue"."is_draft" = TRUE"#),
@@ -920,25 +1296,66 @@ mod tests {
     }
 
     #[test]
+    fn date_columns_take_django_formats_and_reject_datetimes() {
+        // US and month-name dates clean; values normalize to ISO.
+        for (raw, iso) in [
+            ("01/15/2024", "2024-01-15"),
+            ("1/5/24", "2024-01-05"),
+            ("15 Jan 2024", "2024-01-15"),
+            ("October 25, 2006", "2006-10-25"),
+        ] {
+            let rendered = select_where(compile_leaf("start_date", &Value::from(raw)).unwrap());
+            assert!(rendered.contains(iso), "{raw}: {rendered}");
+        }
+        // Datetime strings are rejected on DATE columns (400).
+        for raw in ["2024-01-02T03:04:05Z", "2024-01-02 03:04:05"] {
+            assert_eq!(
+                compile_leaf("start_date", &Value::from(raw)),
+                Err(FilterError::InvalidLookupValue("start_date".to_owned())),
+                "{raw}"
+            );
+        }
+        // ...but accepted verbatim on datetime columns.
+        for raw in [
+            "2024-01-02T03:04:05Z",
+            "2024-01-02 03:04:05",
+            "01/15/2024",
+            "2024-01-02T03:04:05+05:30",
+        ] {
+            let rendered = select_where(compile_leaf("created_at", &Value::from(raw)).unwrap());
+            assert!(rendered.contains(raw), "{raw}: {rendered}");
+        }
+        // Garbage is still a filterset error.
+        assert_eq!(
+            compile_leaf("start_date", &Value::from("yesterday")),
+            Err(FilterError::InvalidLookupValue("start_date".to_owned()))
+        );
+        assert_eq!(
+            compile_leaf("created_at", &Value::from("yesterday")),
+            Err(FilterError::InvalidLookupValue("created_at".to_owned()))
+        );
+    }
+
+    #[test]
     fn null_and_empty_string_follow_the_querydict_round_trip() {
-        // UUIDField("") cleans to None: IS NULL, never an error.
-        let rendered = select_where(compile_leaf("assignee_id", &Value::Null).unwrap());
+        // A direct UUID `""` cleans to None: IS NULL, never an error.
+        let rendered = select_where(compile_leaf("created_by_id", &Value::Null).unwrap());
         assert!(
-            rendered.contains(r#""issue_assignee"."assignee_id" IS NULL"#),
+            rendered.contains(r#""issue"."created_by_id" IS NULL"#),
             "{rendered}"
         );
-        let rendered = select_where(compile_leaf("assignee_id", &Value::from("")).unwrap());
+        let rendered = select_where(compile_leaf("created_by_id", &Value::from("  ")).unwrap());
         assert!(rendered.contains("IS NULL"), "{rendered}");
-        // CharField("") matches the empty string.
+        // CharField("") matches the empty string (stripped first).
         let rendered = select_where(compile_leaf("priority", &Value::Null).unwrap());
         assert!(
             rendered.contains(r#""issue"."priority" = ''"#),
             "{rendered}"
         );
-        // BooleanField("") cleans to False.
+        // NullBooleanField cleans null to None: IS NULL, never FALSE.
         let rendered = select_where(compile_leaf("is_draft", &Value::Null).unwrap());
         assert!(
-            rendered.contains(r#""issue"."is_draft" = FALSE"#),
+            rendered.contains(r#""issue"."is_draft" IS NULL"#),
             "{rendered}"
         );
         // DateField("") cleans to None.
@@ -947,20 +1364,18 @@ mod tests {
             rendered.contains(r#""issue"."start_date" IS NULL"#),
             "{rendered}"
         );
-        // Unparseable dates are a filterset error, never a database error.
-        assert_eq!(
-            compile_leaf("start_date", &Value::from("yesterday")),
-            Err(FilterError::InvalidLookupValue("start_date".to_owned()))
-        );
         // Datetime strings pass through for the datetime columns.
         let rendered =
             select_where(compile_leaf("created_at", &Value::from("2024-01-02T03:04:05Z")).unwrap());
         assert!(rendered.contains("2024-01-02T03:04:05Z"), "{rendered}");
-        // An __in list of only nulls matches nothing, like IN (NULL).
-        let rendered = select_where(
-            compile_leaf("assignee_id__in", &Value::Array(vec![Value::Null])).unwrap(),
+        // A direct `__in` of only nulls is a filterset error: the `"None"`
+        // tail item fails UUID cleaning.
+        assert_eq!(
+            compile_leaf("created_by_id__in", &Value::Array(vec![Value::Null])),
+            Err(FilterError::InvalidLookupValue(
+                "created_by_id__in".to_owned()
+            ))
         );
-        assert!(rendered.contains("FALSE"), "{rendered}");
     }
 
     #[test]

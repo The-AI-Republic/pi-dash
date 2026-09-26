@@ -74,6 +74,9 @@ pub enum FilterValue {
     Text(String),
     Flag(bool),
     Day(NaiveDate),
+    /// A stored Python `None` (the POST `intake_status` branch writes
+    /// `params.get("inbox_status")` verbatim, `None` when absent).
+    Null,
 }
 
 /// The compiled filter: ordered `(field__lookup, value)` pairs, last value
@@ -116,17 +119,31 @@ pub fn filter_valid_uuids(items: &[String]) -> Vec<uuid::Uuid> {
 }
 
 /// `re.compile(r"\d+_(weeks|months)$")` with `match` (start-anchored):
-/// ASCII digits, then exactly `_weeks` or `_months`.
-fn relative_parts(token: &str) -> Option<(u64, &str)> {
-    for term in ["weeks", "months"] {
-        if let Some(digits) = token.strip_suffix(&format!("_{term}")) {
-            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
-                return digits.parse::<u64>().ok().map(|duration| (duration, term));
-            }
-            return None;
-        }
+/// ASCII digits, then exactly `_weeks` or `_months`. A digit run that
+/// overflows `u64` still matched the pattern in Python, where `int()` then
+/// succeeded (big ints) and `timedelta` raised `OverflowError` — so it is
+/// [`RelToken::Overflow`], not "no match".
+enum RelToken<'a> {
+    No,
+    Yes(u64, &'a str),
+    Overflow,
+}
+
+fn relative_token(token: &str) -> RelToken<'_> {
+    let (digits, term) = if let Some(digits) = token.strip_suffix("_weeks") {
+        (digits, "weeks")
+    } else if let Some(digits) = token.strip_suffix("_months") {
+        (digits, "months")
+    } else {
+        return RelToken::No;
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return RelToken::No;
     }
-    None
+    match digits.parse::<u64>() {
+        Ok(duration) => RelToken::Yes(duration, term),
+        Err(_) => RelToken::Overflow,
+    }
 }
 
 /// `string_date_filter`: relative magnitudes resolve against `today`.
@@ -170,8 +187,8 @@ fn date_filter(
     for query in queries {
         let parts: Vec<&str> = query.split(';').collect();
         if parts.len() >= 2 {
-            match relative_parts(parts[0]) {
-                Some((duration, term)) => {
+            match relative_token(parts[0]) {
+                RelToken::Yes(duration, term) => {
                     // Three parts carry the offset; two-part relatives
                     // filter nothing (ported bug).
                     if parts.len() == 3 {
@@ -180,7 +197,16 @@ fn date_filter(
                         )?;
                     }
                 }
-                None => {
+                // The pattern matched but the magnitude overflows: Python's
+                // `int()` succeeds and `timedelta` raises `OverflowError`.
+                // (Two-part relatives match the pattern too but never reach
+                // the offset math, so they still filter nothing.)
+                RelToken::Overflow => {
+                    if parts.len() == 3 {
+                        return Err(IssueFilterError::DateOverflow);
+                    }
+                }
+                RelToken::No => {
                     if parts.contains(&"after") {
                         out.set(
                             format!("{date_term}__gte"),
@@ -538,8 +564,8 @@ pub fn issue_filters_get(
             "created_by" => filter_created_by_get(&mut out, params, prefix),
             "logged_by" => filter_logged_by_get(&mut out, params, prefix),
             "name" => {
-                if params.get("name").is_some_and(|name| !name.is_empty()) {
-                    filter_name_value(&mut out, prefix, FilterValue::Text(params["name"].clone()));
+                if let Some(name) = params.get("name").filter(|name| !name.is_empty()) {
+                    filter_name_value(&mut out, prefix, FilterValue::Text(name.clone()));
                 }
             }
             // Ported bug: updated_at writes created_at__date.
@@ -711,9 +737,14 @@ pub fn issue_filters_post(
                 &format!("{prefix}created_at__date"),
                 today,
             )?,
+            // POST stores the value raw (`issue_filter[...] =
+            // params.get(...)`): no mini-language, even for lists.
             "start_date" => match params.get("start_date") {
                 Some(PostVal::List(items)) if !items.is_empty() => {
-                    date_filter(&mut out, &format!("{prefix}start_date"), items, today)?;
+                    out.set(
+                        format!("{prefix}start_date"),
+                        FilterValue::Strings(items.clone()),
+                    );
                 }
                 Some(PostVal::Text(text)) if !text.is_empty() => {
                     out.set(
@@ -725,7 +756,10 @@ pub fn issue_filters_post(
             },
             "target_date" => match params.get("target_date") {
                 Some(PostVal::List(items)) if !items.is_empty() => {
-                    date_filter(&mut out, &format!("{prefix}target_date"), items, today)?;
+                    out.set(
+                        format!("{prefix}target_date"),
+                        FilterValue::Strings(items.clone()),
+                    );
                 }
                 Some(PostVal::Text(text)) if !text.is_empty() => {
                     out.set(
@@ -776,13 +810,28 @@ pub fn issue_filters_post(
                     FilterValue::Flag(true),
                 );
             }
-            // Ported bug: the POST branch reads `inbox_status`.
-            "intake_status" => post_raw_param(
-                &mut out,
-                params,
-                "inbox_status",
-                &format!("{prefix}issue_intake__status__in"),
-            ),
+            // Ported bug: the POST branch gates on `intake_status` but
+            // stores `params.get("inbox_status")` — `None` when absent.
+            "intake_status" => {
+                let gate = match params.get("intake_status") {
+                    Some(PostVal::List(items)) => !items.is_empty(),
+                    Some(PostVal::Text(text)) => !text.is_empty() && text != "null",
+                    None => false,
+                };
+                if gate {
+                    // Stored raw, like Python (`params.get(...)` verbatim).
+                    let field = format!("{prefix}issue_intake__status__in");
+                    match params.get("inbox_status") {
+                        Some(PostVal::List(items)) => {
+                            out.set(field, FilterValue::Strings(items.clone()));
+                        }
+                        Some(PostVal::Text(text)) => {
+                            out.set(field, FilterValue::Text(text.clone()));
+                        }
+                        None => out.set(field, FilterValue::Null),
+                    }
+                }
+            }
             "inbox_status" => post_raw_param(
                 &mut out,
                 params,
@@ -1065,14 +1114,18 @@ mod tests {
             filter.get("label_issue__deleted_at__isnull"),
             Some(&FilterValue::Flag(true))
         );
-        // POST branch reads inbox_status for intake_status (ported bug).
+        // POST branch reads inbox_status for intake_status (ported bug):
+        // intake present but inbox absent stores None.
         let filter = issue_filters_post(
             &post_map(&[("intake_status", PostVal::List(vec!["s".to_owned()]))]),
             "",
             today(),
         )
         .unwrap();
-        assert!(filter.get("issue_intake__status__in").is_none());
+        assert_eq!(
+            filter.get("issue_intake__status__in"),
+            Some(&FilterValue::Null)
+        );
         let filter = issue_filters_post(
             &post_map(&[("inbox_status", PostVal::List(vec!["s".to_owned()]))]),
             "",
@@ -1094,6 +1147,61 @@ mod tests {
             filter.get("created_at__date__contains"),
             Some(&FilterValue::Text("1".to_owned()))
         );
+    }
+
+    #[test]
+    fn post_start_and_target_dates_store_raw_lists() {
+        // `filter_start_date` POST: `issue_filter[...] = params.get(...)`
+        // verbatim — no mini-language, even for lists.
+        let filter = issue_filters_post(
+            &post_map(&[(
+                "start_date",
+                PostVal::List(vec!["2_months;after;fromnow".to_owned()]),
+            )]),
+            "",
+            today(),
+        )
+        .unwrap();
+        assert_eq!(
+            filter.get("start_date"),
+            Some(&FilterValue::Strings(vec![
+                "2_months;after;fromnow".to_owned()
+            ]))
+        );
+        let filter = issue_filters_post(
+            &post_map(&[(
+                "target_date",
+                PostVal::List(vec!["a".to_owned(), "b".to_owned()]),
+            )]),
+            "",
+            today(),
+        )
+        .unwrap();
+        assert_eq!(
+            filter.get("target_date"),
+            Some(&FilterValue::Strings(vec!["a".to_owned(), "b".to_owned()]))
+        );
+    }
+
+    #[test]
+    fn overflowing_relative_magnitude_is_date_overflow() {
+        // The pattern matches, `int()` succeeds (big ints), `timedelta`
+        // raises `OverflowError` — but only on the three-part path.
+        let filter = issue_filters_get(
+            &get_map(&[("start_date", "99999999999999999999999_weeks;after;fromnow")]),
+            "",
+            today(),
+        );
+        assert_eq!(filter, Err(IssueFilterError::DateOverflow));
+        // Two-part relatives match the pattern but never reach the offset
+        // math: still filter nothing, no error.
+        let filter = issue_filters_get(
+            &get_map(&[("start_date", "99999999999999999999999_weeks;after")]),
+            "",
+            today(),
+        )
+        .unwrap();
+        assert!(filter.is_empty());
     }
 
     #[test]
