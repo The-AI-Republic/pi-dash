@@ -33,11 +33,6 @@ export interface IUserLite {
   joining_date?: string;
 }
 export interface IUser extends IUserLite {
-  // only for uploading the cover image
-  cover_image_asset?: string | null;
-  cover_image?: string | null;
-  // only for rendering the cover image
-  cover_image_url: string | null;
   date_joined: string;
   email: string;
   is_active: boolean;
@@ -171,7 +166,7 @@ export interface IUserProfileProjectSegregation {
     id: string;
     pending_issues: number;
   }[];
-  user_data: Pick<IUser, "avatar_url" | "cover_image_url" | "display_name" | "first_name" | "last_name"> & {
+  user_data: Pick<IUser, "avatar_url" | "display_name" | "first_name" | "last_name"> & {
     date_joined: Date;
     user_timezone: string;
   };

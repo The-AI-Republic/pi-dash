@@ -427,11 +427,6 @@ CELERY_IMPORTS = (
 
 FILE_SIZE_LIMIT = int(get_config("FILE_SIZE_LIMIT", 5242880))
 
-# Unsplash Access key. Intentionally read straight from the env here: the same
-# key is also admin-managed (db-sourced) via the InstanceConfiguration resolver
-# for the in-app Unsplash feature, so it cannot route through get_config (which
-# would resolve it from the DB at settings-import time).
-UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY")  # noqa: config-env-read
 # Github Access Token
 GITHUB_ACCESS_TOKEN = get_config("GITHUB_ACCESS_TOKEN", False)
 

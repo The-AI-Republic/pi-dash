@@ -10,13 +10,11 @@ import { FormProvider, useForm } from "react-hook-form";
 // pi dash imports
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
-import { EFileAssetType } from "@pi-dash/types";
 // components
 import ProjectCommonAttributes from "@/components/project/create/common-attributes";
 import ProjectCreateHeader from "@/components/project/create/header";
 import ProjectCreateButtons from "@/components/project/create/project-create-buttons";
 // hooks
-import { getCoverImageType, uploadCoverImage } from "@/helpers/cover-image.helper";
 import { useProject } from "@/hooks/store/use-project";
 import { usePlatformOS } from "@/hooks/use-platform-os";
 // pi dash web types
@@ -31,14 +29,13 @@ export type TCreateProjectFormProps = {
   handleNextStep: (projectId: string) => void;
   data?: Partial<TProject>;
   templateId?: string;
-  updateCoverImageStatus: (projectId: string, coverImage: string) => Promise<void>;
 };
 
 export const CreateProjectForm = observer(function CreateProjectForm(props: TCreateProjectFormProps) {
-  const { setToFavorite, workspaceSlug, data, onClose, handleNextStep, updateCoverImageStatus } = props;
+  const { setToFavorite, workspaceSlug, data, onClose, handleNextStep } = props;
   // store
   const { t } = useTranslation();
-  const { addProjectToFavorites, createProject, updateProject } = useProject();
+  const { addProjectToFavorites, createProject } = useProject();
   // states
   const [shouldAutoSyncIdentifier, setShouldAutoSyncIdentifier] = useState(true);
   // form info
@@ -63,55 +60,9 @@ export const CreateProjectForm = observer(function CreateProjectForm(props: TCre
   const onSubmit = async (formData: Partial<TProject>) => {
     // Upper case identifier
     formData.identifier = formData.identifier?.toUpperCase();
-    const coverImage = formData.cover_image_url;
-    let uploadedAssetUrl: string | null = null;
-
-    if (coverImage) {
-      const imageType = getCoverImageType(coverImage);
-
-      if (imageType === "local_static") {
-        try {
-          uploadedAssetUrl = await uploadCoverImage(coverImage, {
-            workspaceSlug: workspaceSlug.toString(),
-            entityIdentifier: "",
-            entityType: EFileAssetType.PROJECT_COVER,
-            isUserAsset: false,
-          });
-        } catch (error) {
-          // Bundled static covers ship with the web bundle, so a flaky or
-          // misconfigured asset backend (e.g. MinIO unreachable from the
-          // browser) shouldn't block project creation — every new project
-          // form already defaults `cover_image_url` to a random static URL,
-          // and that URL is renderable directly. Fall back to using it as
-          // the project's `cover_image` instead of rejecting submission.
-          // A non-blocking warning toast surfaces the skipped upload so the
-          // user has a signal when the failure was actually fixable (auth
-          // expired, server rejected the file, etc.) rather than just a
-          // misconfigured local stack.
-          console.warn("Cover upload failed; falling back to bundled static URL", error);
-          formData.cover_image = coverImage;
-          formData.cover_image_asset = null;
-          setToast({
-            type: TOAST_TYPE.WARNING,
-            title: t("Warning"),
-            message: t("Cover image upload skipped — using a default cover."),
-          });
-        }
-      } else {
-        formData.cover_image = coverImage;
-        formData.cover_image_asset = null;
-      }
-    }
 
     try {
       const res = await createProject(workspaceSlug.toString(), formData);
-      if (uploadedAssetUrl) {
-        await updateCoverImageStatus(res.id, uploadedAssetUrl);
-        await updateProject(workspaceSlug.toString(), res.id, { cover_image_url: uploadedAssetUrl });
-      } else if (coverImage && coverImage.startsWith("http")) {
-        await updateCoverImageStatus(res.id, coverImage);
-        await updateProject(workspaceSlug.toString(), res.id, { cover_image_url: coverImage });
-      }
       setToast({
         type: TOAST_TYPE.SUCCESS,
         title: t("Success"),
@@ -177,7 +128,7 @@ export const CreateProjectForm = observer(function CreateProjectForm(props: TCre
       <ProjectCreateHeader handleClose={handleClose} isMobile={isMobile} />
 
       <form onSubmit={handleSubmit(onSubmit)} className="px-3">
-        <div className="mt-9 space-y-6 pb-5">
+        <div className="mt-4 space-y-6 pb-5">
           <ProjectCommonAttributes
             setValue={setValue}
             isMobile={isMobile}

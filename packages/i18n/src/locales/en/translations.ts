@@ -268,7 +268,6 @@ export default {
   "Capture your thoughts and ideas effortlessly by creating stickies that you can access anytime and from anywhere.":
     "Capture your thoughts and ideas effortlessly by creating stickies that you can access anytime and from anywhere.",
   Categories: "Categories",
-  "Change cover": "Change cover",
   "Change email": "Change email",
   "Change estimate": "Change estimate",
   "Change first day of week": "Change first day of week",
@@ -384,7 +383,6 @@ export default {
     "Couldn't remove the cycle from favorites. Please try again.",
   "Couldn't remove the project from favorites. Please try again.":
     "Couldn't remove the project from favorites. Please try again.",
-  "Cover image upload skipped — using a default cover.": "Cover image upload skipped — using a default cover.",
   Create: "Create",
   "Create a draft": "Create a draft",
   "Create and edit free-form content; notes, docs, anything.":
@@ -1226,7 +1224,6 @@ export default {
   "Project admins can now install it on their projects.": "Project admins can now install it on their projects.",
   "Project context": "Project context",
   "Project context (optional)": "Project context (optional)",
-  "Project cover image": "Project cover image",
   "Project created successfully": "Project created successfully",
   "Project default pod": "Project default pod",
   "Project ID": "Project ID",
