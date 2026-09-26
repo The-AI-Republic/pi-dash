@@ -10,10 +10,12 @@
 //! environment, builds an [`AppState`], and delegates to
 //! [`pidash_api::build_app`]. A private overlay crate's own `main.rs`
 //! composes the same builder with its own settings and routes (see the
-//! runbook); named route-group replacement arrives under F-10.
+//! runbook), claiming or dropping whole [`RouteGroup`](pidash_api::RouteGroup)
+//! groups through an [`Overlay`](pidash_api::Overlay) where it replaces
+//! OSS behaviour.
 //!
-//! [`build_app`] is the application seam (F-10): tests and later issues wrap
-//! it with extra routes or layers without touching `main`.
+//! [`build_app`] is the application seam: tests and later issues wrap it
+//! with extra routes or layers without touching `main`.
 
 use clap::{Parser, Subcommand};
 use pidash_api::{with_routes, AppState, EdgeHandle};

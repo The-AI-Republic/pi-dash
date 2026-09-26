@@ -708,7 +708,7 @@ mod tests {
         assert_eq!(record.remote_addr.as_deref(), Some("1.2.3.4"));
         assert_eq!(record.user_agent, "UA/1");
         assert_eq!(record.user_id.as_deref(), Some("user-7"));
-        assert_eq!(record.message(), format!("POST /api/x/?a=1 200"));
+        assert_eq!(record.message(), "POST /api/x/?a=1 200".to_string());
     }
 
     #[tokio::test]

@@ -1702,6 +1702,8 @@ dependencies = [
  "pidash-auth",
  "pidash-db",
  "pidash-types",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

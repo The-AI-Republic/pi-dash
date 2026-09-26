@@ -1,19 +1,16 @@
 //! Router assembly.
 //!
-//! [`build_router`] is the extension seam (F-10): domain routers built by
-//! later issues merge into it, and tests pass throwaway routers through
-//! `with_routes` to prove the seam holds.
+//! [`build_router`] is the extension seam: domain routers built by later
+//! issues merge into it, and tests pass throwaway routers through
+//! `with_routes` to prove the seam holds. Both delegate to
+//! [`build_router_with_overlay`](crate::overlay::build_router_with_overlay)
+//! with an additive-only [`Overlay`](crate::overlay::Overlay); named
+//! group replacement lives in [`crate::overlay`].
 
-use axum::{
-    response::IntoResponse,
-    routing::{any, get},
-    Json, Router,
-};
-use pidash_services::health_report;
+use axum::Router;
 
-use crate::edge;
+use crate::overlay::{build_router_with_overlay, Overlay};
 use crate::state::AppState;
-use crate::web;
 
 /// Assemble the application router. `/` and `/robots.txt` are served by the
 /// canonical D-00 handlers in [`crate::web`], Rust-owned only while the web
@@ -26,23 +23,15 @@ pub fn build_router(state: AppState) -> Router {
 /// Assemble the router with extra (usually per-domain) routes merged in.
 /// This is the seam domain port issues build against.
 pub fn with_routes(state: AppState, extra: Router<AppState>) -> Router {
-    Router::new()
-        .route("/healthz", get(healthz))
-        .route("/", any(web::health_check))
-        .route("/robots.txt", any(web::robots_txt))
-        .merge(extra)
-        .fallback(edge::proxy)
-        .with_state(state)
-}
-
-async fn healthz(axum::extract::State(state): axum::extract::State<AppState>) -> impl IntoResponse {
-    Json(health_report(state.version()))
+    build_router_with_overlay(state, Overlay::new().add_routes(extra))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::edge;
     use axum::http::StatusCode;
+    use axum::{routing::get, Json};
     use tower::ServiceExt;
 
     fn app() -> Router {
