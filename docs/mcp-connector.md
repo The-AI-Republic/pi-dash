@@ -51,3 +51,29 @@ a client to handle; a broken one is not. Clients should treat `url` as optional.
 
 There is no per-comment anchor in the UI, so comment tools link to the parent
 issue rather than to the individual comment.
+
+## Project page tools
+
+The hosted connector exposes two read-only tools for a project's wiki:
+
+| Tool                | Purpose |
+| ------------------- | ------- |
+| `pidash_list_pages` | Lists visible page metadata. It accepts `workspace_slug`, a project UUID or identifier in `project_id`, and optional `limit` and `include_archived` fields. Page bodies are never returned. |
+| `pidash_get_page`   | Retrieves one visible page by `page_id`. It returns `description_markdown` by default; set `include_description_html` to `true` when the source HTML is also needed. |
+
+Both tools require active project membership and follow the `/api/v1/` page
+visibility rule: a page is visible when it is public or owned by the caller. A
+private page owned by another member is reported the same way as a missing
+page. Archived pages are hidden from `pidash_list_pages` unless
+`include_archived` is true, while a known archived page remains retrievable.
+
+The markdown body comes from `PageDetailSerializer`, which uses the shared
+HTML-to-markdown converter. MCP and the `pidash page get` CLI therefore render
+the same page content.
+
+Each list result and detail response includes an absolute `url` for the page in
+the web UI:
+
+```
+<web-base-url>/<workspace-slug>/projects/<project-uuid>/pages/<page-uuid>
+```
