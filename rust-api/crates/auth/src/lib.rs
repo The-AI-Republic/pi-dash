@@ -1,11 +1,30 @@
 #![forbid(unsafe_code)]
 
-//! Authentication and authorization primitives.
+//! Authentication and authorization primitives (F-05).
 //!
-//! The Django session reader (F-05) and the permission kernel (F-06) build on
-//! the tenant scope defined here: every checked access names the workspace it
-//! acts in, and anything without a scope is denied.
+//! Django-parity layer over the mechanisms every ported domain needs:
+//!
+//! - [`signing`]: Django's TimestampSigner codec, shared by sessions.
+//! - [`session`]: DB-session reader (cookie routing, key screening,
+//!   `session_data` decoding, expiry predicate).
+//! - [`password`]: PBKDF2 password-hash verification.
+//! - [`token`]: `X-Api-Key` routing plus `APIToken` / `MachineToken` row
+//!   predicates, with the runner pepper hash and fingerprint helpers.
+//! - [`jwt`]: runner access-token (JWT) verification.
+//! - [`csrf`]: CSRF mask / match / format semantics plus the
+//!   `get-csrf-token` endpoint behaviour.
+//! - [`scope`]: tenant scope both auth and the F-06 permission kernel deny on.
+//!
+//! The modules are pure: row fetching stays the caller's SQL, so the crate
+//! performs no I/O and every check is unit-testable against Django-issued
+//! vectors.
 
+pub mod csrf;
+pub mod jwt;
+pub mod password;
 pub mod scope;
+pub mod session;
+pub mod signing;
+pub mod token;
 
 pub use scope::TenantScope;
