@@ -2322,6 +2322,8 @@ async fn issue_patch_add_label_merges_with_the_issues_current_labels() {
             runner: None,
             clear_runner: false,
             pod: None,
+            work_type: None,
+            clear_work_type: false,
         },
     )
     .await
@@ -2362,6 +2364,8 @@ async fn issue_patch_clear_labels_sends_an_empty_array() {
             runner: None,
             clear_runner: false,
             pod: None,
+            work_type: None,
+            clear_work_type: false,
         },
     )
     .await
@@ -2411,6 +2415,8 @@ async fn issue_patch_add_and_remove_share_one_label_lookup() {
             runner: None,
             clear_runner: false,
             pod: None,
+            work_type: None,
+            clear_work_type: false,
         },
     )
     .await

@@ -518,6 +518,14 @@ def extra_toolsets_vars(run) -> Dict[str, Any]:
     }
 
 
+def _work_type_context(issue: Issue) -> Dict[str, Any]:
+    """``{key, title}`` of the issue's effective work type."""
+    from pi_dash.prompting.work_types import effective_work_type, get_work_type
+
+    work_type = get_work_type(effective_work_type(issue))
+    return {"key": work_type.key, "title": work_type.title}
+
+
 def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
     """Build the dict passed into Jinja.
 
@@ -574,6 +582,9 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
             "name": project.name,
             "description": project.description or "",
         },
+        # The effective work type composed with (PDASHOSS01-234) — exposed so
+        # sections can name it ("work type: software") without re-deriving it.
+        "work_type": _work_type_context(issue),
         "repo": _repo_context(project, issue),
         # Git PRs / code reviews already attached to this issue (empty list
         # when none). Lets the template tell the agent about associated PRs so
