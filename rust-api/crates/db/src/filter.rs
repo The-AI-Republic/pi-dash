@@ -142,6 +142,12 @@ pub enum FilterError {
     InvalidField(String),
     #[error("invalid value for lookup on field '{0}'")]
     InvalidLookupValue(String),
+    /// A `__range` filter whose whole value is empty (`""`/`null`). Python's
+    /// form stays valid with `[]` and only fails at SQL-compile time
+    /// (`ValueError`), which the views do not catch — a 500, unlike
+    /// [`FilterError::InvalidLookupValue`]. The handlers answer 500 for this.
+    #[error("range filter on field '{0}' has no bounds")]
+    EmptyRangeBounds(String),
 }
 
 impl FilterTree {
