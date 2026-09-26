@@ -19,6 +19,7 @@ use crate::cloud::protocol::{
 use crate::config::schema::{
     AgentKind, Config, Credentials, DaemonConfig, RunnerConfig, canonical_for_compare,
 };
+use crate::daemon::drain_journal;
 use crate::daemon::run_event_mirror::RunEventMirror;
 use crate::daemon::runner_instance::RunnerInstance;
 use crate::daemon::runner_out::RunnerOut;
@@ -180,6 +181,22 @@ impl Supervisor {
             }
         });
 
+        // Replay RunFailed signals a previous daemon failed to deliver
+        // on shutdown, BEFORE any runner loop starts: no session is
+        // open yet, so the cloud cannot have redelivered one of these
+        // runs and the replay cannot race live work. Leftovers (cloud
+        // unreachable) are retried in the background.
+        if !opts.offline {
+            replay_drain_journal_once(&paths, &hello_runners).await;
+            if !drain_journal::load(&paths).is_empty() {
+                let replay_paths = paths.clone();
+                let replay_runners = hello_runners.clone();
+                tokio::spawn(async move {
+                    replay_drain_journal_retry_loop(replay_paths, replay_runners).await;
+                });
+            }
+        }
+
         // One RunnerLoop per instance. Each consumes from its mailbox.
         let mut loop_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
         let mut http_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
@@ -242,7 +259,7 @@ impl Supervisor {
         // better than losing the entire shutdown sequence.
         if let Err(_elapsed) = tokio::time::timeout(
             Duration::from_secs(5),
-            drain_in_flight_runs(hello_runners.clone()),
+            drain_in_flight_runs(hello_runners.clone(), &paths),
         )
         .await
         {
@@ -542,7 +559,14 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
 /// total wall-time, but with up to ~30 concurrent runners on one host
 /// a serial loop (each attempt potentially walking through the shared
 /// reqwest Client's 60s timeout) would starve later runners entirely.
-async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>) -> usize {
+///
+/// Every in-flight run is journaled BEFORE the sends are attempted and
+/// removed only on a confirmed send, so a run whose `RunFailed` misses
+/// the 2s window (or a SIGKILL mid-drain) is replayed by the next
+/// daemon start instead of being silently dropped — a dropped signal
+/// leaves the cloud showing the run busy forever, pinned to a runner
+/// that no longer knows about it.
+async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>, paths: &Paths) -> usize {
     // Snapshot under the read lock so the lock is dropped before any
     // network I/O; concurrent writers (config reloads, etc.) are not
     // expected during shutdown but this keeps the contract clean.
@@ -554,6 +578,25 @@ async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>) -> usize {
             .collect()
     };
     let now = Utc::now();
+    const DETAIL: &str = "daemon shutdown requested";
+    let pending: Vec<drain_journal::PendingRunFailure> = snapshot
+        .iter()
+        .filter_map(|(runner_id, in_flight, _)| {
+            Some(drain_journal::PendingRunFailure {
+                runner_id: *runner_id,
+                run_id: (*in_flight)?,
+                reason: FailureReason::DaemonRestart,
+                detail: DETAIL.to_string(),
+                ended_at: now,
+                recorded_at: now,
+            })
+        })
+        .collect();
+    if let Err(e) = drain_journal::record_all(paths, &pending) {
+        // Journal failure must not abort the drain itself — the sends
+        // below are still the primary delivery path.
+        tracing::warn!("failed to journal in-flight runs before drain: {e:#}");
+    }
     let drains = snapshot
         .into_iter()
         .filter_map(|(runner_id, in_flight, out)| {
@@ -561,7 +604,7 @@ async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>) -> usize {
             let msg = ClientMsg::RunFailed {
                 run_id,
                 reason: FailureReason::DaemonRestart,
-                detail: Some("daemon shutdown requested".to_string()),
+                detail: Some(DETAIL.to_string()),
                 ended_at: now,
                 tokens: None,
                 model: None,
@@ -572,24 +615,151 @@ async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>) -> usize {
                 match tokio::time::timeout(Duration::from_secs(2), out.send(msg)).await {
                     Ok(Ok(())) => {
                         tracing::info!(%runner_id, %run_id, "drained in-flight run on shutdown");
-                        true
+                        Some(run_id)
                     }
                     Ok(Err(e)) => {
-                        tracing::warn!(%runner_id, %run_id, "drain send failed: {e:#}");
-                        false
+                        tracing::warn!(
+                            %runner_id, %run_id,
+                            "drain send failed (journaled for replay on next start): {e:#}"
+                        );
+                        None
                     }
                     Err(_) => {
-                        tracing::warn!(%runner_id, %run_id, "drain send timed out at 2s");
-                        false
+                        tracing::warn!(
+                            %runner_id, %run_id,
+                            "drain send timed out at 2s (journaled for replay on next start)"
+                        );
+                        None
                     }
                 }
             })
         });
-    futures_util::future::join_all(drains)
+    let delivered: Vec<uuid::Uuid> = futures_util::future::join_all(drains)
         .await
         .into_iter()
-        .filter(|ok| *ok)
-        .count()
+        .flatten()
+        .collect();
+    if let Err(e) = drain_journal::remove(paths, &delivered) {
+        tracing::warn!("failed to clear delivered runs from drain journal: {e:#}");
+    }
+    delivered.len()
+}
+
+/// Replay `RunFailed` signals a previous daemon failed to deliver on
+/// shutdown (see [`drain_journal`]). One pass over the journal:
+///
+/// - entry's runner no longer configured → dropped (without that
+///   runner's credentials the signal can never be delivered; the
+///   cloud's heartbeat reaper remains the fallback);
+/// - entry older than [`drain_journal::REPLAY_TTL`] → dropped (the
+///   reaper has long since failed the run);
+/// - entry whose run is in flight locally again → dropped WITHOUT
+///   sending (the cloud redelivered the run to this daemon and it is
+///   legitimately running — failing it now would kill live work);
+/// - otherwise the signal is sent; confirmed sends are removed and
+///   anything else is kept for the next pass.
+///
+/// The first pass runs from `Supervisor::run` BEFORE the per-runner
+/// loops start, so nothing can be redelivered or in flight yet; later
+/// passes come from a background retry loop where the in-flight guard
+/// does the work.
+async fn replay_drain_journal_once(paths: &Paths, runners: &Arc<RwLock<HelloRunnerMap>>) -> usize {
+    let entries = drain_journal::load(paths);
+    if entries.is_empty() {
+        return 0;
+    }
+    let now = Utc::now();
+    let mut resolved: Vec<uuid::Uuid> = Vec::new();
+    let mut sends = Vec::new();
+    {
+        let guard = runners.read().await;
+        for entry in entries {
+            let Some((out, state, _)) = guard.get(&entry.runner_id) else {
+                tracing::warn!(
+                    runner_id = %entry.runner_id, run_id = %entry.run_id,
+                    "dropping journaled RunFailed: runner no longer configured"
+                );
+                resolved.push(entry.run_id);
+                continue;
+            };
+            if now - entry.recorded_at > drain_journal::REPLAY_TTL {
+                tracing::warn!(
+                    runner_id = %entry.runner_id, run_id = %entry.run_id,
+                    "dropping journaled RunFailed: older than replay TTL"
+                );
+                resolved.push(entry.run_id);
+                continue;
+            }
+            if *state.rx_in_flight.borrow() == Some(entry.run_id) {
+                // The cloud redelivered this run and it is running again
+                // — the journaled failure is stale, not undelivered.
+                tracing::info!(
+                    runner_id = %entry.runner_id, run_id = %entry.run_id,
+                    "dropping journaled RunFailed: run is in flight again"
+                );
+                resolved.push(entry.run_id);
+                continue;
+            }
+            let out = out.clone();
+            sends.push(async move {
+                let msg = ClientMsg::RunFailed {
+                    run_id: entry.run_id,
+                    reason: entry.reason,
+                    detail: Some(entry.detail.clone()),
+                    ended_at: entry.ended_at,
+                    tokens: None,
+                    model: None,
+                };
+                match tokio::time::timeout(Duration::from_secs(10), out.send(msg)).await {
+                    Ok(Ok(())) => {
+                        tracing::info!(
+                            runner_id = %entry.runner_id, run_id = %entry.run_id,
+                            "replayed journaled RunFailed from previous shutdown"
+                        );
+                        Some(entry.run_id)
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            runner_id = %entry.runner_id, run_id = %entry.run_id,
+                            "replaying journaled RunFailed failed, will retry: {e:#}"
+                        );
+                        None
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            runner_id = %entry.runner_id, run_id = %entry.run_id,
+                            "replaying journaled RunFailed timed out, will retry"
+                        );
+                        None
+                    }
+                }
+            });
+        }
+    }
+    let delivered: Vec<uuid::Uuid> = futures_util::future::join_all(sends)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+    resolved.extend(delivered.iter().copied());
+    if let Err(e) = drain_journal::remove(paths, &resolved) {
+        tracing::warn!("failed to update drain journal after replay: {e:#}");
+    }
+    delivered.len()
+}
+
+/// Background retry for journal entries the startup pass could not
+/// deliver (cloud unreachable, token mid-refresh). Exits as soon as
+/// the journal is empty; entries past the TTL are dropped by
+/// [`replay_drain_journal_once`].
+async fn replay_drain_journal_retry_loop(paths: Paths, runners: Arc<RwLock<HelloRunnerMap>>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        if drain_journal::load(&paths).is_empty() {
+            return;
+        }
+        replay_drain_journal_once(&paths, &runners).await;
+    }
 }
 
 /// Watch the `connected` notify and re-emit one `Hello` per `RunnerInstance`
@@ -3915,8 +4085,12 @@ mod tests {
                 .collect(),
         ));
 
-        let sent = drain_in_flight_runs(runners).await;
+        let sent = drain_in_flight_runs(runners, &paths).await;
         assert_eq!(sent, 1, "exactly one runner had an in-flight run");
+        assert!(
+            drain_journal::load(&paths).is_empty(),
+            "a delivered drain must leave no journal entry behind"
+        );
 
         // Receive the one RunFailed envelope.
         let env = tokio::time::timeout(std::time::Duration::from_secs(2), out_rx.recv())
@@ -3973,13 +4147,217 @@ mod tests {
                 .collect(),
         ));
 
-        let sent = drain_in_flight_runs(runners).await;
+        let sent = drain_in_flight_runs(runners, &paths).await;
         assert_eq!(sent, 0);
+        assert!(drain_journal::load(&paths).is_empty());
         let stray =
             tokio::time::timeout(std::time::Duration::from_millis(100), out_rx.recv()).await;
         assert!(
             stray.is_err(),
             "idle drain produced a stray frame: {stray:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drain_journals_run_failed_when_send_cannot_be_delivered() {
+        // The cloud channel is gone (receiver dropped): the send fails,
+        // and the RunFailed must survive in the journal for the next
+        // daemon start to replay.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        drop(out_rx);
+
+        let inst = RunnerInstance::new(
+            runner_config("busy", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let run_id = uuid::Uuid::new_v4();
+        inst.state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "running".into(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        let runners: Arc<RwLock<HelloRunnerMap>> = Arc::new(RwLock::new(
+            std::iter::once(&inst)
+                .map(|i| {
+                    (
+                        i.runner_id,
+                        (
+                            i.out.clone(),
+                            i.state.clone(),
+                            i.config.project_slug.clone(),
+                        ),
+                    )
+                })
+                .collect(),
+        ));
+
+        let sent = drain_in_flight_runs(runners, &paths).await;
+        assert_eq!(sent, 0, "send must fail with a dropped receiver");
+
+        let journal = drain_journal::load(&paths);
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].runner_id, inst.runner_id);
+        assert_eq!(journal[0].run_id, run_id);
+        assert!(matches!(journal[0].reason, FailureReason::DaemonRestart));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replay_delivers_journaled_run_failed_and_clears_journal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let inst = RunnerInstance::new(
+            runner_config("survivor", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let run_id = uuid::Uuid::new_v4();
+        let ended_at = Utc::now();
+        drain_journal::record_all(
+            &paths,
+            &[drain_journal::PendingRunFailure {
+                runner_id: inst.runner_id,
+                run_id,
+                reason: FailureReason::DaemonRestart,
+                detail: "daemon shutdown requested".into(),
+                ended_at,
+                recorded_at: ended_at,
+            }],
+        )
+        .unwrap();
+        let runners: Arc<RwLock<HelloRunnerMap>> = Arc::new(RwLock::new(
+            std::iter::once(&inst)
+                .map(|i| {
+                    (
+                        i.runner_id,
+                        (
+                            i.out.clone(),
+                            i.state.clone(),
+                            i.config.project_slug.clone(),
+                        ),
+                    )
+                })
+                .collect(),
+        ));
+
+        let delivered = replay_drain_journal_once(&paths, &runners).await;
+        assert_eq!(delivered, 1);
+        assert!(drain_journal::load(&paths).is_empty());
+
+        let env = tokio::time::timeout(std::time::Duration::from_secs(2), out_rx.recv())
+            .await
+            .expect("timed out waiting for replayed RunFailed")
+            .expect("channel closed");
+        assert_eq!(env.runner_id, Some(inst.runner_id));
+        match env.body {
+            ClientMsg::RunFailed {
+                run_id: got,
+                reason,
+                ..
+            } => {
+                assert_eq!(got, run_id);
+                assert!(matches!(reason, FailureReason::DaemonRestart));
+            }
+            other => panic!("expected RunFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replay_skips_run_that_is_in_flight_again() {
+        // The cloud redelivered the journaled run to this daemon and it
+        // is running again: replay must drop the stale entry WITHOUT
+        // sending RunFailed, or it would kill live work.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let inst = RunnerInstance::new(
+            runner_config("resumed", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let run_id = uuid::Uuid::new_v4();
+        inst.state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "running".into(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        let now = Utc::now();
+        drain_journal::record_all(
+            &paths,
+            &[drain_journal::PendingRunFailure {
+                runner_id: inst.runner_id,
+                run_id,
+                reason: FailureReason::DaemonRestart,
+                detail: "daemon shutdown requested".into(),
+                ended_at: now,
+                recorded_at: now,
+            }],
+        )
+        .unwrap();
+        let runners: Arc<RwLock<HelloRunnerMap>> = Arc::new(RwLock::new(
+            std::iter::once(&inst)
+                .map(|i| {
+                    (
+                        i.runner_id,
+                        (
+                            i.out.clone(),
+                            i.state.clone(),
+                            i.config.project_slug.clone(),
+                        ),
+                    )
+                })
+                .collect(),
+        ));
+
+        let delivered = replay_drain_journal_once(&paths, &runners).await;
+        assert_eq!(delivered, 0);
+        assert!(
+            drain_journal::load(&paths).is_empty(),
+            "stale entry must be dropped, not retried forever"
+        );
+        let stray =
+            tokio::time::timeout(std::time::Duration::from_millis(100), out_rx.recv()).await;
+        assert!(
+            stray.is_err(),
+            "no RunFailed may be sent for a run that is in flight again: {stray:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replay_drops_entry_for_unconfigured_runner() {
+        // The runner was removed from config since the entry was
+        // journaled: without its credentials the signal can never be
+        // delivered, so the entry is dropped instead of retried forever.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let now = Utc::now();
+        drain_journal::record_all(
+            &paths,
+            &[drain_journal::PendingRunFailure {
+                runner_id: uuid::Uuid::new_v4(),
+                run_id: uuid::Uuid::new_v4(),
+                reason: FailureReason::DaemonRestart,
+                detail: "daemon shutdown requested".into(),
+                ended_at: now,
+                recorded_at: now,
+            }],
+        )
+        .unwrap();
+        let runners: Arc<RwLock<HelloRunnerMap>> = Arc::new(RwLock::new(HashMap::new()));
+
+        let delivered = replay_drain_journal_once(&paths, &runners).await;
+        assert_eq!(delivered, 0);
+        assert!(drain_journal::load(&paths).is_empty());
     }
 }
