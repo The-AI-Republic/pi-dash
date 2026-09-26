@@ -2,14 +2,22 @@
 
 //! HTTP denials for the F-06 permission kernel.
 //!
-//! The `@allow_permission` decorator and the DRF permission classes answer
-//! denials as compact JSON rendered by `JSONRenderer` with the project
-//! defaults (`COMPACT_JSON=True`, `UNICODE_JSON=True` in
+//! The `@allow_permission` decorator, view-inline 403s, and DRF permission
+//! denials answer as compact JSON rendered by `JSONRenderer` with the
+//! project defaults (`COMPACT_JSON=True`, `UNICODE_JSON=True` in
 //! `rest_framework/settings.py`, so separators are `SHORT_SEPARATORS =
 //! (',', ':')` from `rest_framework/compat.py` — no spaces). The bodies
 //! below are those exact bytes:
 //!
-//! - allow-style denial: `{"error":"You don't have the required permissions."}`
+//! - allow-style denial (the decorator in `app/permissions/base.py` and its
+//!   `utils` copy, plus view-inline 403s such as
+//!   `app/views/project/base.py`):
+//!   `{"error":"You don't have the required permissions."}`
+//! - DRF-default denial: permission classes without a `message` attribute
+//!   (every class in `app/permissions/` except the desktop gate) deny
+//!   through `APIView.permission_denied` with `message=None`, which raises
+//!   `PermissionDenied` with its default detail:
+//!   `{"detail":"You do not have permission to perform this action."}`
 //! - desktop gate (`IsDesktopSession.message`, key order `error`, `detail`):
 //!   `{"error":"desktop_session_required","detail":"This endpoint is
 //!   available to the Pi Dash desktop app."}`
@@ -24,8 +32,13 @@
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 
-/// Exact bytes of the `@allow_permission` / permission-class 403 body.
+/// Exact bytes of the `@allow_permission` / view-inline 403 body.
 pub const PERMISSION_DENIED_BODY: &str = r#"{"error":"You don't have the required permissions."}"#;
+/// Exact bytes of DRF's default permission-denied body: what the
+/// `app/permissions/` classes (no `message` attribute) render through
+/// `APIView.permission_denied` with `message=None`.
+pub const DEFAULT_DENIED_BODY: &str =
+    r#"{"detail":"You do not have permission to perform this action."}"#;
 /// Exact bytes of the `IsDesktopSession` 403 body (key order preserved).
 pub const DESKTOP_REQUIRED_BODY: &str = r#"{"error":"desktop_session_required","detail":"This endpoint is available to the Pi Dash desktop app."}"#;
 
@@ -44,6 +57,17 @@ pub struct PermissionDenied;
 impl IntoResponse for PermissionDenied {
     fn into_response(self) -> Response {
         json_forbidden(PERMISSION_DENIED_BODY)
+    }
+}
+
+/// Rejection for a denied permission-class check: answers the DRF-default
+/// 403 (`VIEWSET_FORBIDDEN` in the contract suites).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefaultPermissionDenied;
+
+impl IntoResponse for DefaultPermissionDenied {
+    fn into_response(self) -> Response {
+        json_forbidden(DEFAULT_DENIED_BODY)
     }
 }
 
@@ -99,6 +123,19 @@ mod tests {
             r#"{"error":"You don't have the required permissions."}"#
         );
         assert_eq!(body, PERMISSION_DENIED_BODY);
+        assert_eq!(content_type.as_deref(), Some("application/json"));
+    }
+
+    #[tokio::test]
+    async fn default_denial_matches_drf_permission_denied() {
+        let (status, body, content_type) = body_of(DefaultPermissionDenied.into_response()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        // DRF `PermissionDenied.default_detail`, compact separators.
+        assert_eq!(
+            body,
+            r#"{"detail":"You do not have permission to perform this action."}"#
+        );
+        assert_eq!(body, DEFAULT_DENIED_BODY);
         assert_eq!(content_type.as_deref(), Some("application/json"));
     }
 
