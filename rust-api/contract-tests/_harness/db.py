@@ -118,11 +118,32 @@ class Database:
     def reset(self):
         # Dependency order. `schedulers` rows are signal-created per
         # workspace; a missing table here fails loudly as an FK violation.
+        # Extras tables (workspace themes, favorites, stickies, quick links,
+        # drafts + M2M, visits, home/sidebar prefs, user properties) all carry
+        # a workspace FK, so they wipe before members/workspaces.
         tables = [
             "schedulers",
+            "draft_issue_assignees",
+            "draft_issue_cycles",
+            "draft_issue_labels",
+            "draft_issue_modules",
+            "draft_issues",
+            "stickies",
+            "user_favorites",
+            "user_recent_visits",
+            "workspace_home_preferences",
+            "workspace_themes",
+            "workspace_user_links",
+            "workspace_user_preferences",
+            "workspace_user_properties",
             "sessions",
+            "workspace_join_requests",
+            "workspace_member_invites",
             "workspace_members",
             "workspaces",
+            "api_tokens",
+            "accounts",
+            "profiles",
             "instance_admins",
             "instance_configurations",
             "instances",
@@ -134,7 +155,7 @@ class Database:
                     cur.execute(f"delete from {table};")
             conn.commit()
 
-    def make_user(self, email, *, password=KNOWN_PASSWORD, first_name="Contract", last_name="User", is_active=True):
+    def make_user(self, email, *, password=KNOWN_PASSWORD, first_name="Contract", last_name="User", is_active=True, is_bot=False):
         uid = str(uuid.uuid4())
         now = _now()
         with self.connect() as conn:
@@ -153,7 +174,7 @@ class Database:
                         signing.make_password_hash(password), uid, f"u-{uid[:8]}", email,
                         first_name, last_name, "", now, now, now, "", "", False, False,
                         False, is_active, False, True, False, secrets.token_hex(32),
-                        "UTC", "", "", "email", "", False, f"{first_name} {last_name}",
+                        "UTC", "", "", "email", "", is_bot, f"{first_name} {last_name}",
                         True, False,
                     ),
                 )
@@ -210,6 +231,86 @@ class Database:
             conn.commit()
         return {"id": cid}
 
+    def make_api_token(self, user_id, *, label="Contract Token", description="",
+                       user_type=0, is_service=False, token=None, expired_at=None):
+        tid = str(uuid.uuid4())
+        now = _now()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """insert into api_tokens
+                       (created_at, updated_at, id, label, description, is_active,
+                        token, user_id, user_type, expired_at, is_service,
+                        allowed_rate_limit)
+                       values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (
+                        now, now, tid, label, description, True,
+                        token or secrets.token_hex(32), user_id, user_type,
+                        expired_at, is_service, "60/min",
+                    ),
+                )
+            conn.commit()
+        return {"id": tid, "label": label}
+
+    def make_profile(self, user_id):
+        # Mirrors the signup path (authentication/adapter/base.py), which
+        # creates the profile with model defaults; raw-SQL users bypass it,
+        # and the profile endpoints 404 without this row.
+        pid = str(uuid.uuid4())
+        now = _now()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """insert into profiles
+                       (created_at, updated_at, id, theme, is_tour_completed,
+                        onboarding_step, is_onboarded, billing_address_country,
+                        has_billing_address, company_name, user_id,
+                        is_mobile_onboarded, mobile_onboarding_step,
+                        mobile_timezone_auto_set, language, is_smooth_cursor_enabled,
+                        start_of_the_week, is_app_rail_docked, background_color, goals,
+                        has_marketing_email_consent, is_navigation_tour_completed,
+                        is_subscribed_to_changelog, notification_view_mode,
+                        product_tour, settings)
+                       values (now(), now(), %s, %s, false, %s, false, 'INDIA',
+                        false, '', %s, false, %s, false, 'en', false, 0, true,
+                        '#ffffff', %s, false, false, false, 'full', %s, %s)""",
+                    (
+                        pid, json.dumps({}),
+                        json.dumps({"profile_complete": False, "workspace_create": False,
+                                    "workspace_invite": False, "workspace_join": False}),
+                        user_id,
+                        json.dumps({"profile_complete": False, "workspace_create": False,
+                                    "workspace_join": False}),
+                        json.dumps({}),
+                        json.dumps({"work_items": False, "cycles": False, "modules": False,
+                                    "intake": False, "pages": False}),
+                        json.dumps({}),
+                    ),
+                )
+            conn.commit()
+        return {"id": pid}
+
+    def make_account(self, user_id, *, provider="google", provider_account_id="p-acc-1"):
+        aid = str(uuid.uuid4())
+        now = _now()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """insert into accounts
+                       (created_at, updated_at, id, user_id, provider_account_id,
+                        provider, access_token, id_token, metadata, last_connected_at)
+                       values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (now, now, aid, user_id, provider_account_id, provider,
+                     "access-token", "", json.dumps({}), now),
+                )
+            conn.commit()
+        return {"id": aid}
+
+    def mint_user_session(self, user, secret, *, max_age=3600):
+        # App-tree auth (`session-id` cookie) reads the same `sessions` rows
+        # as the admin cookie; only the cookie name differs (see http.user_client).
+        return self.mint_admin_session(user, secret, max_age=max_age)
+
     def mint_admin_session(self, user, secret, *, max_age=3600):
         payload = signing.session_payload(user["id"], user["password_hash"], secret)
         data = signing.encode_session(payload, secret)
@@ -240,6 +341,38 @@ class Database:
                 )
             conn.commit()
         return {"id": wid, "name": name, "slug": slug}
+
+    def make_invite(self, workspace_id, email, *, role=15, token="tok-contract-1",
+                    created_by_id=None, accepted=False, responded_at=None):
+        iid = str(uuid.uuid4())
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """insert into workspace_member_invites
+                       (created_at, updated_at, id, email, accepted, token,
+                        role, workspace_id, created_by_id, responded_at)
+                       values (now(), now(), %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (iid, email, accepted, token, role, workspace_id,
+                     created_by_id, responded_at),
+                )
+            conn.commit()
+        return {"id": iid, "email": email, "token": token}
+
+    def make_join_request(self, requester_id, admin_email, *, workspace_id=None,
+                          message=None, role=15, status="PENDING"):
+        jid = str(uuid.uuid4())
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """insert into workspace_join_requests
+                       (created_at, updated_at, id, admin_email, message, role,
+                        status, requester_id, workspace_id, created_by_id)
+                       values (now(), now(), %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (jid, admin_email, message, role, status,
+                     requester_id, workspace_id, requester_id),
+                )
+            conn.commit()
+        return {"id": jid}
 
     def make_workspace_member(self, workspace_id, user_id, *, role=20):
         mid = str(uuid.uuid4())

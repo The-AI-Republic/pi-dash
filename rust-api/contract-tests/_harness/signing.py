@@ -24,6 +24,9 @@ SESSION_SALT = "django.contrib.sessions.SessionStore"
 AUTH_HASH_SALT = "django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash"
 AUTH_BACKEND = "django.contrib.auth.backends.ModelBackend"
 ADMIN_SESSION_COOKIE = "admin-session-id"
+# Default SESSION_COOKIE_NAME (pi_dash/settings/common.py); the app URL tree
+# authenticates with this cookie over the same `sessions` table.
+USER_SESSION_COOKIE = "session-id"
 
 _B62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 SESSION_KEY_CHARS = string.ascii_lowercase + string.digits

@@ -59,13 +59,13 @@ Nothing here imports Django. Tests talk to the system under test only via:
   * local stub sinks (sinks.py) — capture outbound side effects.
 """
 from .db import Database
-from .http import admin_client, anon_client
+from .http import admin_client, anon_client, user_client
 from .settings import base_url, database_url, secret_key
 from _harness.db import db_cursor
 from _harness.worlds import World, build_world, ensure_instance
 from _harness.client import login_client
 
-__all__ = ["Database", "admin_client", "anon_client", "base_url", "database_url", "secret_key"]
+__all__ = ["Database", "admin_client", "anon_client", "user_client", "base_url", "database_url", "secret_key"]
 
 # Re-exports for the HTTP suites (first use: space domain; extended by
 # dispatch, PIDASHCONV-22). Other domains extend these modules, never fork.
