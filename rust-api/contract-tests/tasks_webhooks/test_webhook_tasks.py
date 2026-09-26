@@ -149,9 +149,16 @@ def test_webhook_send_success(db_conn, broker_url, webhook_sink):
     deliveries = webhook_sink.wait_for_count(1, what="webhook POST")
     assert len(deliveries) == 1
     delivery = deliveries[0]
-    assert delivery["headers"].get("X-Pi Dash-Event") == "issue"
-    assert "X-Pi Dash-Delivery" in delivery["headers"]
-    assert "X-Pi Dash-Signature" in delivery["headers"]
+    # Live Django bug: webhook_send_task names its custom headers with
+    # spaces ("X-Pi Dash-Event", ...), which requests/urllib3 silently
+    # drops — the POST arrives without them (verified wire-level against
+    # requests 2.32/2.33). The Rust port must reproduce the wire bytes,
+    # so the oracle pins absence here, not presence.
+    assert delivery["headers"].get("Content-Type") == "application/json"
+    assert delivery["headers"].get("User-Agent") == "Autopilot"
+    assert "X-Pi Dash-Event" not in delivery["headers"]
+    assert "X-Pi Dash-Delivery" not in delivery["headers"]
+    assert "X-Pi Dash-Signature" not in delivery["headers"]
     payload = json.loads(delivery["body"])
     assert payload["event"] == "issue"
     assert payload["action"] == "create"  # POST maps to create
@@ -164,6 +171,9 @@ def test_webhook_send_success(db_conn, broker_url, webhook_sink):
     assert len(new_rows) == 1
     assert str(new_rows[0]["response_status"]) == "200"
     assert new_rows[0]["retry_count"] == 0
+    # ...while the logged request_headers show the task did compute them
+    # (dropped at transmission, not at construction).
+    assert "X-Pi Dash-Event" in new_rows[0]["request_headers"]
 
 
 def test_webhook_send_failure_logs_retry_count(db_conn, broker_url, webhook_sink):
@@ -194,10 +204,16 @@ def test_webhook_send_failure_logs_retry_count(db_conn, broker_url, webhook_sink
     assert str(after[0]["response_status"]) == "500"
 
 
-def test_webhook_redelivery_has_distinct_delivery_ids(
+def test_webhook_redelivery_posts_twice_with_identical_bodies(
     db_conn, broker_url, webhook_sink
 ):
-    """Redelivery: two publishes → two POSTs, distinct delivery ids, same event."""
+    """Redelivery: two publishes → two POSTs with identical bodies.
+
+    Django intends distinct per-execution delivery ids, but the
+    ``X-Pi Dash-Delivery`` header never reaches the wire (see
+    test_webhook_send_success), so redeliveries are header-identical —
+    parity is two POSTs, same body.
+    """
     hook = _seed_workspace_with_hook(db_conn, webhook_sink)
     webhook_sink.clear()
     kwargs = {
@@ -212,16 +228,18 @@ def test_webhook_redelivery_has_distinct_delivery_ids(
     celery_wire.publish(f"{M}.webhook_task.webhook_send_task", kwargs=kwargs)
     celery_wire.publish(f"{M}.webhook_task.webhook_send_task", kwargs=kwargs)
     deliveries = webhook_sink.wait_for_count(2, what="redelivered webhook POSTs")
-    ids = {d["headers"]["X-Pi Dash-Delivery"] for d in deliveries}
-    assert len(ids) == 2, "redeliveries must carry distinct delivery ids"
+    assert all("X-Pi Dash-Delivery" not in d["headers"] for d in deliveries)
     bodies = [json.loads(d["body"])["data"] for d in deliveries]
     assert bodies == [{"id": "contract-redelivery"}] * 2
 
 
 def test_activity_chain_fans_out_to_sink(db_conn, broker_url, webhook_sink):
     """model_activity → webhook_activity → webhook_send_task → sink POST."""
-    owner = seed_helpers.user(db_conn, "contract-chain-owner")
-    workspace = seed_helpers.workspace(db_conn, "contractchain", owner["id"])
+    # model_id must be a real issue: webhook_activity serializes it via
+    # get_model_data, and a miss raises ObjectDoesNotExist which the
+    # chain swallows without fanning out (no POST).
+    chain = seed_helpers.issue_chain(db_conn, "chain")
+    owner, workspace, issue = chain["owner"], chain["workspace"], chain["issue"]
     url = f"{config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
     seed_helpers.webhook(db_conn, workspace["id"], url, issue=True)
     webhook_sink.clear()
@@ -230,7 +248,7 @@ def test_activity_chain_fans_out_to_sink(db_conn, broker_url, webhook_sink):
         f"{M}.webhook_task.model_activity",
         args=[
             "issue",
-            str(uuid.uuid4()),
+            str(issue["id"]),
             {},
             None,
             str(owner["id"]),

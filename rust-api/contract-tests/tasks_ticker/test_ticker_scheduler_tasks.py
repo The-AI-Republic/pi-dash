@@ -112,86 +112,6 @@ def _past(minutes: int = 5) -> str:
     return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
 
 
-def _seed_issue_chain(db_conn, slug: str):
-    """user → workspace → project → state → issue. Returns dict of rows."""
-    owner = seed_helpers.user(db_conn, f"contract-{slug}-owner")
-    workspace = seed_helpers.workspace(db_conn, f"contract{slug}", owner["id"])
-    # Every NOT NULL projects/states/issues column without a database
-    # default must be present (Django field ``default=`` is Python-side
-    # only). Values mirror the model defaults in db/models/{project,
-    # state, issue}.py.
-    project = insert_row(
-        db_conn,
-        "projects",
-        {
-            "workspace_id": str(workspace["id"]),
-            "name": f"contract {slug}",
-            "description": "",
-            "identifier": "CT",
-            "network": 2,
-            "module_view": False,
-            "cycle_view": False,
-            "issue_views_view": False,
-            "page_view": True,
-            "intake_view": False,
-            "is_time_tracking_enabled": False,
-            "is_issue_type_enabled": False,
-            "is_default": False,
-            "guest_view_all_features": False,
-            "members_can_edit_states": True,
-            "archive_in": 0,
-            "close_in": 0,
-            "logo_props": {},
-            "timezone": "UTC",
-            "repo_url": "",
-            "base_branch": "main",
-            "agent_default_interval_seconds": 10800,
-            "agent_default_max_ticks": 10,
-            "agent_review_default_interval_seconds": 10800,
-            "agent_test_default_interval_seconds": 10800,
-            "agent_ticking_enabled": True,
-            "default_agent_executor": "local_runner",
-        },
-    )
-    state = insert_row(
-        db_conn,
-        "states",
-        {
-            "project_id": str(project["id"]),
-            "workspace_id": str(workspace["id"]),
-            "name": "Contract",
-            "description": "",
-            "color": "#000000",
-            "slug": "",
-            "group": "backlog",
-            "sequence": 65535,
-            "is_triage": False,
-            "default": False,
-        },
-    )
-    issue = insert_row(
-        db_conn,
-        "issues",
-        {
-            "workspace_id": str(workspace["id"]),
-            "project_id": str(project["id"]),
-            "state_id": str(state["id"]),
-            "name": "contract issue",
-            "description_json": {},
-            "description_html": "<p></p>",
-            "priority": "none",
-            "complexity_score": 0,
-            "sequence_id": 1,
-            "is_draft": False,
-            "sort_order": 65535,
-            "git_work_branch": "",
-            "workpad": "",
-        },
-    )
-    return {"owner": owner, "workspace": workspace, "project": project,
-            "state": state, "issue": issue}
-
-
 def _quiesce_tickers(conn, keep_id=None) -> None:
     """Disable every ticker except ``keep_id`` — scans are global, tests aren't."""
     with conn.cursor() as cur:
@@ -219,7 +139,7 @@ def _quiesce_bindings(conn, keep_id=None) -> None:
 
 def test_scan_due_tickers_fans_out_fire_tick(db_conn, broker_url):
     """Beat-firing parity: a due ticker row becomes one fire_tick message."""
-    chain = _seed_issue_chain(db_conn, "ticker")
+    chain = seed_helpers.issue_chain(db_conn, "ticker")
     ticker = insert_row(
         db_conn,
         "issue_agent_ticker",
@@ -250,7 +170,7 @@ def test_scan_due_tickers_fans_out_fire_tick(db_conn, broker_url):
 
 def test_scan_due_tickers_skips_not_due(db_conn, broker_url):
     """A ticker with a future next_run_at fans out nothing."""
-    chain = _seed_issue_chain(db_conn, "notdue")
+    chain = seed_helpers.issue_chain(db_conn, "notdue")
     future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
     fresh = insert_row(
         db_conn,
@@ -299,7 +219,7 @@ def test_fire_tick_unknown_id_dispatches_nothing(db_conn, broker_url):
 
 def test_scan_due_bindings_fans_out_fire(db_conn, broker_url):
     """A due scheduler binding becomes one fire_scheduler_binding message."""
-    chain = _seed_issue_chain(db_conn, "sched")
+    chain = seed_helpers.issue_chain(db_conn, "sched")
     scheduler = insert_row(
         db_conn,
         "schedulers",
@@ -363,7 +283,7 @@ def _drain_fire_ticks():
 
 def test_redelivered_scan_fans_out_once_per_run(db_conn, broker_url):
     """Redelivery: two scans of one due ticker → one fire message per scan."""
-    chain = _seed_issue_chain(db_conn, "redel")
+    chain = seed_helpers.issue_chain(db_conn, "redel")
     ticker = insert_row(
         db_conn,
         "issue_agent_ticker",
