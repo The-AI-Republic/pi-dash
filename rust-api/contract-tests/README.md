@@ -657,3 +657,60 @@ list); favorites list 500s; estimate bulk retrieve of a missing id 404s
 via the shared `ObjectDoesNotExist` handler while project retrieve uses
 its own 404 body.
 (PIDASHCONV-83 contract tests: app project + states + estimates)
+
+---
+
+## Run: orchestration engine (D-12 oracle, PIDASHCONV-75)
+
+Black-box engine-behavior oracle under `orchestration/` (35 tests): the
+domain owns no routes — signals, state transitions, workpad, phase machine
+(`blockers.py`, `workpad.py`, `service.py`, `scheduling.py`). Stimuli are
+the surfaces that drive the engine: issue state PATCHes (with and without
+`X-Pi-Dash-Run-Id`), the wait / re-tick endpoints, the workpad and relations
+endpoints, and Celery tasks published in wire format. Asserts read the
+engine's tables (`issue_agent_ticker`, `agent_run`, `issues`,
+`issue_comments`): dispatch on signal, re-entrancy guards, wait/wake
+transitions, ticker claim/rollback, redelivery, ETA, beat-schedule firing,
+workpad wire rules, blocker open/closed semantics, permission floor.
+
+Wire publishing uses `_harness/broker_redis.py` (kombu over the redis
+transport named by `CELERY_BROKER_URL`, with `task_id=` redelivery and
+`countdown=`/`eta=` support). `_harness/broker.py` (pika) targets AMQP
+stacks and has neither; both modules stay — extend, never fork.
+
+```sh
+cd rust-api/contract-tests
+export BASE_URL=http://127.0.0.1:8475
+export DATABASE_URL=postgresql://irichard@localhost:5432/pidash_contract_75
+export CELERY_BROKER_URL=redis://localhost:6379/9
+pytest orchestration _harness/tests -q   # 37 passed (35 oracle + 2 sink loopbacks)
+```
+
+Boot a Django backend for the run (from the repo root; export form — the
+runner scrubs inline `VAR=` prefixes):
+
+```sh
+# 1. migrated database
+export DATABASE_URL=... REDIS_URL=... AMQP_URL=<same-as-CELERY_BROKER_URL>
+export WEB_URL=$BASE_URL APP_BASE_URL=$BASE_URL EMAIL_HOST=localhost
+export API_KEY_RATE_LIMIT=100000/minute
+export DJANGO_SETTINGS_MODULE=pi_dash.settings.test PYTHONPATH=apps/api
+python apps/api/manage.py migrate --no-input
+# 2. http server
+python apps/api/manage.py runserver 127.0.0.1:8475 --noreload
+# 3. worker (separate shell, same env)
+python -m celery -A pi_dash.celery worker -l INFO -P solo -c 1 --queues celery
+```
+
+Isolation: each run uses its own database, port, and broker DB number —
+task redelivery assertions count queue entries, so never share one broker
+DB between two live runs.
+
+Deliberate-break check: removing the workpad permission guard turns
+`test_anonymous_workpad_denied` and `test_cross_workspace_isolation` red
+(demonstrated per PR with a one-line local patch, reverted).
+
+Known oracle limits (pinned, not skipped): full dispatch-True run creation
+needs an eligible runner (owned by the D-13+ runner gates);
+`done_signal.py` has zero production callers and is excluded.
+(PIDASHCONV-75 orchestration engine oracle)

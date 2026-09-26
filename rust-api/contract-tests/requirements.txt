@@ -19,3 +19,6 @@ pyyaml>=6  # v1_openapi: parse the default YAML rendering of the schema doc
 
 # PIDASHCONV-83: SMTP sink backend (lazy import in _harness/sinks.py).
 aiosmtpd==1.4.6
+
+# PIDASHCONV-75 (orchestration domain): redis-transport wire publisher.
+kombu>=5.3
