@@ -94,7 +94,8 @@ function ProjectCommonAttributes(props: Props) {
             required: t("Project ID is required"),
             // allow only alphanumeric & non-latin characters
             validate: (value) =>
-              /^[ÇŞĞIİÖÜA-Z0-9]+$/.test(value.toUpperCase()) || t("Only Alphanumeric & Non-latin characters are allowed."),
+              /^[ÇŞĞIİÖÜA-Z0-9]+$/.test(value.toUpperCase()) ||
+              t("Only Alphanumeric & Non-latin characters are allowed."),
             minLength: {
               value: 1,
               message: t("Project ID must at least be of 1 character"),
@@ -139,7 +140,7 @@ function ProjectCommonAttributes(props: Props) {
               id="description"
               name="description"
               value={value}
-              placeholder={t("Description")}
+              placeholder={t("Project Context (Will be shown to AI agents)")}
               onChange={(e) => {
                 onChange(e);
                 handleFormOnChange?.();
@@ -172,9 +173,7 @@ function ProjectCommonAttributes(props: Props) {
                 handleFormOnChange?.();
               }}
               hasError={Boolean(errors?.repo_url)}
-              placeholder={
-                t("Git repository URL (e.g. git@github.com:org/repo.git)")
-              }
+              placeholder={t("Git repository URL (e.g. git@github.com:org/repo.git)")}
               className="focus:border-blue-400 w-full"
               tabIndex={getIndex("repo_url")}
             />
