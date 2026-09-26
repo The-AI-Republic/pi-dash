@@ -78,7 +78,10 @@ fn resolve_item(
         match rows.get(key) {
             None => default.clone(),
             Some(row) => match row.value.as_deref() {
-                // decrypt_data(None) is None in Python.
+                // The legacy shim calls decrypt_data() directly, whose
+                // falsy branch returns "" — so an encrypted NULL row yields
+                // "", while a plain NULL row stays Null.
+                None if row.is_encrypted => ConfigValue::Str(String::new()),
                 None => ConfigValue::Null,
                 Some(v) if row.is_encrypted => ConfigValue::Str(keyring.decrypt(v)),
                 Some(v) => ConfigValue::Str(v.to_owned()),
@@ -96,17 +99,8 @@ fn resolve_item(
 mod tests {
     use super::*;
     use crate::config::accessor::ConfigStore;
+    use crate::config::env_lock;
     use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        // Ignore poisoning: a failed sibling test must not cascade.
-        ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
 
     #[derive(Default)]
     struct MemStore {
@@ -198,6 +192,57 @@ mod tests {
         ))
         .expect("read");
         assert_eq!(out, vec![ConfigValue::from("shh")]);
+    }
+
+    #[test]
+    fn encrypted_null_row_yields_empty_string() {
+        // The legacy shim calls decrypt_data() directly, whose falsy branch
+        // returns "" — unlike the accessor, where NULL stays Null.
+        let _g = env_lock();
+        let store = MemStore {
+            rows: [(
+                "GOOGLE_CLIENT_SECRET".to_owned(),
+                ConfigRow {
+                    value: None,
+                    is_encrypted: true,
+                },
+            )]
+            .into(),
+        };
+        let out = block(get_configuration_values(
+            &registry(),
+            &store,
+            &keyring(),
+            &[LegacyItem::new(
+                "GOOGLE_CLIENT_SECRET",
+                ConfigValue::from("fallback"),
+            )],
+        ))
+        .expect("read");
+        assert_eq!(out, vec![ConfigValue::from("")]);
+    }
+
+    #[test]
+    fn plain_null_row_yields_null() {
+        let _g = env_lock();
+        let store = MemStore {
+            rows: [(
+                "EMAIL_HOST".to_owned(),
+                ConfigRow {
+                    value: None,
+                    is_encrypted: false,
+                },
+            )]
+            .into(),
+        };
+        let out = block(get_configuration_values(
+            &registry(),
+            &store,
+            &keyring(),
+            &[LegacyItem::new("EMAIL_HOST", ConfigValue::from("fallback"))],
+        ))
+        .expect("read");
+        assert_eq!(out, vec![ConfigValue::Null]);
     }
 
     #[test]

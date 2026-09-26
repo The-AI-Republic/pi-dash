@@ -34,6 +34,20 @@ pub use settings::{
 };
 pub use value::ConfigValue;
 
+/// Process-wide lock serialising tests that mutate the process environment.
+/// Config tests live in several modules but share one environment; a
+/// per-module lock lets cross-module tests race on the same vars (e.g.
+/// `POSTHOG_API_KEY`). Every env-mutating test must hold this guard.
+#[cfg(test)]
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    // Ignore poisoning: a failed sibling test must not cascade.
+    ENV_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 use thiserror::Error as ThisError;
 
 /// How to reach Postgres.

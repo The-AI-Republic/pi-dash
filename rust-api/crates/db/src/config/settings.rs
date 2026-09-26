@@ -657,8 +657,24 @@ impl Settings {
                 amqp_url: ctx.opt_string("AMQP_URL")?,
             },
             runner: RunnerSettings {
-                long_poll_interval_secs: ctx
-                    .req_int("LONG_POLL_INTERVAL_SECS", ConfigValue::from(25))?,
+                long_poll_interval_secs: {
+                    let raw = ctx.req_int("LONG_POLL_INTERVAL_SECS", ConfigValue::from(25))?;
+                    // common.py clamps to [1, 55] so the server-side block
+                    // always finishes strictly before the daemon's
+                    // per-request timeout, and warns so operators see the
+                    // override at boot instead of silently getting another
+                    // value.
+                    if !(1..=55).contains(&raw) {
+                        tracing::warn!(
+                            "LONG_POLL_INTERVAL_SECS={raw} out of allowed range [1, 55]; \
+                             clamping. Raising the upper bound requires also raising \
+                             MAX_LONG_POLL_INTERVAL_SECS in runner/src/cloud/http.rs and the \
+                             shared reqwest Client::timeout so daemon timeouts don't fire \
+                             before the server's block_ms completes."
+                        );
+                    }
+                    raw.clamp(1, 55)
+                },
                 access_token_ttl_secs: ctx
                     .req_int("ACCESS_TOKEN_TTL_SECS", ConfigValue::from(3600))?,
                 offline_threshold_secs: ctx
@@ -1145,6 +1161,24 @@ mod tests {
             matches!(err, ConfigError::TypeMismatch { .. }),
             "unexpected: {err:?}"
         );
+    }
+
+    #[test]
+    fn long_poll_interval_clamps_to_1_55() {
+        // common.py clamps LONG_POLL_INTERVAL_SECS to [1, 55] so the
+        // server-side block finishes before the daemon's per-request timeout.
+        let s = Settings::from_map_with(&HashMap::new(), Profile::Common, &NoOverlay)
+            .expect("resolves");
+        assert_eq!(s.runner.long_poll_interval_secs, 25);
+        for (raw, clamped) in [("0", 1), ("1", 1), ("30", 30), ("55", 55), ("600", 55)] {
+            let s = Settings::from_map_with(
+                &vars(&[("LONG_POLL_INTERVAL_SECS", raw)]),
+                Profile::Common,
+                &NoOverlay,
+            )
+            .expect("resolves");
+            assert_eq!(s.runner.long_poll_interval_secs, clamped, "raw={raw}");
+        }
     }
 
     #[test]

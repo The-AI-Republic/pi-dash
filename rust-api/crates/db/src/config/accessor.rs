@@ -152,8 +152,9 @@ pub async fn get_in<S: ConfigStore>(
 }
 
 /// Resolve several keys at once, batching the db reads into one `fetch`.
-/// Unregistered keys resolve leniently even in strict mode, mirroring
-/// Python's `get_many` (which never raises for unknown keys).
+/// Unregistered keys raise in strict mode via [`check_strict`], mirroring
+/// Python's `get_many` (which routes unknown keys through
+/// `_handle_unregistered`); only the legacy shim never raises.
 pub async fn get_many_in<S: ConfigStore>(
     registry: &ConfigRegistry,
     store: &S,
@@ -165,6 +166,7 @@ pub async fn get_many_in<S: ConfigStore>(
     for key in keys {
         match registry.get(key) {
             None => {
+                check_strict(key)?;
                 result.insert((*key).to_owned(), handle_unregistered(key, None));
             }
             Some(entry) if entry.source == ConfigSource::Env => {
@@ -303,8 +305,8 @@ fn decrypt_row(row: &ConfigRow, keyring: &Keyring) -> Option<ConfigValue> {
 
 /// Unregistered keys: warn and fall back to a plain env read, exactly like
 /// Python's lenient `_handle_unregistered` path. The strict (raising) path
-/// lives in [`get_strict_in`]: `get_many` and the legacy shim never raise,
-/// matching Python.
+/// lives in [`check_strict`], shared by [`get_strict_in`] and [`get_many_in`]:
+/// only the legacy shim never raises, matching Python.
 fn handle_unregistered(key: &str, default: Option<&ConfigValue>) -> ConfigValue {
     tracing::warn!("unregistered config key {key:?}; defaulting to env");
     match std::env::var(key) {
@@ -315,8 +317,8 @@ fn handle_unregistered(key: &str, default: Option<&ConfigValue>) -> ConfigValue 
 
 /// Raise [`ConfigError::UnregisteredKey`] for an unknown key when the
 /// harness is strict; otherwise pass. Single-key entry points
-/// (`get_config`, boot reads) share this; `get_many` and the legacy shim
-/// never raise, matching Python.
+/// (`get_config`, boot reads) and [`get_many_in`] share this; only the
+/// legacy shim never raises, matching Python.
 fn check_strict(key: &str) -> Result<(), ConfigError> {
     if is_strict() {
         return Err(ConfigError::UnregisteredKey(key.to_owned()));
@@ -360,7 +362,7 @@ pub async fn get_config_with<S: ConfigStore>(
     get_strict_in(global(), store, &Keyring::from_env(), key, Some(&default)).await
 }
 
-/// Resolve several keys at once (global registry; lenient on unknown keys).
+/// Resolve several keys at once (global registry; strict-aware on unknown keys).
 pub async fn get_many<S: ConfigStore>(
     store: &S,
     keys: &[&str],
@@ -385,20 +387,9 @@ pub async fn get_int<S: ConfigStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::env_lock;
     use crate::config::registry::ConfigRegistry;
     use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-
-    /// Process env is global: every test that mutates it holds this lock, so
-    /// parallel Rust tests cannot leak vars into each other.
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        // Ignore poisoning: a failed sibling test must not cascade.
-        ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
 
     /// In-memory store. Panics on `fetch` when `panic_on_fetch` is set, to
     /// prove env-tier reads never touch the database.
@@ -693,6 +684,24 @@ mod tests {
             None
         ))
         .is_err());
+        std::env::remove_var("DJANGO_SETTINGS_MODULE");
+    }
+
+    #[test]
+    fn get_many_strict_raises_on_unregistered() {
+        // Python's get_many routes unknown keys through _handle_unregistered,
+        // which raises under the test harness.
+        let _g = env_lock();
+        std::env::set_var("DJANGO_SETTINGS_MODULE", "pi_dash.settings.test");
+        let store = MemStore::default();
+        let err = block(get_many_in(
+            &registry(),
+            &store,
+            &keyring(),
+            &["EMAIL_HOST", "WHATEVER_KEY"],
+        ))
+        .expect_err("strict get_many must raise");
+        assert_eq!(err, ConfigError::UnregisteredKey("WHATEVER_KEY".to_owned()));
         std::env::remove_var("DJANGO_SETTINGS_MODULE");
     }
 
