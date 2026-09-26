@@ -1780,6 +1780,40 @@ async fn fetch_project_labels_stops_when_server_reports_no_next_page() {
 }
 
 #[tokio::test]
+async fn fetch_project_labels_follows_next_page_results_true_across_pages() {
+    // The real server envelope on a multi-page list: `next_page_results` is
+    // true while more rows exist and false on the last page, where a fresh
+    // cursor is still handed out. Page 2 must be fetched, page 3 must not.
+    let fake = start_fake(Box::new(|req| {
+        if req.path.contains("cursor=1000:1:0") {
+            CannedResponse::ok(
+                r#"{"count":1,"next_cursor":"1000:2:0","next_page_results":false,"results":[
+                     {"id":"l-2","name":"frontend"}]}"#,
+            )
+        } else if req.path.contains("cursor=") {
+            CannedResponse::ok(r#"{"count":0,"next_cursor":"1000:3:0","next_page_results":false,"results":[]}"#)
+        } else {
+            CannedResponse::ok(
+                r#"{"count":1,"next_cursor":"1000:1:0","next_page_results":true,"results":[
+                     {"id":"l-1","name":"bug"}]}"#,
+            )
+        }
+    }))
+    .await;
+    let client = client(&fake);
+    let labels = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        pidash::cli::resolve::fetch_project_labels(&client, PROJECT),
+    )
+    .await
+    .expect("fetch_project_labels must terminate")
+    .expect("fetch labels");
+    let names: Vec<&str> = labels.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, vec!["bug", "frontend"]);
+    assert_eq!(fake.recorded.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn fetch_project_labels_stops_on_an_empty_page() {
     // Defence in depth for servers that omit `next_page_results`: an empty
     // page can never be followed by a non-empty one, so stop there.
