@@ -12,7 +12,7 @@ The EXPLAIN test below pins the plan; the behavioral tests pin the results.
 
 import os
 
-from conftest import session_headers
+from .conftest import session_headers
 
 GLOBAL_RESULT_ENTITIES = {
     "workspace", "project", "issue", "cycle", "module", "issue_view",

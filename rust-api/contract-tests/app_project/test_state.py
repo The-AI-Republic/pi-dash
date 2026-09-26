@@ -2,7 +2,7 @@
 
 from psycopg.rows import dict_row
 
-from conftest import assert_keys
+from .conftest import assert_keys
 
 STATE_KEYS = [
     "color", "default", "description", "group", "id", "name",
