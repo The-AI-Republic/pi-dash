@@ -9,6 +9,7 @@ import { useTranslation } from "@pi-dash/i18n";
 import type { TIssue, TPaginationData } from "@pi-dash/types";
 // components
 import { renderFormattedPayloadDate } from "@pi-dash/utils";
+import RenderIfVisible from "@/components/core/render-if-visible-HOC";
 // helpers
 import { useIssuesStore } from "@/hooks/use-issue-layout-store";
 import type { TRenderQuickActions } from "../list/list-view-types";
@@ -71,7 +72,7 @@ export const CalendarIssueBlocks = observer(function CalendarIssueBlocks(props: 
   return (
     <>
       {issueIdList?.map((issueId) => (
-        <div key={issueId} className="relative cursor-pointer p-1 px-2">
+        <RenderIfVisible key={issueId} classNames="relative cursor-pointer p-1 px-2" defaultHeight="40px">
           <CalendarIssueBlockRoot
             issueId={issueId}
             quickActions={quickActions}
@@ -79,7 +80,7 @@ export const CalendarIssueBlocks = observer(function CalendarIssueBlocks(props: 
             canEditProperties={canEditProperties}
             isEpic={isEpic}
           />
-        </div>
+        </RenderIfVisible>
       ))}
 
       {isPaginating && (
