@@ -113,6 +113,157 @@ pub fn is_expired(expire_date_unix: i64, now_unix: i64) -> bool {
     expire_date_unix <= now_unix
 }
 
+/// Format unix seconds as an IMF-fixdate (`http_date`), e.g.
+/// `Wed, 21 Oct 2026 07:28:00 GMT`. Mirrors
+/// `django.utils.http.http_date` (via `email.utils.formatdate(usegmt=True)`);
+/// used for cookie `expires` attributes.
+pub fn http_date(unix_secs: i64) -> String {
+    const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let days = unix_secs.div_euclid(86_400);
+    let tod = unix_secs.rem_euclid(86_400);
+    // civil-from-days (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    // 1970-01-01 was a Thursday; Monday-based weekday index 3.
+    let weekday = WEEKDAYS[((days + 3).rem_euclid(7)) as usize];
+    format!(
+        "{weekday}, {day:02} {} {year:04} {:02}:{:02}:{:02} GMT",
+        MONTHS[(month - 1) as usize],
+        tod / 3_600,
+        (tod % 3_600) / 60,
+        tod % 60,
+    )
+}
+
+/// Attributes for one `Set-Cookie` value, mirroring Django's `set_cookie`
+/// arguments as `SessionMiddleware.process_response` passes them: `Path`
+/// is always `/`, `SameSite` always `Lax`; `Secure`/`HttpOnly` are only
+/// present when truthy (Django passes `secure=... or None`); `Domain` only
+/// when configured. `max_age`/`expires` are both `None` for
+/// expire-at-browser-close sessions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetCookie {
+    pub name: String,
+    pub value: String,
+    pub expires: Option<String>,
+    pub max_age: Option<i64>,
+    pub domain: Option<String>,
+    pub path: String,
+    pub secure: bool,
+    pub httponly: bool,
+    pub samesite: String,
+}
+
+/// Render one `Set-Cookie` header value. Attribute order is
+/// case-insensitive alphabetical (`Domain`, `expires`, `HttpOnly`,
+/// `Max-Age`, `Path`, `SameSite`, `Secure`), exactly as Python's
+/// `Morsel.output` emits them; an empty value renders quoted (`""`), as
+/// `delete_cookie` produces.
+pub fn render_set_cookie(cookie: &SetCookie) -> String {
+    let mut out = String::new();
+    out.push_str(&cookie.name);
+    out.push('=');
+    if cookie.value.is_empty() {
+        out.push_str("\"\"");
+    } else {
+        out.push_str(&cookie.value);
+    }
+    // Case-insensitive alphabetical, matching Morsel emission order.
+    if let Some(domain) = &cookie.domain {
+        out.push_str("; Domain=");
+        out.push_str(domain);
+    }
+    if let Some(expires) = &cookie.expires {
+        out.push_str("; expires=");
+        out.push_str(expires);
+    }
+    if cookie.httponly {
+        out.push_str("; HttpOnly");
+    }
+    if let Some(max_age) = cookie.max_age {
+        out.push_str(&format!("; Max-Age={max_age}"));
+    }
+    out.push_str("; Path=");
+    out.push_str(&cookie.path);
+    out.push_str("; SameSite=");
+    out.push_str(&cookie.samesite);
+    if cookie.secure {
+        out.push_str("; Secure");
+    }
+    out
+}
+
+/// Render the `Set-Cookie` value `delete_cookie` emits: empty value,
+/// `Max-Age=0`, the epoch expiry, `Path` and `SameSite`, plus `Domain` when
+/// configured — never `Secure`/`HttpOnly`. Django's `delete_cookie` passes
+/// `SESSION_COOKIE_DOMAIN` through, so a deployment with `COOKIE_DOMAIN`
+/// set deletes a domain-scoped cookie.
+pub fn render_delete_cookie(
+    name: &str,
+    path: &str,
+    samesite: &str,
+    domain: Option<&str>,
+) -> String {
+    render_set_cookie(&SetCookie {
+        name: name.to_string(),
+        value: String::new(),
+        expires: Some("Thu, 01 Jan 1970 00:00:00 GMT".to_string()),
+        max_age: Some(0),
+        domain: domain.map(str::to_owned),
+        path: path.to_string(),
+        secure: false,
+        httponly: false,
+        samesite: samesite.to_string(),
+    })
+}
+
+/// Generate a fresh session key, mirroring
+/// `SessionStore._get_new_session_key`: 128 chars from lowercase ASCII +
+/// digits (`VALID_KEY_CHARS` in `pi_dash/db/models/session.py`). The store
+/// loops until the key is unused, exactly like the Python `while True`.
+pub fn generate_session_key() -> String {
+    const KEY_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    const KEY_LEN: usize = 128;
+    let mut rng = rand::rng();
+    (0..KEY_LEN)
+        .map(|_| {
+            let i = rand::Rng::random_range(&mut rng, 0..KEY_CHARS.len());
+            KEY_CHARS[i] as char
+        })
+        .collect()
+}
+
+/// Read one cookie value from a `Cookie` header, mirroring
+/// `request.COOKIES.get(name)`: `;`-separated pairs, surrounding whitespace
+/// stripped, surrounding double quotes stripped.
+pub fn cookie_value(cookie_header: &str, name: &str) -> Option<String> {
+    cookie_header.split(';').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        if key.trim() != name {
+            return None;
+        }
+        let value = value.trim();
+        Some(
+            value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .unwrap_or(value)
+                .to_string(),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +348,108 @@ mod tests {
         assert!(is_plausible_session_key("abc123"));
         assert!(!is_plausible_session_key(""));
         assert!(!is_plausible_session_key(&"a".repeat(129)));
+    }
+
+    #[test]
+    fn http_date_matches_python_formatdate() {
+        // Vectors from email.utils.formatdate(ts, usegmt=True).
+        assert_eq!(http_date(0), "Thu, 01 Jan 1970 00:00:00 GMT");
+        assert_eq!(http_date(1), "Thu, 01 Jan 1970 00:00:01 GMT");
+        assert_eq!(http_date(-1), "Wed, 31 Dec 1969 23:59:59 GMT");
+        assert_eq!(http_date(1790452337), "Sat, 26 Sep 2026 19:52:17 GMT");
+        assert_eq!(http_date(1761092880), "Wed, 22 Oct 2025 00:28:00 GMT");
+        assert_eq!(http_date(253402300799), "Fri, 31 Dec 9999 23:59:59 GMT");
+    }
+
+    #[test]
+    fn set_cookie_renders_like_django_morsel() {
+        // Vectors from HttpResponse.set_cookie(...).cookies.output().
+        let rendered = render_set_cookie(&SetCookie {
+            name: "session-id".to_string(),
+            value: "abc123".to_string(),
+            expires: Some("Wed, 21 Oct 2026 07:28:00 GMT".to_string()),
+            max_age: Some(604800),
+            domain: None,
+            path: "/".to_string(),
+            secure: false,
+            httponly: false,
+            samesite: "Lax".to_string(),
+        });
+        assert_eq!(
+            rendered,
+            "session-id=abc123; expires=Wed, 21 Oct 2026 07:28:00 GMT; Max-Age=604800; Path=/; SameSite=Lax"
+        );
+        let rendered = render_set_cookie(&SetCookie {
+            name: "session-id".to_string(),
+            value: "abc123".to_string(),
+            expires: Some("Wed, 21 Oct 2026 07:28:00 GMT".to_string()),
+            max_age: Some(3600),
+            domain: Some("example.com".to_string()),
+            path: "/".to_string(),
+            secure: true,
+            httponly: true,
+            samesite: "Lax".to_string(),
+        });
+        assert_eq!(
+            rendered,
+            "session-id=abc123; Domain=example.com; expires=Wed, 21 Oct 2026 07:28:00 GMT; HttpOnly; Max-Age=3600; Path=/; SameSite=Lax; Secure"
+        );
+        // Browser-close: no Max-Age, no expires.
+        let rendered = render_set_cookie(&SetCookie {
+            name: "session-id".to_string(),
+            value: "abc123".to_string(),
+            expires: None,
+            max_age: None,
+            domain: None,
+            path: "/".to_string(),
+            secure: false,
+            httponly: false,
+            samesite: "Lax".to_string(),
+        });
+        assert_eq!(rendered, "session-id=abc123; Path=/; SameSite=Lax");
+    }
+
+    #[test]
+    fn delete_cookie_renders_like_django() {
+        assert_eq!(
+            render_delete_cookie("session-id", "/", "Lax", None),
+            "session-id=\"\"; expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; SameSite=Lax"
+        );
+        // A configured COOKIE_DOMAIN rides along, like `delete_cookie`
+        // receiving `SESSION_COOKIE_DOMAIN` (verified against live Django).
+        assert_eq!(
+            render_delete_cookie("session-id", "/", "Lax", Some("example.com")),
+            "session-id=\"\"; Domain=example.com; expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; SameSite=Lax"
+        );
+    }
+
+    #[test]
+    fn cookie_value_parses_like_django() {
+        assert_eq!(
+            cookie_value("other=1; session-id=abc123; x=2", "session-id"),
+            Some("abc123".to_string())
+        );
+        assert_eq!(
+            cookie_value("session-id=\"quoted\"; x=2", "session-id"),
+            Some("quoted".to_string())
+        );
+        assert_eq!(
+            cookie_value("session-id = spaced ", "session-id"),
+            Some("spaced".to_string())
+        );
+        assert_eq!(cookie_value("other=1", "session-id"), None);
+        assert_eq!(cookie_value("", "session-id"), None);
+    }
+
+    #[test]
+    fn generated_keys_match_django_shape() {
+        for _ in 0..10 {
+            let key = generate_session_key();
+            assert_eq!(key.len(), 128);
+            assert!(key
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
+        }
+        assert_ne!(generate_session_key(), generate_session_key());
     }
 }

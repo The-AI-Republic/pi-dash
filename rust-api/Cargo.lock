@@ -1597,8 +1597,12 @@ name = "pidash-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "bytes",
  "chrono",
  "chrono-tz",
+ "flate2",
+ "http",
+ "http-body-util",
  "pidash-auth",
  "pidash-db",
  "pidash-services",
@@ -1608,9 +1612,11 @@ dependencies = [
  "sea-query",
  "serde",
  "serde_json",
+ "sqlx",
  "thiserror",
  "tokio",
  "tower",
+ "tracing",
 ]
 
 [[package]]

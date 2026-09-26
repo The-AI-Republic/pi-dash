@@ -9,6 +9,10 @@ pidash-db = { path = "../db" }
 pidash-auth = { path = "../auth" }
 pidash-services = { path = "../services" }
 axum = "0.8"
+bytes = "1"
+flate2 = "1"
+http = "1"
+http-body-util = "0.1"
 serde = { version = "1", features = ["derive"] }
 # preserve_order: response envelopes and trimmed objects keep serializer field
 # order, which byte-identical JSON parity with DRF requires. serde_json::Map
@@ -23,6 +27,9 @@ chrono-tz = "0.10"
 rust_decimal = { version = "1", features = ["serde"] }
 sea-query = { version = "0.32", default-features = false, features = ["backend-postgres"] }
 thiserror = "2"
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
+tower = { version = "0.5" }
+tracing = "0.1"
 # Reverse proxy to Django. Default features are off on purpose: transparent
 # decompression (gzip/br/zstd) would alter relayed bytes, and native-tls would
 # add a system TLS dependency to CI. rustls with bundled roots covers https
