@@ -3,8 +3,12 @@
 //! HTTP layer: axum routers, extractors, and middleware.
 //!
 //! Routers here mirror Django's URL paths exactly; per-domain routers live in
-//! `src/<domain>/` and are merged into [`build_router`]. The serializer and
-//! paginator kernel arrive under F-07, middleware under F-08.
+//! `src/<domain>/` and are merged into [`build_router`].
+//!
+//! - [`paginator`]: cursor paginator kernel (F-07).
+//! - [`serializer`]: DRF-compatible JSON kernel (F-07).
+//!
+//! Middleware arrives under F-08.
 //!
 //! [`build_app`] is the composition point: the OSS binary and a private
 //! overlay crate's own `main.rs` both call it with an [`AppState`] built
@@ -13,7 +17,9 @@
 //! until then `extra` merges whole routers.
 
 pub mod edge;
+pub mod paginator;
 pub mod routes;
+pub mod serializer;
 pub mod state;
 
 pub use edge::{EdgeFlags, EdgeHandle, Prefix, DEFAULT_UPSTREAM};

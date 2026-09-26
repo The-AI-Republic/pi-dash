@@ -10,8 +10,19 @@ pidash-auth = { path = "../auth" }
 pidash-services = { path = "../services" }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order: response envelopes and trimmed objects keep serializer field
+# order, which byte-identical JSON parity with DRF requires. serde_json::Map
+# is then insertion-ordered (IndexMap) instead of key-sorted (BTreeMap).
+serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# DRF-compatible value rendering (F-07 serializer kernel): aware datetimes in
+# any IANA zone (TimezoneMixin activates the user's zone per request) and
+# Decimal-as-string (DRF COERCE_DECIMAL_TO_STRING).
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+rust_decimal = { version = "1", features = ["serde"] }
+sea-query = { version = "0.32", default-features = false, features = ["backend-postgres"] }
+thiserror = "2"
 # Reverse proxy to Django. Default features are off on purpose: transparent
 # decompression (gzip/br/zstd) would alter relayed bytes, and native-tls would
 # add a system TLS dependency to CI. rustls with bundled roots covers https

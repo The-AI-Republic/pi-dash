@@ -12,8 +12,13 @@ rand = "0.8"
 sha2 = "0.11"
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
 thiserror = "2"
-sea-query = { version = "0.32", default-features = false, features = ["backend-postgres"] }
+sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# F-07 filter kernels: NaiveDate arithmetic for the legacy relative-date
+# filters (`2_weeks`, `3_months`) and strict UUID parsing for the legacy
+# UUID-list filters (`filter_valid_uuids`).
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
+uuid = { version = "1", features = ["serde"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1"

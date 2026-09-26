@@ -143,6 +143,29 @@ with `try_init_global` when reclassification must be process-wide, and pass
 route-group replacement arrives under F-10; until then `extra` merges whole
 routers.
 
+## Serializer + paginator kernel (F-07)
+
+Every domain port serializes and paginates through these kernels:
+
+- `crates/api/src/serializer.rs` — DRF-compatible JSON: `parse_list_param`
+  (`fields`/`expand` query params), `render_datetime` / `render_datetime_in`
+  (DRF `iso-8601`, `Z` for UTC, microseconds iff nonzero, request zone from
+  `TimezoneMixin`), `render_decimal` (plain string, scale preserved),
+  `effective_selection` + `apply_expansion` + `expand_value` /
+  `expand_fallback_id` (`DynamicBaseSerializer`, `fields` kwarg discarded).
+- `crates/api/src/paginator.rs` — `Cursor` (`value:offset:is_prev`),
+  `parse_per_page`, `offset_window` / `grouped_window`,
+  `PageResponse` (the 12-key envelope), `process_grouped_results` /
+  `process_sub_grouped_results`, plus `offset_query` / `grouped_page_query`
+  sea-query builders pinning the SQL shapes.
+- `crates/db/src/filterset.rs` — the `IssueFilterSet` declaration
+  (49 names incl. `__exact` aliases), `compile_leaf` / `build_combined`,
+  `archived_condition`.
+- `crates/db/src/issue_filters.rs` — the legacy `issue_filters` compiler
+  (`issue_filters_get` / `issue_filters_post`, 25 keys in order).
+
+Ported bugs live in the module docs and the PR body, not here.
+
 ## Reference
 
 - PIDASHCONV-1: the rulebook (rules, stages, issue types, where things live).

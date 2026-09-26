@@ -10,6 +10,8 @@
 //! - [`pool`]: primary + replica sqlx pools with Django-equivalent routing.
 //! - [`context`]: explicit per-request audit/tenant context.
 //! - [`filter`]: dynamic JSON filters compiled to sea-query conditions.
+//! - [`filterset`]: the `IssueFilterSet` declaration and leaf compiler (F-07).
+//! - [`issue_filters`]: the legacy `issue_filters` query-param compiler (F-07).
 //! - [`soft_delete`]: soft-delete read scope, write statements, view DDL.
 //! - [`tx`]: transaction wrapper with post-commit actions.
 //!
@@ -19,6 +21,8 @@
 pub mod config;
 pub mod context;
 pub mod filter;
+pub mod filterset;
+pub mod issue_filters;
 pub mod pool;
 pub mod soft_delete;
 pub mod tx;
