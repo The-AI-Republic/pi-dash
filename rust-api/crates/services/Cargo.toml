@@ -1,0 +1,9 @@
+[package]
+name = "pidash-services"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pidash-types = { path = "../types" }
+pidash-db = { path = "../db" }
+pidash-auth = { path = "../auth" }

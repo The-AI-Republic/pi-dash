@@ -1,0 +1,8 @@
+[package]
+name = "pidash-auth"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pidash-types = { path = "../types" }
+thiserror = "2"

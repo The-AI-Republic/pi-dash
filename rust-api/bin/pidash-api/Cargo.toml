@@ -1,0 +1,24 @@
+[package]
+name = "pidash-api-bin"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pidash-api"
+path = "src/main.rs"
+
+[dependencies]
+pidash-types = { path = "../../crates/types" }
+pidash-db = { path = "../../crates/db" }
+pidash-auth = { path = "../../crates/auth" }
+pidash-services = { path = "../../crates/services" }
+pidash-api = { path = "../../crates/api" }
+pidash-jobs = { path = "../../crates/jobs" }
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
