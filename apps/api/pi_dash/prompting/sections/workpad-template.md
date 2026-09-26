@@ -9,7 +9,7 @@ Use this exact structure for the workpad body (the document you write via `pidas
 
 ````md
 ```text
-<hostname>:<abs-path>@<short-sha>
+<hostname>:<abs-path>[@<baseline marker, when the work-type guidance defines one>]
 ```
 
 ### Path to done
@@ -25,7 +25,7 @@ Use this exact structure for the workpad body (the document you write via `pidas
 
 ### Phase
 
-- investigating | designing | implementing | validating | opening_pr | addressing_review
+- investigating | designing | implementing | validating | delivering | addressing_feedback
 
 ### Progress Checkpoints
 
@@ -33,8 +33,8 @@ Use this exact structure for the workpad body (the document you write via `pidas
 - [ ] design_choice_recorded
 - [ ] implementation_complete
 - [ ] validation_complete
-- [ ] pr_opened (or `n/a`)
-- [ ] review_feedback_addressed (or `n/a`)
+- [ ] delivered (or `n/a`)
+- [ ] feedback_addressed (or `n/a`)
 
 ### Autonomy / Escalation
 
@@ -49,8 +49,8 @@ Use this exact structure for the workpad body (the document you write via `pidas
 
 - **Restated problem**: <the work in your own words>
 - **Acceptance criteria**: <extracted from issue/comments, or `missing — asked in comment`>
-- **Proposed approach**: <one or two sentences naming files / areas / components, or actions for noncode>
-- **Task type**: code_change | noncode
+- **Proposed approach**: <one or two sentences naming files / areas / components, or actions for answer-only tasks>
+- **Deliverable**: <what this task produces and where it will live, per the work-type guidance>
 - **Risks / assumptions**: <material risks, scope assumptions, downstream impact>
 - **Decision**: proceed | clarify | split
 

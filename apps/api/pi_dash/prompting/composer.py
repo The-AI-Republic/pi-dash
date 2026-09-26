@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional
 
-from pi_dash.prompting import recipes, registry
+from pi_dash.prompting import recipes, registry, work_types
 from pi_dash.prompting.renderer import PromptRenderError, render
 
 #: Manifest/source labels.
@@ -292,6 +292,7 @@ def compose(
     context: Dict[str, Any],
     draft_overrides: Optional[Dict[str, str]] = None,
     executor_kind: Optional[str] = None,
+    work_type: Optional[str] = None,
 ) -> ComposedPrompt:
     """Resolve, assemble, and render the recipe for ``kind``.
 
@@ -301,8 +302,14 @@ def compose(
     ``draft_overrides`` (section key → body) substitutes an *unsaved* body for
     the resolved one before assembly, so a preview can render a draft the admin
     hasn't committed yet. Keys outside this recipe are ignored.
+
+    ``work_type`` fills the recipe's slots (``work_types.expand``); ``None``
+    means the default work type.
     """
-    recipe = recipes.recipe_for(kind, executor_kind=executor_kind)
+    recipe = work_types.expand(
+        recipes.recipe_for(kind, executor_kind=executor_kind),
+        work_type or work_types.DEFAULT_WORK_TYPE,
+    )
     override_index = load_override_index(workspace, user)
     resolved = [
         resolve_section(key, workspace=workspace, project=project, user=user, override_index=override_index)
@@ -344,12 +351,12 @@ def compose_cloud(kind: str, *, workspace, project, context: Dict[str, Any]) -> 
     return ComposedPrompt(text=text, manifest=manifest, template_body=template_body, resolved=resolved)
 
 
-def compile_template(kind: str, *, workspace, project, user) -> ComposedPrompt:
+def compile_template(kind: str, *, workspace, project, user, work_type: Optional[str] = None) -> ComposedPrompt:
     """Assemble the recipe for ``kind`` **without rendering** (Jinja markers
     intact). Powers the "see the final template" view (§7.2). Returns a
     :class:`ComposedPrompt` whose ``text`` is the raw assembled body.
     """
-    recipe = recipes.recipe_for(kind)
+    recipe = work_types.expand(recipes.recipe_for(kind), work_type or work_types.DEFAULT_WORK_TYPE)
     override_index = load_override_index(workspace, user)
     resolved = [
         resolve_section(key, workspace=workspace, project=project, user=user, override_index=override_index)
@@ -392,6 +399,7 @@ def build_first_turn(issue, run) -> str:
 
     template_name = template_name_for(issue.state)
     kind = recipes.kind_for(template_name)
+    work_type = work_types.effective_work_type(issue)
     context = build_first_turn_context(issue, run)
     if getattr(run, "executor_kind", "local_runner") == "cloud_agent":
         composed = compose_cloud(kind, workspace=issue.workspace, project=issue.project, context=context)
@@ -410,6 +418,7 @@ def build_first_turn(issue, run) -> str:
             user=_user_for_run(run),
             context=context,
             executor_kind=getattr(run, "executor_kind", None),
+            work_type=work_type,
         )
         run.prompt_manifest = composed.manifest_dicts
     return composed.text

@@ -7,17 +7,14 @@ customizable: overridable
 ## Step 1 — Decide what kind of review this is
 
 Inspect `parent_done_payload`, the issue description, and the working
-tree. Choose ONE:
+directory to identify the work product this issue produced, then choose
+ONE review kind:
 
-- **(a) CODE** — the issue produced a GitHub PR (look for a `pr_url` in
-  done_payload, or a feature branch ahead of main).
-- **(b) DESIGN** — the issue produced a design / planning document (look
-  for paths under `.ai_design/`, paths in `done_payload.design_doc_paths`,
-  or markdown artifacts referenced as outputs).
-- **(c) DESIGN_THEN_CODE** — both a design doc AND a PR exist. Review the
-  design first, then the code.
-- **(d) GENERIC** — none of the above. Review the work product against the
-  issue description and leave a summary on the pidash issue.
+- The work-type guidance in this prompt defines the review kinds specific
+  to this project's work type, how to recognize each, and the surface each
+  one is reviewed on. Prefer those kinds when one matches.
+- **GENERIC** — none of the work-type kinds fit. Review the work product
+  against the issue description and leave a summary on the pidash issue.
 
 If you cannot decide, ask the human via the "Blocking the run" flow.
 
@@ -28,22 +25,16 @@ All cycles share this shape:
 1. Find issues with the work product.
 2. Validate your findings (no hallucinations) — re-read the artifact,
    confirm each issue is real, drop any that aren't.
-3. Read existing reviewer comments (in the PR, in the doc, or on the
-   pidash issue depending on kind) and reconcile your findings against
-   them.
-4. Comment on the validated issues at the appropriate surface:
-   - CODE: comments on the GitHub PR (use `gh` CLI).
-   - DESIGN: inline comments on the doc, or a structured comment on the
-     pidash issue if the doc has no comment surface.
-   - DESIGN_THEN_CODE: design comments first, then PR comments.
-   - GENERIC: a structured comment on the pidash issue.
-5. If you can fix a confirmed issue and the kind permits it, apply the fix
-   and resolve the corresponding comment:
-   - CODE: edit, commit, push to the PR branch, resolve the PR comment
-     thread.
-   - DESIGN: edit the doc and resolve / strike the inline comment.
-   - GENERIC: usually does NOT auto-apply — leave the summary and let the
-     human act.
+3. Read existing reviewer comments (on the surface the work-type guidance
+   names for the chosen kind, or on the pidash issue for GENERIC) and
+   reconcile your findings against them.
+4. Comment on the validated issues at the appropriate surface for the
+   chosen kind (see the work-type guidance; GENERIC: a structured comment
+   on the pidash issue).
+5. If you can fix a confirmed issue and the kind permits it (the work-type
+   guidance says which kinds do, and how), apply the fix and resolve the
+   corresponding comment. GENERIC usually does NOT auto-apply — leave the
+   summary and let the human act.
 6. Post a summary back to the pidash issue as a comment: confirmed issues
    found, what you fixed automatically, what still needs human action.
 
@@ -61,14 +52,15 @@ name), then the outcome report from "Ending the run":
 - **changes needed** — real defects you could not auto-fix. List them as
   open items in the workpad `### Path to done` block, post the summary
   comment, and move the issue **back to In Progress** (the `started`
-  group) so the next run fixes them. Do not use Blocked for a bug. Yield
-  `done`.
+  group) so the next run fixes them. Do not use Blocked for a defect.
+  Yield `done`.
 - **clarification** — a question only a human can answer. Follow
   "Blocking the run". Yield `waiting_on_human`.
-- **waiting on a human reviewer / nothing changed** — the PR is waiting on
-  a person, or nothing has changed since your last pass. Comment only if
-  you have something a human actually needs to see (a finding, a question,
-  a result); do **not** post a bare "review tick (N/M) — noop, nothing
-  changed" comment — silence is the correct signal for "nothing changed,"
-  and such comments only bury the ones that matter. Leave the issue In
-  Review and yield `done` — the clock stops until a human acts.
+- **waiting on a human reviewer / nothing changed** — the work product is
+  waiting on a person, or nothing has changed since your last pass.
+  Comment only if you have something a human actually needs to see (a
+  finding, a question, a result); do **not** post a bare "review tick
+  (N/M) — noop, nothing changed" comment — silence is the correct signal
+  for "nothing changed," and such comments only bury the ones that
+  matter. Leave the issue In Review and yield `done` — the clock stops
+  until a human acts.

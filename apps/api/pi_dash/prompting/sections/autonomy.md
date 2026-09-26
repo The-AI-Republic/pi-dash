@@ -17,7 +17,7 @@ Fields:
 
 Scoring guide:
 
-- `0-2` — clear local choice strongly implied by existing codebase patterns
+- `0-2` — clear local choice strongly implied by the project's existing patterns and conventions
 - `3-4` — minor ambiguity; decision is reversible and low risk
 - `5-6` — meaningful ambiguity, but a safe default exists and can be documented
 - `7-8` — product, UX, or architecture choice with material downstream impact

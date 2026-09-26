@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from pi_dash.prompting import recipes, registry
+from pi_dash.prompting import recipes, registry, work_types
 from pi_dash.prompting.composer import ResolvedSection, _assemble, resolve_section
 from pi_dash.prompting.renderer import (
     PromptRenderError,
@@ -282,27 +282,51 @@ def sample_contexts(kind: str) -> List[Dict[str, Any]]:
     return [_issue_sample(kind, populated=True), _issue_sample(kind, populated=False)]
 
 
-def kinds_for_section(section_key: str) -> List[str]:
-    """All recipe kinds whose ordered section list contains ``section_key``."""
-    kinds = [k for k, keys in recipes.RECIPES.items() if section_key in keys]
-    for kind, keys in recipes.MANAGED_RECIPES.items():
-        if section_key in keys and kind not in kinds:
-            kinds.append(kind)
+def compositions_for_section(section_key: str) -> List[tuple]:
+    """All ``(kind, work_type)`` compositions containing ``section_key``.
+
+    Recipes carry work-type slots, so membership depends on the work type: a
+    core section appears for every work type, a work-type section
+    (``software.execute``) only where its work type fills the slot. Cloud
+    recipes have no slots and contribute one entry per matching kind (the
+    work type is irrelevant there and recorded as the default).
+    """
+    combos: List[tuple] = []
+    for table in (recipes.RECIPES, recipes.MANAGED_RECIPES):
+        for kind, entries in table.items():
+            for work_type in work_types.WORK_TYPES:
+                combo = (kind, work_type)
+                if combo not in combos and section_key in work_types.expand(entries, work_type):
+                    combos.append(combo)
     for kind, keys in recipes.CLOUD_RECIPES.items():
-        if section_key in keys and kind not in kinds:
+        combo = (kind, work_types.DEFAULT_WORK_TYPE)
+        if section_key in keys and combo not in combos:
+            combos.append(combo)
+    return combos
+
+
+def kinds_for_section(section_key: str) -> List[str]:
+    """All recipe kinds whose recipe can contain ``section_key`` (under any
+    work type)."""
+    kinds: List[str] = []
+    for kind, _work_type in compositions_for_section(section_key):
+        if kind not in kinds:
             kinds.append(kind)
     return kinds
 
 
-def _compose_with_candidate(kind: str, section_key: str, candidate_body: str, *, workspace, project, user):
-    """Assemble ``kind`` with ``section_key`` forced to ``candidate_body``.
+def _compose_with_candidate(
+    kind: str, work_type: str, section_key: str, candidate_body: str, *, workspace, project, user
+):
+    """Assemble ``kind`` (for ``work_type``) with ``section_key`` forced to
+    ``candidate_body``.
 
     Other sections resolve normally (existing overrides + defaults) so the
     candidate is validated in the real assembled context, not in isolation.
     """
     section = registry.get_section(section_key)
     resolved: List[ResolvedSection] = []
-    for key in recipes.recipe_for(kind):
+    for key in work_types.expand(recipes.recipe_for(kind), work_type):
         if key == section_key:
             resolved.append(
                 ResolvedSection(
@@ -341,8 +365,8 @@ def validate_override(section_key: str, candidate_body: str, *, workspace, proje
     except PromptSyntaxError as exc:
         raise OverrideValidationError(f"invalid Jinja syntax: {exc}") from exc
 
-    kinds = kinds_for_section(section_key)
-    if not kinds:
+    combos = compositions_for_section(section_key)
+    if not combos:
         # Fail closed: a section present in the registry but in no recipe would
         # otherwise be saved with zero render validation, and silently become
         # live if a future recipe adds it. Refuse rather than save unvalidated.
@@ -350,14 +374,15 @@ def validate_override(section_key: str, candidate_body: str, *, workspace, proje
             f"section {section_key!r} is not used by any prompt kind; "
             "it cannot be overridden until a recipe references it"
         )
-    for kind in kinds:
+    for kind, work_type in combos:
         template_body = _compose_with_candidate(
-            kind, section_key, candidate_body, workspace=workspace, project=project, user=user
+            kind, work_type, section_key, candidate_body, workspace=workspace, project=project, user=user
         )
         for ctx in sample_contexts(kind):
             try:
                 render(template_body, ctx)
             except PromptRenderError as exc:
                 raise OverrideValidationError(
-                    f"override for section {section_key!r} fails to render as part of the {kind!r} prompt: {exc}"
+                    f"override for section {section_key!r} fails to render as part of the {kind!r} prompt "
+                    f"(work type {work_type!r}): {exc}"
                 ) from exc
