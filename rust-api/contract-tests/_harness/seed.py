@@ -73,6 +73,14 @@ class Seed:
         self._rows.append((table, idcol, row_id))
         return row_id
 
+    def tracked_ids(self, table: str) -> list[str]:
+        """Row ids this Seed inserted or tracked for *table*.
+
+        Lets a domain fixture sweep its own server-created side rows
+        (scoped to its workspaces) before :meth:`cleanup` runs.
+        """
+        return [row_id for t, _, row_id in self._rows if t == table]
+
     def cleanup(self):
         users = [
             row_id for table, _, row_id in self._rows if table == "users"
@@ -468,7 +476,7 @@ class Seed:
         )
 
     def issue(self, workspace_id, project_id, *, name=None,
-              description="", sequence_id=None):
+              description="", sequence_id=None, state_id=None):
         """A minimal issue row with FTS-visible text columns set."""
         return self._insert(
             "issues",
@@ -478,6 +486,7 @@ class Seed:
             description_stripped=description or None,
             priority="none",
             sequence_id=sequence_id if sequence_id is not None else 1,
+            state_id=state_id,
             project_id=project_id,
             workspace_id=workspace_id,
             sort_order=65535,
@@ -540,6 +549,76 @@ class Seed:
             group=group,
             default=False,
             is_triage=False,
+            created_at=_now(),
+            updated_at=_now(),
+        )
+
+    def issue_relation(self, workspace_id, project_id, issue_id,
+                       related_issue_id, *, relation_type="blocked_by"):
+        return self._insert(
+            "issue_relations",
+            issue_id=issue_id,
+            related_issue_id=related_issue_id,
+            relation_type=relation_type,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            created_at=_now(),
+            updated_at=_now(),
+        )
+
+    # -- prompting + scheduler (PIDASHCONV-18, D-04) -----------------------
+    def override(self, workspace_id, section_key, body, *, user_id=None,
+                 active=True, version=1, needs_attention=False,
+                 updated_by_id=None):
+        """A prompt_section_override row. user_id None = workspace-level."""
+        return self._insert(
+            "prompt_section_override",
+            workspace_id=workspace_id,
+            user_id=user_id,
+            section_key=section_key,
+            body=body,
+            is_active=active,
+            version=version,
+            needs_attention=needs_attention,
+            updated_by_id=updated_by_id,
+            created_at=_now(),
+            updated_at=_now(),
+        )
+
+    def scheduler(self, workspace_id, *, slug=None, prompt="Scan repo.",
+                  source="builtin"):
+        slug = slug or _tag("ct18sched")
+        return self._insert(
+            "schedulers",
+            workspace_id=workspace_id,
+            slug=slug,
+            name=f"CT18 {slug}",
+            description="contract scheduler",
+            prompt=prompt,
+            source=source,
+            is_enabled=True,
+            color="#3b82f6",
+            created_at=_now(),
+            updated_at=_now(),
+        )
+
+    def scheduler_binding(self, workspace_id, project_id, scheduler_id,
+                          actor_id, *, dtstart=None):
+        return self._insert(
+            "scheduler_bindings",
+            workspace_id=workspace_id,
+            project_id=project_id,
+            scheduler_id=scheduler_id,
+            actor_id=actor_id,
+            dtstart=dtstart or _now(),
+            tzid="UTC",
+            rrule="",
+            rdates="[]",
+            exdates="[]",
+            extra_context="",
+            enabled=True,
+            last_error="",
+            outcome_mode="create_issue",
             created_at=_now(),
             updated_at=_now(),
         )
