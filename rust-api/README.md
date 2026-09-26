@@ -107,6 +107,42 @@ unset PIDASH_RUST_WEB               # + restart: traffic returns to Django
 curl localhost:8080/                # Django's bytes again
 ```
 
+## Config and settings (F-03)
+
+`crates/db/src/config/` ports `pi_dash.config`:
+
+- `registry` — the per-key env-vs-DB catalog (`ENV_KEYS_OVERRIDE_VAR`
+  reclassifies keys to env, the cloud SSM seam).
+- `accessor` — `get_config` / `get_many` / `get_bool` / `get_int` over a
+  `ConfigStore` (Postgres: `PgConfigStore` over `instance_configurations`).
+  Env-tier reads never touch the store; boot reads reject DB-tier keys.
+- `encryption` — Fernet secrets, byte-compatible with Python's
+  `encryption.py` (same PBKDF2 key schedule; decrypt failure yields `""`).
+- `legacy` — the `get_configuration_value` batch shim (not the
+  email-domain `get_email_configuration`, which travels with that domain).
+- `settings` — boot-time `Settings` (`common.py`), `Profile`
+  (`local`/`production`/`test` deltas), and `SettingsOverlay` for the
+  private crate. Django-only furniture (`INSTALLED_APPS`, `MIDDLEWARE`,
+  `CACHES`, log dirs) is out of scope.
+
+## Composing the app builder (private overlay)
+
+The builder lives in the library so a private crate's own `main.rs` can use
+it — the binary is only a thin wrapper:
+
+```rust
+let settings = pidash_db::config::Settings::from_env()?;
+let state = pidash_api::AppState::with_settings(env!("CARGO_PKG_VERSION"), settings);
+let app = pidash_api::build_app(state, Some(private_routes()));
+```
+
+With an overlay: implement `SettingsOverlay` (`env_keys` to force keys to
+env, `apply` to mutate the resolved `Settings`), pre-install the registry
+with `try_init_global` when reclassification must be process-wide, and pass
+`Settings::from_map_with(&vars, Profile::Production, &overlay)`. Named
+route-group replacement arrives under F-10; until then `extra` merges whole
+routers.
+
 ## Reference
 
 - PIDASHCONV-1: the rulebook (rules, stages, issue types, where things live).

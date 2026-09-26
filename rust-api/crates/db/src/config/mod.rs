@@ -1,7 +1,52 @@
-//! Postgres connection configuration.
+//! Configuration: connection config plus the centralized config mechanism.
 //!
-//! Parsed once at startup from `DATABASE_URL`. The full URL (with password)
-//! never reaches logs: use [`DbConfig::redacted_url`] for diagnostics.
+//! [`DbConfig`] (F-01) parses `DATABASE_URL` once at startup; the full URL
+//! (with password) never reaches logs: use [`DbConfig::redacted_url`] for
+//! diagnostics.
+//!
+//! The `config` submodules (F-03) port `pi_dash.config`: the per-key
+//! env-vs-DB source [`registry`], the [`accessor`] entry point, Fernet
+//! [`encryption`] for DB secrets, the [`legacy`] batch shim, and boot-time
+//! [`settings`].
+
+pub mod accessor;
+pub mod encryption;
+pub mod legacy;
+pub mod registry;
+pub mod settings;
+pub mod value;
+
+pub use accessor::{
+    get_bool, get_config, get_config_with, get_env_in, get_env_with, get_int, get_many, ConfigRow,
+    ConfigStore, PgConfigStore,
+};
+// NOTE: the accessor error is `config::accessor::ConfigError`, distinct from
+// F-01's `config::ConfigError` (DbConfig failures). Both names stay stable.
+pub use encryption::{derive_fernet_key, Keyring};
+pub use legacy::{get_configuration_values, LegacyItem};
+pub use registry::{
+    global, try_init_global, ConfigEntry, ConfigRegistry, ConfigSource, ENV_KEYS_OVERRIDE_VAR,
+};
+pub use settings::{
+    AssistantSettings, CloudAgentSettings, DatabaseSettings, LoopSettings, ManagedRunnerSettings,
+    NoOverlay, Profile, RabbitSettings, RedisSettings, ReplicaSettings, RunnerSettings,
+    SessionSettings, Settings, SettingsOverlay, StorageSettings, UrlSettings,
+};
+pub use value::ConfigValue;
+
+/// Process-wide lock serialising tests that mutate the process environment.
+/// Config tests live in several modules but share one environment; a
+/// per-module lock lets cross-module tests race on the same vars (e.g.
+/// `POSTHOG_API_KEY`). Every env-mutating test must hold this guard.
+#[cfg(test)]
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    // Ignore poisoning: a failed sibling test must not cascade.
+    ENV_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
 
 use thiserror::Error as ThisError;
 
