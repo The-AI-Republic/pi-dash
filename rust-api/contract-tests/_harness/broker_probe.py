@@ -133,3 +133,68 @@ def collect_matching(predicate, queue: str = "celery", timeout: float | None = N
         if time.monotonic() >= deadline:
             raise TimeoutError("timed out waiting for matching broker message")
         time.sleep(_config.POLL_INTERVAL_SECONDS)
+
+def task_received_stream(task_name: str, id_substr: str):
+    """Bind a ``task-received`` event queue now; collect after publishing.
+
+    Events are broadcast pub/sub, so observing them never races the
+    worker's own consumption the way draining the queue does (an idle
+    worker wins that race via prefetch every time). Requires the
+    contract worker to run with ``-E`` (worker_send_events).
+
+    Binding in the ``with`` header — before the trigger publish — closes
+    the race where a fast worker's fan-out predates the observer's queue.
+    Yields ``collect(minimum, timeout)``; only events whose ``args``
+    mention ``id_substr`` are returned. An extra sweep follows each
+    satisfied minimum, so live-beat duplicates may raise the count
+    (assert ``>=``). Raises TimeoutError when too few arrive in time.
+    """
+    import contextlib as _contextlib
+    import json as _json
+    import time as _time
+
+    from . import config as _config
+    from .celery_wire import make_app
+
+    @_contextlib.contextmanager
+    def _stream():
+        seen: list[dict] = []
+
+        def _on_event(event: dict) -> None:
+            if event.get("type") != "task-received":
+                return
+            if event.get("name") != task_name:
+                return
+            if id_substr not in _json.dumps(event.get("args", ""), default=str):
+                return
+            seen.append(event)
+
+        app = make_app(_config.required(_config.CELERY_BROKER_URL))
+        with app.connection() as conn:
+            recv = app.events.Receiver(conn, handlers={"task-received": _on_event})
+
+            def collect(minimum: int = 1, timeout: float | None = None) -> list[dict]:
+                deadline = _time.monotonic() + (
+                    timeout if timeout is not None else _config.TASK_TIMEOUT_SECONDS
+                )
+                while _time.monotonic() < deadline:
+                    try:
+                        recv.capture(limit=1000, timeout=2)
+                    except Exception:
+                        pass  # idle window: no events yet; the queue holds them
+                    if len(seen) >= minimum:
+                        # One more sweep: siblings may publish right behind.
+                        _time.sleep(_config.POLL_INTERVAL_SECONDS)
+                        try:
+                            recv.capture(limit=1000, timeout=2)
+                        except Exception:
+                            pass
+                        return list(seen)
+                raise TimeoutError(
+                    f"timed out waiting for {minimum} task-received "
+                    f"events for {task_name}"
+                )
+
+            yield collect
+
+    return _stream()

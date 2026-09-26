@@ -97,3 +97,7 @@ SMTP_SINK_PORT = int(optional("SMTP_SINK_PORT", "1025"))
 # Base URL of the webhook sink the harness starts. Tests seed Webhook rows
 # pointing at <base>/hook/<token>.
 WEBHOOK_SINK_BASE = optional("WEBHOOK_SINK_BASE", "http://127.0.0.1:18099")
+
+# Redis the Django worker reads (mail send tasks look up the per-issue base
+# URL under the issue id; tests prime it before publishing).
+REDIS_URL = optional("REDIS_URL", "redis://localhost:6379/0")

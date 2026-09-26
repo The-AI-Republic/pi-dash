@@ -2062,6 +2062,88 @@ def webhook(conn, workspace_id, url: str, **flags) -> dict:
     return insert_row(conn, "webhooks", values)
 
 
+def issue_chain(conn, slug: str) -> dict:
+    """user → workspace → project → state → issue. Returns dict of rows.
+
+    Every NOT NULL projects/states/issues column without a database
+    default must be present (Django field ``default=`` is Python-side
+    only). Values mirror the model defaults in db/models/{project,
+    state, issue}.py.
+    """
+    owner = user(conn, f"contract-{slug}-owner")
+    ws = workspace(conn, f"contract{slug}", owner["id"])
+    project = insert_row(
+        conn,
+        "projects",
+        {
+            "workspace_id": str(ws["id"]),
+            "name": f"contract {slug}",
+            "description": "",
+            "identifier": "CT",
+            "network": 2,
+            "module_view": False,
+            "cycle_view": False,
+            "issue_views_view": False,
+            "page_view": True,
+            "intake_view": False,
+            "is_time_tracking_enabled": False,
+            "is_issue_type_enabled": False,
+            "is_default": False,
+            "guest_view_all_features": False,
+            "members_can_edit_states": True,
+            "archive_in": 0,
+            "close_in": 0,
+            "logo_props": {},
+            "timezone": "UTC",
+            "repo_url": "",
+            "base_branch": "main",
+            "agent_default_interval_seconds": 10800,
+            "agent_default_max_ticks": 10,
+            "agent_review_default_interval_seconds": 10800,
+            "agent_test_default_interval_seconds": 10800,
+            "agent_ticking_enabled": True,
+            "default_agent_executor": "local_runner",
+        },
+    )
+    state = insert_row(
+        conn,
+        "states",
+        {
+            "project_id": str(project["id"]),
+            "workspace_id": str(ws["id"]),
+            "name": "Contract",
+            "description": "",
+            "color": "#000000",
+            "slug": "",
+            "group": "backlog",
+            "sequence": 65535,
+            "is_triage": False,
+            "default": False,
+        },
+    )
+    issue = insert_row(
+        conn,
+        "issues",
+        {
+            "workspace_id": str(ws["id"]),
+            "project_id": str(project["id"]),
+            "state_id": str(state["id"]),
+            "name": "contract issue",
+            "description_json": {},
+            "description_html": "<p></p>",
+            "priority": "none",
+            "complexity_score": 0,
+            "sequence_id": 1,
+            "is_draft": False,
+            "sort_order": 65535,
+            "git_work_branch": "",
+            "workpad": "",
+        },
+    )
+    return {"owner": owner, "workspace": ws, "project": project,
+            "state": state, "issue": issue}
+
+
 def email_log(conn, receiver_id, actor_id, entity_id: str, **extra) -> dict:
     values = {
         "receiver_id": str(receiver_id),
@@ -2069,8 +2151,16 @@ def email_log(conn, receiver_id, actor_id, entity_id: str, **extra) -> dict:
         "entity_identifier": entity_id,
         "entity_name": "issue",
         "entity": "issue",
+        # activity_time is required: the send task parses it for the
+        # template and raises without it. ISO text (not datetime): this
+        # dict is stored via Json(), which cannot serialize datetimes.
         "data": {
-            "issue_activity": {"field": "state", "old_value": "a", "new_value": "b"}
+            "issue_activity": {
+                "field": "state",
+                "old_value": "a",
+                "new_value": "b",
+                "activity_time": _now_iso(),
+            }
         },
     }
     values.update(extra)
