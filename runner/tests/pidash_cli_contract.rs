@@ -1740,6 +1740,106 @@ async fn fetch_project_labels_walks_every_page() {
 }
 
 #[tokio::test]
+async fn fetch_project_labels_stops_when_server_reports_no_next_page() {
+    // PDASHOSS01-219. The Django paginator always emits a *fresh* next_cursor
+    // (`1000:1:0`, `1000:2:0`, …) even past the last page, and signals the
+    // end with `next_page_results: false`. Keying on the cursor alone looped
+    // forever over empty pages; the CLI must stop after the first page here.
+    let fake = start_fake(Box::new(|req| {
+        let page: u32 = req
+            .path
+            .split("cursor=1000:")
+            .nth(1)
+            .and_then(|rest| rest.split(':').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
+        if page == 0 {
+            CannedResponse::ok(
+                r#"{"count":2,"next_cursor":"1000:1:0","next_page_results":false,"results":[
+                     {"id":"l-1","name":"bug"},{"id":"l-2","name":"frontend"}]}"#,
+            )
+        } else {
+            CannedResponse::ok(format!(
+                r#"{{"count":0,"next_cursor":"1000:{}:0","next_page_results":false,"results":[]}}"#,
+                page + 1
+            ))
+        }
+    }))
+    .await;
+    let client = client(&fake);
+    let labels = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        pidash::cli::resolve::fetch_project_labels(&client, PROJECT),
+    )
+    .await
+    .expect("fetch_project_labels must terminate")
+    .expect("fetch labels");
+    let names: Vec<&str> = labels.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, vec!["bug", "frontend"]);
+    assert_eq!(fake.recorded.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn fetch_project_labels_follows_next_page_results_true_across_pages() {
+    // The real server envelope on a multi-page list: `next_page_results` is
+    // true while more rows exist and false on the last page, where a fresh
+    // cursor is still handed out. Page 2 must be fetched, page 3 must not.
+    let fake = start_fake(Box::new(|req| {
+        if req.path.contains("cursor=1000:1:0") {
+            CannedResponse::ok(
+                r#"{"count":1,"next_cursor":"1000:2:0","next_page_results":false,"results":[
+                     {"id":"l-2","name":"frontend"}]}"#,
+            )
+        } else if req.path.contains("cursor=") {
+            CannedResponse::ok(r#"{"count":0,"next_cursor":"1000:3:0","next_page_results":false,"results":[]}"#)
+        } else {
+            CannedResponse::ok(
+                r#"{"count":1,"next_cursor":"1000:1:0","next_page_results":true,"results":[
+                     {"id":"l-1","name":"bug"}]}"#,
+            )
+        }
+    }))
+    .await;
+    let client = client(&fake);
+    let labels = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        pidash::cli::resolve::fetch_project_labels(&client, PROJECT),
+    )
+    .await
+    .expect("fetch_project_labels must terminate")
+    .expect("fetch labels");
+    let names: Vec<&str> = labels.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, vec!["bug", "frontend"]);
+    assert_eq!(fake.recorded.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn fetch_project_labels_stops_on_an_empty_page() {
+    // Defence in depth for servers that omit `next_page_results`: an empty
+    // page can never be followed by a non-empty one, so stop there.
+    let fake = start_fake(Box::new(|req| {
+        if req.path.contains("cursor=") {
+            CannedResponse::ok(r#"{"count":0,"next_cursor":"again","results":[]}"#)
+        } else {
+            CannedResponse::ok(
+                r#"{"count":1,"next_cursor":"p2","results":[{"id":"l-1","name":"bug"}]}"#,
+            )
+        }
+    }))
+    .await;
+    let client = client(&fake);
+    let labels = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        pidash::cli::resolve::fetch_project_labels(&client, PROJECT),
+    )
+    .await
+    .expect("fetch_project_labels must terminate")
+    .expect("fetch labels");
+    assert_eq!(labels.len(), 1);
+    assert_eq!(fake.recorded.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn label_create_posts_to_the_project_label_endpoint() {
     let fake = start_fake(Box::new(|req| {
         assert_eq!(req.method, "POST");

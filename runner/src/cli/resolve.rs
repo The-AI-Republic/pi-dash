@@ -148,7 +148,16 @@ pub async fn fetch_project_labels(
                 });
             }
         }
-        // `next_cursor` is present but null/empty on the last page.
+        // The Django paginator always emits a *fresh* `next_cursor`, even past
+        // the last page (`1000:1:0`, `1000:2:0`, …), and marks the end with
+        // `next_page_results: false` (PDASHOSS01-219). Trust that flag when it
+        // is present, and never follow a cursor off an empty page: without
+        // both guards this loop fetched empty pages forever.
+        let no_next_page = body.get("next_page_results").and_then(Value::as_bool) == Some(false);
+        if no_next_page || page.is_empty() {
+            return Ok(labels);
+        }
+        // Older shapes: `next_cursor` is null/empty (or repeats) on the last page.
         match body.get("next_cursor").and_then(Value::as_str) {
             Some(next) if !next.is_empty() && Some(next) != cursor.as_deref() => {
                 cursor = Some(next.to_string());
