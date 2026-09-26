@@ -112,6 +112,7 @@ CLOUD_RECIPES: dict[str, tuple[str, ...]] = {
     ),
     KIND_SCHEDULER: (
         "cloud-scheduler-intro",
+        "cloud-project-context",
         "cloud-capabilities",
         "cloud-scheduler-task",
         "cloud-scheduler-loop",
