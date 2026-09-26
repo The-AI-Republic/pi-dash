@@ -23,7 +23,7 @@
 //! `expires`, `retries`, `timelimit`, `root_id`, `parent_id`) are always
 //! present here.
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -198,9 +198,17 @@ pub struct AmqpProperties {
 
 /// Format a timestamp the way kombu renders `eta`/`expires`: ISO-8601 with
 /// an explicit `+00:00` offset (never `Z`), fractional seconds only when
-/// nonzero (mirrors Python `datetime.isoformat`).
+/// nonzero (mirrors Python `datetime.isoformat`, which always uses six
+/// fraction digits when they are present).
 pub fn format_eta(eta: DateTime<Utc>) -> String {
-    eta.to_rfc3339_opts(SecondsFormat::AutoSi, false)
+    let base = eta.format("%Y-%m-%dT%H:%M:%S").to_string();
+    if eta.timestamp_subsec_nanos() == 0 {
+        format!("{base}+00:00")
+    } else {
+        // Truncated to microseconds: Python datetimes cannot represent
+        // finer precision, so this matches what kombu would have sent.
+        format!("{base}.{:06}+00:00", eta.timestamp_subsec_micros())
+    }
 }
 
 /// Default publisher node name in the `origin` header. Kombu fills in
@@ -358,6 +366,17 @@ mod tests {
             + chrono::Duration::microseconds(173352);
         let headers = message().with_eta(eta).headers();
         assert_eq!(headers["eta"], "2026-09-26T19:55:30.173352+00:00");
+    }
+
+    #[test]
+    fn eta_keeps_six_fraction_digits_like_cpython() {
+        // Python `isoformat` renders exact-millisecond times with six
+        // digits (`.173000`); chrono's `AutoSi` would trim to `.173`.
+        let eta = Utc.with_ymd_and_hms(2026, 9, 26, 19, 55, 30).unwrap()
+            + chrono::Duration::milliseconds(173);
+        assert_eq!(format_eta(eta), "2026-09-26T19:55:30.173000+00:00");
+        let whole = Utc.with_ymd_and_hms(2026, 9, 26, 19, 55, 30).unwrap();
+        assert_eq!(format_eta(whole), "2026-09-26T19:55:30+00:00");
     }
 
     fn embed_triple() -> Value {

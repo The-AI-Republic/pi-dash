@@ -55,12 +55,12 @@ impl AmqpConfig {
     /// `amqps://` (TLS) is rejected with [`AmqpError::TlsUnsupported`]:
     /// the deployment terminates TLS before the broker.
     pub fn parse_url(url: &str) -> Result<Self, AmqpError> {
-        let rest = url
-            .strip_prefix("amqp://")
-            .ok_or_else(|| AmqpError::BadUrl(url.to_owned()))?;
         if url.starts_with("amqps://") {
             return Err(AmqpError::TlsUnsupported);
         }
+        let rest = url
+            .strip_prefix("amqp://")
+            .ok_or_else(|| AmqpError::BadUrl(url.to_owned()))?;
         let (credentials, host_part) = rest
             .split_once('@')
             .ok_or_else(|| AmqpError::BadUrl(url.to_owned()))?;
@@ -212,12 +212,12 @@ impl Publisher {
     pub async fn connect(config: &AmqpConfig) -> Result<Self, AmqpError> {
         let connection = Connection::open(&config.connection_args()).await?;
         let channel = connection.open_channel(None).await?;
-        channel
-            .exchange_declare(ExchangeDeclareArguments::of_type(
-                CELERY_EXCHANGE,
-                ExchangeType::Direct,
-            ))
-            .await?;
+        // Durable like kombu's `Exchange("celery", "direct", durable=True)`:
+        // re-declaring the Python workers' exchange with different
+        // durability would fail with PRECONDITION_FAILED.
+        let mut exchange = ExchangeDeclareArguments::of_type(CELERY_EXCHANGE, ExchangeType::Direct);
+        exchange.durable(true);
+        channel.exchange_declare(exchange).await?;
         channel
             .queue_declare(QueueDeclareArguments::durable_client_named(
                 CELERY_ROUTING_KEY,
@@ -300,8 +300,14 @@ mod tests {
         let default_port = AmqpConfig::parse_url("amqp://u:p@h/v").expect("parse");
         assert_eq!(default_port.port, 5672);
 
-        assert!(AmqpConfig::parse_url("amqps://u:p@h/v").is_err());
-        assert!(AmqpConfig::parse_url("not-a-url").is_err());
+        assert!(matches!(
+            AmqpConfig::parse_url("amqps://u:p@h/v"),
+            Err(AmqpError::TlsUnsupported)
+        ));
+        assert!(matches!(
+            AmqpConfig::parse_url("not-a-url"),
+            Err(AmqpError::BadUrl(_))
+        ));
     }
 
     #[test]

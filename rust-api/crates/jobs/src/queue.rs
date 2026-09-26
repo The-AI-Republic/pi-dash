@@ -140,8 +140,7 @@ pub fn should_retry(attempts: i32, max_retries: i32) -> bool {
     attempts < max_retries
 }
 
-/// DDL for the queue table and its claim index. Idempotent: safe to run
-/// on every worker boot.
+/// DDL for the queue table. Idempotent: safe to run on every worker boot.
 pub fn ensure_schema_sql() -> &'static str {
     "CREATE TABLE IF NOT EXISTS rust_job_queue (\
         id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\
@@ -158,14 +157,21 @@ pub fn ensure_schema_sql() -> &'static str {
         claimed_by TEXT,\
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),\
         last_error TEXT\
-    );\
-    CREATE INDEX IF NOT EXISTS rust_job_queue_claim_idx \
+    )"
+}
+
+/// DDL for the claim index. Separate statement from [`ensure_schema_sql`]:
+/// Postgres rejects multiple commands in one prepared statement, so
+/// [`ensure_schema`] executes each DDL on its own.
+pub fn ensure_claim_index_sql() -> &'static str {
+    "CREATE INDEX IF NOT EXISTS rust_job_queue_claim_idx \
         ON rust_job_queue (status, visible_at, id)"
 }
 
 /// Create both queue tables. Runs at worker boot, never from requests.
 pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query(ensure_schema_sql()).execute(pool).await?;
+    sqlx::query(ensure_claim_index_sql()).execute(pool).await?;
     sqlx::query(crate::schedule::ensure_schedule_schema_sql())
         .execute(pool)
         .await?;
@@ -215,7 +221,7 @@ fn claim_select_sql() -> &'static str {
             max_retries, visible_at, claimed_at, claimed_by, created_at, last_error \
      FROM rust_job_queue \
      WHERE queue = $1 AND status = 'queued' AND visible_at <= now() \
-     ORDER BY id LIMIT 1 \
+     ORDER BY visible_at, id LIMIT 1 \
      FOR UPDATE SKIP LOCKED"
 }
 
@@ -358,6 +364,7 @@ mod tests {
     fn all_statements_parse_as_postgres() {
         for sql in [
             ensure_schema_sql(),
+            ensure_claim_index_sql(),
             enqueue_sql(),
             claim_select_sql(),
             claim_update_sql(),
@@ -378,7 +385,7 @@ mod tests {
     fn claim_skips_locked_rows() {
         assert!(claim_select_sql().contains("FOR UPDATE SKIP LOCKED"));
         assert!(claim_select_sql().contains("visible_at <= now()"));
-        assert!(claim_select_sql().contains("ORDER BY id LIMIT 1"));
+        assert!(claim_select_sql().contains("ORDER BY visible_at, id LIMIT 1"));
     }
 
     #[test]
