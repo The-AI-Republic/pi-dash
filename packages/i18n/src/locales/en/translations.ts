@@ -1880,4 +1880,22 @@ export default {
   "Use Pi Dash Cloud Agent by default": "Use Pi Dash Cloud Agent by default",
   "New work items run on the Cloud Agent — no machine required. Turn this off to default to this project's pod instead. Either way both remain selectable per work item.":
     "New work items run on the Cloud Agent — no machine required. Turn this off to default to this project's pod instead. Either way both remain selectable per work item.",
+  "AI agent ticking": "AI agent ticking",
+  "When off, no work item in this project is re-run on a timer. Human-started runs (Run AI, Comment & Run) still work.":
+    "When off, no work item in this project is re-run on a timer. Human-started runs (Run AI, Comment & Run) still work.",
+  "Run budget per work item": "Run budget per work item",
+  "No cap": "No cap",
+  "Enter a whole number of 1 or more, or tick No cap.": "Enter a whole number of 1 or more, or tick No cap.",
+  "How many automatic runs a work item gets across In Progress, In Review and In Test before it pauses. Re-tick grants more. A new budget applies from the next tick — work items already paused stay paused until you Re-tick them.":
+    "How many automatic runs a work item gets across In Progress, In Review and In Test before it pauses. Re-tick grants more. A new budget applies from the next tick — work items already paused stay paused until you Re-tick them.",
+  Cadence: "Cadence",
+  "30 minutes": "30 minutes",
+  "1 hour": "1 hour",
+  "3 hours": "3 hours",
+  "6 hours": "6 hours",
+  "12 hours": "12 hours",
+  "24 hours": "24 hours",
+  "Custom ({duration})": "Custom ({duration})",
+  "How long Pi Dash waits between automatic runs. One rhythm covers In Progress, In Review and In Test. A new cadence applies from the next tick — a work item already waiting keeps its scheduled time.":
+    "How long Pi Dash waits between automatic runs. One rhythm covers In Progress, In Review and In Test. A new cadence applies from the next tick — a work item already waiting keeps its scheduled time.",
 } as const;
