@@ -167,6 +167,17 @@ def _phase_kind_for_issue(issue: Issue) -> str:
     return kind_for(template_name_for(getattr(issue, "state", None)))
 
 
+def _work_type_for_issue(issue: Issue) -> str:
+    """The effective work type a run created for ``issue`` *now* composes with.
+
+    Stamped on ``AgentRun.work_type`` alongside ``phase_kind`` as audit
+    metadata (PDASHOSS01-234); nothing routes on it.
+    """
+    from pi_dash.prompting.work_types import effective_work_type
+
+    return effective_work_type(issue)
+
+
 def _is_delegation_trigger(to_state: Optional[State]) -> bool:
     """A state transition triggers a run when ``to_state`` is one of the
     registered ticking states (see ``orchestration.agent_phases.PHASES``).
@@ -485,6 +496,7 @@ def _create_continuation_run(*, issue: Issue, parent: AgentRun, creator, pod, tr
             status=AgentRunStatus.QUEUED,
             trigger=trigger,
             phase_kind=_phase_kind_for_issue(issue),
+            work_type=_work_type_for_issue(issue),
             prompt="",
             run_config={
                 "repo_url": (issue.project.repo_url or None),
@@ -792,6 +804,7 @@ def _create_and_dispatch_run(
             status=AgentRunStatus.QUEUED,
             trigger=trigger,
             phase_kind=_phase_kind_for_issue(issue),
+            work_type=_work_type_for_issue(issue),
             prompt="",  # populated below before dispatch
             run_config=_run_config_for_issue(issue),
             **execution,

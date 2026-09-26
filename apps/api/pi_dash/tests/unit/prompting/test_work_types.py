@@ -143,10 +143,10 @@ def test_missing_slot_falls_back_to_general_when_available():
 
 @pytest.mark.unit
 def test_effective_work_type_defaults_and_overrides():
-    # No fields anywhere → the default.
-    assert work_types.effective_work_type(SimpleNamespace(project=None)) == work_types.DEFAULT_WORK_TYPE
+    # No fields anywhere → the ``general`` safety net.
+    assert work_types.effective_work_type(SimpleNamespace(project=None)) == work_types.WORK_TYPE_GENERAL
     # Issue-level value wins.
-    issue = SimpleNamespace(work_type="software", project=SimpleNamespace(default_work_type=None))
+    issue = SimpleNamespace(work_type="software", project=SimpleNamespace(default_work_type="general"))
     assert work_types.effective_work_type(issue) == "software"
     # Project default applies when the issue has none.
     issue = SimpleNamespace(work_type=None, project=SimpleNamespace(default_work_type="software"))

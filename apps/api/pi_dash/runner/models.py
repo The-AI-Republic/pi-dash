@@ -987,6 +987,11 @@ class AgentRun(models.Model):
     # a ``done`` reported by a run whose stage the issue has already left
     # must not touch the clock.
     phase_kind = models.CharField(max_length=32, blank=True, default="", db_index=True)
+    # The effective work type (prompting/work_types.py) this run's prompt was
+    # composed with — stamped at creation alongside ``phase_kind`` so "which
+    # guidance did this run actually get" survives later project/issue
+    # setting changes. Audit metadata only; nothing routes on it.
+    work_type = models.CharField(max_length=32, blank=True, default="")
     run_config = models.JSONField(default=dict, blank=True)
     required_capabilities = models.JSONField(default=list, blank=True)
     thread_id = models.CharField(max_length=128, blank=True, default="")
