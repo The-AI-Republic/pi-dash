@@ -13,7 +13,7 @@ import pytest
 
 from _harness.auth import login_session
 from _harness.config import get_settings
-from _harness.db import Database
+from _harness.db import LazyDatabase as Database
 from _harness.http import anonymous_client, api_client
 from _harness.seed import Seeder, SeedTracker
 
