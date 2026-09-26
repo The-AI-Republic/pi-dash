@@ -205,15 +205,22 @@ pub fn render_set_cookie(cookie: &SetCookie) -> String {
 }
 
 /// Render the `Set-Cookie` value `delete_cookie` emits: empty value,
-/// `Max-Age=0`, the epoch expiry, `Path` and `SameSite` — never
-/// `Secure`/`HttpOnly`/`Domain`.
-pub fn render_delete_cookie(name: &str, path: &str, samesite: &str) -> String {
+/// `Max-Age=0`, the epoch expiry, `Path` and `SameSite`, plus `Domain` when
+/// configured — never `Secure`/`HttpOnly`. Django's `delete_cookie` passes
+/// `SESSION_COOKIE_DOMAIN` through, so a deployment with `COOKIE_DOMAIN`
+/// set deletes a domain-scoped cookie.
+pub fn render_delete_cookie(
+    name: &str,
+    path: &str,
+    samesite: &str,
+    domain: Option<&str>,
+) -> String {
     render_set_cookie(&SetCookie {
         name: name.to_string(),
         value: String::new(),
         expires: Some("Thu, 01 Jan 1970 00:00:00 GMT".to_string()),
         max_age: Some(0),
-        domain: None,
+        domain: domain.map(str::to_owned),
         path: path.to_string(),
         secure: false,
         httponly: false,
@@ -405,8 +412,14 @@ mod tests {
     #[test]
     fn delete_cookie_renders_like_django() {
         assert_eq!(
-            render_delete_cookie("session-id", "/", "Lax"),
+            render_delete_cookie("session-id", "/", "Lax", None),
             "session-id=\"\"; expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; SameSite=Lax"
+        );
+        // A configured COOKIE_DOMAIN rides along, like `delete_cookie`
+        // receiving `SESSION_COOKIE_DOMAIN` (verified against live Django).
+        assert_eq!(
+            render_delete_cookie("session-id", "/", "Lax", Some("example.com")),
+            "session-id=\"\"; Domain=example.com; expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; SameSite=Lax"
         );
     }
 

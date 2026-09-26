@@ -173,21 +173,46 @@ impl Default for LoggingConfig {
 
 /// Render headers as Python's `str(request.headers)`: a `{Name: 'value'}`
 /// dict repr in iteration order, values single-quote-escaped like `repr`.
+/// Names go through Django's `parse_header_name` normalization
+/// (`HTTP_X_API_KEY` -> `X-Api-Key`, i.e. Python `str.title()` on the
+/// hyphenated name); `http::HeaderName` only keeps the lowercase form, so
+/// the title-casing is reapplied here (see `django_title`).
 pub fn render_headers(headers: &header::HeaderMap) -> String {
     let mut out = String::from("{");
     for (i, (name, value)) in headers.iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
         }
-        // Header names render in their original case (`as_str` preserves
-        // it); values are latin-1 in WSGI, UTF-8-lossy here.
+        // Values are latin-1 in WSGI, UTF-8-lossy here.
         out.push('\'');
-        out.push_str(name.as_str());
+        out.push_str(&django_title(name.as_str()));
         out.push_str("': '");
         out.push_str(&python_repr(&String::from_utf8_lossy(value.as_bytes())));
         out.push('\'');
     }
     out.push('}');
+    out
+}
+
+/// Python `str.title()`, restricted to ASCII header names: a cased letter
+/// following a non-cased character uppercases, a cased letter following a
+/// cased character lowercases, everything else passes through and resets
+/// the state. Digits and `-` are not cased, so `x-2fa-trace` becomes
+/// `X-2Fa-Trace` exactly like Django's `parse_header_name`.
+fn django_title(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut prev_cased = false;
+    for c in name.chars() {
+        let cased = c.is_ascii_alphabetic();
+        if cased && !prev_cased {
+            out.extend(c.to_uppercase());
+        } else if cased && prev_cased {
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+        prev_cased = cased;
+    }
     out
 }
 
@@ -603,11 +628,24 @@ mod tests {
         let mut headers = header::HeaderMap::new();
         headers.insert("x-api-key", HeaderValue::from_static("sekret"));
         headers.insert(header::USER_AGENT, HeaderValue::from_static("UA/1"));
-        // Python dict repr: insertion order, original case, single quotes.
+        // Python dict repr: insertion order, Django title-cased names
+        // (`parse_header_name`, verified against live Django), single quotes.
         assert_eq!(
             render_headers(&headers),
-            "{'x-api-key': 'sekret', 'user-agent': 'UA/1'}"
+            "{'X-Api-Key': 'sekret', 'User-Agent': 'UA/1'}"
         );
+    }
+
+    #[test]
+    fn header_names_follow_django_title_casing() {
+        // `str.title()` on the hyphenated name, including the digit-reset
+        // rule (`2x` keeps its capitals). Vectors checked against CPython.
+        assert_eq!(django_title("x-api-key"), "X-Api-Key");
+        assert_eq!(django_title("content-type"), "Content-Type");
+        assert_eq!(django_title("x-forwarded-for"), "X-Forwarded-For");
+        assert_eq!(django_title("etag"), "Etag");
+        assert_eq!(django_title("x-2fa-trace"), "X-2Fa-Trace");
+        assert_eq!(django_title("x-rate-limit-2x"), "X-Rate-Limit-2X");
     }
 
     #[test]
@@ -725,7 +763,7 @@ mod tests {
         assert_eq!(record.path, "/api/x/");
         assert_eq!(record.method, "POST");
         assert_eq!(record.query_params, "a=1");
-        assert!(record.headers.contains("'x-api-key': 'sekret'"));
+        assert!(record.headers.contains("'X-Api-Key': 'sekret'"));
         assert_eq!(record.body.as_deref(), Some("{\"k\": 1}"));
         assert_eq!(record.response_body.as_deref(), Some("done"));
         assert_eq!(record.response_code, 200);

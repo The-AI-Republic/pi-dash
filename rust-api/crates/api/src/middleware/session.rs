@@ -626,8 +626,13 @@ async fn apply_response_rules<Store: SessionStore>(
     response: &mut Response<Body>,
 ) -> Result<(), StoreError> {
     // Rule 1: cookie present but session empty → delete, any status.
+    // The configured domain rides along, like `delete_cookie` receiving
+    // `SESSION_COOKIE_DOMAIN`; without it a domain-scoped cookie survives.
     if cookie_present && session.is_empty() {
-        push_set_cookie(response, &render_delete_cookie(cookie_name, "/", "Lax"));
+        push_set_cookie(
+            response,
+            &render_delete_cookie(cookie_name, "/", "Lax", config.cookie_domain.as_deref()),
+        );
         crate::middleware::append_vary(response.headers_mut(), "Cookie");
         return Ok(());
     }
@@ -878,6 +883,31 @@ mod tests {
         assert_eq!(
             set_cookies(&response),
             vec!["session-id=\"\"; expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; SameSite=Lax".to_string()]
+        );
+        assert!(has_vary_cookie(&response));
+    }
+
+    #[tokio::test]
+    async fn delete_cookie_carries_configured_domain() {
+        let store = MemorySessionStore::new();
+        let inner = axum::Router::new().route("/api/x/", axum::routing::any(plain_ok));
+        let mut cfg = config(Some(store));
+        cfg.cookie_domain = Some("example.com".to_string());
+        let response = SessionLayer::new(cfg)
+            .layer(inner)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/x/")
+                    .header(header::COOKIE, "session-id=unknownkey")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        // Like `delete_cookie(..., domain=SESSION_COOKIE_DOMAIN)`.
+        assert_eq!(
+            set_cookies(&response),
+            vec!["session-id=\"\"; Domain=example.com; expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; SameSite=Lax".to_string()]
         );
         assert!(has_vary_cookie(&response));
     }
