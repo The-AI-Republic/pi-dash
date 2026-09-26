@@ -1,0 +1,12 @@
+-- queries/admin_crud.sql
+-- (1) Permission check: InstanceAdmin.objects.filter(role__gte=15, instance=instance, user=request.user).exists()
+--     (api/permissions/instance.py:18). Emitted shape (uuid params shown inline):
+-- SELECT "instance_admins"."created_at", "instance_admins"."updated_at", "instance_admins"."created_by_id", "instance_admins"."updated_by_id", "instance_admins"."deleted_at", "instance_admins"."id", "instance_admins"."user_id", "instance_admins"."instance_id", "instance_admins"."role", "instance_admins"."is_verified" FROM "instance_admins" WHERE ("instance_admins"."deleted_at" IS NULL AND "instance_admins"."instance_id" = %s AND "instance_admins"."role" >= 15 AND "instance_admins"."user_id" = %s) ORDER BY "instance_admins"."created_at" DESC LIMIT 1;
+-- (2) POST create: InstanceAdmin.objects.create(instance=..., user=..., role=...) (api/views/admin.py:66)
+-- INSERT INTO "instance_admins" ("created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at", "id", "user_id", "instance_id", "role", "is_verified") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+-- Preceded by User.objects.get(email=...) -> SELECT ... FROM "users" WHERE "users"."deleted_at" IS NULL AND "users"."email" = %s; (raises User.DoesNotExist -> BUG-2 path, see handlers/admins.golden.json).
+-- (3) GET list: InstanceAdmin.objects.filter(instance=instance) (api/views/admin.py:78)
+-- SELECT <same column list> FROM "instance_admins" WHERE ("instance_admins"."deleted_at" IS NULL AND "instance_admins"."instance_id" = %s) ORDER BY "instance_admins"."created_at" DESC;
+-- (4) DELETE: InstanceAdmin.objects.filter(instance=instance, pk=pk).delete() (api/views/admin.py:85).
+-- Soft-delete manager overrides delete -> UPDATE "instance_admins" SET "deleted_at" = %s WHERE ("instance_admins"."deleted_at" IS NULL AND "instance_admins"."instance_id" = %s AND "instance_admins"."id" = %s);
+-- (5) Signup existence probe: InstanceAdmin.objects.first() (api/views/admin.py:108) -> (3)-shaped SELECT + LIMIT 1; any row -> ADMIN_ALREADY_EXIST redirect.
