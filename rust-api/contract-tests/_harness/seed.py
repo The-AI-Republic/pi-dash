@@ -2152,13 +2152,14 @@ def email_log(conn, receiver_id, actor_id, entity_id: str, **extra) -> dict:
         "entity_name": "issue",
         "entity": "issue",
         # activity_time is required: the send task parses it for the
-        # template and raises without it.
+        # template and raises without it. ISO text (not datetime): this
+        # dict is stored via Json(), which cannot serialize datetimes.
         "data": {
             "issue_activity": {
                 "field": "state",
                 "old_value": "a",
                 "new_value": "b",
-                "activity_time": _now(),
+                "activity_time": _now_iso(),
             }
         },
     }

@@ -19,7 +19,7 @@ import pytest
 
 from _harness import broker_probe, celery_wire, taskspec
 from _harness import seed as seed_helpers
-from _harness.db import insert_row, snapshot, wait_for
+from _harness.db import insert_row, snapshot, wait_for_condition as wait_for
 
 M = "pi_dash.bgtasks"
 
