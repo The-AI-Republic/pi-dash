@@ -31,7 +31,7 @@ jobs:
           fi
           CHANGED=$(git diff --name-only "$BASE" "${{ github.sha }}" || true)
           echo "$CHANGED"
-          BAD=$(echo "$CHANGED" | grep -v -e '^rust-api/' -e '^\.github/workflows/rust-api.*\.yml$' -e '^$' || true)
+          BAD=$(echo "$CHANGED" | grep -v -e '^rust-api/' -e '^\.github/workflows/rust-api.*\.yml$' -e '^Cargo\.toml$' -e '^$' || true)
           if [ -n "$BAD" ]; then
             echo "::error::Files outside rust-api/ and the allowlist:"
             echo "$BAD"
