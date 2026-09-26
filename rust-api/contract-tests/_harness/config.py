@@ -37,6 +37,10 @@ from dataclasses import dataclass
 class Settings:
     base_url: str
     database_url: str
+    # Django SECRET_KEY of the backend under test. Suites that seed token
+    # hashes (runner enrollment / machine tokens, PIDASHCONV-97) recompute
+    # the server-side hashes, so this must equal the server's key.
+    secret_key: str = ""
 
 
 def get_settings() -> Settings:
@@ -48,7 +52,11 @@ def get_settings() -> Settings:
             "the server BASE_URL serves, e.g. "
             "DATABASE_URL=postgres://user:pass@localhost:5432/pidash"
         )
-    return Settings(base_url=base_url_value, database_url=database_url_value)
+    return Settings(
+        base_url=base_url_value,
+        database_url=database_url_value,
+        secret_key=os.environ.get("SECRET_KEY", ""),
+    )
 
 
 # --- PIDASHCONV-83 (app project/state/estimate oracle) ---
