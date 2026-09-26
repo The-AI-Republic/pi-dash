@@ -235,7 +235,10 @@ jobs:
       - name: Start Celery worker
         working-directory: apps/api
         run: |
-          nohup celery -A pi_dash worker --pool=solo --loglevel=info \
+          # -E (worker_send_events): the ticker fan-out tests observe
+          # task-received events, which are broadcast and never race the
+          # worker's own queue consumption the way draining would.
+          nohup celery -A pi_dash worker -E --pool=solo --loglevel=info \
             > /tmp/contract-worker.log 2>&1 &
 
       - name: Start Celery beat

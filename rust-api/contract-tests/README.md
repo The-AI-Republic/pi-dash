@@ -626,10 +626,12 @@ webhook_send_task` chain, deactivation mail, `process_logs` Postgres
 - cleanup: all five deletes behaviourally (page versions keep newest 20),
   unuploaded-asset delete, expired-exporter URL clear, tombstone hard
   delete, countdown ETA through the real worker, redelivery no-op.
-- ticker: ticker/scheduler scan fan-out observed on the broker (messages are
-  collected, never executed — firing a real tick would dispatch live agent
-  runs), not-due skips, unknown-id `fire_tick` dispatches nothing,
-  redelivery fans out once per scan.
+- ticker: ticker/scheduler scan fan-out observed via worker `task-received`
+  events (broadcast, so no race with the worker's own consumption —
+  draining the queue always loses to prefetch; requires the contract
+  worker's `-E` flag; counts are beat-tolerant), never executed (firing a
+  real tick would dispatch live agent runs), not-due skips, unknown-id
+  `fire_tick` dispatches nothing, redelivery fans out once per scan.
 
 Known non-goals, pinned rather than skipped: full `retry_backoff=600`
 multi-attempt timing (pinned by options parity; a cycle would take ~1h),

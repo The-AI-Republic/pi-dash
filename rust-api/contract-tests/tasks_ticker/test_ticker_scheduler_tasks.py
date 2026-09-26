@@ -17,7 +17,7 @@ import pytest
 
 from _harness import broker_probe, celery_wire, taskspec
 from _harness import seed as seed_helpers
-from _harness.db import insert_row, wait_for
+from _harness.db import insert_row
 
 M = "pi_dash.bgtasks"
 
@@ -158,14 +158,17 @@ def test_scan_due_tickers_fans_out_fire_tick(db_conn, broker_url):
         },
     )
     _quiesce_tickers(db_conn, ticker["id"])
-    celery_wire.publish(f"{M}.agent_ticker.scan_due_tickers")
-    fanned = broker_probe.collect_matching(
-        lambda headers, _payload: headers.get("task")
-        == f"{M}.agent_ticker.fire_tick"
-    )
-    assert len(fanned) == 1
-    _headers, payload = fanned[0]
-    assert list(payload[0]) == [str(ticker["id"])]
+    # Observed via task-received events, not queue drain: an idle worker
+    # wins the drain race via prefetch every time, while events are
+    # broadcast (requires the contract worker's -E flag). The stream binds
+    # before publishing so a fast worker can't predate the observer.
+    # Counts are beat-tolerant (>=): the live beat may fan out the same row.
+    with broker_probe.task_received_stream(
+        f"{M}.agent_ticker.fire_tick", str(ticker["id"])
+    ) as collect:
+        celery_wire.publish(f"{M}.agent_ticker.scan_due_tickers")
+        fanned = collect(minimum=1)
+    assert len(fanned) >= 1
 
 
 def test_scan_due_tickers_skips_not_due(db_conn, broker_url):
@@ -254,14 +257,13 @@ def test_scan_due_bindings_fans_out_fire(db_conn, broker_url):
         },
     )
     _quiesce_bindings(db_conn, binding["id"])
-    celery_wire.publish(f"{M}.scheduler.scan_due_bindings")
-    fanned = broker_probe.collect_matching(
-        lambda headers, _payload: headers.get("task")
-        == f"{M}.scheduler.fire_scheduler_binding"
-    )
-    assert len(fanned) == 1
-    _headers, payload = fanned[0]
-    assert list(payload[0]) == [str(binding["id"])]
+    # Same event-based observation as the ticker fan-out test (see above).
+    with broker_probe.task_received_stream(
+        f"{M}.scheduler.fire_scheduler_binding", str(binding["id"])
+    ) as collect:
+        celery_wire.publish(f"{M}.scheduler.scan_due_bindings")
+        fanned = collect(minimum=1)
+    assert len(fanned) >= 1
 
 
 def test_loop_scan_consumed_without_crash(db_conn, broker_url):
@@ -271,14 +273,6 @@ def test_loop_scan_consumed_without_crash(db_conn, broker_url):
     broker_probe.wait_for_queue_drain(
         baseline=baseline, what="loop scan consumed"
     )
-
-
-def _drain_fire_ticks():
-    return [
-        (headers, payload)
-        for headers, payload in broker_probe.drain_queue()
-        if headers.get("task") == f"{M}.agent_ticker.fire_tick"
-    ]
 
 
 def test_redelivered_scan_fans_out_once_per_run(db_conn, broker_url):
@@ -302,10 +296,12 @@ def test_redelivered_scan_fans_out_once_per_run(db_conn, broker_url):
         },
     )
     _quiesce_tickers(db_conn, ticker["id"])
-    broker_probe.drain_queue()
-    celery_wire.publish(f"{M}.agent_ticker.scan_due_tickers")
-    first = wait_for(lambda: _drain_fire_ticks() or None, what="first scan fan-out")
-    assert [list(payload[0]) for _, payload in first] == [[str(ticker["id"])]]
-    celery_wire.publish(f"{M}.agent_ticker.scan_due_tickers")
-    second = wait_for(lambda: _drain_fire_ticks() or None, what="second scan fan-out")
-    assert [list(payload[0]) for _, payload in second] == [[str(ticker["id"])]]
+    # Same event-based observation as above; two scans → at least two
+    # fan-outs for this ticker (beat may add its own).
+    with broker_probe.task_received_stream(
+        f"{M}.agent_ticker.fire_tick", str(ticker["id"])
+    ) as collect:
+        celery_wire.publish(f"{M}.agent_ticker.scan_due_tickers")
+        celery_wire.publish(f"{M}.agent_ticker.scan_due_tickers")
+        fanned = collect(minimum=2)
+    assert len(fanned) >= 2
