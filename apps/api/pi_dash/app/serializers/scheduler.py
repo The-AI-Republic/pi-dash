@@ -110,6 +110,29 @@ class SchedulerSerializer(BaseSerializer):
     def validate_color(self, value: str) -> str:
         return _validate_color(value)
 
+    def validate_slug(self, value: str) -> str:
+        # Mirror the conditional DB constraint
+        # ``scheduler_unique_workspace_slug_when_active`` so a duplicate slug
+        # comes back as a field error ({"slug": [...]}) instead of an
+        # IntegrityError that BaseAPIView flattens to a generic 400. DRF does
+        # not auto-validate conditional UniqueConstraints. ``objects`` is the
+        # soft-delete manager, so tombstoned slugs stay reusable, matching
+        # the constraint's ``deleted_at__isnull`` condition.
+        workspace = (
+            self.instance.workspace
+            if self.instance is not None
+            else self.context.get("workspace")
+        )
+        if workspace is not None:
+            existing = Scheduler.objects.filter(workspace=workspace, slug=value)
+            if self.instance is not None:
+                existing = existing.exclude(pk=self.instance.pk)
+            if existing.exists():
+                raise serializers.ValidationError(
+                    "This slug is already in use in this workspace."
+                )
+        return value
+
 
 class SchedulerBindingSerializer(BaseSerializer):
     scheduler_slug = serializers.CharField(source="scheduler.slug", read_only=True)

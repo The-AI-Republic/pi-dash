@@ -76,7 +76,12 @@ class WorkspaceSchedulerListEndpoint(BaseAPIView):
         if not _feature_enabled():
             return _disabled_response()
         workspace = get_object_or_404(Workspace, slug=slug)
-        serializer = SchedulerSerializer(data=request.data)
+        # Workspace in context so validate_slug can enforce the per-workspace
+        # slug uniqueness constraint at validation time (save() pins it too
+        # late for a field error).
+        serializer = SchedulerSerializer(
+            data=request.data, context={"workspace": workspace}
+        )
         serializer.is_valid(raise_exception=True)
         scheduler = serializer.save(workspace=workspace)
         return Response(
