@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from psycopg.rows import dict_row
 
 from _harness import broker_probe, celery_wire, taskspec
 from _harness import seed as seed_helpers
@@ -114,7 +115,7 @@ def _past(minutes: int = 5) -> str:
 
 def _quiesce_tickers(conn, keep_id=None) -> None:
     """Disable every ticker except ``keep_id`` — scans are global, tests aren't."""
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=dict_row) as cur:
         if keep_id is None:
             cur.execute("UPDATE issue_agent_ticker SET enabled = FALSE")
         else:
@@ -126,7 +127,7 @@ def _quiesce_tickers(conn, keep_id=None) -> None:
 
 
 def _quiesce_bindings(conn, keep_id=None) -> None:
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=dict_row) as cur:
         if keep_id is None:
             cur.execute("UPDATE scheduler_bindings SET enabled = FALSE")
         else:

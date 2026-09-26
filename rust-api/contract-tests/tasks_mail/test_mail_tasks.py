@@ -10,6 +10,7 @@ project_add_user_email_task, workspace_invitation_task}.py
 import uuid
 
 import pytest
+from psycopg.rows import dict_row
 
 from _harness import broker_probe, celery_wire, redis_cache, taskspec
 from _harness import seed as seed_helpers
@@ -219,7 +220,7 @@ def test_pure_mail_tasks_deliver(db_conn, broker_url, smtp_sink, task_name, args
 
 
 def _processed(conn, log_ids) -> bool:
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT count(*) AS n FROM email_notification_logs "
             "WHERE id = ANY(%s::uuid[]) AND processed_at IS NOT NULL",

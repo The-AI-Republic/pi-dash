@@ -16,6 +16,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from psycopg.rows import dict_row
 
 from _harness import broker_probe, celery_wire, taskspec
 from _harness import seed as seed_helpers
@@ -441,20 +442,20 @@ def test_storage_aware_tasks_consumed_without_crash(db_conn, broker_url):
 
 
 def _soft_deleted(conn, table: str, pk) -> bool:
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(f'SELECT deleted_at FROM "{table}" WHERE id = %s::uuid', (str(pk),))
         row = cur.fetchone()
         return row is not None and row["deleted_at"] is not None
 
 
 def _missing(conn, table: str, pk) -> bool:
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(f'SELECT 1 FROM "{table}" WHERE id = %s::uuid', (str(pk),))
         return cur.fetchone() is None
 
 
 def _count(conn, table: str, page_id, expected: int):
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             f'SELECT count(*) AS n FROM "{table}" WHERE page_id = %s::uuid',
             (str(page_id),),
@@ -464,7 +465,7 @@ def _count(conn, table: str, page_id, expected: int):
 
 
 def _column_is_null(conn, table: str, pk, column: str) -> bool:
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             f'SELECT {column} FROM "{table}" WHERE id = %s::uuid', (str(pk),)
         )
