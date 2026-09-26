@@ -1898,4 +1898,26 @@ export default {
   "Custom ({duration})": "Custom ({duration})",
   "How long Pi Dash waits between automatic runs. One rhythm covers In Progress, In Review and In Test. A new cadence applies from the next tick — a work item already waiting keeps its scheduled time.":
     "How long Pi Dash waits between automatic runs. One rhythm covers In Progress, In Review and In Test. A new cadence applies from the next tick — a work item already waiting keeps its scheduled time.",
+  // Scheduler binding detail page (config + run history drilldown).
+  "Back to schedulers": "Back to schedulers",
+  Configuration: "Configuration",
+  "Disabled for the whole workspace": "Disabled for the whole workspace",
+  Ended: "Ended",
+  "Extra dates": "Extra dates",
+  "Hide resolved prompt": "Hide resolved prompt",
+  "Installed by": "Installed by",
+  "Last error": "Last error",
+  "No runs yet — next run at {ts}": "No runs yet — next run at {ts}",
+  "Outcome mode": "Outcome mode",
+  "Queued {ts}": "Queued {ts}",
+  "Run history": "Run history",
+  "Scheduler is disabled — it will not fire until re-enabled.":
+    "Scheduler is disabled — it will not fire until re-enabled.",
+  "Show resolved prompt": "Show resolved prompt",
+  "Skipped dates": "Skipped dates",
+  "This scheduler install is not available. It may have been uninstalled.":
+    "This scheduler install is not available. It may have been uninstalled.",
+  "View scheduler": "View scheduler",
+  "View workspace definition": "View workspace definition",
+  "{count} runs": "{count} runs",
 } as const;

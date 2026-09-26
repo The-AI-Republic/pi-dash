@@ -5,6 +5,7 @@
  */
 
 import { API_BASE_URL } from "@pi-dash/constants";
+import type { IAgentRunPage } from "@pi-dash/types";
 import { APIService } from "../api.service";
 
 /**
@@ -98,6 +99,18 @@ export interface ISchedulerBinding {
   actor: string | null;
   created_at: string;
   updated_at: string;
+  /**
+   * Detail endpoint only: the composed prompt a run of this binding actually
+   * receives (scheduler prompt + extra context + outcome-mode directive).
+   * Absent from the list payload.
+   */
+  resolved_prompt?: string;
+  /** Detail endpoint only: total AgentRuns this binding has fired. */
+  run_count?: number;
+  /** Detail endpoint only: workspace-level source of the parent definition. */
+  scheduler_source?: SchedulerSource;
+  /** Detail endpoint only: workspace-level enable flag of the parent definition. */
+  scheduler_is_enabled?: boolean;
 }
 
 export interface ISchedulerBindingCreatePayload {
@@ -230,6 +243,30 @@ export class SchedulerService extends APIService {
   async destroyBinding(workspaceSlug: string, projectId: string, bindingId: string): Promise<void> {
     return this.delete(`/api/workspaces/${workspaceSlug}/projects/${projectId}/scheduler-bindings/${bindingId}/`)
       .then(() => undefined)
+      .catch((err) => {
+        throw err?.response?.data;
+      });
+  }
+
+  // -------- Run history --------
+
+  /**
+   * List the AgentRuns a binding has fired, newest first, one page at a
+   * time. Same envelope as ``/api/runners/runs/`` (``IAgentRunPage``).
+   */
+  async listBindingRuns(
+    workspaceSlug: string,
+    projectId: string,
+    bindingId: string,
+    page = 1,
+    perPage?: number
+  ): Promise<IAgentRunPage> {
+    const params: Record<string, string | number> = { page };
+    if (perPage !== undefined) params.per_page = perPage;
+    return this.get(`/api/workspaces/${workspaceSlug}/projects/${projectId}/scheduler-bindings/${bindingId}/runs/`, {
+      params,
+    })
+      .then((res) => res?.data)
       .catch((err) => {
         throw err?.response?.data;
       });

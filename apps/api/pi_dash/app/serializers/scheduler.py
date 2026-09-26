@@ -266,3 +266,43 @@ class SchedulerBindingSerializer(BaseSerializer):
                     {"pod": "pod must belong to the same project as this scheduler install"}
                 )
         return super().validate(attrs)
+
+
+class SchedulerBindingDetailSerializer(SchedulerBindingSerializer):
+    """Single-binding payload for the scheduler detail page.
+
+    Adds fields the bindings *list* must not pay for per row: the resolved
+    prompt (composed exactly as the dispatched agent receives it, via
+    ``build_scheduler_task_body`` — not re-implemented client-side), the
+    total run count, and the joined workspace-level ``source`` /
+    ``is_enabled`` of the parent scheduler definition.
+    """
+
+    resolved_prompt = serializers.SerializerMethodField()
+    run_count = serializers.SerializerMethodField()
+    scheduler_source = serializers.CharField(source="scheduler.source", read_only=True)
+    scheduler_is_enabled = serializers.BooleanField(
+        source="scheduler.is_enabled", read_only=True
+    )
+
+    class Meta(SchedulerBindingSerializer.Meta):
+        fields = SchedulerBindingSerializer.Meta.fields + [
+            "resolved_prompt",
+            "run_count",
+            "scheduler_source",
+            "scheduler_is_enabled",
+        ]
+        read_only_fields = SchedulerBindingSerializer.Meta.read_only_fields + [
+            "resolved_prompt",
+            "run_count",
+            "scheduler_source",
+            "scheduler_is_enabled",
+        ]
+
+    def get_resolved_prompt(self, obj: SchedulerBinding) -> str:
+        from pi_dash.prompting.context import build_scheduler_task_body
+
+        return build_scheduler_task_body(obj)
+
+    def get_run_count(self, obj: SchedulerBinding) -> int:
+        return obj.agent_runs.count()

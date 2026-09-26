@@ -22,6 +22,7 @@ from rest_framework.response import Response
 
 from pi_dash.app.permissions import ROLE, allow_permission
 from pi_dash.app.serializers.scheduler import (
+    SchedulerBindingDetailSerializer,
     SchedulerBindingSerializer,
     SchedulerSerializer,
 )
@@ -238,13 +239,13 @@ class ProjectSchedulerBindingDetailEndpoint(BaseAPIView):
         if not _feature_enabled():
             return _disabled_response()
         binding = get_object_or_404(
-            SchedulerBinding,
+            SchedulerBinding.objects.select_related("scheduler", "last_run", "pod"),
             pk=binding_id,
             project_id=project_id,
             workspace__slug=slug,
         )
         return Response(
-            SchedulerBindingSerializer(binding).data,
+            SchedulerBindingDetailSerializer(binding).data,
             status=status.HTTP_200_OK,
         )
 
@@ -272,8 +273,11 @@ class ProjectSchedulerBindingDetailEndpoint(BaseAPIView):
             if nxt is not None:
                 binding.next_run_at = nxt
                 binding.save(update_fields=["next_run_at", "updated_at"])
+        # Detail shape, not the list shape: the detail page PATCHes (enabled
+        # toggle, edits) and reuses the response, so a list-shaped body would
+        # drop resolved_prompt / run_count from its cache.
         return Response(
-            SchedulerBindingSerializer(binding).data,
+            SchedulerBindingDetailSerializer(binding).data,
             status=status.HTTP_200_OK,
         )
 
@@ -289,3 +293,73 @@ class ProjectSchedulerBindingDetailEndpoint(BaseAPIView):
         )
         binding.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ProjectSchedulerBindingRunsEndpoint(BaseAPIView):
+    """GET /workspaces/<slug>/projects/<project_id>/scheduler-bindings/<bid>/runs/
+
+    Run history for one binding: the AgentRuns it has fired, newest first,
+    page-number paginated with the same envelope as ``/api/runners/runs/``
+    so the client reuses the ``IAgentRunPage`` type.
+
+    Readable by any project member (ADMIN / MEMBER / GUEST) — the same read
+    permission as the binding list/detail endpoints, whose payloads already
+    surface the scheduler prompt surface. This is a dedicated endpoint rather
+    than a filter on ``AgentRunListEndpoint`` because that endpoint's
+    visibility rules are issue-centric (creator / issue owner / assignee /
+    workspace admin) and would hide scheduler runs (``work_item=None``) from
+    project admins.
+    """
+
+    @allow_permission(
+        allowed_roles=[ROLE.ADMIN, ROLE.MEMBER, ROLE.GUEST],
+        level="PROJECT",
+    )
+    def get(self, request, slug, project_id, binding_id):
+        if not _feature_enabled():
+            return _disabled_response()
+        import math
+
+        from pi_dash.runner.models import AgentRun
+        from pi_dash.runner.serializers import AgentRunSerializer
+        from pi_dash.runner.views.runs import _parse_pagination
+
+        binding = get_object_or_404(
+            SchedulerBinding,
+            pk=binding_id,
+            project_id=project_id,
+            workspace__slug=slug,
+        )
+        qs = (
+            AgentRun.objects.filter(scheduler_binding=binding)
+            # Private-runner gate, mirroring AgentRunListEndpoint: project
+            # standing never reveals a run executing on someone else's
+            # private machine — only the run creator and the runner owner
+            # see those rows. Runner-less runs (queued, Cloud Agent) pass.
+            .filter(
+                Q(runner__isnull=True)
+                | Q(runner__owner=request.user)
+                | Q(created_by=request.user)
+            )
+            # Joined by AgentRunSerializer (pod_detail, scheduler_binding_detail,
+            # tool_calls); pull them up front so a page costs O(1) queries.
+            .select_related("pod__project", "scheduler_binding__scheduler")
+            .prefetch_related("tool_calls")
+            .order_by("-created_at")
+        )
+        page, per_page = _parse_pagination(request.query_params)
+        total_count = qs.count()
+        total_pages = max(1, math.ceil(total_count / per_page))
+        offset = (page - 1) * per_page
+        results = qs[offset : offset + per_page]
+        return Response(
+            {
+                "results": AgentRunSerializer(results, many=True).data,
+                "count": len(results),
+                "total_count": total_count,
+                "total_pages": total_pages,
+                "page": page,
+                "per_page": per_page,
+            },
+            status=status.HTTP_200_OK,
+        )
