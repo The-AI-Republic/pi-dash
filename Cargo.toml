@@ -2,7 +2,7 @@
 members = ["runner", "pidash-ipc"]
 # The Tauri desktop app is its own workspace (desktop/src-tauri/Cargo.lock) so
 # its GUI dependency tree stays out of the runner's lockfile and CI.
-exclude = ["desktop"]
+exclude = ["desktop", "rust-api"]
 resolver = "3"
 
 [profile.release]

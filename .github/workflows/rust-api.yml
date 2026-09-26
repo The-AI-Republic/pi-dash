@@ -1,0 +1,64 @@
+name: rust-api
+
+on:
+  push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  pull_request:
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+jobs:
+  quarantine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fail when the PR touches anything outside rust-api/ and the allowlist
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+          fi
+          CHANGED=$(git diff --name-only "$BASE" "${{ github.sha }}" || true)
+          echo "$CHANGED"
+          BAD=$(echo "$CHANGED" | grep -v -e '^rust-api/' -e '^\.github/workflows/rust-api.*\.yml$' -e '^$' || true)
+          if [ -n "$BAD" ]; then
+            echo "::error::Files outside rust-api/ and the allowlist:"
+            echo "$BAD"
+            exit 1
+          fi
+          # The only root-level file a rust-api PR may touch is Cargo.toml,
+          # and only for the one-line rust-api exclude.
+          if echo "$CHANGED" | grep -q -e '^Cargo\.toml$'; then
+            if ! git diff "$BASE" "${{ github.sha }}" -- Cargo.toml | grep -q '+.*"rust-api"'; then
+              echo "::error::Cargo.toml changed without the rust-api exclude line"
+              exit 1
+            fi
+          fi
+
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust-api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-api
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace

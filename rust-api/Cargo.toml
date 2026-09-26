@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/types",
+    "crates/db",
+    "crates/auth",
+    "crates/services",
+    "crates/api",
+    "crates/jobs",
+    "bin/pidash-api",
+]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
