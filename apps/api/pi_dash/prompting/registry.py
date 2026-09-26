@@ -10,6 +10,14 @@ The unit of prompt content is a **section**: a markdown + Jinja file under
 key and define their order per prompt kind; the composer
 (``prompting/composer.py``) resolves and assembles them at compose time.
 
+``prompting/sections/`` holds the **core** sections only, and they must stay
+work-type-neutral. Work-type sections live under
+``prompting/work_types/<key>/<slot>.md`` and are loaded here as ordinary
+registry sections with namespaced keys (``software.execute``), so overrides,
+the customizability tiers, validation, and the manifest treat them exactly
+like core sections. The ``work_type.md`` metadata file in each folder is
+*not* a section; ``prompting/work_types.py`` parses it.
+
 Default section bodies live in code and evolve through code review — exactly
 like the fragments they replace. The DB only ever stores *overrides*
 (``prompting.models.PromptSectionOverride``), never defaults, so there is no
@@ -24,6 +32,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SECTIONS_DIR = Path(__file__).resolve().parent / "sections"
+WORK_TYPES_DIR = Path(__file__).resolve().parent / "work_types"
+
+#: Filename reserved for work-type metadata inside a work-type folder.
+WORK_TYPE_META_FILENAME = "work_type.md"
 
 #: Allowed values for a section's ``customizable`` front-matter field — the
 #: three governance tiers (design §9.2):
@@ -99,10 +111,14 @@ class PromptSection:
         return tier_allows_personal_override(self.customizable)
 
 
-def _parse_front_matter(path: Path) -> PromptSection:
+def _parse_front_matter(path: Path, *, expected_key: str | None = None) -> PromptSection:
     """Parse a ``<key>.md`` section file with a leading ``---`` front-matter
     block. Deliberately a tiny hand-rolled parser (key: value lines) so the
     registry has no YAML dependency and the format stays trivially auditable.
+
+    ``expected_key`` overrides the default filename-stem check — work-type
+    sections carry namespaced keys (``software.execute``) that cannot equal
+    the stem of ``work_types/software/execute.md``.
     """
     text = path.read_text(encoding="utf-8")
     if not text.startswith("---"):
@@ -136,7 +152,12 @@ def _parse_front_matter(path: Path) -> PromptSection:
             f"(expected one of {sorted(_VALID_CUSTOMIZABLE)})"
         )
     key = meta["key"]
-    if path.stem != key:
+    if expected_key is not None:
+        if key != expected_key:
+            raise PromptRegistryError(
+                f"section file {path.name!r} must carry key={expected_key!r} (its folder + filename), got key={key!r}"
+            )
+    elif path.stem != key:
         raise PromptRegistryError(
             f"section file {path.name!r} does not match its front-matter key={key!r} (filename stem must equal the key)"
         )
@@ -158,6 +179,18 @@ def _load_registry() -> dict[str, PromptSection]:
         registry[section.key] = section
     if not registry:
         raise PromptRegistryError(f"no sections found under {SECTIONS_DIR}")
+    # Work-type sections: work_types/<key>/<slot>.md → section key "<key>.<slot>".
+    # Slot-name and metadata validation is work_types.py's job; here they are
+    # just sections with enforced namespaced keys.
+    if WORK_TYPES_DIR.is_dir():
+        for wt_dir in sorted(p for p in WORK_TYPES_DIR.iterdir() if p.is_dir()):
+            for path in sorted(wt_dir.glob(_SECTION_GLOB)):
+                if path.name == WORK_TYPE_META_FILENAME:
+                    continue
+                section = _parse_front_matter(path, expected_key=f"{wt_dir.name}.{path.stem}")
+                if section.key in registry:
+                    raise PromptRegistryError(f"duplicate section key: {section.key!r}")
+                registry[section.key] = section
     return registry
 
 

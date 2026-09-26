@@ -15,3 +15,4 @@ storybook-static/
 # apps/api/pi_dash/prompting/fragments/__init__.py and prompting/registry.py.
 apps/api/pi_dash/prompting/fragments/
 apps/api/pi_dash/prompting/sections/
+apps/api/pi_dash/prompting/work_types/

@@ -14,10 +14,10 @@ from pi_dash.prompting.renderer import validate_syntax
 
 @pytest.mark.unit
 def test_registry_loaded_with_expected_sections():
-    # 24 local sections (13 ported + relationships + 2 review + 2 test
-    # + 3 scheduler + task-lifecycle + repo-context + workpad-context)
-    # plus 14 locked Cloud Agent sections.
-    assert len(registry.REGISTRY) == 38
+    # 23 core sections (repo-context moved into the software work type as
+    # software.context) + 14 locked Cloud Agent sections + 4 software
+    # work-type sections.
+    assert len(registry.REGISTRY) == 41
     for key in (
         "intro",
         "relationships",
@@ -27,8 +27,11 @@ def test_registry_loaded_with_expected_sections():
         "test-cycle",
         "scheduler-task",
         "task-lifecycle",
-        "repo-context",
         "workpad-context",
+        "software.context",
+        "software.execute",
+        "software.review",
+        "software.test",
     ):
         assert key in registry.REGISTRY
 
@@ -96,15 +99,21 @@ def test_every_section_body_is_valid_jinja():
 
 @pytest.mark.unit
 def test_every_recipe_key_exists_in_registry():
-    for kind, section_keys in recipes.RECIPES.items():
-        for key in section_keys:
-            assert key in registry.REGISTRY, f"{kind} references missing {key}"
+    for kind, entries in recipes.RECIPES.items():
+        for entry in entries:
+            if isinstance(entry, recipes.Slot):
+                continue  # resolved per work type; covered by test_work_types
+            assert entry in registry.REGISTRY, f"{kind} references missing {entry}"
 
 
 @pytest.mark.unit
-def test_section_key_matches_filename_stem():
+def test_section_key_matches_file_location():
     for section in registry.all_sections():
-        path = registry.SECTIONS_DIR / f"{section.key}.md"
+        if "." in section.key:
+            work_type, _, slot = section.key.partition(".")
+            path = registry.WORK_TYPES_DIR / work_type / f"{slot}.md"
+        else:
+            path = registry.SECTIONS_DIR / f"{section.key}.md"
         assert path.exists()
 
 

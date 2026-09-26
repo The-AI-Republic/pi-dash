@@ -10,7 +10,7 @@ import copy
 
 import pytest
 
-from pi_dash.prompting import recipes
+from pi_dash.prompting import recipes, work_types
 from pi_dash.prompting.composer import (
     SOURCE_DEFAULT,
     SOURCE_DRAFT,
@@ -61,7 +61,7 @@ def test_manifest_one_entry_per_recipe_section_all_default():
     out = compose(
         "coding-task", workspace=None, project=None, user=None, context=_ctx()
     )
-    recipe = recipes.recipe_for("coding-task")
+    recipe = work_types.expand(recipes.recipe_for("coding-task"), work_types.DEFAULT_WORK_TYPE)
     assert [e.section_key for e in out.manifest] == list(recipe)
     assert all(e.source == SOURCE_DEFAULT and e.version == 0 for e in out.manifest)
 
@@ -509,7 +509,7 @@ def test_review_and_test_do_not_get_the_implementation_workpad_checklist(kind):
 def test_test_kind_defects_go_back_to_in_progress_not_blocked():
     out = compose("test", workspace=None, project=None, user=None, context=_ctx("test")).text
     assert "back to In Progress" in out
-    assert "Blocked for a bug" in out
+    assert "Blocked for a defect" in out
 
 
 @pytest.mark.unit
@@ -587,7 +587,7 @@ def test_coding_task_requires_ancestor_reading_when_parent(depth):
     assert REQUIRED_READING_DIRECTIVE in body
     # analyze-and-scope step 2 walks the chain and assesses readiness.
     assert "Walk the ancestor chain to the root" in body
-    assert "ready to implement against" in body
+    assert "ready to build against" in body
     # The old optional wording is gone.
     assert "To learn about any ancestor" not in body
 
@@ -654,7 +654,7 @@ def test_coding_task_split_gate_offers_multipart_plan():
 
     # The new, non-blocking outcome exists and is keyed on clarity, not size.
     assert "Proceed with a multi-part plan" in body
-    assert "larger than one PR, but the requirements and design are clear" in body
+    assert "larger than one deliverable, but the requirements and design are clear" in body
     # Size and ambiguity are explicitly separated.
     assert "Size is a different axis from ambiguity." in body
     # Clarify is reserved for an open decision, not for a large-but-clear issue.
@@ -716,7 +716,7 @@ def test_coding_task_split_standard_is_independence_not_size():
     assert "clearly more than one run's work" not in body
     assert "span different areas" not in body
     # One-line test the agent can apply, plus explicit split / do-not-split lists.
-    assert "without ever seeing child A's code or decisions" in body
+    assert "without ever seeing child A's work or decisions" in body
     assert "**Split when**" in body
     assert "**Do not split when** the parts share an interface that is not yet fixed" in body
     # Size is a fallback only; splitting has a real run cost.
@@ -811,7 +811,7 @@ def test_coding_task_tracking_parent_is_context_not_blocker():
     assert "Parent is a **tracking issue**" in body
     assert "context, not a blocker" in body
     # Base-branch resolution (workpad-setup): tracking parent -> project base or sibling branch.
-    assert "it carries no code branch of its own and will never get one" in body
+    assert "it carries no branch of its own and will never get one" in body
 
 
 @pytest.mark.unit
@@ -831,7 +831,7 @@ def test_coding_task_advances_stage_only_when_all_parts_done():
     assert "Plan parts still remain" in body
     # The whole-issue testing hand-off is posted once, listing every PR.
     assert "Hand off to testing — once, for the whole issue, when every plan part is built." in body
-    assert "list every PR" in body
+    assert "list every deliverable" in body
 
 
 # ----------------------------------------------------------------------

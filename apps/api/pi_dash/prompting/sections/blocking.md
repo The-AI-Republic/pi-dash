@@ -12,11 +12,11 @@ Use this when completion is blocked by missing required tools or missing auth/pe
    - `### Autonomy / Escalation` updated: `score`, `type`, `safe_to_continue: false`, `Reason:` explaining the blocker in your own words.
    - `Awaiting human reply:` set to a one-line note about the comment you're about to post (gist + today's date). This is a self-note for the *next* run — it isn't read by any code on the cloud side, but reading it as part of your workpad reconciliation{% if run.kind == "coding-task" %} in Step 1{% endif %} tells you immediately that you're resuming a clarification thread (so you check the most recent human comments first) rather than starting a fresh investigation.
 
-2. **Post a comment to the human** via `pidash comment add {{ issue.identifier }} --body-file <path>`. Write as a colleague{% if run.kind == "coding-task" %} (see Step 0.5 step 7 for tone){% endif %}. Lead with what's blocking, then what you need from them. Don't use a `Blocked:` prefix or any other template — just write it.
+2. **Post a comment to the human** via `pidash comment add {{ issue.identifier }} --body-file <path>`. Write as a colleague{% if run.kind == "coding-task" %} (see "Analyze & scope" step 7 for tone){% endif %}. Lead with what's blocking, then what you need from them. Don't use a `Blocked:` prefix or any other template — just write it.
 
    Example (missing access):
 
-   > Blocked: I need the staging Postgres credentials to verify the migration in §2 runs cleanly before I open the PR. Could you drop them into the `pi_dash_runner` 1Password vault, or rotate me a short-lived token? Once that's in place I'll pick this back up on the next tick.
+   > Blocked: I need the staging Postgres credentials to verify the migration in §2 runs cleanly before I hand this over. Could you drop them into the `pi_dash_runner` 1Password vault, or rotate me a short-lived token? Once that's in place I'll pick this back up on the next tick.
 
    Example (decision only a human can make):
 
