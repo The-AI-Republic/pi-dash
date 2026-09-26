@@ -6,6 +6,7 @@
 
 import { useMemo, useState } from "react";
 import { observer } from "mobx-react";
+import { useNavigate } from "react-router";
 import useSWR from "swr";
 // pi dash imports
 import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
@@ -39,6 +40,7 @@ export const SchedulerBindingsPanel = observer(function SchedulerBindingsPanel(p
   const { workspaceSlug, projectId } = props;
   const { allowPermissions } = useUserPermissions();
   const { t } = useTranslation();
+  const navigate = useNavigate();
 
   const canManage = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.PROJECT, workspaceSlug, projectId);
   // Definition CRUD is workspace-admin territory; gates the modal's "Create new" path.
@@ -93,6 +95,7 @@ export const SchedulerBindingsPanel = observer(function SchedulerBindingsPanel(p
                   key={b.id}
                   binding={b}
                   canManage={canManage}
+                  onOpen={() => navigate(`/${workspaceSlug}/projects/${projectId}/schedulers/${b.id}`)}
                   onEdit={() => setEditTarget(b)}
                   onUninstall={() => setUninstallTarget(b)}
                   onToggle={async (next) => {
@@ -187,12 +190,14 @@ export const SchedulerBindingsPanel = observer(function SchedulerBindingsPanel(p
 type RowProps = {
   binding: ISchedulerBinding;
   canManage: boolean;
+  /** Row click — opens the binding detail page (config + run history). */
+  onOpen: () => void;
   onEdit: () => void;
   onUninstall: () => void;
   onToggle: (next: boolean) => Promise<void>;
 };
 
-function BindingRow({ binding, canManage, onEdit, onUninstall, onToggle }: RowProps) {
+function BindingRow({ binding, canManage, onOpen, onEdit, onUninstall, onToggle }: RowProps) {
   const { t } = useTranslation();
   const [toggling, setToggling] = useState(false);
 
@@ -218,8 +223,11 @@ function BindingRow({ binding, canManage, onEdit, onUninstall, onToggle }: RowPr
     }
   };
 
+  // Whole-row click navigates to the binding detail page; the toggle and
+  // Edit / Uninstall cells stopPropagation so managing an install never
+  // navigates away.
   return (
-    <tr className="border-t border-subtle">
+    <tr onClick={onOpen} className="cursor-pointer border-t border-subtle hover:bg-layer-1">
       <td className="px-3 py-2 font-medium text-primary">
         <div className="flex items-center gap-2">
           <span
@@ -238,7 +246,7 @@ function BindingRow({ binding, canManage, onEdit, onUninstall, onToggle }: RowPr
       </td>
       <td className="px-3 py-2 text-secondary">{formatTs(binding.next_run_at)}</td>
       <td className="px-3 py-2 text-secondary">{formatTs(binding.last_run_ended_at)}</td>
-      <td className="px-3 py-2">
+      <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center gap-2">
           <ToggleSwitch
             value={binding.enabled}
@@ -250,7 +258,7 @@ function BindingRow({ binding, canManage, onEdit, onUninstall, onToggle }: RowPr
         </div>
       </td>
       <td className="px-3 py-2 text-secondary">{new Date(binding.updated_at).toLocaleString()}</td>
-      <td className="px-3 py-2 text-right">
+      <td className="px-3 py-2 text-right" onClick={(e) => e.stopPropagation()}>
         {canManage && (
           <div className="flex items-center justify-end gap-2">
             <Button variant="link-neutral" size="sm" onClick={onEdit}>

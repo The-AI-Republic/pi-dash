@@ -197,6 +197,18 @@ export interface IAgentRunErrorDiagnostic {
   action: string;
 }
 
+/**
+ * Joined info about the scheduler binding that fired a run, so run views can
+ * show "fired by scheduler X" and link back to the binding detail page.
+ */
+export interface IAgentRunSchedulerBinding {
+  id: string;
+  scheduler_name: string;
+  scheduler_slug: string;
+  /** Project the binding is installed on (builds the detail-page URL). */
+  project: string;
+}
+
 export interface IAgentRun {
   id: string;
   status: TAgentRunStatus;
@@ -208,6 +220,9 @@ export interface IAgentRun {
   thread_id: string;
   runner: string | null;
   work_item: string | null;
+  /** Scheduler binding that fired this run; null for issue / direct runs. */
+  scheduler_binding: string | null;
+  scheduler_binding_detail: IAgentRunSchedulerBinding | null;
   pod: string;
   pod_detail: IPodMini | null;
   /** Run creator — the access principal for permission checks. */
