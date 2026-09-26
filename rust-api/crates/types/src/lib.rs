@@ -11,4 +11,4 @@ pub mod ids;
 
 pub use error::Error;
 pub use health::HealthStatus;
-pub use ids::{IssueId, ProjectId, WorkspaceId};
+pub use ids::{IssueId, ProjectId, UserId, WorkspaceId};

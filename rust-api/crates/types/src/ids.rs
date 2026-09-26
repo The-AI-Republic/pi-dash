@@ -41,6 +41,7 @@ macro_rules! string_id {
 string_id!(WorkspaceId);
 string_id!(ProjectId);
 string_id!(IssueId);
+string_id!(UserId);
 
 #[cfg(test)]
 mod tests {
