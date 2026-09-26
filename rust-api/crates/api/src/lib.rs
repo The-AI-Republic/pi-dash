@@ -18,6 +18,7 @@
 
 pub mod edge;
 pub mod paginator;
+pub mod permissions;
 pub mod routes;
 pub mod serializer;
 pub mod state;

@@ -14,6 +14,9 @@
 //! - [`csrf`]: CSRF mask / match / format semantics plus the
 //!   `get-csrf-token` endpoint behaviour.
 //! - [`scope`]: tenant scope both auth and the F-06 permission kernel deny on.
+//! - [`permissions`]: the F-06 permission kernel — every access rule the
+//!   Django backend enforces (`app`/`utils`/`core` permissions, runner,
+//!   managed-runner desktop gate, license console gate, `@allow_permission`).
 //!
 //! The modules are pure: row fetching stays the caller's SQL, so the crate
 //! performs no I/O and every check is unit-testable against Django-issued
@@ -22,6 +25,7 @@
 pub mod csrf;
 pub mod jwt;
 pub mod password;
+pub mod permissions;
 pub mod scope;
 pub mod session;
 pub mod signing;
