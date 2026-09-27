@@ -806,6 +806,26 @@ class IssueDetailAPIEndpoint(BaseAPIView):
             from pi_dash.orchestration.signals import MOVED_BY_RUN_ATTR
 
             setattr(issue, MOVED_BY_RUN_ATTR, moved_by_run)
+        # The work type is locked once the issue enters a ticking stage
+        # (started / review / test): only a human may change it, so the review
+        # and test passes always match what was built (PDASHOSS01-234). A
+        # patch attributed to an agent run that tries to *change* it is
+        # rejected; sending the current value back is a no-op, not an error.
+        # The lock keys on the *explicit* run-id header, not the headerless
+        # inference above: the inference exists so a pre-``PIDASH_RUN_ID``
+        # binary's stage moves still count as agent moves, but a human
+        # patching from their own shell (no header) while their run is active
+        # on the issue must not be locked out — and every binary that knows
+        # ``--work-type`` also sends the header.
+        header_run_id = (request.headers.get(RUN_ID_HEADER) or "").strip()
+        if moved_by_run is not None and header_run_id and "work_type" in request.data:
+            new_work_type = request.data.get("work_type") or None
+            state_group = getattr(getattr(issue, "state", None), "group", "")
+            if new_work_type != (issue.work_type or None) and state_group in ("started", "review", "test"):
+                return Response(
+                    {"error": "work_type is locked while the issue is being worked; only a human can change it"},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
         current_instance = json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder)
         # See ``post``: activity tracking must see the converted HTML.
         data, from_markdown = normalize_description_input(request.data)

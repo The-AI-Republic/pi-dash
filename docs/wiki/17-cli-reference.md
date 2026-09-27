@@ -333,15 +333,18 @@ Update fields. Pass only the fields you want to change.
 ```
 pidash issue patch ENG-42 [--state <S>] [--title <T>]
                           [--description <D> | --description-file <PATH>] [--priority <P>]
+                          [--work-type <K> | --clear-work-type]
 ```
 
-| Flag                        | Purpose                                                                                  |
-| --------------------------- | ---------------------------------------------------------------------------------------- |
-| `--state <S>`               | State name (case-insensitive) or UUID.                                                   |
-| `--title <T>`               | New title.                                                                               |
-| `--description <D>`         | New description as markdown. `--description ""` clears it.                               |
-| `--description-file <PATH>` | Read the new markdown description from a file; `-` reads stdin. Empty input is an error. |
-| `--priority <P>`            | `none` \| `low` \| `medium` \| `high` \| `urgent`.                                       |
+| Flag                        | Purpose                                                                                                                                                                                                         |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--state <S>`               | State name (case-insensitive) or UUID.                                                                                                                                                                          |
+| `--title <T>`               | New title.                                                                                                                                                                                                      |
+| `--description <D>`         | New description as markdown. `--description ""` clears it.                                                                                                                                                      |
+| `--description-file <PATH>` | Read the new markdown description from a file; `-` reads stdin. Empty input is an error.                                                                                                                        |
+| `--priority <P>`            | `none` \| `low` \| `medium` \| `high` \| `urgent`.                                                                                                                                                              |
+| `--work-type <K>`           | Work type key (e.g. `software`, `general`) — selects the per-work-type agent guidance. The server validates the key, and rejects agent-attributed changes while the issue is In Progress / In Review / In Test. |
+| `--clear-work-type`         | Clear the per-issue work type; the issue inherits the project's default.                                                                                                                                        |
 
 A description flag replaces the whole body. It is converted server-side, the same way as for `issue create`.
 
