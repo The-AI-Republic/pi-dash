@@ -26,6 +26,7 @@
 
 pub mod csrf;
 pub mod jwt;
+pub mod license;
 pub mod password;
 pub mod permissions;
 pub mod scope;
