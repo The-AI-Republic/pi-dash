@@ -17,7 +17,9 @@ Two responsibilities:
 
 3. ``next_fire_from_rrule(...)`` — return the next datetime an RRULE
    bundle is due after ``now`` (UTC). Honors ``dtstart``, ``tzid``,
-   ``rrule``, ``rdates``, ``exdates``. Returns ``None`` on parse error.
+   ``rrule``, ``rdates``, ``exdates``. Returns ``None`` on parse error
+   *and* on a legitimately exhausted series; ``next_fire_with_error(...)``
+   is the variant that distinguishes the two.
 
 This module is intentionally Django-free so the migration can import it
 without setting up the apps registry.
@@ -277,8 +279,37 @@ def next_fire_from_rrule(
 ) -> Optional[datetime]:
     """Return the next datetime the RRULE bundle is due strictly after ``now``.
 
-    Returns ``None`` on parse error (caller treats as a configuration error
-    and disables the binding).
+    Returns ``None`` both on parse error and when the series is legitimately
+    exhausted (a finite COUNT/UNTIL series with nothing left, or a single-shot
+    whose ``dtstart`` has passed). Callers that need to tell those two cases
+    apart use :func:`next_fire_with_error`.
+    """
+    nxt, _err = next_fire_with_error(
+        dtstart=dtstart,
+        rrule_str=rrule_str,
+        tzid=tzid,
+        rdates=rdates,
+        exdates=exdates,
+        now=now,
+    )
+    return nxt
+
+
+def next_fire_with_error(
+    *,
+    dtstart: datetime,
+    rrule_str: str,
+    tzid: str = "UTC",
+    rdates: Optional[Sequence[datetime]] = None,
+    exdates: Optional[Sequence[datetime]] = None,
+    now: Optional[datetime] = None,
+) -> tuple[Optional[datetime], Optional[str]]:
+    """Return ``(next_fire, error)`` for the RRULE bundle.
+
+    - ``(datetime, None)`` — the bundle is valid and fires again after ``now``.
+    - ``(None, None)`` — the bundle is valid but the series has no occurrence
+      after ``now`` (finite series exhausted / single-shot already past).
+    - ``(None, str)`` — the bundle failed to parse; the string is the error.
 
     Semantics:
     - ``dtstart`` is the series anchor. If ``rrule_str`` is empty, the rule
@@ -327,13 +358,13 @@ def next_fire_from_rrule(
                 ahead = sorted(d for d in (rdates or ()) if d > base)
                 nxt = ahead[0] if ahead else None
         if nxt is None:
-            return None
+            return None, None
         if nxt.tzinfo is None:
             nxt = nxt.replace(tzinfo=dt_timezone.utc)
-        return nxt.astimezone(dt_timezone.utc)
+        return nxt.astimezone(dt_timezone.utc), None
     except (ValueError, TypeError) as e:
         logger.warning("scheduler.rrule_parse: bad rrule=%r err=%s", rrule_str, e)
-        return None
+        return None, str(e)
 
 
 def occurrences_between(
