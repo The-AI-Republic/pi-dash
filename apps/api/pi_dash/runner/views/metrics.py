@@ -18,6 +18,9 @@ Schema (all gauges):
   awaiting_reauth).
 - ``pi_dash_approvals_pending``: count of ApprovalRequests with
   ``status=pending``.
+- ``pi_dash_runs_failed_by_reason{reason="…"}``: count of FAILED
+  AgentRuns per canonical ``failure_reason`` (PDASHOSS01-183). Rows that
+  predate the taxonomy backfill (blank reason) are omitted.
 """
 
 from __future__ import annotations
@@ -54,6 +57,17 @@ def _gauge(name: str, help_text: str, value: int) -> str:
     )
 
 
+def _labeled_gauge(name: str, help_text: str, rows: list[tuple[str, str, int]]) -> str:
+    """One gauge family with a single label. ``rows`` is
+    ``[(label_key, label_value, value), …]``; label values are escaped per
+    the Prometheus text format."""
+    lines = [f"# HELP {name} {help_text}", f"# TYPE {name} gauge"]
+    for key, value, count in rows:
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'{name}{{{key}="{escaped}"}} {count}')
+    return "\n".join(lines) + "\n"
+
+
 class MetricsEndpoint(APIView):
     authentication_classes: list = []
     permission_classes = [AllowAny]
@@ -74,6 +88,12 @@ class MetricsEndpoint(APIView):
         pending_approvals = ApprovalRequest.objects.filter(
             status=ApprovalStatus.PENDING
         ).count()
+        failed_by_reason = sorted(
+            AgentRun.objects.filter(status=AgentRunStatus.FAILED)
+            .exclude(failure_reason="")
+            .values_list("failure_reason")
+            .annotate(c=Count("id"))
+        )
 
         body = "".join([
             _gauge(
@@ -100,6 +120,11 @@ class MetricsEndpoint(APIView):
                 "pi_dash_approvals_pending",
                 "ApprovalRequests waiting for a decision.",
                 pending_approvals,
+            ),
+            _labeled_gauge(
+                "pi_dash_runs_failed_by_reason",
+                "FAILED AgentRuns per canonical failure_reason.",
+                [("reason", reason, count) for reason, count in failed_by_reason],
             ),
         ])
         return HttpResponse(body, content_type="text/plain; version=0.0.4")
