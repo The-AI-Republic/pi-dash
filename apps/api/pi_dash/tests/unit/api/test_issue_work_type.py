@@ -170,3 +170,80 @@ def test_work_type_for_issue_resolves_override_then_project_default(db, workspac
     issue.work_type = "general"
     issue.save()
     assert _work_type_for_issue(issue) == "general"
+
+
+def _running_agent_run(issue, create_user):
+    return AgentRun.objects.create(
+        workspace=issue.workspace,
+        created_by=create_user,
+        work_item=issue,
+        status=AgentRunStatus.RUNNING,
+        phase_kind="coding-task",
+        prompt="x",
+        started_at=timezone.now(),
+    )
+
+
+@pytest.mark.unit
+def test_headerless_human_patch_succeeds_despite_active_run(api_key_client, workspace, issue, create_user):
+    # A human patching from their own shell sends no run-id header. The
+    # headerless caller inference (kept for tick attribution of pre-run-id
+    # binaries) must not extend the work-type lock to them, even while a run
+    # they created is active on the issue.
+    _running_agent_run(issue, create_user)
+    resp = api_key_client.patch(_patch_url(workspace, issue), {"work_type": "general"}, format="json")
+    assert resp.status_code == http_status.HTTP_200_OK, resp.data
+    issue.refresh_from_db()
+    assert issue.work_type == "general"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("group,name", [("review", "In Review"), ("test", "In Test")])
+def test_agent_lock_applies_in_review_and_test(api_key_client, workspace, project, issue, create_user, group, name):
+    with impersonate(create_user):
+        state = State.objects.create(name=name, project=project, workspace=workspace, group=group)
+    Issue.all_objects.filter(pk=issue.pk).update(state=state)
+    issue.refresh_from_db()
+    run = _running_agent_run(issue, create_user)
+    resp = api_key_client.patch(
+        _patch_url(workspace, issue),
+        {"work_type": "general"},
+        format="json",
+        HTTP_X_PI_DASH_RUN_ID=str(run.id),
+    )
+    assert resp.status_code == http_status.HTTP_403_FORBIDDEN
+    issue.refresh_from_db()
+    assert issue.work_type is None
+
+
+@pytest.mark.unit
+def test_agent_cannot_change_project_default_work_type(api_key_client, workspace, issue, create_user):
+    # The per-issue lock must not be sidesteppable by patching the project's
+    # default instead: a run-attributed request may not change it.
+    url = f"/api/v1/workspaces/{workspace.slug}/projects/{issue.project_id}/"
+    run = _running_agent_run(issue, create_user)
+    resp = api_key_client.patch(url, {"default_work_type": "general"}, format="json", HTTP_X_PI_DASH_RUN_ID=str(run.id))
+    assert resp.status_code == http_status.HTTP_403_FORBIDDEN
+    issue.project.refresh_from_db()
+    assert issue.project.default_work_type == "software"
+    # The same change from a human (no header) succeeds.
+    resp = api_key_client.patch(url, {"default_work_type": "general"}, format="json")
+    assert resp.status_code == http_status.HTTP_200_OK, resp.data
+    issue.project.refresh_from_db()
+    assert issue.project.default_work_type == "general"
+
+
+@pytest.mark.unit
+def test_app_project_serializer_validates_default_work_type(db, workspace, project):
+    # The app tier is what the web settings form writes through; it must
+    # enforce the same registry check as the external serializers.
+    from pi_dash.app.serializers.project import ProjectSerializer as AppProjectSerializer
+
+    serializer = AppProjectSerializer(
+        project,
+        data={"default_work_type": "carpentry"},
+        partial=True,
+        context={"workspace_id": workspace.id},
+    )
+    assert not serializer.is_valid()
+    assert "default_work_type" in serializer.errors

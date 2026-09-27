@@ -29,6 +29,8 @@ This is what "deliver the current part" in "Implementation and validation" means
 
 In the hand-off comment's `### How to Test` block ("Implementation and validation"), `Setup` names where each deliverable lives and how to open it (page, file path, or the record that was changed), plus anything needed to verify it. When the issue was delivered as several parts, list **every** deliverable.
 
+For `Kind`, pick from how general deliverables are verified: `DOCUMENT` (the consumer is a reader who must act on it), `ACTION / RECORD` (the consumer depends on the changed state or record), or `GENERIC` (verify the stated acceptance criteria one by one). The test phase's guidance defines each in full — name the kind here so that phase starts on the right foot.
+
 ### Guardrails
 
 - Prefer updating an existing page or document over creating a near-duplicate.
