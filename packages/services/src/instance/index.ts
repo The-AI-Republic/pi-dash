@@ -6,3 +6,4 @@
 
 export * from "./instance.service";
 export * from "./loop.service";
+export * from "./runner.service";
