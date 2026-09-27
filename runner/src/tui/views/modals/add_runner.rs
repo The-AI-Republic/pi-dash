@@ -133,6 +133,7 @@ impl AddRunnerView {
                     summary: "add runner failed".into(),
                     detail: Some(e.to_string()),
                     service_state: "unknown".into(),
+                    warnings: None,
                 },
             };
             tx.send(AppEvent::ReloadOutcomeUpdated(outcome));
