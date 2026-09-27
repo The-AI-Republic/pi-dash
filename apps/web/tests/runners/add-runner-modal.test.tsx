@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -161,9 +161,11 @@ describe("AddRunnerModal", () => {
 
   // SWR caches by key across tests in this file; pass a unique
   // workspaceId when a test needs fresh dev-machine data.
-  function renderModal(workspaceId = "workspace-1") {
+  function renderModal(workspaceId = "workspace-1", projectId?: string) {
     const onClose = vi.fn();
-    const utils = render(<AddRunnerModal isOpen onClose={onClose} workspaceId={workspaceId} workspaceSlug="acme" />);
+    const utils = render(
+      <AddRunnerModal isOpen onClose={onClose} workspaceId={workspaceId} workspaceSlug="acme" projectId={projectId} />
+    );
     return { ...utils, onClose };
   }
 
@@ -198,6 +200,37 @@ describe("AddRunnerModal", () => {
     expect(command.textContent).toContain("--agent codex");
     expect(command.textContent).not.toContain("pidash connect");
     expect(command.textContent).not.toContain("--token");
+  });
+
+  it("prefills and locks the project when opened from a project-scoped page", async () => {
+    const user = userEvent.setup();
+    // ``project-1`` is the route UUID; the modal resolves it to the BROWSERX
+    // identifier from the projects-lite list.
+    renderModal("workspace-scoped", "project-1");
+
+    await screen.findByRole("option", { name: "BrowserX" });
+    const projectSelect = screen.getAllByTestId("select")[1];
+    await waitFor(() => expect(projectSelect).toHaveValue("BROWSERX"));
+    // Field is locked — creating a runner for another project from inside a
+    // project page is intentionally disallowed here.
+    expect(projectSelect).toBeDisabled();
+
+    // No user action on the Project field needed; the generated command
+    // carries the prefilled identifier.
+    await user.click(screen.getByRole("button", { name: "Generate Runner" }));
+    const command = await screen.findByText(
+      (_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre"
+    );
+    expect(command.textContent).toContain("--project BROWSERX");
+  });
+
+  it("leaves the project empty and editable when no projectId is supplied", async () => {
+    renderModal("workspace-unscoped");
+
+    await screen.findByRole("option", { name: "BrowserX" });
+    const projectSelect = screen.getAllByTestId("select")[1];
+    expect(projectSelect).toHaveValue("");
+    expect(projectSelect).not.toBeDisabled();
   });
 
   it("lets the user go back and edit the form after generating a command", async () => {
