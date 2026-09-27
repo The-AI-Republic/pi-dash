@@ -475,14 +475,18 @@ def test_re_tick_in_test_grants_to_the_shared_pool(
 
 
 @pytest.mark.unit
-def test_deferred_pause_skips_when_disarm_reason_is_terminal_signal(
-    seeded, issue, states, runner_for_workspace, create_user
+@pytest.mark.parametrize(
+    "reason", [TickerDisarmReason.STOP_SIGNAL, TickerDisarmReason.TERMINAL_SIGNAL]
+)
+def test_deferred_pause_skips_when_disarmed_by_a_signal(
+    seeded, issue, states, runner_for_workspace, create_user, reason
 ):
-    """Terminal-signal disarm must NOT cascade into auto-Pause."""
+    """A stop-signal disarm (or a legacy terminal-signal row) must NOT
+    cascade into auto-Pause."""
     _to_in_progress(issue, states)
     sched = scheduling.arm_ticker(issue)
     sched.enabled = False
-    sched.disarm_reason = TickerDisarmReason.TERMINAL_SIGNAL
+    sched.disarm_reason = reason
     sched.save(update_fields=["enabled", "disarm_reason"])
     run = AgentRun.objects.create(
         workspace=issue.workspace,
@@ -531,14 +535,16 @@ def test_deferred_pause_skips_when_other_active_run_exists(
 
 
 # ---------------------------------------------------------------------------
-# maybe_disarm_on_terminal_signal — new in PR A
+# maybe_disarm_on_terminal_signal — stops only on an explicit stop signal
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_disarm_on_terminal_signal_completed(
+def test_disarm_only_on_stop_signal_not_on_completed(
     seeded, issue, states, runner_for_workspace, create_user
 ):
+    """A ``completed`` (legacy alias for ``done``) without ``stop_ticking``
+    is informational: the clock keeps ticking (PDASHOSS01-247)."""
     _to_in_progress(issue, states)
     sched = scheduling.arm_ticker(issue)
     assert sched.enabled is True
@@ -552,14 +558,36 @@ def test_disarm_on_terminal_signal_completed(
         prompt="x",
     )
     applied = scheduling.maybe_disarm_on_terminal_signal(run)
-    assert applied is True
+    assert applied is False
     sched.refresh_from_db()
-    assert sched.enabled is False
-    assert sched.disarm_reason == TickerDisarmReason.TERMINAL_SIGNAL
+    assert sched.enabled is True
+    assert sched.disarm_reason == TickerDisarmReason.NONE
 
 
 @pytest.mark.unit
-def test_disarm_on_terminal_signal_blocked(
+def test_disarm_on_stop_signal(
+    seeded, issue, states, runner_for_workspace, create_user
+):
+    _to_in_progress(issue, states)
+    sched = scheduling.arm_ticker(issue)
+    run = AgentRun.objects.create(
+        workspace=issue.workspace,
+        created_by=create_user,
+        pod=runner_for_workspace.pod,
+        work_item=issue,
+        status=AgentRunStatus.COMPLETED,
+        done_payload={"status": "waiting_on_human", "stop_ticking": True},
+        prompt="x",
+    )
+    applied = scheduling.maybe_disarm_on_terminal_signal(run)
+    assert applied is True
+    sched.refresh_from_db()
+    assert sched.enabled is False
+    assert sched.disarm_reason == TickerDisarmReason.STOP_SIGNAL
+
+
+@pytest.mark.unit
+def test_blocked_without_stop_signal_keeps_ticking(
     seeded, issue, states, runner_for_workspace, create_user
 ):
     _to_in_progress(issue, states)
@@ -574,20 +602,18 @@ def test_disarm_on_terminal_signal_blocked(
         prompt="x",
     )
     applied = scheduling.maybe_disarm_on_terminal_signal(run)
-    assert applied is True
+    assert applied is False
     sched.refresh_from_db()
-    assert sched.enabled is False
-    assert sched.disarm_reason == TickerDisarmReason.TERMINAL_SIGNAL
+    assert sched.enabled is True
 
 
 @pytest.mark.unit
-def test_disarm_on_terminal_signal_legacy_noop_follows_the_kind(
+def test_legacy_noop_keeps_ticking_in_every_kind(
     seeded, issue, states, runner_for_workspace, create_user
 ):
-    """The legacy ``noop`` status means "nothing changed". For an
-    implementation run that must keep ticking (CI may still be running);
-    for a review run the stage is satisfied and the clock stops instead of
-    ticking to the cap saying "no change"."""
+    """The legacy ``noop`` status means "nothing changed" — informational
+    in every stage now; a review that found nothing new keeps ticking and
+    the budget bounds the cost."""
     _to_in_progress(issue, states)
     sched = scheduling.arm_ticker(issue)
     impl = AgentRun.objects.create(
@@ -618,18 +644,18 @@ def test_disarm_on_terminal_signal_legacy_noop_follows_the_kind(
         done_payload={"status": "noop"},
         prompt="x",
     )
-    assert scheduling.maybe_disarm_on_terminal_signal(review) is True
+    assert scheduling.maybe_disarm_on_terminal_signal(review) is False
     sched.refresh_from_db()
-    assert sched.enabled is False
-    assert sched.disarm_reason == TickerDisarmReason.TERMINAL_SIGNAL
+    assert sched.enabled is True
 
 
 @pytest.mark.unit
-def test_disarm_on_terminal_signal_paused_waits_on_human(
+def test_paused_run_keeps_ticking_without_stop_signal(
     seeded, issue, states, runner_for_workspace, create_user
 ):
-    """A paused run asked the human something: ``waiting_on_human`` stops
-    the clock until a human acts (Comment & Run re-arms it)."""
+    """A paused run asked the human something: ``waiting_on_human`` is
+    informational and the clock keeps ticking; a Comment & Run re-engages
+    sooner."""
     _to_in_progress(issue, states)
     sched = scheduling.arm_ticker(issue)
     run = AgentRun.objects.create(
@@ -642,14 +668,13 @@ def test_disarm_on_terminal_signal_paused_waits_on_human(
         prompt="x",
     )
     applied = scheduling.maybe_disarm_on_terminal_signal(run)
-    assert applied is True
+    assert applied is False
     sched.refresh_from_db()
-    assert sched.enabled is False
-    assert sched.disarm_reason == TickerDisarmReason.TERMINAL_SIGNAL
+    assert sched.enabled is True
 
 
 @pytest.mark.unit
-def test_disarm_on_terminal_signal_idempotent(
+def test_disarm_on_stop_signal_idempotent(
     seeded, issue, states, runner_for_workspace, create_user
 ):
     """Running the hook twice in a row is safe; the second call is a
@@ -662,27 +687,27 @@ def test_disarm_on_terminal_signal_idempotent(
         pod=runner_for_workspace.pod,
         work_item=issue,
         status=AgentRunStatus.COMPLETED,
-        done_payload={"status": "completed"},
+        done_payload={"status": "done", "stop_ticking": True},
         prompt="x",
     )
     assert scheduling.maybe_disarm_on_terminal_signal(run) is True
     sched = IssueAgentTicker.objects.get(issue=issue)
     assert sched.enabled is False
-    assert sched.disarm_reason == TickerDisarmReason.TERMINAL_SIGNAL
+    assert sched.disarm_reason == TickerDisarmReason.STOP_SIGNAL
     # Second call is a no-op because the ticker is already disabled —
     # this is what protects the cap-hit auto-pause path.
     assert scheduling.maybe_disarm_on_terminal_signal(run) is False
     sched.refresh_from_db()
     assert sched.enabled is False
-    assert sched.disarm_reason == TickerDisarmReason.TERMINAL_SIGNAL
+    assert sched.disarm_reason == TickerDisarmReason.STOP_SIGNAL
 
 
 @pytest.mark.unit
-def test_terminal_signal_preserves_cap_hit_reason(
+def test_stop_signal_preserves_cap_hit_reason(
     seeded, issue, states, runner_for_workspace, create_user
 ):
     """Critical race: cap-hit fires during a tick, the dispatched run
-    later emits ``completed``. The terminal-disarm hook must NOT
+    later yields with ``stop_ticking``. The disarm hook must NOT
     overwrite the CAP_HIT reason or the auto-pause path is skipped."""
     _to_in_progress(issue, states)
     sched = scheduling.arm_ticker(issue)
@@ -695,7 +720,7 @@ def test_terminal_signal_preserves_cap_hit_reason(
         pod=runner_for_workspace.pod,
         work_item=issue,
         status=AgentRunStatus.COMPLETED,
-        done_payload={"status": "completed"},
+        done_payload={"status": "done", "stop_ticking": True},
         prompt="x",
     )
     applied = scheduling.maybe_disarm_on_terminal_signal(run)
@@ -711,11 +736,11 @@ def test_terminal_signal_preserves_cap_hit_reason(
 
 
 @pytest.mark.unit
-def test_terminal_signal_then_deferred_pause_does_not_auto_pause(
+def test_stop_signal_then_deferred_pause_does_not_auto_pause(
     seeded, issue, states, runner_for_workspace, create_user
 ):
-    """The combined ordering used by the runner consumer (terminal
-    disarm before deferred pause) must NOT cascade into auto-Pause."""
+    """The combined ordering used by the runner consumer (signal disarm
+    before deferred pause) must NOT cascade into auto-Pause."""
     _to_in_progress(issue, states)
     scheduling.arm_ticker(issue)
     run = AgentRun.objects.create(
@@ -724,10 +749,12 @@ def test_terminal_signal_then_deferred_pause_does_not_auto_pause(
         pod=runner_for_workspace.pod,
         work_item=issue,
         status=AgentRunStatus.COMPLETED,
-        done_payload={"status": "completed"},
+        done_payload={"status": "done", "stop_ticking": True},
         prompt="x",
     )
     scheduling.maybe_disarm_on_terminal_signal(run)
+    sched = IssueAgentTicker.objects.get(issue=issue)
+    assert sched.disarm_reason == TickerDisarmReason.STOP_SIGNAL
     applied = scheduling.maybe_apply_deferred_pause(run)
     assert applied is False
     issue.refresh_from_db()
@@ -735,10 +762,13 @@ def test_terminal_signal_then_deferred_pause_does_not_auto_pause(
 
 
 @pytest.mark.unit
-def test_arm_ticker_clears_disarm_reason(seeded, issue, states):
+@pytest.mark.parametrize(
+    "reason", [TickerDisarmReason.STOP_SIGNAL, TickerDisarmReason.TERMINAL_SIGNAL]
+)
+def test_arm_ticker_clears_disarm_reason(seeded, issue, states, reason):
     _to_in_progress(issue, states)
     sched = scheduling.arm_ticker(issue)
-    sched.disarm_reason = TickerDisarmReason.TERMINAL_SIGNAL
+    sched.disarm_reason = reason
     sched.enabled = False
     sched.save(update_fields=["disarm_reason", "enabled"])
     sched = scheduling.arm_ticker(issue)

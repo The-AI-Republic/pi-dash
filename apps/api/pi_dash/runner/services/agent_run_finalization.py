@@ -23,8 +23,9 @@ TERMINAL_STATUSES = {
 #: Keys ``pidash run yield`` writes on ``done_payload`` (see
 #: ``AgentRunYieldAPIEndpoint``). A bridge's own terminal payload
 #: (``{"conclusion": …}``) arrives *after* the yield and must not erase it —
-#: the ticker reads ``status`` from here to decide whether to tick again.
-YIELD_KEYS = ("status", "note", "yielded_at")
+#: the ticker reads ``stop_ticking`` (and, informationally, ``status``)
+#: from here to decide whether to tick again.
+YIELD_KEYS = ("status", "note", "yielded_at", "stop_ticking")
 
 
 def merge_done_payload(existing, incoming):
