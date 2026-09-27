@@ -9,17 +9,28 @@ There is no fenced `pi-dash-done` block. The cloud does not parse your final tur
 
 ### Report the outcome — `pidash run yield` (always, as your last `pidash` call)
 
-The ticking clock reads exactly one signal from a run: the outcome you report. Without it the clock guesses (it keeps ticking for In Progress; it stops for review / test). Report it after the state move, as the last thing you do:
+The outcome you report is informational: it tells Pi Dash, and the humans reading the run history, what this run did. **No outcome stops the issue's ticking clock** — not `done`, not `blocked`, not `waiting_on_human` — and a run that reports nothing keeps ticking too. The clock stops only on an explicit `--stop-ticking` from you (next block), on the issue leaving the ticking states, on the tick budget running out, or on a human switching it off. Report the outcome after the state move, as the last thing you do:
 
 ```sh
-pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--note "<one line>"]
+pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--stop-ticking] [--note "<one line>"]
 ```
 
-- `progressed` — you did work and there is more to do in this stage; tick again.
-- `waiting_on_human` — you asked the human a question, or the budget is spent and you told them; the clock stops until a human acts.
-- `waiting_on_external` — In Progress is waiting on CI or a merge; keep ticking.
-- `done` — this stage's exit condition is met: you moved the issue on, **or** it is approved / verified and stays where it is. The clock for this stage stops; the next stage's run (if any) is already queued.
+- `progressed` — you did work and there is more to do in this stage.
+- `waiting_on_human` — you asked the human a question and the issue now waits on their answer.
+- `waiting_on_external` — you are waiting on something outside this issue that needs no human: CI, a merge, a dependency issue. Valid in every stage, not just In Progress.
+- `done` — **this run's turn is done**: the stage's exit condition is met and you moved the issue on, or your pass finished and there is nothing more for this run to add. It says nothing about the clock — the next tick still comes unless you also send `--stop-ticking`.
 - `blocked` — you cannot proceed; you followed "Blocking the run".
+
+### Stopping the clock — `--stop-ticking`
+
+The clock keeps re-invoking the agent while the issue sits in a ticking state (In Progress, In Review, In Test). Add `--stop-ticking` to your yield to stop it — it is the only run-side signal that does. Send it proactively when no further agent run belongs on this issue:
+
+- the issue itself is finished — a test pass verified everything and only a human close remains, or an approved review has no `test` state to move on to; or
+- no further agent run can do anything useful until a human acts — the issue is parked for a human decision or close, or you asked a question and the issue waits on the answer.
+
+**Never send it while work remains that a later run could pick up.** Waiting on CI, a merge, or a dependency issue is `waiting_on_external` — leave the clock ticking so a later run re-checks. When you are unsure whether a human is truly the only way forward, keep ticking: the budget bounds the cost of extra ticks, but a wrong stop strands the issue silently.
+
+A stopped clock is re-armed by a human reply ("Comment & Run"), a state move, Run AI, or Re-tick — so stopping is not final. But nothing stops the clock for you, and nothing except those human actions restarts it.
 
 The report is tied to this run (`PIDASH_RUN_ID` in your environment); a run that has already moved the issue on is never mistaken for the next stage's run, so the order of "move" and "yield" does not matter for correctness — but do both.
 
@@ -48,7 +59,7 @@ If any item fails this check, fix the workpad before exiting — `pidash workpad
      - **Move a successfully finished issue to the `review` group — usually "In Review" — whether or not you opened a PR.** A `code_change` that opened a PR is awaiting human review and merge; a finished `noncode` task (a question answered in a comment, a debug/investigation with the root cause posted, a status check) is awaiting a human's acknowledgement. In **both** cases the runner's job is done but the *issue* is not — a human (or a separate supporting process) closes it to Done. Marking it "Done" yourself drops it off the user's radar prematurely.
        `pidash issue patch {{ issue.identifier }} --state "In Review"`
        Pick the state from "Available states" whose `group` is `review`. **Only** if this project exposes no `review`-group state at all, leave the issue in its current state and let the human move it.
-     - So for the classic examples — "what color is the home page button?" or "help debug why X" — answer fully in an issue comment, then move the issue to **In Review**. Do **not** move it to Done just because you finished answering.{% elif run.kind == "test" %} Resolve the destination from this test pass's outcome — see "Test cycle" Step 3: a **pass** posts its results comment and **leaves the issue In Test** (the runner never moves it to Done); **defects** go **back to In Progress** with open items listed on the workpad; **cannot run** follows "Blocking the run"; a **clarification** follows "Blocking the run". Match the target `group` first in "Available states", then the name.{% else %} Resolve the destination from this review pass's outcome — see "Review cycle" Step 3: an **approved** review posts its summary and moves the issue to **In Test** (or leaves it In Review if the project has no `test` state; the runner never moves it to Done); **changes needed** goes **back to In Progress** with open items listed on the workpad; a **clarification** follows "Blocking the run". Match the target `group` first in "Available states", then the name.{% endif %}
+     - So for the classic examples — "what color is the home page button?" or "help debug why X" — answer fully in an issue comment, then move the issue to **In Review**. Do **not** move it to Done just because you finished answering.{% elif run.kind == "test" %} Resolve the destination from this test pass's outcome — see "Test cycle" Step 3: a **pass** posts its results comment and **leaves the issue In Test**, yielding `done --stop-ticking` so a human takes it from there — except where the project explicitly lets agents merge and close, in which case merge and move it to Done (the move leaves the ticking states); **defects** go **back to In Progress** with open items listed on the workpad; **cannot run** follows "Blocking the run"; a **clarification** follows "Blocking the run"; **nothing changed** stays In Test with `waiting_on_external` (waiting on CI or a dependency — keep ticking) or `waiting_on_human --stop-ticking` (waiting on a human). Match the target `group` first in "Available states", then the name.{% else %} Resolve the destination from this review pass's outcome — see "Review cycle" Step 3: an **approved** review posts its summary and moves the issue to **In Test** (or, if the project has no `test` state, leaves it In Review with `done --stop-ticking`; the runner never moves it to Done); **changes needed** goes **back to In Progress** with open items listed on the workpad; a **clarification** follows "Blocking the run"; **waiting on CI or the PR** stays In Review with `waiting_on_external` (keep ticking); **waiting on a human reviewer** stays In Review with `waiting_on_human --stop-ticking`. Match the target `group` first in "Available states", then the name.{% endif %}
 
 2. **If the run is blocked** (missing auth, missing access, or a decision only a human can make):
    - Wrote the final workpad noting the blocker and setting `Awaiting human reply` to point at the comment.
