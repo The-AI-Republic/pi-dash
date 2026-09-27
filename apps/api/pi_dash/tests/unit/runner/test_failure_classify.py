@@ -254,3 +254,28 @@ def test_runner_stall_detail_with_stderr_tail_stays_platform_side():
         "stderr tail (1 line(s)):\n  npm err! ENOTFOUND registry.npmjs.org"
     )
     assert classify(detail) == RunFailureReason.TIMEOUT
+
+
+def test_internal_reason_consults_text_rules_for_codex_bridge_errors():
+    """The Codex bridge reports agent-side turn/API errors as ``internal``;
+    the server text rules recover the real bucket from the detail, and a
+    detail that says nothing agent-ish stays platform-internal."""
+    assert (
+        classify("stream error: 401 Unauthorized", runner_reason="internal")
+        == RunFailureReason.AGENT_PROVIDER_AUTH
+    )
+    assert (
+        classify(
+            "The selected model may not exist or you may not have access to it.",
+            runner_reason="internal",
+        )
+        == RunFailureReason.AGENT_MODEL_NOT_FOUND
+    )
+    assert (
+        classify("turn/completed without conclusion", runner_reason="internal")
+        == RunFailureReason.INTERNAL
+    )
+
+
+def test_cancelled_runner_reason_maps_platform_side():
+    assert classify("openclaw stopReason: cancelled", runner_reason="cancelled") == RunFailureReason.INTERNAL

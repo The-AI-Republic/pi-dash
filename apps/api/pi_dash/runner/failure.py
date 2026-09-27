@@ -199,12 +199,14 @@ _RUNNER_REASON_MAP: dict[str, RunFailureReason] = {
     "network": RunFailureReason.NETWORK,
     "max_turns": RunFailureReason.MAX_TURNS,
     "timeout": RunFailureReason.TIMEOUT,
-    "internal": RunFailureReason.INTERNAL,
     "daemon_restart": RunFailureReason.DAEMON_RESTART,
     "assign_rejected_busy": RunFailureReason.ASSIGN_REJECTED_BUSY,
     # Legacy value no longer emitted; a very old runner that still sends it
     # had a runner-side session problem, not an agent one.
     "resume_unavailable": RunFailureReason.INTERNAL,
+    # A bridge-observed local cancellation surfaced through the failure
+    # path rather than the RunCancelled frame.
+    "cancelled": RunFailureReason.INTERNAL,
 }
 
 _AGENT_CRASH_RUNNER_REASONS = frozenset({"agent_crash", "codex_crash"})
@@ -406,6 +408,16 @@ def classify(
     detail = str(raw_error or "").strip()
     if reason_key in _AGENT_CRASH_RUNNER_REASONS:
         return _classify_agent_text(detail)
+
+    if reason_key == "internal":
+        # Deployed runners' Codex bridge reports agent-side turn / API
+        # errors (provider 401s, model-not-allowed 400s) as ``internal``,
+        # so the detail deserves the text rules; only a detail that says
+        # nothing agent-ish stays platform-internal. Text classification
+        # living here (not in the runner) is what lets this improve
+        # without a runner release.
+        result = _classify_agent_text(detail)
+        return result if result != RunFailureReason.AGENT_UNKNOWN else RunFailureReason.INTERNAL
 
     code_key = str(error_code or "").strip().lower()
     if code_key in _ERROR_CODE_MAP:
