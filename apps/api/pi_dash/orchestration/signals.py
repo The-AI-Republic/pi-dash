@@ -94,6 +94,10 @@ def fire_state_transition(sender, instance: Issue, created: bool, **kwargs) -> N
             actor=None,
             dispatch_immediate=dispatch_immediate,
             moved_by_run=moved_by_run,
+            # A real transition (the issue already had a state) gets the
+            # settling window before its entry run fires; creation directly
+            # into a ticking state is deliberate and dispatches immediately.
+            settle=from_state is not None,
         )
     except Exception:  # noqa: BLE001 — never let orchestration crash issue save
         orchestration_error_count += 1

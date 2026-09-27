@@ -728,3 +728,232 @@ def test_queued_hand_back_parents_off_the_implementation_run(seeded, issue, stat
     back = AgentRun.objects.filter(work_item=issue).order_by("-created_at").first()
     assert back.phase_kind == "coding-task"
     assert back.parent_run_id == impl.id
+
+
+# ---------------------------------------------------------------------------
+# The settling window on dispatch-triggering transitions
+# (``.ai_design/state_transition_debounce/design.md``)
+# ---------------------------------------------------------------------------
+#
+# These go through real ``Issue.save()`` calls so the post_save signal sets
+# ``settle=True`` — the production path a kanban drag takes.
+
+
+def _transition(issue, states, key):
+    """Change state *with* the post_save signal (a real human move).
+
+    Impersonates the issue creator so ``BaseModel.save`` keeps the audit
+    fields — in production the request middleware always provides a
+    current user; a bare save in tests would null ``created_by``.
+    """
+    with impersonate(issue.created_by):
+        issue.state = states[key]
+        issue.save()
+    issue.refresh_from_db()
+    return issue
+
+
+def _force_due(ticker):
+    from datetime import timedelta
+
+    IssueAgentTicker.objects.filter(pk=ticker.pk).update(next_run_at=timezone.now() - timedelta(seconds=1))
+
+
+@pytest.mark.unit
+def test_settled_transition_holds_the_entry_instead_of_dispatching(seeded, issue, states, runner_for_workspace):
+    _transition(issue, states, "in_progress")
+    assert AgentRun.objects.filter(work_item=issue).count() == 0
+    t = IssueAgentTicker.objects.get(issue=issue)
+    assert t.pending_entry is True
+    assert t.pending_entry_free is True  # a human move is free
+    assert t.enabled is True
+    assert t.next_run_at > timezone.now()  # held for the window
+    # An early fire (a stale accelerator, a fast scanner pass) is a no-op.
+    from pi_dash.bgtasks.agent_ticker import fire_tick
+
+    assert fire_tick(str(t.id)) is False
+    assert AgentRun.objects.filter(work_item=issue).count() == 0
+
+
+@pytest.mark.unit
+def test_settled_first_delegation_fires_the_coding_run_after_the_window(seeded, issue, states, runner_for_workspace):
+    from pi_dash.bgtasks.agent_ticker import fire_tick
+
+    _transition(issue, states, "in_progress")
+    t = IssueAgentTicker.objects.get(issue=issue)
+    _force_due(t)
+    assert fire_tick(str(t.id)) is True
+    runs = AgentRun.objects.filter(work_item=issue)
+    assert runs.count() == 1
+    run = runs.get()
+    assert run.phase_kind == "coding-task"
+    assert run.trigger == "state_transition"
+    assert run.parent_run_id is None
+    t.refresh_from_db()
+    assert t.used == 0  # criterion 5: a human move spends nothing
+    assert t.pending_entry is False
+
+
+@pytest.mark.unit
+def test_settling_window_coalesces_rapid_moves_into_one_review_run(seeded, issue, states, runner_for_workspace):
+    """Todo → In Progress → In Review inside the window: exactly one run,
+    on the review template (acceptance criterion 1)."""
+    from pi_dash.bgtasks.agent_ticker import fire_tick
+
+    _transition(issue, states, "in_progress")
+    _transition(issue, states, "in_review")
+    assert AgentRun.objects.filter(work_item=issue).count() == 0
+    t = IssueAgentTicker.objects.get(issue=issue)
+    assert t.pending_entry is True and t.pending_entry_free is True
+    _force_due(t)
+    assert fire_tick(str(t.id)) is True
+    runs = AgentRun.objects.filter(work_item=issue)
+    assert runs.count() == 1
+    run = runs.get()
+    assert run.phase_kind == "review"
+    assert run.parent_run_id is None  # review enters on a fresh session
+    t.refresh_from_db()
+    assert t.used == 0
+
+
+@pytest.mark.unit
+def test_settling_window_move_back_out_cancels_the_pending_entry(seeded, issue, states, runner_for_workspace):
+    """Todo → In Progress → Todo inside the window: zero runs, no armed
+    clock (acceptance criterion 2)."""
+    from pi_dash.bgtasks.agent_ticker import fire_tick
+
+    _transition(issue, states, "in_progress")
+    _transition(issue, states, "todo")
+    t = IssueAgentTicker.objects.get(issue=issue)
+    assert t.pending_entry is False
+    assert t.enabled is False
+    assert t.next_run_at is None
+    assert fire_tick(str(t.id)) is False
+    assert AgentRun.objects.filter(work_item=issue).count() == 0
+
+
+@pytest.mark.unit
+def test_settling_window_preserves_used_and_granted(seeded, issue, states, runner_for_workspace):
+    """Criterion 5: no transition through the window resets the pool."""
+    _move(issue, states, "in_progress")
+    _ticker(issue, used=4, granted=10)
+    _transition(issue, states, "in_review")
+    _transition(issue, states, "in_progress")
+    t = IssueAgentTicker.objects.get(issue=issue)
+    assert t.used == 4
+    assert t.granted == 10
+    assert t.pending_entry is True and t.pending_entry_free is True
+
+
+@pytest.mark.unit
+def test_agent_move_through_the_signal_still_counts_and_never_settles(seeded, issue, states, runner_for_workspace):
+    """Criterion 3 — the regression that killed the old branch: a state
+    move made from inside an agent run (``moved_by_run`` carried through
+    the signal) is still classified as an agent move. The entry queues
+    immediately (no settle hold) and counts against the pool."""
+    from pi_dash.orchestration.signals import MOVED_BY_RUN_ATTR
+
+    _move(issue, states, "in_progress")
+    run = _run(issue, runner_for_workspace)
+    issue.state = states["in_review"]
+    setattr(issue, MOVED_BY_RUN_ATTR, run)
+    with impersonate(issue.created_by):
+        issue.save()
+    t = IssueAgentTicker.objects.get(issue=issue)
+    assert t.pending_entry is True
+    assert t.pending_entry_free is False  # counts against the pool
+    assert t.next_run_at <= timezone.now()  # no settle hold for agent moves
+
+
+@pytest.mark.unit
+def test_agent_move_with_pool_spent_through_the_signal_parks(seeded, issue, states, runner_for_workspace):
+    """Criterion 3, spent-pool half: an agent move on a spent pool fires
+    nothing — even after the window would have elapsed."""
+    from pi_dash.bgtasks.agent_ticker import fire_tick
+    from pi_dash.orchestration.signals import MOVED_BY_RUN_ATTR
+
+    _move(issue, states, "in_progress")
+    run = _run(issue, runner_for_workspace)
+    _ticker(issue, used=10)
+    issue.state = states["in_review"]
+    setattr(issue, MOVED_BY_RUN_ATTR, run)
+    with impersonate(issue.created_by):
+        issue.save()
+    t = IssueAgentTicker.objects.get(issue=issue)
+    assert t.pending_entry is False
+    assert t.enabled is False
+    assert t.disarm_reason == TickerDisarmReason.POOL_SPENT
+    assert fire_tick(str(t.id)) is False
+    assert AgentRun.objects.filter(work_item=issue).exclude(pk=run.pk).count() == 0
+
+
+@pytest.mark.unit
+def test_settled_move_schedules_a_precision_accelerator(seeded, issue, states, django_capture_on_commit_callbacks):
+    with mock.patch("pi_dash.bgtasks.agent_ticker.fire_tick.apply_async") as apply_async:
+        with django_capture_on_commit_callbacks(execute=True):
+            _transition(issue, states, "in_progress")
+    apply_async.assert_called_once()
+    assert apply_async.call_args.kwargs["countdown"] == scheduling.STATE_TRANSITION_SETTLE_SECONDS + 1
+
+
+@pytest.mark.unit
+def test_settled_move_while_a_run_is_active_fires_once_the_issue_is_free(seeded, issue, states, runner_for_workspace):
+    """Criterion 6: a room change with a run in flight still owes exactly
+    one entry run, fired when the issue is free (after the window)."""
+    from pi_dash.bgtasks.agent_ticker import fire_tick
+
+    _move(issue, states, "in_progress")
+    impl = _run(issue, runner_for_workspace, phase_kind="coding-task")
+    _transition(issue, states, "in_review")
+    t = IssueAgentTicker.objects.get(issue=issue)
+    assert t.pending_entry is True and t.pending_entry_free is True
+    _force_due(t)
+    # Window elapsed but the impl run still holds the seat: no fire.
+    assert fire_tick(str(t.id)) is False
+    AgentRun.objects.filter(pk=impl.pk).update(status=AgentRunStatus.COMPLETED)
+    assert fire_tick(str(t.id)) is True
+    review = AgentRun.objects.filter(work_item=issue).order_by("-created_at").first()
+    assert review.phase_kind == "review"
+    assert review.pk != impl.pk
+
+
+@pytest.mark.unit
+def test_deleted_issue_never_fires_a_settled_entry(seeded, issue, states, runner_for_workspace):
+    """Deletion inside the window cancels the pending dispatch."""
+    from pi_dash.bgtasks.agent_ticker import fire_tick
+
+    _transition(issue, states, "in_progress")
+    t = IssueAgentTicker.objects.get(issue=issue)
+    Issue.all_objects.filter(pk=issue.pk).update(deleted_at=timezone.now())
+    _force_due(t)
+    assert fire_tick(str(t.id)) is False
+    assert AgentRun.objects.filter(work_item=issue).count() == 0
+
+
+@pytest.mark.unit
+def test_bounced_settled_entry_does_not_rearm_the_clock(seeded, issue, states, project, create_user):
+    """A no-eligible-runner bounce at fire time must not re-enter the
+    window and loop: the post-dispatch rollback may not resurrect a clock
+    the bounce disarmed."""
+    from crum import impersonate
+
+    from pi_dash.bgtasks.agent_ticker import fire_tick
+    from pi_dash.db.models.issue import IssueComment
+
+    with impersonate(create_user):
+        State.objects.create(name="Backlog", project=project, group="backlog")
+    _transition(issue, states, "in_progress")
+    t = IssueAgentTicker.objects.get(issue=issue)
+    _force_due(t)
+    # No runner registered in the pod → preflight bounces to Backlog.
+    assert fire_tick(str(t.id)) is False
+    issue.refresh_from_db()
+    assert issue.state.group == "backlog"
+    t.refresh_from_db()
+    assert t.enabled is False
+    assert t.pending_entry is False
+    assert AgentRun.objects.filter(work_item=issue).count() == 0
+    assert IssueComment.objects.filter(issue=issue).count() == 1
+    # A stale accelerator after the bounce is a no-op — no comment spam.
+    assert fire_tick(str(t.id)) is False
+    assert IssueComment.objects.filter(issue=issue).count() == 1
