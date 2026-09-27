@@ -105,6 +105,16 @@ def test_invalid_status_rejected(world, instance_admin):
     assert res.data["error"] == "invalid_status"
 
 
+def test_empty_filter_values_rejected(world, instance_admin):
+    # ?provisioning= / ?status= (present but empty) is a 400, not "no filter".
+    res = _client(instance_admin).get(RUNNERS_URL + "?provisioning=")
+    assert res.status_code == 400
+    assert res.data["error"] == "invalid_provisioning"
+    res = _client(instance_admin).get(RUNNERS_URL + "?status=")
+    assert res.status_code == 400
+    assert res.data["error"] == "invalid_status"
+
+
 def test_workspace_filter(world, instance_admin):
     make_runner(world, name="in-ws")
     res = _client(instance_admin).get(RUNNERS_URL, {"workspace": world.ws.slug})

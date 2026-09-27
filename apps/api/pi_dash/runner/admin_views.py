@@ -27,7 +27,9 @@ class InstanceRunnerListEndpoint(BaseAPIView):
         qs = Runner.objects.select_related("workspace", "owner").order_by("-created_at")
 
         provisioning = request.query_params.get("provisioning")
-        if provisioning:
+        # A present-but-empty value is rejected like any other unknown value,
+        # rather than silently returning everything.
+        if provisioning is not None:
             if provisioning not in RunnerProvisioning.values:
                 return Response(
                     {"error": "invalid_provisioning", "detail": sorted(RunnerProvisioning.values)},
@@ -35,7 +37,7 @@ class InstanceRunnerListEndpoint(BaseAPIView):
                 )
             qs = qs.filter(provisioning=provisioning)
         runner_status = request.query_params.get("status")
-        if runner_status:
+        if runner_status is not None:
             if runner_status not in RunnerStatus.values:
                 return Response(
                     {"error": "invalid_status", "detail": sorted(RunnerStatus.values)},
