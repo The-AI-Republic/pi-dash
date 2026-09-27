@@ -277,7 +277,7 @@ _AGENT_TEXT_RULES: tuple[tuple[RunFailureReason, re.Pattern[str]], ...] = tuple(
         (
             RunFailureReason.AGENT_PROVIDER_QUOTA,
             _status(402)
-            + r"|insufficient (?:credit|quota|funds)|credit balance|out of credits"
+            + r"|insufficient (?:credit|quota|funds)|credit balance|out of (?:usage )?credits"
             r"|quota exceeded|usage limit|billing|payment required"
             r"|\b(?:5-hour|weekly|monthly) limit\b|hard limit reached",
         ),

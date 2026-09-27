@@ -46,6 +46,14 @@ AGENT_TEXT_CASES = [
     ("Your credit balance is too low to access the Anthropic API.", RunFailureReason.AGENT_PROVIDER_QUOTA),
     ("402 Payment Required", RunFailureReason.AGENT_PROVIDER_QUOTA),
     ("You have hit your usage limit.", RunFailureReason.AGENT_PROVIDER_QUOTA),
+    (
+        # Claude Code's out-of-credits message, verbatim from a captured run
+        # (mentions "model" and "credits" but neither a status code nor
+        # "usage limit", so it needs its own alternative in the pattern).
+        "You're out of usage credits. Switch to another model, or manage usage "
+        "credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue.",
+        RunFailureReason.AGENT_PROVIDER_QUOTA,
+    ),
     ("5-hour limit reached ∙ resets 3am", RunFailureReason.AGENT_PROVIDER_QUOTA),
     # provider_capacity_or_rate_limit
     ("429 Too Many Requests", RunFailureReason.AGENT_PROVIDER_CAPACITY),
