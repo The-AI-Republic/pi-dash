@@ -392,7 +392,13 @@ impl BridgeCursor {
                     } else {
                         vec![BridgeEvent::Failed {
                             run_id: self.run_id,
-                            reason: FailureReason::Internal,
+                            // Agent-side, not `Internal`: a failed turn is
+                            // Codex (or its provider) reporting its own
+                            // error, and the cloud's failure classifier
+                            // only consults the detail text for agent-side
+                            // reasons (PDASHOSS01-183). `CodexCrash` keeps
+                            // pre-existing dashboards matching.
+                            reason: FailureReason::CodexCrash,
                             detail: params
                                 .get("error")
                                 .and_then(|v| v.as_str())
@@ -431,7 +437,12 @@ impl BridgeCursor {
                             .map(|s| s.to_string());
                         vec![BridgeEvent::Failed {
                             run_id: self.run_id,
-                            reason: FailureReason::Internal,
+                            // Transport / API failures are agent-side: the
+                            // detail carries the provider's message (a 401,
+                            // a model-not-allowed 400) and the cloud's
+                            // classifier reads it for agent-side reasons
+                            // (PDASHOSS01-183).
+                            reason: FailureReason::CodexCrash,
                             detail,
                         }]
                     }
