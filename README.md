@@ -139,7 +139,7 @@ Then authenticate the machine and register a runner. The standard flow is two co
 ```bash
 # 1. Browser-based device-code login (like `gh auth login` / `stripe login`).
 #    Stores a CLI token at ~/.config/pidash/config.toml.
-pidash auth login --url https://your-pidash-instance.com
+pidash login --url https://your-pidash-instance.com
 
 # 2. Register this host as a runner. Uses the token from step 1 — no
 #    enrollment-token paste needed. On the first runner, installs the OS
@@ -148,7 +148,7 @@ pidash auth login --url https://your-pidash-instance.com
 pidash runner add --project <project-id>
 ```
 
-`pidash auth login` prompts to add a runner inline when no runner exists yet, so a fresh dev laptop can be onboarded with a single command. Add more runners later with `pidash runner add --project <other-project-id>`.
+`pidash login` (an alias of `pidash auth login`) prompts to add a runner inline when no runner exists yet, so a fresh dev laptop can be onboarded with a single command. Add more runners later with `pidash runner add --project <other-project-id>`.
 
 The runner daemon runs in the background, polls for assigned tasks, dispatches them to your AI agent, and reports results back to the platform.
 

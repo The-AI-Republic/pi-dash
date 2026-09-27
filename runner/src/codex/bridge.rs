@@ -9,6 +9,7 @@ use uuid::Uuid;
 // existing integration tests and any downstream callers that imported them
 // from here keep compiling. The canonical definitions live in `agent::`.
 pub use crate::agent::{BridgeEvent, RunPayload};
+use crate::approval::EngineThreadSettings;
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, FailureReason};
 use crate::codex::app_server::AppServer;
 use crate::util::shell::AgentEnv;
@@ -25,6 +26,10 @@ pub struct Bridge {
     /// `high`/`xhigh`). `None` omits the field so codex uses the model's
     /// default effort. Sourced from `[runner.codex].effort_default`.
     pub effort_default: Option<String>,
+    /// The `sandbox` / `approval_policy` this bridge stamps on every thread it
+    /// starts. Defaults to the historical full-access posture; the local chat
+    /// lane overrides it per session from the user's chosen approval mode.
+    pub engine_settings: EngineThreadSettings,
     initialized: bool,
     thread_id: Option<String>,
     /// Notifications that arrived while we were waiting for an RPC response
@@ -41,15 +46,25 @@ impl Bridge {
         model_default: Option<String>,
         effort_default: Option<String>,
     ) -> Result<Self> {
-        Self::spawn_with_env(binary, cwd, model_default, effort_default, &AgentEnv::default()).await
+        Self::spawn_with_env(
+            binary,
+            cwd,
+            model_default,
+            effort_default,
+            EngineThreadSettings::default(),
+            &AgentEnv::default(),
+        )
+        .await
     }
 
-    /// [`Bridge::spawn`] with a Pi Dash-controlled agent environment.
+    /// [`Bridge::spawn`] with a Pi Dash-controlled agent environment and the
+    /// per-thread engine posture derived from the caller's approval mode.
     pub async fn spawn_with_env(
         binary: &str,
         cwd: &Path,
         model_default: Option<String>,
         effort_default: Option<String>,
+        engine_settings: EngineThreadSettings,
         env: &AgentEnv,
     ) -> Result<Self> {
         let server = AppServer::spawn_with_env(binary, cwd, env).await?;
@@ -57,6 +72,7 @@ impl Bridge {
             server,
             model_default,
             effort_default,
+            engine_settings,
             initialized: false,
             thread_id: None,
             pending: std::collections::VecDeque::new(),
@@ -70,6 +86,7 @@ impl Bridge {
             server,
             model_default,
             effort_default: None,
+            engine_settings: EngineThreadSettings::default(),
             initialized: false,
             thread_id: None,
             pending: std::collections::VecDeque::new(),
@@ -146,9 +163,13 @@ impl Bridge {
             &ThreadStartParams {
                 cwd: cwd.to_string_lossy().to_string(),
                 model: self.model_default.clone(),
-                // Match Claude Code's MVP `bypassPermissions` posture.
-                sandbox: "danger-full-access".into(),
-                approval_policy: "never".into(),
+                // Per-thread posture. Defaults to the historical full-access
+                // stance; the local chat lane overrides it from the user's
+                // chosen approval mode (see `approval::mode`). The managed
+                // config's own `sandbox_mode`/`approval_policy` are shadowed by
+                // these per-thread values, which is why they must be set here.
+                sandbox: self.engine_settings.sandbox.into(),
+                approval_policy: self.engine_settings.approval_policy.into(),
             },
         )?;
         self.server.send_raw(&line).await?;

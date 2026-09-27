@@ -173,7 +173,9 @@ def test_chat_sessions_project_filter(db, session_client, workspace, project, se
     s1 = AgentChatSession.objects.create(workspace=workspace, runner=r1, created_by=workspace.owner, pod=p1)
     s2 = AgentChatSession.objects.create(workspace=workspace, runner=r2, created_by=workspace.owner, pod=p2)
 
-    resp = session_client.get("/api/runners/chat/sessions/", {"workspace": str(workspace.id), "project": str(project.id)})
+    resp = session_client.get(
+        "/api/runners/chat/sessions/", {"workspace": str(workspace.id), "project": str(project.id)}
+    )
 
     assert resp.status_code == status.HTTP_200_OK
     ids = {s["id"] for s in resp.data}

@@ -76,7 +76,13 @@ export const CodeBlock = Node.create<CodeBlockOptions>({
         default: null,
         parseHTML: (element) => {
           const { languageClassPrefix } = this.options;
-          const classNames = [...(element.firstElementChild?.classList || [])];
+          // Server-side parsing (the live server's DOM shim) has no
+          // `firstElementChild` / `classList`, so fall back to the first
+          // element child node and its raw class attribute.
+          const codeElement =
+            element.firstElementChild ??
+            (Array.from(element.childNodes).find((node) => node.nodeType === 1) as Element | undefined);
+          const classNames = (codeElement?.getAttribute("class") ?? "").split(/\s+/).filter(Boolean);
           const languages = classNames
             .filter((className) => className.startsWith(languageClassPrefix))
             .map((className) => className.replace(languageClassPrefix, ""));

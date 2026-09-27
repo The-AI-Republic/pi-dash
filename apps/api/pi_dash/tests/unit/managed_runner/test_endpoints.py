@@ -87,7 +87,12 @@ def test_issue_endpoints_persist_the_viewers_desktop_selection(
     from pi_dash.app.views.issue import base
     from pi_dash.db.models import Issue
 
-    for task in [base.issue_activity, base.model_activity, base.issue_description_version_task, base.recent_visited_task]:
+    for task in [
+        base.issue_activity,
+        base.model_activity,
+        base.issue_description_version_task,
+        base.recent_visited_task,
+    ]:
         monkeypatch.setattr(task, "delay", lambda **kwargs: None)
     path = f"/api/workspaces/{workspace.slug}/projects/{project.id}/issues/"
     if operation == "create":

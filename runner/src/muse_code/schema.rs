@@ -1,179 +1,159 @@
-//! JSONL event shapes emitted by `muse exec --json`. Muse Code (Meta) is
-//! closed-source and its event schema is not publicly documented in full, so —
-//! exactly like the Cursor bridge — we capture only the envelope (`type` +
-//! `subtype`) plus the handful of fields we actually read, and retain the full
-//! body as a `serde_json::Value` so the daemon can ship it to local history
-//! verbatim without tracking every upstream schema revision.
+//! JSONL record shapes emitted by `muse exec --json`.
 //!
-//! The frame families modeled here (`system`/`user`/`assistant`/`tool_call`/
-//! `result`) mirror the shape Meta's harness documents for its headless
-//! (`exec`) mode; anything unrecognized collapses to [`StreamEvent::Unknown`]
-//! so a schema drift on Meta's side degrades to "preserved but unmapped"
-//! rather than crashing the bridge.
+//! Muse Code (Meta) is closed-source and its event schema is not publicly
+//! documented, so this module is modeled on frames captured from a real
+//! binary (`muse 1.3.0-R3401.1`) — see `runner/tests/fixtures/muse_code/`.
+//! Every line is an event-sourced *record* envelope with no top-level `type`:
+//!
+//! ```json
+//! {"record_type":"event","payload_type":"run.terminal.completed",
+//!  "payload":{"kind":"run_terminal","terminal":"completed","text":"..."},
+//!  "sequence":654,"stream":{"id":"01a0b6ab-...","kind":"session"},
+//!  "schema_version":1,"payload_schema_version":1,"id":"...", ...}
+//! ```
+//!
+//! Dispatch is on `payload_type` (`run.terminal.completed`,
+//! `run.output.delta`, `tool.result`, `task.lifecycle.*`, ...). The full body is
+//! retained so the daemon can ship it to local history verbatim. A line that is
+//! valid JSON but not a record envelope collapses to [`StreamEvent::Unknown`];
+//! the bridge refuses to start a run on one (see `Bridge::wait_for_init`), so a
+//! future envelope change fails the first frame loudly instead of silently
+//! streaming a whole run of unrecognized frames.
 
-use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
+use uuid::Uuid;
 
-/// Top-level JSONL event. Dispatch is on the top-level `type` tag; unknown
-/// tags collapse to [`StreamEvent::Unknown`] so forward-compatible upstream
-/// changes don't crash the bridge.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
-    /// The first frame of a run: `{"type":"system","subtype":"init",
-    /// "session_id":"...","model":"..."}`. We capture `session_id` as the
-    /// thread id so history/IPC can link follow-up work to the same session.
-    System(SystemEvent),
-    /// `{"type":"assistant","message":{...}}` — one message segment from the
-    /// model (emitted between tool calls).
-    Assistant(MessageEvent),
-    /// `{"type":"user","message":{...}}` — the prompt echo and/or tool-result
-    /// echoes. Useful for transcripts.
-    User(MessageEvent),
-    /// `{"type":"tool_call","subtype":"started|completed",...}` — tool
-    /// execution lifecycle.
-    ToolCall(ToolCallEvent),
-    /// `{"type":"result","subtype":"success","is_error":false,...}` — the
-    /// terminal frame `muse exec` emits before exiting.
-    Result(ResultEvent),
-    /// Anything else: new event types Muse may emit that we don't map yet.
-    /// Preserved verbatim in history.
+    /// A `{"record_type", "payload_type", "payload", ...}` envelope.
+    Record(Record),
+    /// Valid JSON that is not a record envelope. Preserved verbatim in history.
     Unknown(serde_json::Value),
 }
 
 impl<'de> Deserialize<'de> for StreamEvent {
-    // Dispatch manually on `type` rather than `#[serde(untagged)]`: several
-    // variants share field sets (`system` and `result` both carry `subtype` +
-    // `session_id`), so an untagged enum would greedily misroute frames.
-    // Tagging on `type` is unambiguous and keeps a catch-all for forward-compat.
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let v = serde_json::Value::deserialize(d)?;
-        let ty = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
-        match ty {
-            "system" => serde_json::from_value(v)
-                .map(StreamEvent::System)
-                .map_err(D::Error::custom),
-            "assistant" => serde_json::from_value(v)
-                .map(StreamEvent::Assistant)
-                .map_err(D::Error::custom),
-            "user" => serde_json::from_value(v)
-                .map(StreamEvent::User)
-                .map_err(D::Error::custom),
-            "tool_call" => serde_json::from_value(v)
-                .map(StreamEvent::ToolCall)
-                .map_err(D::Error::custom),
-            "result" => serde_json::from_value(v)
-                .map(StreamEvent::Result)
-                .map_err(D::Error::custom),
-            _ => Ok(StreamEvent::Unknown(v)),
-        }
+        Ok(match Record::from_value(&v) {
+            Some(r) => StreamEvent::Record(r),
+            None => StreamEvent::Unknown(v),
+        })
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct SystemEvent {
-    pub subtype: String,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(flatten)]
-    pub rest: serde_json::Map<String, serde_json::Value>,
+/// One record envelope. `payload_type` is the discriminator; `payload` holds
+/// the type-specific body; `raw` is the full line as emitted.
+#[derive(Debug, Clone)]
+pub struct Record {
+    /// `event` / `status` / `reconciliation`.
+    pub record_type: String,
+    pub payload_type: String,
+    pub payload: serde_json::Value,
+    pub raw: serde_json::Value,
 }
 
-/// Shared shape for `assistant` and `user` events: both wrap a `message`
-/// object (`{role, content}`) and may carry the session id.
-#[derive(Debug, Clone, Deserialize)]
-pub struct MessageEvent {
-    pub message: serde_json::Value,
-    #[serde(default)]
-    pub session_id: Option<String>,
-}
+impl Record {
+    fn from_value(v: &serde_json::Value) -> Option<Self> {
+        let record_type = v.get("record_type")?.as_str()?.to_owned();
+        let payload_type = v.get("payload_type")?.as_str()?.to_owned();
+        Some(Self {
+            record_type,
+            payload_type,
+            payload: v.get("payload").cloned().unwrap_or(serde_json::Value::Null),
+            raw: v.clone(),
+        })
+    }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct ToolCallEvent {
-    pub subtype: String,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(flatten)]
-    pub rest: serde_json::Map<String, serde_json::Value>,
-}
+    /// The Muse session id: the envelope's `stream.id` when `stream.kind` is
+    /// `session`. It is a UUID and is exactly what `muse exec --session-id`
+    /// accepts to resume the session on a later turn. Non-UUID ids are
+    /// rejected so they can never reach `--session-id`.
+    pub fn session_id(&self) -> Option<String> {
+        let stream = self.raw.get("stream")?;
+        if stream.get("kind")?.as_str()? != "session" {
+            return None;
+        }
+        let id = stream.get("id")?.as_str()?;
+        Uuid::parse_str(id).ok().map(|_| id.to_owned())
+    }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct ResultEvent {
-    pub subtype: String,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default)]
-    pub result: Option<String>,
-    #[serde(default)]
-    pub is_error: Option<bool>,
-    #[serde(default)]
-    pub duration_ms: Option<u64>,
-    #[serde(flatten)]
-    pub rest: serde_json::Map<String, serde_json::Value>,
+    /// A string field of `payload`.
+    pub fn payload_str(&self, key: &str) -> Option<&str> {
+        self.payload.get(key).and_then(|v| v.as_str())
+    }
+
+    /// `payload.event.task_kind` on `task.lifecycle.proposed` records, e.g.
+    /// `tool.bash`, `model.meta.response`, `reminder.agent.skill-reminder`.
+    pub fn task_kind(&self) -> Option<&str> {
+        self.payload
+            .get("event")
+            .and_then(|e| e.get("task_kind"))
+            .and_then(|v| v.as_str())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn dispatches_system_init() {
-        let line = r#"{"type":"system","subtype":"init","session_id":"s1","model":"muse-spark","permissionMode":"yolo"}"#;
+    fn record(line: &str) -> Record {
         match serde_json::from_str::<StreamEvent>(line).unwrap() {
-            StreamEvent::System(s) => {
-                assert_eq!(s.subtype, "init");
-                assert_eq!(s.session_id.as_deref(), Some("s1"));
-                assert_eq!(
-                    s.rest.get("model").and_then(|m| m.as_str()),
-                    Some("muse-spark")
-                );
-            }
-            other => panic!("expected System, got {other:?}"),
+            StreamEvent::Record(r) => r,
+            other => panic!("expected Record, got {other:?}"),
         }
     }
 
     #[test]
-    fn dispatches_assistant_and_user() {
-        let a = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]},"session_id":"s1"}"#;
-        assert!(matches!(
-            serde_json::from_str::<StreamEvent>(a).unwrap(),
-            StreamEvent::Assistant(_)
-        ));
-        let u = r#"{"type":"user","message":{"role":"user","content":[]},"session_id":"s1"}"#;
-        assert!(matches!(
-            serde_json::from_str::<StreamEvent>(u).unwrap(),
-            StreamEvent::User(_)
-        ));
+    fn parses_terminal_completed_record() {
+        let r = record(
+            r#"{"record_type":"event","payload_type":"run.terminal.completed","payload":{"kind":"run_terminal","terminal":"completed","reason":null,"text":"all done"},"sequence":654,"stream":{"id":"01a0b6ab-0000-7000-8000-000000000001","kind":"session"},"schema_version":1}"#,
+        );
+        assert_eq!(r.record_type, "event");
+        assert_eq!(r.payload_type, "run.terminal.completed");
+        assert_eq!(r.payload_str("terminal"), Some("completed"));
+        assert_eq!(r.payload_str("text"), Some("all done"));
+        assert_eq!(
+            r.session_id().as_deref(),
+            Some("01a0b6ab-0000-7000-8000-000000000001")
+        );
     }
 
     #[test]
-    fn dispatches_tool_call_subtypes() {
-        let started = r#"{"type":"tool_call","subtype":"started","call_id":"c1","tool_call":{"shell":{}},"session_id":"s1"}"#;
-        match serde_json::from_str::<StreamEvent>(started).unwrap() {
-            StreamEvent::ToolCall(t) => assert_eq!(t.subtype, "started"),
-            other => panic!("expected ToolCall, got {other:?}"),
+    fn session_id_requires_session_stream_and_uuid() {
+        let task = record(
+            r#"{"record_type":"event","payload_type":"x","payload":{},"stream":{"id":"01a0b6ab-0000-7000-8000-000000000001","kind":"task"}}"#,
+        );
+        assert_eq!(task.session_id(), None);
+        let not_uuid = record(
+            r#"{"record_type":"event","payload_type":"x","payload":{},"stream":{"id":"muse-abc","kind":"session"}}"#,
+        );
+        assert_eq!(not_uuid.session_id(), None);
+    }
+
+    #[test]
+    fn task_kind_reads_proposed_event() {
+        let r = record(
+            r#"{"record_type":"event","payload_type":"task.lifecycle.proposed","payload":{"kind":"task_lifecycle","event":{"kind":"proposed","task_kind":"tool.bash","task_id":"t1"}}}"#,
+        );
+        assert_eq!(r.task_kind(), Some("tool.bash"));
+    }
+
+    #[test]
+    fn non_envelope_json_is_unknown() {
+        // The shape the original bridge assumed (Claude-style `type` tag) is not
+        // a Muse record and must not be mistaken for one.
+        for line in [
+            r#"{"type":"result","subtype":"success","result":"done"}"#,
+            r#"{"payload_type":"run.terminal.completed"}"#,
+            r#"[1,2,3]"#,
+        ] {
+            assert!(
+                matches!(
+                    serde_json::from_str::<StreamEvent>(line).unwrap(),
+                    StreamEvent::Unknown(_)
+                ),
+                "{line}"
+            );
         }
-    }
-
-    #[test]
-    fn dispatches_result_terminal() {
-        let line = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":1200,"result":"done","session_id":"s1"}"#;
-        match serde_json::from_str::<StreamEvent>(line).unwrap() {
-            StreamEvent::Result(r) => {
-                assert_eq!(r.subtype, "success");
-                assert_eq!(r.is_error, Some(false));
-                assert_eq!(r.duration_ms, Some(1200));
-                assert_eq!(r.result.as_deref(), Some("done"));
-            }
-            other => panic!("expected Result, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn unknown_type_is_preserved() {
-        let line = r#"{"type":"telemetry","foo":1}"#;
-        assert!(matches!(
-            serde_json::from_str::<StreamEvent>(line).unwrap(),
-            StreamEvent::Unknown(_)
-        ));
     }
 }

@@ -1229,6 +1229,8 @@ class IssueDetailSerializer(IssueSerializer):
     is_intake = serializers.BooleanField(read_only=True)
     agent_ticker = serializers.SerializerMethodField()
     agent_status = serializers.SerializerMethodField()
+    relations_summary = serializers.SerializerMethodField()
+    has_open_blockers = serializers.SerializerMethodField()
 
     class Meta(IssueSerializer.Meta):
         fields = IssueSerializer.Meta.fields + [
@@ -1237,11 +1239,31 @@ class IssueDetailSerializer(IssueSerializer):
             "is_intake",
             "agent_ticker",
             "agent_status",
+            "relations_summary",
+            "has_open_blockers",
         ]
         read_only_fields = fields
 
     def _serialize_datetime(self, value):
         return value.isoformat() if value else None
+
+    def _blocker_summary(self, obj):
+        # Both fields come from one ``relations_summary`` call; cache it per
+        # issue so serializing the detail doesn't query the relations twice.
+        from pi_dash.orchestration.blockers import relations_summary
+
+        cache = self.__dict__.setdefault("_blocker_summary_cache", {})
+        if obj.pk not in cache:
+            cache[obj.pk] = relations_summary(obj)
+        return cache[obj.pk]
+
+    def get_relations_summary(self, obj):
+        """``{blocked_by, blocking}`` lists of ``{identifier, state, state_group}``
+        — the same blocker picture the agent prompt carries (PDASHOSS01-197)."""
+        return self._blocker_summary(obj)["relations_summary"]
+
+    def get_has_open_blockers(self, obj):
+        return self._blocker_summary(obj)["has_open_blockers"]
 
     def get_agent_ticker(self, obj):
         """Surface the per-issue continuation ticker for the issue detail UI.
@@ -1265,17 +1287,33 @@ class IssueDetailSerializer(IssueSerializer):
         # server would no-op (e.g. a cap-hit issue already auto-paused out
         # of a ticking state).
         from pi_dash.orchestration.agent_phases import is_ticking_state
+        from pi_dash.orchestration.scheduling import is_paused_state
 
-        can_re_tick = is_ticking_state(obj.state) and ticker.cap_reached()
+        # Re-tick is offered wherever the grant is honoured: in the bucket,
+        # and on the Paused state the cap-hit auto-pause parks issues in.
+        can_re_tick = (is_ticking_state(obj.state) or is_paused_state(obj.state)) and ticker.cap_reached()
         return {
             "enabled": ticker.enabled,
             "user_disabled": ticker.user_disabled,
-            "tick_count": ticker.tick_count,
+            # One pool per issue: ``used`` of ``max_ticks`` (project pool +
+            # Re-tick grants + waits). ``tick_count`` is the pre-pool
+            # spelling. A wait run is a run, so it is inside both ``used`` and
+            # ``max_ticks`` (PDASHOSS01-211); ``waited`` rides alongside them
+            # because a high wait count is how a human tells a stuck issue
+            # from a busy one.
+            "used": ticker.used,
+            "tick_count": ticker.used,
+            "granted": ticker.granted,
+            "waited": ticker.waited,
             "max_ticks": ticker.effective_max_ticks(),
+            "remaining": ticker.remaining(),
             "interval_seconds": ticker.effective_interval_seconds(),
             "next_run_at": ticker.next_run_at.isoformat() if ticker.next_run_at else None,
             "last_tick_at": ticker.last_tick_at.isoformat() if ticker.last_tick_at else None,
             "disarm_reason": ticker.disarm_reason,
+            # An entry run is owed and fires as soon as the issue is free
+            # (design §4.5) — the card shows "next run queued".
+            "pending_entry": ticker.pending_entry,
             "can_re_tick": can_re_tick,
         }
 

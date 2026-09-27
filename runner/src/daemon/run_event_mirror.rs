@@ -60,7 +60,10 @@ impl CompactRunEventBuffer {
 }
 
 fn is_compactable_run_event(kind: &str) -> bool {
+    // `muse/*` is Muse Code's task/session bookkeeping (~500 records per run);
+    // its transcript-bearing records use the shared method names instead.
     kind.starts_with("stream_event/")
+        || kind.starts_with("muse/")
         || matches!(
             kind,
             "assistant/message"
@@ -462,6 +465,15 @@ mod tests {
         assert!(mirror.flush_deadline().is_some());
         assert!(mirror.pending.is_empty());
         assert!(!mirror.compact.is_empty());
+    }
+
+    #[test]
+    fn muse_bookkeeping_records_are_compacted() {
+        // Muse emits ~500 task/session bookkeeping records per run; they must
+        // not each become a cloud run event. Its typed tool events still do.
+        assert!(is_compactable_run_event("muse/task.lifecycle.started"));
+        assert!(is_compactable_run_event("muse/runtime.command.accepted"));
+        assert!(!is_compactable_run_event("tool_call/started"));
     }
 
     #[test]

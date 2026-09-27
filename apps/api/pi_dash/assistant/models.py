@@ -260,3 +260,34 @@ class UserLLMConfig(models.Model):
     @property
     def has_api_key(self) -> bool:
         return bool(self.api_key_encrypted)
+
+
+class UserSTTConfig(models.Model):
+    """Per-user BYO speech-to-text (dictation) configuration (global across workspaces).
+
+    Mirrors :class:`UserLLMConfig` but for the OpenAI-compatible
+    ``/v1/audio/transcriptions`` endpoint that voice dictation posts to. There
+    is a single provider kind (OpenAI-compatible), so unlike ``UserLLMConfig``
+    there is no ``provider_kind`` column. The API never exposes the stored key —
+    only ``has_api_key`` — same as BYOK.
+    """
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="assistant_stt_config"
+    )
+    base_url = models.URLField(max_length=500, blank=True, default="")
+    model_name = models.CharField(max_length=255, blank=True, default="")
+    api_key_encrypted = models.BinaryField(null=True, blank=True)
+    last_verified_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "assistant_user_stt_config"
+
+    def __str__(self) -> str:
+        return f"UserSTTConfig({self.user_id})"
+
+    @property
+    def has_api_key(self) -> bool:
+        return bool(self.api_key_encrypted)

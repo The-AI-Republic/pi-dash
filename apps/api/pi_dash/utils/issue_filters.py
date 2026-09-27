@@ -464,3 +464,178 @@ def issue_filters(query_params, method, prefix=""):
             func = value
             func(query_params, issue_filter, method, prefix)
     return issue_filter
+
+
+# ---------------------------------------------------------------------------
+# Work-item list filters for agent-facing surfaces (v1 list, assistant tool).
+#
+# ``issue_filters`` above parses UUID-only params for the web UI. Agents think
+# in names and identifiers ("Backlog", "ENG-12"), so this layer resolves those
+# to ids within the project, validates enumerations, and rejects unknown values
+# loudly instead of silently dropping them (which would widen the result set).
+# ---------------------------------------------------------------------------
+
+WORK_ITEM_LIST_FILTER_KEYS = ("state", "state_group", "parent", "labels", "priority", "assignees")
+
+VALID_PRIORITIES = ("urgent", "high", "medium", "low", "none")
+
+_NULL_TOKENS = {"null", "none"}
+
+
+class IssueFilterError(ValueError):
+    """A list filter value could not be resolved; ``str(err)`` is user-facing."""
+
+
+def _split_tokens(raw):
+    if raw is None:
+        return []
+    return [token.strip() for token in str(raw).split(",") if token.strip()]
+
+
+def _is_uuid(value):
+    try:
+        uuid.UUID(str(value))
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_states(tokens, project_id):
+    from pi_dash.db.models import State
+
+    ids = [t for t in tokens if _is_uuid(t)]
+    names = [t for t in tokens if not _is_uuid(t)]
+    if names:
+        states = list(State.objects.filter(project_id=project_id).values_list("id", "name"))
+        by_name = {}
+        for state_id, state_name in states:
+            by_name.setdefault(state_name.lower(), []).append(str(state_id))
+        unknown = [n for n in names if n.lower() not in by_name]
+        if unknown:
+            valid = ", ".join(sorted({name for _, name in states}, key=str.lower))
+            raise IssueFilterError(f"Unknown state name(s): {', '.join(unknown)}. Valid states: {valid}.")
+        for name in names:
+            ids.extend(by_name[name.lower()])
+    return ids
+
+
+def _resolve_labels(tokens, project_id, workspace_slug):
+    from django.db.models import Q
+
+    from pi_dash.db.models import Label
+
+    ids = [t for t in tokens if _is_uuid(t)]
+    names = [t for t in tokens if not _is_uuid(t)]
+    if names:
+        # Workspace-level labels (no project) are attachable in every project.
+        scope = Q(project_id=project_id) | Q(project__isnull=True, workspace__slug=workspace_slug)
+        labels = list(Label.objects.filter(scope).values_list("id", "name"))
+        by_name = {}
+        for label_id, label_name in labels:
+            by_name.setdefault(label_name.lower(), []).append(str(label_id))
+        unknown = [n for n in names if n.lower() not in by_name]
+        if unknown:
+            valid = ", ".join(sorted({name for _, name in labels}, key=str.lower)) or "(none)"
+            raise IssueFilterError(f"Unknown label name(s): {', '.join(unknown)}. Valid labels: {valid}.")
+        for name in names:
+            ids.extend(by_name[name.lower()])
+    return ids
+
+
+def _resolve_parents(tokens, workspace_slug):
+    from pi_dash.db.models import Issue
+
+    ids = []
+    for token in tokens:
+        if _is_uuid(token):
+            ids.append(token)
+            continue
+        project_identifier, _, sequence = token.rpartition("-")
+        if not project_identifier or not sequence.isdigit():
+            raise IssueFilterError(
+                f"Invalid parent '{token}': expected an issue UUID, an identifier like PROJ-123, or null."
+            )
+        parent_id = (
+            Issue.issue_objects.filter(
+                workspace__slug=workspace_slug,
+                project__identifier__iexact=project_identifier,
+                sequence_id=int(sequence),
+            )
+            .values_list("id", flat=True)
+            .first()
+        )
+        if parent_id is None:
+            raise IssueFilterError(f"Unknown parent issue '{token}'.")
+        ids.append(str(parent_id))
+    return ids
+
+
+def work_item_list_filters(query_params, *, project_id, workspace_slug):
+    """Resolve agent-facing list filters into kwargs for ``Issue.objects.filter``.
+
+    Supported keys (each comma-separated; values within a key OR together,
+    keys AND together):
+
+    - ``state``: state UUIDs or names (case-insensitive exact match in the project)
+    - ``state_group``: backlog, unstarted, started, review, test, completed, cancelled
+    - ``parent``: parent issue UUIDs or identifiers (``PROJ-123``), or ``null``/``none``
+      for top-level issues only
+    - ``labels``: label UUIDs or names
+    - ``priority``: urgent, high, medium, low, none
+    - ``assignees``: user UUIDs
+
+    Keys that are absent or blank are ignored, so an empty params dict yields
+    ``{}``. Raises ``IssueFilterError`` for unknown names or invalid values.
+    """
+    normalized = {}
+    extra = {}
+
+    states = _split_tokens(query_params.get("state"))
+    if states:
+        normalized["state"] = ",".join(_resolve_states(states, project_id))
+
+    groups = [g.lower() for g in _split_tokens(query_params.get("state_group"))]
+    if groups:
+        invalid = [g for g in groups if g not in STATE_GROUP_ORDER]
+        if invalid:
+            raise IssueFilterError(
+                f"Unknown state group(s): {', '.join(invalid)}. Valid groups: {', '.join(STATE_GROUP_ORDER)}."
+            )
+        normalized["state_group"] = ",".join(groups)
+
+    priorities = [p.lower() for p in _split_tokens(query_params.get("priority"))]
+    if priorities:
+        invalid = [p for p in priorities if p not in VALID_PRIORITIES]
+        if invalid:
+            raise IssueFilterError(
+                f"Unknown priority value(s): {', '.join(invalid)}. Valid priorities: {', '.join(VALID_PRIORITIES)}."
+            )
+        normalized["priority"] = ",".join(priorities)
+
+    parents = _split_tokens(query_params.get("parent"))
+    if parents:
+        nulls = [p for p in parents if p.lower() in _NULL_TOKENS]
+        if nulls and len(nulls) != len(parents):
+            raise IssueFilterError("parent=null cannot be combined with specific parent issues.")
+        # ``filter_parent`` spells "top-level only" as the literal "None".
+        normalized["parent"] = "None" if nulls else ",".join(_resolve_parents(parents, workspace_slug))
+
+    labels = _split_tokens(query_params.get("labels"))
+    if labels:
+        # Filter through the through-model in one join so a soft-deleted label
+        # link never matches (``filter_labels`` joins the M2M and the
+        # through-model separately).
+        extra["label_issue__label_id__in"] = _resolve_labels(labels, project_id, workspace_slug)
+        extra["label_issue__deleted_at__isnull"] = True
+
+    assignees = _split_tokens(query_params.get("assignees"))
+    if assignees:
+        invalid = [a for a in assignees if not _is_uuid(a)]
+        if invalid:
+            raise IssueFilterError(f"Invalid assignee id(s): {', '.join(invalid)}. Expected user UUIDs.")
+        extra["issue_assignee__assignee_id__in"] = assignees
+        extra["issue_assignee__deleted_at__isnull"] = True
+
+    filters = issue_filters(normalized, "GET") if normalized else {}
+    filters.update(extra)
+    return filters

@@ -26,7 +26,7 @@ This is the first run on this issue — the workpad is empty. You will create it
 2. Write the hierarchical plan in the workpad.
 3. Ensure the workpad includes an environment stamp at the top in a `text` fenced block, format: `<host>:<abs-workdir>@<short-sha>`.
 4. Capture a concrete reproduction signal (command output, failing test, screenshot description) in the workpad `Notes` section before changing code.
-5. Persist the workpad: `pidash workpad update --body-file ./.pidash-workpad.md`. This is your single source of cross-run truth — re-run `pidash workpad update` after every meaningful change throughout the run.
+5. Persist the workpad: `pidash workpad update --body-file ./.pidash-workpad.md`. This is your single source of cross-run truth — re-run `pidash workpad update` after every meaningful change throughout the run. A successful `update` deletes the local `--body-file` (pass `--keep` to retain it), so re-fetch with `pidash workpad get | jq -r .body > ./.pidash-workpad.md` before each subsequent edit — the file being gone after an update is expected, not an error.
 6. **If `task_type == code_change`** (per your Step 0.5 analysis), before any code edits, sync with the repository. Skip this entire sub-step for `noncode` tasks — do not run `git fetch`, `git checkout`, or any other git operation here.
    - `git fetch origin`
 {% if repo.work_branch %}

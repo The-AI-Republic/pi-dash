@@ -11,6 +11,7 @@ use tokio::net::windows::named_pipe::{NamedPipeServer as IpcStream, ServerOption
 use tokio::net::{UnixListener, UnixStream as IpcStream};
 use uuid::Uuid;
 
+use super::chat;
 use super::protocol::{Request, Response, RpcError, StatusSnapshot};
 use crate::approval::router::DecisionSource;
 use crate::daemon::runner_instance::RunnerInstance;
@@ -303,6 +304,91 @@ impl IpcServer {
                         )
                     })?;
                 Ok(Response::Ack)
+            }
+            // Local chat (PDASHOSS01-159, IPC v4). The desktop host drives
+            // the built-in engine directly over this socket — never through
+            // the Pi Dash chat relay. Streamed `Response::Chat*` frames are
+            // written onto `buf` mid-call (same pattern as StatusSubscribe);
+            // the terminal frame is returned. See `super::chat`.
+            Request::ChatWarm {
+                chat_session_id,
+                runner,
+                cwd,
+                model,
+                mode,
+                local_thread_id,
+                local_session_id,
+            } => {
+                let inst = self.resolve_runner(runner.as_deref())?;
+                let mut sink = chat::SocketSink { buf };
+                chat::handle_warm(
+                    &inst,
+                    chat::WarmArgs {
+                        chat_session_id,
+                        cwd,
+                        model,
+                        mode,
+                        local_thread_id,
+                        local_session_id,
+                    },
+                    &mut sink,
+                )
+                .await
+            }
+            Request::ChatSend {
+                chat_session_id,
+                message_id,
+                content,
+                runner,
+                cwd,
+                model,
+                mode,
+                local_thread_id,
+                local_session_id,
+            } => {
+                let inst = self.resolve_runner(runner.as_deref())?;
+                let mut sink = chat::SocketSink { buf };
+                chat::handle_send(
+                    &inst,
+                    chat::SendArgs {
+                        chat_session_id,
+                        message_id,
+                        content,
+                        cwd,
+                        model,
+                        mode,
+                        local_thread_id,
+                        local_session_id,
+                    },
+                    &mut sink,
+                )
+                .await
+            }
+            Request::ChatCancel {
+                chat_session_id,
+                runner,
+                ..
+            } => {
+                let inst = self.resolve_runner(runner.as_deref())?;
+                chat::handle_cancel(&inst, chat_session_id).await
+            }
+            Request::ChatClose {
+                chat_session_id,
+                runner,
+                ..
+            } => {
+                let inst = self.resolve_runner(runner.as_deref())?;
+                let mut sink = chat::SocketSink { buf };
+                chat::handle_close(&inst, chat_session_id, &mut sink).await
+            }
+            Request::ChatDecide {
+                local_approval_id,
+                decision,
+                runner,
+                ..
+            } => {
+                let inst = self.resolve_runner(runner.as_deref())?;
+                chat::handle_decide(&inst, &local_approval_id, decision).await
             }
         }
     }

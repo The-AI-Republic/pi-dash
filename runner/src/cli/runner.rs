@@ -292,7 +292,7 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
             );
         }
     } else {
-        println!("Workspace context will be written after the runner resolves its git workspace.");
+        println!("Workspace context will be written when this runner resolves its working directory on the first run.");
     }
     if applied.is_first_runner {
         println!(
@@ -349,6 +349,7 @@ async fn ensure_cli_token(
             url: cloud_url.map(|u| u.trim_end_matches('/').to_string()),
             no_browser: !std::io::stderr().is_terminal() && !std::io::stdin().is_terminal(),
             workspace: workspace.map(str::to_string),
+            device_code: None,
         },
         paths,
     )

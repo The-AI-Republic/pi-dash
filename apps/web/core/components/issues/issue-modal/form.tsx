@@ -354,7 +354,18 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
   };
 
   const handleMoveToProjects = async () => {
-    if (!data?.id || !data?.project_id || !data) return;
+    if (!data?.id || !data) return;
+    // A draft can only be published into a project. Surface a clear error
+    // instead of silently no-oping when no project is set (the backend also
+    // rejects the move with "Project is required to create an issue.").
+    if (!data?.project_id) {
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: t("Error"),
+        message: t("Select a project before publishing this draft."),
+      });
+      return;
+    }
     setIsMoving(true);
     try {
       await handleCreateUpdatePropertyValues({
@@ -369,6 +380,12 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
         ...data,
         ...getValues(),
       } as TWorkspaceDraftIssue);
+      setToast({
+        type: TOAST_TYPE.SUCCESS,
+        title: t("Success"),
+        message: t("Draft published to project."),
+      });
+      onClose();
     } catch {
       setToast({
         type: TOAST_TYPE.ERROR,
@@ -677,6 +694,22 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                         size="lg"
                       >
                         {t("Add to project")}
+                      </Button>
+                    )}
+
+                    {/* Publish affordance when viewing an existing draft in the
+                        detail/preview modal (not the dedicated move-to-project
+                        flow, which already renders its own button above). */}
+                    {!moveToIssue && isDraft && !!data?.id && (
+                      <Button
+                        variant="primary"
+                        type="button"
+                        loading={isMoving}
+                        onClick={handleMoveToProjects}
+                        disabled={isMoving || isGeneratingTitle}
+                        size="lg"
+                      >
+                        {t("Publish issue")}
                       </Button>
                     )}
                   </div>

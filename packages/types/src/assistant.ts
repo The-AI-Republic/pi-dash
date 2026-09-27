@@ -82,6 +82,26 @@ export interface IUserLLMConfigInput {
   api_key?: string;
 }
 
+/**
+ * User-level speech-to-text (dictation) provider config. BYO OpenAI-compatible
+ * `/v1/audio/transcriptions` endpoint — base URL + API key + model. There is a
+ * single provider kind (OpenAI-compatible), so no provider selector is needed.
+ * Mirrors {@link IUserLLMConfig}; the API never echoes the key, only `has_api_key`.
+ */
+export interface IUserSTTConfig {
+  base_url: string;
+  model_name: string;
+  has_api_key: boolean;
+  last_verified_at: string | null;
+}
+
+export interface IUserSTTConfigInput {
+  base_url: string;
+  model_name: string;
+  /** Write-only: the API never echoes it back. Omit to keep the saved key. */
+  api_key?: string;
+}
+
 export interface IAssistantMCPServer {
   id: string;
   name: string;

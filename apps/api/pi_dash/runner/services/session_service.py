@@ -26,6 +26,7 @@ from pi_dash.runner.models import (
     RunnerLiveState,
     RunnerStatus,
 )
+from pi_dash.runner.services.usage import normalize_usage
 
 logger = logging.getLogger(__name__)
 
@@ -304,9 +305,10 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
 
 # Snapshot fields stored on RunnerLiveState. Does NOT include
 # `observed_run_id` (that field drives the wipe, it is not a wipe target).
-# Tokens travel as a nested `tokens.{input,output,total}` object and the
-# selected LLM travels as top-level `model`; both are unpacked into flat
-# columns by the upsert.
+# Tokens travel as a nested `tokens` object (canonical counters plus the
+# agent's verbatim usage under `raw`) and are normalised into the `usage`
+# JSON column; the selected LLM travels as top-level `model`. Both are
+# unpacked by the upsert rather than copied field-for-field.
 SNAPSHOT_FIELDS = (
     "last_event_at",
     "last_event_kind",
@@ -314,9 +316,6 @@ SNAPSHOT_FIELDS = (
     "agent_pid",
     "agent_subprocess_alive",
     "approvals_pending",
-    "input_tokens",
-    "output_tokens",
-    "total_tokens",
     "llm_model",
     "turn_count",
 )
@@ -376,7 +375,8 @@ def upsert_runner_live_state(runner: Runner, status_entry: Dict[str, Any]) -> No
         # wipe, not just the fields present on this poll.
         for f in SNAPSHOT_FIELDS:
             setattr(state, f, None)
-        update_fields.extend(SNAPSHOT_FIELDS)
+        state.usage = {}
+        update_fields.extend((*SNAPSHOT_FIELDS, "usage"))
         state.observed_run_id = incoming_run_id
         update_fields.append("observed_run_id")
 
@@ -386,11 +386,8 @@ def upsert_runner_live_state(runner: Runner, status_entry: Dict[str, Any]) -> No
             update_fields.append(f)
 
     if "tokens" in status_entry:
-        tokens = status_entry["tokens"] or {}
-        state.input_tokens = tokens.get("input")
-        state.output_tokens = tokens.get("output")
-        state.total_tokens = tokens.get("total")
-        update_fields.extend(["input_tokens", "output_tokens", "total_tokens"])
+        state.usage = normalize_usage(status_entry["tokens"])
+        update_fields.append("usage")
     if "model" in status_entry:
         model = str(status_entry.get("model") or "").strip()
         state.llm_model = model[:128] or None

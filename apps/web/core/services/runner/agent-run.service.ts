@@ -49,7 +49,7 @@ export type TAgentRun = {
 };
 
 /**
- * Re-tick dispatch — re-grants a fresh phase-sized ticking budget to an
+ * Re-tick dispatch — re-grants a fresh pool-sized ticking budget to an
  * issue whose agent-ticker budget is exhausted, and re-arms the ticker.
  * The server enforces the guardrails (issue must be in a ticking state and
  * its budget exhausted); when they don't hold it responds ``granted:
@@ -65,10 +65,21 @@ export type TReTickPayload = {
 export type TReTickResponse = {
   granted: boolean;
   reason: string;
+  /** The run Re-tick started right away, when the issue was free. */
+  run_id?: string | null;
+  used?: number;
   tick_count?: number;
   max_ticks?: number;
   enabled?: boolean;
+  pending_entry?: boolean;
   next_run_at?: string | null;
+};
+
+/** 202 from Run AI / Comment & Run: a run is active, the next one is queued. */
+export type TAgentRunQueued = {
+  queued: true;
+  reason: string;
+  detail: string;
 };
 
 export class AgentRunService extends APIService {
@@ -81,7 +92,7 @@ export class AgentRunService extends APIService {
    * side from the issue's phase template — the client sends only the
    * workspace + issue ids.
    */
-  async runAi(data: TRunAiPayload): Promise<TAgentRun> {
+  async runAi(data: TRunAiPayload): Promise<TAgentRun | TAgentRunQueued> {
     return this.post(`/api/runners/runs/`, { ...data, triggered_by: "run_ai" })
       .then((response) => response?.data)
       .catch((error) => {
@@ -93,7 +104,7 @@ export class AgentRunService extends APIService {
    * Dispatch a continuation run for the Comment & Run flow. The just-
    * posted comment must already exist on the issue.
    */
-  async commentAndRun(data: TCommentAndRunPayload): Promise<TAgentRun> {
+  async commentAndRun(data: TCommentAndRunPayload): Promise<TAgentRun | TAgentRunQueued> {
     return this.post(`/api/runners/runs/`, { ...data, triggered_by: "comment_and_run" })
       .then((response) => response?.data)
       .catch((error) => {

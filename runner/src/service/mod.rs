@@ -269,6 +269,25 @@ impl Service {
             Service::WindowsTask => windows::diagnose_recent_exit().await,
         }
     }
+
+    /// After `restart_and_verify`'s IPC wait times out, report whether the
+    /// daemon's most recent exit is the kind a bounded restart retry is
+    /// likely to clear. Today that's exactly the macOS AMFI
+    /// SIGKILL-on-first-exec race after a binary swap (PDASHOSS01-164):
+    /// launchd exec's the freshly-written binary, AMFI kills it before it
+    /// serves IPC, but the very next exec succeeds. systemd and Windows have
+    /// no analogous transient-startup-kill mode, so they never ask for a
+    /// retry and their restart behavior is unchanged.
+    pub async fn recent_exit_is_retryable(&self) -> bool {
+        match self {
+            #[cfg(target_os = "linux")]
+            Service::Systemd => false,
+            #[cfg(target_os = "macos")]
+            Service::Launchd => launchd::recent_exit_is_retryable().await,
+            #[cfg(windows)]
+            Service::WindowsTask => false,
+        }
+    }
 }
 
 #[cfg(test)]

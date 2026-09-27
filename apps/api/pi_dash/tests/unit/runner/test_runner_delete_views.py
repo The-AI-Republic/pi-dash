@@ -476,3 +476,93 @@ def test_dev_machine_actions_hide_other_users_private_machines(
     assert machine.revoked_at is None
     assert token.revoked_at is None
     assert runner.revoked_at is None
+
+
+@pytest.mark.unit
+def test_dev_machine_delete_drops_machine_and_tears_down_runners(
+    db, session_client, create_user, workspace, pod, _stub_outbox_send
+):
+    """Default (no ``purge_local``) → the connection is removed entirely:
+    the machine row and its runner rows are gone, the token is revoked,
+    and a ``remove_runner`` cascade frame is enqueued."""
+    machine = DevMachine.objects.create(owner=create_user, host_label="host-del")
+    token = _make_machine_token(create_user, workspace, machine, raw="mt_delete")
+    runner = _make_runner(create_user, workspace, pod, "delete-runner", dev_machine=machine)
+
+    url = reverse("dev-machine-delete", kwargs={"machine_id": machine.id}) + f"?workspace={workspace.id}"
+    resp = session_client.delete(url)
+
+    assert resp.status_code == 204, getattr(resp, "data", resp.content)
+    assert not DevMachine.objects.filter(pk=machine.id).exists()
+    assert not Runner.objects.filter(pk=runner.id).exists()
+    token.refresh_from_db()
+    assert token.revoked_at is not None
+    types_enqueued = [
+        c.kwargs.get("message", c.args[1] if len(c.args) > 1 else {}).get("type")
+        for c in _stub_outbox_send["enqueue"].call_args_list
+    ]
+    assert "remove_runner" in types_enqueued
+    assert "revoke" not in types_enqueued
+
+
+@pytest.mark.unit
+def test_dev_machine_delete_purge_false_emits_revoke_only(
+    db, session_client, create_user, workspace, pod, _stub_outbox_send
+):
+    machine = DevMachine.objects.create(owner=create_user, host_label="host-del-norepurge")
+    _make_machine_token(create_user, workspace, machine, raw="mt_delete_np")
+    runner = _make_runner(create_user, workspace, pod, "delete-runner-np", dev_machine=machine)
+
+    base = reverse("dev-machine-delete", kwargs={"machine_id": machine.id})
+    resp = session_client.delete(f"{base}?workspace={workspace.id}&purge_local=false")
+
+    assert resp.status_code == 204, getattr(resp, "data", resp.content)
+    assert not DevMachine.objects.filter(pk=machine.id).exists()
+    assert not Runner.objects.filter(pk=runner.id).exists()
+    types_enqueued = [
+        c.kwargs.get("message", c.args[1] if len(c.args) > 1 else {}).get("type")
+        for c in _stub_outbox_send["enqueue"].call_args_list
+    ]
+    assert "revoke" in types_enqueued
+    assert "remove_runner" not in types_enqueued
+
+
+@pytest.mark.unit
+def test_dev_machine_delete_404_for_other_users_private_machine(db, session_client, workspace, pod):
+    from pi_dash.db.models import User, WorkspaceMember
+
+    other = User.objects.create_user(
+        email="other-dev-machine-delete@example.com",
+        username="other-dev-machine-delete",
+    )
+    WorkspaceMember.objects.create(workspace=workspace, member=other, role=15)
+    machine = DevMachine.objects.create(owner=other, host_label="host-other-del")
+    _make_machine_token(other, workspace, machine, raw="mt_other_del")
+    runner = _make_runner(other, workspace, pod, "other-runner-del", dev_machine=machine)
+
+    url = reverse("dev-machine-delete", kwargs={"machine_id": machine.id}) + f"?workspace={workspace.id}"
+    resp = session_client.delete(url)
+
+    assert resp.status_code == 404
+    assert DevMachine.objects.filter(pk=machine.id).exists()
+    assert Runner.objects.filter(pk=runner.id).exists()
+
+
+@pytest.mark.unit
+def test_dev_machine_delete_requires_workspace(db, session_client, create_user):
+    machine = DevMachine.objects.create(owner=create_user, host_label="host-no-ws")
+    url = reverse("dev-machine-delete", kwargs={"machine_id": machine.id})
+    resp = session_client.delete(url)
+    assert resp.status_code == 400
+    assert DevMachine.objects.filter(pk=machine.id).exists()
+
+
+@pytest.mark.unit
+def test_dev_machine_delete_invalid_purge_returns_400(db, session_client, create_user, workspace, pod):
+    machine = DevMachine.objects.create(owner=create_user, host_label="host-bad-flag")
+    _make_machine_token(create_user, workspace, machine, raw="mt_bad_flag")
+    base = reverse("dev-machine-delete", kwargs={"machine_id": machine.id})
+    resp = session_client.delete(f"{base}?workspace={workspace.id}&purge_local=maybe")
+    assert resp.status_code == 400
+    # Validation runs before any destructive work.
+    assert DevMachine.objects.filter(pk=machine.id).exists()

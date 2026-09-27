@@ -22,6 +22,7 @@ from pi_dash.runner.views import (
     AgentRunReleasePinEndpoint,
     ApprovalDecideEndpoint,
     ApprovalListEndpoint,
+    DevMachineDeleteEndpoint,
     DevMachineListEndpoint,
     DevMachineRevokeEndpoint,
     DevMachineRotateEndpoint,
@@ -62,6 +63,14 @@ urlpatterns = [
         "dev-machines/<uuid:machine_id>/create-runner/<uuid:request_id>/",
         MachineCreateRunnerStatusEndpoint.as_view(),
         name="dev-machine-create-runner-status",
+    ),
+    # Hard-delete a dev-machine connection (destructive counterpart to
+    # revoke). Bare ``<machine_id>/`` — the action routes above carry an
+    # extra path segment, so they still match first.
+    path(
+        "dev-machines/<uuid:machine_id>/",
+        DevMachineDeleteEndpoint.as_view(),
+        name="dev-machine-delete",
     ),
     # Deprecated token-mint route retained only to return a clear 410.
     # New runners are created by `pidash runner add` through the

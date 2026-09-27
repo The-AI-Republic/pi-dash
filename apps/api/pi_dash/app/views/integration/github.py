@@ -672,7 +672,10 @@ class GithubAppInstallStartEndpoint(BaseAPIView):
             return Response({"error": "workspace_slug is required"}, status=status.HTTP_400_BAD_REQUEST)
         workspace = get_object_or_404(Workspace, slug=workspace_slug)
         if not _is_workspace_admin(request.user, workspace):
-            return Response({"error": "You must be a workspace admin to install the GitHub App"}, status=status.HTTP_403_FORBIDDEN)
+            return Response(
+                {"error": "You must be a workspace admin to install the GitHub App"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         state = secrets.token_urlsafe(32)
         install_session = GithubAppInstallSession.objects.create(
@@ -703,11 +706,17 @@ class GithubAppRefreshEndpoint(BaseAPIView):
             return Response({"error": "workspace_slug is required"}, status=status.HTTP_400_BAD_REQUEST)
         workspace = get_object_or_404(Workspace, slug=workspace_slug)
         if not _is_workspace_admin(request.user, workspace):
-            return Response({"error": "You must be a workspace admin to refresh this connection"}, status=status.HTTP_403_FORBIDDEN)
+            return Response(
+                {"error": "You must be a workspace admin to refresh this connection"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         wi = _get_workspace_integration(workspace)
         app_installation = getattr(wi, "github_app_installation", None) if wi else None
         if app_installation is None:
-            return Response({"error": "GitHub App is not installed for this workspace"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "GitHub App is not installed for this workspace"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
         try:
             app_installation = _refresh_app_installation(app_installation, raise_on_error=True)
         except GithubAppAuthError:
@@ -739,7 +748,9 @@ class GithubAppCallbackEndpoint(BaseAPIView):
         if not state:
             return _redirect_to_profile_integrations({"github_app": "error", "error": "missing_state"})
 
-        install_session = GithubAppInstallSession.objects.filter(state=state).select_related("workspace", "actor").first()
+        install_session = (
+            GithubAppInstallSession.objects.filter(state=state).select_related("workspace", "actor").first()
+        )
         if install_session is None:
             return _redirect_to_profile_integrations({"github_app": "error", "error": "unknown_state"})
 

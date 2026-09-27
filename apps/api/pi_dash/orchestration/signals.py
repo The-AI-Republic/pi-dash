@@ -14,6 +14,11 @@ receiver here. The agent is woken by the per-issue ticker
 (``pi_dash.bgtasks.agent_ticker``) or by the explicit Comment & Run
 button, which calls into ``orchestration.service.handle_issue_comment``
 directly. See ``.ai_design/issue_ticking_system/design.md`` §9.
+
+Closing an issue fires nothing on the issues it was blocking: the platform
+does not read ``blocked_by`` to decide when someone else's wait ends. A
+dependent picks the change up on its next cadence tick and decides for
+itself (PDASHOSS01-204).
 """
 
 from __future__ import annotations
@@ -37,6 +42,15 @@ _PREVIOUS_STATE = "_orchestration_prev_state_id"
 #: = False`` before calling ``Issue.save()``.
 _DISPATCH_IMMEDIATE_ATTR = "_orchestration_dispatch_immediate"
 
+#: Per-instance carrier for "this state change was made from inside an
+#: agent run". The work-item PATCH view sets
+#: ``issue._orchestration_moved_by_run = <AgentRun>`` (verified from the
+#: ``X-Pi-Dash-Run-Id`` header) before ``Issue.save()``; the handler uses it
+#: to tell an agent's move from a human's — account identity cannot, because
+#: the agent's CLI token resolves to the runner owner's account. See
+#: ``.ai_design/ticking_relevance/design.md`` §5.6.
+MOVED_BY_RUN_ATTR = "_orchestration_moved_by_run"
+
 #: Process-local counter of swallowed orchestration errors. We catch and log
 #: every exception in `fire_state_transition` so a broken trigger can't crash
 #: the user's Issue save — but silent failures are worse than loud 500s, so we
@@ -59,6 +73,7 @@ def capture_prior_state(sender, instance: Issue, **kwargs) -> None:
 
 @receiver(post_save, sender=Issue, dispatch_uid="orchestration.issue_postsave")
 def fire_state_transition(sender, instance: Issue, created: bool, **kwargs) -> None:
+    global orchestration_error_count
     prev_state_id = getattr(instance, _PREVIOUS_STATE, None)
     current_state_id = instance.state_id
     if prev_state_id == current_state_id:
@@ -69,6 +84,7 @@ def fire_state_transition(sender, instance: Issue, created: bool, **kwargs) -> N
     dispatch_immediate = bool(
         getattr(instance, _DISPATCH_IMMEDIATE_ATTR, True)
     )
+    moved_by_run = getattr(instance, MOVED_BY_RUN_ATTR, None)
 
     try:
         handle_issue_state_transition(
@@ -77,9 +93,9 @@ def fire_state_transition(sender, instance: Issue, created: bool, **kwargs) -> N
             to_state=to_state,
             actor=None,
             dispatch_immediate=dispatch_immediate,
+            moved_by_run=moved_by_run,
         )
     except Exception:  # noqa: BLE001 — never let orchestration crash issue save
-        global orchestration_error_count
         orchestration_error_count += 1
         logger.exception(
             "orchestration.error: handle_issue_state_transition failed "

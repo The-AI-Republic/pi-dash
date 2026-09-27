@@ -5,18 +5,14 @@
 # Python imports
 import uuid
 import base64
-import requests
 from bs4 import BeautifulSoup
-
-# Django imports
-from django.conf import settings
 
 # Module imports
 from pi_dash.db.models import FileAsset, Page, Issue
 from pi_dash.utils.exception_logger import log_exception
 from pi_dash.settings.storage import S3Storage
 from celery import shared_task
-from pi_dash.utils.url import normalize_url_path
+from pi_dash.utils.live_document import LiveConversionError, convert_document
 
 
 def get_entity_id_field(entity_type, entity_id):
@@ -65,24 +61,26 @@ def update_description(entity, duplicated_assets, tag):
 
 # Get the description binary and description from the live server
 def sync_with_external_service(entity_name, description_html):
+    """Best-effort conversion for duplicated entities.
+
+    Returns ``{}`` when the live server is unavailable so the duplicate is
+    still created; the live server regenerates the binary from HTML the first
+    time the (empty-binary) document is opened. Writers that must not lose
+    the body call :func:`pi_dash.utils.live_document.convert_document`
+    directly, which raises instead.
+    """
     try:
-        data = {
-            "description_html": description_html,
-            "variant": "rich" if entity_name == "PAGE" else "document",
-        }
-
-        live_url = settings.LIVE_URL
-        if not live_url:
-            return {}
-
-        url = normalize_url_path(f"{live_url}/convert-document/")
-
-        response = requests.post(url, json=data, headers=None)
-        if response.status_code == 200:
-            return response.json()
-    except requests.RequestException as e:
+        document = convert_document(
+            description_html,
+            variant="rich" if entity_name == "PAGE" else "document",
+        )
+    except LiveConversionError as e:
         log_exception(e)
-    return {}
+        return {}
+    return {
+        "description_json": document.description_json,
+        "description_binary": base64.b64encode(document.description_binary).decode("ascii"),
+    }
 
 
 def copy_assets(entity, entity_identifier, project_id, asset_ids, user_id):

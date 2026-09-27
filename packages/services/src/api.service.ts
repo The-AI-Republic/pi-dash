@@ -6,6 +6,7 @@
 
 import type { AxiosInstance, AxiosRequestConfig } from "axios";
 import axios from "axios";
+import { getDesktopApiAdapter } from "./desktop-api-adapter";
 // `_axios-setup` first so its registry is fully initialized before
 // `./ee/init` runs and (in cloud builds) registers an interceptor.
 import { applyAxiosSetups } from "./_axios-setup";
@@ -37,6 +38,7 @@ export abstract class APIService {
     this.axiosInstance = axios.create({
       baseURL,
       withCredentials: true,
+      adapter: getDesktopApiAdapter(),
     });
     applyAxiosSetups(this.axiosInstance);
   }

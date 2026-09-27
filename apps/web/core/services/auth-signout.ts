@@ -6,6 +6,7 @@
 
 // types
 import type { ICsrfTokenData } from "@pi-dash/types";
+import { clearDesktopSessionData } from "@/services/desktop-session";
 
 /**
  * The minimal slice of ``AuthService`` the sign-out strategy needs. Declared
@@ -45,6 +46,11 @@ export async function performSignOut(client: SignOutClient, baseUrl: string): Pr
   form.appendChild(input);
 
   document.body.appendChild(form);
+
+  // Desktop only: the server's cookie deletions do not reach a
+  // `tauri://localhost` page, so the app clears its own jar before navigating.
+  // No-op in a browser.
+  await clearDesktopSessionData();
 
   form.submit();
 }

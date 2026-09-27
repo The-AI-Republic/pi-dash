@@ -1224,22 +1224,7 @@ impl Serialize for PollStatusObservabilityFlag {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct TokenUsage {
-    pub input: u64,
-    pub output: u64,
-    pub total: u64,
-}
-
-impl From<crate::daemon::observability::TokenUsage> for TokenUsage {
-    fn from(t: crate::daemon::observability::TokenUsage) -> Self {
-        Self {
-            input: t.input,
-            output: t.output,
-            total: t.total,
-        }
-    }
-}
+pub use crate::daemon::observability::TokenUsage;
 
 impl PollStatus {
     pub fn idle() -> Self {
@@ -1308,7 +1293,7 @@ impl PollStatus {
         me.agent_pid = snapshot.agent_pid;
         me.agent_subprocess_alive = snapshot.agent_subprocess_alive;
         me.approvals_pending = Some(u32::try_from(approvals_pending).unwrap_or(u32::MAX));
-        me.tokens = snapshot.tokens.map(TokenUsage::from);
+        me.tokens = snapshot.tokens;
         me.model = snapshot.model;
         me.turn_count = snapshot.turn_count;
         me
@@ -2618,6 +2603,10 @@ mod tests {
                 input: 100,
                 output: 200,
                 total: 300,
+                cache_read: Some(60),
+                reasoning: Some(20),
+                raw: Some(serde_json::json!({"futureCounter": 7})),
+                ..Default::default()
             }),
             model: Some("gpt-5.1-codex".into()),
             turn_count: Some(2),
@@ -2639,5 +2628,13 @@ mod tests {
         assert_eq!(tokens.get("input"), Some(&serde_json::json!(100)));
         assert_eq!(tokens.get("output"), Some(&serde_json::json!(200)));
         assert_eq!(tokens.get("total"), Some(&serde_json::json!(300)));
+        assert_eq!(tokens.get("cache_read"), Some(&serde_json::json!(60)));
+        assert_eq!(tokens.get("reasoning"), Some(&serde_json::json!(20)));
+        assert_eq!(
+            tokens.get("raw"),
+            Some(&serde_json::json!({"futureCounter": 7}))
+        );
+        // Unreported breakdowns stay off the wire rather than as nulls.
+        assert!(!tokens.contains_key("cache_write"));
     }
 }

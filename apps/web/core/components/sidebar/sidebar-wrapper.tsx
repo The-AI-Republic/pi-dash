@@ -11,6 +11,7 @@ import { useOutsideClickDetector } from "@pi-dash/hooks";
 import { PreferencesIcon } from "@pi-dash/propel/icons";
 import { ScrollArea } from "@pi-dash/propel/scrollarea";
 // components
+import { DesktopUpdateButton } from "@/components/desktop-update-button";
 import { CustomizeNavigationDialog } from "@/components/navigation/customize-navigation-dialog";
 // hooks
 import { useAppTheme } from "@/hooks/store/use-app-theme";
@@ -105,8 +106,12 @@ export const SidebarWrapper = observer(function SidebarWrapper(props: TSidebarWr
             the compact fallback instead, so there is exactly one UserMenuRoot
             on screen at any time. */}
         {!sidebarCollapsed && (
-          <div className="flex items-center border-t border-subtle bg-surface-1 px-2 py-2">
-            <UserMenuRoot variant="sidebar" />
+          <div className="flex items-center gap-1 border-t border-subtle bg-surface-1 px-2 py-2">
+            <div className="min-w-0 flex-1">
+              <UserMenuRoot variant="sidebar" />
+            </div>
+            {/* Desktop only: a corner button while an app update is waiting. */}
+            <DesktopUpdateButton />
           </div>
         )}
       </div>

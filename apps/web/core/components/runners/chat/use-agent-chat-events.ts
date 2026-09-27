@@ -5,10 +5,8 @@
  */
 
 import { useEffect, useRef } from "react";
-import { RunnerService } from "@pi-dash/services";
+import { getChatTransport } from "@pi-dash/services";
 import type { IAgentChatEvent } from "@pi-dash/types";
-
-const service = new RunnerService();
 
 export function useAgentChatEvents(
   sessionId: string | undefined,
@@ -18,29 +16,21 @@ export function useAgentChatEvents(
 ) {
   const onEventRef = useRef(onEvent);
   const onErrorRef = useRef(onError);
-  const lastSeqRef = useRef(initialAfter);
   onEventRef.current = onEvent;
   onErrorRef.current = onError;
 
   useEffect(() => {
     if (!sessionId) return;
-    lastSeqRef.current = initialAfter;
-    const source = new EventSource(service.chatEventsUrl(sessionId, initialAfter), {
-      withCredentials: true,
-    });
-    source.addEventListener("chat.event", (message) => {
-      try {
-        const event = JSON.parse((message as MessageEvent).data) as IAgentChatEvent;
-        lastSeqRef.current = Math.max(lastSeqRef.current, event.seq);
-        onEventRef.current(event);
-      } catch (error) {
-        console.error("Failed to parse runner chat event", error);
-        onErrorRef.current?.(error);
-      }
-    });
-    source.addEventListener("error", (error) => {
-      onErrorRef.current?.(error);
-    });
-    return () => source.close();
+    // Route the event stream through the pluggable chat transport: the
+    // cloud default opens the same SSE `EventSource` as before, while a
+    // desktop build can subscribe to Tauri events instead — the hook is
+    // agnostic. The refs keep the latest callbacks without re-subscribing.
+    const unsubscribe = getChatTransport().subscribeChatEvents(
+      sessionId,
+      initialAfter,
+      (event) => onEventRef.current(event),
+      (error) => onErrorRef.current?.(error)
+    );
+    return unsubscribe;
   }, [initialAfter, sessionId]);
 }

@@ -18,7 +18,7 @@ import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { Tooltip } from "@pi-dash/propel/tooltip";
 import { EFileAssetType } from "@pi-dash/types";
 import type { IProject, IWorkspace } from "@pi-dash/types";
-import { CustomSelect, Input, TextArea } from "@pi-dash/ui";
+import { CustomSelect, Input, TextArea, ToggleSwitch } from "@pi-dash/ui";
 import { renderFormattedDate } from "@pi-dash/utils";
 import { CoverImage } from "@/components/common/cover-image";
 import { ImagePickerPopover } from "@/components/core/image-picker-popover";
@@ -43,12 +43,51 @@ export interface IProjectDetailsForm {
 }
 const projectService = new ProjectService();
 
+// Agent ticking policy. The backend keeps one cadence column per ticking
+// stage so the rhythms can diverge later, but they are unified today, so this
+// form offers a single Cadence picker and writes it to all three — only when
+// the picker itself moved, so an out-of-band per-stage rhythm survives an
+// unrelated save.
+const TICKING_CADENCE_OPTIONS = [
+  { seconds: 1800, i18n_label: "30 minutes" },
+  { seconds: 3600, i18n_label: "1 hour" },
+  { seconds: 10800, i18n_label: "3 hours" },
+  { seconds: 21600, i18n_label: "6 hours" },
+  { seconds: 43200, i18n_label: "12 hours" },
+  { seconds: 86400, i18n_label: "24 hours" },
+] as const;
+const DEFAULT_CADENCE_SECONDS = 10800;
+const DEFAULT_MAX_TICKS = 10;
+// Mirrors ``IssueAgentTicker.INFINITE_MAX_TICKS`` — the pool sentinel meaning
+// "never stop for budget".
+const INFINITE_MAX_TICKS = -1;
+
+/** The project's numeric budget, or the default when it is uncapped/unset. */
+function cappedBudgetOf(project: IProject): number {
+  return project.agent_default_max_ticks && project.agent_default_max_ticks > 0
+    ? project.agent_default_max_ticks
+    : DEFAULT_MAX_TICKS;
+}
+
+/** Label a cadence the presets don't cover, e.g. a hand-PATCHed 8h row. */
+function formatCadenceSeconds(seconds: number): string {
+  if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+  if (seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${seconds}s`;
+}
+
 export function ProjectDetailsForm(props: IProjectDetailsForm) {
   const { project, workspaceSlug, projectId, isAdmin } = props;
   const { t } = useTranslation();
   // states
   const [isOpen, setIsOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  // Remembers the numeric budget while "No cap" is ticked, so unticking it
+  // restores what the admin had typed rather than snapping back to the default.
+  // Re-seeded by the reset effect below: this component is not remounted when
+  // the settings sidebar switches projects, so the initializer alone would
+  // carry the first project's budget over to every later one.
+  const [lastCappedBudget, setLastCappedBudget] = useState(cappedBudgetOf(project));
   // store hooks
   const { updateProject } = useProject();
   const { isMobile } = usePlatformOS();
@@ -61,7 +100,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
     setValue,
     setError,
     reset,
-    formState: { errors },
+    formState: { errors, dirtyFields },
     getValues,
   } = useForm<IProject>({
     defaultValues: {
@@ -73,6 +112,9 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
   const currentNetwork = NETWORK_CHOICES.find((n) => n.key === project?.network);
   const coverImage = watch("cover_image_url");
   const cloudExecutorOption = project.agent_executor_options?.find((option) => option.kind === "cloud_agent");
+  // The budget and cadence controls stay visible but inert while ticking is
+  // off, so the configured policy is still readable at a glance.
+  const isTickingEnabled = watch("agent_ticking_enabled") ?? true;
 
   useEffect(() => {
     if (project && projectId !== getValues("id")) {
@@ -80,6 +122,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
         ...project,
         workspace: (project.workspace as IWorkspace).id,
       });
+      setLastCappedBudget(cappedBudgetOf(project));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project, projectId]);
@@ -207,6 +250,19 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
     // through the repository bind endpoint (verifies the URL upstream, creates
     // the binding, and writes the canonical URL back). This keeps the field
     // and the actual provider binding from drifting apart.
+    // One rhythm for every ticking stage: the model keeps a column per stage
+    // so they can diverge later, but this form sets a single cadence. The two
+    // stages without a control of their own are only written when the picker
+    // moved (see below).
+    const cadenceSeconds = Number(formData.agent_default_interval_seconds ?? DEFAULT_CADENCE_SECONDS);
+    // The number input stores `""` when it is cleared, and `Number("")` is 0 —
+    // a budget that would arm a clock which can never fire. Treat a blank as
+    // "leave it at the default".
+    const rawBudget = formData.agent_default_max_ticks;
+    const budget =
+      rawBudget === undefined || rawBudget === null || String(rawBudget).trim() === ""
+        ? DEFAULT_MAX_TICKS
+        : Number(rawBudget);
     const payload: Partial<IProject> = {
       name: formData.name,
       network: formData.network,
@@ -217,7 +273,18 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
       timezone: formData.timezone,
       base_branch: formData.base_branch ?? "",
       default_agent_executor: formData.default_agent_executor ?? "local_runner",
+      agent_ticking_enabled: formData.agent_ticking_enabled ?? true,
+      agent_default_max_ticks: budget,
+      agent_default_interval_seconds: cadenceSeconds,
     };
+    // The review and test cadences have no control of their own, so they move
+    // only when the Cadence picker moves. Writing them on every save would
+    // silently collapse a per-stage rhythm that had been set elsewhere, just
+    // because someone renamed the project.
+    if (dirtyFields.agent_default_interval_seconds) {
+      payload.agent_review_default_interval_seconds = cadenceSeconds;
+      payload.agent_test_default_interval_seconds = cadenceSeconds;
+    }
 
     // Handle cover image changes
     try {
@@ -497,6 +564,128 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
           <p className="text-11 text-tertiary">
             {t("Changing this affects new runs only. Existing and queued runs keep their original executor.")}
           </p>
+        </div>
+        <div className="flex flex-col gap-3">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex flex-col gap-1">
+              <h4 className="text-13">{t("AI agent ticking")}</h4>
+              <p className="text-11 text-tertiary">
+                {t(
+                  "When off, no work item in this project is re-run on a timer. Human-started runs (Run AI, Comment & Run) still work."
+                )}
+              </p>
+            </div>
+            <Controller
+              name="agent_ticking_enabled"
+              control={control}
+              render={({ field: { value, onChange } }) => (
+                <ToggleSwitch value={value ?? true} onChange={onChange} disabled={!isAdmin} size="sm" />
+              )}
+            />
+          </div>
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+            <div className="flex flex-col gap-1">
+              <h4 className="text-13">{t("Run budget per work item")}</h4>
+              <Controller
+                name="agent_default_max_ticks"
+                control={control}
+                rules={{
+                  validate: (value) => {
+                    // Nothing to enforce while the clock is off: both this
+                    // input and the No cap checkbox are disabled, so a
+                    // half-typed budget could not be corrected without
+                    // turning ticking back on. onSubmit falls back to the
+                    // default for a blank field.
+                    if (!getValues("agent_ticking_enabled")) return true;
+                    const parsed = Number(value ?? DEFAULT_MAX_TICKS);
+                    if (parsed === INFINITE_MAX_TICKS) return true;
+                    return (
+                      (Number.isInteger(parsed) && parsed >= 1) ||
+                      t("Enter a whole number of 1 or more, or tick No cap.")
+                    );
+                  },
+                }}
+                render={({ field: { value, onChange } }) => {
+                  const isUncapped = value === INFINITE_MAX_TICKS;
+                  return (
+                    <div className="flex items-center gap-3">
+                      <Input
+                        id="agent_default_max_ticks"
+                        name="agent_default_max_ticks"
+                        type="number"
+                        min={1}
+                        step={1}
+                        value={isUncapped ? "" : (value ?? DEFAULT_MAX_TICKS)}
+                        onChange={(event) => onChange(event.target.value === "" ? "" : Number(event.target.value))}
+                        hasError={Boolean(errors?.agent_default_max_ticks)}
+                        placeholder={isUncapped ? t("No cap") : undefined}
+                        className="w-24 font-medium"
+                        disabled={!isAdmin || !isTickingEnabled || isUncapped}
+                      />
+                      <label className="flex items-center gap-1.5 text-11 text-tertiary">
+                        <input
+                          type="checkbox"
+                          checked={isUncapped}
+                          onChange={(event) => {
+                            if (event.target.checked) {
+                              if (typeof value === "number" && value > 0) setLastCappedBudget(value);
+                              onChange(INFINITE_MAX_TICKS);
+                            } else {
+                              onChange(lastCappedBudget);
+                            }
+                          }}
+                          disabled={!isAdmin || !isTickingEnabled}
+                        />
+                        {t("No cap")}
+                      </label>
+                    </div>
+                  );
+                }}
+              />
+              <span className="text-11 text-danger-primary">{errors?.agent_default_max_ticks?.message}</span>
+              <p className="text-11 text-tertiary">
+                {t(
+                  "How many automatic runs a work item gets across In Progress, In Review and In Test before it pauses. Re-tick grants more. A new budget applies from the next tick — work items already paused stay paused until you Re-tick them."
+                )}
+              </p>
+            </div>
+            <div className="flex flex-col gap-1">
+              <h4 className="text-13">{t("Cadence")}</h4>
+              <Controller
+                name="agent_default_interval_seconds"
+                control={control}
+                render={({ field: { value, onChange } }) => {
+                  const selected = Number(value ?? DEFAULT_CADENCE_SECONDS);
+                  const isPreset = TICKING_CADENCE_OPTIONS.some((option) => option.seconds === selected);
+                  return (
+                    <select
+                      aria-label={t("Cadence")}
+                      value={selected}
+                      onChange={(event) => onChange(Number(event.target.value))}
+                      disabled={!isAdmin || !isTickingEnabled}
+                      className="w-fit rounded-md border border-subtle bg-surface-1 px-2 py-1 text-13"
+                    >
+                      {!isPreset && (
+                        <option value={selected}>
+                          {t("Custom ({duration})", { duration: formatCadenceSeconds(selected) })}
+                        </option>
+                      )}
+                      {TICKING_CADENCE_OPTIONS.map((option) => (
+                        <option key={option.seconds} value={option.seconds}>
+                          {t(option.i18n_label)}
+                        </option>
+                      ))}
+                    </select>
+                  );
+                }}
+              />
+              <p className="text-11 text-tertiary">
+                {t(
+                  "How long Pi Dash waits between automatic runs. One rhythm covers In Progress, In Review and In Test. A new cadence applies from the next tick — a work item already waiting keeps its scheduled time."
+                )}
+              </p>
+            </div>
+          </div>
         </div>
         <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
           <div className="flex flex-col gap-1">
