@@ -45,6 +45,15 @@ logger = logging.getLogger(__name__)
 
 PAUSED_STATE_NAME = "Paused"
 
+#: The settling window on a dispatch-triggering state transition: a human
+#: move into (or within) the ticking bucket queues its entry run on the
+#: clock and holds it for this long, so a kanban mis-drop can be corrected
+#: before anything fires. A further move inside the window re-times the
+#: same pending entry (the clock is "a queue of length one" — design §4.5),
+#: and a move out of the bucket clears it. See
+#: ``.ai_design/state_transition_debounce/design.md``.
+STATE_TRANSITION_SETTLE_SECONDS = 15
+
 # DEPRECATED: retained only for backward compatibility with external
 # importers (tests, integrations). Internal callers must use
 # ``orchestration.agent_phases.is_ticking_state`` /
@@ -132,10 +141,18 @@ class TickerEvent:
     #: (LLM config, runner eligibility) and labelled correctly.
     actor: Optional[Any] = None
     trigger: str = ""
+    #: For ``ENTERED_BUCKET`` / ``MOVED_STAGE``: hold the entry run for the
+    #: settling window (``STATE_TRANSITION_SETTLE_SECONDS``) instead of
+    #: dispatching now, so a mis-dropped card can be corrected. Set by the
+    #: post_save signal for real transitions (``from_state`` known); direct
+    #: programmatic callers (assistant tools, Re-tick, creation into a
+    #: ticking state) keep the immediate path. Agent moves ignore it — they
+    #: already queue on the clock.
+    settle: bool = False
 
     # Convenience constructors — keep call sites readable.
     @classmethod
-    def entered_bucket(cls, *, moved_by_run=None, resume_parent=None, want_run=True, actor=None):
+    def entered_bucket(cls, *, moved_by_run=None, resume_parent=None, want_run=True, actor=None, settle=False):
         return cls(
             TickerEventKind.ENTERED_BUCKET,
             moved_by_run=moved_by_run,
@@ -143,10 +160,11 @@ class TickerEvent:
             want_run=want_run,
             actor=actor,
             trigger=AgentRunTrigger.STATE_TRANSITION.value,
+            settle=settle,
         )
 
     @classmethod
-    def moved_stage(cls, *, moved_by_run=None, resume_parent=None, want_run=True, actor=None):
+    def moved_stage(cls, *, moved_by_run=None, resume_parent=None, want_run=True, actor=None, settle=False):
         return cls(
             TickerEventKind.MOVED_STAGE,
             moved_by_run=moved_by_run,
@@ -154,6 +172,7 @@ class TickerEvent:
             want_run=want_run,
             actor=actor,
             trigger=AgentRunTrigger.STATE_TRANSITION.value,
+            settle=settle,
         )
 
     @classmethod
@@ -282,21 +301,21 @@ def _stop_clock(ticker: IssueAgentTicker, reason: str) -> None:
     _clear_pending(ticker)
 
 
-def _queue_entry(ticker: IssueAgentTicker, *, free: bool, actor=None, trigger: str = "") -> None:
+def _queue_entry(ticker: IssueAgentTicker, *, free: bool, actor=None, trigger: str = "", not_before=None) -> None:
     """Owe an entry run for the current stage (design §4.5).
 
-    ``next_run_at = now`` so the scanner picks it up on its next pass;
-    ``fire_tick`` refuses while a run is active and leaves the clock
-    untouched, so the entry fires as soon as the issue is free. ``enabled``
-    must be ``True`` even when the pool is spent and the entry is free — the
-    scan admits pending rows regardless of cap — and even when the user or
-    project switched automatic ticking off: a human asked for *this* run.
-    ``fire_tick`` re-applies the switch after the claim so no timer tick
-    follows on a disabled clock.
+    ``next_run_at = now`` (or ``not_before``, for a settling-window hold) so
+    the scanner picks it up on its next pass once due; ``fire_tick`` refuses
+    while a run is active and leaves the clock untouched, so the entry fires
+    as soon as the issue is free. ``enabled`` must be ``True`` even when the
+    pool is spent and the entry is free — the scan admits pending rows
+    regardless of cap — and even when the user or project switched automatic
+    ticking off: a human asked for *this* run. ``fire_tick`` re-applies the
+    switch after the claim so no timer tick follows on a disabled clock.
     """
     ticker.enabled = True
     ticker.disarm_reason = TickerDisarmReason.NONE
-    ticker.next_run_at = timezone.now()
+    ticker.next_run_at = not_before or timezone.now()
     ticker.pending_entry = True
     ticker.pending_entry_free = free
     ticker.pending_entry_actor = actor if free else None
@@ -436,6 +455,25 @@ def _on_enter_or_move(issue: Issue, event: TickerEvent) -> TickerDecision:
         if not event.want_run:
             _retime_clock(ticker, issue)
             decision.reason = "retimed"
+        elif event.settle:
+            # Settling window: queue the free entry on the clock with a
+            # short hold instead of dispatching inline, so a mis-dropped
+            # card can be corrected. A further move inside the window
+            # re-enters here and re-times the same pending entry; a move
+            # out of the bucket clears it (LEFT_BUCKET). The scanner is
+            # the primary firing path; the countdown task below is only a
+            # precision accelerator and is a no-op when stale, because
+            # ``fire_tick`` re-validates ``next_run_at`` under the row lock.
+            _queue_entry(
+                ticker,
+                free=True,
+                actor=event.actor,
+                trigger=event.trigger,
+                not_before=timezone.now() + timedelta(seconds=STATE_TRANSITION_SETTLE_SECONDS),
+            )
+            decision.queued = True
+            decision.reason = "entry-settling"
+            _schedule_settle_fire(ticker)
         elif _issue_has_active_run(issue):
             _queue_entry(ticker, free=True, actor=event.actor, trigger=event.trigger)
             decision.queued = True
@@ -446,6 +484,25 @@ def _on_enter_or_move(issue: Issue, event: TickerEvent) -> TickerDecision:
             decision.reason = "dispatch-now"
     _save_clock(ticker)
     return decision
+
+
+def _schedule_settle_fire(ticker: IssueAgentTicker) -> None:
+    """Fire the settled entry ~on time rather than on the next scanner pass.
+
+    Best-effort: a lost or duplicated countdown task is harmless — the
+    minute scanner is the firing path of record, and ``fire_tick``'s claim
+    re-validates everything (enabled, due, ticking state, active run) so a
+    stale accelerator from a superseded move is a natural no-op.
+    """
+    from pi_dash.bgtasks.agent_ticker import fire_tick
+
+    ticker_id = str(ticker.id)
+    transaction.on_commit(
+        lambda: fire_tick.apply_async(
+            args=[ticker_id],
+            countdown=STATE_TRANSITION_SETTLE_SECONDS + 1,
+        )
+    )
 
 
 def _on_left_bucket(issue: Issue, event: TickerEvent) -> TickerDecision:
@@ -1130,6 +1187,7 @@ def dispatch_continuation_run(
     *,
     triggered_by: str,
     actor=None,
+    allow_first_run: bool = False,
 ) -> Optional[AgentRun]:
     """Public wrapper for tick / Comment & Run dispatch.
 
@@ -1139,6 +1197,12 @@ def dispatch_continuation_run(
     Returns the created run, or ``None`` when the single-active-run
     guardrail blocks creation, no pod is available, or the eligibility
     preflight bounced the issue (§6.6).
+
+    ``allow_first_run=True`` lets a *queued entry* claim create the issue's
+    first run (fresh session, no parent): with the settling window, the
+    transition that used to dispatch the first run inline now parks it on
+    the clock, so the entry fire must be able to mint it. Plain timer ticks
+    keep the no-prior-run skip — a tick is a continuation, not an entry.
     """
     from pi_dash.orchestration import service as orchestration_service
 
@@ -1150,7 +1214,7 @@ def dispatch_continuation_run(
         )
         return None
 
-    if orchestration_service._latest_prior_run(issue) is None:
+    if not allow_first_run and orchestration_service._latest_prior_run(issue) is None:
         logger.info(
             "agent_ticker: skip dispatch issue=%s reason=no-prior-run triggered_by=%s",
             issue.pk,
@@ -1484,6 +1548,7 @@ __all__ = [
     "RUN_AI_NO_ELIGIBLE_RUNNER",
     "RUN_AI_NO_POD",
     "RUN_OUTCOMES",
+    "STATE_TRANSITION_SETTLE_SECONDS",
     "STOPPING_OUTCOMES",
     "TRIGGER_COMMENT_AND_RUN",
     "TRIGGER_RUN_AI",

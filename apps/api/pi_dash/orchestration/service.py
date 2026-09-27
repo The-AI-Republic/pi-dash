@@ -185,6 +185,7 @@ def handle_issue_state_transition(
     *,
     dispatch_immediate: bool = True,
     moved_by_run: Optional[AgentRun] = None,
+    settle: bool = False,
 ) -> TransitionOutcome:
     """React to an issue state change.
 
@@ -204,6 +205,17 @@ def handle_issue_state_transition(
     ``dispatch_immediate=False`` lets a caller (e.g., the Comment & Run
     flow re-opening a Paused issue) update the clock without firing the
     transition's own entry run — the caller will dispatch its own run.
+
+    ``settle=True`` (set by the post_save signal for real transitions)
+    holds a *human* move's entry run on the clock for the settling window
+    (``scheduling.STATE_TRANSITION_SETTLE_SECONDS``) instead of dispatching
+    inline, so a kanban mis-drop can be corrected — a further move inside
+    the window coalesces onto the same pending entry, and a move out of the
+    bucket cancels it. Direct programmatic callers (assistant tools,
+    Re-tick, creation into a ticking state) leave it ``False`` and keep the
+    immediate dispatch. Agent moves (``moved_by_run``) are unaffected — they
+    already queue on the clock. See
+    ``.ai_design/state_transition_debounce/design.md``.
     """
     from pi_dash.orchestration import scheduling
 
@@ -231,6 +243,7 @@ def handle_issue_state_transition(
             resume_parent=resume_parent,
             want_run=dispatch_immediate,
             actor=actor,
+            settle=settle,
         )
     else:
         event = scheduling.TickerEvent.entered_bucket(
@@ -238,6 +251,7 @@ def handle_issue_state_transition(
             resume_parent=resume_parent,
             want_run=dispatch_immediate,
             actor=actor,
+            settle=settle,
         )
     decision = scheduling.reconcile(issue, event)
 
@@ -246,7 +260,10 @@ def handle_issue_state_transition(
     if decision.parked:
         return TransitionOutcome(reason="pool-spent")
     if decision.queued:
-        return TransitionOutcome(reason="entry-queued")
+        # "entry-settling" when the transition's settling window holds the
+        # entry; "entry-queued" otherwise (busy issue / agent move).
+        settling = decision.reason == "entry-settling"
+        return TransitionOutcome(reason="entry-settling" if settling else "entry-queued")
     if not decision.dispatch_now:
         return TransitionOutcome(reason=decision.reason or "no-dispatch")
 

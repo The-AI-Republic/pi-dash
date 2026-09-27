@@ -182,6 +182,12 @@ def fire_tick(ticker_id: str) -> bool:
             return False
 
         issue = ticker.issue
+        # A soft-deleted issue must never fire — deletion cancels any
+        # pending (settled) entry. The deletion cascade soft-deletes the
+        # ticker row asynchronously; this guard covers the window before
+        # it lands.
+        if issue.deleted_at is not None:
+            return False
         # Registry-driven: only the registered ticking state for the
         # issue's state group fires.
         if not is_ticking_state(issue.state):
@@ -200,7 +206,11 @@ def fire_tick(ticker_id: str) -> bool:
                 issue.pk,
             )
             return False
-        if orchestration_service._latest_prior_run(issue) is None:
+        # A *queued entry* may mint the issue's first run — with the
+        # settling window, the transition that used to dispatch the first
+        # run inline parks it on the clock instead. Plain timer ticks are
+        # continuations and keep the no-prior-run skip.
+        if not ticker.pending_entry and orchestration_service._latest_prior_run(issue) is None:
             logger.info(
                 "agent_ticker.fire_tick: skip issue=%s reason=no-prior-run",
                 issue.pk,
@@ -289,7 +299,12 @@ def fire_tick(ticker_id: str) -> bool:
     # it is created as the person who asked, with their trigger, exactly as
     # if it had dispatched immediately — so per-user overrides, LLM config
     # and runner eligibility resolve the same way — and it does not count.
-    run = dispatch_continuation_run(issue, triggered_by=claim_trigger, actor=claim_actor)
+    run = dispatch_continuation_run(
+        issue,
+        triggered_by=claim_trigger,
+        actor=claim_actor,
+        allow_first_run=prev_pending_entry,
+    )
     if run is None:
         # Dispatch failed post-claim — restore the ticker so the budget
         # isn't wasted and any cap-disarm we just applied is undone.
@@ -297,37 +312,51 @@ def fire_tick(ticker_id: str) -> bool:
         # field for "we attempted a tick at this time," not a budget input.
         with transaction.atomic():
             rollback = (
-                IssueAgentTicker.objects.select_for_update()
+                IssueAgentTicker.objects.select_for_update(of=("self",))
+                .select_related("issue", "issue__state")
                 .filter(pk=ticker_id)
                 .first()
             )
             if rollback is not None:
                 rollback.used = prev_used
-                rollback.next_run_at = prev_next_run_at
-                rollback.enabled = prev_enabled
-                # Restore the captured pre-claim reason. fire_tick only
-                # reaches the claim block on an enabled ticker, so this
-                # is NONE in practice — but capturing keeps the rollback
-                # consistent with the other prev_* fields and survives
-                # any future weakening of that early-return invariant.
-                rollback.disarm_reason = prev_disarm_reason
-                rollback.pending_entry = prev_pending_entry
-                rollback.pending_entry_free = prev_pending_entry_free
-                rollback.pending_entry_actor_id = prev_pending_entry_actor_id
-                rollback.pending_entry_trigger = prev_pending_entry_trigger
-                rollback.save(
-                    update_fields=[
-                        "used",
-                        "next_run_at",
-                        "enabled",
-                        "disarm_reason",
-                        "pending_entry",
-                        "pending_entry_free",
-                        "pending_entry_actor",
-                        "pending_entry_trigger",
-                        "updated_at",
-                    ]
+                bounced = not is_ticking_state(rollback.issue.state) or (
+                    not rollback.enabled and rollback.disarm_reason == TickerDisarmReason.LEFT_TICKING_STATE
                 )
+                if bounced:
+                    # Dispatch itself took the issue out of play — the
+                    # eligibility preflight bounced it to Backlog (the
+                    # state-move signal disarmed the clock), or, with no
+                    # safe Backlog target, disarmed the clock in place.
+                    # Restore only the budget; resurrecting enabled /
+                    # pending / next_run_at would re-fire the entry and
+                    # loop the bounce (and its comment) every scanner pass.
+                    rollback.save(update_fields=["used", "updated_at"])
+                else:
+                    rollback.next_run_at = prev_next_run_at
+                    rollback.enabled = prev_enabled
+                    # Restore the captured pre-claim reason. fire_tick only
+                    # reaches the claim block on an enabled ticker, so this
+                    # is NONE in practice — but capturing keeps the rollback
+                    # consistent with the other prev_* fields and survives
+                    # any future weakening of that early-return invariant.
+                    rollback.disarm_reason = prev_disarm_reason
+                    rollback.pending_entry = prev_pending_entry
+                    rollback.pending_entry_free = prev_pending_entry_free
+                    rollback.pending_entry_actor_id = prev_pending_entry_actor_id
+                    rollback.pending_entry_trigger = prev_pending_entry_trigger
+                    rollback.save(
+                        update_fields=[
+                            "used",
+                            "next_run_at",
+                            "enabled",
+                            "disarm_reason",
+                            "pending_entry",
+                            "pending_entry_free",
+                            "pending_entry_actor",
+                            "pending_entry_trigger",
+                            "updated_at",
+                        ]
+                    )
         logger.info(
             "agent_ticker.fire_tick: dispatch returned None issue=%s; rolled back claim",
             issue.pk,
