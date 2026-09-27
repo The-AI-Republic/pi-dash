@@ -8,6 +8,7 @@
 pub mod error;
 pub mod health;
 pub mod ids;
+pub mod license;
 
 pub use error::Error;
 pub use health::HealthStatus;
