@@ -27,6 +27,7 @@ pub mod run_cmd;
 pub mod runner;
 pub mod runner_ops;
 mod start;
+mod scheduler;
 mod state;
 mod status;
 mod stop;
@@ -143,6 +144,10 @@ pub enum Command {
     /// Inspect workflow states on a project.
     State(state::StateArgs),
 
+    /// Read project schedulers (read-only): `scheduler list` /
+    /// `scheduler get <id>` / `scheduler runs <id>`.
+    Scheduler(scheduler::SchedulerArgs),
+
     /// Read or overwrite the coding agent's per-issue workpad.
     Workpad(workpad::WorkpadArgs),
 
@@ -199,6 +204,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Comment(args) => run_crud(comment::run(args, &paths).await),
         Command::Page(args) => run_crud(page::run(args, &paths).await),
         Command::State(args) => run_crud(state::run(args, &paths).await),
+        Command::Scheduler(args) => run_crud(scheduler::run(args, &paths).await),
         Command::Workpad(args) => run_crud(workpad::run(args, &paths).await),
         Command::Workspace(args) => run_crud(workspace::run(args, &paths).await),
         Command::RunCmd(args) => run_crud(run_cmd::run(args, &paths).await),
