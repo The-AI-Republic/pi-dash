@@ -328,6 +328,109 @@ def release_runner_if_idle(runner_id) -> bool:
     )
 
 
+def reconcile_unsatisfiable_pins(pod: Optional[Pod] = None) -> set:
+    """Recover QUEUED runs whose ``pinned_runner`` cannot take work.
+
+    A pin (session-resume affinity) is normally served as soon as its
+    runner finishes the previous run — but a runner that wedged BUSY, went
+    offline, or died silently never takes it, and the run queues forever
+    while the rest of the pod idles (PDASHOSS01-231's 47-minute incident).
+    Two remedies, mildest first (PDASHOSS01-233):
+
+    1. Pinned runner BUSY with a fresh heartbeat but no busy-status run —
+       the wedge that :func:`release_runner_if_idle` normally clears at
+       finalization; re-applied here so the matcher self-heals if a
+       release was ever missed. The pin is kept: once ONLINE, the runner
+       serves its own pinned run on the next drain. A *dead* wedged runner
+       (stale heartbeat) is deliberately left alone — the BUSY-but-dead
+       sweeper flips it OFFLINE rather than resurrecting it to ONLINE.
+
+    2. Pin held past ``RUNNER_PIN_AUTO_RELEASE_SECS`` (measured from the
+       run's ``created_at`` — every requeue path that resets a run also
+       clears its pin, so a QUEUED pinned run has been waiting since
+       creation) while the runner is neither assignable (ONLINE + fresh
+       heartbeat) nor legitimately working (BUSY + fresh heartbeat + a
+       busy-status run): clear the pin so any eligible runner serves the
+       run. This is the release-pin escape hatch made automatic and
+       bounded. Restricted to LOCAL_RUNNER runs — a managed
+       (desktop-bundled) run without its pin is unservable by
+       construction (see :func:`next_for_runner`).
+
+    Returns the ids of pods whose queue or capacity changed; callers
+    should drain those pods.
+    """
+    from django.conf import settings
+
+    now = timezone.now()
+    alive_threshold = now - HEARTBEAT_GRACE
+    affected_pod_ids: set = set()
+
+    # (1) Wedged-busy pinned runners that are still alive: release them.
+    wedged = (
+        AgentRun.objects.filter(
+            status=AgentRunStatus.QUEUED,
+            executor_kind__in=MACHINE_EXECUTORS,
+            pinned_runner__status=RunnerStatus.BUSY,
+            pinned_runner__last_heartbeat_at__gte=alive_threshold,
+        )
+        .values_list("pinned_runner_id", "pod_id")
+        .distinct()
+    )
+    if pod is not None:
+        wedged = wedged.filter(pod=pod)
+    for runner_id, pod_id in wedged:
+        if release_runner_if_idle(runner_id):
+            logger.info(
+                "reconcile_unsatisfiable_pins: released wedged busy runner %s",
+                runner_id,
+            )
+            if pod_id is not None:
+                affected_pod_ids.add(pod_id)
+
+    # (2) Bounded pin auto-release.
+    bound_secs = int(getattr(settings, "RUNNER_PIN_AUTO_RELEASE_SECS", 600))
+    if bound_secs > 0:
+        with transaction.atomic():
+            stale_qs = (
+                AgentRun.objects.select_for_update(skip_locked=True)
+                .filter(
+                    status=AgentRunStatus.QUEUED,
+                    executor_kind=AgentExecutorKind.LOCAL_RUNNER,
+                    pinned_runner__isnull=False,
+                    created_at__lt=now - timedelta(seconds=bound_secs),
+                )
+                # Assignable: the pin will be served as soon as the runner
+                # picks work up — leave it.
+                .exclude(
+                    pinned_runner__status=RunnerStatus.ONLINE,
+                    pinned_runner__last_heartbeat_at__gte=alive_threshold,
+                )
+                # Legitimately working: an alive BUSY runner still serving a
+                # busy-status run frees itself on finalization — leave it.
+                .exclude(
+                    pinned_runner__status=RunnerStatus.BUSY,
+                    pinned_runner__last_heartbeat_at__gte=alive_threshold,
+                    pinned_runner__agent_runs__status__in=BUSY_STATUSES,
+                )
+            )
+            if pod is not None:
+                stale_qs = stale_qs.filter(pod=pod)
+            stale = list(stale_qs.values_list("id", "pinned_runner_id", "pod_id"))
+            if stale:
+                AgentRun.objects.filter(id__in=[run_id for run_id, _, _ in stale]).update(pinned_runner=None)
+        for run_id, runner_id, pod_id in stale:
+            logger.info(
+                "reconcile_unsatisfiable_pins: auto-released pin run=%s runner=%s after %ss bound",
+                run_id,
+                runner_id,
+                bound_secs,
+            )
+            if pod_id is not None:
+                affected_pod_ids.add(pod_id)
+
+    return affected_pod_ids
+
+
 def _build_assign_msg(run: AgentRun) -> dict:
     """Compose the WS ``assign`` envelope sent to a runner daemon.
 

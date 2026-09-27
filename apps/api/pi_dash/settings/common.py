@@ -523,6 +523,14 @@ RUNNER_AGENT_STALL_THRESHOLD_SECS = int(get_config("RUNNER_AGENT_STALL_THRESHOLD
 # roughly three missed 25s polls; stale rows from disabled / downgraded
 # runners age out instead of failing active runs.
 RUNNER_AGENT_OBSERVABILITY_STALE_SECS = int(get_config("RUNNER_AGENT_OBSERVABILITY_STALE_SECS", 90))
+# How long a QUEUED run may hold a pin to a runner that cannot take work
+# (offline, heartbeat-stale, or wedged busy) before the matcher clears the
+# pin and lets any eligible runner serve the run. Pins exist for session
+# resume, so releasing one only costs warm context — the assign prompt is
+# self-sufficient. 0 or negative disables the auto-release.
+# See PDASHOSS01-233 (the 2026-09-26 incident's manual release-pin escape
+# hatch, made automatic and bounded).
+RUNNER_PIN_AUTO_RELEASE_SECS = int(get_config("RUNNER_PIN_AUTO_RELEASE_SECS", 600))
 
 # Desktop-bundled managed runner. The kill switch gates creation, availability
 # and dispatch; turning it off must never mutate project settings, so issues

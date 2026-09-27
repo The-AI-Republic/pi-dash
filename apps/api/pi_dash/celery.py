@@ -84,6 +84,14 @@ app.conf.beat_schedule = {
         "task": "runner.mark_offline_runners",
         "schedule": crontab(minute="*/1"),
     },
+    # Unsatisfiable-pin recovery — releases wedged-busy pinned runners and
+    # auto-clears pins held past RUNNER_PIN_AUTO_RELEASE_SECS, then drains
+    # the affected pods. Time-driven by nature (a pin to a dead runner
+    # produces no event), so it must live on beat. See PDASHOSS01-233.
+    "runner-reconcile-unsatisfiable-pins": {
+        "task": "runner.reconcile_unsatisfiable_pins",
+        "schedule": crontab(minute="*/1"),
+    },
     # Per-active-run agent stall watchdog. Backstop for the runner's own
     # internal 5-minute stall timer; see
     # `.ai_design/runner_agent_bridge/design.md` §4.5.3. 30s gives ~12
