@@ -30,7 +30,7 @@ from pi_dash.runner.serializers import AgentRunSerializer
 from pi_dash.runner.services import tokens
 from pi_dash.runner.services.error_details import merge_error_details
 
-_MIGRATION = importlib.import_module("pi_dash.runner.migrations.0029_agent_run_error_details")
+_MIGRATION = importlib.import_module("pi_dash.runner.migrations.0030_agent_run_error_details")
 
 
 @pytest.fixture
@@ -309,7 +309,7 @@ def test_issue_agent_status_panel_renders_the_same_keys(db, create_user, workspa
     ],
 )
 def test_migration_backfill_round_trips_legacy_rows(db, create_user, workspace, pod, legacy):
-    """The migration's own SQL, run against a stand-in for the pre-0029 table.
+    """The migration's own SQL, run against a stand-in for the pre-0030 table.
 
     Only the table name is substituted, so this is the statement that runs in
     production. Forward proves a legacy row's three values land in the bag;

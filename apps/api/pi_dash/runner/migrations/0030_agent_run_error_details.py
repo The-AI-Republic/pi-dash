@@ -53,7 +53,7 @@ SET error_code = COALESCE(error_details ->> 'code', ''),
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("runner", "0028_agent_run_usage_json"),
+        ("runner", "0029_drop_agentrun_trigger_blocker_completed"),
     ]
 
     operations = [
