@@ -22,7 +22,8 @@ import {
   ParentPropertyIcon,
 } from "@pi-dash/propel/icons";
 import { cn, getDate, renderFormattedPayloadDate, shouldHighlightIssueDueDate } from "@pi-dash/utils";
-import { Container } from "lucide-react";
+import { Container, Layers } from "lucide-react";
+import { CustomSelect } from "@pi-dash/ui";
 // components
 import { DateDropdown } from "@/components/dropdowns/date";
 import { EstimateDropdown } from "@/components/dropdowns/estimate";
@@ -53,6 +54,19 @@ import { TransferHopInfo } from "@/pi-dash-web/components/issues/issue-details/s
 import { IssueWorklogProperty } from "@/pi-dash-web/components/issues/worklog/property";
 import { SidebarPropertyListItem } from "@/components/common/layout/sidebar/property-list-item";
 import { IssueAgentStatusPanel } from "./agent-status";
+
+// Human-readable label for a work-type key (PDASHOSS01-234). The value set is
+// code-owned server-side; unknown keys render verbatim rather than crashing.
+function workTypeLabel(key: string, t: (s: string) => string): string {
+  switch (key) {
+    case "software":
+      return t("Software");
+    case "general":
+      return t("General");
+    default:
+      return key;
+  }
+}
 import { IssueCycleSelect } from "./cycle-select";
 import { IssueLabel } from "./label";
 import { IssueModuleSelect } from "./module-select";
@@ -157,6 +171,36 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
                 dropdownArrow
                 dropdownArrowClassName="h-3.5 w-3.5 hidden group-hover:inline"
               />
+            </SidebarPropertyListItem>
+
+            <SidebarPropertyListItem icon={Layers} label={t("Work type")}>
+              <CustomSelect
+                value={issue?.work_type ?? null}
+                label={
+                  <span className={`text-body-xs-regular ${issue?.work_type ? "" : "text-placeholder"}`}>
+                    {issue?.work_type
+                      ? workTypeLabel(issue.work_type, t)
+                      : t("Project default ({{workType}})", {
+                          workType: workTypeLabel(projectDetails?.default_work_type ?? "software", t),
+                        })}
+                  </span>
+                }
+                onChange={(val: string | null) =>
+                  issueOperations.update(workspaceSlug, projectId, issueId, { work_type: val })
+                }
+                disabled={!isEditable}
+                buttonClassName="w-full text-left h-7.5 border-none rounded-sm"
+                className="group w-full grow"
+                maxHeight="lg"
+              >
+                <CustomSelect.Option value={null}>
+                  {t("Project default ({{workType}})", {
+                    workType: workTypeLabel(projectDetails?.default_work_type ?? "software", t),
+                  })}
+                </CustomSelect.Option>
+                <CustomSelect.Option value="software">{t("Software")}</CustomSelect.Option>
+                <CustomSelect.Option value="general">{t("General")}</CustomSelect.Option>
+              </CustomSelect>
             </SidebarPropertyListItem>
 
             <SidebarPropertyListItem icon={PriorityPropertyIcon} label={t("Priority")}>
