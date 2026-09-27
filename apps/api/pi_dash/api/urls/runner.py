@@ -4,12 +4,17 @@
 
 from django.urls import path
 
-from pi_dash.api.views import RunnerDeleteEndpoint
+from pi_dash.api.views import ProjectRunnersEndpoint, RunnerDeleteEndpoint
 
 urlpatterns = [
     path(
         "runners/<uuid:runner_id>/",
         RunnerDeleteEndpoint.as_view(http_method_names=["delete"]),
         name="api-runner-delete",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/runners/",
+        ProjectRunnersEndpoint.as_view(http_method_names=["get"]),
+        name="api-project-runners",
     ),
 ]
