@@ -30,6 +30,18 @@ from pi_dash.runner.services.usage import normalize_usage
 
 logger = logging.getLogger(__name__)
 
+# Structured product events for the managed-runner feature (design §15.1).
+#
+# Deliberately NOT ``getLogger(__name__)``: the project's ``LOGGING`` sets
+# ``disable_existing_loggers: True`` and declares no ``root`` logger, so a
+# module logger such as ``pi_dash.runner.services.session_service`` resolves
+# to level WARNING with zero handlers and its INFO records go nowhere. The
+# ``managed_runner.*`` events are support-facing signals that must actually
+# reach the log stream, so they are emitted on a name the settings configure
+# (see ``pi_dash/settings/local.py`` and ``production.py``). The repo-wide
+# version of this gap is tracked separately in PDASHOSS01-208.
+event_logger = logging.getLogger("pi_dash.managed_runner")
+
 OFFLINE_GRACE_SECS = 60
 
 # Grace window protecting freshly-assigned runs from the reaper.
@@ -127,6 +139,18 @@ def apply_hello(runner: Runner, body: Dict[str, Any]) -> None:
     runner.runner_version = body.get("version", "") or runner.runner_version
     runner.dev_metadata = _merge_dev_metadata(runner.dev_metadata, body)
     runner.last_heartbeat_at = timezone.now()
+    # Observability (design §15.1): a bundled runner ships its agent binary
+    # inside the desktop app, so the engine version it self-reports at session
+    # open is support's only signal for "which build is this user on". Emit it
+    # only when the runner actually reports a non-empty value this open — a
+    # legacy or non-managed daemon that never sends it produces no noise.
+    reported_engine_version = body.get("engine_version")
+    if isinstance(reported_engine_version, str) and reported_engine_version:
+        event_logger.info(
+            "managed_runner.engine_version runner=%s version=%s",
+            runner.id,
+            reported_engine_version[:64],
+        )
     update_fields = [
         "os",
         "arch",
