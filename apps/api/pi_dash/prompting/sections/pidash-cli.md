@@ -96,7 +96,7 @@ pidash issue patch {{ ident }} --remove-label needs-design         # detach one
 
 {% if run.kind != "scheduler" %}#### Run outcome
 
-- `pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--note "<one line>"]` — report this run's outcome to the ticking clock. Call it once, as your **last** `pidash` command, after any state move. See "Ending the run" for what each outcome means. Without it the clock guesses.
+- `pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--stop-ticking] [--note "<one line>"]` — report this run's outcome. Call it once, as your **last** `pidash` command, after any state move. The outcome is informational: `done` means "this run's turn is done", and `waiting_on_external` (waiting on CI, a merge, or a dependency issue) applies in **every** stage. No outcome stops the issue's ticking clock, and a run that reports nothing keeps ticking too. `--stop-ticking` is the only run-side signal that stops it — send it when the issue is finished or parked on a human, never while CI, a merge, or a dependency wait remains. See "Ending the run" for what each outcome means and exactly when to stop the clock.
 
 {% endif %}#### Debugging
 
@@ -129,20 +129,24 @@ pidash issue patch {{ issue.identifier }} --state "Blocked"
 
 ```sh
 pidash issue patch {{ issue.identifier }} --state "In Review"
-pidash run yield --outcome done
+pidash run yield --outcome done   # turn done — the issue moved on; review runs still belong on it, so no --stop-ticking
 ```
-{% elif run.kind == "review" %}End a review pass (workpad `### Path to done` already written) — **approved** moves the issue on to In Test; **changes needed** sends it back to In Progress with the open items listed; the runner never moves it to `completed`/Done (see "Review cycle" and "Available states"):
+{% elif run.kind == "review" %}End a review pass (workpad `### Path to done` already written) — **approved** moves the issue on to In Test; **changes needed** sends it back to In Progress with the open items listed; the runner never moves it to `completed`/Done. Staying In Review keeps or stops the clock depending on what the wait is for (see "Review cycle" Step 3 and "Available states"):
 
 ```sh
 pidash issue patch {{ issue.identifier }} --state "In Test"      # approved
 pidash issue patch {{ issue.identifier }} --state "In Progress"  # changes needed
-pidash run yield --outcome done
+pidash run yield --outcome done                                  # after either move: your turn is done
+pidash run yield --outcome waiting_on_external                   # staying: waiting on CI or the PR — keep ticking
+pidash run yield --outcome waiting_on_human --stop-ticking       # staying: waiting on a human reviewer
 ```
-{% else %}End a test pass (workpad `### Path to done` already written) — a **pass** leaves the issue In Test for a human to close; **defects** send it back to In Progress with the open items listed (see "Test cycle" and "Available states"):
+{% else %}End a test pass (workpad `### Path to done` already written) — a **pass** leaves the issue In Test and stops the clock so a human takes it from there (unless the project explicitly lets agents merge and close — then merge and move it to Done instead); **defects** send it back to In Progress with the open items listed (see "Test cycle" Step 3 and "Available states"):
 
 ```sh
-pidash issue patch {{ issue.identifier }} --state "In Progress"  # defects only
-pidash run yield --outcome done
+pidash run yield --outcome done --stop-ticking                   # pass — leave In Test; a human takes it from here
+pidash issue patch {{ issue.identifier }} --state "In Progress"  # defects
+pidash run yield --outcome done                                  # after the move: your turn is done
+pidash run yield --outcome waiting_on_external                   # nothing changed — CI or a dependency still pending
 ```
 {% endif %}{% else %}File a finding as a new issue under this project:
 

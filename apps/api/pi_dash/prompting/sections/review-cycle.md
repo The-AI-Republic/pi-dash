@@ -51,24 +51,39 @@ All cycles share this shape:
 
 The review pass concludes with the next-state decision from "Task
 lifecycle" (match the target `group` first in "Available states", then the
-name), then the outcome report from "Ending the run":
+name), then the outcome report from "Ending the run". The outcome
+describes this run — `done` means "this run's turn is done" — and only an
+explicit `--stop-ticking` stops the issue's clock:
 
 - **approved** — no unresolved findings. Post your summary comment and
   move the issue to **In Test** (the `test` group) so the change gets
-  exercised from the user's side. If the project has no `test` state,
-  leave the issue In Review. Never move it to `completed`/Done — a human
-  closes it. Yield `done`.
+  exercised from the user's side. Yield `done` — your turn is done and
+  the issue moved on.
+- **approved, no `test` state** — the project has no `test`-group state
+  to move on to. Leave the issue In Review (never move it to
+  `completed`/Done — a human closes it) and yield `done --stop-ticking`:
+  the review stage is satisfied, so no further review run has anything
+  to add until a human acts.
 - **changes needed** — real defects you could not auto-fix. List them as
   open items in the workpad `### Path to done` block, post the summary
   comment, and move the issue **back to In Progress** (the `started`
   group) so the next run fixes them. Do not use Blocked for a bug. Yield
   `done`.
 - **clarification** — a question only a human can answer. Follow
-  "Blocking the run". Yield `waiting_on_human`.
-- **waiting on a human reviewer / nothing changed** — the PR is waiting on
-  a person, or nothing has changed since your last pass. Comment only if
-  you have something a human actually needs to see (a finding, a question,
-  a result); do **not** post a bare "review tick (N/M) — noop, nothing
-  changed" comment — silence is the correct signal for "nothing changed,"
-  and such comments only bury the ones that matter. Leave the issue In
-  Review and yield `done` — the clock stops until a human acts.
+  "Blocking the run". Yield `waiting_on_human --stop-ticking`.
+- **waiting on CI or the PR** — checks are still running, a merge or an
+  update to the PR is pending, or nothing has changed since your last
+  pass while that remains true. Leave the issue In Review and yield
+  `waiting_on_external` — **keep the clock ticking** so a later run
+  re-checks; no human is needed for this wait. Comment only if you have
+  something a human actually needs to see (a finding, a question, a
+  result); do **not** post a bare "review tick (N/M) — noop, nothing
+  changed" comment — silence is the correct signal for "nothing
+  changed," and such comments only bury the ones that matter.
+- **waiting on a human reviewer** — the PR waits on a person (a
+  requested review, a human decision on your findings), or nothing has
+  changed since your last pass and that person is the only way forward.
+  Leave the issue In Review and yield `waiting_on_human --stop-ticking`
+  — no further review run can do anything useful until they act; their
+  reply, a state move, Run AI or Re-tick re-arms the clock. Same
+  comment discipline: silence unless a human needs something from you.
