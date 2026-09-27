@@ -57,6 +57,18 @@ def finalize_agent_run(run_id, new_status, *, updates=None, expected_runner_id=N
         "terminal_capacity_released_at": None,
         **(updates or {}),
     }
+    # Safety net for the canonical failure taxonomy (PDASHOSS01-183): every
+    # FAILED row must carry a non-empty ``failure_reason``. Callers with a
+    # structured runner reason classify earlier (``finalize_run_terminal``);
+    # the cloud-side writers (Cloud Agent tasks, reapers, managed-runner
+    # expiry) land here with only ``error`` / ``error_code``.
+    if new_status == AgentRunStatus.FAILED and not values.get("failure_reason"):
+        from pi_dash.runner.failure import classify
+
+        values["failure_reason"] = classify(
+            str(values.get("error") or ""),
+            error_code=str(values.get("error_code") or ""),
+        ).value
     with transaction.atomic():
         qs = AgentRun.objects.select_for_update().filter(pk=run_id).exclude(status__in=TERMINAL_STATUSES)
         if expected_runner_id is not None:

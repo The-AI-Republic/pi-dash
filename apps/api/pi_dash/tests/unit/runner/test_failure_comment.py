@@ -436,3 +436,181 @@ def test_finalize_falls_back_to_matching_live_state_usage(
     assert run.input_tokens == 10
     assert run.output_tokens == 20
     assert run.total_tokens == 30
+
+
+# ---------------------------------------------------------------------------
+# Canonical failure_reason at write time (PDASHOSS01-183)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_failed_finalize_stores_canonical_failure_reason(
+    db, create_user, workspace, pod, issue
+):
+    """The runner's coarse reason + the error text classify into the
+    stored taxonomy at write time."""
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="401 authentication_failed: invalid authentication credentials",
+        runner_failure_reason="agent_crash",
+    )
+
+    run.refresh_from_db()
+    assert run.failure_reason == "agent_error.provider_auth_or_access"
+
+
+@pytest.mark.unit
+def test_failed_finalize_maps_platform_runner_reason_directly(
+    db, create_user, workspace, pod, issue
+):
+    """Old runners only send today's FailureReason values — they map
+    platform-side without consulting the text rules."""
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="could not push: authentication failed for origin",
+        runner_failure_reason="git_auth",
+    )
+
+    run.refresh_from_db()
+    assert run.failure_reason == "git_auth"
+
+
+@pytest.mark.unit
+def test_failed_finalize_without_runner_reason_still_classifies(
+    db, create_user, workspace, pod, issue
+):
+    """The finalize safety net keeps the invariant for writers that have
+    no structured reason at all (legacy runners, cloud reapers)."""
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="agent stalled: no events for >360s",
+    )
+
+    run.refresh_from_db()
+    assert run.failure_reason == "timeout"
+
+
+@pytest.mark.unit
+def test_completed_finalize_leaves_failure_reason_blank(
+    db, create_user, workspace, pod, issue
+):
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+    finalize_run_terminal(runner, run.id, AgentRunStatus.COMPLETED, done_payload={"status": "done"})
+    run.refresh_from_db()
+    assert run.failure_reason == ""
+
+
+@pytest.mark.unit
+def test_needs_human_failure_comment_names_the_fix_and_the_stopped_clock(
+    db, create_user, workspace, pod, issue
+):
+    """An expired-login failure tells the user what to do — the reason
+    label and the re-authenticate action, not only the raw stderr — and
+    says the automatic clock is stopped until they act."""
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="401 authentication_failed: invalid authentication credentials",
+        runner_failure_reason="agent_crash",
+    )
+
+    comments = list(IssueComment.objects.filter(issue=issue))
+    assert len(comments) == 1
+    body = comments[0].comment_html
+    assert "Provider authentication or access failed" in body
+    assert "Re-authenticate" in body
+    assert "Re-tick" in body
+    # The raw detail stays visible for debugging.
+    assert "authentication_failed" in body
+
+
+@pytest.mark.unit
+def test_transient_network_failure_posts_no_comment(
+    db, create_user, workspace, pod, issue
+):
+    """A free-retry failure is being retried silently on a short backoff;
+    posting it each attempt would be noise."""
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="connection reset by peer",
+        runner_failure_reason="agent_crash",
+    )
+
+    run.refresh_from_db()
+    assert run.failure_reason == "agent_error.provider_network"
+    assert IssueComment.objects.filter(issue=issue).count() == 0
+
+
+@pytest.mark.unit
+def test_cloud_writer_safety_net_uses_error_code(db, create_user, workspace, pod, issue):
+    """Cloud-side writers (Cloud Agent tasks, reapers) go through
+    ``finalize_agent_run`` with an error_code and no runner reason."""
+    from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    assert finalize_agent_run(
+        run.id,
+        AgentRunStatus.FAILED,
+        updates={"error_code": "run_timeout", "error": "Cloud Agent worker was lost or exceeded its deadline"},
+    )
+    run.refresh_from_db()
+    assert run.failure_reason == "timeout"
+
+
+@pytest.mark.unit
+def test_backfill_migration_classifies_existing_failed_rows(
+    db, create_user, workspace, pod, issue
+):
+    """The 0031 data migration runs the write-path classifier over rows
+    that predate the failure_reason column."""
+    from importlib import import_module
+
+    from django.apps import apps as django_apps
+
+    runner = _make_runner(create_user, workspace, pod)
+    auth_run = _make_run(create_user, workspace, pod, runner, issue, status=AgentRunStatus.FAILED)
+    stall_run = _make_run(create_user, workspace, pod, runner, issue, status=AgentRunStatus.FAILED)
+    ok_run = _make_run(create_user, workspace, pod, runner, issue, status=AgentRunStatus.COMPLETED)
+    AgentRun.objects.filter(pk=auth_run.pk).update(
+        error="401 authentication_failed: invalid authentication credentials", failure_reason=""
+    )
+    AgentRun.objects.filter(pk=stall_run.pk).update(
+        error="agent stalled: no events for >360s", failure_reason=""
+    )
+
+    migration = import_module("pi_dash.runner.migrations.0031_backfill_failure_reason")
+    migration.backfill_failure_reason(django_apps, None)
+
+    auth_run.refresh_from_db()
+    stall_run.refresh_from_db()
+    ok_run.refresh_from_db()
+    assert auth_run.failure_reason == "agent_error.provider_auth_or_access"
+    assert stall_run.failure_reason == "timeout"
+    assert ok_run.failure_reason == ""

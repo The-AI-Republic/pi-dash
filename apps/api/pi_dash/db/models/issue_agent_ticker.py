@@ -59,6 +59,17 @@ class TickerDisarmReason(models.TextChoices):
     POOL_SPENT = "pool_spent", "Pool Spent"
     TERMINAL_SIGNAL = "terminal_signal", "Terminal Signal"
     USER_DISABLED = "user_disabled", "User Disabled"
+    #: The last run failed for a reason a retry cannot fix (expired agent
+    #: login, exhausted quota, missing binary, bad model — see
+    #: ``pi_dash.runner.failure.FailurePolicy.NEEDS_HUMAN``). The clock
+    #: stops without spending further ticks; never auto-pauses, so the
+    #: issue stays in the bucket where Re-tick / Run AI can re-arm it once
+    #: the human has fixed the cause.
+    FAILURE_NEEDS_HUMAN = "failure_needs_human", "Failure Needs Human"
+    #: Backstop: ``REPEATED_FAILURE_LIMIT`` runs in a row failed with the
+    #: same ``failure_reason`` regardless of its policy. Same recovery as
+    #: ``FAILURE_NEEDS_HUMAN``.
+    REPEATED_FAILURE = "repeated_failure", "Repeated Failure"
 
 
 def jitter_seconds(interval_seconds: int) -> float:

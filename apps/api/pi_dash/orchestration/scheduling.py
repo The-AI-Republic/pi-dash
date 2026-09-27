@@ -97,6 +97,17 @@ _LEGACY_OUTCOME_ALIASES = {
 }
 
 
+#: Disarm reasons written by the failure policy (``_apply_failure_policy``).
+#: Re-tick re-arms these without granting budget; the deferred auto-pause
+#: never fires on them (it gates on ``CAP_HIT``).
+_FAILURE_DISARM_REASONS = frozenset(
+    {
+        TickerDisarmReason.FAILURE_NEEDS_HUMAN,
+        TickerDisarmReason.REPEATED_FAILURE,
+    }
+)
+
+
 class TickerEventKind:
     ENTERED_BUCKET = "entered_bucket"
     MOVED_STAGE = "moved_stage"
@@ -459,6 +470,83 @@ def _on_left_bucket(issue: Issue, event: TickerEvent) -> TickerDecision:
     return TickerDecision(ticker=ticker, reason="dormant")
 
 
+def _apply_failure_policy(issue: Issue, ticker: IssueAgentTicker, run: AgentRun) -> Optional[TickerDecision]:
+    """Per-reason ticker policy for a run that FAILED without yielding
+    (PDASHOSS01-183). Returns ``None`` to fall through to the normal
+    keep-ticking path — the fail-safe default for anything unclassified.
+
+    - ``NEEDS_HUMAN`` (expired login, quota, missing binary, bad model,
+      git auth, workspace setup): stop the clock with
+      ``FAILURE_NEEDS_HUMAN``; no further ticks are spent. Never
+      auto-pauses (the deferred pause gates on ``CAP_HIT``), so Re-tick /
+      Run AI / a state move can re-arm once the human has fixed the cause.
+    - ``RETRY_FREE`` (transient infra): queue a free entry on a short
+      backoff — it does not spend a tick — capped at
+      ``FREE_RETRY_MAX_ATTEMPTS`` consecutive tries.
+    - ``FRESH_SESSION`` (context overflow): clear the failed run's
+      ``thread_id`` so the continuation that follows builds a fresh-session
+      Assign instead of resuming the session that will fail again (same
+      mechanism as ``apply_run_resume_unavailable``), then tick normally.
+    - Backstop regardless of policy: ``repeated_failure_limit_for`` runs in
+      a row with the same reason stop the clock with ``REPEATED_FAILURE``.
+    """
+    from pi_dash.runner.failure import (
+        FREE_RETRY_BACKOFF_SECONDS,
+        FREE_RETRY_MAX_ATTEMPTS,
+        FailurePolicy,
+        classify,
+        consecutive_failure_streak,
+        policy_for,
+        repeated_failure_limit_for,
+    )
+
+    # Stored at finalize; classify on the fly only for legacy rows that
+    # predate the failure_reason column.
+    reason_value = (run.failure_reason or "").strip() or classify(run.error or "").value
+    policy = policy_for(reason_value)
+    streak = consecutive_failure_streak(issue.pk, reason_value)
+
+    if streak >= repeated_failure_limit_for(reason_value):
+        if ticker.enabled:
+            # Only stop an armed clock — a prior ``cap_hit`` must survive so
+            # the deferred auto-pause still fires (mirrors TERMINAL_SIGNAL).
+            _stop_clock(ticker, TickerDisarmReason.REPEATED_FAILURE)
+            _save_clock(ticker)
+            return TickerDecision(ticker=ticker, reason=f"failed:{reason_value}:repeated-failure-stopped")
+        return TickerDecision(ticker=ticker, reason=f"failed:{reason_value}:repeated-failure-already-stopped")
+
+    if policy == FailurePolicy.NEEDS_HUMAN:
+        if ticker.enabled:
+            _stop_clock(ticker, TickerDisarmReason.FAILURE_NEEDS_HUMAN)
+            _save_clock(ticker)
+            return TickerDecision(ticker=ticker, reason=f"failed:{reason_value}:needs-human-stopped")
+        return TickerDecision(ticker=ticker, reason=f"failed:{reason_value}:needs-human-already-stopped")
+
+    if policy == FailurePolicy.RETRY_FREE:
+        if streak <= FREE_RETRY_MAX_ATTEMPTS and ticker.enabled and _clock_allowed(issue, ticker):
+            # A free entry does not spend the pool (``fire_tick`` skips the
+            # claim's ``used`` increment for free claims) and the scanner
+            # admits pending rows regardless of cap. ``TICK`` trigger so the
+            # retry is created as a machine run, not as a person.
+            _queue_entry(ticker, free=True, trigger=AgentRunTrigger.TICK.value)
+            ticker.next_run_at = timezone.now() + timedelta(seconds=FREE_RETRY_BACKOFF_SECONDS)
+            _save_clock(ticker)
+            return TickerDecision(
+                ticker=ticker,
+                queued=True,
+                reason=f"failed:{reason_value}:free-retry-{streak}",
+            )
+        return None
+
+    if policy == FailurePolicy.FRESH_SESSION:
+        if run.thread_id:
+            AgentRun.objects.filter(pk=run.pk).update(thread_id="")
+            run.thread_id = ""
+        return None
+
+    return None
+
+
 def _on_run_ended(issue: Issue, event: TickerEvent) -> TickerDecision:
     """A run on the issue reached a resting status (design §7).
 
@@ -482,12 +570,16 @@ def _on_run_ended(issue: Issue, event: TickerEvent) -> TickerDecision:
         return TickerDecision(ticker=ticker, reason="stage-moved-on")
 
     outcome = event.outcome if event.outcome is not None else outcome_for_run(run)
+    failed_without_yield = outcome is None and run.status == AgentRunStatus.FAILED
     if outcome is None:
         # No yield. A run that *completed* is read per kind (§7 defaults);
-        # one that failed, was cancelled, or was refused said nothing about
-        # the stage — keep ticking so the next tick retries, rather than
-        # stopping the clock on a crash (which would strand a review/test
-        # issue with no Re-tick button, since the cap was never reached).
+        # one that was cancelled or refused said nothing about the stage —
+        # keep ticking so the next tick retries, rather than stopping the
+        # clock on a crash (which would strand a review/test issue with no
+        # Re-tick button, since the cap was never reached). A *failed* run
+        # goes through the per-reason failure policy below first: a failure
+        # a retry cannot fix must stop the clock instead of repeating
+        # identically until the pool is spent (PDASHOSS01-183).
         if run.status == AgentRunStatus.COMPLETED:
             outcome = default_outcome_for_kind(run_kind or current_kind)
         elif run.status == AgentRunStatus.PAUSED_AWAITING_INPUT:
@@ -499,6 +591,12 @@ def _on_run_ended(issue: Issue, event: TickerEvent) -> TickerDecision:
         # Something (a human, a queued hand-off) already owes the next run
         # on this clock; the finished run's opinion does not override it.
         return TickerDecision(ticker=ticker, reason=f"{outcome}:pending-entry-kept")
+
+    if failed_without_yield:
+        decision = _apply_failure_policy(issue, ticker, run)
+        if decision is not None:
+            return decision
+        # No policy override: fall through to the normal keep-ticking path.
 
     if outcome in STOPPING_OUTCOMES:
         if ticker.enabled:
@@ -554,6 +652,22 @@ def _on_retick(issue: Issue, event: TickerEvent) -> TickerDecision:
     if not is_ticking_state(issue.state) and not paused:
         return TickerDecision(ticker=ticker, reason="not_ticking_state")
     if not ticker.cap_reached():
+        if not ticker.enabled and ticker.disarm_reason in _FAILURE_DISARM_REASONS:
+            # The clock was stopped by the failure policy (needs-human /
+            # repeated failure) with budget left in the pool. Re-tick is the
+            # advertised "I fixed it, run again" lever, so re-arm and fire —
+            # without granting: there is budget to spend. ``granted=True``
+            # only signals the caller that the press took effect and a run
+            # should dispatch (PDASHOSS01-183).
+            decision = TickerDecision(ticker=ticker, granted=True, reason="rearmed-after-failure")
+            if event.want_run and _issue_has_active_run(issue):
+                _queue_entry(ticker, free=True, actor=event.actor, trigger=event.trigger)
+                decision.queued = True
+            else:
+                _retime_clock(ticker, issue)
+                decision.dispatch_now = event.want_run
+            _save_clock(ticker)
+            return decision
         return TickerDecision(ticker=ticker, reason="budget_not_exhausted")
 
     pool = ticker.pool_size()

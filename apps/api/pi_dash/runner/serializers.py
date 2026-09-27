@@ -270,7 +270,7 @@ class AgentRunSerializer(serializers.ModelSerializer):
         # cost on every row for data the list view discards.
         if isinstance(self.parent, serializers.ListSerializer):
             return None
-        return classify_run_error(run.error)
+        return classify_run_error(run.error, failure_reason=run.failure_reason)
 
     def get_scheduler_binding_detail(self, run: AgentRun):
         # "Fired by scheduler X" for scheduler-triggered runs, so run views
@@ -317,6 +317,7 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "done_payload",
             "error",
             "error_code",
+            "failure_reason",
             "error_diagnostic",
             "refusal_category",
             "llm_model",
