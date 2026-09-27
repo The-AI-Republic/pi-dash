@@ -271,6 +271,8 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
       logo_props: formData.logo_props,
       timezone: formData.timezone,
       base_branch: formData.base_branch ?? "",
+      default_agent_executor: formData.default_agent_executor ?? "local_runner",
+      default_work_type: formData.default_work_type ?? "software",
       agent_ticking_enabled: formData.agent_ticking_enabled ?? true,
       agent_default_max_ticks: budget,
       agent_default_interval_seconds: cadenceSeconds,
@@ -527,6 +529,76 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
               {errors?.base_branch?.message}
             </span>
           </div>
+        </div>
+        <div className="flex flex-col gap-1">
+          <h4 className="text-13">{t("Default AI execution target")}</h4>
+          <div className="flex items-start justify-between gap-4">
+            <p className="text-11 text-tertiary">
+              {t(
+                "Choose where this project's new runs execute. Pi Dash Agent requires the user's desktop app to remain open. Work items can override this default."
+              )}
+            </p>
+            <Controller
+              name="default_agent_executor"
+              control={control}
+              render={({ field: { value, onChange } }) => (
+                <select
+                  aria-label={t("Default AI execution target")}
+                  value={value ?? "local_runner"}
+                  onChange={(event) => onChange(event.target.value)}
+                  disabled={!isAdmin}
+                  className="rounded-md border border-subtle bg-surface-1 px-2 py-1 text-13"
+                >
+                  <option value="local_runner">{t("Local runner")}</option>
+                  <option value="cloud_agent" disabled={cloudExecutorOption?.available === false}>
+                    {t("Pi Dash Cloud Agent")}
+                  </option>
+                  <option
+                    value="managed_runner"
+                    disabled={
+                      !project.agent_executor_options?.some(
+                        (option) => option.kind === "managed_runner" && option.available
+                      )
+                    }
+                  >
+                    {t("Pi Dash Agent (desktop)")}
+                  </option>
+                </select>
+              )}
+            />
+          </div>
+          <p className="text-11 text-tertiary">
+            {t("Changing this affects new runs only. Existing and queued runs keep their original executor.")}
+          </p>
+        </div>
+        <div className="flex flex-col gap-1">
+          <h4 className="text-13">{t("Default work type")}</h4>
+          <div className="flex items-start justify-between gap-4">
+            <p className="text-11 text-tertiary">
+              {t(
+                "What kind of work this project's items are by default — it selects the guidance agent runs follow. Software carries the git/PR workflow; General fits documents, research, and other non-code work. Work items can override this default."
+              )}
+            </p>
+            <Controller
+              name="default_work_type"
+              control={control}
+              render={({ field: { value, onChange } }) => (
+                <select
+                  aria-label={t("Default work type")}
+                  value={value ?? "software"}
+                  onChange={(event) => onChange(event.target.value)}
+                  disabled={!isAdmin}
+                  className="rounded-md border border-subtle bg-surface-1 px-2 py-1 text-13"
+                >
+                  <option value="software">{t("Software")}</option>
+                  <option value="general">{t("General")}</option>
+                </select>
+              )}
+            />
+          </div>
+          <p className="text-11 text-tertiary">
+            {t("Changing this affects new runs only; items already In Progress keep the work type they started with.")}
+          </p>
         </div>
         <div className="flex flex-col gap-3">
           <div className="flex items-start justify-between gap-4">
