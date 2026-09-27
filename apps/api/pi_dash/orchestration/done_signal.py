@@ -153,12 +153,18 @@ def ingest_into_run(run, text: str):
     try:
         signal = parse(text)
     except DoneSignalError as exc:
+        from pi_dash.runner.failure import classify
+
         run.error = f"done-signal parse error: {exc}"
         run.done_payload = None
         if not run.is_terminal:
             run.status = AgentRunStatus.FAILED
+        if run.status == AgentRunStatus.FAILED and not run.failure_reason:
+            # This writer bypasses ``finalize_agent_run``, so the canonical
+            # failure_reason invariant is kept here (PDASHOSS01-183).
+            run.failure_reason = classify(run.error).value
         run.ended_at = now
-        run.save(update_fields=["error", "done_payload", "status", "ended_at"])
+        run.save(update_fields=["error", "done_payload", "status", "ended_at", "failure_reason"])
         return None
 
     run.done_payload = signal.payload

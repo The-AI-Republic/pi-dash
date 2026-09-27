@@ -89,6 +89,65 @@ Agent emits done_signal → orchestration parses + validates → phase complete
                        →  advance to next phase OR finalize run
 ```
 
+## Run failure taxonomy and retry policy
+
+Every failed run stores one canonical value in `AgentRun.failure_reason`,
+classified at write time by `pi_dash/runner/failure.py::classify` from the
+runner protocol's `FailureReason` plus the raw error text (old runners that
+only send the coarse protocol reasons still classify — the text rules fill
+the gap). The stored strings are a wire contract for dashboards and API
+filters: never rename one, only add.
+
+The ticker consults `policy_for(reason)` when a run fails without yielding
+(`orchestration/scheduling.py::_apply_failure_policy`):
+
+| Policy                        | Ticker behaviour                                                                                                                                                                                                                                  |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Retry soon, free**          | Re-queue a free entry on a short backoff (`FREE_RETRY_BACKOFF_SECONDS`, 120 s). Does not spend a tick. Capped at `FREE_RETRY_MAX_ATTEMPTS` (3) consecutive tries, then the backstop stops the clock.                                              |
+| **Retry on the normal clock** | Today's behaviour: keep ticking, spend a tick per retry.                                                                                                                                                                                          |
+| **Needs a human**             | Stop the clock with disarm reason `failure_needs_human`; no further ticks are spent. The failure comment names the reason and the fix. Never auto-pauses — Re-tick (re-arms without granting budget), Run AI, or a state move resumes once fixed. |
+| **Fresh session**             | Clear the failed run's `thread_id` so the next continuation starts a fresh session instead of resuming the one that will fail again. Ticks on the normal clock.                                                                                   |
+
+Backstop regardless of policy: `REPEATED_FAILURE_LIMIT` (3) runs in a row
+failing with the same reason stops the clock with disarm reason
+`repeated_failure` (free-retry reasons get their retry allowance first, so
+their backstop sits at `FREE_RETRY_MAX_ATTEMPTS + 1`). Same recovery as
+`failure_needs_human`.
+
+| Reason                                        | Side     | Policy                           |
+| --------------------------------------------- | -------- | -------------------------------- |
+| `workspace_setup`                             | platform | needs a human                    |
+| `git_auth`                                    | platform | needs a human                    |
+| `network`                                     | platform | retry soon, free                 |
+| `runner_offline`                              | platform | retry soon, free                 |
+| `daemon_restart`                              | platform | retry soon, free                 |
+| `assign_rejected_busy`                        | platform | retry soon, free                 |
+| `timeout`                                     | platform | normal clock                     |
+| `max_turns`                                   | platform | normal clock                     |
+| `internal`                                    | platform | normal clock                     |
+| `agent_error.provider_auth_or_access`         | agent    | needs a human                    |
+| `agent_error.provider_quota_limit`            | agent    | needs a human                    |
+| `agent_error.provider_capacity_or_rate_limit` | agent    | normal clock                     |
+| `agent_error.provider_server_error`           | agent    | normal clock                     |
+| `agent_error.provider_network`                | agent    | retry soon, free                 |
+| `agent_error.context_overflow`                | agent    | fresh session                    |
+| `agent_error.model_not_found_or_unavailable`  | agent    | needs a human                    |
+| `agent_error.missing_executable`              | agent    | needs a human                    |
+| `agent_error.missing_config`                  | agent    | needs a human                    |
+| `agent_error.unsupported_version`             | agent    | needs a human                    |
+| `agent_error.empty_or_unparseable_output`     | agent    | normal clock                     |
+| `agent_error.process_failure`                 | agent    | normal clock                     |
+| `agent_error.unknown`                         | agent    | normal clock (fail-safe default) |
+
+Classifier notes: HTTP status codes only match on digit boundaries (so
+`402913 tokens` / `15290ms` / `exit status 4030` never land in a provider
+bucket); pre-launch failures route platform-side by construction and never
+reach the agent-text rules; capacity wording is checked before the auth
+status codes because Anthropic-compatible providers use 403 for concurrency
+rejections; anything unrecognised falls into the normal-clock bucket, never
+the free-retry one. Refusals are out of this taxonomy — `REFUSED` +
+`refusal_category` model those separately.
+
 ## Extending the system
 
 - **New phase** — add to `orchestration/agent_phases.py` and a matching prompt template in `prompting/fragments/` + `seed.py`.

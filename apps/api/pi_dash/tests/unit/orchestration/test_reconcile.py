@@ -728,3 +728,199 @@ def test_queued_hand_back_parents_off_the_implementation_run(seeded, issue, stat
     back = AgentRun.objects.filter(work_item=issue).order_by("-created_at").first()
     assert back.phase_kind == "coding-task"
     assert back.parent_run_id == impl.id
+
+
+# ---------------------------------------------------------------------------
+# Per-reason failure policy (PDASHOSS01-183)
+# ---------------------------------------------------------------------------
+
+
+def _failed_run(issue, runner, *, reason, error="boom", phase_kind="coding-task", thread_id=""):
+    run = _run(issue, runner, status=AgentRunStatus.FAILED, phase_kind=phase_kind)
+    AgentRun.objects.filter(pk=run.pk).update(failure_reason=reason, error=error, thread_id=thread_id)
+    run.refresh_from_db()
+    return run
+
+
+@pytest.mark.unit
+def test_needs_human_failure_stops_the_clock_without_spending_ticks(
+    seeded, issue, states, runner_for_workspace
+):
+    """An expired agent login stops the clock after the first failure —
+    instead of ticking to the cap at one identical failure per interval."""
+    _move(issue, states, "in_progress")
+    _ticker(issue, used=2, enabled=True, next_run_at=timezone.now())
+    run = _failed_run(
+        issue, runner_for_workspace,
+        reason="agent_error.provider_auth_or_access",
+        error="401 authentication_failed",
+    )
+    decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
+    assert decision.reason == "failed:agent_error.provider_auth_or_access:needs-human-stopped"
+    t = decision.ticker
+    assert t.enabled is False
+    assert t.disarm_reason == TickerDisarmReason.FAILURE_NEEDS_HUMAN
+    assert t.used == 2  # nothing spent by the stop
+    # The failure stop never auto-pauses — the issue must stay in the
+    # bucket where Re-tick / Run AI can re-arm it.
+    assert scheduling.maybe_apply_deferred_pause(run) is False
+    issue.refresh_from_db()
+    assert issue.state == states["in_progress"]
+
+
+@pytest.mark.unit
+def test_needs_human_failure_does_not_overwrite_a_prior_cap_hit(
+    seeded, issue, states, runner_for_workspace
+):
+    _move(issue, states, "in_progress")
+    _ticker(issue, used=10, enabled=False, disarm_reason=TickerDisarmReason.CAP_HIT)
+    run = _failed_run(issue, runner_for_workspace, reason="agent_error.provider_auth_or_access")
+    decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
+    assert decision.reason.endswith(":needs-human-already-stopped")
+    assert decision.ticker.disarm_reason == TickerDisarmReason.CAP_HIT
+
+
+@pytest.mark.unit
+def test_retick_rearms_a_needs_human_stop_without_granting(seeded, issue, states):
+    """After the human fixes the login, Re-tick runs again — no fresh pool
+    is granted because the original one still has budget."""
+    _move(issue, states, "in_progress")
+    _ticker(issue, used=2, enabled=False, disarm_reason=TickerDisarmReason.FAILURE_NEEDS_HUMAN)
+    decision = scheduling.reconcile(issue, TickerEvent.retick())
+    assert decision.reason == "rearmed-after-failure"
+    assert decision.granted is True
+    assert decision.dispatch_now is True
+    t = decision.ticker
+    assert t.granted == 0
+    assert t.enabled is True
+    assert t.disarm_reason == TickerDisarmReason.NONE
+
+
+@pytest.mark.unit
+def test_retick_rearms_a_repeated_failure_stop(seeded, issue, states):
+    _move(issue, states, "in_progress")
+    _ticker(issue, used=5, enabled=False, disarm_reason=TickerDisarmReason.REPEATED_FAILURE)
+    decision = scheduling.reconcile(issue, TickerEvent.retick())
+    assert decision.reason == "rearmed-after-failure"
+    assert decision.granted is True
+
+
+@pytest.mark.unit
+def test_transient_network_failure_free_retries_on_a_short_backoff(
+    seeded, issue, states, runner_for_workspace
+):
+    from pi_dash.runner.failure import FREE_RETRY_BACKOFF_SECONDS
+
+    _move(issue, states, "in_progress")
+    _ticker(issue, used=3, enabled=True, next_run_at=timezone.now())
+    run = _failed_run(
+        issue, runner_for_workspace,
+        reason="agent_error.provider_network",
+        error="connection reset by peer",
+    )
+    before = timezone.now()
+    decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
+    assert decision.reason == "failed:agent_error.provider_network:free-retry-1"
+    assert decision.queued is True
+    t = decision.ticker
+    assert t.pending_entry is True
+    assert t.pending_entry_free is True  # fire_tick will not spend the pool
+    assert t.pending_entry_trigger == "tick"
+    assert t.used == 3
+    # Short backoff, not an immediate fire and not the stage interval.
+    assert t.next_run_at >= before
+    assert (t.next_run_at - before).total_seconds() <= FREE_RETRY_BACKOFF_SECONDS + 5
+
+
+@pytest.mark.unit
+def test_free_retries_are_capped_then_the_backstop_stops_the_clock(
+    seeded, issue, states, runner_for_workspace
+):
+    """The 4th consecutive same-reason network failure hits the backstop:
+    the clock stops with REPEATED_FAILURE instead of retrying forever."""
+    _move(issue, states, "in_progress")
+    _ticker(issue, used=3, enabled=True, next_run_at=timezone.now())
+    for _ in range(3):
+        _failed_run(issue, runner_for_workspace, reason="agent_error.provider_network")
+    run = _failed_run(issue, runner_for_workspace, reason="agent_error.provider_network")
+    decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
+    assert decision.reason == "failed:agent_error.provider_network:repeated-failure-stopped"
+    t = decision.ticker
+    assert t.enabled is False
+    assert t.disarm_reason == TickerDisarmReason.REPEATED_FAILURE
+
+
+@pytest.mark.unit
+def test_repeated_same_reason_failures_stop_the_clock_regardless_of_policy(
+    seeded, issue, states, runner_for_workspace
+):
+    """Normal-clock reasons also trip the backstop at 3 in a row."""
+    _move(issue, states, "in_progress")
+    _ticker(issue, used=3, enabled=True, next_run_at=timezone.now())
+    for _ in range(2):
+        _failed_run(issue, runner_for_workspace, reason="agent_error.process_failure")
+    run = _failed_run(issue, runner_for_workspace, reason="agent_error.process_failure")
+    decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
+    assert decision.reason == "failed:agent_error.process_failure:repeated-failure-stopped"
+    assert decision.ticker.disarm_reason == TickerDisarmReason.REPEATED_FAILURE
+
+
+@pytest.mark.unit
+def test_a_success_resets_the_failure_streak(seeded, issue, states, runner_for_workspace):
+    _move(issue, states, "in_progress")
+    _ticker(issue, used=3, enabled=True, next_run_at=timezone.now())
+    for _ in range(2):
+        _failed_run(issue, runner_for_workspace, reason="agent_error.process_failure")
+    _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED)
+    run = _failed_run(issue, runner_for_workspace, reason="agent_error.process_failure")
+    decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
+    # Streak is 1, not 3 — normal clock keeps ticking.
+    assert decision.reason == "progressed:keep-ticking"
+    assert decision.ticker.enabled is True
+
+
+@pytest.mark.unit
+def test_context_overflow_clears_the_thread_for_a_fresh_session(
+    seeded, issue, states, runner_for_workspace
+):
+    _move(issue, states, "in_progress")
+    _ticker(issue, used=3, enabled=True, next_run_at=timezone.now())
+    run = _failed_run(
+        issue, runner_for_workspace,
+        reason="agent_error.context_overflow",
+        error="prompt is too long: 213462 tokens > 200000 maximum",
+        thread_id="thread-abc",
+    )
+    decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
+    assert decision.reason == "progressed:keep-ticking"
+    run.refresh_from_db()
+    assert run.thread_id == ""
+
+
+@pytest.mark.unit
+def test_unclassified_failure_keeps_todays_behaviour(seeded, issue, states, runner_for_workspace):
+    """Fail safe: an unknown reason ticks on the normal clock — never the
+    free-retry bucket, never a silent stop."""
+    _move(issue, states, "in_progress")
+    _ticker(issue, used=3, enabled=True, next_run_at=timezone.now())
+    run = _failed_run(issue, runner_for_workspace, reason="agent_error.unknown")
+    decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
+    assert decision.reason == "progressed:keep-ticking"
+    assert decision.ticker.enabled is True
+
+
+@pytest.mark.unit
+def test_failed_run_that_already_yielded_keeps_its_outcome(seeded, issue, states, runner_for_workspace):
+    """A run that yielded before crashing spoke for the stage; the failure
+    policy must not override its outcome."""
+    _move(issue, states, "in_progress")
+    _ticker(issue, used=3, enabled=True, next_run_at=timezone.now())
+    run = _run(
+        issue, runner_for_workspace, status=AgentRunStatus.FAILED,
+        done_payload={"status": "waiting_on_human", "yielded_at": "x"},
+    )
+    AgentRun.objects.filter(pk=run.pk).update(failure_reason="agent_error.provider_network")
+    run.refresh_from_db()
+    decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
+    assert decision.reason == "waiting_on_human:stopped"
+    assert decision.ticker.disarm_reason == TickerDisarmReason.TERMINAL_SIGNAL
