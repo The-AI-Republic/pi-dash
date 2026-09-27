@@ -116,6 +116,18 @@ LOGGING = {
             "handlers": ["console"],
             "propagate": False,
         },
+        # Django's DEFAULT_LOGGING runs before this dict (django.setup applies
+        # both) and configures "django" at INFO with its own console handler
+        # and propagate=True. Without an explicit entry here, django.* warnings
+        # would be emitted twice in DEBUG (Django's handler + root), and django
+        # INFO would leak through root's handler (a logger's level doesn't
+        # filter records propagated from descendants). WARNING matches the
+        # root backstop's noise choice.
+        "django": {
+            "level": "WARNING",
+            "handlers": ["console"],
+            "propagate": False,
+        },
     },
     # Backstop for everything outside pi_dash.* (django.request errors,
     # third-party warnings). WARNING keeps third-party INFO/DEBUG noise out.

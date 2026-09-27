@@ -33,6 +33,12 @@ import logging.config
 import sys
 
 mod = importlib.import_module(sys.argv[1])
+# Mirror django.setup(): Django applies its DEFAULT_LOGGING (which configures
+# the "django" logger at INFO with its own console handler, propagate=True)
+# before the project dict — the project config must cope with that.
+from django.utils.log import DEFAULT_LOGGING
+
+logging.config.dictConfig(DEFAULT_LOGGING)
 logging.config.dictConfig(mod.LOGGING)
 
 
@@ -62,8 +68,15 @@ third_party = logging.getLogger("some_third_party.module")
 results["root_warning_enabled"] = third_party.isEnabledFor(logging.WARNING)
 results["root_has_handler"] = bool(logging.getLogger().handlers)
 
+results["django_warning_enabled"] = logging.getLogger("django").isEnabledFor(logging.WARNING)
+
 # Emit once on stderr so the parent can assert delivery and no duplication.
 svc.info("managed_runner.engine_version probe_marker_pdashoss01_208")
+# django.* warnings must come out exactly once (not once via Django's
+# DEFAULT_LOGGING handler and again via root), and django INFO must stay
+# suppressed rather than leaking through root's handler.
+logging.getLogger("django.request").warning("django_warn_marker_pdashoss01_208")
+logging.getLogger("django").info("django_info_marker_pdashoss01_208")
 print(json.dumps(results))
 """
 
@@ -107,3 +120,13 @@ def test_module_loggers_reach_a_handler(settings_module):
     # exactly once (propagate=False on the catch-all prevents double emission).
     occurrences = proc.stderr.count("probe_marker_pdashoss01_208")
     assert occurrences == 1, f"expected exactly one emission, got {occurrences}: stderr={proc.stderr!r}"
+
+    # django.* warnings emit exactly once, and django INFO stays suppressed.
+    assert results["django_warning_enabled"], "django logger must be WARNING-enabled"
+    warn_occurrences = proc.stderr.count("django_warn_marker_pdashoss01_208")
+    assert warn_occurrences == 1, (
+        f"expected exactly one django warning emission, got {warn_occurrences}: stderr={proc.stderr!r}"
+    )
+    assert "django_info_marker_pdashoss01_208" not in proc.stderr, (
+        f"django INFO must not reach a handler: stderr={proc.stderr!r}"
+    )
