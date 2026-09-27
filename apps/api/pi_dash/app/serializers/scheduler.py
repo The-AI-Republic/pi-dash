@@ -19,9 +19,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from rest_framework import serializers
 
 from pi_dash.app.serializers.base import BaseSerializer
-from pi_dash.bgtasks._rrule import RRuleValidationError, validate_rrule_string
+from pi_dash.bgtasks._rrule import (
+    RRuleValidationError,
+    next_fire_with_error,
+    validate_rrule_string,
+)
 from pi_dash.db.models.scheduler import Scheduler, SchedulerBinding
 from pi_dash.runner.models import Pod
+from pi_dash.utils.iso_datetime import coerce_iso_datetimes
 
 
 EXTRA_CONTEXT_MAX_LENGTH = 16 * 1024
@@ -140,6 +145,11 @@ class SchedulerBindingSerializer(BaseSerializer):
     scheduler_color = serializers.CharField(source="scheduler.color", read_only=True)
     last_run_status = serializers.SerializerMethodField()
     last_run_ended_at = serializers.SerializerMethodField()
+    # True when the RRULE bundle is valid but has no occurrence left after
+    # now — a finite COUNT/UNTIL series that finished, or a single-shot whose
+    # dtstart passed. The UI badges these "Completed" instead of treating the
+    # disabled binding as misconfigured.
+    series_exhausted = serializers.SerializerMethodField()
     # Optional pod override. Scoped to active pods; the cross-project check
     # lives in `validate()` (the project is known there via instance/context).
     # NULL = use the project's default pod at fire time.
@@ -177,6 +187,7 @@ class SchedulerBindingSerializer(BaseSerializer):
             "last_run_status",
             "last_run_ended_at",
             "last_error",
+            "series_exhausted",
             "actor",
             "created_at",
             "updated_at",
@@ -190,6 +201,7 @@ class SchedulerBindingSerializer(BaseSerializer):
             "last_run_status",
             "last_run_ended_at",
             "last_error",
+            "series_exhausted",
             "actor",
             "created_at",
             "updated_at",
@@ -200,6 +212,21 @@ class SchedulerBindingSerializer(BaseSerializer):
 
     def get_last_run_ended_at(self, obj: SchedulerBinding):
         return obj.last_run.ended_at if obj.last_run_id else None
+
+    def get_series_exhausted(self, obj: SchedulerBinding) -> bool:
+        # A binding with a scheduled next fire is trivially not exhausted —
+        # this guard also keeps list serialization from paying for RRULE
+        # expansion on every healthy row.
+        if obj.next_run_at is not None:
+            return False
+        nxt, err = next_fire_with_error(
+            dtstart=obj.dtstart,
+            rrule_str=obj.rrule or "",
+            tzid=obj.tzid or "UTC",
+            rdates=coerce_iso_datetimes(obj.rdates),
+            exdates=coerce_iso_datetimes(obj.exdates),
+        )
+        return err is None and nxt is None
 
     def validate_rrule(self, value: str) -> str:
         value = (value or "").strip()
