@@ -61,8 +61,9 @@ use sqlx::{Postgres, Row};
 use crate::state::AppState;
 
 use pidash_services::app_issues::{
-    deleted_ids_body, envelope, on_results_fields, order_sql, v2_fields, ListParams, OrderSpec,
-    DETAIL_FIELDS, LIST_VALUES_FIELDS, PRIORITY_VALUES, STATE_GROUP_VALUES,
+    deleted_ids_body, envelope, on_results_fields, order_sql, raw_group_mismatch, v2_fields,
+    ListParams, OrderSpec, ParseOptions, DETAIL_FIELDS, LIST_VALUES_FIELDS, PRIORITY_VALUES,
+    STATE_GROUP_VALUES,
 };
 
 use render::v2_page;
@@ -102,7 +103,9 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// A list-family path: the GET handler owns reads, everything else falls
-/// through to Django (its create/update/delete/405s live there).
+/// through to Django (its create/update/delete/405s live there). OPTIONS
+/// proxies too: DRF answers metadata (401 anon / 200 authed) where axum
+/// would 405.
 fn owned(
     get_handler: axum::routing::MethodRouter<AppState>,
 ) -> axum::routing::MethodRouter<AppState> {
@@ -111,6 +114,7 @@ fn owned(
         .put(crate::edge::proxy)
         .patch(crate::edge::proxy)
         .delete(crate::edge::proxy)
+        .options(crate::edge::proxy)
 }
 
 /// Exact bytes of the DRF `IsAuthenticated` denial.
@@ -233,6 +237,7 @@ fn json_string(value: &str) -> String {
 
 /// The authenticated, authorized request context: who acts, in which
 /// tenant, with which list scoping.
+#[derive(Debug, Clone, Copy)]
 pub struct Gate {
     pub user_id: uuid::Uuid,
     pub timezone: Tz,
@@ -907,6 +912,10 @@ fn legacy_text_sql(binder: &mut Binder, name: &str, text: &str) -> Result<String
 /// Parse an `updated_at__gt`-style datetime param the way Django's
 /// `DateTimeField.get_prep_value` does (naive values attach UTC).
 /// Garbage is a `ValidationError`, not SQL text.
+/// `updated_at__gt` parsing: RFC-3339 (with offsets) plus Django's
+/// `DATETIME_INPUT_FORMATS` naive shapes, interpreted as UTC exactly like
+/// the naive datetimes Django compares in `__gt` lookups. Anything else is
+/// a `ValidationError`.
 fn parse_datetime_param(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     if let Ok(aware) = chrono::DateTime::parse_from_rfc3339(text) {
         return Some(aware.with_timezone(&chrono::Utc));
@@ -914,15 +923,23 @@ fn parse_datetime_param(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     for format in [
         "%Y-%m-%d %H:%M:%S%.f",
         "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
         "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y %H:%M",
+        "%m/%d/%y %H:%M:%S",
+        "%m/%d/%y %H:%M",
         "%Y-%m-%d",
+        "%m/%d/%Y",
+        "%m/%d/%y",
     ] {
         if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(text, format) {
             return Some(naive.and_utc());
-        } else if format == "%Y-%m-%d" {
-            if let Ok(date) = chrono::NaiveDate::parse_from_str(text, format) {
-                return Some(date.and_hms_opt(0, 0, 0)?.and_utc());
-            }
+        }
+        if let Ok(date) = chrono::NaiveDate::parse_from_str(text, format) {
+            return Some(date.and_hms_opt(0, 0, 0)?.and_utc());
         }
     }
     None
@@ -935,8 +952,9 @@ fn parse_datetime_param(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 // `issue_subscribers`, `issue_intake`. A relation join is INNER when a
 // compiled condition references it or the m2m group filter needs it
 // (Django's `filter()` join), else LEFT (Django's `__isnull` join).
-// Every used relation join carries its soft-delete guard, mirroring the
-// related managers.
+// Joined tables carry no soft-delete guard: `filter()` never applies a
+// related manager to a join. (The annotation subqueries are different —
+// those query `.objects` managers directly, so they keep their guards.)
 
 /// Relation joins the list query can use: SQL table plus kernel alias.
 const RELATION_JOINS: &[(&str, &str, &str)] = &[
@@ -987,14 +1005,23 @@ fn group_join_alias(group_by: Option<&str>, sub_group_by: Option<&str>, alias: &
 /// `IssueListDetailSerializer`'s prefetch reads: the reverse managers run
 /// on the plain `objects` manager, so the array subqueries carry *no*
 /// soft-delete guard and the module one neither joins `modules` nor checks
-/// `archived_at` — every link row counts, unlike the grouper's annotated
-/// arrays (deleted-link guard everywhere, active-member guard on v2
-/// assignees, archived-module guard on modules).
+/// Count annotations render `NULL` when empty: Django's grouped
+/// `Subquery(...values().annotate(count=Count()).values("count"))` has no
+/// `Coalesce`, so zero related rows yield `NULL` → JSON `null`, never `0`.
+/// `NULLIF(COUNT(*), 0)` reproduces that on every list path.
+/// Array guards mirror the managers Django queries through:
+/// `IssueLabel`/`IssueAssignee`/`ModuleIssue.objects` are soft-deletion
+/// managers (deleted rows excluded everywhere); the v2 assignee filter
+/// adds the active-member join; the grouper and the v2 view add the
+/// archived-module guard, while the detail endpoint's
+/// `Prefetch(...objects.all())` carries the manager's deleted filter only
+/// (`module_archived_guard = false` there). The extra `m.deleted_at`
+/// guard on modules is a disclosed divergence (shared helper, all paths).
 fn annotation_selects(
     arrays: bool,
     skip_array: Option<&str>,
     assignee_active_member: bool,
-    unguarded_arrays: bool,
+    module_archived_guard: bool,
 ) -> String {
     let mut selects = String::from(
         r#"issue.id, issue.name, issue.state_id, issue.sort_order, issue.completed_at,
@@ -1002,16 +1029,16 @@ fn annotation_selects(
         issue.target_date, issue.sequence_id, issue.project_id, issue.parent_id,
         (SELECT ci.cycle_id FROM cycle_issues ci
           WHERE ci.issue_id = issue.id AND ci.deleted_at IS NULL LIMIT 1) AS cycle_id,
-        (SELECT COUNT(*) FROM issue_links il
+        (SELECT NULLIF(COUNT(*), 0) FROM issue_links il
           WHERE il.issue_id = issue.id AND il.deleted_at IS NULL) AS link_count,
-        (SELECT COUNT(*) FROM file_assets fa
+        (SELECT NULLIF(COUNT(*), 0) FROM file_assets fa
           WHERE fa.issue_id = issue.id AND fa.entity_type = 'ISSUE_ATTACHMENT'
             AND fa.deleted_at IS NULL) AS attachment_count,
-        (SELECT COUNT(*) FROM issues c
+        (SELECT NULLIF(COUNT(*), 0) FROM issues c
            LEFT JOIN states cs ON cs.id = c.state_id AND cs.deleted_at IS NULL
            JOIN projects cp ON cp.id = c.project_id
           WHERE c.parent_id = issue.id AND c.deleted_at IS NULL
-            AND NOT (cs."group" = 'triage')
+            AND (cs."group" IS NULL OR NOT (cs."group" = 'triage'))
             AND c.archived_at IS NULL AND cp.archived_at IS NULL AND c.is_draft = FALSE
         ) AS sub_issues_count,
         issue.created_at, issue.updated_at, issue.created_by_id AS created_by,
@@ -1020,31 +1047,15 @@ fn annotation_selects(
     );
     if arrays {
         if skip_array != Some("label_ids") {
-            if unguarded_arrays {
-                selects.push_str(
-                    r#",
-        (SELECT COALESCE(ARRAY_AGG(DISTINCT il.label_id), '{}'::uuid[])
-           FROM issue_labels il
-          WHERE il.issue_id = issue.id) AS label_ids"#,
-                );
-            } else {
-                selects.push_str(
-                    r#",
+            selects.push_str(
+                r#",
         (SELECT COALESCE(ARRAY_AGG(DISTINCT il.label_id), '{}'::uuid[])
            FROM issue_labels il
           WHERE il.issue_id = issue.id AND il.deleted_at IS NULL) AS label_ids"#,
-                );
-            }
+            );
         }
         if skip_array != Some("assignee_ids") {
-            if unguarded_arrays {
-                selects.push_str(
-                    r#",
-        (SELECT COALESCE(ARRAY_AGG(DISTINCT ia.assignee_id), '{}'::uuid[])
-           FROM issue_assignees ia
-          WHERE ia.issue_id = issue.id) AS assignee_ids"#,
-                );
-            } else if assignee_active_member {
+            if assignee_active_member {
                 selects.push_str(
                     r#",
         (SELECT COALESCE(ARRAY_AGG(DISTINCT ia.assignee_id), '{}'::uuid[])
@@ -1064,20 +1075,20 @@ fn annotation_selects(
             }
         }
         if skip_array != Some("module_ids") {
-            if unguarded_arrays {
-                selects.push_str(
-                    r#",
-        (SELECT COALESCE(ARRAY_AGG(DISTINCT mi.module_id), '{}'::uuid[])
-           FROM module_issues mi
-          WHERE mi.issue_id = issue.id) AS module_ids"#,
-                );
-            } else {
+            if module_archived_guard {
                 selects.push_str(
                     r#",
         (SELECT COALESCE(ARRAY_AGG(DISTINCT mi.module_id), '{}'::uuid[])
            FROM module_issues mi JOIN modules m ON m.id = mi.module_id
           WHERE mi.issue_id = issue.id AND mi.deleted_at IS NULL
             AND m.archived_at IS NULL AND m.deleted_at IS NULL) AS module_ids"#,
+                );
+            } else {
+                selects.push_str(
+                    r#",
+        (SELECT COALESCE(ARRAY_AGG(DISTINCT mi.module_id), '{}'::uuid[])
+           FROM module_issues mi
+          WHERE mi.issue_id = issue.id AND mi.deleted_at IS NULL) AS module_ids"#,
                 );
             }
         }
@@ -1089,18 +1100,31 @@ fn annotation_selects(
 /// (`SoftDeletionManager` + triage/archived/draft exclusions).
 /// `detail` selects the `IssueDetailEndpoint` permission model: the
 /// `Exists` membership subquery (passed separately via `extra`) replaces
-/// the guest `created_by` scoping, so the preamble skips it.
-fn base_where(binder: &mut Binder, gate: &Gate, slug: &str, detail: bool) -> String {
+/// the guest `created_by` scoping, so the preamble skips it. The flat
+/// `issues/list/` endpoint never scopes guests either
+/// (`IssueListEndpoint.get` has no role-5 check), so it passes
+/// `guest_scope = false` too.
+/// The triage exclusion keeps NULL-state rows: `state` is a nullable FK
+/// and Django's `exclude(state__group=TRIAGE)` retains them via
+/// `split_exclude`'s `IS NULL` disjunct; a bare `NOT (group = 'triage')`
+/// over the left join would drop them (three-valued logic).
+fn base_where(
+    binder: &mut Binder,
+    gate: &Gate,
+    slug: &str,
+    detail: bool,
+    guest_scope: bool,
+) -> String {
     let slug_holder = binder.bind_string(slug.to_owned());
     let project_holder = binder.bind_uuid(gate.project_id);
     let mut where_sql = format!(
         r#"workspaces.slug = {slug_holder} AND issue.project_id = {project_holder}
         AND issue.deleted_at IS NULL
-        AND NOT (state."group" = 'triage')
+        AND (state."group" IS NULL OR NOT (state."group" = 'triage'))
         AND issue.archived_at IS NULL AND project.archived_at IS NULL
         AND issue.is_draft = FALSE"#
     );
-    if gate.guest_scoped && !detail {
+    if gate.guest_scoped && !detail && guest_scope {
         let user_holder = binder.bind_uuid(gate.user_id);
         where_sql.push_str(&format!(" AND issue.created_by_id = {user_holder}"));
     }
@@ -1117,6 +1141,51 @@ pub struct FilteredSet {
     pub referenced: Vec<&'static str>,
 }
 
+/// Which filter layers a path applies. The main list, flat endpoint and
+/// detail endpoint apply the rich (`ComplexFilterBackend` +
+/// `IssueFilterSet`) and legacy (`issue_filters`) stacks; the v2 cursor
+/// page reads only `cursor`, `description` and `updated_at__gt` in Python
+/// and must skip both stacks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilterLayers {
+    /// Rich filters (`ComplexFilterBackend` + `IssueFilterSet`).
+    pub rich: bool,
+    /// Legacy `issue_filters` predicates.
+    pub legacy: bool,
+    /// Guest `created_by` scoping (false on flat/detail paths, which never
+    /// check it in Python).
+    pub guest_scope: bool,
+}
+
+impl FilterLayers {
+    /// Main list, flat `.values()` branch and detail endpoint: everything.
+    pub const FULL: Self = Self {
+        rich: true,
+        legacy: true,
+        guest_scope: true,
+    };
+    /// v2 cursor page: tenant + guest + `updated_at__gt` only.
+    pub const V2: Self = Self {
+        rich: false,
+        legacy: false,
+        guest_scope: true,
+    };
+    /// Flat endpoint and detail endpoint: no guest scoping in Python.
+    pub const NO_GUEST: Self = Self {
+        rich: true,
+        legacy: true,
+        guest_scope: false,
+    };
+    /// Flat `fields=`/`expand=` branch: the view serializes the
+    /// rich-filtered `queryset` — the legacy `issue_filters` never run on
+    /// it (a ported bug).
+    pub const SERIALIZER: Self = Self {
+        rich: true,
+        legacy: false,
+        guest_scope: false,
+    };
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn filtered_set(
     gate: &Gate,
@@ -1126,31 +1195,38 @@ pub fn filtered_set(
     sub_group_by: Option<&str>,
     extra: Option<(String, Vec<sea_query::Value>)>,
     detail: bool,
+    layers: FilterLayers,
 ) -> Result<FilteredSet, Denial> {
     let mut binder = Binder::new();
-    let preamble = base_where(&mut binder, gate, slug, detail);
+    let preamble = base_where(&mut binder, gate, slug, detail, layers.guest_scope);
     let mut fragments: Vec<String> = vec![preamble];
     // Rich filters (`filters` JSON via ComplexFilterBackend + IssueFilterSet).
     let mut complex_sql = String::new();
-    if let Some(cond) = complex_filter(query)? {
-        let (fragment, values) = render_condition(&cond);
-        complex_sql = binder.splice(&fragment, values);
+    if layers.rich {
+        if let Some(cond) = complex_filter(query)? {
+            let (fragment, values) = render_condition(&cond);
+            complex_sql = binder.splice(&fragment, values);
+        }
     }
-    // Legacy filters.
-    let flat: HashMap<String, String> = query
-        .keys()
-        .filter_map(|key| query_last(query, key).map(|last| (key.clone(), last)))
-        .collect();
-    let today = chrono::Utc::now().date_naive();
-    let legacy = pidash_db::issue_filters::issue_filters_get(&flat, "", today)
-        .map_err(|_| Denial::ServerError)?;
+    // Legacy filters. Relative dates resolve against the UTC date, exactly
+    // like `timezone.now().date()` in `issue_filters.py` (`now()` is always
+    // UTC; the request tz activation only affects `localtime()`).
     let mut legacy_sql_text = String::new();
-    for (name, value) in legacy.predicates() {
-        let fragment = legacy_sql(&mut binder, name, value)?;
-        if legacy_sql_text.is_empty() {
-            legacy_sql_text = fragment;
-        } else {
-            legacy_sql_text = format!("{legacy_sql_text} AND {fragment}");
+    if layers.legacy {
+        let flat: HashMap<String, String> = query
+            .keys()
+            .filter_map(|key| query_last(query, key).map(|last| (key.clone(), last)))
+            .collect();
+        let today = chrono::Utc::now().date_naive();
+        let legacy = pidash_db::issue_filters::issue_filters_get(&flat, "", today)
+            .map_err(|_| Denial::ServerError)?;
+        for (name, value) in legacy.predicates() {
+            let fragment = legacy_sql(&mut binder, name, value)?;
+            if legacy_sql_text.is_empty() {
+                legacy_sql_text = fragment;
+            } else {
+                legacy_sql_text = format!("{legacy_sql_text} AND {fragment}");
+            }
         }
     }
     if !complex_sql.is_empty() {
@@ -1166,52 +1242,48 @@ pub fn filtered_set(
     // INNER when referenced by a positive condition or m2m-grouped
     // (Django's `filter()` join); LEFT when every reference is an
     // `IS [NOT] NULL` test (Django's `__isnull` join) or unreferenced.
+    // Joined tables carry no soft-delete guard: `filter()` never applies a
+    // related manager to a join, so `filter(labels__in=...)` matches
+    // soft-deleted link rows and `labels__isnull=False` keeps issues whose
+    // only links are deleted.
     let mut joins = String::new();
     let mut referenced = Vec::new();
-    for (table, alias, key_column) in RELATION_JOINS {
-        let marker = format!("\"{alias}\".");
-        let mentioned = where_sql.contains(&marker);
-        let nullable_only = mentioned && alias_nullable_only(&where_sql, alias);
-        let used = mentioned || group_join_alias(group_by, sub_group_by, alias);
-        let inner = used && !nullable_only || group_join_alias(group_by, sub_group_by, alias);
-        if used {
-            referenced.push(*alias);
+    if layers.rich || layers.legacy {
+        for (table, alias, key_column) in RELATION_JOINS {
+            let marker = format!("\"{alias}\".");
+            let mentioned = where_sql.contains(&marker);
+            let nullable_only = mentioned && alias_nullable_only(&where_sql, alias);
+            let used = mentioned || group_join_alias(group_by, sub_group_by, alias);
+            let inner = used && !nullable_only || group_join_alias(group_by, sub_group_by, alias);
+            if used {
+                referenced.push(*alias);
+            }
+            let kind = if inner { "INNER JOIN" } else { "LEFT JOIN" };
+            joins.push_str(&format!(
+                " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
+            ));
+            let _ = key_column;
         }
-        let kind = if inner { "INNER JOIN" } else { "LEFT JOIN" };
+        let intake_used = where_sql.contains("\"issue_intake\".");
         joins.push_str(&format!(
-            " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
+            " {} intake_issues AS issue_intake ON issue_intake.issue_id = issue.id",
+            if intake_used {
+                "INNER JOIN"
+            } else {
+                "LEFT JOIN"
+            }
         ));
-        let _ = key_column;
-    }
-    let intake_used = where_sql.contains("\"issue_intake\".");
-    joins.push_str(&format!(
-        " {} intake_issues AS issue_intake ON issue_intake.issue_id = issue.id",
         if intake_used {
-            "INNER JOIN"
-        } else {
-            "LEFT JOIN"
+            referenced.push("issue_intake");
         }
-    ));
-    if intake_used {
-        referenced.push("issue_intake");
     }
-    // Soft-delete guards for every *used* relation join (related managers).
-    let mut guards = Vec::new();
-    for alias in &referenced {
-        guards.push(format!("{alias}.deleted_at IS NULL"));
-    }
-    let guard_sql = if guards.is_empty() {
-        String::new()
-    } else {
-        format!(" AND {}", guards.join(" AND "))
-    };
     let from_where = format!(
         r#"FROM issues AS issue
         JOIN projects AS project ON project.id = issue.project_id
         JOIN workspaces ON workspaces.id = issue.workspace_id
         LEFT JOIN states AS state ON state.id = issue.state_id AND state.deleted_at IS NULL
         {joins}
-        WHERE {where_sql}{guard_sql}"#
+        WHERE {where_sql}"#
     );
     Ok(FilteredSet {
         from_where,
@@ -1226,8 +1298,14 @@ pub fn filtered_set(
 // and the grouped variants). This resolves the rewritten key to SQL.
 
 /// `(key expression, descending)` for the rewritten `order_by` param.
-/// Plain columns are allowlisted `issues` columns; anything else is
-/// Django's `FieldError` (generic 500).
+/// The default branch of `order_issue_queryset` orders by the raw param,
+/// so any valid ORM path works in Python and only a truly invalid path
+/// raises `FieldError` (generic 500). FK names order by their id column
+/// (`estimate_point` → `estimate_point_id`, `project` → `project_id`,
+/// `parent` → `parent_id`, `state` → `state_id`); `state__name` resolves
+/// through the state join. Deeper relation traversals beyond the
+/// `min_values` trio stay a 500 (out of pilot scope; the suite never sends
+/// them).
 pub fn order_key(out_param: &str, orig_param: &str) -> Result<(String, bool), Denial> {
     let descending = out_param.starts_with('-');
     let key = out_param.trim_start_matches('-');
@@ -1239,10 +1317,15 @@ pub fn order_key(out_param: &str, orig_param: &str) -> Result<(String, bool), De
         "min_values" => min_order_subquery(orig_param.trim_start_matches('-'))?,
         "cycle_id" => "(SELECT ci.cycle_id FROM cycle_issues ci WHERE ci.issue_id = issue.id AND ci.deleted_at IS NULL LIMIT 1)".to_owned(),
         "created_at" | "updated_at" | "sort_order" | "sequence_id" | "name" | "start_date"
-        | "target_date" | "completed_at" | "id" | "is_draft" | "archived_at" => {
+        | "target_date" | "completed_at" | "id" | "is_draft" | "archived_at"
+        | "deleted_at" => {
             format!("issue.\"{key}\"")
         }
+        "estimate_point" => "issue.estimate_point_id".to_owned(),
+        "project" => "issue.project_id".to_owned(),
+        "parent" => "issue.parent_id".to_owned(),
         "state" => "issue.state_id".to_owned(),
+        "state__name" => "state.name".to_owned(),
         "created_by" => "issue.created_by_id".to_owned(),
         "updated_by" => "issue.updated_by_id".to_owned(),
         _ => return Err(Denial::ServerError),
@@ -1269,7 +1352,19 @@ fn min_order_subquery(relation: &str) -> Result<String, Denial> {
 // drops the `.0` DRF renders).
 
 /// Render one row's selected keys in order as a compact JSON object.
-pub fn shape_row(row: &Map<String, Value>, fields: &[String], timezone: &Tz) -> String {
+/// `shift` selects the datetime rule: the flat `issues/list/` `.values()`
+/// branch (via `user_timezone_converter`), the v2 page and the
+/// `IssueSerializer` branch (via DRF `enforce_timezone` against the
+/// activated actor tz) render `created_at`/`updated_at` in the actor's
+/// zone; the main `issues/` list and `issues-detail/` render `.values()`
+/// dicts / raw serializer dicts through the plain JSON encoder, i.e. as
+/// stored (UTC).
+pub fn shape_row(
+    row: &Map<String, Value>,
+    fields: &[String],
+    timezone: &Tz,
+    shift: bool,
+) -> String {
     let mut out = String::from("{");
     for (index, field) in fields.iter().enumerate() {
         if index > 0 {
@@ -1282,16 +1377,17 @@ pub fn shape_row(row: &Map<String, Value>, fields: &[String], timezone: &Tz) -> 
             field,
             row.get(field).unwrap_or(&Value::Null),
             timezone,
+            shift,
         ));
     }
     out.push('}');
     out
 }
 
-fn shape_value(field: &str, value: &Value, timezone: &Tz) -> String {
+fn shape_value(field: &str, value: &Value, timezone: &Tz, shift: bool) -> String {
     match field {
-        "created_at" | "updated_at" => shift_datetime(value, timezone),
-        "completed_at" | "deleted_at" => utc_datetime(value),
+        "created_at" | "updated_at" if shift => shift_datetime(value, timezone),
+        "created_at" | "updated_at" | "completed_at" | "deleted_at" => utc_datetime(value),
         "sort_order" => match value {
             Value::Number(number) => {
                 let float = number.as_f64().unwrap_or(f64::NAN);
@@ -1501,24 +1597,67 @@ pub struct ListContext {
     pub slug: String,
 }
 
+/// Which list-family path a [`list_context`] call serves. The main
+/// `issues/` list validates `per_page` and the group mismatch; the detail
+/// endpoint validates `per_page` (through its paginator) but never the
+/// mismatch; the flat, v2 and deleted paths read neither param in Python,
+/// so they parse leniently (a strict parse would 400 where Django 200s).
+/// The flat path additionally checks `issues`-required first, before any
+/// `per_page` handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListMode {
+    Main,
+    Detail,
+    Flat,
+    Lenient,
+}
+
+fn denial_from_param(error: pidash_services::app_issues::ParamError) -> Denial {
+    if error.key == "detail" {
+        Denial::BadDetail(error.message)
+    } else {
+        Denial::BadError(error.message)
+    }
+}
+
 pub async fn list_context(
     state: AppState,
     slug: String,
     project_id: String,
     query: &QueryMap,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
-    require_issues: bool,
+    mode: ListMode,
 ) -> Result<ListContext, Denial> {
     let gate = resolve_gate(&state, &slug, &project_id, extension).await?;
-    let params = ListParams::parse(&multi_map(query), require_issues).map_err(|error| {
-        if error.key == "detail" {
-            Denial::BadDetail(error.message)
-        } else {
-            Denial::BadError(error.message)
+    let (require_issues, strict_per_page, check_mismatch) = match mode {
+        ListMode::Main => (false, true, true),
+        ListMode::Detail => (false, true, false),
+        ListMode::Flat => (true, false, false),
+        ListMode::Lenient => (false, false, false),
+    };
+    // Main-list order: the group mismatch is checked in-view before
+    // `paginate` parses `per_page`/cursor.
+    if check_mismatch {
+        let multi = multi_map(query);
+        let group_by = multi
+            .get("group_by")
+            .and_then(|values| values.last().map(String::as_str));
+        let sub_group_by = multi
+            .get("sub_group_by")
+            .and_then(|values| values.last().map(String::as_str));
+        if let Some(mismatch) = raw_group_mismatch(group_by, sub_group_by) {
+            return Err(denial_from_param(mismatch));
         }
-    })?;
-    if let Some(mismatch) = params.group_mismatch() {
-        return Err(Denial::BadError(mismatch.message));
+    }
+    let options = ParseOptions {
+        require_issues,
+        strict_per_page,
+    };
+    let params = ListParams::parse_with(&multi_map(query), options).map_err(denial_from_param)?;
+    if check_mismatch {
+        if let Some(mismatch) = params.group_mismatch() {
+            return Err(Denial::BadError(mismatch.message));
+        }
     }
     let pool = state
         .pools()
@@ -1539,7 +1678,7 @@ pub async fn list_issues(
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
-    let context = list_context(state, slug, project_id, &query, extension, false).await?;
+    let context = list_context(state, slug, project_id, &query, extension, ListMode::Main).await?;
     record_recent_visit(&context).await;
     let order_spec = order_sql(&context.params.order_by, "state.\"group\"", |name| {
         format!("min_{}", name.replace("__", "_"))
@@ -1557,13 +1696,13 @@ pub async fn list_issues(
         context.params.sub_group_by.as_deref(),
         extra,
         false,
+        FilterLayers::FULL,
     )?;
     let (key_expr, descending) = order_key(&order_spec.out_param, &context.params.order_by)?;
     let direction = if descending { "DESC" } else { "ASC" };
-    // per_page / cursor with the paginator kernel's exact errors.
-    let per_page =
-        crate::paginator::parse_per_page(query_last(&query, "per_page").as_deref(), 1000, 1000)
-            .map_err(|error| Denial::BadDetail(error.detail()))?;
+    // `per_page` already validated by the strict preamble; the cursor
+    // parses here with the paginator kernel's exact errors.
+    let per_page = context.params.per_page;
     let cursor = crate::paginator::Cursor::from_string(&context.params.cursor_raw)
         .map_err(|error| Denial::BadDetail(error.detail()))?;
     let group_by = context.params.group_by.clone();
@@ -1581,10 +1720,10 @@ pub async fn list_issues(
         )
         .await;
     }
-    let selects = annotation_selects(true, None, false, false);
+    let selects = annotation_selects(true, None, false, true);
     let fields = on_results_fields(None, None);
     flat_paginated_response(
-        &context, &filtered, &key_expr, direction, per_page, cursor, selects, fields,
+        &context, &filtered, &key_expr, direction, per_page, cursor, selects, fields, false,
     )
     .await
 }
@@ -1603,6 +1742,7 @@ async fn flat_paginated_response(
     cursor: crate::paginator::Cursor,
     selects: String,
     fields: Vec<String>,
+    shift: bool,
 ) -> HandlerResult {
     use crate::paginator::{
         apply_offset_window, max_hits, next_cursor, offset_window, prev_cursor,
@@ -1630,7 +1770,7 @@ async fn flat_paginated_response(
     let prev = prev_cursor(limit, window.page);
     let shaped: Vec<String> = page
         .iter()
-        .map(|row| shape_row(row, &fields, &context.gate.timezone))
+        .map(|row| shape_row(row, &fields, &context.gate.timezone, shift))
         .collect();
     Ok(json_response(envelope(
         None,
@@ -1686,7 +1826,7 @@ async fn grouped_response(
     let limit = per_page.min(1000);
     let window = grouped_window(limit, cursor.offset, cursor.value, None).map_err(page_denial)?;
     let group_expr = group_expression(group_by)?;
-    let selects = annotation_selects(true, skip_array_for(group_by), false, false);
+    let selects = annotation_selects(true, skip_array_for(group_by), false, true);
     let member_select = group_member_select(group_by);
     let sub_expr = match &sub_group_by {
         Some(sub) => Some(group_expression(sub)?),
@@ -1743,7 +1883,7 @@ async fn grouped_response(
     let fields = on_results_fields(Some(group_by), sub_group_by.as_deref());
     let shaped: Vec<Map<String, Value>> = page
         .iter()
-        .map(|row| shape_map(row, &fields, &context.gate.timezone))
+        .map(|row| shape_map(row, &fields, &context.gate.timezone, false))
         .collect();
     let group_fields = group_values(
         &context.pool,
@@ -1797,12 +1937,21 @@ fn top_group_count(pairs: &[(String, i64)]) -> i64 {
     pairs.iter().map(|(_, count)| *count).max().unwrap_or(0)
 }
 
-/// Shape a row into an ordered map (for grouping).
-fn shape_map(row: &Map<String, Value>, fields: &[String], timezone: &Tz) -> Map<String, Value> {
+/// Shape a row into an ordered map (for grouping). Grouped main-list rows
+/// render datetimes as stored (no `user_timezone_converter` on that path).
+fn shape_map(
+    row: &Map<String, Value>,
+    fields: &[String],
+    timezone: &Tz,
+    shift: bool,
+) -> Map<String, Value> {
     let mut out = Map::new();
     for field in fields {
         let value = row.get(field).unwrap_or(&Value::Null);
-        out.insert(field.clone(), shape_json_value(field, value, timezone));
+        out.insert(
+            field.clone(),
+            shape_json_value(field, value, timezone, shift),
+        );
     }
     // Group raw keys ride along for the grouper (not in the field list
     // for m2m groups they are appended by on_results_fields already).
@@ -1816,9 +1965,9 @@ fn shape_map(row: &Map<String, Value>, fields: &[String], timezone: &Tz) -> Map<
     out
 }
 
-fn shape_json_value(field: &str, value: &Value, timezone: &Tz) -> Value {
+fn shape_json_value(field: &str, value: &Value, timezone: &Tz, shift: bool) -> Value {
     match field {
-        "created_at" | "updated_at" => match value {
+        "created_at" | "updated_at" if shift => match value {
             Value::String(text) => match chrono::DateTime::parse_from_rfc3339(text) {
                 Ok(aware) => Value::String(crate::serializer::render_datetime_in(&aware, timezone)),
                 Err(_) => value.clone(),
@@ -1939,14 +2088,18 @@ async fn sub_total_pairs(
 
 /// Whether the pagination window itself is empty (`if results:` in
 /// `get_result` guards `max_hits`).
-/// `GET .../issues/list/`: flat fetch of an explicit id set.
+/// `GET .../issues/list/`: flat fetch of an explicit id set. With
+/// `fields`/`expand` present the view returns `IssueSerializer` rows over
+/// the rich-filtered `queryset` instead of the `.values()` list (see
+/// [`serializer_list`]); otherwise the `.values()` branch below runs.
+/// Neither branch scopes guests — the view has no role-5 check.
 pub async fn flat_list(
     State(state): State<AppState>,
     Path((slug, project_id)): Path<(String, String)>,
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
-    let context = list_context(state, slug, project_id, &query, extension, true).await?;
+    let context = list_context(state, slug, project_id, &query, extension, ListMode::Flat).await?;
     record_recent_visit(&context).await;
     let ids = context.params.issue_ids.clone().unwrap_or_default();
     let mut validated = Vec::with_capacity(ids.len());
@@ -1955,6 +2108,9 @@ pub async fn flat_list(
             id.parse::<uuid::Uuid>()
                 .map_err(|_| Denial::BadError(INVALID_DETAIL_BODY_MSG.to_owned()))?,
         );
+    }
+    if !context.params.is_flat_shape() {
+        return serializer_list(&context, &query, validated).await;
     }
     let order_spec = order_sql(&context.params.order_by, "state.\"group\"", |name| {
         format!("min_{}", name.replace("__", "_"))
@@ -1973,6 +2129,7 @@ pub async fn flat_list(
         context.params.sub_group_by.as_deref(),
         Some((extra, extra_binder.values())),
         false,
+        FilterLayers::NO_GUEST,
     )?;
     // A grouped m2m field drops its array annotation, and then `.values()`
     // cannot resolve it: Django's `FieldError` (generic 500).
@@ -1984,7 +2141,7 @@ pub async fn flat_list(
     // Flat ordering: the `order_issue_queryset` fragment directly — no
     // paginator re-ordering, no `NULLS LAST` (Postgres defaults apply).
     let order_clause = flat_order_sql(&order_spec, &context.params.order_by)?;
-    let selects = annotation_selects(true, None, false, false);
+    let selects = annotation_selects(true, None, false, true);
     let inner = format!(
         "SELECT {selects} {} ORDER BY {order_clause}",
         filtered.from_where
@@ -1997,9 +2154,135 @@ pub async fn flat_list(
         .collect();
     let shaped: Vec<String> = rows
         .iter()
-        .map(|row| shape_row(row, &fields, &context.gate.timezone))
+        .map(|row| shape_row(row, &fields, &context.gate.timezone, true))
         .collect();
     Ok(json_response(format!("[{}]", shaped.join(","))))
+}
+
+/// `IssueSerializer` keys present on the flat `fields=`/`expand=` branch,
+/// in `Meta.fields` order. Annotation-backed keys (`cycle_id`,
+/// `module_ids`, `label_ids`, `assignee_ids`, `sub_issues_count`,
+/// `attachment_count`, `link_count`) are absent: the view serializes the
+/// un-annotated `queryset`, so DRF's missing-attribute rule (`SkipField`
+/// on non-required fields) omits them.
+const SERIALIZER_FIELDS: &[&str] = &[
+    "id",
+    "name",
+    "state_id",
+    "sort_order",
+    "completed_at",
+    "estimate_point",
+    "priority",
+    "complexity_score",
+    "start_date",
+    "target_date",
+    "sequence_id",
+    "project_id",
+    "parent_id",
+    "assigned_pod_id",
+    "agent_executor",
+    "created_at",
+    "updated_at",
+    "created_by",
+    "updated_by",
+    "is_draft",
+    "archived_at",
+    "is_synced",
+];
+
+/// The flat `fields=`/`expand=` branch: `IssueSerializer(queryset, ...)`
+/// rows, where `queryset` is the rich-filtered base — the legacy
+/// `issue_filters` never run on it (ported bug), there are no annotations
+/// and no explicit ordering (the model's `-created_at` default applies).
+/// `fields=` itself is discarded (`DynamicBaseSerializer` overwrites it
+/// with `expand`), and `expand` only ever *adds* nested keys, so the base
+/// shape below is what every `fields`-only request renders. Nested
+/// `expand` objects (the expansion mapper + `issue_attachments`) are a
+/// known residual gap: the contract suite never sends `expand` on this
+/// path, and the nested lite-serializer fleet is out of pilot scope.
+async fn serializer_list(
+    context: &ListContext,
+    query: &QueryMap,
+    validated: Vec<uuid::Uuid>,
+) -> HandlerResult {
+    let mut extra_binder = Binder::new();
+    let mut holders = Vec::with_capacity(validated.len());
+    for id in validated {
+        holders.push(extra_binder.bind_uuid(id));
+    }
+    let extra = format!("issue.id IN ({})", holders.join(","));
+    let filtered = filtered_set(
+        &context.gate,
+        &context.slug,
+        query,
+        None,
+        None,
+        Some((extra, extra_binder.values())),
+        false,
+        FilterLayers::SERIALIZER,
+    )?;
+    // `is_synced`: empty `external_source` short-circuits false before any
+    // query; otherwise either sync table holds a live row (both use
+    // soft-deletion managers, so deleted rows do not count).
+    let selects = r#"issue.id, issue.name, issue.state_id, issue.sort_order,
+        issue.completed_at, issue.estimate_point_id AS estimate_point, issue.priority,
+        issue.complexity_score, issue.start_date, issue.target_date, issue.sequence_id,
+        issue.project_id, issue.parent_id, issue.assigned_pod_id, issue.agent_executor,
+        issue.created_at, issue.updated_at, issue.created_by_id AS created_by,
+        issue.updated_by_id AS updated_by, issue.is_draft, issue.archived_at,
+        (CASE WHEN issue.external_source IS NULL OR issue.external_source = '' THEN FALSE
+         ELSE (EXISTS (SELECT 1 FROM git_issue_syncs g
+                       WHERE g.issue_id = issue.id AND g.deleted_at IS NULL)
+            OR EXISTS (SELECT 1 FROM github_issue_syncs gh
+                       WHERE gh.issue_id = issue.id AND gh.deleted_at IS NULL))
+         END) AS is_synced"#;
+    let inner = format!(
+        "SELECT {selects} {} ORDER BY issue.created_at DESC",
+        filtered.from_where
+    );
+    let rows = fetch_json_rows(&context.pool, &inner, filtered.values.clone()).await?;
+    let fields: Vec<String> = SERIALIZER_FIELDS
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    let shaped: Vec<String> = rows
+        .iter()
+        .map(|row| serializer_shape_row(row, &fields, &context.gate.timezone))
+        .collect();
+    Ok(json_response(format!("[{}]", shaped.join(","))))
+}
+
+/// One `IssueSerializer` row: model fields in `Meta.fields` order with
+/// every DRF `DateTimeField` shifted into the actor's zone
+/// (`enforce_timezone` against the activated tz, `Z`-normalized like the
+/// flat `.values()` converter path).
+fn serializer_shape_row(row: &Map<String, Value>, fields: &[String], timezone: &Tz) -> String {
+    let mut out = String::from("{");
+    for (index, field) in fields.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        out.push_str(field);
+        out.push_str("\":");
+        let value = row.get(field).unwrap_or(&Value::Null);
+        let rendered = match field.as_str() {
+            "created_at" | "updated_at" | "completed_at" | "archived_at" => {
+                shift_datetime(value, timezone)
+            }
+            "sort_order" => match value {
+                Value::Number(number) => {
+                    let float = number.as_f64().unwrap_or(f64::NAN);
+                    crate::paginator::py_float_str(float)
+                }
+                _ => serde_json::to_string(value).unwrap_or("null".to_owned()),
+            },
+            _ => serde_json::to_string(value).unwrap_or("null".to_owned()),
+        };
+        out.push_str(&rendered);
+    }
+    out.push('}');
+    out
 }
 
 /// `ORDER BY` for the unpaginated flat endpoint: the rewritten branches
@@ -2068,16 +2351,18 @@ fn permission_exists_fragment(binder: &mut Binder, gate: &Gate) -> String {
 }
 
 /// `GET .../issues-detail/`: `IssueDetailEndpoint.get` — the permission
-/// `Exists` subquery over the same filtered set, `apply_annotations`'
-/// prefetch-equivalent (unguarded) arrays, `order_issue_queryset`, and the
-/// plain `OffsetPaginator` shaping rows with
-/// `IssueListDetailSerializer`.
+/// `Exists` subquery over the same filtered set, the prefetch-equivalent
+/// arrays (manager-deleted-guarded, no archived-module guard),
+/// `order_issue_queryset`, and the plain `OffsetPaginator` shaping rows
+/// with `IssueListDetailSerializer`.
 ///
 /// Differences from [`list_issues`], all literal from base.py:
 /// - no `updated_at__gt` and no `group_by`/`sub_group_by` (those params
 ///   are parsed for `per_page`/`cursor`/`order_by` only; they never
 ///   mismatch here),
 /// - no `recent_visited_task` side effect (the view never fires it),
+/// - rows render datetimes as stored (the hand-written `to_representation`
+///   returns raw values; no `user_timezone_converter` runs here),
 /// - `fields=` is ignored by the serializer and `expand=` only appends
 ///   relation arrays, so with no `expand` the shape is [`DETAIL_FIELDS`].
 ///   `expand=issue_relation|issue_related` is a known gap (recorded in the
@@ -2088,20 +2373,10 @@ pub async fn detail_list(
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
-    let gate = resolve_gate(&state, &slug, &project_id, extension).await?;
-    // Same param errors as every list path, but no group-mismatch guard:
-    // `IssueDetailEndpoint.get` never reads the group params.
-    let params = ListParams::parse(&multi_map(&query), false).map_err(|error| {
-        if error.key == "detail" {
-            Denial::BadDetail(error.message)
-        } else {
-            Denial::BadError(error.message)
-        }
-    })?;
-    let pool = state
-        .pools()
-        .map(|pools| pools.primary().clone())
-        .ok_or(Denial::ServerError)?;
+    let context =
+        list_context(state, slug, project_id, &query, extension, ListMode::Detail).await?;
+    let params = context.params.clone();
+    let gate = context.gate;
     let order_spec = order_sql(&params.order_by, "state.\"group\"", |name| {
         format!("min_{}", name.replace("__", "_"))
     });
@@ -2109,33 +2384,28 @@ pub async fn detail_list(
     let exists = permission_exists_fragment(&mut perm_binder, &gate);
     let filtered = filtered_set(
         &gate,
-        &slug,
+        &context.slug,
         &query,
         None,
         None,
         Some((exists, perm_binder.values())),
         true,
+        FilterLayers::NO_GUEST,
     )?;
     let (key_expr, descending) = order_key(&order_spec.out_param, &params.order_by)?;
     let direction = if descending { "DESC" } else { "ASC" };
-    let per_page =
-        crate::paginator::parse_per_page(query_last(&query, "per_page").as_deref(), 1000, 1000)
-            .map_err(|error| Denial::BadDetail(error.detail()))?;
+    // `per_page` already validated by the strict preamble; the cursor
+    // parses here with the paginator kernel's exact errors.
+    let per_page = params.per_page;
     let cursor = crate::paginator::Cursor::from_string(&params.cursor_raw)
         .map_err(|error| Denial::BadDetail(error.detail()))?;
-    let selects = annotation_selects(true, None, false, true);
+    let selects = annotation_selects(true, None, false, false);
     let fields: Vec<String> = DETAIL_FIELDS
         .iter()
         .map(|name| (*name).to_owned())
         .collect();
-    let context = ListContext {
-        gate,
-        params,
-        pool,
-        slug,
-    };
     flat_paginated_response(
-        &context, &filtered, &key_expr, direction, per_page, cursor, selects, fields,
+        &context, &filtered, &key_expr, direction, per_page, cursor, selects, fields, false,
     )
     .await
 }
@@ -2147,7 +2417,18 @@ pub async fn v2_list(
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
-    let context = list_context(state, slug, project_id, &query, extension, false).await?;
+    // Lenient params: v2 never reads `per_page`/`group_by` in Python.
+    // Only tenant + guest scoping and `updated_at__gt` shape the rows —
+    // the rich and legacy filter stacks never run here.
+    let context = list_context(
+        state,
+        slug,
+        project_id,
+        &query,
+        extension,
+        ListMode::Lenient,
+    )
+    .await?;
     let cursor_raw = query_last(&query, "cursor");
     let cursor_raw = cursor_raw.as_deref();
     let updated_gt = updated_at_gt(&query)?;
@@ -2163,13 +2444,14 @@ pub async fn v2_list(
         None,
         extra,
         false,
+        FilterLayers::V2,
     )?;
     let total_results = {
         let sql = format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where);
         fetch_count(&context.pool, &sql, filtered.values.clone()).await?
     };
     let page = v2_page(cursor_raw, total_results).map_err(|_| Denial::ServerError)?;
-    let mut selects = annotation_selects(true, None, true, false);
+    let mut selects = annotation_selects(true, None, true, true);
     // `description_html` is a plain model column, not an annotation: v2
     // always selects it (like `.values()` does) so `?description=true`
     // renders it instead of null.
@@ -2187,7 +2469,7 @@ pub async fn v2_list(
         .collect();
     let shaped: Vec<String> = rows
         .iter()
-        .map(|row| shape_row(row, &fields, &context.gate.timezone))
+        .map(|row| shape_row(row, &fields, &context.gate.timezone, true))
         .collect();
     let next_cursor = page
         .next_cursor
@@ -2215,7 +2497,16 @@ pub async fn deleted_list(
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
-    let context = list_context(state, slug, project_id, &query, extension, false).await?;
+    // Lenient params: deleted-issues never reads `per_page` in Python.
+    let context = list_context(
+        state,
+        slug,
+        project_id,
+        &query,
+        extension,
+        ListMode::Lenient,
+    )
+    .await?;
     let mut binder = Binder::new();
     let slug_holder = binder.bind_string(context.slug.clone());
     let project_holder = binder.bind_uuid(context.gate.project_id);
@@ -2373,35 +2664,27 @@ mod tests {
     }
 
     #[test]
-    fn unguarded_arrays_drop_guards_and_module_join() {
-        let guarded = annotation_selects(true, None, false, false);
+    fn count_annotations_render_null_when_empty() {
+        // No `Coalesce` in Python: zero related rows yield NULL, not 0.
+        let selects = annotation_selects(true, None, false, true);
+        assert!(selects.contains("NULLIF(COUNT(*), 0)"));
+        assert!(!selects.contains("(SELECT COUNT(*)"));
+    }
+
+    #[test]
+    fn detail_arrays_keep_deleted_guard_without_module_join() {
+        // The detail prefetches (`...objects.all()`) carry the managers'
+        // deleted filter but no archived-module guard.
+        let guarded = annotation_selects(true, None, false, true);
         assert!(guarded.contains("il.deleted_at IS NULL"));
         assert!(guarded.contains("JOIN modules m ON m.id = mi.module_id"));
         assert!(guarded.contains("m.archived_at IS NULL"));
-        let unguarded = annotation_selects(true, None, false, true);
-        assert!(unguarded.contains("FROM issue_labels il\n          WHERE il.issue_id = issue.id)"));
-        assert!(
-            unguarded.contains("FROM issue_assignees ia\n          WHERE ia.issue_id = issue.id)")
-        );
-        assert!(
-            unguarded.contains("FROM module_issues mi\n          WHERE mi.issue_id = issue.id)")
-        );
-        let label_part = unguarded
-            .split("FROM issue_labels il")
-            .nth(1)
-            .expect("label subquery");
-        assert!(label_part.starts_with("\n          WHERE il.issue_id = issue.id)"));
-        let assignee_part = unguarded
-            .split("FROM issue_assignees ia")
-            .nth(1)
-            .expect("assignee subquery");
-        assert!(assignee_part.starts_with("\n          WHERE ia.issue_id = issue.id)"));
-        let module_part = unguarded
-            .split("FROM module_issues mi")
-            .nth(1)
-            .expect("module subquery");
-        assert!(module_part.starts_with("\n          WHERE mi.issue_id = issue.id)"));
-        assert!(!unguarded.contains("JOIN modules"));
+        let detail = annotation_selects(true, None, false, false);
+        assert!(detail.contains("il.deleted_at IS NULL"));
+        assert!(detail.contains("ia.deleted_at IS NULL"));
+        assert!(detail.contains("mi.deleted_at IS NULL"));
+        assert!(!detail.contains("JOIN modules"));
+        assert!(!detail.contains("m.archived_at IS NULL"));
     }
 
     #[test]
@@ -2435,8 +2718,23 @@ mod tests {
             guest_scoped: true,
         };
         let query: QueryMap = Default::default();
-        let scoped = filtered_set(&gate, "w", &query, None, None, None, false).expect("set");
+        let scoped = filtered_set(
+            &gate,
+            "w",
+            &query,
+            None,
+            None,
+            None,
+            false,
+            FilterLayers::FULL,
+        )
+        .expect("set");
         assert!(scoped.from_where.contains("issue.created_by_id"));
+        // The triage exclusion keeps NULL-state rows (nullable FK +
+        // `split_exclude` semantics).
+        assert!(scoped
+            .from_where
+            .contains("(state.\"group\" IS NULL OR NOT (state.\"group\" = 'triage'))"));
         let mut binder = Binder::new();
         let exists = permission_exists_fragment(&mut binder, &gate);
         let detail = filtered_set(
@@ -2447,12 +2745,70 @@ mod tests {
             None,
             Some((exists, binder.values())),
             true,
+            FilterLayers::NO_GUEST,
         )
         .expect("set");
         assert!(!detail.from_where.contains("issue.created_by_id"));
         assert!(detail
             .from_where
             .contains("EXISTS (SELECT 1 FROM issues AS _perm"));
+    }
+
+    #[test]
+    fn v2_layers_skip_filter_stacks_but_keep_guest_scope() {
+        let gate = Gate {
+            user_id: uuid::Uuid::nil(),
+            timezone: "UTC".parse().expect("tz"),
+            workspace_id: uuid::Uuid::nil(),
+            project_id: uuid::Uuid::nil(),
+            guest_scoped: true,
+        };
+        let mut query: QueryMap = Default::default();
+        query.insert("state".to_owned(), OneOrMany::One("x".to_owned()));
+        let v2 = filtered_set(
+            &gate,
+            "w",
+            &query,
+            None,
+            None,
+            None,
+            false,
+            FilterLayers::V2,
+        )
+        .expect("set");
+        // Guest scoping stays; no rich/legacy predicates, no relation joins.
+        assert!(v2.from_where.contains("issue.created_by_id"));
+        assert!(!v2.from_where.contains("issue_labels"));
+        assert!(!v2.from_where.contains("issue_assignees"));
+        assert!(!v2.from_where.contains("intake_issues"));
+        assert!(v2.referenced.is_empty());
+        let flat = filtered_set(
+            &gate,
+            "w",
+            &Default::default(),
+            None,
+            None,
+            None,
+            false,
+            FilterLayers::NO_GUEST,
+        )
+        .expect("set");
+        assert!(!flat.from_where.contains("issue.created_by_id"));
+    }
+
+    #[test]
+    fn order_key_resolves_fk_and_state_names() {
+        let (expr, descending) = order_key("estimate_point", "estimate_point").expect("key");
+        assert_eq!(expr, "issue.estimate_point_id");
+        assert!(!descending);
+        let (expr, _) = order_key("-project", "-project").expect("key");
+        assert_eq!(expr, "issue.project_id");
+        let (expr, _) = order_key("parent", "parent").expect("key");
+        assert_eq!(expr, "issue.parent_id");
+        let (expr, _) = order_key("-deleted_at", "-deleted_at").expect("key");
+        assert_eq!(expr, "issue.\"deleted_at\"");
+        let (expr, _) = order_key("state__name", "state__name").expect("key");
+        assert_eq!(expr, "state.name");
     }
 
     #[test]

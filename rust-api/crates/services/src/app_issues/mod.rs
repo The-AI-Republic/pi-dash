@@ -35,7 +35,7 @@ pub mod params;
 pub mod shape;
 
 pub use ordering::{order_sql, priority_case_sql, state_case_sql, OrderSpec};
-pub use params::{ListParams, ParamError};
+pub use params::{parse_per_page, raw_group_mismatch, ListParams, ParamError, ParseOptions};
 pub use shape::{
     deleted_ids_body, envelope, group_mismatch_body, issues_required_body, on_results_fields,
     v2_fields, DETAIL_FIELDS, FLAT_LIST_FIELDS, LIST_VALUES_FIELDS, ON_RESULTS_ARRAY_FIELDS,

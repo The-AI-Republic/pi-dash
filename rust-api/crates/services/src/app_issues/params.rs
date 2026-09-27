@@ -83,6 +83,21 @@ pub struct ListParams {
     pub description: bool,
 }
 
+/// How strictly a list-family path parses its query params. Only the
+/// main `issues/` list validates `per_page` and the group mismatch:
+/// the flat, v2, deleted and detail paths never read those params in
+/// Python, so a strict parse would 400 where Django 200s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseOptions {
+    /// Flat `issues/list/` behavior: a missing/empty `issues` param is a
+    /// 400, checked *before* anything else (Python returns
+    /// `{"error": "Issues are required"}` without touching `per_page`).
+    pub require_issues: bool,
+    /// Validate `per_page` (`ParseError` on garbage/over-max). Flat, v2,
+    /// deleted and detail paths skip it.
+    pub strict_per_page: bool,
+}
+
 impl ListParams {
     /// Default `per_page` / max `per_page` on every list-family path.
     pub const DEFAULT_PER_PAGE: i64 = 1000;
@@ -94,12 +109,41 @@ impl ListParams {
         query: &HashMap<String, Vec<String>>,
         require_issues: bool,
     ) -> Result<Self, ParamError> {
+        Self::parse_with(
+            query,
+            ParseOptions {
+                require_issues,
+                strict_per_page: true,
+            },
+        )
+    }
+
+    /// Parse with explicit per-path strictness (see [`ParseOptions`]).
+    pub fn parse_with(
+        query: &HashMap<String, Vec<String>>,
+        options: ParseOptions,
+    ) -> Result<Self, ParamError> {
         // Django's `QueryDict.get` returns the *last* value on repeats.
         let first = |name: &str| query.get(name).and_then(|values| values.last().cloned());
-        let per_page = parse_per_page(first("per_page").as_deref())?;
+        // The flat `issues`-required check precedes `per_page` parsing:
+        // Python answers `{"error": "Issues are required"}` however broken
+        // `per_page` is.
+        if options.require_issues && !options.strict_per_page {
+            match first("issues") {
+                Some(raw) if !raw.is_empty() => {}
+                _ => return Err(ParamError::error("Issues are required")),
+            }
+        }
+        let per_page = if options.strict_per_page {
+            parse_per_page(first("per_page").as_deref())?
+        } else {
+            Self::DEFAULT_PER_PAGE
+        };
         let cursor_raw = first("cursor").unwrap_or_else(|| format!("{per_page}:0:0"));
-        let group_by = first("group_by");
-        let sub_group_by = first("sub_group_by");
+        // `GET.get(name, False)` + `if group_by:`: an empty `?group_by=`
+        // is falsy, so it behaves as absent (flat branch, never collides).
+        let group_by = first("group_by").filter(|value| !value.is_empty());
+        let sub_group_by = first("sub_group_by").filter(|value| !value.is_empty());
         let order_by = first("order_by").unwrap_or_else(|| "-created_at".to_owned());
         let updated_at_gt = first("updated_at__gt");
         let issue_ids = match first("issues") {
@@ -110,7 +154,7 @@ impl ListParams {
                     .collect(),
             ),
             _ => {
-                if require_issues {
+                if options.require_issues {
                     return Err(ParamError::error("Issues are required"));
                 }
                 None
@@ -118,7 +162,7 @@ impl ListParams {
         };
         // `GET.get("issues", False)`: an `issues=` empty value is falsy, so
         // it takes the same 400 branch as a missing param.
-        if require_issues && issue_ids.as_ref().map(Vec::len).unwrap_or(0) == 0 {
+        if options.require_issues && issue_ids.as_ref().map(Vec::len).unwrap_or(0) == 0 {
             return Err(ParamError::error("Issues are required"));
         }
         let fields = split_list(first("fields").as_deref());
@@ -160,24 +204,56 @@ impl ListParams {
     }
 }
 
+/// The group-mismatch guard on *raw* query values, for the main-list
+/// validation order: Python checks the mismatch in-view *before*
+/// `paginate` parses `per_page`/cursor, so
+/// `?group_by=X&sub_group_by=X&per_page=lots` answers the mismatch 400,
+/// not the `per_page` 400. Empty values are falsy (`if group_by:`) and
+/// never collide.
+pub fn raw_group_mismatch(
+    group_by: Option<&str>,
+    sub_group_by: Option<&str>,
+) -> Option<ParamError> {
+    match (group_by, sub_group_by) {
+        (Some(group), Some(sub)) if !group.is_empty() && !sub.is_empty() && group == sub => Some(
+            ParamError::error("Group by and sub group by cannot have same parameters"),
+        ),
+        _ => None,
+    }
+}
+
 /// `BasePaginator.get_per_page`: non-integers and over-max values raise.
 /// Python's `int()` is unbounded (whitespace/underscores/signs allowed),
 /// so a huge magnitude parses fine and then trips the ceiling instead of
-/// failing to parse.
+/// failing to parse. Inputs that overflow even `i128` but read as an
+/// integer take the ceiling branch too, exactly like `int()` would.
 pub fn parse_per_page(raw: Option<&str>) -> Result<i64, ParamError> {
     const MAX: i64 = ListParams::DEFAULT_PER_PAGE;
     let Some(text) = raw else {
         return Ok(ListParams::DEFAULT_PER_PAGE);
     };
-    let per_page = text
-        .trim()
-        .replace('_', "")
-        .parse::<i128>()
-        .map_err(|_| ParamError::detail("Invalid per_page parameter."))?;
+    let ceiling = || ParamError::detail(format!("Invalid per_page value. Cannot exceed {MAX}."));
+    let digits = text.trim().replace('_', "");
+    let per_page = match digits.parse::<i128>() {
+        Ok(value) => value,
+        Err(_) => {
+            // `int()` accepts an optional sign plus digits (after the same
+            // trim/underscore cleanup); anything else is not an integer.
+            // Beyond `i128`, emulate unbounded-then-compare: a positive
+            // magnitude necessarily trips the ceiling, a negative one
+            // falls through to the `i64` clamp below.
+            let body: &str = digits.strip_prefix(['+', '-']).unwrap_or(&digits);
+            if !body.is_empty() && body.bytes().all(|byte| byte.is_ascii_digit()) {
+                if digits.starts_with('-') {
+                    return Ok(i64::MIN);
+                }
+                return Err(ceiling());
+            }
+            return Err(ParamError::detail("Invalid per_page parameter."));
+        }
+    };
     if per_page > MAX as i128 {
-        return Err(ParamError::detail(format!(
-            "Invalid per_page value. Cannot exceed {MAX}."
-        )));
+        return Err(ceiling());
     }
     Ok(per_page.clamp(i64::MIN as i128, i64::MAX as i128) as i64)
 }
@@ -286,6 +362,47 @@ mod tests {
         )
         .expect("parse");
         assert_eq!(params.group_mismatch(), None);
+    }
+
+    #[test]
+    fn huge_integer_per_page_trips_ceiling_like_python_int() {
+        // `int("9" * 40)` parses (unbounded) then exceeds the max.
+        let err = ListParams::parse(&query(&[("per_page", &"9".repeat(40))]), false).unwrap_err();
+        assert_eq!(
+            err.body(),
+            r#"{"detail":"Invalid per_page value. Cannot exceed 1000."}"#
+        );
+        // Non-integers still fail to parse.
+        let err = ListParams::parse(&query(&[("per_page", "lots")]), false).unwrap_err();
+        assert_eq!(err.body(), r#"{"detail":"Invalid per_page parameter."}"#);
+    }
+
+    #[test]
+    fn lenient_parse_skips_per_page_but_keeps_issues_required() {
+        let options = ParseOptions {
+            require_issues: true,
+            strict_per_page: false,
+        };
+        // Garbage per_page is ignored; the issues check runs first.
+        let params = ListParams::parse_with(&query(&[("per_page", "lots")]), options);
+        assert!(params.is_err());
+        let params =
+            ListParams::parse_with(&query(&[("per_page", "lots"), ("issues", "a")]), options)
+                .expect("parse");
+        assert_eq!(params.per_page, 1000);
+        assert_eq!(params.issue_ids, Some(vec!["a".to_owned()]));
+    }
+
+    #[test]
+    fn empty_group_values_behave_as_absent() {
+        let params = ListParams::parse(&query(&[("group_by", "")]), false).expect("parse");
+        assert_eq!(params.group_by, None);
+        assert_eq!(params.group_mismatch(), None);
+        assert_eq!(raw_group_mismatch(Some(""), Some("")), None);
+        assert_eq!(
+            raw_group_mismatch(Some("state"), Some("state")).map(|error| error.body()),
+            Some(r#"{"error":"Group by and sub group by cannot have same parameters"}"#.to_owned())
+        );
     }
 
     #[test]

@@ -52,10 +52,18 @@ pub fn v2_page(cursor: Option<&str>, total_results: i64) -> Result<V2Page, V2Pag
     // so this is exactly `math.ceil`.
     let total_pages =
         total_results.div_euclid(page_size) + i64::from(total_results.rem_euclid(page_size) != 0);
-    let start = if current > 0 { current * page_size } else { 0 };
-    let end = (start + page_size).min(total_results);
+    // Python ints are unbounded: a huge cursor page renders an empty 200
+    // page, so saturate instead of overflowing (`current * page_size` and
+    // `current ± 1` panic in debug / wrap in release) and clamp the slice
+    // to `total_results`.
+    let start = if current > 0 {
+        current.saturating_mul(page_size).min(total_results)
+    } else {
+        0
+    };
+    let end = start.saturating_add(page_size).min(total_results);
     let next_cursor = if end < total_results {
-        Some(format!("{page_size}:{}:0", current + 1))
+        Some(format!("{page_size}:{}:0", current.saturating_add(1)))
     } else {
         None
     };
@@ -63,7 +71,7 @@ pub fn v2_page(cursor: Option<&str>, total_results: i64) -> Result<V2Page, V2Pag
         page_size,
         start,
         end,
-        prev_cursor: format!("{page_size}:{}:0", current - 1),
+        prev_cursor: format!("{page_size}:{}:0", current.saturating_sub(1)),
         cursor: format!("{page_size}:{current}:0"),
         next_cursor: next_cursor.clone(),
         prev_page_results: current > 0,
@@ -102,5 +110,14 @@ mod tests {
     fn v2_bad_cursor_and_zero_page_are_500s() {
         assert!(v2_page(Some("nope"), 10).is_err());
         assert!(v2_page(Some("0:0:0"), 10).is_err());
+    }
+
+    #[test]
+    fn v2_huge_cursor_saturates_to_empty_page() {
+        // Python ints are unbounded: an out-of-range cursor is an empty
+        // 200 page, not a panic or a wrapped negative OFFSET.
+        let page = v2_page(Some("1000:9223372036854775807:0"), 2500).expect("page");
+        assert_eq!((page.start, page.end), (2500, 2500));
+        assert_eq!(page.next_cursor, None);
     }
 }
