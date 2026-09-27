@@ -623,6 +623,7 @@ def _create_project_move_handoff_run(*, issue: Issue, parent: AgentRun, pod: Pod
             status=AgentRunStatus.QUEUED,
             trigger=parent.trigger,
             prompt="",
+            work_type=_work_type_for_issue(issue),
             run_config=_run_config_for_issue(issue, base=parent.run_config),
             **execution,
         )
