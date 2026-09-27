@@ -36,7 +36,10 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 irm https://github.com/The-AI-Republic/pi-dash/releases/latest/download/install.ps1 | iex
 ```
 
-When prompted, enter `https://pidash.airepublic.com` and approve the device-code in the browser.
+The installer goes straight into the device-code flow against
+`https://pidash.airepublic.com` — approve it in the browser.
+(Self-hosting instead? Cancel with Ctrl-C before approving, then run
+`pidash auth login --url <YOUR-URL>`.)
 
 ## 5. Register this machine as a runner
 
@@ -86,6 +89,6 @@ Full command + flag reference: [17 — `pidash` CLI reference](./17-cli-referenc
 - **Run fails immediately** → `pidash doctor` (usually agent not on `PATH`, or git clone auth).
 - **Command not found** → open a new terminal.
 - **Browser auth not approving** → use the same browser you signed up in.
-- **Headless host** → run `pidash auth login --no-browser --url https://pidash.airepublic.com`, approve the printed URL from another browser, then run `pidash runner add --project <PROJECT_ID>`.
+- **Headless host** → run `pidash auth login --no-browser`, approve the printed URL from another browser, then run `pidash runner add --project <PROJECT_ID>`. Add `--url <YOUR-URL>` if you self-host.
 
 Discussions: <https://github.com/The-AI-Republic/pi-dash/discussions> · Bugs: <https://github.com/The-AI-Republic/pi-dash/issues>

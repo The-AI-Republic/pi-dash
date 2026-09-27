@@ -33,10 +33,10 @@ pidash login [--url <URL>] [--no-browser]
 pidash auth login [--url <URL>] [--no-browser]
 ```
 
-| Flag           | Purpose                                                                                    |
-| -------------- | ------------------------------------------------------------------------------------------ |
-| `--url <URL>`  | Cloud base URL (e.g. `https://pidash.airepublic.com`). Optional if config already has one. |
-| `--no-browser` | Don't try to open the verification URL automatically.                                      |
+| Flag           | Purpose                                                                                                                                                  |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--url <URL>`  | Cloud base URL of a self-hosted instance. Omitted, reuses this host's configured `[daemon].cloud_url`, else defaults to `https://pidash.airepublic.com`. |
+| `--no-browser` | Don't try to open the verification URL automatically.                                                                                                    |
 
 Writes the CLI token to `config.toml`, then confirms the account and workspace and points you at the cloud URL. Registering a runner is a separate, explicit step — see `pidash runner add`.
 
