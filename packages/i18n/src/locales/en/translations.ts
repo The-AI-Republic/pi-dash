@@ -7,9 +7,11 @@
 export default {
   "123456": "123456",
   "(default pod)": "(default pod)",
+  "(does not repeat)": "(does not repeat)",
   "(never)": "(never)",
   "(optional — pin this issue to an existing remote branch)":
     "(optional — pin this issue to an existing remote branch)",
+  "(UTC, inclusive)": "(UTC, inclusive)",
   "{active} active / {total} total": "{active} active / {total} total",
   "{count, plural, one {# install} other {# installs}}": "{count, plural, one {# install} other {# installs}}",
   "{count, plural, one {# project failed} other {# projects failed}}":
@@ -135,6 +137,8 @@ export default {
   Admin: "Admin",
   Administration: "Administration",
   "Advanced — git": "Advanced — git",
+  "Advanced: edit raw RRULE": "Advanced: edit raw RRULE",
+  After: "After",
   afternoon: "afternoon",
   Agent: "Agent",
   "Agent activity": "Agent activity",
@@ -468,6 +472,7 @@ export default {
   Dashboards: "Dashboards",
   date: "date",
   "Date range": "Date range",
+  day: "day",
   "Days left": "Days left",
   "Deactivate account": "Deactivate account",
   "Deactivate your account": "Deactivate your account",
@@ -578,6 +583,8 @@ export default {
   "Enable views": "Enable views",
   Enabled: "Enabled",
   "End date": "End date",
+  "End date (UTC)": "End date (UTC)",
+  Ends: "Ends",
   "Enrolled at": "Enrolled at",
   "Enter a Git repository URL first.": "Enter a Git repository URL first.",
   "Enter a new email address to receive a verification link.":
@@ -688,6 +695,7 @@ export default {
   Format: "Format",
   "Founder / Executive": "Founder / Executive",
   "Freelancer / Consultant": "Freelancer / Consultant",
+  Friday: "Friday",
   "Full changelog": "Full changelog",
   "Full name": "Full name",
   "Full Screen": "Full Screen",
@@ -705,6 +713,8 @@ export default {
   "Run `pidash runner add` manually": "Run `pidash runner add` manually",
   "Connected dev machines can create the runner directly — no copy-paste needed.":
     "Connected dev machines can create the runner directly — no copy-paste needed.",
+  first: "first",
+  fourth: "fourth",
   "No connected dev machines. Install and start the pidash daemon on your machine, or generate the command to run manually.":
     "No connected dev machines. Install and start the pidash daemon on your machine, or generate the command to run manually.",
   "Runner created": "Runner created",
@@ -772,6 +782,7 @@ export default {
     "Hi instance admin(s),\n\nPlease create a new workspace with the URL [/workspace-name] for [purpose of creating the workspace].\n\nThanks,\n{firstName} {lastName}\n{email}",
   "Hide all": "Hide all",
   "Hide password": "Hide password",
+  "Hide raw RRULE": "Hide raw RRULE",
   High: "High",
   Home: "Home",
   Horizon: "Horizon",
@@ -813,6 +824,7 @@ export default {
     "Intake helps you manage incoming requests to your project and add them as work items in your workflow. Enable intake from project settings to manage requests.",
   "Intake is not enabled for the project.": "Intake is not enabled for the project.",
   Integrations: "Integrations",
+  Interval: "Interval",
   "Invalid date. Please enter valid date.": "Invalid date. Please enter valid date.",
   "Invalid RRULE — fix it before submitting.": "Invalid RRULE — fix it before submitting.",
   "Invalid verification code. Please try again.": "Invalid verification code. Please try again.",
@@ -859,6 +871,7 @@ export default {
   Labels: "Labels",
   Language: "Language",
   "Language & Time": "Language & Time",
+  last: "last",
   "Last activity {time}": "Last activity {time}",
   "Last created": "Last created",
   "Last edited by": "Last edited by",
@@ -962,11 +975,16 @@ export default {
   "Modules are not enabled for the project.": "Modules are not enabled for the project.",
   "Modules are the building blocks of your project. Enable modules from project settings to start using them.":
     "Modules are the building blocks of your project. Enable modules from project settings to start using them.",
+  Monday: "Monday",
   "Monitor cycles across projects, track high-priority work items, and zoom in cycles that need attention.":
     "Monitor cycles across projects, track high-priority work items, and zoom in cycles that need attention.",
   "Monitor how each of your teams are performing with a peek into each cycle’s burndown report.":
     "Monitor how each of your teams are performing with a peek into each cycle’s burndown report.",
+  month: "month",
   Month: "Month",
+  "Monthly on day {day}": "Monthly on day {day}",
+  "Monthly on the {nth} {weekday}": "Monthly on the {nth} {weekday}",
+  "Monthly repeat mode": "Monthly repeat mode",
   More: "More",
   "More details": "More details",
   morning: "morning",
@@ -1086,13 +1104,16 @@ export default {
   "Notify me when work items' properties like assignees, priority, estimates or anything else changes.":
     "Notify me when work items' properties like assignees, priority, estimates or anything else changes.",
   "Number of members": "Number of members",
+  "Number of occurrences": "Number of occurrences",
   "Number of work items": "Number of work items",
   "Observe high priority work items tackled in the cycle at a glance.":
     "Observe high priority work items tackled in the cycle at a glance.",
+  occurrences: "occurrences",
   Off: "Off",
   offline: "offline",
   Offline: "Offline",
   "Old password": "Old password",
+  On: "On",
   "On-demand snapshots of all your cycles": "On-demand snapshots of all your cycles",
   "Once at dtstart": "Once at dtstart",
   "Once deactivated, you can't be assigned work items and be billed for your workspace. To reactivate your account, you will need an invite to a workspace at this email address.":
@@ -1279,7 +1300,6 @@ export default {
   "Recent activity": "Recent activity",
   Recents: "Recents",
   Recurrence: "Recurrence",
-  "Recurrence (RRULE)": "Recurrence (RRULE)",
   "Recurring AI Agent jobs scoped to projects": "Recurring AI Agent jobs scoped to projects",
   Refresh: "Refresh",
   "Refresh status": "Refresh status",
@@ -1299,6 +1319,8 @@ export default {
   "Removing work item from the cycle": "Removing work item from the cycle",
   "Removing work item from the module": "Removing work item from the module",
   "Render failed.": "Render failed.",
+  "Repeat every": "Repeat every",
+  "Repeat on": "Repeat on",
   "Report a bug": "Report a bug",
   "Reported status: {status}": "Reported status: {status}",
   "Repository URL is too long": "Repository URL is too long",
@@ -1345,6 +1367,7 @@ export default {
   running: "running",
   Runs: "Runs",
   "Sales / Business Development": "Sales / Business Development",
+  Saturday: "Saturday",
   Save: "Save",
   "Save changes": "Save changes",
   "Save custom sorts, filters, and display options or share them with your team.":
@@ -1356,6 +1379,7 @@ export default {
   Saving: "Saving",
   "Saving…": "Saving…",
   Schedule: "Schedule",
+  "Schedule completed — every occurrence has run.": "Schedule completed — every occurrence has run.",
   "Schedule work in flexible periods that adapt to this project's unique rhythm and pace.":
     "Schedule work in flexible periods that adapt to this project's unique rhythm and pace.",
   Scheduled: "Scheduled",
@@ -1377,6 +1401,7 @@ export default {
   Search: "Search",
   "Search by title": "Search by title",
   "Search projects…": "Search projects…",
+  second: "second",
   "Secret key": "Secret key",
   "Secret key copied to clipboard.": "Secret key copied to clipboard.",
   Security: "Security",
@@ -1508,6 +1533,7 @@ export default {
   "Success!": "Success!",
   Summary: "Summary",
   "Summary of Projects": "Summary of Projects",
+  Sunday: "Sunday",
   Support: "Support",
   "Support / Operations": "Support / Operations",
   "Switch to private comment": "Switch to private comment",
@@ -1582,6 +1608,7 @@ export default {
     "They help you in communicating complexity and workload of the team.",
   "Think of each project as the parent for goal-oriented work. Projects are where Jobs, Cycles, and Modules live and, along with your colleagues, help you achieve that goal. Create a new project or filter for archived projects.":
     "Think of each project as the parent for goal-oriented work. Projects are where Jobs, Cycles, and Modules live and, along with your colleagues, help you achieve that goal. Create a new project or filter for archived projects.",
+  third: "third",
   "This archives your workspace-scoped template. New agent runs in this workspace will use the Pi Dash default until you create another override.":
     "This archives your workspace-scoped template. New agent runs in this workspace will use the Pi Dash default until you create another override.",
   "This field is required": "This field is required",
@@ -1593,6 +1620,8 @@ export default {
     "This permanently revokes the dev machine, invalidates its auth token, and revokes runners hosted on it. Use this when the machine should no longer be trusted.",
   "This removes the dev machine connection entirely: its auth token is invalidated, the runners hosted on it are torn down, and the machine disappears from this list. Deleting a dev machine does not uninstall the AI agent (such as Codex or Claude) on the machine itself.":
     "This removes the dev machine connection entirely: its auth token is invalidated, the runners hosted on it are torn down, and the machine disappears from this list. Deleting a dev machine does not uninstall the AI agent (such as Codex or Claude) on the machine itself.",
+  "This rule uses features the builder can't edit, so it opens as raw RRULE. Editing below keeps it untouched otherwise.":
+    "This rule uses features the builder can't edit, so it opens as raw RRULE. Editing below keeps it untouched otherwise.",
   "This run is not available. It may have been deleted or belong to a different workspace.":
     "This run is not available. It may have been deleted or belong to a different workspace.",
   "This soft-deletes the scheduler. Any active project bindings will stop firing. The slug becomes available for re-creation.":
@@ -1613,6 +1642,7 @@ export default {
     "Re-ticking only applies while the issue is ticking and its run budget is used up.",
   "Add more runs to this issue's budget and start the AI agent now.":
     "Add more runs to this issue's budget and start the AI agent now.",
+  Thursday: "Thursday",
   Time: "Time",
   "Time zone": "Time zone",
   "Timebox work as you see fit per project and change frequency from one period to the next.":
@@ -1663,6 +1693,7 @@ export default {
     "Try a different term or let us know\nif you are sure your search is right.",
   "Try again, please.": "Try again, please.",
   "Try setting-up a strong password to proceed": "Try setting-up a strong password to proceed",
+  Tuesday: "Tuesday",
   "Type a command or search": "Type a command or search",
   "Type or paste a URL": "Type or paste a URL",
   "Type to add a new label": "Type to add a new label",
@@ -1744,6 +1775,8 @@ export default {
   "Webhook details": "Webhook details",
   "Webhook not created": "Webhook not created",
   Webhooks: "Webhooks",
+  Wednesday: "Wednesday",
+  week: "week",
   Week: "Week",
   "What is the pidash CLI, daemon, and runner?": "What is the pidash CLI, daemon, and runner?",
   "What to do with findings": "What to do with findings",
@@ -1932,5 +1965,6 @@ export default {
     "This scheduler install is not available. It may have been uninstalled.",
   "View scheduler": "View scheduler",
   "View workspace definition": "View workspace definition",
+  year: "year",
   "{count} runs": "{count} runs",
 } as const;
