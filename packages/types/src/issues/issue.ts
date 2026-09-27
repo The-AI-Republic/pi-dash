@@ -74,6 +74,11 @@ export type TBaseIssue = {
   // "cloud_agent" has no pod. Changing it is rejected by the backend once the
   // issue has an active run, same as the pod.
   agent_executor?: "local_runner" | "cloud_agent" | "managed_runner" | null;
+  // Per-issue work-type override (PDASHOSS01-234). Null inherits the
+  // project's `default_work_type`. Selects which per-work-type guidance the
+  // agent prompts carry; the backend locks it to humans once the issue is in
+  // a started/review/test group.
+  work_type?: string | null;
 
   created_at: string;
   updated_at: string;
