@@ -1704,6 +1704,7 @@ dependencies = [
  "pidash-types",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
