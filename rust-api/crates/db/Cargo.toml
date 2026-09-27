@@ -10,7 +10,7 @@ fernet = "0.2"
 pbkdf2 = "0.13"
 rand = "0.8"
 sha2 = "0.11"
-sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono"] }
 thiserror = "2"
 sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid"] }
 serde = { version = "1", features = ["derive"] }
