@@ -17,6 +17,7 @@
 //! their extra routes. Named route-group replacement lives in [`overlay`];
 //! `extra` stays the additive-only path.
 
+pub mod app_issues;
 pub mod edge;
 pub mod middleware;
 pub mod overlay;

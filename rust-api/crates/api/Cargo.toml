@@ -27,7 +27,8 @@ chrono-tz = "0.10"
 rust_decimal = { version = "1", features = ["serde"] }
 sea-query = { version = "0.32", default-features = false, features = ["backend-postgres"] }
 thiserror = "2"
-sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono"] }
+uuid = { version = "1" }
 tower = { version = "0.5" }
 tracing = "0.1"
 # Reverse proxy to Django. Default features are off on purpose: transparent
