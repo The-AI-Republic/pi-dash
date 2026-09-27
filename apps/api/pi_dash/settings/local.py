@@ -40,7 +40,10 @@ if not os.path.exists(LOG_DIR):
 
 LOGGING = {
     "version": 1,
-    "disable_existing_loggers": True,
+    # False so loggers created before dictConfig runs (e.g. in modules the
+    # settings import) aren't hard-disabled; they follow the config below
+    # like everything else.
+    "disable_existing_loggers": False,
     "formatters": {
         "verbose": {
             "format": "{levelname} {asctime} {module} {process:d} {thread:d} {message}",
@@ -91,5 +94,23 @@ LOGGING = {
             "handlers": ["console"],
             "propagate": False,
         },
+        # Catch-all for every pi_dash.* module logger created with
+        # logging.getLogger(__name__) — runner services/views, managed_runner,
+        # cloud_agent, … Without this, anything not named above inherits the
+        # root default (WARNING, no handlers) and its events — including the
+        # structured observability events and logger.exception() calls — are
+        # silently dropped. The named loggers above keep propagate=False, so
+        # nothing is emitted twice.
+        "pi_dash": {
+            "level": "INFO",
+            "handlers": ["console"],
+            "propagate": False,
+        },
+    },
+    # Backstop for everything outside pi_dash.* (django.request errors,
+    # third-party warnings). WARNING keeps third-party INFO/DEBUG noise out.
+    "root": {
+        "level": "WARNING",
+        "handlers": ["console"],
     },
 }
