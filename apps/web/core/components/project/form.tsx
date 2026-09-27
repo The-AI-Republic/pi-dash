@@ -592,7 +592,9 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
             />
           </div>
           <p className="text-11 text-tertiary">
-            {t("Changing this affects new runs only; items already In Progress keep the work type they started with.")}
+            {t(
+              "Applies to work items without their own work type, starting with their next agent run. Set a work type on the item itself to pin it."
+            )}
           </p>
         </div>
         <div className="flex flex-col gap-3">

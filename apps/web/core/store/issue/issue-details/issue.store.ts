@@ -206,6 +206,7 @@ export class IssueStore implements IIssueStore {
       assignee_ids: issue?.assignee_ids,
       assigned_pod_id: issue?.assigned_pod_id,
       agent_executor: issue?.agent_executor,
+      work_type: issue?.work_type,
       estimate_point: issue?.estimate_point,
       sub_issues_count: issue?.sub_issues_count,
       attachment_count: issue?.attachment_count,

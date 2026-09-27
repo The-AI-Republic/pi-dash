@@ -299,7 +299,10 @@ function SectionsLibrary({ slug, isAdmin, workType }: { slug: string; isAdmin: b
         )}
         {entries.map(({ section, kinds }) => (
           <SectionCard
-            key={section.key}
+            // workType in the key: remount on toggle so an open editor's
+            // draft preview and other local state can't survive as another
+            // work type's output.
+            key={`${workType}:${section.key}`}
             sectionId={sectionAnchorId(section.key)}
             slug={slug}
             previewKinds={kinds}
@@ -411,7 +414,9 @@ function ReceiptLibrary({ slug, isAdmin, workType }: { slug: string; isAdmin: bo
         </div>
         {entries.map(({ kind, compiled, sections }) => (
           <ReceiptCard
-            key={kind}
+            // workType in the key: remount on toggle so a rendered preview
+            // can't linger as stale output under the other work type.
+            key={`${workType}:${kind}`}
             receiptId={receiptAnchorId(kind)}
             slug={slug}
             kind={kind}

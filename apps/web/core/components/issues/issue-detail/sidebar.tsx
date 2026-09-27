@@ -54,6 +54,10 @@ import { TransferHopInfo } from "@/pi-dash-web/components/issues/issue-details/s
 import { IssueWorklogProperty } from "@/pi-dash-web/components/issues/worklog/property";
 import { SidebarPropertyListItem } from "@/components/common/layout/sidebar/property-list-item";
 import { IssueAgentStatusPanel } from "./agent-status";
+import { IssueCycleSelect } from "./cycle-select";
+import { IssueLabel } from "./label";
+import { IssueModuleSelect } from "./module-select";
+import type { TIssueOperations } from "./root";
 
 // Human-readable label for a work-type key (PDASHOSS01-234). The value set is
 // code-owned server-side; unknown keys render verbatim rather than crashing.
@@ -67,10 +71,6 @@ function workTypeLabel(key: string, t: (s: string) => string): string {
       return key;
   }
 }
-import { IssueCycleSelect } from "./cycle-select";
-import { IssueLabel } from "./label";
-import { IssueModuleSelect } from "./module-select";
-import type { TIssueOperations } from "./root";
 
 type Props = {
   workspaceSlug: string;
