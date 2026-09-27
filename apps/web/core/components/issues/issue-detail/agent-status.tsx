@@ -338,6 +338,19 @@ function getTickerOnlyView(ticker: TIssueAgentTicker, now: number, t: Translatio
     };
   }
 
+  if (ticker.disarm_reason === "stop_signal") {
+    return {
+      title: t("AI agent ticking stopped by the agent"),
+      detail: t(
+        "The agent decided no further automatic run would help here. A comment, state change or Run AI re-arms it."
+      ),
+      badge: t("Stopped"),
+      badgeVariant: "neutral",
+      icon: CirclePause,
+      iconClassName: "text-tertiary",
+    };
+  }
+
   if (ticker.disarm_reason === "cap_hit" || ticker.disarm_reason === "pool_spent") {
     return {
       title: t("AI agent run limit reached"),

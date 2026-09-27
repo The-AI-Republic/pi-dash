@@ -158,6 +158,7 @@ export default {
   "AI agent ticking is disabled": "AI agent ticking is disabled",
   "AI agent ticking is off": "AI agent ticking is off",
   "AI agent ticking is scheduled": "AI agent ticking is scheduled",
+  "AI agent ticking stopped by the agent": "AI agent ticking stopped by the agent",
   "AI Agents": "AI Agents",
   "AI Dev Machines": "AI Dev Machines",
   "AI Prompt Templates": "AI Prompt Templates",
@@ -713,6 +714,8 @@ export default {
     "Waiting for the dev machine to report back. This usually takes a few seconds.",
   "is now running on": "is now running on",
   "Runner creation failed": "Runner creation failed",
+  "The agent decided no further automatic run would help here. A comment, state change or Run AI re-arms it.":
+    "The agent decided no further automatic run would help here. A comment, state change or Run AI re-arms it.",
   "The dev machine did not report back in time. The runner may still appear shortly — check the runners list, or run the command manually.":
     "The dev machine did not report back in time. The runner may still appear shortly — check the runners list, or run the command manually.",
   "Show manual command": "Show manual command",
@@ -1486,6 +1489,7 @@ export default {
   "Sticky not removed": "Sticky not removed",
   "Sticky not updated": "Sticky not updated",
   "Sticky removed": "Sticky removed",
+  Stopped: "Stopped",
   "Stored with the binding. Future PRs honour it for wall-clock-aware DST semantics.":
     "Stored with the binding. Future PRs honour it for wall-clock-aware DST semantics.",
   "Student / Professor": "Student / Professor",
