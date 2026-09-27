@@ -70,6 +70,16 @@ cargo run -p pidash-api-bin -- worker --concurrency 4
 before any migrate, seed or destructive SQL and stop if it is not yours.
 Never touch the shared postgres database.
 
+`serve` connects the database at boot and refuses to start when it is
+missing or unreachable (a pool-less server 500s every DB-backed route, so
+fail-fast beats serving). Use a TCP URL
+(`postgresql://user:pass@127.0.0.1:5432/db`); socket-dir URLs
+(`?host=/tmp`) are rejected by the URL parser at connect time. `serve`
+also honors `SECRET_KEY` from the environment for session validation: when
+it is unset the server mints an ephemeral key (warned at boot) and every
+previously forged session stops validating, so contract runs must export
+the same `SECRET_KEY` the sessions were forged with.
+
 ## Cutover edge (F-02)
 
 `serve` sits in front of Django: every request is reverse-proxied to

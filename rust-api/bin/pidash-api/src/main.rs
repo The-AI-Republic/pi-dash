@@ -49,7 +49,8 @@ enum Mode {
 /// Assemble the axum application. `extra` merges additional routes (domain
 /// routers from later issues); `None` serves the foundation routes only.
 /// State is test-defaults; use [`build_app_with_edge`] for a live edge or
-/// [`build_app_from_env`] for the `serve` path (settings + edge from env).
+/// [`build_app_from_env`] for a pool-less env state (tests). `serve`
+/// builds its own state with pools attached.
 pub fn build_app(version: &'static str, extra: Option<axum::Router<AppState>>) -> axum::Router {
     build_router_with(version, extra.unwrap_or_default())
 }
@@ -73,8 +74,10 @@ fn build_router_with(version: &'static str, extra: axum::Router<AppState>) -> ax
 }
 
 /// Resolve settings plus the cutover edge from the environment and assemble
-/// the application (F-03 + F-02). `serve` uses this; tests that need a
-/// fixed state use [`build_app`] / [`build_app_with_edge`].
+/// the application (F-03 + F-02). Tests that need a fixed state use this
+/// or [`build_app`] / [`build_app_with_edge`]; `serve` builds its own
+/// state (settings + edge + pools) so unit tests never need a database.
+#[cfg(test)]
 fn build_app_from_env(
     version: &'static str,
     extra: Option<axum::Router<AppState>>,
@@ -87,16 +90,35 @@ fn build_app_from_env(
     ))
 }
 
+/// Connect the pools `serve` attaches to its state. A missing or
+/// unreachable database is a boot error, never a per-request 500: without
+/// pools every DB-backed handler answers the generic 500 (PIDASHCONV-126),
+/// so serving pool-less is strictly worse than refusing to start (same
+/// fail-fast as `worker`).
+///
+/// `DATABASE_URL` must be a TCP `postgres://` URL; socket-dir URLs
+/// (`?host=/tmp`) are rejected by the URL parser at connect time.
+async fn connect_serve_pools() -> Result<pidash_db::Pools, Box<dyn std::error::Error>> {
+    let db = pidash_db::DbConfig::from_env()?;
+    let pools = pidash_db::Pools::connect(&db, None).await?;
+    tracing::info!(db = %db.redacted_url(), "connected postgres");
+    Ok(pools)
+}
+
 async fn serve(bind: &str) -> MainResult {
     let addr: SocketAddr = bind.parse()?;
+    let settings = Settings::from_env()?;
     let edge = EdgeHandle::from_env()?;
+    let pools = connect_serve_pools().await?;
     tracing::info!(
         %addr,
         upstream = edge.upstream(),
         flags = ?edge.flags(),
         "serving HTTP"
     );
-    let app = build_app_from_env(env!("CARGO_PKG_VERSION"), None)?;
+    let state = AppState::with_settings_and_edge(env!("CARGO_PKG_VERSION"), settings, edge)
+        .with_pools(pools);
+    let app = pidash_api::build_app(state, None);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(
         listener,
@@ -199,6 +221,45 @@ fn main() -> MainResult {
 mod tests {
     use super::*;
     use tower::ServiceExt;
+
+    /// Serialise the env-mutating boot tests: they share the process
+    /// environment with the other tests in this binary.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        // Ignore poisoning: a failed sibling test must not cascade.
+        ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// PIDASHCONV-126: `serve` must fail fast at boot without a database
+    /// instead of starting pool-less (every DB-backed handler 500s then).
+    #[tokio::test]
+    async fn serve_pools_fail_fast_without_database_url() {
+        // Remove under the lock, restore under the lock, but never hold
+        // it across the await (clippy::await_holding_lock); no other test
+        // in this binary reads DATABASE_URL.
+        let saved = {
+            let _guard = env_lock();
+            let saved = std::env::var("DATABASE_URL").ok();
+            std::env::remove_var("DATABASE_URL");
+            saved
+        };
+        let err = connect_serve_pools()
+            .await
+            .expect_err("serve boot without DATABASE_URL must fail");
+        assert!(
+            err.to_string().contains("DATABASE_URL"),
+            "unexpected error: {err}"
+        );
+        {
+            let _guard = env_lock();
+            if let Some(value) = saved {
+                std::env::set_var("DATABASE_URL", value);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn built_app_serves_healthz() {
