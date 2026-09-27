@@ -129,11 +129,17 @@ impl Overlay {
 /// and `GET /robots.txt` behind the web flag; unsafe methods still proxy
 /// so Django's CSRF-failure page is preserved); every other group's
 /// endpoints arrive with their domain ports.
+///
+/// The App group serves the issue-list family (`app_issues`, pilot 2 of
+/// D-26): exactly the four list GETs. Registration is the cutover
+/// granularity — sibling paths have no Rust route and keep proxying to
+/// Django through the fallback, so no per-path flag is needed.
 fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
     match group {
         RouteGroup::Web => Router::new()
             .route("/", any(web::health_check))
             .route("/robots.txt", any(web::robots_txt)),
+        RouteGroup::App => crate::app_issues::routes(),
         _ => Router::new(),
     }
 }
