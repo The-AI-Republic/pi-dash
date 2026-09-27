@@ -193,6 +193,8 @@ _ENV_INFRA = {
     "MIN_RUNNER_VERSION": None,
     "RUNNER_AGENT_STALL_THRESHOLD_SECS": 360,
     "RUNNER_AGENT_OBSERVABILITY_STALE_SECS": 90,
+    # Bounded auto-release for unsatisfiable runner pins (PDASHOSS01-233).
+    "RUNNER_PIN_AUTO_RELEASE_SECS": 600,
     # Desktop-bundled managed runner (.ai_design/managed_runner/design.md §16).
     "MANAGED_RUNNER_ENABLED": "false",
     "MANAGED_RUNNER_MAX_PER_USER_PROJECT": 1,

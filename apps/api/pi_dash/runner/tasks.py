@@ -97,6 +97,27 @@ def expire_stale_approvals() -> int:
     return expired
 
 
+def _sweep_dead_busy_runners(threshold) -> int:
+    """Flip BUSY-but-dead runners to OFFLINE (PDASHOSS01-233).
+
+    The ONLINE→OFFLINE sweep above never touches BUSY rows, so a BUSY
+    runner whose daemon dies silently (no shutdown drain, no reconnect)
+    stays BUSY until something finalizes its run. Only runners with no
+    busy-status run are reconciled here: while a run is still non-terminal
+    the stall reaper owns the wind-down, and its finalization releases the
+    runner (PDASHOSS01-231) — after which this sweep catches the row on
+    the next pass via the ONLINE branch.
+    """
+    from pi_dash.runner.services.matcher import BUSY_STATUSES
+
+    return (
+        Runner.objects.filter(status=RunnerStatus.BUSY)
+        .exclude(last_heartbeat_at__gte=threshold)
+        .exclude(agent_runs__status__in=BUSY_STATUSES)
+        .update(status=RunnerStatus.OFFLINE)
+    )
+
+
 @shared_task(name="runner.mark_offline_runners")
 def mark_offline_runners() -> int:
     """Heartbeat-staleness offline detection."""
@@ -108,7 +129,10 @@ def mark_offline_runners() -> int:
     )
     if affected:
         logger.info("marked %s runner(s) offline via heartbeat timeout", affected)
-    return affected
+    dead_busy = _sweep_dead_busy_runners(threshold)
+    if dead_busy:
+        logger.info("marked %s dead busy runner(s) offline via heartbeat timeout", dead_busy)
+    return affected + dead_busy
 
 
 # ---- Per-runner HTTPS transport sweepers ---------------------------------
@@ -149,7 +173,28 @@ def sweep_stale_runners() -> int:
     )
     if affected:
         logger.info("sweep_stale_runners flipped %s offline", affected)
-    return affected
+    dead_busy = _sweep_dead_busy_runners(threshold)
+    if dead_busy:
+        logger.info("sweep_stale_runners flipped %s dead busy runner(s) offline", dead_busy)
+    return affected + dead_busy
+
+
+@shared_task(name="runner.reconcile_unsatisfiable_pins")
+def reconcile_unsatisfiable_pins() -> int:
+    """Recover QUEUED runs pinned to runners that cannot take work.
+
+    Beat-scheduled backstop (PDASHOSS01-233): releases wedged-busy pinned
+    runners and clears pins held past ``RUNNER_PIN_AUTO_RELEASE_SECS``,
+    then drains the affected pods so the recovered runs are assigned in
+    the same pass. Event-driven drains cannot cover this — a pin to a
+    dead runner generates no event, only the passage of time.
+    """
+    from pi_dash.runner.services import matcher
+
+    pod_ids = matcher.reconcile_unsatisfiable_pins()
+    for pod_id in pod_ids:
+        matcher.drain_pod_by_id(pod_id)
+    return len(pod_ids)
 
 
 @shared_task(name="runner.sweep_old_streams")
