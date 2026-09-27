@@ -15,6 +15,7 @@
 //! docs for the ChangeLog-no-readers note.
 
 pub mod models;
+pub mod queries;
 
 pub use models::{
     default_tags, instance::Instance, instance_admin::InstanceAdmin,
