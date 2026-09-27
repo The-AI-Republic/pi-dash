@@ -483,7 +483,11 @@ impl TraceDb for PgTraceDb {
 
     async fn workspace_inputs(&self) -> Result<Vec<WorkspaceInput>, String> {
         let rows: Vec<(uuid::Uuid, String)> =
-            sqlx::query_as("SELECT id, slug FROM workspaces WHERE deleted_at IS NULL")
+            // `Workspace.objects.all()`: default manager scope plus the
+            // `Meta.ordering = ("-created_at",)` span-emission order.
+            sqlx::query_as(
+                "SELECT id, slug FROM workspaces WHERE deleted_at IS NULL ORDER BY created_at DESC",
+            )
                 .fetch_all(&self.pool)
                 .await
                 .map_err(|e| e.to_string())?;
