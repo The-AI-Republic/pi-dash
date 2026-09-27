@@ -160,6 +160,9 @@ describe("parseRrule — unsupported constructs fall back to raw mode (null)", (
     "FREQ=DAILY;INTERVAL=0",
     "COUNT=5",
     "garbage",
+    // UNTIL with a time-of-day the widget would rewrite to end-of-day
+    "FREQ=DAILY;UNTIL=20261226T090000Z",
+    "FREQ=DAILY;UNTIL=20261226",
     // RFC 5545 forbids UNTIL and COUNT together
     "FREQ=DAILY;COUNT=5;UNTIL=20261226T000000Z",
     // embedded DTSTART lines are out of widget scope

@@ -140,8 +140,13 @@ export function parseRrule(rrule: string, dtstart?: Date | string | null): Recur
   if (parsed.until != null && parsed.count != null) return null; // RFC 5545 forbids both
   if (parsed.until != null) {
     if (!(parsed.until instanceof Date) || Number.isNaN(parsed.until.getTime())) return null;
+    const untilIso = parsed.until.toISOString();
+    // The widget only expresses whole-day ends (it emits T235959Z). Any
+    // other UNTIL time-of-day would be silently rewritten to end-of-day on
+    // the next widget touch — open in raw mode instead.
+    if (untilIso.slice(11) !== "23:59:59.000Z") return null;
     draft.ends = "until";
-    draft.untilDate = parsed.until.toISOString().slice(0, 10);
+    draft.untilDate = untilIso.slice(0, 10);
   }
   if (parsed.count != null) {
     if (!Number.isInteger(parsed.count) || parsed.count < 1) return null;
