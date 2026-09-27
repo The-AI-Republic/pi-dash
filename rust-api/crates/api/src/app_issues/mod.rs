@@ -6,6 +6,7 @@
 //! crates:
 //! - `GET .../issues/` (`IssueViewSet.list`)
 //! - `GET .../issues/list/` (`IssueListEndpoint.get`)
+//! - `GET .../issues-detail/` (`IssueDetailEndpoint.get`)
 //! - `GET .../v2/issues/` (`IssuePaginatedViewSet.list`)
 //! - `GET .../deleted-issues/` (`DeletedIssuesListViewSet.get`)
 //!
@@ -61,12 +62,12 @@ use crate::state::AppState;
 
 use pidash_services::app_issues::{
     deleted_ids_body, envelope, on_results_fields, order_sql, v2_fields, ListParams, OrderSpec,
-    LIST_VALUES_FIELDS, PRIORITY_VALUES, STATE_GROUP_VALUES,
+    DETAIL_FIELDS, LIST_VALUES_FIELDS, PRIORITY_VALUES, STATE_GROUP_VALUES,
 };
 
 use render::v2_page;
 
-/// Register the four list-family GET routes. Nothing else: sibling paths
+/// Register the five list-family GET routes. Nothing else: sibling paths
 /// stay unmatched and proxy to Django.
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -77,6 +78,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/issues/list/",
             get(flat_list),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/issues-detail/",
+            get(detail_list),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/v2/issues/",
@@ -958,10 +963,18 @@ fn group_join_alias(group_by: Option<&str>, sub_group_by: Option<&str>, alias: &
 
 /// Scalar subquery annotations shared by every list path
 /// (`apply_annotations` + the grouper array annotations).
+/// `unguarded_arrays` reproduces `IssueDetailEndpoint.apply_annotations` +
+/// `IssueListDetailSerializer`'s prefetch reads: the reverse managers run
+/// on the plain `objects` manager, so the array subqueries carry *no*
+/// soft-delete guard and the module one neither joins `modules` nor checks
+/// `archived_at` — every link row counts, unlike the grouper's annotated
+/// arrays (deleted-link guard everywhere, active-member guard on v2
+/// assignees, archived-module guard on modules).
 fn annotation_selects(
     arrays: bool,
     skip_array: Option<&str>,
     assignee_active_member: bool,
+    unguarded_arrays: bool,
 ) -> String {
     let mut selects = String::from(
         r#"issue.id, issue.name, issue.state_id, issue.sort_order, issue.completed_at,
@@ -987,15 +1000,31 @@ fn annotation_selects(
     );
     if arrays {
         if skip_array != Some("label_ids") {
-            selects.push_str(
-                r#",
+            if unguarded_arrays {
+                selects.push_str(
+                    r#",
+        (SELECT COALESCE(ARRAY_AGG(DISTINCT il.label_id), '{}'::uuid[])
+           FROM issue_labels il
+          WHERE il.issue_id = issue.id) AS label_ids"#,
+                );
+            } else {
+                selects.push_str(
+                    r#",
         (SELECT COALESCE(ARRAY_AGG(DISTINCT il.label_id), '{}'::uuid[])
            FROM issue_labels il
           WHERE il.issue_id = issue.id AND il.deleted_at IS NULL) AS label_ids"#,
-            );
+                );
+            }
         }
         if skip_array != Some("assignee_ids") {
-            if assignee_active_member {
+            if unguarded_arrays {
+                selects.push_str(
+                    r#",
+        (SELECT COALESCE(ARRAY_AGG(DISTINCT ia.assignee_id), '{}'::uuid[])
+           FROM issue_assignees ia
+          WHERE ia.issue_id = issue.id) AS assignee_ids"#,
+                );
+            } else if assignee_active_member {
                 selects.push_str(
                     r#",
         (SELECT COALESCE(ARRAY_AGG(DISTINCT ia.assignee_id), '{}'::uuid[])
@@ -1015,13 +1044,22 @@ fn annotation_selects(
             }
         }
         if skip_array != Some("module_ids") {
-            selects.push_str(
-                r#",
+            if unguarded_arrays {
+                selects.push_str(
+                    r#",
+        (SELECT COALESCE(ARRAY_AGG(DISTINCT mi.module_id), '{}'::uuid[])
+           FROM module_issues mi
+          WHERE mi.issue_id = issue.id) AS module_ids"#,
+                );
+            } else {
+                selects.push_str(
+                    r#",
         (SELECT COALESCE(ARRAY_AGG(DISTINCT mi.module_id), '{}'::uuid[])
            FROM module_issues mi JOIN modules m ON m.id = mi.module_id
           WHERE mi.issue_id = issue.id AND mi.deleted_at IS NULL
             AND m.archived_at IS NULL AND m.deleted_at IS NULL) AS module_ids"#,
-            );
+                );
+            }
         }
     }
     selects
@@ -1029,7 +1067,10 @@ fn annotation_selects(
 
 /// `WHERE` preamble: tenant scope plus the `issue_objects` manager
 /// (`SoftDeletionManager` + triage/archived/draft exclusions).
-fn base_where(binder: &mut Binder, gate: &Gate, slug: &str) -> String {
+/// `detail` selects the `IssueDetailEndpoint` permission model: the
+/// `Exists` membership subquery (passed separately via `extra`) replaces
+/// the guest `created_by` scoping, so the preamble skips it.
+fn base_where(binder: &mut Binder, gate: &Gate, slug: &str, detail: bool) -> String {
     let slug_holder = binder.bind_string(slug.to_owned());
     let project_holder = binder.bind_uuid(gate.project_id);
     let mut where_sql = format!(
@@ -1039,7 +1080,7 @@ fn base_where(binder: &mut Binder, gate: &Gate, slug: &str) -> String {
         AND issue.archived_at IS NULL AND project.archived_at IS NULL
         AND issue.is_draft = FALSE"#
     );
-    if gate.guest_scoped {
+    if gate.guest_scoped && !detail {
         let user_holder = binder.bind_uuid(gate.user_id);
         where_sql.push_str(&format!(" AND issue.created_by_id = {user_holder}"));
     }
@@ -1064,9 +1105,10 @@ pub fn filtered_set(
     group_by: Option<&str>,
     sub_group_by: Option<&str>,
     extra: Option<(String, Vec<sea_query::Value>)>,
+    detail: bool,
 ) -> Result<FilteredSet, Denial> {
     let mut binder = Binder::new();
-    let preamble = base_where(&mut binder, gate, slug);
+    let preamble = base_where(&mut binder, gate, slug, detail);
     let mut fragments: Vec<String> = vec![preamble];
     // Rich filters (`filters` JSON via ComplexFilterBackend + IssueFilterSet).
     let mut complex_sql = String::new();
@@ -1494,6 +1536,7 @@ pub async fn list_issues(
         context.params.group_by.as_deref(),
         context.params.sub_group_by.as_deref(),
         extra,
+        false,
     )?;
     let (key_expr, descending) = order_key(&order_spec.out_param, &context.params.order_by)?;
     let direction = if descending { "DESC" } else { "ASC" };
@@ -1518,14 +1561,19 @@ pub async fn list_issues(
         )
         .await;
     }
+    let selects = annotation_selects(true, None, false, false);
+    let fields = on_results_fields(None, None);
     flat_paginated_response(
-        &context, &filtered, &key_expr, direction, per_page, cursor, &query,
+        &context, &filtered, &key_expr, direction, per_page, cursor, selects, fields,
     )
     .await
 }
 
 /// The flat (non-grouped) branch of `IssueViewSet.list`, through
-/// `issue_on_results` (hence `state__group`, no `deleted_at`).
+/// `issue_on_results` (hence `state__group`, no `deleted_at`) — shared
+/// with `issues-detail/`, which passes the `IssueListDetailSerializer`
+/// selects (unguarded arrays) and field list (no `state__group`).
+#[allow(clippy::too_many_arguments)]
 async fn flat_paginated_response(
     context: &ListContext,
     filtered: &FilteredSet,
@@ -1533,7 +1581,8 @@ async fn flat_paginated_response(
     direction: &str,
     per_page: i64,
     cursor: crate::paginator::Cursor,
-    _query: &QueryMap,
+    selects: String,
+    fields: Vec<String>,
 ) -> HandlerResult {
     use crate::paginator::{
         apply_offset_window, max_hits, next_cursor, offset_window, prev_cursor,
@@ -1541,7 +1590,6 @@ async fn flat_paginated_response(
     let limit = per_page.min(1000);
     let window = offset_window(limit, cursor.offset, cursor.value, cursor.is_prev, None)
         .map_err(page_denial)?;
-    let selects = annotation_selects(true, None, false);
     let inner = format!(
         "SELECT DISTINCT {selects}, ({key_expr}) AS __order_key {} ORDER BY __order_key {direction} NULLS LAST, issue.created_at DESC LIMIT {} OFFSET {}",
         filtered.from_where,
@@ -1560,7 +1608,6 @@ async fn flat_paginated_response(
     };
     let next = next_cursor(limit, window.page, has_more);
     let prev = prev_cursor(limit, window.page);
-    let fields = on_results_fields(None, None);
     let shaped: Vec<String> = page
         .iter()
         .map(|row| shape_row(row, &fields, &context.gate.timezone))
@@ -1619,7 +1666,7 @@ async fn grouped_response(
     let limit = per_page.min(1000);
     let window = grouped_window(limit, cursor.offset, cursor.value, None).map_err(page_denial)?;
     let group_expr = group_expression(group_by)?;
-    let selects = annotation_selects(true, skip_array_for(group_by), false);
+    let selects = annotation_selects(true, skip_array_for(group_by), false, false);
     let member_select = group_member_select(group_by);
     let sub_expr = match &sub_group_by {
         Some(sub) => Some(group_expression(sub)?),
@@ -1905,6 +1952,7 @@ pub async fn flat_list(
         context.params.group_by.as_deref(),
         context.params.sub_group_by.as_deref(),
         Some((extra, extra_binder.values())),
+        false,
     )?;
     // A grouped m2m field drops its array annotation, and then `.values()`
     // cannot resolve it: Django's `FieldError` (generic 500).
@@ -1916,7 +1964,7 @@ pub async fn flat_list(
     // Flat ordering: the `order_issue_queryset` fragment directly — no
     // paginator re-ordering, no `NULLS LAST` (Postgres defaults apply).
     let order_clause = flat_order_sql(&order_spec, &context.params.order_by)?;
-    let selects = annotation_selects(true, None, false);
+    let selects = annotation_selects(true, None, false, false);
     let inner = format!(
         "SELECT {selects} {} ORDER BY {order_clause}",
         filtered.from_where
@@ -1962,6 +2010,116 @@ fn flat_order_sql(order_spec: &OrderSpec, orig_param: &str) -> Result<String, De
     Ok(sql)
 }
 
+/// The `IssueDetailEndpoint.get` permission subquery: the issue survives
+/// when the actor holds an active project membership with a role above
+/// guest, or an active guest membership on a project with
+/// `guest_view_all_features`, or an active guest membership without it on
+/// issues they created. The outer query already pins the issue's workspace
+/// and project, so correlating the primary key (plus the project, belt and
+/// braces) makes the subquery's own workspace/project filters redundant —
+/// omitted, not weakened. Role and soft-delete semantics mirror
+/// [`allow_project`].
+fn permission_exists_fragment(binder: &mut Binder, gate: &Gate) -> String {
+    let project_holder = binder.bind_uuid(gate.project_id);
+    let user_holder = binder.bind_uuid(gate.user_id);
+    let branch = |role_pred: &str, view_all: &str, own_only: bool| {
+        let own = if own_only {
+            format!(" AND _perm.created_by_id = {user_holder}")
+        } else {
+            String::new()
+        };
+        format!(
+            "EXISTS (SELECT 1 FROM project_members AS _pm \
+             JOIN projects AS _pp ON _pp.id = _pm.project_id \
+             WHERE _pm.project_id = _perm.project_id \
+             AND _pm.member_id = {user_holder} AND _pm.is_active \
+             AND _pm.deleted_at IS NULL AND {role_pred} \
+             AND _pp.guest_view_all_features = {view_all}{own})"
+        )
+    };
+    format!(
+        "EXISTS (SELECT 1 FROM issues AS _perm \
+         WHERE _perm.id = issue.id AND _perm.project_id = {project_holder} \
+         AND ({} OR {} OR {}))",
+        branch("_pm.role > 5", "TRUE", false),
+        branch("_pm.role = 5", "TRUE", false),
+        branch("_pm.role = 5", "FALSE", true),
+    )
+}
+
+/// `GET .../issues-detail/`: `IssueDetailEndpoint.get` — the permission
+/// `Exists` subquery over the same filtered set, `apply_annotations`'
+/// prefetch-equivalent (unguarded) arrays, `order_issue_queryset`, and the
+/// plain `OffsetPaginator` shaping rows with
+/// `IssueListDetailSerializer`.
+///
+/// Differences from [`list_issues`], all literal from base.py:
+/// - no `updated_at__gt` and no `group_by`/`sub_group_by` (those params
+///   are parsed for `per_page`/`cursor`/`order_by` only; they never
+///   mismatch here),
+/// - no `recent_visited_task` side effect (the view never fires it),
+/// - `fields=` is ignored by the serializer and `expand=` only appends
+///   relation arrays, so with no `expand` the shape is [`DETAIL_FIELDS`].
+///   `expand=issue_relation|issue_related` is a known gap (recorded in the
+///   workpad; the contract suite never sends it).
+pub async fn detail_list(
+    State(state): State<AppState>,
+    Path((slug, project_id)): Path<(String, String)>,
+    Query(query): Query<QueryMap>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+) -> HandlerResult {
+    let gate = resolve_gate(&state, &slug, &project_id, extension).await?;
+    // Same param errors as every list path, but no group-mismatch guard:
+    // `IssueDetailEndpoint.get` never reads the group params.
+    let params = ListParams::parse(&multi_map(&query), false).map_err(|error| {
+        if error.key == "detail" {
+            Denial::BadDetail(error.message)
+        } else {
+            Denial::BadError(error.message)
+        }
+    })?;
+    let pool = state
+        .pools()
+        .map(|pools| pools.primary().clone())
+        .ok_or(Denial::ServerError)?;
+    let order_spec = order_sql(&params.order_by, "state.\"group\"", |name| {
+        format!("min_{}", name.replace("__", "_"))
+    });
+    let mut perm_binder = Binder::new();
+    let exists = permission_exists_fragment(&mut perm_binder, &gate);
+    let filtered = filtered_set(
+        &gate,
+        &slug,
+        &query,
+        None,
+        None,
+        Some((exists, perm_binder.values())),
+        true,
+    )?;
+    let (key_expr, descending) = order_key(&order_spec.out_param, &params.order_by)?;
+    let direction = if descending { "DESC" } else { "ASC" };
+    let per_page =
+        crate::paginator::parse_per_page(query_last(&query, "per_page").as_deref(), 1000, 1000)
+            .map_err(|error| Denial::BadDetail(error.detail()))?;
+    let cursor = crate::paginator::Cursor::from_string(&params.cursor_raw)
+        .map_err(|error| Denial::BadDetail(error.detail()))?;
+    let selects = annotation_selects(true, None, false, true);
+    let fields: Vec<String> = DETAIL_FIELDS
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    let context = ListContext {
+        gate,
+        params,
+        pool,
+        slug,
+    };
+    flat_paginated_response(
+        &context, &filtered, &key_expr, direction, per_page, cursor, selects, fields,
+    )
+    .await
+}
+
 /// `GET .../v2/issues/`: cursor page over `updated_at`.
 pub async fn v2_list(
     State(state): State<AppState>,
@@ -1977,13 +2135,21 @@ pub async fn v2_list(
         (Some(fragment), binds) => Some((fragment, binds)),
         (None, _) => None,
     };
-    let filtered = filtered_set(&context.gate, &context.slug, &query, None, None, extra)?;
+    let filtered = filtered_set(
+        &context.gate,
+        &context.slug,
+        &query,
+        None,
+        None,
+        extra,
+        false,
+    )?;
     let total_results = {
         let sql = format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where);
         fetch_count(&context.pool, &sql, filtered.values.clone()).await?
     };
     let page = v2_page(cursor_raw, total_results).map_err(|_| Denial::ServerError)?;
-    let selects = annotation_selects(true, None, true);
+    let selects = annotation_selects(true, None, true, false);
     let inner = format!(
         "SELECT {selects} {} ORDER BY issue.updated_at LIMIT {} OFFSET {}",
         filtered.from_where,
@@ -2175,14 +2341,16 @@ mod tests {
         .status()
     }
 
-    /// The four list paths are Rust-owned (they reach the handlers: 500
+    /// The five list paths are Rust-owned (they reach the handlers: 500
     /// here only because the test state carries no pools), while the
-    /// detail sibling keeps proxying (502 fail-closed with no upstream).
+    /// issue-detail sibling keeps proxying (502 fail-closed with no
+    /// upstream).
     #[tokio::test]
     async fn list_paths_are_routed_and_detail_proxies() {
         for path in [
             "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/issues/",
             "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/issues/list/?issues=1",
+            "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/issues-detail/",
             "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/v2/issues/",
             "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/deleted-issues/",
         ] {
@@ -2200,6 +2368,89 @@ mod tests {
             .await,
             StatusCode::BAD_GATEWAY
         );
+    }
+
+    #[test]
+    fn unguarded_arrays_drop_guards_and_module_join() {
+        let guarded = annotation_selects(true, None, false, false);
+        assert!(guarded.contains("il.deleted_at IS NULL"));
+        assert!(guarded.contains("JOIN modules m ON m.id = mi.module_id"));
+        assert!(guarded.contains("m.archived_at IS NULL"));
+        let unguarded = annotation_selects(true, None, false, true);
+        assert!(unguarded.contains("FROM issue_labels il\n          WHERE il.issue_id = issue.id)"));
+        assert!(
+            unguarded.contains("FROM issue_assignees ia\n          WHERE ia.issue_id = issue.id)")
+        );
+        assert!(
+            unguarded.contains("FROM module_issues mi\n          WHERE mi.issue_id = issue.id)")
+        );
+        let label_part = unguarded
+            .split("FROM issue_labels il")
+            .nth(1)
+            .expect("label subquery");
+        assert!(label_part.starts_with("\n          WHERE il.issue_id = issue.id)"));
+        let assignee_part = unguarded
+            .split("FROM issue_assignees ia")
+            .nth(1)
+            .expect("assignee subquery");
+        assert!(assignee_part.starts_with("\n          WHERE ia.issue_id = issue.id)"));
+        let module_part = unguarded
+            .split("FROM module_issues mi")
+            .nth(1)
+            .expect("module subquery");
+        assert!(module_part.starts_with("\n          WHERE mi.issue_id = issue.id)"));
+        assert!(!unguarded.contains("JOIN modules"));
+    }
+
+    #[test]
+    fn permission_exists_has_three_membership_branches() {
+        let gate = Gate {
+            user_id: uuid::Uuid::nil(),
+            timezone: "UTC".parse().expect("tz"),
+            workspace_id: uuid::Uuid::nil(),
+            project_id: uuid::Uuid::nil(),
+            guest_scoped: true,
+        };
+        let mut binder = Binder::new();
+        let fragment = permission_exists_fragment(&mut binder, &gate);
+        assert!(fragment.starts_with("EXISTS (SELECT 1 FROM issues AS _perm"));
+        assert!(fragment.contains("_perm.id = issue.id"));
+        assert!(fragment.contains("_pm.role > 5"));
+        assert!(fragment.contains("_pm.role = 5"));
+        assert!(fragment.contains("_pp.guest_view_all_features = TRUE"));
+        assert!(fragment.contains("_pp.guest_view_all_features = FALSE"));
+        assert!(fragment.contains("_perm.created_by_id = $2"));
+        assert_eq!(binder.values().len(), 2);
+    }
+
+    #[test]
+    fn detail_filtered_set_skips_guest_scoping_for_exists() {
+        let gate = Gate {
+            user_id: uuid::Uuid::nil(),
+            timezone: "UTC".parse().expect("tz"),
+            workspace_id: uuid::Uuid::nil(),
+            project_id: uuid::Uuid::nil(),
+            guest_scoped: true,
+        };
+        let query: QueryMap = Default::default();
+        let scoped = filtered_set(&gate, "w", &query, None, None, None, false).expect("set");
+        assert!(scoped.from_where.contains("issue.created_by_id"));
+        let mut binder = Binder::new();
+        let exists = permission_exists_fragment(&mut binder, &gate);
+        let detail = filtered_set(
+            &gate,
+            "w",
+            &query,
+            None,
+            None,
+            Some((exists, binder.values())),
+            true,
+        )
+        .expect("set");
+        assert!(!detail.from_where.contains("issue.created_by_id"));
+        assert!(detail
+            .from_where
+            .contains("EXISTS (SELECT 1 FROM issues AS _perm"));
     }
 
     #[test]

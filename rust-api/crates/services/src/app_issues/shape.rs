@@ -91,6 +91,39 @@ pub const ON_RESULTS_ARRAY_FIELDS: &[&str] = &["assignee_ids", "label_ids", "mod
 /// The extra key the grouped path always carries.
 pub const ON_RESULTS_STATE_GROUP_FIELD: &str = "state__group";
 
+/// `IssueListDetailSerializer.to_representation` keys (the `issues-detail/`
+/// path), in source order: like the on-results list minus `state__group`
+/// (the serializer never emits it), with the three array suffixes at the
+/// end. `fields=` is ignored by that serializer and `expand=` only appends
+/// relation arrays, so with no `expand` this is the whole shape.
+pub const DETAIL_FIELDS: &[&str] = &[
+    "id",
+    "name",
+    "state_id",
+    "sort_order",
+    "completed_at",
+    "estimate_point",
+    "priority",
+    "start_date",
+    "target_date",
+    "sequence_id",
+    "project_id",
+    "parent_id",
+    "created_at",
+    "updated_at",
+    "created_by",
+    "updated_by",
+    "is_draft",
+    "archived_at",
+    "cycle_id",
+    "module_ids",
+    "label_ids",
+    "assignee_ids",
+    "sub_issues_count",
+    "attachment_count",
+    "link_count",
+];
+
 /// v2 `required_fields` without the `description_html` opt-in.
 pub const V2_REQUIRED_FIELDS: &[&str] = &[
     "id",
@@ -287,6 +320,28 @@ mod tests {
         assert!(!fields.contains(&"label_ids".to_owned()));
         assert!(fields.contains(&"assignee_ids".to_owned()));
         assert!(fields.contains(&"priority".to_owned()));
+    }
+
+    #[test]
+    fn detail_shape_is_list_detail_serializer_order() {
+        // Source order of IssueListDetailSerializer.to_representation:
+        // base keys, then cycle/arrays/counts; no state__group.
+        assert_eq!(DETAIL_FIELDS.len(), 25);
+        assert!(!DETAIL_FIELDS.contains(&"state__group"));
+        assert!(!DETAIL_FIELDS.contains(&"deleted_at"));
+        let tail = &DETAIL_FIELDS[DETAIL_FIELDS.len() - 7..];
+        assert_eq!(
+            tail,
+            [
+                "cycle_id",
+                "module_ids",
+                "label_ids",
+                "assignee_ids",
+                "sub_issues_count",
+                "attachment_count",
+                "link_count",
+            ]
+        );
     }
 
     #[test]
