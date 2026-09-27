@@ -155,7 +155,8 @@ pub fn admin_permission_check_sql() -> String {
 
 /// POST create: `InstanceAdmin.objects.create(instance, user, role)`
 /// (`admin.py:66`, fixture §2). Binds all ten columns in `_meta` order;
-/// `created_by/updated_by` are `NULL` (the view sets no audit user).
+/// `updated_by` is `NULL` (Django leaves it unset on insert,
+/// `db/models/base.py:36-40`).
 pub const ADMIN_INSERT_SQL: &str = "INSERT INTO \"instance_admins\" (\"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"id\", \"user_id\", \"instance_id\", \"role\", \"is_verified\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
 
 /// GET list: `filter(instance=instance)` (`admin.py:78`, fixture §3).
@@ -226,6 +227,12 @@ where
 /// Insert one admin row; returns the row as written. `now` binds both
 /// `created_at` and `updated_at` (Django calls `timezone.now()` twice;
 /// the values are identical for readers).
+///
+/// `created_by_id` is caller-supplied: `BaseModel.save` fills it from the
+/// request user via crum (`db/models/base.py:27-40`), so the authenticated
+/// create path (`admin.py:66`) stores the requesting admin while the
+/// anonymous signup path (`admin.py:229`) stores `NULL`. It is exposed in
+/// `InstanceAdminSerializer` (`fields = "__all__"`), so it must round-trip.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_instance_admin<'e, E>(
     ex: E,
@@ -235,6 +242,7 @@ pub async fn create_instance_admin<'e, E>(
     instance_id: uuid::Uuid,
     role: i32,
     is_verified: bool,
+    created_by_id: Option<uuid::Uuid>,
 ) -> Result<InstanceAdminRow, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -242,7 +250,7 @@ where
     sqlx::query(ADMIN_INSERT_SQL)
         .bind(now)
         .bind(now)
-        .bind(None::<uuid::Uuid>)
+        .bind(created_by_id)
         .bind(None::<uuid::Uuid>)
         .bind(None::<chrono::DateTime<chrono::Utc>>)
         .bind(id)
@@ -255,7 +263,7 @@ where
     Ok(InstanceAdminRow {
         created_at: now,
         updated_at: now,
-        created_by_id: None,
+        created_by_id,
         updated_by_id: None,
         deleted_at: None,
         id,
@@ -582,7 +590,10 @@ pub fn workspace_list_sql(search: Option<&str>) -> String {
     );
     match search {
         Some(_) => sql.push_str(" WHERE (\"workspaces\".\"deleted_at\" IS NULL AND UPPER(\"workspaces\".\"name\"::text) LIKE UPPER($1)) ORDER BY \"workspaces\".\"created_at\" DESC"),
-        None => sql.push_str(" WHERE (\"workspaces\".\"deleted_at\" IS NULL) ORDER BY \"workspaces\".\"created_at\" DESC"),
+        // No parens: Django renders a single-condition WHERE bare
+        // (`WHERE "workspaces"."deleted_at" IS NULL`); the parenthesized
+        // form only appears with two or more ANDed predicates.
+        None => sql.push_str(" WHERE \"workspaces\".\"deleted_at\" IS NULL ORDER BY \"workspaces\".\"created_at\" DESC"),
     }
     sql
 }
@@ -905,10 +916,12 @@ mod tests {
 
     #[test]
     fn workspace_list_no_search_shape() {
+        // Single-condition WHERE is bare (no parens) in real Django output;
+        // verified against `str(Workspace.objects.annotate(...).query)`.
         assert_eq!(
             workspace_list_sql(None),
             format!(
-                "SELECT {}, {PROJECT_COUNT_SUBQUERY}, {MEMBER_COUNT_SUBQUERY} FROM \"workspaces\" WHERE (\"workspaces\".\"deleted_at\" IS NULL) ORDER BY \"workspaces\".\"created_at\" DESC",
+                "SELECT {}, {PROJECT_COUNT_SUBQUERY}, {MEMBER_COUNT_SUBQUERY} FROM \"workspaces\" WHERE \"workspaces\".\"deleted_at\" IS NULL ORDER BY \"workspaces\".\"created_at\" DESC",
                 WORKSPACE_LIST_COLUMNS.join(", ")
             )
         );
@@ -1068,20 +1081,32 @@ mod tests {
             .await
             .expect("gate"));
         let a1 = live_uuid(13);
-        let created = create_instance_admin(&mut *tx, a1, ts, Some(u1), inst, 20, false)
+        let created = create_instance_admin(&mut *tx, a1, ts, Some(u1), inst, 20, false, None)
             .await
             .expect("create");
         assert_eq!(created.role, 20);
         assert!(!created.is_verified);
         assert_eq!(created.created_at, created.updated_at);
+        // Anonymous-signup path stores NULL created_by (BaseModel.save).
+        assert_eq!(created.created_by_id, None);
         assert!(admin_permission_check(&mut *tx, inst, u1)
             .await
             .expect("gate"));
         // role 10 < 15 stays denied (the latent wider gate, kept as-is).
+        // Authenticated create stores the requesting admin as created_by.
         let a2 = live_uuid(14);
-        create_instance_admin(&mut *tx, a2, ts, Some(u2), inst, 10, false)
+        create_instance_admin(&mut *tx, a2, ts, Some(u2), inst, 10, false, Some(u1))
             .await
             .expect("create low role");
+        assert_eq!(
+            get_admins_by_instance_user(&mut *tx, inst, u2)
+                .await
+                .expect("get low role")
+                .first()
+                .expect("one row")
+                .created_by_id,
+            Some(u1)
+        );
         assert!(!admin_permission_check(&mut *tx, inst, u2)
             .await
             .expect("gate"));
