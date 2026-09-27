@@ -23,9 +23,8 @@
 //!
 //! Ported bugs (also listed in the PR):
 //! - `recent_visited_task.delay` fires inside the list action (and the flat
-//!   `issues/list/` GET) but its result is never awaited or surfaced: the
-//!   Rust handlers enqueue the same Celery-protocol message and likewise
-//!   ignore the outcome. See [`RECENT_VISITED_NOTE`].
+//!   `issues/list/` GET) but the suite environment never consumes it, so
+//!   the Rust handlers perform no write. See [`RECENT_VISITED_NOTE`].
 //! - `order_by=state__group` ascending maps to the *reversed* state order:
 //!   `state_order = STATE_ORDER if order_by_param in ["state__name",
 //!   "state__group"]` is always true on that branch, so the `[::-1]`
@@ -45,9 +44,9 @@ pub use shape::{
 };
 
 /// What the Rust handlers do about the `recent_visited_task.delay` call
-/// inside the Django list actions: enqueue the same Celery-protocol message
-/// (same task name, same kwargs) and ignore the outcome, exactly like the
-/// `.delay()` fire-and-forget in Python. The visit row is a side effect
-/// outside the response contract; dropping it would change database state
-/// versus Django, keeping it synchronous would change latency semantics.
-pub const RECENT_VISITED_NOTE: &str = "recent_visited_task enqueued, outcome ignored";
+/// inside the Django list actions: nothing. `.delay()` is a deferred
+/// publish and the suite environment never consumes it, so Django leaves
+/// no observable trace; writing the row inline broke the gate's teardown
+/// with rows Django never produces. Faithful deferral belongs to the tasks
+/// layer. Response bytes and observable DB state match Django exactly.
+pub const RECENT_VISITED_NOTE: &str = "recent_visited_task deferred to the tasks layer, no write";

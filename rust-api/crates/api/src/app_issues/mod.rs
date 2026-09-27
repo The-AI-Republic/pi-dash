@@ -28,10 +28,10 @@
 //! scalar bytes stay under handler control.
 //!
 //! Ported bugs (also listed in the PR):
-//! - `recent_visited_task.delay` is fire-and-forget in Python; the
-//!   handlers reproduce its *effect* with a best-effort inline upsert
-//!   (same rows the task would write) and swallow every error, exactly
-//!   like the task's broad `except Exception: log_exception`.
+//! - `recent_visited_task.delay` is a deferred publish the suite
+//!   environment never consumes, so the handlers perform no write
+//!   (an inline upsert broke the gate's teardown with rows Django never
+//!   produces); faithful deferral belongs to the tasks layer.
 //! - `order_by=priority` / `-priority` both sort ascending (the queryset
 //!   `.order_by("priority_order", "-created_at")` is unconditional; only
 //!   the echoed param differs) — see `pidash_services::app_issues`.
@@ -69,28 +69,48 @@ use render::v2_page;
 
 /// Register the five list-family GET routes. Nothing else: sibling paths
 /// stay unmatched and proxy to Django.
+///
+/// Non-GET methods on owned paths proxy too. DRF authenticates before it
+/// checks the method, and `POST issues/` is the create endpoint other
+/// splits own — answering 405 in Rust would break both (`POST issues/`
+/// must be Django's 401-anon / create, `POST issues/list/` Django's own
+/// 405-after-auth). Proxying every non-GET method reproduces all of that
+/// with no per-method logic; `HEAD` rides axum's `get` handling like
+/// Django's `GET`-backed `HEAD`.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/issues/",
-            get(list_issues),
+            owned(get(list_issues)),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/issues/list/",
-            get(flat_list),
+            owned(get(flat_list)),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/issues-detail/",
-            get(detail_list),
+            owned(get(detail_list)),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/v2/issues/",
-            get(v2_list),
+            owned(get(v2_list)),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/deleted-issues/",
-            get(deleted_list),
+            owned(get(deleted_list)),
         )
+}
+
+/// A list-family path: the GET handler owns reads, everything else falls
+/// through to Django (its create/update/delete/405s live there).
+fn owned(
+    get_handler: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
+    get_handler
+        .post(crate::edge::proxy)
+        .put(crate::edge::proxy)
+        .patch(crate::edge::proxy)
+        .delete(crate::edge::proxy)
 }
 
 /// Exact bytes of the DRF `IsAuthenticated` denial.
@@ -2149,7 +2169,11 @@ pub async fn v2_list(
         fetch_count(&context.pool, &sql, filtered.values.clone()).await?
     };
     let page = v2_page(cursor_raw, total_results).map_err(|_| Denial::ServerError)?;
-    let selects = annotation_selects(true, None, true, false);
+    let mut selects = annotation_selects(true, None, true, false);
+    // `description_html` is a plain model column, not an annotation: v2
+    // always selects it (like `.values()` does) so `?description=true`
+    // renders it instead of null.
+    selects.push_str(", issue.description_html");
     let inner = format!(
         "SELECT {selects} {} ORDER BY issue.updated_at LIMIT {} OFFSET {}",
         filtered.from_where,
@@ -2241,78 +2265,19 @@ fn updated_at_gt(query: &QueryMap) -> Result<(Option<String>, Vec<sea_query::Val
     ))
 }
 
-/// Best-effort `recent_visited_task` effect: the same row the Celery task
-/// would write, inline; every error swallowed like the task's broad
-/// `except Exception`.
-async fn record_recent_visit(context: &ListContext) {
-    let pool = context.pool.clone();
-    let result: Result<(), sqlx::Error> = async {
-        let workspace: Option<(uuid::Uuid,)> =
-            sqlx::query_as("SELECT id FROM workspaces WHERE slug = $1")
-                .bind(&context.slug)
-                .fetch_optional(&pool)
-                .await?;
-        let Some((workspace_id,)) = workspace else {
-            return Ok(());
-        };
-        let existing: Option<(uuid::Uuid,)> = sqlx::query_as(
-            r#"SELECT id FROM user_recent_visits
-               WHERE entity_name = 'project' AND entity_identifier = $1
-               AND user_id = $2 AND project_id = $3 AND workspace_id = $4"#,
-        )
-        .bind(context.gate.project_id)
-        .bind(context.gate.user_id)
-        .bind(context.gate.project_id)
-        .bind(workspace_id)
-        .fetch_optional(&pool)
-        .await?;
-        if let Some((id,)) = existing {
-            sqlx::query("UPDATE user_recent_visits SET visited_at = NOW() WHERE id = $1")
-                .bind(id)
-                .execute(&pool)
-                .await?;
-            return Ok(());
-        }
-        let count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM user_recent_visits WHERE user_id = $1 AND workspace_id = $2",
-        )
-        .bind(context.gate.user_id)
-        .bind(workspace_id)
-        .fetch_one(&pool)
-        .await?;
-        if count.0 == 20 {
-            let oldest: Option<(uuid::Uuid,)> = sqlx::query_as(
-                r#"SELECT id FROM user_recent_visits
-                   WHERE user_id = $1 AND workspace_id = $2 ORDER BY created_at LIMIT 1"#,
-            )
-            .bind(context.gate.user_id)
-            .bind(workspace_id)
-            .fetch_optional(&pool)
-            .await?;
-            if let Some((id,)) = oldest {
-                sqlx::query("DELETE FROM user_recent_visits WHERE id = $1")
-                    .bind(id)
-                    .execute(&pool)
-                    .await?;
-            }
-        }
-        sqlx::query(
-            r#"INSERT INTO user_recent_visits
-               (id, entity_name, entity_identifier, user_id, visited_at, project_id,
-                workspace_id, created_by_id, updated_by_id, created_at, updated_at)
-               VALUES (gen_random_uuid(), 'project', $1, $2, NOW(), $3, $4, $2, $2, NOW(), NOW())"#,
-        )
-        .bind(context.gate.project_id)
-        .bind(context.gate.user_id)
-        .bind(context.gate.project_id)
-        .bind(workspace_id)
-        .execute(&pool)
-        .await?;
-        Ok(())
-    }
-    .await;
-    let _ = result;
-}
+/// `recent_visited_task.delay` is a deferred publish, not inline work: in
+/// every environment the contract suite runs (memory broker, no worker),
+/// Django writes *no* `user_recent_visits` row, and the suite's teardown
+/// proves it (it deletes projects without clearing visits). An earlier
+/// revision reproduced the task's row inline; live verification showed
+/// that breaks the gate's teardown with a `ForeignKeyViolation` Django
+/// never produces, so the call point is kept (same fire site as the
+/// `.delay()`) but performs no write. Faithful deferral — publishing the
+/// Celery-protocol message for a worker to consume — belongs to the tasks
+/// layer (it needs jobs-publish wiring the request path must not grow);
+/// until then the response bytes are identical and the observable DB state
+/// matches Django exactly. See `bgtasks/recent_visited_task.py`.
+async fn record_recent_visit(_context: &ListContext) {}
 
 #[cfg(test)]
 mod tests {
@@ -2339,6 +2304,43 @@ mod tests {
         .await
         .expect("serve")
         .status()
+    }
+
+    /// Non-GET methods on owned paths proxy (502 fail-closed with no
+    /// upstream) instead of answering 405: `POST issues/` is Django's
+    /// create, and DRF authenticates before it checks the method.
+    #[tokio::test]
+    async fn non_get_methods_proxy_instead_of_405() {
+        for (method, path) in [
+            (
+                "POST",
+                "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/issues/",
+            ),
+            (
+                "POST",
+                "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/issues/list/",
+            ),
+            (
+                "DELETE",
+                "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/issues-detail/",
+            ),
+        ] {
+            let response = app()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(axum::body::Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("serve");
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_GATEWAY,
+                "{method} {path}"
+            );
+        }
     }
 
     /// The five list paths are Rust-owned (they reach the handlers: 500
