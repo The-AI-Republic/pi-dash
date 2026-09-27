@@ -111,6 +111,22 @@ export function formatTickBudget(ticker: TIssueAgentTicker | null | undefined, t
   return `${budget}, ${t(waited === 1 ? "{count} wait" : "{count} waits", { count: waited })}`;
 }
 
+/** Exported for tests — `_stop_clock` retains `next_run_at`, so a disarmed
+ * clock still carries a timestamp; the tile must gate on the clock being
+ * armed (or an entry being queued), not on the timestamp existing. */
+export function formatNextTick(
+  ticker: TIssueAgentTicker | null | undefined,
+  now: number,
+  t: TranslationFn
+): string | null {
+  if (!ticker) return null;
+  // A queued entry (design §4.5) is due now and starts the moment the
+  // active run ends — say so instead of "due now".
+  if (ticker.pending_entry) return t("queued");
+  if (!ticker.enabled) return null;
+  return formatUntil(ticker.next_run_at, now, t);
+}
+
 function getPayloadString(payload: Record<string, unknown> | null | undefined, key: string): string | null {
   const value = payload?.[key];
   if (typeof value !== "string") return null;
@@ -148,7 +164,9 @@ function getLiveDetail(run: TIssueAgentRunSummary, now: number, t: TranslationFn
   return null;
 }
 
-function getRunView(
+/** Exported for tests — the run view always outranks getTickerOnlyView on
+ * the detail page, so the stop_signal precedence lives here. */
+export function getRunView(
   run: TIssueAgentRunSummary,
   ticker: TIssueAgentTicker | null | undefined,
   runCount: number,
@@ -286,6 +304,21 @@ function getRunView(
         iconClassName: "text-danger-primary",
       };
     case "completed":
+      // A stop_signal disarm is always produced by a run, so this run view —
+      // not getTickerOnlyView — is what renders after the agent stops its own
+      // clock (`active_run ?? latest_run` wins). Surface the stop here.
+      if (ticker && !ticker.enabled && ticker.disarm_reason === "stop_signal") {
+        return {
+          title: t("AI agent ticking stopped by the agent"),
+          detail: `${formatRunDone(runCount, t)} — ${t(
+            "The agent decided no further automatic run would help here. A comment, state change or Run AI re-arms it."
+          )}`,
+          badge: t("Stopped"),
+          badgeVariant: "neutral",
+          icon: CirclePause,
+          iconClassName: "text-tertiary",
+        };
+      }
       return {
         title: t("AI agent run completed"),
         detail: doneDetail,
@@ -441,9 +474,7 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
   if (!view) return null;
 
   const Icon = view.icon;
-  // A queued entry (design §4.5) is due now and starts the moment the
-  // active run ends — say so instead of "due now".
-  const nextTick = ticker?.pending_entry ? t("queued") : formatUntil(ticker?.next_run_at, now, t);
+  const nextTick = formatNextTick(ticker, now, t);
   const tickBudget = formatTickBudget(ticker, t);
 
   return (
