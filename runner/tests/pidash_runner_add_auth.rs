@@ -211,6 +211,7 @@ async fn runner_add_checks_local_cap_before_auth_bootstrap() {
             agent: AgentKind::Codex,
             model: None,
             reasoning_effort: None,
+            skip_agent_install: true,
         },
         &paths,
     )
@@ -247,6 +248,7 @@ async fn runner_add_rejects_invalid_name_before_auth_bootstrap() {
             agent: AgentKind::Codex,
             model: None,
             reasoning_effort: None,
+            skip_agent_install: true,
         },
         &paths,
     )
@@ -288,6 +290,7 @@ async fn runner_add_bootstraps_auth_when_cli_token_is_missing() {
             agent: AgentKind::Codex,
             model: None,
             reasoning_effort: None,
+            skip_agent_install: true,
         },
         &paths,
     )
@@ -357,6 +360,7 @@ async fn runner_add_auth_bootstrap_uses_explicit_workspace_without_prompt() {
             agent: AgentKind::Codex,
             model: None,
             reasoning_effort: None,
+            skip_agent_install: true,
         },
         &paths,
     )
