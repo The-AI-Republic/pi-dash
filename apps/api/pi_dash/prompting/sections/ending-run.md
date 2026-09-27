@@ -17,7 +17,7 @@ pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done
 
 - `progressed` — you did work and there is more to do in this stage; tick again.
 - `waiting_on_human` — you asked the human a question, or the budget is spent and you told them; the clock stops until a human acts.
-- `waiting_on_external` — In Progress is waiting on CI or a merge; keep ticking.
+- `waiting_on_external` — In Progress is waiting on an external process or another party's action on a deliverable (automated checks, an approval); keep ticking.
 - `done` — this stage's exit condition is met: you moved the issue on, **or** it is approved / verified and stays where it is. The clock for this stage stops; the next stage's run (if any) is already queued.
 - `blocked` — you cannot proceed; you followed "Blocking the run".
 
