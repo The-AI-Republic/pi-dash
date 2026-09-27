@@ -1289,9 +1289,20 @@ class IssueDetailSerializer(IssueSerializer):
         from pi_dash.orchestration.agent_phases import is_ticking_state
         from pi_dash.orchestration.scheduling import is_paused_state
 
-        # Re-tick is offered wherever the grant is honoured: in the bucket,
+        # Re-tick is offered wherever the press is honoured: in the bucket,
         # and on the Paused state the cap-hit auto-pause parks issues in.
-        can_re_tick = (is_ticking_state(obj.state) or is_paused_state(obj.state)) and ticker.cap_reached()
+        # Besides a spent pool, the failure policy's stops (needs-human /
+        # repeated failure, PDASHOSS01-183) also honour Re-tick — it re-arms
+        # the clock without granting, mirroring ``scheduling._on_retick``.
+        from pi_dash.db.models.issue_agent_ticker import TickerDisarmReason
+
+        failure_stopped = not ticker.enabled and ticker.disarm_reason in (
+            TickerDisarmReason.FAILURE_NEEDS_HUMAN,
+            TickerDisarmReason.REPEATED_FAILURE,
+        )
+        can_re_tick = (is_ticking_state(obj.state) or is_paused_state(obj.state)) and (
+            ticker.cap_reached() or failure_stopped
+        )
         return {
             "enabled": ticker.enabled,
             "user_disabled": ticker.user_disabled,
