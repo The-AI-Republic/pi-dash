@@ -87,8 +87,8 @@ export const badgeStyling: IBadgeStyling = {
     disabled: `cursor-not-allowed !bg-green-300`,
   },
   "accent-success": {
-    default: `text-success-primary bg-green-50`,
-    hover: `hover:bg-green-100 hover:text-success-primary`,
+    default: `text-success-primary bg-success-subtle`,
+    hover: `hover:bg-success-subtle-1 hover:text-success-primary`,
     disabled: `cursor-not-allowed text-success-secondary!`,
   },
   "outline-success": {
@@ -103,9 +103,9 @@ export const badgeStyling: IBadgeStyling = {
     disabled: `cursor-not-allowed !bg-amber-300`,
   },
   "accent-warning": {
-    default: `text-amber-500 bg-amber-50`,
-    hover: `hover:bg-amber-100 hover:text-amber-600`,
-    disabled: `cursor-not-allowed !text-amber-300`,
+    default: `text-warning-primary bg-warning-subtle`,
+    hover: `hover:bg-warning-subtle-1 hover:text-warning-primary`,
+    disabled: `cursor-not-allowed text-warning-secondary!`,
   },
   "outline-warning": {
     default: `text-amber-500 bg-surface-1 border border-amber-500`,
