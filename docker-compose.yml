@@ -45,6 +45,13 @@ services:
     command: ./bin/docker-entrypoint-api.sh
     env_file:
       - ./apps/api/.env
+    # apps/api/.env points the live server at localhost:3100 (works for
+    # `pnpm dev` on the host). Inside docker-compose the live service is
+    # reachable as `live` on the PORT from apps/live/.env; without this
+    # override every page write fails with 503 "LIVE_URL is not
+    # configured" / "the live server is unreachable".
+    environment:
+      LIVE_BASE_URL: http://live:3100
     depends_on:
       - pi-dash-db
       - pi-dash-redis
@@ -60,6 +67,10 @@ services:
     command: ./bin/docker-entrypoint-worker.sh
     env_file:
       - ./apps/api/.env
+    # Same docker-aware live-server override as the api service; the
+    # worker also regenerates documents (bgtasks/copy_s3_object.py).
+    environment:
+      LIVE_BASE_URL: http://live:3100
     depends_on:
       - api
       - pi-dash-db
