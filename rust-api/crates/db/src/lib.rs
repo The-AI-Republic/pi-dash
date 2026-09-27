@@ -24,6 +24,7 @@ pub mod context;
 pub mod filter;
 pub mod filterset;
 pub mod issue_filters;
+pub mod license;
 pub mod migrations;
 pub mod pool;
 pub mod soft_delete;
