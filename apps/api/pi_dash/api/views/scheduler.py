@@ -50,19 +50,29 @@ def _binding_queryset():
     )
 
 
-def _issues_by_run(runs) -> dict:
+def _issues_by_run(runs, user) -> dict:
     """Map run id -> the issues that run wrote to (audit trail).
 
     The durable run→issue link is the comments the run posted
     (``IssueComment.speaker_agent_run_id``): scheduler runs report their
     findings and file follow-ups through comments made with their run id.
     One query for the whole page.
+
+    Scoped to projects ``user`` is an active member of: a run may have
+    commented on an issue in a project the caller cannot access, and issue
+    visibility is project-scoped, so those rows are omitted rather than
+    leaking another project's issue identifier and name (same rule as the
+    nested bindings on the workspace list).
     """
     run_ids = [run.id for run in runs]
     if not run_ids:
         return {}
     rows = (
-        IssueComment.objects.filter(speaker_agent_run_id__in=run_ids)
+        IssueComment.objects.filter(
+            speaker_agent_run_id__in=run_ids,
+            issue__project__project_projectmember__member=user,
+            issue__project__project_projectmember__is_active=True,
+        )
         .values_list(
             "speaker_agent_run_id",
             "issue_id",
@@ -248,7 +258,7 @@ class ProjectSchedulerRunsAPIEndpoint(BaseAPIView):
             return SchedulerRunAPISerializer(
                 runs,
                 many=True,
-                context={"issues_by_run": _issues_by_run(runs)},
+                context={"issues_by_run": _issues_by_run(runs, request.user)},
             ).data
 
         return self.paginate(

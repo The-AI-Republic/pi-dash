@@ -304,6 +304,66 @@ class TestProjectSchedulerRuns:
         assert rows[0]["issues"] == []
 
     @pytest.mark.django_db
+    def test_issue_attribution_scoped_to_callers_projects(
+        self,
+        api_key_client,
+        workspace,
+        sched_project,
+        scheduler,
+        binding,
+        create_user,
+        nonmember_user,
+    ):
+        # A run that commented on an issue in a project the caller is not a
+        # member of must not leak that issue's identifier/name through the
+        # audit trail — same visibility rule as the workspace-list bindings.
+        run = _make_run(binding, create_user)
+        with impersonate(nonmember_user):
+            hidden_project = Project.objects.create(
+                name="Hidden Project",
+                identifier="HID",
+                workspace=workspace,
+                created_by=nonmember_user,
+            )
+            hidden_issue = Issue.objects.create(
+                name="Should not be visible",
+                project=hidden_project,
+                workspace=workspace,
+                created_by=nonmember_user,
+            )
+            IssueComment.objects.create(
+                issue=hidden_issue,
+                workspace=workspace,
+                project=hidden_project,
+                actor=nonmember_user,
+                comment_html="<p>Cross-project comment</p>",
+                speaker_agent_run_id=run.id,
+            )
+        with impersonate(create_user):
+            visible_issue = Issue.objects.create(
+                name="Visible to caller",
+                project=sched_project,
+                workspace=workspace,
+                created_by=create_user,
+            )
+            IssueComment.objects.create(
+                issue=visible_issue,
+                workspace=workspace,
+                project=sched_project,
+                actor=create_user,
+                comment_html="<p>In-project comment</p>",
+                speaker_agent_run_id=run.id,
+            )
+
+        response = api_key_client.get(
+            _runs_url(workspace.slug, sched_project.id, scheduler.id)
+        )
+        assert response.status_code == http_status.HTTP_200_OK
+        (row,) = response.data["results"]
+        touched = {issue["name"] for issue in row["issues"]}
+        assert touched == {"Visible to caller"}
+
+    @pytest.mark.django_db
     def test_per_page_bounds_the_page(
         self, api_key_client, workspace, sched_project, scheduler, binding, create_user
     ):

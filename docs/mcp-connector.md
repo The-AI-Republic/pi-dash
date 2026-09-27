@@ -97,4 +97,7 @@ a non-member gets the API's normal permission error.
   column would not flow through by default.
 - Issue attribution in `runs` is comment-based (`speaker_agent_run_id`):
   an issue a run created but never commented on is not listed against the
-  run, because no durable run→issue creation link exists yet.
+  run, because no durable run→issue creation link exists yet. The `issues`
+  list is also scoped to projects the caller is a member of — a comment
+  the run left on an issue in a project the caller cannot access is
+  omitted, matching normal issue visibility.
