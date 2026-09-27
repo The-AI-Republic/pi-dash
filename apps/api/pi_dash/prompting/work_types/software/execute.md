@@ -75,6 +75,8 @@ This is what "deliver the current part" in "Implementation and validation" means
 
 In the hand-off comment's `### How to Test` block ("Implementation and validation"), `Setup` names the branch to check out alongside services/env/creds and seed data, and when the issue was delivered as several {{ repo.code_review_term }}s, list **every** one so the test phase exercises them together.
 
+For `Kind`, pick from how software changes are verified: `AUTOMATED` (the user is a program — API client, CLI, library caller; verified by real calls and this repo's own gates), `UI / EXPLORATORY` (the user is a human at a screen; verified by driving the changed flow), `OPS / INFRA` (the user is an operator or the deploy machinery; verified by running the procedure), or `DESIGN` (the user is a reader who must act on the doc). The test phase's guidance defines each in full — name the kind here so that phase starts on the right foot.
+
 ### Repository guardrails
 
 - Never commit on the base branch; work only on the issue's derived (or pinned) branch.

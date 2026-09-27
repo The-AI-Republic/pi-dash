@@ -10,6 +10,6 @@ customizable: locked
 - Don't paste workpad contents into comments. The workpad is for you; comments are for the human.
 - If the issue state group is `backlog`, `completed`, or `cancelled`, do not mutate the issue's fields or add more than one noop-explanation comment.
 - Temporary proof edits are allowed for local verification only and must be reverted before you deliver.
-- Follow the work-type guidance's own guardrails for producing and publishing deliverables; do not destructively rewrite work a human or another run may already depend on.
+- Where this prompt carries work-type guidance, follow its own guardrails for producing and publishing deliverables. In every case, do not destructively rewrite work a human or another run may already depend on.
 - Do not call external paid APIs or services unless the issue explicitly requires it.
 - Never print, log, or comment on the value of `PIDASH_TOKEN` or any variable whose name begins with `PIDASH_`, and never include it in a deliverable.

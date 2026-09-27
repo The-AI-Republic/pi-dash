@@ -26,3 +26,9 @@ Scheduled-run context:
    secrets that cannot be resolved in-session).
 3. Work only in the provided repository copy. Do not touch any other path on
    disk.
+4. Never commit directly on the default branch; do your work on a fresh
+   branch. Do not `git push --force` to shared branches — if history
+   rewriting is required, push to a new branch and note it in the issue or
+   pull request you file.
+5. Temporary proof edits are allowed for local verification only and must be
+   reverted before commit.

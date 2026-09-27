@@ -38,13 +38,21 @@ NEUTRALITY_BANNED = [
     r"\brepositor(y|ies)\b",
     r"\bcodebase\b",
     r"CLAUDE\.md",
+    r"AGENTS\.md",
     r"\.ai_design",
     r"\bgh\b",
     r"\bglab\b",
+    r"\brebase(s|d)?\b",
+    r"\bcheckout\b",
+    # Bare "merge" only: "merged set" (labels) is not a git reference.
+    r"\bmerge\b",
+    r"\bpipeline(s)?\b",
+    r"\bdiff(s)?\b",
 ]
 NEUTRALITY_BANNED_CASE_SENSITIVE = [
     r"\bPRs?\b",
     r"\bMRs?\b",
+    r"\bCI\b",
 ]
 
 
@@ -151,9 +159,14 @@ def test_effective_work_type_defaults_and_overrides():
     # Project default applies when the issue has none.
     issue = SimpleNamespace(work_type=None, project=SimpleNamespace(default_work_type="software"))
     assert work_types.effective_work_type(issue) == "software"
-    # Unknown stored keys fall back to the default rather than failing a run.
+    # Unknown stored keys are treated as absent rather than failing a run:
+    # with no other rung to fall to, the ``general`` safety net applies.
     issue = SimpleNamespace(work_type="not-a-work-type", project=None)
-    assert work_types.effective_work_type(issue) == work_types.DEFAULT_WORK_TYPE
+    assert work_types.effective_work_type(issue) == work_types.WORK_TYPE_GENERAL
+    # An unknown issue-level key is treated as absent: the project default
+    # still applies rather than being skipped for the global default.
+    issue = SimpleNamespace(work_type="not-a-work-type", project=SimpleNamespace(default_work_type="software"))
+    assert work_types.effective_work_type(issue) == "software"
 
 
 # ----------------------------------------------------------------------
