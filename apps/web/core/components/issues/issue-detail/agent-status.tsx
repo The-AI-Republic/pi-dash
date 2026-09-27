@@ -338,6 +338,28 @@ function getTickerOnlyView(ticker: TIssueAgentTicker, now: number, t: Translatio
     };
   }
 
+  if (ticker.disarm_reason === "failure_needs_human" || ticker.disarm_reason === "repeated_failure") {
+    // The failure policy stopped the clock (PDASHOSS01-183): the last run
+    // failed in a way a retry cannot fix (or kept failing identically).
+    // The failure comment on the issue names the reason and the fix; the
+    // Re-tick button re-arms without spending budget once it's fixed.
+    return {
+      title: t("AI agent ticking is paused after a failure"),
+      detail:
+        ticker.disarm_reason === "repeated_failure"
+          ? t(
+              "Several runs in a row failed the same way. Fix the cause from the failure comment, then press Re-tick to resume."
+            )
+          : t(
+              "The last run failed in a way a retry cannot fix. Fix the cause from the failure comment, then press Re-tick to resume."
+            ),
+      badge: t("Needs attention"),
+      badgeVariant: "warning",
+      icon: CircleAlert,
+      iconClassName: "text-warning-primary",
+    };
+  }
+
   if (ticker.disarm_reason === "cap_hit" || ticker.disarm_reason === "pool_spent") {
     return {
       title: t("AI agent run limit reached"),

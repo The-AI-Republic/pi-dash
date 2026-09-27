@@ -85,6 +85,37 @@ function errorKindLabel(kind: string, t: (text: string) => string): string {
       return t("Runner lifecycle");
     case "agent_stalled":
       return t("Agent stalled");
+    // Kinds introduced with the stored failure taxonomy (PDASHOSS01-183).
+    case "agent_quota":
+      return t("Provider quota");
+    case "agent_rate_limit":
+      return t("Provider rate limit");
+    case "provider_server_error":
+      return t("Provider server error");
+    case "provider_network":
+      return t("Provider network");
+    case "runner_network":
+      return t("Runner network");
+    case "agent_context_overflow":
+      return t("Context overflow");
+    case "agent_missing_executable":
+      return t("Agent CLI missing");
+    case "agent_missing_config":
+      return t("Agent config missing");
+    case "agent_unsupported_version":
+      return t("Agent version unsupported");
+    case "agent_output":
+      return t("Agent output unusable");
+    case "agent_crash":
+      return t("Agent crashed");
+    case "workspace_setup":
+      return t("Workspace setup");
+    case "git_auth":
+      return t("Git authentication");
+    case "max_turns":
+      return t("Turn limit");
+    case "internal":
+      return t("Internal");
     case "unknown":
       return t("Unknown");
     default:
