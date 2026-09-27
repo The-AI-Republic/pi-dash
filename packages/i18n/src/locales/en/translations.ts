@@ -964,6 +964,7 @@ export default {
   More: "More",
   "More details": "More details",
   morning: "morning",
+  "Move to project": "Move to project",
   "Move {value} to project work items": "Move {value} to project work items",
   "My projects": "My projects",
   "my-laptop-runner": "my-laptop-runner",
