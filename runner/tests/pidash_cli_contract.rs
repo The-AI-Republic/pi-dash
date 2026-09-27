@@ -542,6 +542,12 @@ async fn http_401_maps_to_exit_auth() {
     let client = client(&fake);
     let err = client.get("users/me/").await.expect_err("401");
     assert_eq!(err.exit_code, EXIT_AUTH);
+    // 401 must read as an authentication failure — not be collapsed into the
+    // 403 wording — and must carry the server's reason.
+    assert_eq!(
+        err.message,
+        "HTTP 401 Unauthorized: authentication failed: bad token"
+    );
 }
 
 #[tokio::test]
@@ -555,6 +561,63 @@ async fn http_403_maps_to_exit_auth() {
     let client = client(&fake);
     let err = client.get("users/me/").await.expect_err("403");
     assert_eq!(err.exit_code, EXIT_AUTH);
+    assert_eq!(err.message, "HTTP 403 Forbidden: permission denied: forbidden");
+}
+
+#[tokio::test]
+async fn http_403_surfaces_drf_detail_in_message() {
+    // DRF permission classes (e.g. ProjectEntityPermission's project-role
+    // check) answer with {"detail": "..."} — that text must reach the
+    // operator-facing message, not just the stderr detail blob.
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 403,
+        status_text: "Forbidden",
+        body: r#"{"detail":"You do not have permission to perform this action."}"#.into(),
+    }))
+    .await;
+    let client = client(&fake);
+    let err = client.get("users/me/").await.expect_err("403");
+    assert_eq!(err.exit_code, EXIT_AUTH);
+    assert_eq!(
+        err.message,
+        "HTTP 403 Forbidden: permission denied: You do not have permission to perform this action."
+    );
+}
+
+#[tokio::test]
+async fn http_403_surfaces_handrolled_error_in_message() {
+    // The issue views hand-roll their 403s as {"error": "..."} with an
+    // endpoint-specific explanation.
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 403,
+        status_text: "Forbidden",
+        body: r#"{"error":"an agent run cannot re-tick its own issue"}"#.into(),
+    }))
+    .await;
+    let client = client(&fake);
+    let err = client.get("users/me/").await.expect_err("403");
+    assert_eq!(err.exit_code, EXIT_AUTH);
+    assert_eq!(
+        err.message,
+        "HTTP 403 Forbidden: permission denied: an agent run cannot re-tick its own issue"
+    );
+}
+
+#[tokio::test]
+async fn http_401_with_unrecognized_body_keeps_generic_message() {
+    // A proxy or gateway may answer with non-JSON; the message falls back to
+    // the generic label and the raw body still rides along as detail.
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 401,
+        status_text: "Unauthorized",
+        body: "<html>gateway says no</html>".into(),
+    }))
+    .await;
+    let client = client(&fake);
+    let err = client.get("users/me/").await.expect_err("401");
+    assert_eq!(err.exit_code, EXIT_AUTH);
+    assert_eq!(err.message, "HTTP 401 Unauthorized: authentication failed");
+    assert_eq!(err.detail.as_deref(), Some("<html>gateway says no</html>"));
 }
 
 #[tokio::test]
