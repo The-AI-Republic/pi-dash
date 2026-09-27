@@ -64,11 +64,12 @@ use serde::Serialize;
 ///   display_name, email, first_name, last_name, is_active, is_bot,
 ///   is_email_verified, user_timezone, username, is_password_autoset`)
 ///
-/// Note: the workspace `serde_json` does not enable `preserve_order`, so
-/// objects serialize with alphabetically sorted keys — the same canonical
-/// form the golden fixtures are stored in (`sort_keys`). Key order is
-/// semantically irrelevant JSON; byte-identity is established in that
-/// canonical form (see tests).
+/// Note: `serde_json::Value` key order depends on workspace feature
+/// unification (`preserve_order` is enabled by the `api`/`jobs` crates),
+/// so tests compare the canonical sorted-keys form — the form the golden
+/// fixtures are stored in (`sort_keys`). Key order is semantically
+/// irrelevant JSON; byte-identity is established in that canonical form
+/// (see tests).
 /// A database row for `Instance` (`license/models/instance.py:22-50` with
 /// audit columns). Datetimes are pre-rendered DRF strings; ids are UUID
 /// strings; nullable columns are `Option`.
@@ -420,20 +421,53 @@ mod tests {
         })
     }
 
+    /// Canonical form: objects with recursively sorted keys. `Value` key
+    /// order follows workspace feature unification (`preserve_order` from
+    /// the `api`/`jobs` crates), so raw `to_string` is not comparable.
+    fn canonical(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                let mut sorted = serde_json::Map::new();
+                for key in keys {
+                    sorted.insert(key.clone(), canonical(&map[key]));
+                }
+                Value::Object(sorted)
+            }
+            Value::Array(items) => Value::Array(items.iter().map(canonical).collect()),
+            _ => value.clone(),
+        }
+    }
+
     /// Field-for-field equality with the golden output plus byte-identical
-    /// replay: under this workspace's `serde_json` (sorted keys, no
-    /// `preserve_order`) `to_string` is deterministic, so string equality is
-    /// byte equality of the canonical form the goldens are stored in.
+    /// replay of the canonical form the goldens are stored in.
     fn assert_replay(produced: &Value, expected: &Value) {
         assert_eq!(
             produced, expected,
             "field-for-field mismatch against golden output"
         );
         assert_eq!(
-            serde_json::to_string(produced).expect("serializes"),
-            serde_json::to_string(expected).expect("serializes"),
+            serde_json::to_string(&canonical(produced)).expect("serializes"),
+            serde_json::to_string(&canonical(expected)).expect("serializes"),
             "byte-identical replay mismatch"
         );
+    }
+
+    #[test]
+    fn assert_replay_ignores_key_order() {
+        // Same content, opposite insertion orders: must replay clean. Under
+        // workspace feature unification (`preserve_order`) the raw strings
+        // differ, so this pins the canonical comparison.
+        let produced: Value = serde_json::from_str(
+            r#"{"id":"1","avatar":"","nested":{"b":2,"a":1},"tags":["x","y"]}"#,
+        )
+        .expect("parses");
+        let expected: Value = serde_json::from_str(
+            r#"{"tags":["x","y"],"nested":{"a":1,"b":2},"avatar":"","id":"1"}"#,
+        )
+        .expect("parses");
+        assert_replay(&produced, &expected);
     }
 
     #[test]
