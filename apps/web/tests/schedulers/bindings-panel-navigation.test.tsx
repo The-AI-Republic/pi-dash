@@ -72,8 +72,8 @@ vi.mock("@/components/project/scheduler-bindings/edit-binding-modal", () => ({
   EditSchedulerBindingModal: () => null,
 }));
 
-vi.mock("@/components/project/scheduler-bindings/install-binding-modal", () => ({
-  InstallSchedulerBindingModal: () => null,
+vi.mock("@/components/project/scheduler-bindings/new-scheduler-modal", () => ({
+  NewSchedulerModal: () => null,
 }));
 
 vi.mock("@/components/project/scheduler-bindings/uninstall-binding-modal", () => ({
