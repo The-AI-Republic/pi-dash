@@ -92,8 +92,10 @@ vi.mock("@pi-dash/ui", async () => {
       {children}
     </select>
   );
-  Sel.Option = ({ value, children }: { value: string; children: React.ReactNode }) => (
-    <option value={value}>{children}</option>
+  Sel.Option = ({ value, children, disabled }: { value: string; children: React.ReactNode; disabled?: boolean }) => (
+    <option value={value} disabled={disabled}>
+      {children}
+    </option>
   );
   return {
     ModalCore: ({ isOpen, children }: { isOpen: boolean; children: React.ReactNode }) =>
@@ -137,6 +139,8 @@ const CONNECTED_MACHINE = {
   runner_count: 1,
   online_runner_count: 0,
   control_online: true,
+  // Empty = daemon predates the advertisement — the modal must gate nothing.
+  supported_agents: [] as string[],
   last_seen_at: "2026-07-14T00:00:00Z",
   last_heartbeat_at: null,
   revoked_at: null,
@@ -340,6 +344,88 @@ describe("AddRunnerModal", () => {
       screen.queryByText((_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre")
     ).not.toBeInTheDocument();
   }, 15_000);
+
+  it("disables agents the selected machine's daemon doesn't support", async () => {
+    listDevMachines.mockResolvedValue([
+      { ...CONNECTED_MACHINE, supported_agents: ["claude-code", "codex", "cursor-agent", "open-claw"] },
+    ]);
+    renderModal("workspace-gated");
+
+    await screen.findByRole("option", { name: "Work PC" });
+    const muse = (await screen.findByRole("option", {
+      name: "Muse Code — needs a daemon upgrade",
+    })) as HTMLOptionElement;
+    expect(muse.disabled).toBe(true);
+    const grok = screen.getByRole("option", { name: "Grok — needs a daemon upgrade" }) as HTMLOptionElement;
+    expect(grok.disabled).toBe(true);
+    const codex = screen.getByRole("option", { name: "Codex" }) as HTMLOptionElement;
+    expect(codex.disabled).toBe(false);
+    expect(screen.getByText(/Grayed-out agents aren't supported by the runner daemon/)).toBeInTheDocument();
+  });
+
+  it("offers every agent when the machine advertises no supported set", async () => {
+    listDevMachines.mockResolvedValue([CONNECTED_MACHINE]);
+    renderModal("workspace-ungated");
+
+    await screen.findByRole("option", { name: "Work PC" });
+    const muse = (await screen.findByRole("option", { name: "Muse Code" })) as HTMLOptionElement;
+    expect(muse.disabled).toBe(false);
+    expect(screen.queryByText(/Grayed-out agents aren't supported by the runner daemon/)).not.toBeInTheDocument();
+  });
+
+  it("snaps the selected agent to a supported one when the machine can't run it", async () => {
+    // Default agent is claude-code; this machine's daemon only knows codex.
+    listDevMachines.mockResolvedValue([{ ...CONNECTED_MACHINE, supported_agents: ["codex"] }]);
+    renderModal("workspace-snap");
+
+    await screen.findByRole("option", { name: "Work PC" });
+    await waitFor(() => {
+      const agentSelect = screen.getAllByTestId("select")[3] as HTMLSelectElement;
+      expect(agentSelect.value).toBe("codex");
+    });
+  });
+
+  it("maps the daemon's raw unknown-agent write-back to an upgrade hint", async () => {
+    // An old daemon (advertising nothing, so the modal gates nothing)
+    // rejects the command with its raw parse error.
+    listDevMachines.mockResolvedValue([CONNECTED_MACHINE]);
+    createRunnerOnMachine.mockResolvedValue({ request_id: "req-2" });
+    getCreateRunnerOnMachineStatus.mockResolvedValue({
+      request_id: "req-2",
+      status: "error",
+      error: 'unknown agent kind "muse-code"',
+    });
+    const user = userEvent.setup();
+    renderModal("workspace-remote-old-daemon");
+
+    await screen.findByRole("option", { name: "BrowserX" });
+    await screen.findByRole("option", { name: "Work PC" });
+    await user.selectOptions(screen.getAllByTestId("select")[1], "BROWSERX");
+    await user.click(screen.getByRole("button", { name: "Generate Runner" }));
+
+    expect(
+      await screen.findByText(/The runner daemon on this machine is too old to support the selected agent/, undefined, {
+        timeout: 8000,
+      })
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/unknown agent kind/)).not.toBeInTheDocument();
+  }, 15_000);
+
+  it("maps the cloud's unsupported_agent rejection to an upgrade hint", async () => {
+    listDevMachines.mockResolvedValue([CONNECTED_MACHINE]);
+    createRunnerOnMachine.mockRejectedValue({ error: "unsupported_agent" });
+    const user = userEvent.setup();
+    renderModal("workspace-remote-unsupported");
+
+    await screen.findByRole("option", { name: "BrowserX" });
+    await screen.findByRole("option", { name: "Work PC" });
+    await user.selectOptions(screen.getAllByTestId("select")[1], "BROWSERX");
+    await user.click(screen.getByRole("button", { name: "Generate Runner" }));
+
+    expect(
+      await screen.findByText(/The runner daemon on this machine is too old to support the selected agent/)
+    ).toBeInTheDocument();
+  });
 
   it("surfaces failure and offers the manual command when the machine is offline", async () => {
     listDevMachines.mockResolvedValue([CONNECTED_MACHINE]);

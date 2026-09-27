@@ -267,6 +267,34 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
     setValue("model", DEFAULT_MODEL_BY_AGENT[selectedAgent]);
   }, [selectedAgent, setValue]);
 
+  // Agent kinds the selected machine's daemon can actually create. An older
+  // daemon advertises nothing — empty list — which means "unknown", so gate
+  // nothing rather than everything. Manual mode (no machine) gates nothing
+  // either: the command panel targets whatever machine the operator pastes
+  // it on.
+  const supportedAgents = useMemo(() => selectedMachine?.supported_agents ?? [], [selectedMachine]);
+  const gateAgents = supportedAgents.length > 0;
+  const isAgentSupported = (opt: TAgent): boolean => !gateAgents || supportedAgents.includes(opt);
+  // Switching to a machine whose daemon doesn't know the currently selected
+  // agent would submit a command guaranteed to fail — snap to the first
+  // agent that machine supports.
+  useEffect(() => {
+    if (!gateAgents || supportedAgents.includes(selectedAgent)) return;
+    const fallback = AGENT_OPTIONS.find((opt) => supportedAgents.includes(opt));
+    if (fallback) setValue("agent", fallback);
+  }, [gateAgents, supportedAgents, selectedAgent, setValue]);
+
+  // The daemon's create_runner write-back is a raw Rust error string. Map
+  // the one shape operators actually hit — an older daemon rejecting an
+  // agent kind its binary predates (`unknown agent kind "muse-code"`) —
+  // to an actionable message instead of showing parser output.
+  const friendlyRemoteError = (raw?: string): string | undefined => {
+    if (!raw || !/unknown agent kind/.test(raw)) return raw;
+    return t(
+      "The runner daemon on this machine is too old to support the selected agent. Upgrade pidash on the machine and try again."
+    );
+  };
+
   // Drive the cloud → daemon creation and poll the daemon's result.
   // Transient status-poll failures are retried until the deadline; a
   // deadline without a verdict shows the timeout panel (the runner may
@@ -294,7 +322,11 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
         error:
           code === "machine_offline"
             ? t("The dev machine went offline before the command could be delivered.")
-            : (code ?? t("Could not reach the cloud to start the runner creation.")),
+            : code === "unsupported_agent"
+              ? t(
+                  "The runner daemon on this machine is too old to support the selected agent. Upgrade pidash on the machine and try again."
+                )
+              : (code ?? t("Could not reach the cloud to start the runner creation.")),
       });
       return;
     }
@@ -315,7 +347,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
         return;
       }
       if (status.status === "error") {
-        setRemoteCreate({ phase: "error", machineLabel, error: status.error });
+        setRemoteCreate({ phase: "error", machineLabel, error: friendlyRemoteError(status.error) });
         return;
       }
     }
@@ -607,8 +639,10 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                 >
                   <>
                     {AGENT_OPTIONS.map((opt) => (
-                      <CustomSelect.Option key={opt} value={opt}>
-                        {agentOptionLabel(opt)}
+                      <CustomSelect.Option key={opt} value={opt} disabled={!isAgentSupported(opt)}>
+                        {isAgentSupported(opt)
+                          ? agentOptionLabel(opt)
+                          : `${agentOptionLabel(opt)} — ${t("needs a daemon upgrade")}`}
                       </CustomSelect.Option>
                     ))}
                   </>
@@ -618,6 +652,13 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
             <p className="text-12 text-secondary">
               {t("Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.")}
             </p>
+            {gateAgents && !AGENT_OPTIONS.every(isAgentSupported) && (
+              <p className="text-12 text-secondary">
+                {t(
+                  "Grayed-out agents aren't supported by the runner daemon on the selected machine. Upgrade pidash there to use them."
+                )}
+              </p>
+            )}
           </div>
 
           <div className="flex flex-col gap-1">

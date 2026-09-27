@@ -121,6 +121,11 @@ class DevMachineSerializer(serializers.ModelSerializer):
             "runner_count",
             "online_runner_count",
             "control_online",
+            # Agent kinds the machine's daemon binary understands (kebab-case,
+            # advertised on machine-session open). Empty = unknown (older
+            # daemon) — the Add-runner modal must offer everything, not
+            # nothing.
+            "supported_agents",
             "last_seen_at",
             "last_heartbeat_at",
             "revoked_at",
