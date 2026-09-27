@@ -727,6 +727,132 @@ def _in_progress_state_for(issue: Issue):
 
 
 # ---------------------------------------------------------------------------
+# The agent's wait — ``pidash issue wait`` (PDASHOSS01-204)
+# ---------------------------------------------------------------------------
+#
+# The platform does not decide when a wait ends, and does not read the
+# agent's workpad or the ``blocked_by`` semantics to guess that it started.
+# Each tick the agent already sees its blockers and their states; if it
+# decides it cannot safely proceed it says so here and yields. The only
+# thing the platform does is make that decision free: one extra tick, so
+# the run that is ending costs no net budget.
+
+
+#: ``wait_ticker`` applied the wait.
+WAIT_GRANTED = "waited"
+#: The issue has spent its wait allowance (one extra pool). Further waiting
+#: spends normal budget until the pool runs out and the issue parks.
+WAIT_CAP_REACHED = "wait_cap_reached"
+#: ``agent_default_max_ticks == -1``: there is no budget to buy back, so the
+#: command is a no-op — as Re-tick already is on an infinite pool.
+WAIT_INFINITE_POOL = "infinite_pool"
+#: The issue has no clock (it never entered the ticking bucket), so there is
+#: no budget to refund and nothing to wait for.
+WAIT_NO_TICKER = "no_ticker"
+
+#: ``IssueActivity.field`` recorded on every wait call.
+WAIT_ACTIVITY_FIELD = "agent_wait"
+
+#: Disarm reasons a wait may lift. Both mean "the pool ran out"; the extra
+#: tick has nothing to buy if the clock never fires again.
+_WAIT_REARMABLE_DISARMS = frozenset(
+    {
+        TickerDisarmReason.CAP_HIT,
+        TickerDisarmReason.POOL_SPENT,
+    }
+)
+
+
+def wait_ticker(issue: Issue, *, run: Optional[AgentRun] = None, actor=None) -> dict:
+    """Buy back one tick so an agent can yield without spending budget.
+
+    Returns ``{"applied": bool, "reason": str, "ticker": IssueAgentTicker|None}``.
+    Every call adds a tick while the allowance lasts — including a second
+    call inside the same run. The per-issue allowance (one extra pool) is the
+    only limit; one run may spend the whole of it, and the cap bounds that.
+
+    ``run`` is the run that asked, recorded on the activity entry so repeated
+    waits are visible and attributable.
+    """
+    now = timezone.now()
+    with transaction.atomic():
+        ticker = (
+            IssueAgentTicker.objects.select_for_update(of=("self",))
+            .select_related("issue", "issue__state", "issue__project")
+            .filter(issue_id=issue.pk)
+            .first()
+        )
+        if ticker is None:
+            return {"applied": False, "reason": WAIT_NO_TICKER, "ticker": None}
+        if ticker.pool_size() == INFINITE_MAX_TICKS:
+            return {"applied": False, "reason": WAIT_INFINITE_POOL, "ticker": ticker}
+        if ticker.wait_allowance() <= 0:
+            return {"applied": False, "reason": WAIT_CAP_REACHED, "ticker": ticker}
+
+        ticker.waited = ticker.waited + 1
+        update_fields = ["waited", "updated_at"]
+
+        # Re-arm when the clock stopped *because the pool ran out* and the
+        # raised cap has now left room. This is the common case, not an edge
+        # one: an agent that waits on its last run has the claim disarm the
+        # ticker (CAP_HIT) before it ever gets to call this, and a CAP_HIT
+        # disarm is also what ``maybe_apply_deferred_pause`` reads to park
+        # the issue when the run ends. Without the re-arm the refunded tick
+        # would be unspendable and the issue would be Paused anyway.
+        if (
+            not ticker.enabled
+            and ticker.disarm_reason in _WAIT_REARMABLE_DISARMS
+            and not ticker.cap_reached()
+            and not ticker.user_disabled
+            and getattr(ticker.issue.project, "agent_ticking_enabled", True)
+            and is_ticking_state(ticker.issue.state)
+        ):
+            interval = ticker.effective_interval_seconds()
+            ticker.enabled = True
+            ticker.disarm_reason = TickerDisarmReason.NONE
+            ticker.next_run_at = now + timedelta(seconds=interval + jitter_seconds(interval))
+            update_fields += ["enabled", "disarm_reason", "next_run_at"]
+
+        ticker.save(update_fields=update_fields)
+        _record_wait_activity(ticker.issue, ticker, run=run, actor=actor)
+
+    logger.info(
+        "agent_wait: issue=%s waited=%d used=%d cap=%d run=%s",
+        issue.pk,
+        ticker.waited,
+        ticker.used,
+        ticker.effective_max_ticks(),
+        getattr(run, "pk", None),
+    )
+    return {"applied": True, "reason": WAIT_GRANTED, "ticker": ticker}
+
+
+def _record_wait_activity(issue: Issue, ticker: IssueAgentTicker, *, run=None, actor=None) -> None:
+    """Log the wait on the issue's activity feed, naming the calling run."""
+    import time
+
+    from pi_dash.db.models.issue import IssueActivity
+    from pi_dash.orchestration.workpad import get_agent_system_user
+
+    pool = ticker.pool_size()
+    run_id = str(run.pk) if run is not None else ""
+    IssueActivity.objects.create(
+        issue=issue,
+        project_id=issue.project_id,
+        workspace_id=issue.workspace_id,
+        verb="updated",
+        field=WAIT_ACTIVITY_FIELD,
+        # The allowance and the wait's position in it, so the UI can render
+        # "waited (3 of 10)" without re-deriving project policy.
+        old_value=str(pool),
+        new_value=str(ticker.waited),
+        comment=f"Waited on a blocker ({ticker.waited} of {pool})" + (f"; run {run_id}" if run_id else ""),
+        actor=actor if actor is not None else get_agent_system_user(),
+        epoch=time.time(),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Continuation dispatch
 # ---------------------------------------------------------------------------
 
@@ -737,10 +863,9 @@ def _in_progress_state_for(issue: Issue):
 TRIGGER_TICK = AgentRunTrigger.TICK.value
 TRIGGER_COMMENT_AND_RUN = AgentRunTrigger.COMMENT_AND_RUN.value
 TRIGGER_RUN_AI = AgentRunTrigger.RUN_AI.value
-TRIGGER_BLOCKER_COMPLETED = AgentRunTrigger.BLOCKER_COMPLETED.value
 #: Triggers the clock starts on its own — resolved like a tick (system bot on
 #: a local runner, never an explicit actor).
-_MACHINE_TRIGGERS = frozenset({TRIGGER_TICK, TRIGGER_BLOCKER_COMPLETED})
+_MACHINE_TRIGGERS = frozenset({TRIGGER_TICK})
 
 
 def _resolve_pod_for_issue(issue: Issue):
@@ -1360,7 +1485,6 @@ __all__ = [
     "RUN_AI_NO_POD",
     "RUN_OUTCOMES",
     "STOPPING_OUTCOMES",
-    "TRIGGER_BLOCKER_COMPLETED",
     "TRIGGER_COMMENT_AND_RUN",
     "TRIGGER_RUN_AI",
     "TRIGGER_TICK",
@@ -1382,4 +1506,10 @@ __all__ = [
     "re_tick_ticker",
     "reconcile",
     "reset_ticker_after_comment_and_run",
+    "WAIT_ACTIVITY_FIELD",
+    "WAIT_CAP_REACHED",
+    "WAIT_GRANTED",
+    "WAIT_INFINITE_POOL",
+    "WAIT_NO_TICKER",
+    "wait_ticker",
 ]

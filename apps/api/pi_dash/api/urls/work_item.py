@@ -14,6 +14,7 @@ from pi_dash.api.views import (
     IssueMoveAPIEndpoint,
     IssueReTickAPIEndpoint,
     IssueRunAiAPIEndpoint,
+    IssueWaitAPIEndpoint,
     AgentRunYieldAPIEndpoint,
     IssueLinkListCreateAPIEndpoint,
     IssueLinkDetailAPIEndpoint,
@@ -133,6 +134,11 @@ new_url_patterns = [
         "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:pk>/re-tick/",
         IssueReTickAPIEndpoint.as_view(http_method_names=["post"]),
         name="work-item-re-tick",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:pk>/wait/",
+        IssueWaitAPIEndpoint.as_view(http_method_names=["post"]),
+        name="work-item-wait",
     ),
     path(
         "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:pk>/run-ai/",

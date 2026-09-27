@@ -47,10 +47,13 @@ def scan_due_tickers() -> int:
     Returns the number of fan-outs (mostly for logging / tests).
     """
     now = timezone.now()
-    # One pool per issue: cap = project pool + Re-tick grants; ``-1`` means
-    # infinite. A row owing a *pending entry* (design §4.5) is admitted
-    # regardless of cap — a human's free run must fire even on a spent
-    # pool; ``fire_tick`` re-evaluates the cap after the claim.
+    # One pool per issue: cap = project pool + Re-tick grants + the ticks
+    # bought back by ``pidash issue wait``; ``-1`` means infinite. This
+    # mirrors ``IssueAgentTicker.effective_max_ticks`` in SQL — the two must
+    # agree, or a waited issue is admitted here and refused there (or worse,
+    # never re-ticks). A row owing a *pending entry* (design §4.5) is
+    # admitted regardless of cap — a human's free run must fire even on a
+    # spent pool; ``fire_tick`` re-evaluates the cap after the claim.
     due_ids = list(
         IssueAgentTicker.objects.filter(
             enabled=True,
@@ -59,7 +62,7 @@ def scan_due_tickers() -> int:
         .filter(
             Q(pending_entry=True)
             | Q(issue__project__agent_default_max_ticks=INFINITE_MAX_TICKS)
-            | Q(used__lt=F("issue__project__agent_default_max_ticks") + F("granted"))
+            | Q(used__lt=F("issue__project__agent_default_max_ticks") + F("granted") + F("waited"))
         )
         .order_by("next_run_at")
         .values_list("id", flat=True)
@@ -72,17 +75,19 @@ def scan_due_tickers() -> int:
 
 
 @shared_task(name="pi_dash.bgtasks.agent_ticker.fire_tick")
-def fire_tick(ticker_id: str, trigger: str | None = None) -> bool:
+def fire_tick(ticker_id: str) -> bool:
     """Per-ticker worker. Atomically claims and dispatches.
 
-    ``trigger`` set means a forced tick fired *now* regardless of cadence
-    (the blocker-completed wake, ``orchestration.wake``): it skips the
-    ``next_run_at`` check and the waiting-on-blockers pause, labels the run
-    with ``trigger``, and otherwise claims like a timer tick (it counts).
-
     Returns ``True`` if a continuation run was dispatched, ``False`` if the
-    fire was skipped (race lost, ticker changed, no active In Progress
-    state, run already in flight, agent waiting on open blockers, etc.).
+    fire was skipped (race lost, ticker changed, ticking switched off for
+    the project or the issue, no active In Progress state, run already in
+    flight, etc.).
+
+    The clock is never paused on the agent's behalf: an agent that wants to
+    wait for a blocker says so explicitly with ``pidash issue wait``
+    (:func:`pi_dash.orchestration.scheduling.wait_ticker`), which buys back
+    the tick rather than skipping it. The scheduler reads no relation
+    semantics and no workpad prose (PDASHOSS01-204).
     """
     from pi_dash.orchestration.scheduling import (
         TRIGGER_RUN_AI,
@@ -105,17 +110,7 @@ def fire_tick(ticker_id: str, trigger: str | None = None) -> bool:
         if not ticker.enabled:
             return False
         now = timezone.now()
-        forced = bool(trigger)
-        if not forced and (ticker.next_run_at is None or ticker.next_run_at > now):
-            return False
-        if forced and ticker.pending_entry:
-            # An entry run is already owed (next_run_at = now); it fires on
-            # the next scan and serves the wake too.
-            logger.info(
-                "agent_ticker.fire_tick: skip ticker=%s trigger=%s reason=pending-entry",
-                ticker_id,
-                trigger,
-            )
+        if ticker.next_run_at is None or ticker.next_run_at > now:
             return False
 
         # A pending entry (design §4.5) fires even on a spent pool when it
@@ -123,6 +118,42 @@ def fire_tick(ticker_id: str, trigger: str | None = None) -> bool:
         # cannot exist (reconcile parks the issue instead), so the cap
         # check below only ever stops timer ticks.
         free_claim = ticker.pending_entry and ticker.pending_entry_free
+
+        # The switches stop the clock *before* the claim, not one tick
+        # later: rows armed while the project switch was on must not fire
+        # once it is turned off. ``_stop_for_switch`` disarms on state
+        # transitions, but nothing walks the already-armed rows when the
+        # project flag flips, so this is where they stop. A queued human
+        # entry still fires — the person asked for that run — and the
+        # post-claim branch below disarms the clock after it dispatches.
+        if not free_claim and (
+            ticker.user_disabled or not getattr(ticker.issue.project, "agent_ticking_enabled", True)
+        ):
+            ticker.enabled = False
+            ticker.disarm_reason = (
+                TickerDisarmReason.USER_DISABLED if ticker.user_disabled else TickerDisarmReason.NONE
+            )
+            ticker.pending_entry = False
+            ticker.pending_entry_free = False
+            ticker.pending_entry_actor = None
+            ticker.pending_entry_trigger = ""
+            ticker.save(
+                update_fields=[
+                    "enabled",
+                    "disarm_reason",
+                    "pending_entry",
+                    "pending_entry_free",
+                    "pending_entry_actor",
+                    "pending_entry_trigger",
+                    "updated_at",
+                ]
+            )
+            logger.info(
+                "agent_ticker.fire_tick: skip issue=%s reason=ticking-switched-off",
+                ticker.issue_id,
+            )
+            return False
+
         cap = ticker.effective_max_ticks()
         if not free_claim and cap != INFINITE_MAX_TICKS and ticker.used >= cap:
             # Already at cap — disarm and bail. A queued (counting) entry
@@ -175,30 +206,6 @@ def fire_tick(ticker_id: str, trigger: str | None = None) -> bool:
                 issue.pk,
             )
             return False
-        if not forced and not ticker.pending_entry:
-            # The agent chose to wait on open blockers (``Waiting on:`` in
-            # the workpad): skip this cadence tick without spending budget
-            # and look again one interval later. A blocker closing wakes
-            # the issue straight away (``orchestration.wake``).
-            from pi_dash.orchestration.wake import SKIP_WAITING_ON_BLOCKERS, waiting_pause
-
-            waiting_on = waiting_pause(issue, now=now)
-            if waiting_on:
-                from datetime import timedelta
-
-                from pi_dash.db.models.issue_agent_ticker import jitter_seconds
-
-                interval = ticker.effective_interval_seconds()
-                ticker.next_run_at = now + timedelta(seconds=interval + jitter_seconds(interval))
-                ticker.save(update_fields=["next_run_at", "updated_at"])
-                logger.info(
-                    "agent_ticker.fire_tick: skip issue=%s reason=%s waiting_on=%s",
-                    issue.pk,
-                    SKIP_WAITING_ON_BLOCKERS,
-                    ",".join(waiting_on),
-                )
-                return False
-
         # Claim: advance the clock first, then dispatch. We capture the
         # pre-claim values so we can roll back below if dispatch returns
         # None for a reason the pre-claim skips didn't catch (no-pod,
@@ -217,10 +224,7 @@ def fire_tick(ticker_id: str, trigger: str | None = None) -> bool:
         # The queued human lever, if any — who asked and how — so the run
         # is created as that person and labelled with their trigger.
         claim_actor = ticker.pending_entry_actor if free_claim else None
-        if free_claim:
-            claim_trigger = ticker.pending_entry_trigger or TRIGGER_RUN_AI
-        else:
-            claim_trigger = trigger or TRIGGER_TICK
+        claim_trigger = (ticker.pending_entry_trigger or TRIGGER_RUN_AI) if free_claim else TRIGGER_TICK
 
         # Only machine-started runs spend the pool: a timer tick, or an
         # entry an agent's own move queued. A human's free entry does not.
@@ -252,8 +256,10 @@ def fire_tick(ticker_id: str, trigger: str | None = None) -> bool:
             ticker.enabled = False
             ticker.disarm_reason = TickerDisarmReason.CAP_HIT
         elif ticker.user_disabled or not getattr(issue.project, "agent_ticking_enabled", True):
-            # A queued human entry fires even on a switched-off clock (the
-            # human asked for this run), but no timer tick may follow it.
+            # Free claims only — a timer tick on a switched-off clock never
+            # reaches the claim (see the pre-claim switch check above). A
+            # queued human entry fires because the human asked for this
+            # run, but no timer tick may follow it.
             ticker.enabled = False
             ticker.disarm_reason = (
                 TickerDisarmReason.USER_DISABLED if ticker.user_disabled else TickerDisarmReason.NONE

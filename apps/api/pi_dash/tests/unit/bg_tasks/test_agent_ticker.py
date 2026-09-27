@@ -562,3 +562,101 @@ def test_fire_tick_bail_on_a_queued_entry_parks_as_pool_spent(seeded, issue, run
     assert sched.enabled is False
     assert sched.disarm_reason == TickerDisarmReason.POOL_SPENT
     assert sched.pending_entry is False
+
+
+# ---------------------------------------------------------------------------
+# The switches stop an already-armed clock (project settings / user disable)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_fire_tick_does_not_fire_when_project_ticking_is_switched_off(
+    seeded, issue, project, runner_for_workspace
+):
+    """Turning the project switch off stops rows that were already armed.
+
+    Nothing walks the ticker table when the flag flips, so a row armed while
+    ticking was on is still due afterwards. It must disarm without spending a
+    tick or dispatching a run — otherwise every armed issue in the project
+    gets one more automatic agent run after the admin turned ticking off.
+    """
+    from pi_dash.db.models.issue_agent_ticker import TickerDisarmReason
+
+    _make_prior_run(issue, runner_for_workspace)
+    sched = _make_due_schedule(issue)
+    project.agent_ticking_enabled = False
+    project.save(update_fields=["agent_ticking_enabled"])
+
+    assert fire_tick(str(sched.id)) is False
+
+    sched.refresh_from_db()
+    assert sched.used == 0
+    assert sched.enabled is False
+    assert sched.disarm_reason == TickerDisarmReason.NONE
+    assert AgentRun.objects.filter(work_item=issue, parent_run__isnull=False).count() == 0
+
+
+@pytest.mark.unit
+def test_fire_tick_does_not_fire_an_agent_queued_entry_when_ticking_is_off(
+    seeded, issue, project, runner_for_workspace
+):
+    """A counting (agent-queued) entry is a machine-started run, so the
+    project switch stops it too — only a human's free entry gets through."""
+    _make_prior_run(issue, runner_for_workspace)
+    sched = _make_due_schedule(issue)
+    sched.pending_entry = True
+    sched.pending_entry_free = False
+    sched.save(update_fields=["pending_entry", "pending_entry_free"])
+    project.agent_ticking_enabled = False
+    project.save(update_fields=["agent_ticking_enabled"])
+
+    assert fire_tick(str(sched.id)) is False
+
+    sched.refresh_from_db()
+    assert sched.used == 0
+    assert sched.enabled is False
+    assert sched.pending_entry is False
+    assert AgentRun.objects.filter(work_item=issue, parent_run__isnull=False).count() == 0
+
+
+@pytest.mark.unit
+def test_fire_tick_free_pending_entry_still_fires_when_ticking_is_off(
+    seeded, issue, project, runner_for_workspace
+):
+    """The human asked for this run before the switch was flipped, so it
+    fires — but the clock is left disarmed so no timer tick follows it."""
+    _make_prior_run(issue, runner_for_workspace)
+    sched = _make_due_schedule(issue)
+    sched.pending_entry = True
+    sched.pending_entry_free = True
+    sched.save(update_fields=["pending_entry", "pending_entry_free"])
+    project.agent_ticking_enabled = False
+    project.save(update_fields=["agent_ticking_enabled"])
+
+    assert fire_tick(str(sched.id)) is True
+
+    sched.refresh_from_db()
+    assert sched.used == 0
+    assert sched.enabled is False
+    assert AgentRun.objects.filter(work_item=issue, parent_run__isnull=False).count() == 1
+
+
+@pytest.mark.unit
+def test_fire_tick_does_not_fire_a_user_disabled_row(
+    seeded, issue, runner_for_workspace
+):
+    """``user_disabled`` is the per-issue switch; same rule as the project one."""
+    from pi_dash.db.models.issue_agent_ticker import TickerDisarmReason
+
+    _make_prior_run(issue, runner_for_workspace)
+    sched = _make_due_schedule(issue)
+    sched.user_disabled = True
+    sched.save(update_fields=["user_disabled"])
+
+    assert fire_tick(str(sched.id)) is False
+
+    sched.refresh_from_db()
+    assert sched.used == 0
+    assert sched.enabled is False
+    assert sched.disarm_reason == TickerDisarmReason.USER_DISABLED
+    assert AgentRun.objects.filter(work_item=issue, parent_run__isnull=False).count() == 0

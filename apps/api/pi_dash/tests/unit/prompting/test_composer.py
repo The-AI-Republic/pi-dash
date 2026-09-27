@@ -401,10 +401,15 @@ def test_session_framing_renders_tick_guidance_and_schedule():
         "coding-task", workspace=None, project=None, user=None, context=ctx
     ).text
     assert "automatically by the issue's ticker" in out
-    assert "used 5 of 10 agent runs" in out
-    assert "(5 remaining)" in out
-    # The lifecycle section carries the budget line and the pool rules.
-    assert "Runs used on this issue: **5 of 10** (5 remaining)" in out
+    # The sample carries two waits, and a wait run is a run (PDASHOSS01-211):
+    # the cap is the pool plus those two, so 5 of 12 with 7 remaining.
+    assert "used 5 of 12 agent runs (7 remaining)" in out
+    # The lifecycle section carries the budget line and the pool rules, and
+    # must agree with the framing line above — that consistency is the point
+    # of PDASHOSS01-211.
+    assert "Runs used on this issue: **5 of 12** (7 remaining)" in out
+    # Waits are named alongside the count, not excluded from it.
+    assert "counted above and cost no net budget" in out
     assert "about every 3 hours" in out
 
 
@@ -963,7 +968,9 @@ def test_relationships_section_renders_open_blocker_with_warning():
     assert "- SAMPLE-b0: Blocker SAMPLE-b0 (In Progress)" in body
     assert "- Warning: SAMPLE-b0 is still open" in body
     assert "Open blockers (SAMPLE-b0) are information, not a hard stop" in body
-    assert "`Waiting on: <IDs>`" in body
+    # The agent decides and asks explicitly; the platform reads no marker.
+    assert "`pidash issue wait SAMPLE-1`" in body
+    assert "Waiting on: <IDs>" not in body
     assert REQUIRED_READING_DIRECTIVE in body
     assert "Blocking (waiting on this item):" not in body
     assert "Other relations:" not in body

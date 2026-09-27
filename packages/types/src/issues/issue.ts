@@ -118,7 +118,12 @@ export type TIssueAgentTicker = {
   tick_count: number;
   /** Extra runs a human added with Re-tick. */
   granted?: number;
-  /** Pool cap: project default + ``granted``; -1 means no cap. */
+  /** Ticks bought back by `pidash issue wait` — the agent read its open
+   * blockers and decided it could not proceed. Counted in `max_ticks` but
+   * shown separately from the pool, so a human can tell a stuck issue from
+   * a busy one. */
+  waited?: number;
+  /** Pool cap: project default + ``granted`` + ``waited``; -1 means no cap. */
   max_ticks: number;
   /** Runs left in the pool; null when there is no cap. */
   remaining?: number | null;

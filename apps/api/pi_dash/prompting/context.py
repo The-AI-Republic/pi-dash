@@ -348,6 +348,12 @@ def _tick_context(issue: Issue) -> Optional[Dict[str, Any]]:
     ``cap`` / ``remaining`` are ``None`` for an infinite (``-1``) pool so
     templates can branch with ``{% if tick.cap is not none %}``.
 
+    ``count`` / ``cap`` are the raw counters: a wait run is a run
+    (PDASHOSS01-211). ``pidash issue wait`` adds one to ``used`` (the run it
+    ended) and one to the cap (the tick it bought back), so waiting costs no
+    net budget and still shows up. ``waited`` is reported alongside so a
+    reader can tell how much of the count went on discovering a blocker.
+
     Returns ``None`` only when no ticker row exists (the issue has never
     entered the ticking bucket) or when the configured cadence is nonsense
     (the project fields are API-writable with no validation; "every 0
@@ -368,10 +374,21 @@ def _tick_context(issue: Issue) -> Optional[Dict[str, Any]]:
         return None
     unlimited = cap == INFINITE_MAX_TICKS
     remaining = None if unlimited else max(0, cap - ticker.used)
+    # A wait run is a run (PDASHOSS01-211). Report the counters as they
+    # stand: ``cap`` already carries the ticks waits bought back, so an
+    # issue that spent one run discovering a blocker reads "1 of 11", not
+    # "0 of 10". Netting waits out of ``count``/``cap`` while ``remaining``
+    # kept the raw figure made the three numbers disagree, and the clamps
+    # hid a real run once ``waited`` ran ahead of ``used``.
+    waited = ticker.waited
     return {
         "count": ticker.used,
         "cap": None if unlimited else cap,
         "remaining": remaining,
+        # How many times this issue has ended a run by waiting on a blocker,
+        # and how many such waits it may still make for free.
+        "waited": waited,
+        "wait_allowance": ticker.wait_allowance(),
         # ``used`` already counts this run when the ticker started it, so
         # ``remaining == 0`` means "no machine-started run follows this one".
         "spent": (not unlimited) and remaining == 0,

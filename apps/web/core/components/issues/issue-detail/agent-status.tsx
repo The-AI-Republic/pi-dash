@@ -92,13 +92,23 @@ function formatRunDone(count: number, t: TranslationFn): string {
   });
 }
 
-function formatTickBudget(ticker: TIssueAgentTicker | null | undefined, t: TranslationFn): string | null {
+/** Exported for tests — the wait arithmetic below is easy to get subtly wrong. */
+export function formatTickBudget(ticker: TIssueAgentTicker | null | undefined, t: TranslationFn): string | null {
   if (!ticker) return null;
   // One pool per issue, spent in any stage; ``used`` falls back to the
   // pre-pool ``tick_count`` spelling for older payloads.
   const used = ticker.used ?? ticker.tick_count;
+  const waited = ticker.waited ?? 0;
   if (ticker.max_ticks === -1) return t("{count} runs used, no cap", { count: used });
-  return t("{count} of {max} runs used", { count: used, max: ticker.max_ticks });
+  // A wait run is a run: report the counters as they stand rather than
+  // netting waits out of them (PDASHOSS01-211). `max_ticks` already carries
+  // the ticks waits bought back, so 3 runs of which 3 waited read "3 of 13
+  // runs used, 3 waits" — no clamp, and nothing can disagree with the
+  // remaining count the prompt renders from the same numbers.
+  const budget = t("{count} of {max} runs used", { count: used, max: ticker.max_ticks });
+  if (waited === 0) return budget;
+  // Same singular/plural shape as formatRunDone above.
+  return `${budget}, ${t(waited === 1 ? "{count} wait" : "{count} waits", { count: waited })}`;
 }
 
 function getPayloadString(payload: Record<string, unknown> | null | undefined, key: string): string | null {

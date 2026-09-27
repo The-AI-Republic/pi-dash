@@ -144,6 +144,47 @@ pidash runner add --project X    # add another runner
 pidash runner list / remove      # manage runners
 ```
 
+### Agent CLI auto-install
+
+`--agent` selects which coding agent the runner drives (`codex` by default;
+also `claude-code`, `cursor-agent`, `open-claw`, `grok`, `muse-code`). If the
+selected agent's CLI isn't present on the machine, `pidash runner add` installs
+it for you by invoking **the vendor's own official install script** — Pi Dash
+never bundles, mirrors, or ships an agent binary, so you always get the vendor's
+latest supported build:
+
+```bash
+pidash runner add --project WEB --agent claude-code
+```
+
+What happens when the agent is missing:
+
+1. Pi Dash prints which agent is missing and the exact official command it's
+   about to run, then runs it with output streamed to your terminal
+   (`curl … | bash` on macOS/Linux/WSL, PowerShell on Windows).
+2. After the installer finishes, Pi Dash re-detects the binary, resolves its
+   **absolute path** (installers often drop it in `~/.local/bin`, which may not
+   be on the current `PATH` yet), and records that path in the runner's config.
+3. Installers don't authenticate the agent, so Pi Dash prints the one login step
+   still needed (e.g. run `claude` and follow `/login`, or `codex login`) before
+   the runner can pick up work.
+
+`runner add` never hard-fails on an install error: if the installer can't run
+(no network, no scriptable installer for that agent), Pi Dash prints the error,
+falls back to opening the vendor's install page in your browser, and leaves
+`pidash doctor` reporting the agent as missing. Agents that are already
+installed are left untouched.
+
+Verified official installers exist for `claude-code`, `codex`, and
+`cursor-agent`; `open-claw`, `grok`, and `muse-code` currently use the
+open-install-page fallback until a vendor script is confirmed.
+
+Pass `--skip-agent-install` if you manage agent installs yourself:
+
+```bash
+pidash runner add --project WEB --agent claude-code --skip-agent-install
+```
+
 ## Task folders and Git
 
 Direct-mode runners can execute coding and non-coding tasks in an ordinary
@@ -151,11 +192,27 @@ working directory. No Git repository or project repository URL is required;
 existing files are preserved, and the runner does not initialize Git for you.
 This applies to user-connected agents and the built-in desktop agent alike.
 
-When a repository URL is supplied, the runner still clones into an empty
-directory or reuses an existing repository. It refuses to clone over files in
-a non-repository directory. Branch checkout only applies to repositories.
-Explicit worktree pools remain Git-based; use a direct working directory for
-repo-free tasks.
+Git is **context, not a gate**. The platform tells the agent what it knows
+about the repository — url, base branch, work branch — and the agent decides
+what, if anything, to do with Git. The platform performs no Git operation on
+the agent's behalf beyond one convenience, and never fails a run over Git.
+
+That convenience is clone bootstrap: when a repository URL is supplied **and**
+the working directory is empty, the runner clones it so a fresh runner starts
+on a checkout. Every other case runs the directory as an ordinary task folder:
+
+| working dir           | repository URL | behaviour                                                         |
+| --------------------- | -------------- | ----------------------------------------------------------------- |
+| is a Git repo         | anything       | used as-is; the URL is never verified against the remote          |
+| not a repo, empty     | none           | ordinary task folder                                              |
+| not a repo, empty     | supplied       | cloned (best effort — a failed clone falls back to a task folder) |
+| not a repo, has files | anything       | ordinary task folder; **never** cloned over                       |
+
+The last row matters for multi-repo layouts: pointing a runner at a directory
+that _contains_ clones (rather than at a clone) is supported — it runs there
+and the agent drives Git itself. Files are always preserved, and the runner
+never initializes Git for you. Branch checkout is the agent's job, not the
+platform's (PDASHOSS01-136).
 
 ## Auto-update
 

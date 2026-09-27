@@ -159,11 +159,6 @@ class Project(BaseModel):
     agent_review_default_interval_seconds = models.IntegerField(default=10800)  # In Review, 3 h
     agent_test_default_interval_seconds = models.IntegerField(default=10800)    # In Test, 3 h
     agent_ticking_enabled = models.BooleanField(default=True)
-    # Longest an agent's ``Waiting on:`` marker may hold cadence ticks off
-    # (PDASHOSS01-198, ``orchestration.wake``); after it elapses since the
-    # waiting run ended, ticks resume so a stale marker cannot park an issue
-    # forever. ``0`` turns the pause off.
-    agent_wait_max_pause_seconds = models.IntegerField(default=604800)  # 7 d
     # Execution policy for future runs. Existing runs retain their snapshotted
     # executor even when this setting changes.
     default_agent_executor = models.CharField(
