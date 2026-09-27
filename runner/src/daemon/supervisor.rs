@@ -3433,6 +3433,43 @@ impl AssignWorker {
                         method.as_str(),
                         params,
                     ) {
+                        // PDASHOSS01-228: agent engines silently scrub inline
+                        // `VAR=value cmd` assignments for secret-looking
+                        // names, so the command runs against default values
+                        // (a migrate against the wrong database, in the
+                        // incident that motivated this). The runner only
+                        // observes the command — it cannot block it — so make
+                        // the failure mode loud: a warning in the runner log
+                        // and a non-compactable run event on the AgentRun
+                        // record. Names only; the values are secrets.
+                        let secret_names =
+                            crate::daemon::observability::inline_secret_env_names(&hint.command);
+                        if !secret_names.is_empty() {
+                            tracing::warn!(
+                                vars = ?secret_names,
+                                "agent command sets secret-like env vars inline \
+                                 (`VAR=value cmd`); agent engines may scrub these \
+                                 before the command runs, silently falling back to \
+                                 defaults — use `export VAR=…` on its own line"
+                            );
+                            if run_events.push_content(
+                                "runner/env_warning".to_string(),
+                                serde_json::json!({
+                                    "schema": "runner_env_warning_v1",
+                                    "vars": secret_names,
+                                    "text": format!(
+                                        "Command sets secret-like env vars inline ({}); \
+                                         the agent engine may scrub inline assignments \
+                                         before the command runs, silently falling back \
+                                         to default values. Use `export VAR=…` on its \
+                                         own line instead.",
+                                        secret_names.join(", ")
+                                    ),
+                                }),
+                            ) {
+                                run_events.flush(&self.out).await;
+                            }
+                        }
                         self.state
                             .note_exec_command(crate::daemon::state::ExecCommandSnapshot {
                                 command: hint.command,
