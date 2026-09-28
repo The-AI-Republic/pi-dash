@@ -2251,11 +2251,13 @@ name = "pidash-jobs"
 version = "0.1.0"
 dependencies = [
  "amqprs",
+ "bson",
  "chrono",
  "pidash-db",
  "pidash-services",
  "pidash-types",
  "rand 0.8.8",
+ "reqwest",
  "rrule",
  "sea-query",
  "serde",
