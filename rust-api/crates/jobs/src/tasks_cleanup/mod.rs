@@ -108,18 +108,24 @@ pub fn export_analytics_csv_message(
 
 /// Render `timezone.now() - timedelta(days=8)` the way the Django ORM
 /// renders it into the expiry scan (`2026-09-20 06:00:00+00:00` for the
-/// frozen fixture instant). Feed the result to the services-layer
+/// frozen fixture instant). `str(datetime)` keeps the `.%f` fraction
+/// only when microseconds are nonzero, so the fraction is emitted
+/// conditionally. Feed the result to the services-layer
 /// `tasks_cleanup::exports::delete_old_s3_link_sql`.
 pub fn format_expiry_cutoff(now: DateTime<Utc>) -> String {
-    (now - Duration::days(EXPIRY_DAYS))
-        .format("%Y-%m-%d %H:%M:%S+00:00")
-        .to_string()
+    let cutoff = now - Duration::days(EXPIRY_DAYS);
+    let micros = cutoff.timestamp_subsec_micros();
+    if micros == 0 {
+        cutoff.format("%Y-%m-%d %H:%M:%S+00:00").to_string()
+    } else {
+        format!("{}.{:06}+00:00", cutoff.format("%Y-%m-%d %H:%M:%S"), micros)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Timelike};
 
     #[test]
     fn export_tasks_route_python_owned() {
@@ -191,5 +197,20 @@ mod tests {
         // Frozen fixture instant 2026-09-28T06:00:00Z.
         let now = Utc.with_ymd_and_hms(2026, 9, 28, 6, 0, 0).unwrap();
         assert_eq!(format_expiry_cutoff(now), "2026-09-20 06:00:00+00:00");
+    }
+
+    #[test]
+    fn expiry_cutoff_keeps_nonzero_microseconds() {
+        // `str(timezone.now() - timedelta(days=8))` keeps `.%f` iff
+        // nonzero; production `now()` carries microseconds.
+        let now = Utc
+            .with_ymd_and_hms(2026, 9, 28, 6, 0, 0)
+            .unwrap()
+            .with_nanosecond(123_456_000)
+            .unwrap();
+        assert_eq!(
+            format_expiry_cutoff(now),
+            "2026-09-20 06:00:00.123456+00:00"
+        );
     }
 }

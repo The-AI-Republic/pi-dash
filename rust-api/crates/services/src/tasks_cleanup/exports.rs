@@ -34,16 +34,24 @@ fn quote_field(rendered: &str) -> String {
 }
 
 /// Render rows to CSV text: QUOTE_ALL + `\r\n` lineterminator
-/// (`generate_csv_from_rows:180-185`). Cells are rendered with
-/// [`CsvCell::render`] (Python `str(value)`, `None` → `""`) then
-/// sanitised per row, mirroring
+/// (`generate_csv_from_rows:180-185`), mirroring
 /// `[writer.writerow(sanitize_csv_row(row)) for row in rows]`.
+/// Sanitising applies per Python `sanitize_csv_value`: only `str` cells
+/// are ever prefixed, so only [`CsvCell::Text`] goes through
+/// [`sanitize_csv_value`] — rendered numerics/bools pass through
+/// untouched (a Python `int(-5)` writes `"-5"`, never `"'-5"`).
+/// `None` renders as `""`, exactly as `csv.writer` writes it.
 pub fn write_csv_rows(rows: &[Vec<CsvCell>]) -> String {
     let mut out = String::new();
     for row in rows {
-        let rendered: Vec<String> = row.iter().map(CsvCell::render).collect();
-        let clean = sanitize_csv_row(&rendered);
-        let quoted: Vec<String> = clean.iter().map(|cell| quote_field(cell)).collect();
+        let rendered: Vec<String> = row
+            .iter()
+            .map(|cell| match cell {
+                CsvCell::Text(text) => sanitize_csv_value(text),
+                other => other.render(),
+            })
+            .collect();
+        let quoted: Vec<String> = rendered.iter().map(|cell| quote_field(cell)).collect();
         out.push_str(&quoted.join(","));
         out.push_str("\r\n");
     }
@@ -190,13 +198,15 @@ pub fn generate_segmented_rows(
     for (item, points) in distribution {
         let mut generated = vec![CsvCell::Text(item.clone()), sum_values(points).cell()];
         for seg in &segment_zero {
-            // `:217`: missing cell is the STRING "0" (BUG-2, kept).
-            let value = points
-                .iter()
-                .find(|point| &point.segment == seg)
-                .and_then(|point| point.value)
-                .map(Numeric::cell)
-                .unwrap_or(CsvCell::Text("0".to_owned()));
+            // `:217`: `next((x.get(key) ...), "0")` — the STRING "0"
+            // (BUG-2, kept) applies only when NO point carries the
+            // segment. A point whose value is `None` (`x.get(key)` is
+            // `None`, e.g. an all-null `Sum` estimate) yields `None`,
+            // which `csv.writer` writes as `""`.
+            let value = match points.iter().find(|point| &point.segment == seg) {
+                Some(point) => point.value.map(Numeric::cell).unwrap_or(CsvCell::Empty),
+                None => CsvCell::Text("0".to_owned()),
+            };
             generated.push(value);
         }
         generated[0] = CsvCell::Text(resolve_x_name(
@@ -380,13 +390,20 @@ pub fn is_segmented(segment: Option<&str>) -> bool {
 
 /// `DataExporter` provider check (`exporter.py:44-46`): only
 /// csv/json/xlsx construct; anything else raises `ValueError`, which the
-/// task records as `failed` + reason (`export_task.py:192-201`).
+/// task records as `failed` + reason (`export_task.py:192-201`). The
+/// message is byte-exact: Python formats the key list with `repr`
+/// (single quotes).
 pub fn validate_provider(provider: &str) -> Result<(), String> {
     if EXPORT_FORMATS.contains(&provider) {
         Ok(())
     } else {
+        let available = EXPORT_FORMATS
+            .iter()
+            .map(|format| format!("'{format}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
         Err(format!(
-            "Unsupported format: {provider}. Available: {EXPORT_FORMATS:?}"
+            "Unsupported format: {provider}. Available: [{available}]"
         ))
     }
 }
@@ -749,6 +766,21 @@ mod tests {
     }
 
     #[test]
+    fn csv_sanitize_applies_to_strings_only() {
+        // `sanitize_csv_value` is `isinstance(value, str)`-gated: a
+        // Python `int(-5)` writes `"-5"` with no `'` prefix, while the
+        // string `"-5"` is prefixed.
+        let out = write_csv_rows(&[vec![
+            CsvCell::Int(-5),
+            CsvCell::Float(-2.5),
+            CsvCell::Text("-5".into()),
+            CsvCell::Bool(true),
+            CsvCell::Empty,
+        ]]);
+        assert_eq!(out, "\"-5\",\"-2.5\",\"'-5\",\"True\",\"\"\r\n");
+    }
+
+    #[test]
     fn sanitize_triggers_match_owasp_set() {
         for trigger in ["=cmd", "+x", "-b", "@a", "\ttab", "\rlf", "\nlf"] {
             assert_eq!(sanitize_csv_value(trigger), format!("'{trigger}"));
@@ -801,6 +833,44 @@ mod tests {
             "\"X-Axis\",\"Issue Count\",\"seg-a\",\"seg-b\"\r\n\
              \"Todo\",\"5\",\"2\",\"3\"\r\n\
              \"Done\",\"1\",\"1\",\"0\"\r\n"
+        );
+    }
+
+    #[test]
+    fn segmented_null_value_renders_empty_not_zero() {
+        // `next((x.get(key) ...), "0")`: the `"0"` default fires only
+        // when no point carries the segment. A point with a `None`
+        // value (e.g. an all-null `Sum` estimate) yields `None`, which
+        // `csv.writer` writes as `""` — while the total still skips it.
+        let dist = vec![(
+            "Todo".to_owned(),
+            vec![
+                SegmentPoint {
+                    segment: "seg-a".into(),
+                    value: Some(Numeric::Int(2)),
+                },
+                SegmentPoint {
+                    segment: "seg-b".into(),
+                    value: None,
+                },
+            ],
+        )];
+        let rows = generate_segmented_rows(
+            &dist,
+            STATE_ID,
+            "issue_count",
+            "seg",
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        let text = write_csv_rows(&rows);
+        assert_eq!(
+            text,
+            "\"X-Axis\",\"Issue Count\",\"seg-a\",\"seg-b\"\r\n\
+             \"Todo\",\"2\",\"2\",\"\"\r\n"
         );
     }
 
@@ -1077,7 +1147,12 @@ mod tests {
         assert!(validate_provider("csv").is_ok());
         assert!(validate_provider("json").is_ok());
         assert!(validate_provider("xlsx").is_ok());
-        assert!(validate_provider("pdf").is_err());
+        // Byte-exact `ValueError` text (single-quoted `repr` list), saved
+        // as the exporter row `reason` on the failure path.
+        assert_eq!(
+            validate_provider("pdf").unwrap_err(),
+            "Unsupported format: pdf. Available: ['csv', 'json', 'xlsx']"
+        );
     }
 
     #[test]
