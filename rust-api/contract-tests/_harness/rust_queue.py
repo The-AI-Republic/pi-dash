@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Rust-worker replay publisher (PIDASHCONV-225, D-09 fix).
+"""Rust-worker replay publisher (PIDASHCONV-225, D-09 fix; extended PIDASHCONV-239).
 
 The Django oracle (``celery_wire.publish``) publishes jobs in Celery
 protocol v2 to ``CELERY_BROKER_URL`` and probes the worker with Celery
@@ -27,11 +27,14 @@ Payload mapping (mirrors ``queue::NewJob`` / ``enqueue_sql``):
 - ``args`` / ``kwargs`` — the Celery v2 body parts, unchanged.
 - ``countdown`` — delivery delay in seconds, mapped to
   ``visible_at = now() + countdown`` (mirrors
-  ``NewJob::delayed``; the worker will not claim the row before then,
-  which is the ETA-parity half of ``test_eta_delayed_execution``).
-- Task-level ``countdown`` inside ``kwargs`` (e.g. the version
-  backfills' ``{"batch_size": 1, "countdown": 300}``) is payload, never
+  ``NewJob::delayed``; the worker will not claim the row before then).
+- Task-level ``countdown`` inside ``kwargs`` is payload, never
   a delivery delay: it passes through untouched.
+- ``celery_id`` (PIDASHCONV-239 extension) — explicit message id for
+  redelivery probes, mirroring ``broker.publish_task(..., task_id=...)``:
+  republishing the same id models broker redelivery reusing the id.
+  The Rust worker has no id dedup (ack deletes the row), so the replay
+  asserts single-effect idempotency, not consume-once.
 
 Nothing here imports Django or touches the broker. The Django worker
 must be stopped while the replay runs; the Rust worker
@@ -59,9 +62,10 @@ def publish(
     kwargs=None,
     countdown: float | None = None,
     queue: str = "celery",
+    celery_id: str | None = None,
 ) -> str:
     """Enqueue one job for the Rust worker. Returns the celery id."""
-    celery_id = str(uuid.uuid4())
+    celery_id = celery_id or str(uuid.uuid4())
     payload_args = list(args or [])
     payload_kwargs = dict(kwargs or {})
     if countdown is not None:
@@ -119,5 +123,5 @@ def wait_for_queue_drain(baseline: int = 0, what: str = "rust queue drain") -> N
 
 
 def broker_url() -> str:
-    """Broker URL for export-forwarding observation (AMQP half)."""
+    """Broker URL for forwarding observation (AMQP half)."""
     return config.required(config.CELERY_BROKER_URL)
