@@ -13,6 +13,8 @@
 //!   from [`lite`](pidash_services::space::serializers::lite).
 //! * `issue` — `views/issue.py` list/retrieve + comments/reactions/votes
 //!   (PIDASHCONV-175/176).
+//! * [`social`] — `views/issue.py` comments, issue reactions, comment
+//!   reactions, votes (PIDASHCONV-176).
 //! * `asset` — `views/asset.py` (PIDASHCONV-178).
 //!
 //! [`routes`] merges the owned route groups; every other method on the
@@ -45,6 +47,7 @@ pub mod filters;
 pub mod intake;
 pub mod project_meta;
 pub mod sanitize;
+pub mod social;
 
 /// Exact bytes of the DRF `NotAuthenticated` denial: anonymous on a guarded
 /// route (`request.successful_authenticator` is `None`).
@@ -278,5 +281,7 @@ pub fn owned(
 /// from Rust, everything else keeps proxying). Sibling handler issues
 /// merge their routers here; merges keep both sides.
 pub fn routes() -> Router<AppState> {
-    intake::routes().merge(project_meta::routes())
+    intake::routes()
+        .merge(project_meta::routes())
+        .merge(social::routes())
 }
