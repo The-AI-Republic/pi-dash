@@ -8,6 +8,7 @@
 pub mod error;
 pub mod health;
 pub mod ids;
+pub mod integrations;
 pub mod license;
 
 pub use error::Error;
