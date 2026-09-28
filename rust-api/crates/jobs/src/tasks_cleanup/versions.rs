@@ -42,9 +42,16 @@
 //!   deserialized payload with Python `!=` rules ([`py_eq`]): UUID/date
 //!   columns never equal their string payload form, so those keys always
 //!   read as changed — exactly as `getattr(issue, key) != value` behaves.
-//! * Unknown payload keys abort the whole task (≈ `AttributeError`); on the
-//!   dead coalesce-update path a changed key outside the version columns
-//!   aborts too (≈ `FieldError` from `save(update_fields=[…])`).
+//! * Unknown payload keys ack the task (≈ `AttributeError` into the broad
+//!   `except`); on the dead coalesce-update path a changed key outside
+//!   the version columns acks too (≈ `FieldError` from
+//!   `save(update_fields=[…])`).
+//! * `issue_task`'s `else` branch NEVER writes: `log_issue_version`
+//!   (`issue.py:863`) always raises `FieldError` (`Module` has no `issue`
+//!   relation, so `Module.objects.filter(issue=…)` in `:896` fails) and
+//!   returns `False`. The branch is ported as no-write + ack.
+//! * The 20-cap prune is a soft-delete (`UPDATE deleted_at`): `PageVersion`
+//!   rides `SoftDeleteModel`, so `.first().delete()` stamps the marker.
 //!
 //! Wiring note: the crate root declares `pub mod tasks_cleanup;`
 //! (foundation change, per the merged layer-PR precedent); these files are
@@ -182,6 +189,22 @@ fn strict_int(value: Option<&Value>, default: i64) -> Parsed<i64> {
     }
 }
 
+/// Bind one Celery argument kwargs-first with positional fallback,
+/// mirroring how Celery binds a call: every live producer sends
+/// kwargs-only, so a positional-only parser would requeue production
+/// traffic forever. Missing in both places is an envelope failure
+/// (`Err`, requeue): Python raises `TypeError` at call time the same way.
+fn bind_arg<'a>(
+    map: Option<&'a Map<String, Value>>,
+    items: &'a [Value],
+    key: &str,
+    index: usize,
+) -> Result<&'a Value, String> {
+    map.and_then(|m| m.get(key))
+        .or_else(|| items.get(index))
+        .ok_or_else(|| format!("version task: missing argument {key}"))
+}
+
 /// `issue_task(updated_issue, issue_id, user_id)`
 /// (`issue_version_sync.py:34`).
 #[derive(Debug, Clone, PartialEq)]
@@ -191,20 +214,18 @@ pub struct IssueTaskCall {
     pub user_id: String,
 }
 
-pub fn parse_issue_task_call(args: &Value) -> Parsed<IssueTaskCall> {
+pub fn parse_issue_task_call(args: &Value, kwargs: &Value) -> Parsed<IssueTaskCall> {
     let items = ensure_args_array(args)?;
-    if items.len() < 3 {
-        return Err("version task: issue_task needs 3 positional args".to_string());
-    }
-    let updated_issue = match payload_arg(&items[0])? {
+    let map = kwargs_map(kwargs).ok();
+    let updated_issue = match payload_arg(bind_arg(map, items, "updated_issue", 0)?)? {
         Some(updated) => updated,
         None => return Ok(None),
     };
-    let issue_id = match task_string(&items[1])? {
+    let issue_id = match task_string(bind_arg(map, items, "issue_id", 1)?)? {
         Some(id) => id,
         None => return Ok(None),
     };
-    let user_id = match task_string(&items[2])? {
+    let user_id = match task_string(bind_arg(map, items, "user_id", 2)?)? {
         Some(id) => id,
         None => return Ok(None),
     };
@@ -267,9 +288,16 @@ pub struct ScheduleCall {
 }
 
 pub fn parse_schedule_call(kwargs: &Value, default_batch: i64) -> Parsed<ScheduleCall> {
+    // A bare `.delay()` with no kwargs envelope still binds Python's
+    // parameter defaults (`batch_size=5000, countdown=300`) and enqueues;
+    // only an `int()`/`TypeError` failure downstream aborts the task.
+    let empty;
     let map = match kwargs_map(kwargs) {
         Ok(m) => m,
-        Err(_) => return Ok(None),
+        Err(_) => {
+            empty = Map::new();
+            &empty
+        }
     };
     let batch_size = match map.get("batch_size") {
         None | Some(Value::Null) => default_batch,
@@ -300,24 +328,25 @@ pub struct DescriptionTaskCall {
 
 pub fn parse_description_task_call(args: &Value, kwargs: &Value) -> Parsed<DescriptionTaskCall> {
     let items = ensure_args_array(args)?;
-    if items.len() < 3 {
-        return Err("version task: description task needs 3 positional args".to_string());
-    }
-    let updated_issue = match payload_arg(&items[0])? {
+    let map = kwargs_map(kwargs).ok();
+    let updated_issue = match payload_arg(bind_arg(map, items, "updated_issue", 0)?)? {
         Some(updated) => updated,
         None => return Ok(None),
     };
-    let issue_id = match task_string(&items[1])? {
+    let issue_id = match task_string(bind_arg(map, items, "issue_id", 1)?)? {
         Some(id) => id,
         None => return Ok(None),
     };
-    let user_id = match task_string(&items[2])? {
+    let user_id = match task_string(bind_arg(map, items, "user_id", 2)?)? {
         Some(id) => id,
         None => return Ok(None),
     };
-    let is_creating = kwargs_map(kwargs)
-        .ok()
-        .is_some_and(|m| celery_truthy(m.get("is_creating")));
+    // `is_creating=False` is the fourth parameter: kwargs-first with
+    // positional fallback, same Celery binding as the other three.
+    let flag = map
+        .and_then(|m| m.get("is_creating"))
+        .or_else(|| items.get(3));
+    let is_creating = celery_truthy(flag);
     Ok(Some(DescriptionTaskCall {
         updated_issue,
         issue_id,
@@ -335,23 +364,21 @@ pub struct TrackPageCall {
     pub user_id: String,
 }
 
-pub fn parse_track_page_call(args: &Value) -> Parsed<TrackPageCall> {
+pub fn parse_track_page_call(args: &Value, kwargs: &Value) -> Parsed<TrackPageCall> {
     let items = ensure_args_array(args)?;
-    if items.len() < 3 {
-        return Err("version task: track_page_version needs 3 positional args".to_string());
-    }
+    let map = kwargs_map(kwargs).ok();
     // `existing_instance` keeps its `""`-vs-`None` distinction: `None`
     // reads as `{}` but `""` fails `json.loads` — the flow decides.
-    let existing_instance = match &items[1] {
+    let existing_instance = match bind_arg(map, items, "existing_instance", 1)? {
         Value::Null => None,
         Value::String(s) => Some(s.clone()),
         _ => return Ok(None),
     };
-    let page_id = match task_string(&items[0])? {
+    let page_id = match task_string(bind_arg(map, items, "page_id", 0)?)? {
         Some(id) => id,
         None => return Ok(None),
     };
-    let user_id = match task_string(&items[2])? {
+    let user_id = match task_string(bind_arg(map, items, "user_id", 2)?)? {
         Some(id) => id,
         None => return Ok(None),
     };
@@ -1109,6 +1136,16 @@ pub async fn run_issue_task(pool: &sqlx::PgPool, call: &IssueTaskCall) -> Result
     let mut known: HashSet<&str> = q::ISSUE_COLUMNS.iter().copied().collect();
     known.insert("assignees");
     known.insert("labels");
+    // Unknown keys must ack (`Ok`), never requeue: `getattr(issue, key)`
+    // raises `AttributeError` into the broad `except`. The membership
+    // check runs BEFORE any column read — a missing column would
+    // otherwise surface as a transport `Err` and requeue.
+    for key in payload.keys() {
+        if !known.contains(key.as_str()) {
+            tracing::warn!("issue_task: unknown payload key {key}");
+            return Ok(());
+        }
+    }
     let mut live = std::collections::HashMap::new();
     for key in payload.keys() {
         live.insert(
@@ -1123,14 +1160,18 @@ pub async fn run_issue_task(pool: &sqlx::PgPool, call: &IssueTaskCall) -> Result
     if !v::issue_task_writes(&changed) {
         return Ok(());
     }
-    let snapshot = row_issue_snapshot(&row).map_err(|e| e.to_string())?;
     let now = Utc::now();
     let mut conn = pool.acquire().await.map_err(|e| e.to_string())?;
     let owner = fetch_latest_owner(&mut conn, issue_id)
         .await
         .map_err(|e| e.to_string())?;
     match owner {
-        None => log_issue_version(pool, &snapshot, &call.user_id, now).await,
+        // The `else` branch calls `IssueVersion.log_issue_version`, which
+        // ALWAYS raises `FieldError` (`Module` has no `issue` relation:
+        // `Module.objects.filter(issue=...)` in `issue.py:896`) and
+        // returns `False` — so the branch never writes and always acks.
+        // Ported as that observable behavior: no write, ack.
+        None => Ok(()),
         Some(o) => {
             let display = v::render_owner_display(&o.username, &o.email);
             let age = (now - o.last_saved_at)
@@ -1139,53 +1180,10 @@ pub async fn run_issue_task(pool: &sqlx::PgPool, call: &IssueTaskCall) -> Result
             if v::issue_task_coalesces(&display, &call.user_id, age) {
                 update_issue_version(pool, o.id, &payload, &changed, now).await
             } else {
-                log_issue_version(pool, &snapshot, &call.user_id, now).await
+                Ok(())
             }
         }
     }
-}
-
-/// The `else` branch: `IssueVersion.log_issue_version(issue, user_id)`
-/// (`:57`). The user travels unparsed into the UUID column in Python, so
-/// an unparsable id aborts the task the way the resulting `DataError`
-/// would.
-async fn log_issue_version(
-    pool: &sqlx::PgPool,
-    snapshot: &v::IssueSnapshot,
-    user_id: &str,
-    now: DateTime<Utc>,
-) -> Result<(), String> {
-    let user = match Uuid::parse_str(user_id) {
-        Ok(id) => id,
-        Err(_) => {
-            tracing::warn!("issue_task: unparsable user_id");
-            return Ok(());
-        }
-    };
-    let mut conn = pool.acquire().await.map_err(|e| e.to_string())?;
-    let related = fetch_related(&mut conn, &[snapshot.id])
-        .await
-        .map_err(|e| e.to_string())?;
-    let key = snapshot.id.to_string();
-    let empty: Vec<String> = Vec::new();
-    let row = v::build_log_issue_version(
-        snapshot,
-        user,
-        related.assignees.get(&key).unwrap_or(&empty),
-        related.labels.get(&key).unwrap_or(&empty),
-        related.modules.get(&key).unwrap_or(&empty),
-        related.cycle_issues.get(&key).and_then(|c| c.as_deref()),
-        now,
-        Uuid::new_v4(),
-    );
-    let row = match row {
-        Some(row) => row,
-        None => return Ok(()),
-    };
-    let ctx = ctx_for(snapshot.workspace_id, Some(user));
-    insert_issue_version_rows(&mut conn, &ctx, &[row])
-        .await
-        .map_err(|e| e.to_string())
 }
 
 /// The dead-in-practice coalesce branch (`:47-55`): a changed key outside
@@ -1563,7 +1561,10 @@ pub async fn run_track_page_version(
             .await
             .map_err(|e| e.to_string())?;
         if let Some(id) = oldest {
-            sqlx::query(q::DELETE_PAGE_VERSION_BY_ID_SQL)
+            // `.first().delete()` on a `SoftDeleteModel` stamps
+            // `deleted_at` — it never removes the row.
+            sqlx::query(q::PRUNE_PAGE_VERSION_BY_ID_SQL)
+                .bind(now)
                 .bind(id)
                 .execute(pool)
                 .await
@@ -1587,7 +1588,7 @@ pub async fn dispatch(
     kwargs: &Value,
 ) -> Result<(), HandlerError> {
     match task {
-        TASK_ISSUE_TASK => match parse_issue_task_call(args) {
+        TASK_ISSUE_TASK => match parse_issue_task_call(args, kwargs) {
             Err(e) => Err(e),
             Ok(None) => Ok(()),
             Ok(Some(call)) => run_issue_task(pool, &call).await,
@@ -1651,7 +1652,7 @@ pub async fn dispatch(
             Ok(None) => Ok(()),
             Ok(Some(call)) => run_description_task(pool, &call).await,
         },
-        TASK_TRACK_PAGE_VERSION => match parse_track_page_call(args) {
+        TASK_TRACK_PAGE_VERSION => match parse_track_page_call(args, kwargs) {
             Err(e) => Err(e),
             Ok(None) => Ok(()),
             Ok(Some(call)) => run_track_page_version(pool, &call).await,
@@ -1735,33 +1736,51 @@ mod tests {
 
     #[test]
     fn issue_task_parsing() {
-        let call = parse_issue_task_call(&args(vec![
-            str_val(r#"{"name": "x"}"#),
-            str_val("issue-1"),
-            str_val("user-1"),
-        ]))
+        let call = parse_issue_task_call(
+            &args(vec![
+                str_val(r#"{"name": "x"}"#),
+                str_val("issue-1"),
+                str_val("user-1"),
+            ]),
+            &Value::Null,
+        )
         .unwrap()
         .unwrap();
         assert_eq!(call.updated_issue.as_deref(), Some(r#"{"name": "x"}"#));
         assert_eq!(call.issue_id, "issue-1");
-        // Short args are an envelope failure (requeue), not a task abort.
-        assert!(parse_issue_task_call(&args(vec![str_val("a")])).is_err());
-        assert!(parse_issue_task_call(&str_val("nope")).is_err());
+        // Live traffic is kwargs-only (no producer sends positionals):
+        // kwargs bind with positional fallback, like Celery.
+        let call = parse_issue_task_call(
+            &args(vec![]),
+            &kwargs(vec![
+                ("updated_issue", str_val(r#"{"name": "x"}"#)),
+                ("issue_id", str_val("issue-1")),
+                ("user_id", str_val("user-1")),
+            ]),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(call.updated_issue.as_deref(), Some(r#"{"name": "x"}"#));
+        assert_eq!(call.issue_id, "issue-1");
+        assert_eq!(call.user_id, "user-1");
+        // Missing in both places is an envelope failure (requeue), not a
+        // task abort.
+        assert!(parse_issue_task_call(&args(vec![str_val("a")]), &Value::Null).is_err());
+        assert!(parse_issue_task_call(&args(vec![]), &Value::Null).is_err());
+        assert!(parse_issue_task_call(&str_val("nope"), &Value::Null).is_err());
         // A non-string issue_id aborts the task (ack): Python binds it,
         // then the body raises into the broad `except`.
-        assert!(parse_issue_task_call(&args(vec![
-            Value::Null,
-            serde_json::json!(1),
-            str_val("u")
-        ]))
+        assert!(parse_issue_task_call(
+            &args(vec![Value::Null, serde_json::json!(1), str_val("u")]),
+            &Value::Null,
+        )
         .unwrap()
         .is_none());
         // A non-string payload aborts too (`json.loads` would raise).
-        assert!(parse_issue_task_call(&args(vec![
-            serde_json::json!(7),
-            str_val("i"),
-            str_val("u")
-        ]))
+        assert!(parse_issue_task_call(
+            &args(vec![serde_json::json!(7), str_val("i"), str_val("u")]),
+            &Value::Null,
+        )
         .unwrap()
         .is_none());
     }
@@ -1823,8 +1842,16 @@ mod tests {
 
     #[test]
     fn schedule_parsing_applies_int_coercion() {
-        // Missing kwargs → task-level abort (nothing to schedule from).
-        assert!(parse_schedule_call(&Value::Null, 5000).unwrap().is_none());
+        // No kwargs envelope still binds Python's parameter defaults
+        // (`batch_size=5000, countdown=300`) and enqueues.
+        let call = parse_schedule_call(&Value::Null, 5000).unwrap().unwrap();
+        assert_eq!(
+            call,
+            ScheduleCall {
+                batch_size: 5000,
+                countdown_secs: 300
+            }
+        );
         let call = parse_schedule_call(
             &kwargs(vec![
                 ("batch_size", str_val("25")),
@@ -1885,17 +1912,51 @@ mod tests {
                 .is_creating
         );
         assert!(parse_description_task_call(&args(vec![]), &Value::Null).is_err());
+        // Live producers send kwargs-only (`intake/base.py:287`, …):
+        // kwargs bind with positional fallback, flag included.
+        let call = parse_description_task_call(
+            &args(vec![]),
+            &kwargs(vec![
+                ("updated_issue", Value::Null),
+                ("issue_id", str_val("i")),
+                ("user_id", str_val("u")),
+                ("is_creating", Value::Bool(true)),
+            ]),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(call.issue_id, "i");
+        assert_eq!(call.updated_issue, None);
+        assert!(call.is_creating);
     }
 
     #[test]
     fn track_page_parsing() {
-        let call = parse_track_page_call(&args(vec![str_val("p"), Value::Null, str_val("u")]))
-            .unwrap()
-            .unwrap();
+        let call = parse_track_page_call(
+            &args(vec![str_val("p"), Value::Null, str_val("u")]),
+            &Value::Null,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(call.page_id, "p");
         assert_eq!(call.existing_instance, None);
         assert_eq!(call.user_id, "u");
-        assert!(parse_track_page_call(&args(vec![str_val("p")])).is_err());
+        assert!(parse_track_page_call(&args(vec![str_val("p")]), &Value::Null).is_err());
+        // Live producers send kwargs-only (`page/base.py:568`,
+        // `api/views/page.py:164`), with `existing_instance=None` common.
+        let call = parse_track_page_call(
+            &args(vec![]),
+            &kwargs(vec![
+                ("page_id", str_val("p")),
+                ("existing_instance", Value::Null),
+                ("user_id", str_val("u")),
+            ]),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(call.page_id, "p");
+        assert_eq!(call.existing_instance, None);
+        assert_eq!(call.user_id, "u");
     }
 
     #[test]

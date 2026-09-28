@@ -158,6 +158,7 @@ async fn worker(concurrency: u32) -> MainResult {
         tracing::info!("MongoDB not configured; cleanup tasks will delete from Postgres only");
     }
     pidash_jobs::tasks_cleanup::register_cleanup_handlers(&mut registry, pools.clone(), mongo);
+    pidash_jobs::tasks_cleanup::register_versions(&mut registry, pools.primary().clone());
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,
         ..Default::default()

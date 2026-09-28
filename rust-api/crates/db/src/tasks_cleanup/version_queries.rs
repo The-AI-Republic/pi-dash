@@ -452,9 +452,10 @@ pub const PAGE_VERSION_COUNT_SQL: &str = "SELECT COUNT(*) AS \"__count\" FROM \"
 /// (`page_version_task.py:74`).
 pub const OLDEST_PAGE_VERSION_ID_SQL: &str = "SELECT \"page_versions\".\"id\" FROM \"page_versions\" WHERE (\"page_versions\".\"deleted_at\" IS NULL AND \"page_versions\".\"page_id\" = $1) ORDER BY \"page_versions\".\"last_saved_at\" ASC LIMIT 1";
 
-/// Prune delete by primary key (`.first().delete()`).
-pub const DELETE_PAGE_VERSION_BY_ID_SQL: &str =
-    "DELETE FROM \"page_versions\" WHERE \"page_versions\".\"id\" = $1";
+/// Prune by primary key (`.first().delete()` on a `SoftDeleteModel`:
+/// `update(deleted_at=now())`, never a row removal).
+pub const PRUNE_PAGE_VERSION_BY_ID_SQL: &str =
+    "UPDATE \"page_versions\" SET \"deleted_at\" = $1 WHERE (\"page_versions\".\"id\" = $2 AND \"page_versions\".\"deleted_at\" IS NULL)";
 
 /// Read one `issues` row by id into a [`PgRow`] (caller maps columns):
 /// `Issue.objects.get(id=)` under the soft-delete scope (see module docs
@@ -618,8 +619,8 @@ mod tests {
             "SELECT \"page_versions\".\"id\" FROM \"page_versions\" WHERE (\"page_versions\".\"deleted_at\" IS NULL AND \"page_versions\".\"page_id\" = $1) ORDER BY \"page_versions\".\"last_saved_at\" ASC LIMIT 1"
         );
         assert_eq!(
-            DELETE_PAGE_VERSION_BY_ID_SQL,
-            "DELETE FROM \"page_versions\" WHERE \"page_versions\".\"id\" = $1"
+            PRUNE_PAGE_VERSION_BY_ID_SQL,
+            "UPDATE \"page_versions\" SET \"deleted_at\" = $1 WHERE (\"page_versions\".\"id\" = $2 AND \"page_versions\".\"deleted_at\" IS NULL)"
         );
         // Owner join carries the version id, the username/email pair for
         // the `str(owned_by)` bug-compatibility comparison, and the stamp

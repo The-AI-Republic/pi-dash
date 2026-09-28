@@ -246,10 +246,10 @@ pub mod workspace_seed;
 
 pub use workspace_seed::{register_workspace_seed, TASK_NAME as WORKSPACE_SEED_TASK_NAME};
 // D-09 version tasks: issue/description/page versions (PIDASHCONV-188).
-//! Worker-plane port of `issue_version_sync.py`,
-//! `issue_description_version_sync.py`, `issue_description_version_task.py`
-//! and `page_version_task.py`. See [`versions`] for names, parsing,
-//! message constructors and the seven task flows.
+// Worker-plane port of `issue_version_sync.py`,
+// `issue_description_version_sync.py`, `issue_description_version_task.py`
+// and `page_version_task.py`: names, parsing, message constructors and
+// the seven task flows live in `versions`.
 pub mod versions;
 
 pub use versions::register_versions;
