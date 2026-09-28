@@ -78,10 +78,9 @@ async fn stub_app() -> axum::Router {
             "redirecting",
         )
             .into_response();
-        response.headers_mut().insert(
-            axum::http::header::LOCATION,
-            "/".parse().expect("location"),
-        );
+        response
+            .headers_mut()
+            .insert(axum::http::header::LOCATION, "/".parse().expect("location"));
         response.headers_mut().append(
             axum::http::header::SET_COOKIE,
             "session-id=stub-session; Path=/".parse().expect("cookie"),
