@@ -6,7 +6,7 @@
 
 import { useState, useEffect } from "react";
 import { observer } from "mobx-react";
-import { useRouter } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { ChevronsUpDown, Globe, LogOut, Settings } from "lucide-react";
 // pi dash imports
 import { GOD_MODE_URL } from "@pi-dash/constants";
@@ -33,6 +33,7 @@ export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact"
   const [isCommunityModalOpen, setIsCommunityModalOpen] = useState(false);
   // router
   const router = useRouter();
+  const { workspaceSlug } = useParams();
   // store hooks
   const { toggleAnySidebarDropdown } = useAppTheme();
   const { data: currentUser } = useUser();
@@ -157,7 +158,7 @@ export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact"
         </div>
         <div>
           <CustomMenu.MenuItem
-            onClick={() => router.push("/settings/profile/general")}
+            onClick={() => router.push(`/${workspaceSlug}/settings/account/general`)}
             className="flex items-center gap-2"
           >
             <Settings className="size-3.5 shrink-0" />

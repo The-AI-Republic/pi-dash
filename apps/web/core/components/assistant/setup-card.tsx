@@ -5,10 +5,12 @@
  */
 
 import { Sparkles } from "lucide-react";
-import { Link } from "react-router";
+import { Link, useParams } from "react-router";
 import { Button } from "@pi-dash/ui";
 
 export function AssistantSetupCard() {
+  const { workspaceSlug } = useParams();
+
   return (
     <div className="mx-auto flex max-w-md flex-col items-center gap-3 rounded-lg border border-subtle bg-surface-1 px-6 py-8 text-center">
       <Sparkles className="size-6 text-accent-primary" />
@@ -17,7 +19,7 @@ export function AssistantSetupCard() {
         Bring your own LLM provider key to start chatting. The assistant can search, create, and update issues on your
         behalf — with exactly your permissions.
       </p>
-      <Link to="/settings/profile/ai-assistant">
+      <Link to={`/${workspaceSlug}/settings/account/ai-assistant`}>
         <Button variant="primary" size="sm">
           Configure provider
         </Button>

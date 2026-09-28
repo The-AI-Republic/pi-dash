@@ -389,6 +389,21 @@ export const coreRoutes: RouteConfigEntry[] = [
         ]),
 
         // --------------------------------------------------------------------
+        // ACCOUNT (PROFILE) SETTINGS
+        // --------------------------------------------------------------------
+        // Account settings are user-scoped data, but they live under the
+        // workspace so they inherit the app shell (top nav + app rail) and share
+        // the settings navigator with workspace settings. `/settings/profile/*`
+        // redirects here.
+
+        layout("./(all)/[workspaceSlug]/(settings)/settings/account/layout.tsx", [
+          route(
+            ":workspaceSlug/settings/account/:profileTabId",
+            "./(all)/[workspaceSlug]/(settings)/settings/account/[profileTabId]/page.tsx"
+          ),
+        ]),
+
+        // --------------------------------------------------------------------
         // PROJECT SETTINGS
         // --------------------------------------------------------------------
 
@@ -465,17 +480,6 @@ export const coreRoutes: RouteConfigEntry[] = [
         ]),
       ]),
     ]),
-    // ======================================================================
-    // STANDALONE ROUTES (outside workspace context)
-    // ======================================================================
-
-    // --------------------------------------------------------------------
-    // PROFILE SETTINGS
-    // --------------------------------------------------------------------
-
-    layout("./(all)/settings/profile/layout.tsx", [
-      route("settings/profile/:profileTabId", "./(all)/settings/profile/[profileTabId]/page.tsx"),
-    ]),
   ]),
 
   // ========================================================================
@@ -495,7 +499,7 @@ export const coreRoutes: RouteConfigEntry[] = [
   route(":workspaceSlug/analytics", "routes/redirects/core/analytics.tsx"),
 
   // API tokens redirect: /:workspaceSlug/settings/api-tokens
-  // → /settings/profile/api-tokens
+  // → /:workspaceSlug/settings/account/api-tokens
   route(":workspaceSlug/settings/api-tokens", "routes/redirects/core/api-tokens.tsx"),
 
   // Inbox redirect: /:workspaceSlug/projects/:projectId/inbox
@@ -516,11 +520,13 @@ export const coreRoutes: RouteConfigEntry[] = [
   // Profile settings redirects
   route("profile/*", "routes/redirects/core/profile-settings.tsx"),
 
-  // Settings index redirect: /settings (and /settings/profile) → /settings/profile/general.
-  // The static `settings/profile/:profileTabId` route out-ranks this splat, so
-  // real tabs still render their page.
+  // Legacy global settings redirect: /settings, /settings/profile and
+  // /settings/profile/:tab all land on /:workspaceSlug/settings/account/:tab in
+  // the user's current workspace.
   route("settings/*", "routes/redirects/core/settings.tsx"),
 
-  // Account settings redirects
+  // Bare or unknown account paths: /:workspaceSlug/settings/account(/…)
+  // → /:workspaceSlug/settings/account/general. The `:profileTabId` route above
+  // out-ranks this splat, so real tabs still render their page.
   route(":workspaceSlug/settings/account/*", "routes/redirects/core/workspace-account-settings.tsx"),
 ] satisfies RouteConfig;
