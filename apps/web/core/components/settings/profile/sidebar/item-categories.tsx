@@ -5,7 +5,6 @@
  */
 
 import { observer } from "mobx-react";
-import { useParams } from "react-router";
 // pi dash imports
 import {
   GROUPED_PROFILE_SETTINGS,
@@ -20,15 +19,12 @@ import { ProfileSettingsSidebarWorkspaceOptions } from "./workspace-options";
 
 type Props = {
   activeTab: TProfileSettingsTabs;
-  updateActiveTab: (tab: TProfileSettingsTabs) => void;
 };
 
 export const ProfileSettingsSidebarItemCategories = observer(function ProfileSettingsSidebarItemCategories(
   props: Props
 ) {
-  const { activeTab, updateActiveTab } = props;
-  // params
-  const { profileTabId } = useParams();
+  const { activeTab } = props;
   // translation
   const { t } = useTranslation();
 
@@ -48,8 +44,8 @@ export const ProfileSettingsSidebarItemCategories = observer(function ProfileSet
               {categoryItems.map((item) => (
                 <SettingsSidebarItem
                   key={item.key}
-                  as="button"
-                  onClick={() => updateActiveTab(item.key)}
+                  as="link"
+                  href={`/settings/profile/${item.key}`}
                   isActive={activeTab === item.key}
                   icon={item.icon}
                   label={t(item.i18n_label)}
@@ -59,7 +55,7 @@ export const ProfileSettingsSidebarItemCategories = observer(function ProfileSet
           </div>
         );
       })}
-      {profileTabId && <ProfileSettingsSidebarWorkspaceOptions />}
+      <ProfileSettingsSidebarWorkspaceOptions />
     </div>
   );
 });
