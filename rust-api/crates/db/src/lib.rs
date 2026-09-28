@@ -24,6 +24,7 @@ pub mod config;
 pub mod context;
 pub mod filter;
 pub mod filterset;
+pub mod integrations;
 pub mod issue_filters;
 pub mod license;
 pub mod migrations;
