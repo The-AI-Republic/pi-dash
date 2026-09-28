@@ -28,6 +28,7 @@
 pub mod auth_mail;
 pub mod email_notification;
 pub mod mail_send;
+pub mod notifications;
 
 use crate::worker::Registry;
 
@@ -126,6 +127,263 @@ pub fn register_auth_mail_tasks(registry: &mut Registry, pool: sqlx::PgPool) {
     registry.register(auth_mail::UPDATE_CONFIRM_TASK, update_confirm_handler(pool));
 }
 
+/// Shared mention-component parser.
+///
+/// This is the single implementation of the BeautifulSoup query both mail
+/// helpers build on — `soup.find_all("mention-component",
+/// attrs={"entity_name": "user_mention"})` followed by
+/// `tag["entity_identifier"]` — so `extract_mentions` here and T2's
+/// `process_mention` cannot drift apart (T2 must reuse this, never fork it).
+///
+/// Returns `None` when any matched tag has no `entity_identifier`
+/// attribute: Python's list comprehension raises `KeyError` there, which the
+/// caller's broad `except` turns into `[]`. An empty `Vec` means zero
+/// matched tags. Matching is case-insensitive on the tag and attribute
+/// names (html.parser lowercases both) and exact on the `entity_name`
+/// value. Comment nodes and `<script>`/`<style>` CDATA bodies never yield
+/// tags, mirroring html.parser.
+pub(crate) fn mention_ids_in_html(html: &str) -> Option<Vec<String>> {
+    let bytes = html.as_bytes();
+    let len = bytes.len();
+    let mut pos = 0;
+    let mut ids: Vec<String> = Vec::new();
+    while pos < len {
+        let open = match find_byte(bytes, pos, b'<') {
+            Some(i) => i,
+            None => break,
+        };
+        let rest = &html[open..];
+        if rest.starts_with("<!--") {
+            match html[open + 4..].find("-->") {
+                Some(end) => pos = open + 4 + end + 3,
+                None => break,
+            }
+            continue;
+        }
+        if rest.starts_with("</") || rest.starts_with("<!") || rest.starts_with("<?") {
+            match tag_end(bytes, open + 2) {
+                Some(end) => pos = end,
+                None => break,
+            }
+            continue;
+        }
+        let (name, attrs_end, self_closing, close) = match parse_open_tag(bytes, open) {
+            Some(parsed) => parsed,
+            None => break,
+        };
+        let _ = attrs_end;
+        if name == "script" || name == "style" {
+            if self_closing {
+                pos = close;
+                continue;
+            }
+            match find_close_tag(bytes, close, &name) {
+                Some(end) => pos = end,
+                None => break,
+            }
+            continue;
+        }
+        if name == "mention-component" {
+            let attrs = parse_attrs(&html[open..close]);
+            let is_user_mention = attrs.iter().any(|(key, value)| {
+                key == "entity_name" && value.as_deref() == Some("user_mention")
+            });
+            if is_user_mention {
+                match attrs
+                    .iter()
+                    .find(|(key, _)| key == "entity_identifier")
+                    .and_then(|(_, value)| value.clone())
+                {
+                    Some(identifier) => ids.push(identifier),
+                    None => return None,
+                }
+            }
+        }
+        pos = close;
+    }
+    Some(ids)
+}
+
+/// Index of the first `needle` at or after `from`, or `None`.
+fn find_byte(bytes: &[u8], from: usize, needle: u8) -> Option<usize> {
+    bytes[from..]
+        .iter()
+        .position(|&b| b == needle)
+        .map(|i| from + i)
+}
+
+/// Index just past the `>` closing the tag opened at `open` (the byte after
+/// `<` is `start`). Respects single/double quotes. `None` when unterminated.
+fn tag_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut i = start;
+    let mut quote = 0u8;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote != 0 {
+            if b == quote {
+                quote = 0;
+            }
+        } else if b == b'"' || b == b'\'' {
+            quote = b;
+        } else if b == b'>' {
+            return Some(i + 1);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Parse `<name attrs...>` at `open`. Returns the lowercased tag name, the
+/// byte offset where attributes start, whether the tag is self-closing, and
+/// the offset just past `>`. All offsets are absolute into the source.
+fn parse_open_tag(bytes: &[u8], open: usize) -> Option<(String, usize, bool, usize)> {
+    let close = tag_end(bytes, open + 1)?;
+    let mut i = open + 1;
+    while i < close && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let name_start = i;
+    while i < close && !bytes[i].is_ascii_whitespace() && bytes[i] != b'/' && bytes[i] != b'>' {
+        i += 1;
+    }
+    if i == name_start {
+        return None;
+    }
+    let name = html_slice(bytes, name_start, i)?.to_ascii_lowercase();
+    let mut self_closing = false;
+    let mut j = close - 1;
+    while j > open && bytes[j].is_ascii_whitespace() {
+        j -= 1;
+    }
+    if bytes[j] == b'/' {
+        self_closing = true;
+    }
+    Some((name, i, self_closing, close))
+}
+
+/// Parse the attribute list of one already-bounded open tag
+/// (`tag_source` spans `<` through `>` inclusive). Names are lowercased;
+/// later duplicates win, mirroring BeautifulSoup's dict conversion. A bare
+/// name with no `=` carries `None`.
+fn parse_attrs(tag_source: &str) -> Vec<(String, Option<String>)> {
+    let bytes = tag_source.as_bytes();
+    let mut attrs: Vec<(String, Option<String>)> = Vec::new();
+    let mut i = 1;
+    while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'/' && bytes[i] != b'>'
+    {
+        i += 1;
+    }
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b'>' || bytes[i] == b'/' {
+            break;
+        }
+        let name_start = i;
+        while i < bytes.len()
+            && !bytes[i].is_ascii_whitespace()
+            && bytes[i] != b'='
+            && bytes[i] != b'>'
+            && bytes[i] != b'/'
+        {
+            i += 1;
+        }
+        if i == name_start {
+            i += 1;
+            continue;
+        }
+        let name = match html_slice(bytes, name_start, i) {
+            Some(s) => s.to_ascii_lowercase(),
+            None => break,
+        };
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let mut value: Option<String> = None;
+        if i < bytes.len() && bytes[i] == b'=' {
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+                let quote = bytes[i];
+                i += 1;
+                let value_start = i;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+                value = html_slice(bytes, value_start, i).map(str::to_owned);
+                if i < bytes.len() {
+                    i += 1;
+                }
+            } else {
+                let value_start = i;
+                while i < bytes.len()
+                    && !bytes[i].is_ascii_whitespace()
+                    && bytes[i] != b'>'
+                    && bytes[i] != b'/'
+                {
+                    i += 1;
+                }
+                value = html_slice(bytes, value_start, i).map(str::to_owned);
+            }
+        }
+        if let Some(slot) = attrs.iter_mut().find(|(key, _)| *key == name) {
+            slot.1 = value;
+        } else {
+            attrs.push((name, value));
+        }
+    }
+    attrs
+}
+
+/// Byte-slice helper: every boundary this parser records sits on an ASCII
+/// character, so slicing is always valid UTF-8.
+fn html_slice(bytes: &[u8], start: usize, end: usize) -> Option<&str> {
+    if start > end || end > bytes.len() {
+        return None;
+    }
+    std::str::from_utf8(&bytes[start..end]).ok()
+}
+
+/// Offset just past the `</name>` closing tag at or after `from`
+/// (case-insensitive), or `None` when there is none.
+fn find_close_tag(bytes: &[u8], from: usize, name: &str) -> Option<usize> {
+    let mut pos = from;
+    while let Some(open) = find_byte(bytes, pos, b'<') {
+        if bytes.get(open + 1) == Some(&b'/') {
+            let mut i = open + 2;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            let name_start = i;
+            while i < bytes.len()
+                && !bytes[i].is_ascii_whitespace()
+                && bytes[i] != b'>'
+                && bytes[i] != b'/'
+            {
+                i += 1;
+            }
+            if let Some(found) = html_slice(bytes, name_start, i) {
+                if found.eq_ignore_ascii_case(name) {
+                    return tag_end(bytes, open + 2);
+                }
+            }
+            match tag_end(bytes, open + 2) {
+                Some(end) => pos = end,
+                None => return None,
+            }
+        } else {
+            match tag_end(bytes, open + 1) {
+                Some(end) => pos = end,
+                None => return None,
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,5 +438,60 @@ mod tests {
         // task are NOT registered here.
         assert!(!registry.owns("pi_dash.bgtasks.user_activation_email_task.user_activation_email"));
         assert!(!registry.owns("pi_dash.bgtasks.project_invitation_task.project_invitation"));
+    }
+
+    #[test]
+    fn parses_two_mentions_in_document_order() {
+        let html = "<p>hi <mention-component entity_name=\"user_mention\" entity_identifier=\"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\"></mention-component> and <mention-component entity_identifier=\"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\" entity_name=\"user_mention\"/></p>";
+        assert_eq!(
+            mention_ids_in_html(html),
+            Some(vec![
+                "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".to_owned(),
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn ignores_other_entities_and_comments_and_scripts() {
+        let html = "<!-- <mention-component entity_name=\"user_mention\" entity_identifier=\"cccc\"></mention-component> -->\
+            <script>var x = '<mention-component entity_name=\"user_mention\" entity_identifier=\"dddd\"></mention-component>';</script>\
+            <mention-component entity_name=\"emoji\" entity_identifier=\"eeee\"></mention-component>\
+            <MENTION-COMPONENT ENTITY_NAME=\"user_mention\" ENTITY_IDENTIFIER=\"ffff\"></MENTION-COMPONENT>";
+        assert_eq!(mention_ids_in_html(html), Some(vec!["ffff".to_owned()]));
+    }
+
+    #[test]
+    fn missing_identifier_fails_the_whole_parse() {
+        let html = "<mention-component entity_name=\"user_mention\" entity_identifier=\"aaaa\"></mention-component>\
+            <mention-component entity_name=\"user_mention\"></mention-component>";
+        assert_eq!(mention_ids_in_html(html), None);
+    }
+
+    #[test]
+    fn nested_tags_both_match() {
+        let html = "<mention-component entity_name=\"user_mention\" entity_identifier=\"aaaa\">\
+            <mention-component entity_name=\"user_mention\" entity_identifier=\"bbbb\"></mention-component>\
+            </mention-component>";
+        assert_eq!(
+            mention_ids_in_html(html),
+            Some(vec!["aaaa".to_owned(), "bbbb".to_owned()])
+        );
+    }
+
+    #[test]
+    fn empty_identifier_is_still_a_match() {
+        let html = "<mention-component entity_name=\"user_mention\" entity_identifier=\"\"></mention-component>";
+        assert_eq!(mention_ids_in_html(html), Some(vec!["".to_owned()]));
+    }
+
+    #[test]
+    fn single_quoted_and_unquoted_values_match() {
+        let html = "<mention-component entity_name='user_mention' entity_identifier='aaaa'></mention-component>\
+            <mention-component entity_name=user_mention entity_identifier=bbbb></mention-component>";
+        assert_eq!(
+            mention_ids_in_html(html),
+            Some(vec!["aaaa".to_owned(), "bbbb".to_owned()])
+        );
     }
 }
