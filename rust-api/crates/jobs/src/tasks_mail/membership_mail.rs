@@ -38,9 +38,14 @@
 //!   SMTP send, so a failed send still leaves the message stored.
 //!
 //! SQL semantics: `users` has no `deleted_at` column (plain `WHERE`
-//! lookups); every other table here is soft-deletable, so the default
-//! manager scope (`deleted_at IS NULL`) is applied — the same convention
-//! as the sibling jobs (`license/tasks.rs:36`). Sends go through T5's
+//! lookups). Direct `.objects.get(pk)` reads (`ProjectMember`,
+//! `Workspace`, `WorkspaceMemberInvite`) carry the default manager scope
+//! (`deleted_at IS NULL`) — the same convention as the sibling jobs
+//! (`license/tasks.rs:36`). The lazy FK-descriptor hops
+//! (`project_member.project/workspace/member`) resolve through Django's
+//! `_base_manager` (plain `Manager`: no `base_manager_name` is set
+//! anywhere under `apps/api/pi_dash`), so they carry no `deleted_at`
+//! scope. Sends go through T5's
 //! shared [`super::mail_send::send_mail`] (reused, never forked); the
 //! invite `message` UPDATE renders via the same [`super::mail_send`]
 //! helpers, which is byte-identical to the send's own render (all four
@@ -350,28 +355,34 @@ pub fn project_add_user_email_handler(pool: PgPool) -> Handler {
                         .ok_or_else(|| "User.DoesNotExist".to_owned())?;
                         // `ProjectMember.objects.get(pk=...)` (default
                         // manager: soft-deleted rows are invisible).
-                        let member_row: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(
-                            "SELECT project_id, member_id FROM project_members WHERE id = $1 AND deleted_at IS NULL",
+                        let member_row: Option<(Uuid, Uuid, Option<Uuid>)> = sqlx::query_as(
+                            "SELECT project_id, workspace_id, member_id FROM project_members WHERE id = $1 AND deleted_at IS NULL",
                         )
                         .bind(member_id)
                         .fetch_optional(&pool)
                         .await
                         .map_err(|e| e.to_string())?;
-                        let (project_id, member_id) =
+                        let (project_id, workspace_id, member_id) =
                             member_row.ok_or_else(|| "ProjectMember.DoesNotExist".to_owned())?;
-                        // Lazy `project_member.project.name` hop.
-                        let project_row: Option<(String, Uuid)> = sqlx::query_as(
-                            "SELECT name, workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL",
-                        )
-                        .bind(project_id)
-                        .fetch_optional(&pool)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                        let (project_name, workspace_id) =
+                        // Lazy `project_member.project.name` hop: the FK
+                        // descriptor reads through `_base_manager`
+                        // (unfiltered — no `base_manager_name` is set), so
+                        // no `deleted_at` scope, unlike the direct gets.
+                        let project_row: Option<(String,)> =
+                            sqlx::query_as("SELECT name FROM projects WHERE id = $1")
+                                .bind(project_id)
+                                .fetch_optional(&pool)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                        let (project_name,) =
                             project_row.ok_or_else(|| "Project.DoesNotExist".to_owned())?;
-                        // Lazy `project_member.workspace.name`/`slug` hop.
+                        // Lazy `project_member.workspace.name`/`slug` hop
+                        // (same unfiltered descriptor read, keyed off the
+                        // member's own `workspace_id` column, which
+                        // `ProjectBaseModel.save()` keeps in sync with the
+                        // project).
                         let workspace_row: Option<(String, String)> = sqlx::query_as(
-                            "SELECT name, slug FROM workspaces WHERE id = $1 AND deleted_at IS NULL",
+                            "SELECT name, slug FROM workspaces WHERE id = $1",
                         )
                         .bind(workspace_id)
                         .fetch_optional(&pool)
