@@ -26,6 +26,7 @@ pub mod schedule;
 pub mod scheduler;
 pub mod space;
 pub mod tasks_cleanup;
+pub mod tasks_mail;
 pub mod tasks_ticker;
 pub mod worker;
 
