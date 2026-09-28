@@ -176,7 +176,8 @@ pub fn workspace_lite_to_representation<'a>(
 
 /// A database row for `Project` lite rendering (`db/models/project.py:72+`):
 /// `id` UUID string, `identifier`, `name`, nullable `cover_image`,
-/// `icon_prop` JSON, `emoji`, `description`.
+/// `icon_prop` JSON, nullable `emoji` (`project.py:95`, `null=True`),
+/// `description`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectLiteRow<'a> {
     pub id: &'a str,
@@ -184,7 +185,7 @@ pub struct ProjectLiteRow<'a> {
     pub name: &'a str,
     pub cover_image: Option<&'a str>,
     pub icon_prop: &'a serde_json::Value,
-    pub emoji: &'a str,
+    pub emoji: Option<&'a str>,
     pub description: &'a str,
 }
 
@@ -197,7 +198,7 @@ pub struct ProjectLiteView<'a> {
     pub name: &'a str,
     pub cover_image: Option<&'a str>,
     pub icon_prop: &'a serde_json::Value,
-    pub emoji: &'a str,
+    pub emoji: Option<&'a str>,
     pub description: &'a str,
 }
 
@@ -492,18 +493,38 @@ mod tests {
         let input = &case(&golden, "ProjectLiteSerializer")["input"];
         let output = &case(&golden, "ProjectLiteSerializer")["output"];
         let cover_image = opt(input, "cover_image");
+        let emoji = opt(input, "emoji");
         let row = ProjectLiteRow {
             id: req(input, "id"),
             identifier: req(input, "identifier"),
             name: req(input, "name"),
             cover_image: cover_image.as_deref(),
             icon_prop: input.get("icon_prop").expect("icon_prop"),
-            emoji: req(input, "emoji"),
+            emoji: emoji.as_deref(),
             description: req(input, "description"),
         };
         let produced =
             serde_json::to_value(project_lite_to_representation(&row)).expect("serializes");
         assert_replay(&produced, output);
+    }
+
+    #[test]
+    fn project_lite_null_emoji_renders_null() {
+        // Project.emoji is nullable (db/models/project.py:95, null=True):
+        // DRF renders a null emoji as null, not "".
+        let icon = serde_json::json!({"color": "#fff"});
+        let row = ProjectLiteRow {
+            id: "33333333-3333-3333-3333-333333333333",
+            identifier: "WEB",
+            name: "Web",
+            cover_image: None,
+            icon_prop: &icon,
+            emoji: None,
+            description: "Ship it",
+        };
+        let produced =
+            serde_json::to_value(project_lite_to_representation(&row)).expect("serializes");
+        assert_eq!(produced.get("emoji"), Some(&Value::Null));
     }
 
     #[test]
