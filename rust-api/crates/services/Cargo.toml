@@ -21,6 +21,9 @@ flate2 = { version = "1" }
 # D-08 activity trackers also use it for is_valid_uuid parity
 # (pi_dash/utils/uuid.py); same locked uuid 1.x as pidash-db.
 uuid = { version = "1", features = ["serde", "v4"] }
+# D-08 page component extraction: BeautifulSoup html.parser equivalent for
+# the mention-/image-component fragment selects in page_transaction_task.
+scraper = { version = "0.24" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

@@ -11,9 +11,14 @@
 //!   (PIDASHCONV-202): Celery task names, `(args, kwargs)` extraction, the
 //!   mongo-else-postgres routing, the PostHog `/batch/` payload, and the
 //!   [`Registry`][crate::worker::Registry] wiring.
+//! * [`visit_page`] — `bgtasks/recent_visited_task.py` +
+//!   `bgtasks/page_transaction_task.py` (PIDASHCONV-201): recent-visit +
+//!   page-transaction entry points. The pure component extraction lives in
+//!   `pidash-services` (`tasks_webhooks::page_extract`).
 
 pub mod link_crawl;
 pub mod sinks;
+pub mod visit_page;
 
 pub use link_crawl::{register_link_crawl_handler, TASK_NAMES};
 pub use sinks::{
@@ -26,4 +31,8 @@ pub use sinks::{
     POSTHOG_BATCH_PATH, POSTHOG_DEFAULT_HOST, POSTHOG_HOST_VAR, POSTHOG_LIB, POSTHOG_LIB_VERSION,
     POSTHOG_TIMEOUT_SECS, POSTHOG_USER_AGENT, PROCESS_LOGS_TASK, TRACK_EVENT_TASK,
     WORKSPACE_OWNER_SQL,
+};
+pub use visit_page::{
+    is_visit_page_task, page_transaction_message, recent_visited_task_message,
+    register_visit_page_handlers, PAGE_TRANSACTION_TASK_NAME, RECENT_VISITED_TASK_NAME,
 };
