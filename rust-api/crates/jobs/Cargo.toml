@@ -20,6 +20,7 @@ sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "uuid", "ch
 amqprs = "2.1.5"
 sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid"] }
 sha2 = "0.10"
+rand = "0.8"
 
 [dev-dependencies]
 sqlparser = "0.63.0"
