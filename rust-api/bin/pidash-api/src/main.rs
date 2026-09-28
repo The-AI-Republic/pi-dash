@@ -185,6 +185,19 @@ async fn worker(concurrency: u32) -> MainResult {
         seed_data_dir(),
     );
     pidash_jobs::tasks_cleanup::dummy_data::register(&mut registry, pools.primary().clone());
+    // D-05 integrations groups (PIDASHCONV-238; kept in sync with
+    // `tests::worker_registry_owns_all_d05_local_tasks`). All six task
+    // names are worker-owned with live providers.
+    pidash_jobs::integrations::git_sync::register_git_sync_tasks(
+        &mut registry,
+        pools.primary().clone(),
+        pidash_jobs::integrations::git_sync::LiveProviders::from_env(),
+    );
+    pidash_jobs::integrations::github_sync::register_github_sync_tasks(
+        &mut registry,
+        pools.primary().clone(),
+        pidash_jobs::integrations::github_sync::LiveTransports::from_env(),
+    );
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,
         ..Default::default()
@@ -411,6 +424,44 @@ mod tests {
             assert!(tasks_cleanup::is_export_task(name));
             assert!(!registry.owns(name), "{name} must stay Python-owned");
             assert_eq!(route_for(&registry, name), Route::PythonOwned);
+        }
+    }
+
+    /// PIDASHCONV-238: the worker owns all six D-05 task names with live
+    /// providers. Mirrors the `worker()` registration block: the real
+    /// register fns over a lazy pool (no I/O) plus `from_env` providers
+    /// (`Keyring::from_env` falls back to an empty secret, so no env is
+    /// needed). `github_signals` owns no names of its own — its dispatch
+    /// targets the git `post_completion_comment` task.
+    #[tokio::test]
+    async fn worker_registry_owns_all_d05_local_tasks() {
+        use pidash_jobs::integrations::{git_sync, github_sync};
+        use pidash_jobs::worker::{route_for, Registry, Route};
+
+        // `connect_lazy` never touches the network (it needs a Tokio
+        // context to build the pool, hence `tokio::test`): registration
+        // wiring stays testable with no database.
+        let pool =
+            sqlx::PgPool::connect_lazy("postgres://localhost:1/unused").expect("lazy pool builds");
+        let mut registry = Registry::new();
+        // Real registrations (the same calls `worker()` makes).
+        git_sync::register_git_sync_tasks(
+            &mut registry,
+            pool.clone(),
+            git_sync::LiveProviders::from_env(),
+        );
+        github_sync::register_github_sync_tasks(
+            &mut registry,
+            pool.clone(),
+            github_sync::LiveTransports::from_env(),
+        );
+
+        let mut local: Vec<&str> = git_sync::TASK_NAMES.to_vec();
+        local.extend(github_sync::TASK_NAMES);
+        assert_eq!(local.len(), 6, "D-05 local task count drifted");
+        for name in local {
+            assert!(registry.owns(name), "{name} must be worker-owned");
+            assert_eq!(route_for(&registry, name), Route::Local);
         }
     }
 }
