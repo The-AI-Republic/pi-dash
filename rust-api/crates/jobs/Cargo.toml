@@ -41,6 +41,7 @@ amqprs = "2.1.5"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-webpki-roots"] }
 bson = "2"
 sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid"] }
+crc32fast = { version = "1" }
 sha2 = "0.10"
 # Sibling D-10 (tasks_ticker/fire_tick) pins rand 0.8 while dummy_data
 # (PIDASHCONV-191) needs rand 0.9 APIs (`random_range`, `from_os_rng`):

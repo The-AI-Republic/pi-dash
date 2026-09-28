@@ -2270,6 +2270,7 @@ dependencies = [
  "base64 0.22.1",
  "bson",
  "chrono",
+ "crc32fast",
  "hmac 0.12.1",
  "md-5 0.10.6",
  "minijinja",
