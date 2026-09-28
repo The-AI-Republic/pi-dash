@@ -110,10 +110,10 @@
 //!   values a previous arm wrote.
 //! * The metadata read-modify-writes (`_reconcile_upstream_gone`, the
 //!   completion guard, the login merge) are non-atomic, as in Python.
-//! * A non-string `config["token"]` raises out of `_resolve_token`
+//! * A truthy non-string `config["token"]` raises out of `_resolve_token`
 //!   (outside the guarded `try`, so the task fails without recording);
-//!   a failed decryption returns `""`, which takes the missing-credential
-//!   path instead.
+//!   falsy shapes take the missing-credential path via `or ""`, and a
+//!   failed decryption returns `""`, which takes it too.
 //!
 //! Deliberate approximations (unreachable with real GitHub payloads,
 //! documented here instead of a paragraph per call site):
@@ -127,6 +127,10 @@
 //!   here.
 //! * `issue_url` keeps strings verbatim and renders everything else as
 //!   `""`; Python would `str()` a truthy non-string. Same reachability.
+//! * A non-string comment `issue_url`, a non-object `user`, or a
+//!   non-string `user.login` skips the comment/login merge here, where
+//!   Python would raise into record-and-retry (or store the odd value).
+//!   GitHub always sends a string URL, an object user, and a string login.
 //! * `\d`'s Unicode tail in `parse_issue_number_from_url` yields `None`
 //!   here (ASCII digits only); GitHub URLs are ASCII.
 //!
@@ -294,14 +298,16 @@ pub const COMPLETION_MISSING_TOKEN_ERROR: &str = "credential missing or disconne
 
 /// Resolve the PAT (`_resolve_token`, `github_sync_task.py:53-58`):
 /// `config or {}` → `config.get("token") or ""` → `decrypt_data`.
-/// Empty/missing yields `""` (the callers treat it as missing); a failed
-/// decryption yields `""` too (`decrypt_data` fails closed to `""`). A
-/// present-but-non-string token errors — Python's `.encode()` raises
-/// outside the guarded `try`, failing the task without recording.
+/// Every falsy shape (missing, null, `""`, `false`, `0`, `[]`, `{}`)
+/// yields `""` (the callers treat it as missing), like Python's
+/// `or ""`; a failed decryption yields `""` too (`decrypt_data` fails
+/// closed to `""`). A truthy non-string token errors — Python's
+/// `.encode()` raises outside the guarded `try`, failing the task
+/// without recording.
 pub fn resolve_token(config: &Value, keyring: &Keyring) -> Result<String, String> {
     let token = match config.as_object().and_then(|map| map.get("token")) {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::String(text)) if text.is_empty() => String::new(),
+        None => String::new(),
+        Some(value) if !json_truthy(value) => String::new(),
         Some(Value::String(text)) => keyring.decrypt(text),
         Some(other) => {
             return Err(format!(
@@ -379,10 +385,12 @@ pub const PROJECT_WORKSPACE_SQL: &str = "SELECT workspace_id FROM projects WHERE
 /// `$1` the project id, `$2` the upstream issue number.
 pub const ISSUE_LOOKUP_SQL: &str = "SELECT id FROM issues WHERE project_id = $1 AND external_source = 'github' AND external_id = $2 AND deleted_at IS NULL";
 
-/// Current state + group for the issue UPDATE arm (`Issue.save`,
-/// `issue.py:288-309`): the row's own state, if any. `$1` is the issue
-/// id. A NULL state re-resolves the default (same branch as creation).
-pub const ISSUE_STATE_SQL: &str = "SELECT i.state_id, s.\"group\" AS state_group FROM issues i LEFT JOIN states s ON s.id = i.state_id WHERE i.id = $1";
+/// Current state + group + stored completion stamp for the issue UPDATE
+/// arm (`Issue.save`, `issue.py:288-309`): the row's own state, if any.
+/// `$1` is the issue id. A NULL state re-resolves the default (same
+/// branch as creation); the stored `completed_at` rides along because
+/// the `state is None` branch never touches it.
+pub const ISSUE_STATE_SQL: &str = "SELECT i.state_id, s.\"group\" AS state_group, i.completed_at FROM issues i LEFT JOIN states s ON s.id = i.state_id WHERE i.id = $1";
 
 /// Adopt the resolved default on a stateless mirror (`Issue.save`,
 /// `issue.py:288-301`): `self.state = default_state` then the full
@@ -1162,20 +1170,25 @@ pub async fn upsert_issue(
             // new HTML, `updated_at` touches (auto_now) — then the audit
             // restamp via `filter(pk).update`, collapsed into the same
             // statement (identical final bytes).
-            let (state_id, state_group): (Option<Uuid>, Option<String>) =
-                sqlx::query_as(ISSUE_STATE_SQL)
-                    .bind(issue_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(db_error)?
-                    .unwrap_or((None, None));
+            let (state_id, state_group, stored_completed_at): (
+                Option<Uuid>,
+                Option<String>,
+                Option<DateTime<Utc>>,
+            ) = sqlx::query_as(ISSUE_STATE_SQL)
+                .bind(issue_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(db_error)?
+                .unwrap_or((None, None, None));
             let completed_at: Option<DateTime<Utc>> = match (state_id, state_group.as_deref()) {
                 (Some(_), Some("completed")) => Some(*now),
                 (Some(_), _) => None,
                 (None, _) => {
                     // `self.state is None` (`issue.py:288-296`): resolve
-                    // the default, store it on the row, and leave
-                    // `completed_at` unstamped.
+                    // the default and store it on the row. That branch
+                    // never touches `completed_at`, so the stored stamp
+                    // is preserved (it stays NULL on every row the sync
+                    // itself created).
                     let mut tx = pool.begin().await.map_err(db_error)?;
                     let resolved = save_default_state(&mut tx, &scan.project_id).await?;
                     tx.commit().await.map_err(db_error)?;
@@ -1185,7 +1198,7 @@ pub async fn upsert_issue(
                         .execute(pool)
                         .await
                         .map_err(db_error)?;
-                    None
+                    stored_completed_at
                 }
             };
             // `save()` recomputes the stripped form (`issue.py:345-350`).
@@ -2139,9 +2152,10 @@ mod tests {
         }
     }
 
-    // `_resolve_token`: missing/empty config yields `""` (the callers
-    // treat it as missing); round-trips through the Fernet keyring;
-    // non-string tokens error (Python raises outside the guarded try).
+    // `_resolve_token`: every falsy shape yields `""` (the callers
+    // treat it as missing — Python's `or ""`); round-trips through the
+    // Fernet keyring; truthy non-string tokens error (Python raises
+    // outside the guarded try).
     #[test]
     fn token_resolution_matches_python() {
         let keyring = pidash_db::config::encryption::Keyring::from_secret("test-secret-key");
@@ -2155,6 +2169,14 @@ mod tests {
             resolve_token(&json!({"token": null}), &keyring),
             Ok(String::new())
         );
+        // Falsy non-strings collapse through `or ""`, like Python.
+        for falsy in [json!(false), json!(0), json!([]), json!({})] {
+            assert_eq!(
+                resolve_token(&json!({"token": falsy}), &keyring),
+                Ok(String::new()),
+                "{falsy}"
+            );
+        }
         let ciphertext = keyring.encrypt("pat-123");
         assert_eq!(
             resolve_token(&json!({"token": ciphertext}), &keyring),
