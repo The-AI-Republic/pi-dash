@@ -331,6 +331,38 @@ where
     Ok(row.map(|r| r.0))
 }
 
+/// Multi-row INSERT for one reconcile chunk
+/// (`bulk_create(batch, ignore_conflicts=True, batch_size=500)`).
+/// Eight bound values per row in column order (`id`, `created_at`,
+/// `updated_at`, `job_id`, `workspace_id`, `user_id`, `next_run_at`,
+/// `last_skip_reason`); `ON CONFLICT DO NOTHING` is
+/// `ignore_conflicts=True`.
+fn reconcile_insert_sql(chunk_len: usize) -> String {
+    let placeholders = (0..chunk_len)
+        .map(|i| {
+            let b = i * 8 + 1;
+            format!(
+                "(${b}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                b + 1,
+                b + 2,
+                b + 3,
+                b + 4,
+                b + 5,
+                b + 6,
+                b + 7
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "INSERT INTO \"{t}\" (\"id\", \"created_at\", \"updated_at\", \
+        \"job_id\", \"workspace_id\", \"user_id\", \"next_run_at\", \
+        \"last_skip_reason\") VALUES {placeholders} \
+        ON CONFLICT DO NOTHING",
+        t = loop_target::TABLE,
+    )
+}
+
 /// Create missing `LoopTarget` rows for (enabled job × active edge)
 /// (`bgtasks/loop.py:62-108`). Throttled to once per
 /// `LOOP_RECONCILE_EVERY_MINUTES`; first fire is next occurrence plus
@@ -375,30 +407,7 @@ pub async fn reconcile_targets(pool: &PgPool, now: &DateTime<Utc>) -> Result<usi
                     next_run_at,
                 ));
             }
-            let placeholders = values
-                .iter()
-                .enumerate()
-                .map(|(i, _)| {
-                    let b = i * 7 + 1;
-                    format!(
-                        "(${b}, ${}, ${}, ${}, ${}, ${}, ${})",
-                        b + 1,
-                        b + 2,
-                        b + 3,
-                        b + 4,
-                        b + 5,
-                        b + 6
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            let sql = format!(
-                "INSERT INTO \"{t}\" (\"id\", \"created_at\", \"updated_at\", \
-                \"job_id\", \"workspace_id\", \"user_id\", \"next_run_at\", \
-                \"last_skip_reason\") VALUES {placeholders} \
-                ON CONFLICT DO NOTHING",
-                t = loop_target::TABLE,
-            );
+            let sql = reconcile_insert_sql(values.len());
             let mut query = sqlx::query(&sql);
             for (id, created_at, updated_at, job_id, workspace_id, user_id, next_run_at) in &values
             {
@@ -795,6 +804,37 @@ mod tests {
         let by_id = job_by_id_sql();
         assert!(matches!(parse(&by_id), sqlparser::ast::Statement::Query(_)));
         assert!(norm(&by_id).contains("from loop_jobs where loop_jobs.id = $1"));
+    }
+
+    // Reconcile INSERT (`bulk_create(ignore_conflicts=True)`): eight
+    // bound values per row need eight placeholders per row. A short
+    // placeholder list compiles and passes every broker-free test, then
+    // fails at runtime with a bind-count mismatch on the first non-empty
+    // reconcile — so the placeholder sequence is asserted exactly.
+    #[test]
+    fn reconcile_insert_binds_match_placeholders() {
+        for n in [1, 2, 3] {
+            let sql = reconcile_insert_sql(n);
+            assert!(matches!(parse(&sql), sqlparser::ast::Statement::Insert(_)));
+            let mut nums: Vec<usize> = Vec::new();
+            let bytes = sql.as_bytes();
+            let mut k = 0;
+            while k < bytes.len() {
+                if bytes[k] == b'$' {
+                    let mut j = k + 1;
+                    while j < bytes.len() && bytes[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    assert!(j > k + 1, "bare $ in:\n{sql}");
+                    nums.push(sql[k + 1..j].parse().expect("placeholder index"));
+                    k = j;
+                } else {
+                    k += 1;
+                }
+            }
+            nums.sort_unstable();
+            assert_eq!(nums, (1..=8 * n).collect::<Vec<_>>(), "in:\n{sql}");
+        }
     }
 
     // Fan-out payloads are Celery v2 wire-identical to the Python
