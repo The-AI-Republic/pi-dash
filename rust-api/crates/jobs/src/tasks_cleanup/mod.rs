@@ -18,6 +18,19 @@
 //! predicate the worker consults, and every name routes to `PythonOwned`.
 //!
 //! * [`workspace_seed`] — `bgtasks/workspace_seed_task.py` (PIDASHCONV-190).
+//!
+//! Background-task handlers for the D-09 cleanup domain (stage 5).
+//!
+//! Ports the Celery registration half of
+//! `apps/api/pi_dash/bgtasks/deletion_task.py` (PIDASHCONV-186). Task
+//! bodies live in `pidash-services` (`tasks_cleanup::deletion`); this
+//! module owns the Celery task names, the `(args, kwargs)` extraction,
+//! and the [`Registry`][crate::worker::Registry] wiring.
+//!
+//! Ownership note: [`register_deletion_tasks`] only builds the handler
+//! table. Flipping the live worker to these handlers (calling it from
+//! the binary) is the domain gate's call (PIDASHCONV-192, after the
+//! PIDASHCONV-21 proxy pass) — not this layer issue.
 
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Map, Value};
@@ -33,8 +46,13 @@ pub use pidash_types::tasks_cleanup::exports_dto::EXPORT_TASK_NAMES;
 // D-09 cleanup retention + mongo flush handlers (PIDASHCONV-185):
 // port of the `@shared_task` entry points of cleanup_task.py (`:422-:479`).
 pub mod cleanup;
+pub mod deletion;
 
 pub use cleanup::register_cleanup_handlers;
+pub use deletion::{
+    hard_delete_handler, register_deletion_tasks, soft_delete_handler, HARD_DELETE_TASK,
+    RESTORE_TASK_NAME, SOFT_DELETE_TASK,
+};
 
 /// True for the four D-09 export task names. The worker forwards them to
 /// the Python plane until the domain gate flips ownership.

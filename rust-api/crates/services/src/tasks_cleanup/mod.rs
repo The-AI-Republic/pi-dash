@@ -31,7 +31,22 @@
 //! (`:92-:163`, `:422-:479`).
 //!
 //! * [`workspace_seed`] — `bgtasks/workspace_seed_task.py` (PIDASHCONV-190).
+//!
+//! Business logic for the D-09 cleanup domain (stage 5).
+//!
+//! Ports the orchestration half of
+//! `apps/api/pi_dash/bgtasks/deletion_task.py` (PIDASHCONV-186): the
+//! soft-delete relation walk, the hard-delete driver, and the unregistered
+//! restore function. SQL shapes and catalog discovery live in `pidash-db`
+//! (`tasks_cleanup::deletion_queries`); worker registration lives in
+//! `pidash-jobs` (`tasks_cleanup::deletion`).
 
 pub mod cleanup;
+pub mod deletion;
 pub mod exports;
 pub mod workspace_seed;
+
+pub use deletion::{
+    hard_delete, parse_soft_delete_call, restore_related_objects, soft_delete_related_objects,
+    DeletionError, HardDeleteOutcome, SoftDeleteOutcome, SoftDeleteTarget,
+};
