@@ -17,7 +17,10 @@ serde = { version = "1", features = ["derive"] }
 # preserve_order: response envelopes and trimmed objects keep serializer field
 # order, which byte-identical JSON parity with DRF requires. serde_json::Map
 # is then insertion-ordered (IndexMap) instead of key-sorted (BTreeMap).
-serde_json = { version = "1", features = ["preserve_order"] }
+# arbitrary_precision: huge JSON integers (e.g. a 2**128 pk) keep their
+# original text, so Python-int vs float discrimination and the exact decimal
+# display DRF uses both survive parsing (`Number::to_string` echoes input).
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # DRF-compatible value rendering (F-07 serializer kernel): aware datetimes in
 # any IANA zone (TimezoneMixin activates the user's zone per request) and

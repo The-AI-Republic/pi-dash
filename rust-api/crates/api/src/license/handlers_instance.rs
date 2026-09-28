@@ -73,9 +73,7 @@ use pidash_db::license::queries::{
 };
 use pidash_types::license::serializers_core::{instance_to_representation, InstanceRow};
 
-use super::handlers_base::{
-    json_response, resolve_request_tz, HandlerError, CACHE_CONTROL_VALUE, INVALID_DETAIL_BODY,
-};
+use super::handlers_base::{json_response, resolve_request_tz, HandlerError, CACHE_CONTROL_VALUE};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
@@ -433,36 +431,155 @@ fn datatype_name(value: &serde_json::Value) -> &'static str {
     }
 }
 
-/// One validated column write.
+/// One validated column write. The `NullableUuid` display string is the
+/// original pk rendering DRF echoes in its `does_not_exist` message
+/// (`Invalid pk "<display>" - object does not exist.`): the raw string for
+/// string pks, the canonical decimal for integer pks.
 #[derive(Debug, Clone, PartialEq)]
 enum Assignment {
     Text(&'static str, String),
     NullableText(&'static str, Option<String>),
     Flag(&'static str, bool),
-    NullableUuid(&'static str, Option<Uuid>),
+    NullableUuid(&'static str, Option<(Uuid, String)>),
 }
 
-/// PATCH validation outcome: assignments, per-field errors
-/// (`serializer.errors`), or a whole-response `ValidationError`-branch
-/// error (a malformed UUID never reaches the queryset: Django raises
-/// `ValidationError`, mapped to `{"error": "Please provide valid
-/// detail"}`).
+/// PATCH validation outcome: assignments or per-field errors
+/// (`serializer.errors`). Every pk shape, including malformed UUIDs, maps
+/// to a per-field error: DRF catches Django's `ValidationError` inside
+/// `PrimaryKeyRelatedField` (`serializers.py:506`).
 #[derive(Debug, Clone, PartialEq)]
 enum PatchRejection {
     FieldErrors(Vec<(String, Vec<String>)>),
-    BadUuid,
 }
 
 const MAX_NAME_LEN: usize = 255;
 
 /// DRF `CharField` input: bools, objects and arrays are `"Not a valid
-/// string."`; numbers coerce via `str()`.
+/// string."`; numbers coerce via `str()`; strings are stripped
+/// (`trim_whitespace=True`), so blank-check, length-count and storage all
+/// see the trimmed value.
 fn as_text(value: &serde_json::Value) -> Result<String, &'static str> {
     match value {
-        serde_json::Value::String(s) => Ok(s.clone()),
+        serde_json::Value::String(s) => Ok(s.trim().to_owned()),
         serde_json::Value::Number(n) => Ok(n.to_string()),
         _ => Err("Not a valid string."),
     }
+}
+
+/// Python `str()` of a float, for pk error displays: shortest round-trip
+/// digits with `e±XX` exponents (`1.0`, `1.5`, `1e+16`, `1e-05`).
+fn py_float_str(n: f64) -> String {
+    if n.is_nan() {
+        return "nan".to_owned();
+    }
+    if n.is_infinite() {
+        return if n.is_sign_positive() {
+            "inf".to_owned()
+        } else {
+            "-inf".to_owned()
+        };
+    }
+    let rendered = format!("{n:?}");
+    let Some(pos) = rendered.find('e') else {
+        return rendered;
+    };
+    let (mantissa, exp) = rendered.split_at(pos);
+    let exp: i32 = exp[1..].parse().unwrap_or(0);
+    format!("{mantissa}e{exp:+03}")
+}
+
+/// Python `repr()` of a string: single quotes unless the value holds one
+/// (and no double quote), with backslash and control escapes.
+fn py_repr_str(s: &str) -> String {
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push(quote);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if (c < '\u{20}') || c == '\u{7f}' => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
+/// Python `repr()` of a JSON value (container elements, dict keys).
+fn py_repr_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "None".to_owned(),
+        serde_json::Value::Bool(true) => "True".to_owned(),
+        serde_json::Value::Bool(false) => "False".to_owned(),
+        serde_json::Value::Number(n) => py_number_str(n),
+        serde_json::Value::String(s) => py_repr_str(s),
+        serde_json::Value::Array(items) => {
+            let inner: Vec<String> = items.iter().map(py_repr_value).collect();
+            format!("[{}]", inner.join(", "))
+        }
+        serde_json::Value::Object(object) => {
+            let inner: Vec<String> = object
+                .iter()
+                .map(|(key, item)| format!("{}: {}", py_repr_str(key), py_repr_value(item)))
+                .collect();
+            format!("{{{}}}", inner.join(", "))
+        }
+    }
+}
+
+/// Python `str()` of a JSON value: bare strings, `repr()` otherwise.
+fn py_str_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        _ => py_repr_value(value),
+    }
+}
+
+/// Python `str()` of a JSON number: decimal for ints, [`py_float_str`]
+/// for floats. Int-vs-float follows the token shape (no `.`/`e`/`E` is an
+/// int), which `arbitrary_precision` preserves verbatim.
+fn py_number_str(n: &serde_json::Number) -> String {
+    let token = n.to_string();
+    if token.bytes().any(|b| b == b'.' || b == b'e' || b == b'E') {
+        py_float_str(n.as_f64().unwrap_or(f64::NAN))
+    } else {
+        token
+    }
+}
+
+/// Django `UUIDField.get_prep_value` for an integer pk: `uuid.UUID(int=…)`,
+/// valid exactly for `[0, 2**128)`. Returns the UUID plus the canonical
+/// decimal DRF echoes in both the lookup and the failure messages.
+fn uuid_from_int_token(token: &str) -> Option<(Uuid, String)> {
+    if let Ok(v) = token.parse::<i128>() {
+        if v >= 0 {
+            return Some((Uuid::from_u128(v as u128), v.to_string()));
+        }
+        return None;
+    }
+    token
+        .parse::<u128>()
+        .ok()
+        .map(|v| (Uuid::from_u128(v), v.to_string()))
+}
+
+/// The Django `UUIDField` failure message, curly quotes included
+/// (Django emits them raw UTF-8: the renderer runs `ensure_ascii=False`).
+fn invalid_uuid_message(display: &str) -> String {
+    format!("\u{201c}{display}\u{201d} is not a valid UUID.")
 }
 
 /// DRF `BooleanField` input: the strict true/false sets plus `1` / `0`
@@ -565,7 +682,7 @@ fn validate_partial(
         }
     }
     if let Some(value) = get("latest_version") {
-        if let Some(text) = check_text("latest_version", value, true, None, &mut errors) {
+        if let Some(text) = check_text("latest_version", value, true, CAPPED, &mut errors) {
             sets.push(Assignment::NullableText("latest_version", Some(text)));
         }
     }
@@ -580,7 +697,7 @@ fn validate_partial(
         }
     }
     if let Some(value) = get("namespace") {
-        if let Some(text) = check_text("namespace", value, true, None, &mut errors) {
+        if let Some(text) = check_text("namespace", value, true, CAPPED, &mut errors) {
             sets.push(Assignment::NullableText("namespace", Some(text)));
         }
     }
@@ -600,22 +717,46 @@ fn validate_partial(
         }
     }
     // `created_by` / `updated_by`: writable `PrimaryKeyRelatedField`s over
-    // users. Non-strings are `incorrect_type`; malformed UUIDs raise
-    // Django `ValidationError` before any queryset hit (a whole-response
-    // 400); well-formed UUIDs are checked against users by the caller.
+    // users. DRF catches every conversion failure per field
+    // (`serializers.py:506`), so each shape below is a field error: bools
+    // are `incorrect_type`; strings parse as UUIDs; integers coerce through
+    // `uuid.UUID(int=…)` (valid for `[0, 2**128)`) and are looked up;
+    // floats, lists and dicts fail with the Python `str()` of the value.
     for field in ["created_by", "updated_by"] {
         if let Some(value) = get(field) {
             match value {
-                serde_json::Value::String(raw) => match raw.parse::<Uuid>() {
-                    Ok(id) => sets.push(Assignment::NullableUuid(field, Some(id))),
-                    Err(_) => return Err(PatchRejection::BadUuid),
-                },
-                other => errors.push((
+                serde_json::Value::Bool(_) => errors.push((
                     field.to_owned(),
                     vec![format!(
                         "Incorrect type. Expected pk value, received {}.",
-                        datatype_name(other)
+                        datatype_name(value)
                     )],
+                )),
+                serde_json::Value::String(raw) => match raw.parse::<Uuid>() {
+                    Ok(id) => sets.push(Assignment::NullableUuid(field, Some((id, raw.clone())))),
+                    Err(_) => errors.push((field.to_owned(), vec![invalid_uuid_message(raw)])),
+                },
+                serde_json::Value::Number(n) => {
+                    let token = n.to_string();
+                    if token.bytes().any(|b| b == b'.' || b == b'e' || b == b'E') {
+                        errors.push((
+                            field.to_owned(),
+                            vec![invalid_uuid_message(&py_number_str(n))],
+                        ));
+                    } else {
+                        match uuid_from_int_token(&token) {
+                            Some((id, display)) => {
+                                sets.push(Assignment::NullableUuid(field, Some((id, display))));
+                            }
+                            None => {
+                                errors.push((field.to_owned(), vec![invalid_uuid_message(&token)]))
+                            }
+                        }
+                    }
+                }
+                other => errors.push((
+                    field.to_owned(),
+                    vec![invalid_uuid_message(&py_str_value(other))],
                 )),
             }
         }
@@ -680,11 +821,9 @@ async fn patch_instance(
             ));
         }
     };
-    let sets = validate_partial(&object).map_err(|rejection| match rejection {
-        PatchRejection::FieldErrors(errors) => {
-            HandlerError::FieldErrors(render_field_errors(&errors))
-        }
-        PatchRejection::BadUuid => HandlerError::BadError(INVALID_DETAIL_BODY.to_owned()),
+    let sets = validate_partial(&object).map_err(|rejection| {
+        let PatchRejection::FieldErrors(errors) = rejection;
+        HandlerError::FieldErrors(render_field_errors(&errors))
     })?;
     let row = fetch_instance_first(pool)
         .await
@@ -815,7 +954,7 @@ async fn check_user_assignments(
 ) -> Result<(), HandlerError> {
     let mut errors = Vec::new();
     for set in sets {
-        if let Assignment::NullableUuid(field, Some(id)) = set {
+        if let Assignment::NullableUuid(field, Some((id, display))) = set {
             let hit: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM users WHERE id = $1")
                 .bind(id)
                 .fetch_optional(pool)
@@ -824,7 +963,7 @@ async fn check_user_assignments(
             if hit.is_none() {
                 errors.push((
                     (*field).to_owned(),
-                    vec![format!("Invalid pk \"{id}\" - object does not exist.")],
+                    vec![format!("Invalid pk \"{display}\" - object does not exist.")],
                 ));
             }
         }
@@ -886,7 +1025,7 @@ fn push_assignment(builder: &mut QueryBuilder<Postgres>, set: &Assignment) {
             builder.push(format!("{column} = "));
             builder.push_bind(*flag);
         }
-        Assignment::NullableUuid(column, Some(target)) => {
+        Assignment::NullableUuid(column, Some((target, _))) => {
             builder.push(format!("{column}_id = "));
             builder.push_bind(*target);
         }
@@ -983,7 +1122,7 @@ async fn insert_instance(
             Some(Assignment::Flag(_, flag)) => {
                 builder.push_bind(*flag);
             }
-            Some(Assignment::NullableUuid(_, Some(target))) => {
+            Some(Assignment::NullableUuid(_, Some((target, _)))) => {
                 builder.push_bind(*target);
             }
             Some(Assignment::NullableUuid(_, None)) => {
@@ -1209,20 +1348,160 @@ mod tests {
     }
 
     #[test]
-    fn patch_pk_type_errors_match_drf() {
-        // A non-string pk is `incorrect_type` (a field error); a malformed
-        // UUID string raises Django `ValidationError` before any queryset
-        // hit (a whole-response error).
-        let body = obj(serde_json::json!({"created_by": 42}));
+    fn patch_pk_errors_match_drf_per_field() {
+        // DRF catches every pk conversion failure per field
+        // (`serializers.py:506`): only bools are `incorrect_type`; every
+        // other malformed shape is a `“… is not a valid UUID.”` field
+        // error. Bodies parsed from raw JSON so the token path (including
+        // `arbitrary_precision` echo) matches the wire.
+        let uuid_msg = |display: &str| format!("\u{201c}{display}\u{201d} is not a valid UUID.");
+        let field_error = |field: &str, message: &str| {
+            format!(
+                "{{\"{field}\":[{msg}]}}",
+                msg = serde_json::to_string(message).expect("message")
+            )
+        };
+        // Malformed string: UUID message with the raw value (curly quotes
+        // U+201C/U+201D, raw UTF-8 on the wire like Django's
+        // `ensure_ascii=False` renderer).
+        let body: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"created_by": "not-a-uuid"}"#).expect("json");
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+            panic!("expected field errors");
+        };
+        let rendered = render_field_errors(&errors);
+        assert_eq!(rendered, field_error("created_by", &uuid_msg("not-a-uuid")));
+        assert!(
+            rendered
+                .as_bytes()
+                .windows(3)
+                .any(|w| w == [0xe2, 0x80, 0x9c]),
+            "curly quotes are raw UTF-8, not \\u escapes: {rendered:?}"
+        );
+        // Ints in `[0, 2**128)` coerce via `uuid.UUID(int=…)` and are
+        // looked up: validation passes with the canonical decimal display.
+        for (raw, display) in [
+            ("42", "42"),
+            ("0", "0"),
+            (
+                "340282366920938463463374607431768211455",
+                "340282366920938463463374607431768211455",
+            ),
+        ] {
+            let body: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(&format!(r#"{{"created_by": {raw}}}"#)).expect("json");
+            let sets = validate_partial(&body).expect("int pk validates");
+            assert_eq!(
+                sets,
+                vec![Assignment::NullableUuid(
+                    "created_by",
+                    Some((
+                        Uuid::from_u128(display.parse::<u128>().expect("u128")),
+                        display.to_owned()
+                    )),
+                )],
+                "input {raw}"
+            );
+        }
+        // Out-of-range ints fail with the decimal display.
+        for raw in ["340282366920938463463374607431768211456", "-5"] {
+            let body: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(&format!(r#"{{"created_by": {raw}}}"#)).expect("json");
+            let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+                panic!("expected field errors for {raw}");
+            };
+            assert_eq!(
+                render_field_errors(&errors),
+                field_error("created_by", &uuid_msg(raw)),
+                "input {raw}"
+            );
+        }
+        // Floats fail with the Python `str()` of the value.
+        for (raw, display) in [("1.5", "1.5"), ("1.0", "1.0"), ("1e3", "1000.0")] {
+            let body: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(&format!(r#"{{"created_by": {raw}}}"#)).expect("json");
+            let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+                panic!("expected field errors for {raw}");
+            };
+            assert_eq!(
+                render_field_errors(&errors),
+                field_error("created_by", &uuid_msg(display)),
+                "input {raw}"
+            );
+        }
+        // Lists and dicts fail with the Python `str()` (single quotes).
+        for (raw, display) in [(r#"["a"]"#, "['a']"), (r#"{"a": 1}"#, "{'a': 1}")] {
+            let body: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(&format!(r#"{{"created_by": {raw}}}"#)).expect("json");
+            let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+                panic!("expected field errors for {raw}");
+            };
+            assert_eq!(
+                render_field_errors(&errors),
+                field_error("created_by", &uuid_msg(display)),
+                "input {raw}"
+            );
+        }
+        // Bools stay `incorrect_type`; `updated_by` mirrors `created_by`.
+        let body = obj(serde_json::json!({"created_by": true}));
         let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
             panic!("expected field errors");
         };
         assert_eq!(
             render_field_errors(&errors),
-            r#"{"created_by":["Incorrect type. Expected pk value, received int."]}"#
+            r#"{"created_by":["Incorrect type. Expected pk value, received bool."]}"#
         );
-        let body = obj(serde_json::json!({"created_by": "not-a-uuid"}));
-        assert_eq!(validate_partial(&body), Err(PatchRejection::BadUuid));
+        let body = obj(serde_json::json!({"updated_by": "not-a-uuid"}));
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+            panic!("expected field errors");
+        };
+        assert_eq!(
+            render_field_errors(&errors),
+            field_error("updated_by", &uuid_msg("not-a-uuid"))
+        );
+    }
+
+    #[test]
+    fn patch_namespace_and_latest_version_cap_at_255() {
+        // Both are `CharField(max_length=255)` (`models/instance.py:28,33`);
+        // the `TextField`s (`whitelist_emails`, `domain`) stay uncapped.
+        for field in ["namespace", "latest_version"] {
+            let body = obj(serde_json::json!({field: "x".repeat(300)}));
+            let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+                panic!("expected field errors for {field}");
+            };
+            assert_eq!(
+                render_field_errors(&errors),
+                format!("{{\"{field}\":[\"Ensure this field has no more than 255 characters.\"]}}"),
+                "field {field}"
+            );
+            let body = obj(serde_json::json!({field: "x".repeat(255)}));
+            assert!(validate_partial(&body).is_ok(), "field {field}");
+        }
+    }
+
+    #[test]
+    fn patch_trims_text_like_drf() {
+        // DRF `trim_whitespace`: whitespace-only fails blank-guarded
+        // fields, surrounding runs are stripped before store.
+        let body = obj(serde_json::json!({"instance_name": "   "}));
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+            panic!("expected field errors");
+        };
+        assert_eq!(
+            render_field_errors(&errors),
+            r#"{"instance_name":["This field may not be blank."]}"#
+        );
+        let body = obj(serde_json::json!({"instance_name": "  x  "}));
+        assert_eq!(
+            validate_partial(&body).expect("trimmed"),
+            vec![Assignment::Text("instance_name", "x".to_owned())]
+        );
+        let body = obj(serde_json::json!({"domain": "   "}));
+        assert_eq!(
+            validate_partial(&body).expect("blank ok"),
+            vec![Assignment::Text("domain", String::new())]
+        );
     }
 
     #[test]
