@@ -129,6 +129,15 @@ async fn serve(bind: &str) -> MainResult {
     Ok(())
 }
 
+/// Seed-data directory for `workspace_seed` (`settings.SEED_DIR`,
+/// `apps/api/pi_dash/settings/common.py:743`): `SEED_DIR` env, else the
+/// `seeds` checkout dir. Missing files only empty the seed.
+fn seed_data_dir() -> std::path::PathBuf {
+    std::env::var("SEED_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("seeds"))
+}
+
 async fn worker(concurrency: u32) -> MainResult {
     let db = pidash_db::DbConfig::from_env()?;
     let pools = pidash_db::Pools::connect(&db, None).await?;
@@ -159,6 +168,23 @@ async fn worker(concurrency: u32) -> MainResult {
     }
     pidash_jobs::tasks_cleanup::register_cleanup_handlers(&mut registry, pools.clone(), mongo);
     pidash_jobs::tasks_cleanup::register_versions(&mut registry, pools.primary().clone());
+    // D-09 remaining groups (PIDASHCONV-224; kept in sync with
+    // `tests::worker_registry_owns_all_d09_local_tasks`). The four export
+    // tasks stay Python-owned: never register them here.
+    pidash_jobs::tasks_cleanup::register_deletion_tasks(&mut registry, pools.clone());
+    // `register_assets` installs sweep + metadata + copy (assets.rs:692).
+    pidash_jobs::tasks_cleanup::assets::register_assets(
+        &mut registry,
+        pools.primary().clone(),
+        std::sync::Arc::new(pidash_jobs::tasks_cleanup::assets::UnavailableObjectStore),
+        std::sync::Arc::new(pidash_jobs::tasks_cleanup::assets::NoopLiveConvert),
+    );
+    pidash_jobs::tasks_cleanup::register_workspace_seed(
+        &mut registry,
+        pools.primary().clone(),
+        seed_data_dir(),
+    );
+    pidash_jobs::tasks_cleanup::dummy_data::register(&mut registry, pools.primary().clone());
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,
         ..Default::default()
@@ -306,6 +332,85 @@ mod tests {
         match worker.mode {
             Mode::Worker { concurrency } => assert_eq!(concurrency, 2),
             Mode::Serve { .. } => panic!("wrong mode"),
+        }
+    }
+
+    /// PIDASHCONV-224: the worker owns every local D-09 task name, while
+    /// `restore_related_objects` and the four export tasks still route to
+    /// Python. Mirrors the `worker()` registration block: the `PgPool`
+    /// groups register for real (lazy pool, no I/O); the `Pools` groups
+    /// (cleanup, deletion) register stubs over the same name constants
+    /// the real register fns consume — `Pools` cannot be built without a
+    /// database (same precedent as `all_five_tasks_registered`).
+    #[tokio::test]
+    async fn worker_registry_owns_all_d09_local_tasks() {
+        use pidash_jobs::tasks_cleanup;
+        use pidash_jobs::worker::{route_for, Handler, Registry, Route, Verdict};
+
+        // `connect_lazy` never touches the network (it needs a Tokio
+        // context to build the pool, hence `tokio::test`): registration
+        // wiring stays testable with no database.
+        let pool =
+            sqlx::PgPool::connect_lazy("postgres://localhost:1/unused").expect("lazy pool builds");
+        let mut registry = Registry::new();
+        // Real registrations (the same calls `worker()` makes).
+        tasks_cleanup::register_versions(&mut registry, pool.clone());
+        tasks_cleanup::assets::register_assets(
+            &mut registry,
+            pool.clone(),
+            std::sync::Arc::new(tasks_cleanup::assets::UnavailableObjectStore),
+            std::sync::Arc::new(tasks_cleanup::assets::NoopLiveConvert),
+        );
+        tasks_cleanup::register_workspace_seed(&mut registry, pool.clone(), std::env::temp_dir());
+        tasks_cleanup::dummy_data::register(&mut registry, pool.clone());
+        // Stub-backed: the exact names the `Pools`-taking registers own.
+        for spec in tasks_cleanup::cleanup::TASKS {
+            let handler: Handler = std::sync::Arc::new(|_| Box::pin(async { Ok(Verdict::Ack) }));
+            registry.register(spec.task, handler);
+        }
+        for name in [
+            tasks_cleanup::SOFT_DELETE_TASK,
+            tasks_cleanup::HARD_DELETE_TASK,
+        ] {
+            let handler: Handler = std::sync::Arc::new(|_| Box::pin(async { Ok(Verdict::Ack) }));
+            registry.register(name, handler);
+        }
+
+        let mut local: Vec<&str> = tasks_cleanup::cleanup::TASKS
+            .iter()
+            .map(|spec| spec.task)
+            .collect();
+        local.extend([
+            tasks_cleanup::SOFT_DELETE_TASK,
+            tasks_cleanup::HARD_DELETE_TASK,
+            tasks_cleanup::assets::TASK_DELETE_UNUPLOADED,
+            tasks_cleanup::assets::TASK_GET_METADATA,
+            tasks_cleanup::assets::TASK_COPY_S3_OBJECTS,
+            tasks_cleanup::WORKSPACE_SEED_TASK_NAME,
+            tasks_cleanup::dummy_data::TASK_NAME,
+        ]);
+        local.extend(tasks_cleanup::versions::ALL_VERSION_TASKS);
+        assert_eq!(local.len(), 19, "D-09 local task count drifted");
+        for name in local {
+            assert!(registry.owns(name), "{name} must be worker-owned");
+            assert_eq!(route_for(&registry, name), Route::Local);
+            assert!(
+                !tasks_cleanup::is_export_task(name),
+                "{name} must not be an export task"
+            );
+        }
+
+        // Still Python-owned: restore (BUG-DEL-2) plus the four exports.
+        assert!(!registry.owns(tasks_cleanup::RESTORE_TASK_NAME));
+        assert_eq!(
+            route_for(&registry, tasks_cleanup::RESTORE_TASK_NAME),
+            Route::PythonOwned
+        );
+        assert_eq!(tasks_cleanup::EXPORT_TASK_NAMES.len(), 4);
+        for name in tasks_cleanup::EXPORT_TASK_NAMES {
+            assert!(tasks_cleanup::is_export_task(name));
+            assert!(!registry.owns(name), "{name} must stay Python-owned");
+            assert_eq!(route_for(&registry, name), Route::PythonOwned);
         }
     }
 }
