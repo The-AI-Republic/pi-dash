@@ -1,0 +1,532 @@
+{
+  "_fixture": "F-WIRE-MAIL",
+  "_method": "executed: .venv-contract python /tmp/probe_d07_wire.py (celery 5.6.3, memory:// broker, real kombu app.amqp.create_task_message + harness assert_wire_message per task); volatile header ids normalized to <uuid>, origin to <origin>; eta_sample used countdown=60",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "_sources": [
+    "apps/api/pi_dash/bgtasks/email_notification_task.py:46-47,152-153",
+    "apps/api/pi_dash/bgtasks/notification_task.py:190-191",
+    "apps/api/pi_dash/bgtasks/magic_link_code_task.py:23",
+    "apps/api/pi_dash/bgtasks/forgot_password_task.py:23",
+    "apps/api/pi_dash/bgtasks/user_activation_email_task.py:23",
+    "apps/api/pi_dash/bgtasks/user_deactivation_email_task.py:23",
+    "apps/api/pi_dash/bgtasks/user_email_update_task.py:22,67",
+    "apps/api/pi_dash/bgtasks/project_add_user_email_task.py:25",
+    "apps/api/pi_dash/bgtasks/workspace_invitation_task.py:23",
+    "apps/api/pi_dash/celery.py:29-32",
+    "rust-api/contract-tests/_harness/celery_wire.py:1-100 (capture path)"
+  ],
+  "beat": {
+    "entry": "check-every-five-minutes-to-send-email-notifications",
+    "schedule": "crontab(minute=\"*/5\")",
+    "source_lines": [
+      "    \"check-every-five-minutes-to-send-email-notifications\": {",
+      "        \"task\": \"pi_dash.bgtasks.email_notification_task.stack_email_notification\","
+    ],
+    "task": "pi_dash.bgtasks.email_notification_task.stack_email_notification"
+  },
+  "eta_sample": {
+    "headers_eta": "2026-09-28T06:01:07.519352+00:00",
+    "note": "countdown=60 -> eta ISO with +00:00 (F-09 AutoSi fractions)",
+    "task": "pi_dash.bgtasks.magic_link_code_task.magic_link"
+  },
+  "messages": {
+    "pi_dash.bgtasks.email_notification_task.send_email_notification": {
+      "body_args": [],
+      "body_kwargs": {
+        "email_notification_ids": [],
+        "issue_id": "11111111-1111-1111-1111-111111111111",
+        "notification_data": {},
+        "receiver_id": "22222222-2222-2222-2222-222222222222"
+      },
+      "cpython_argsrepr": "[]",
+      "cpython_kwargsrepr": "{'issue_id': '11111111-1111-1111-1111-111111111111', 'notification_data': {}, 'receiver_id': '22222222-2222-2222-2222-222222222222', 'email_notification_ids': []}",
+      "embed": {
+        "callbacks": null,
+        "chain": null,
+        "chord": null,
+        "errbacks": null
+      },
+      "headers": {
+        "argsrepr": "()",
+        "eta": null,
+        "expires": null,
+        "group": null,
+        "group_index": null,
+        "id": "<uuid>",
+        "ignore_result": false,
+        "kwargsrepr": "{'issue_id': '11111111-1111-1111-1111-111111111111', 'notification_data': {}, 'receiver_id': '22222222-2222-2222-2222-222222222222', 'email_notification_ids': []}",
+        "lang": "py",
+        "origin": "<origin>",
+        "parent_id": null,
+        "replaced_task_nesting": 0,
+        "retries": 0,
+        "root_id": "<uuid>",
+        "shadow": null,
+        "stamped_headers": null,
+        "stamps": {},
+        "task": "pi_dash.bgtasks.email_notification_task.send_email_notification",
+        "timelimit": [
+          null,
+          null
+        ]
+      },
+      "note": "argsrepr/kwargsrepr are CPython repr, insertion order (preserve_order); eta renders +00:00 (F-09)",
+      "properties": {
+        "correlation_id": "<uuid>",
+        "reply_to": ""
+      }
+    },
+    "pi_dash.bgtasks.email_notification_task.stack_email_notification": {
+      "body_args": [],
+      "body_kwargs": {},
+      "cpython_argsrepr": "[]",
+      "cpython_kwargsrepr": "{}",
+      "embed": {
+        "callbacks": null,
+        "chain": null,
+        "chord": null,
+        "errbacks": null
+      },
+      "headers": {
+        "argsrepr": "()",
+        "eta": null,
+        "expires": null,
+        "group": null,
+        "group_index": null,
+        "id": "<uuid>",
+        "ignore_result": false,
+        "kwargsrepr": "{}",
+        "lang": "py",
+        "origin": "<origin>",
+        "parent_id": null,
+        "replaced_task_nesting": 0,
+        "retries": 0,
+        "root_id": "<uuid>",
+        "shadow": null,
+        "stamped_headers": null,
+        "stamps": {},
+        "task": "pi_dash.bgtasks.email_notification_task.stack_email_notification",
+        "timelimit": [
+          null,
+          null
+        ]
+      },
+      "note": "argsrepr/kwargsrepr are CPython repr, insertion order (preserve_order); eta renders +00:00 (F-09)",
+      "properties": {
+        "correlation_id": "<uuid>",
+        "reply_to": ""
+      }
+    },
+    "pi_dash.bgtasks.forgot_password_task.forgot_password": {
+      "body_args": [
+        "Contract",
+        "contract@example.com",
+        "uidb64",
+        "token",
+        "example.com"
+      ],
+      "body_kwargs": {},
+      "cpython_argsrepr": "['Contract', 'contract@example.com', 'uidb64', 'token', 'example.com']",
+      "cpython_kwargsrepr": "{}",
+      "embed": {
+        "callbacks": null,
+        "chain": null,
+        "chord": null,
+        "errbacks": null
+      },
+      "headers": {
+        "argsrepr": "['Contract', 'contract@example.com', 'uidb64', 'token', 'example.com']",
+        "eta": null,
+        "expires": null,
+        "group": null,
+        "group_index": null,
+        "id": "<uuid>",
+        "ignore_result": false,
+        "kwargsrepr": "{}",
+        "lang": "py",
+        "origin": "<origin>",
+        "parent_id": null,
+        "replaced_task_nesting": 0,
+        "retries": 0,
+        "root_id": "<uuid>",
+        "shadow": null,
+        "stamped_headers": null,
+        "stamps": {},
+        "task": "pi_dash.bgtasks.forgot_password_task.forgot_password",
+        "timelimit": [
+          null,
+          null
+        ]
+      },
+      "note": "argsrepr/kwargsrepr are CPython repr, insertion order (preserve_order); eta renders +00:00 (F-09)",
+      "properties": {
+        "correlation_id": "<uuid>",
+        "reply_to": ""
+      }
+    },
+    "pi_dash.bgtasks.magic_link_code_task.magic_link": {
+      "body_args": [
+        "contract@example.com",
+        "key",
+        "token"
+      ],
+      "body_kwargs": {},
+      "cpython_argsrepr": "['contract@example.com', 'key', 'token']",
+      "cpython_kwargsrepr": "{}",
+      "embed": {
+        "callbacks": null,
+        "chain": null,
+        "chord": null,
+        "errbacks": null
+      },
+      "headers": {
+        "argsrepr": "['contract@example.com', 'key', 'token']",
+        "eta": null,
+        "expires": null,
+        "group": null,
+        "group_index": null,
+        "id": "<uuid>",
+        "ignore_result": false,
+        "kwargsrepr": "{}",
+        "lang": "py",
+        "origin": "<origin>",
+        "parent_id": null,
+        "replaced_task_nesting": 0,
+        "retries": 0,
+        "root_id": "<uuid>",
+        "shadow": null,
+        "stamped_headers": null,
+        "stamps": {},
+        "task": "pi_dash.bgtasks.magic_link_code_task.magic_link",
+        "timelimit": [
+          null,
+          null
+        ]
+      },
+      "note": "argsrepr/kwargsrepr are CPython repr, insertion order (preserve_order); eta renders +00:00 (F-09)",
+      "properties": {
+        "correlation_id": "<uuid>",
+        "reply_to": ""
+      }
+    },
+    "pi_dash.bgtasks.notification_task.notifications": {
+      "body_args": [
+        "issue.activity.created",
+        "11111111-1111-1111-1111-111111111111",
+        "22222222-2222-2222-2222-222222222222",
+        "33333333-3333-3333-3333-333333333333",
+        [],
+        null,
+        {},
+        {}
+      ],
+      "body_kwargs": {},
+      "cpython_argsrepr": "['issue.activity.created', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333', [], None, {}, {}]",
+      "cpython_kwargsrepr": "{}",
+      "embed": {
+        "callbacks": null,
+        "chain": null,
+        "chord": null,
+        "errbacks": null
+      },
+      "headers": {
+        "argsrepr": "['issue.activity.created', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333', [], None, {}, {}]",
+        "eta": null,
+        "expires": null,
+        "group": null,
+        "group_index": null,
+        "id": "<uuid>",
+        "ignore_result": false,
+        "kwargsrepr": "{}",
+        "lang": "py",
+        "origin": "<origin>",
+        "parent_id": null,
+        "replaced_task_nesting": 0,
+        "retries": 0,
+        "root_id": "<uuid>",
+        "shadow": null,
+        "stamped_headers": null,
+        "stamps": {},
+        "task": "pi_dash.bgtasks.notification_task.notifications",
+        "timelimit": [
+          null,
+          null
+        ]
+      },
+      "note": "argsrepr/kwargsrepr are CPython repr, insertion order (preserve_order); eta renders +00:00 (F-09)",
+      "properties": {
+        "correlation_id": "<uuid>",
+        "reply_to": ""
+      }
+    },
+    "pi_dash.bgtasks.project_add_user_email_task.project_add_user_email": {
+      "body_args": [
+        "example.com",
+        "11111111-1111-1111-1111-111111111111",
+        "22222222-2222-2222-2222-222222222222"
+      ],
+      "body_kwargs": {},
+      "cpython_argsrepr": "['example.com', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222']",
+      "cpython_kwargsrepr": "{}",
+      "embed": {
+        "callbacks": null,
+        "chain": null,
+        "chord": null,
+        "errbacks": null
+      },
+      "headers": {
+        "argsrepr": "['example.com', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222']",
+        "eta": null,
+        "expires": null,
+        "group": null,
+        "group_index": null,
+        "id": "<uuid>",
+        "ignore_result": false,
+        "kwargsrepr": "{}",
+        "lang": "py",
+        "origin": "<origin>",
+        "parent_id": null,
+        "replaced_task_nesting": 0,
+        "retries": 0,
+        "root_id": "<uuid>",
+        "shadow": null,
+        "stamped_headers": null,
+        "stamps": {},
+        "task": "pi_dash.bgtasks.project_add_user_email_task.project_add_user_email",
+        "timelimit": [
+          null,
+          null
+        ]
+      },
+      "note": "argsrepr/kwargsrepr are CPython repr, insertion order (preserve_order); eta renders +00:00 (F-09)",
+      "properties": {
+        "correlation_id": "<uuid>",
+        "reply_to": ""
+      }
+    },
+    "pi_dash.bgtasks.user_activation_email_task.user_activation_email": {
+      "body_args": [
+        "example.com",
+        "11111111-1111-1111-1111-111111111111"
+      ],
+      "body_kwargs": {},
+      "cpython_argsrepr": "['example.com', '11111111-1111-1111-1111-111111111111']",
+      "cpython_kwargsrepr": "{}",
+      "embed": {
+        "callbacks": null,
+        "chain": null,
+        "chord": null,
+        "errbacks": null
+      },
+      "headers": {
+        "argsrepr": "['example.com', '11111111-1111-1111-1111-111111111111']",
+        "eta": null,
+        "expires": null,
+        "group": null,
+        "group_index": null,
+        "id": "<uuid>",
+        "ignore_result": false,
+        "kwargsrepr": "{}",
+        "lang": "py",
+        "origin": "<origin>",
+        "parent_id": null,
+        "replaced_task_nesting": 0,
+        "retries": 0,
+        "root_id": "<uuid>",
+        "shadow": null,
+        "stamped_headers": null,
+        "stamps": {},
+        "task": "pi_dash.bgtasks.user_activation_email_task.user_activation_email",
+        "timelimit": [
+          null,
+          null
+        ]
+      },
+      "note": "argsrepr/kwargsrepr are CPython repr, insertion order (preserve_order); eta renders +00:00 (F-09)",
+      "properties": {
+        "correlation_id": "<uuid>",
+        "reply_to": ""
+      }
+    },
+    "pi_dash.bgtasks.user_deactivation_email_task.user_deactivation_email": {
+      "body_args": [
+        "example.com",
+        "11111111-1111-1111-1111-111111111111"
+      ],
+      "body_kwargs": {},
+      "cpython_argsrepr": "['example.com', '11111111-1111-1111-1111-111111111111']",
+      "cpython_kwargsrepr": "{}",
+      "embed": {
+        "callbacks": null,
+        "chain": null,
+        "chord": null,
+        "errbacks": null
+      },
+      "headers": {
+        "argsrepr": "['example.com', '11111111-1111-1111-1111-111111111111']",
+        "eta": null,
+        "expires": null,
+        "group": null,
+        "group_index": null,
+        "id": "<uuid>",
+        "ignore_result": false,
+        "kwargsrepr": "{}",
+        "lang": "py",
+        "origin": "<origin>",
+        "parent_id": null,
+        "replaced_task_nesting": 0,
+        "retries": 0,
+        "root_id": "<uuid>",
+        "shadow": null,
+        "stamped_headers": null,
+        "stamps": {},
+        "task": "pi_dash.bgtasks.user_deactivation_email_task.user_deactivation_email",
+        "timelimit": [
+          null,
+          null
+        ]
+      },
+      "note": "argsrepr/kwargsrepr are CPython repr, insertion order (preserve_order); eta renders +00:00 (F-09)",
+      "properties": {
+        "correlation_id": "<uuid>",
+        "reply_to": ""
+      }
+    },
+    "pi_dash.bgtasks.user_email_update_task.send_email_update_confirmation": {
+      "body_args": [
+        "contract@example.com"
+      ],
+      "body_kwargs": {},
+      "cpython_argsrepr": "['contract@example.com']",
+      "cpython_kwargsrepr": "{}",
+      "embed": {
+        "callbacks": null,
+        "chain": null,
+        "chord": null,
+        "errbacks": null
+      },
+      "headers": {
+        "argsrepr": "['contract@example.com']",
+        "eta": null,
+        "expires": null,
+        "group": null,
+        "group_index": null,
+        "id": "<uuid>",
+        "ignore_result": false,
+        "kwargsrepr": "{}",
+        "lang": "py",
+        "origin": "<origin>",
+        "parent_id": null,
+        "replaced_task_nesting": 0,
+        "retries": 0,
+        "root_id": "<uuid>",
+        "shadow": null,
+        "stamped_headers": null,
+        "stamps": {},
+        "task": "pi_dash.bgtasks.user_email_update_task.send_email_update_confirmation",
+        "timelimit": [
+          null,
+          null
+        ]
+      },
+      "note": "argsrepr/kwargsrepr are CPython repr, insertion order (preserve_order); eta renders +00:00 (F-09)",
+      "properties": {
+        "correlation_id": "<uuid>",
+        "reply_to": ""
+      }
+    },
+    "pi_dash.bgtasks.user_email_update_task.send_email_update_magic_code": {
+      "body_args": [
+        "contract@example.com",
+        "token"
+      ],
+      "body_kwargs": {},
+      "cpython_argsrepr": "['contract@example.com', 'token']",
+      "cpython_kwargsrepr": "{}",
+      "embed": {
+        "callbacks": null,
+        "chain": null,
+        "chord": null,
+        "errbacks": null
+      },
+      "headers": {
+        "argsrepr": "['contract@example.com', 'token']",
+        "eta": null,
+        "expires": null,
+        "group": null,
+        "group_index": null,
+        "id": "<uuid>",
+        "ignore_result": false,
+        "kwargsrepr": "{}",
+        "lang": "py",
+        "origin": "<origin>",
+        "parent_id": null,
+        "replaced_task_nesting": 0,
+        "retries": 0,
+        "root_id": "<uuid>",
+        "shadow": null,
+        "stamped_headers": null,
+        "stamps": {},
+        "task": "pi_dash.bgtasks.user_email_update_task.send_email_update_magic_code",
+        "timelimit": [
+          null,
+          null
+        ]
+      },
+      "note": "argsrepr/kwargsrepr are CPython repr, insertion order (preserve_order); eta renders +00:00 (F-09)",
+      "properties": {
+        "correlation_id": "<uuid>",
+        "reply_to": ""
+      }
+    },
+    "pi_dash.bgtasks.workspace_invitation_task.workspace_invitation": {
+      "body_args": [
+        "contract@example.com",
+        "11111111-1111-1111-1111-111111111111",
+        "token",
+        "example.com",
+        "inviter"
+      ],
+      "body_kwargs": {},
+      "cpython_argsrepr": "['contract@example.com', '11111111-1111-1111-1111-111111111111', 'token', 'example.com', 'inviter']",
+      "cpython_kwargsrepr": "{}",
+      "embed": {
+        "callbacks": null,
+        "chain": null,
+        "chord": null,
+        "errbacks": null
+      },
+      "headers": {
+        "argsrepr": "['contract@example.com', '11111111-1111-1111-1111-111111111111', 'token', 'example.com', 'inviter']",
+        "eta": null,
+        "expires": null,
+        "group": null,
+        "group_index": null,
+        "id": "<uuid>",
+        "ignore_result": false,
+        "kwargsrepr": "{}",
+        "lang": "py",
+        "origin": "<origin>",
+        "parent_id": null,
+        "replaced_task_nesting": 0,
+        "retries": 0,
+        "root_id": "<uuid>",
+        "shadow": null,
+        "stamped_headers": null,
+        "stamps": {},
+        "task": "pi_dash.bgtasks.workspace_invitation_task.workspace_invitation",
+        "timelimit": [
+          null,
+          null
+        ]
+      },
+      "note": "argsrepr/kwargsrepr are CPython repr, insertion order (preserve_order); eta renders +00:00 (F-09)",
+      "properties": {
+        "correlation_id": "<uuid>",
+        "reply_to": ""
+      }
+    }
+  },
+  "protocol": "celery-v2 (kombu create_task_message)",
+  "task_options": "all 11 live tasks use bare @shared_task (no kwargs): ack-on-success default, no acks_late/max_retries/autoretry (verified by AST over all 10 bgtasks files)"
+}

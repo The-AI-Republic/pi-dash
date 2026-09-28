@@ -1,0 +1,44 @@
+{
+  "_fixture": "F-COMMON",
+  "_method": "source-derived control-flow table (verified by reading each task tail).",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "_sources": [
+    "apps/api/pi_dash/bgtasks/email_notification_task.py:265-306",
+    "apps/api/pi_dash/bgtasks/notification_task.py:672-674",
+    "apps/api/pi_dash/bgtasks/magic_link_code_task.py:60-63",
+    "apps/api/pi_dash/bgtasks/forgot_password_task.py:68-71",
+    "apps/api/pi_dash/bgtasks/user_activation_email_task.py:65-68",
+    "apps/api/pi_dash/bgtasks/user_deactivation_email_task.py:67-70",
+    "apps/api/pi_dash/bgtasks/user_email_update_task.py:61-64,110-113",
+    "apps/api/pi_dash/bgtasks/project_add_user_email_task.py:85-88",
+    "apps/api/pi_dash/bgtasks/workspace_invitation_task.py:84-88",
+    "apps/api/pi_dash/utils/exception_logger.py:12-23 (log_exception)"
+  ],
+  "log_exception": "getLogger('pi_dash.exception').exception(e); if settings.DEBUG: .debug(traceback). Returns None always.",
+  "table": [
+    {
+      "handler": "NONE \u2014 exceptions propagate to Celery",
+      "task": "stack_email_notification"
+    },
+    {
+      "handler": "send-block Exception -> log_exception+release+return; (Issue,User).DoesNotExist -> release+return (silent); outer Exception -> log_exception+release+return",
+      "task": "send_email_notification"
+    },
+    {
+      "handler": "except Exception as e: print(e); return (PRINT to stdout, not logging)",
+      "task": "notifications"
+    },
+    {
+      "handler": "except Exception as e: log_exception(e); return (swallow, returns None)",
+      "task": "magic_link / forgot_password / user_activation / user_deactivation / 2x email_update / project_add_user"
+    },
+    {
+      "handler": "except (Workspace.DoesNotExist, WorkspaceMemberInvite.DoesNotExist): silent return; except Exception: log_exception, return",
+      "task": "workspace_invitation"
+    },
+    {
+      "handler": "except (Project.DoesNotExist, ProjectMemberInvite.DoesNotExist): silent return; except Exception: log_exception, return",
+      "task": "project_invitation (DEAD)"
+    }
+  ]
+}

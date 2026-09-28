@@ -1,0 +1,70 @@
+{
+  "_fixture": "F-MEMBER",
+  "_method": "source-derived (User/Project/Workspace/Invite SELECTs + UPDATE; live coverage is the worker-plane oracle)",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "_sources": [
+    "apps/api/pi_dash/bgtasks/user_activation_email_task.py:23-69",
+    "apps/api/pi_dash/bgtasks/user_deactivation_email_task.py:23-71",
+    "apps/api/pi_dash/bgtasks/project_add_user_email_task.py:25-89",
+    "apps/api/pi_dash/bgtasks/workspace_invitation_task.py:23-89"
+  ],
+  "tasks": {
+    "project_add_user_email(current_site, project_member_id, invitor_id)": {
+      "context": [
+        "project_name",
+        "workspace_name",
+        "email (member)",
+        "inviter_first_name",
+        "project_url"
+      ],
+      "project_url": "{current_site}/{workspace.slug}/projects/{project_id}/issues",
+      "reads": [
+        "User.objects.get(pk=invitor_id)",
+        "ProjectMember.objects.get(pk=project_member_id)",
+        "project_member.project.name/.workspace.name/.member.email via FK (lazy SELECTs)",
+        "inviter_first_name = invitor.first_name (no fallback chain, unlike invite tasks)"
+      ],
+      "subject": "You have been invited to a Pi Dash project (fixed string)",
+      "template": "emails/notifications/project_addition.html"
+    },
+    "user_activation_email(current_site, user_id)": {
+      "context": {
+        "email": "str(user.email)",
+        "profile_url": "current_site + '/profile'"
+      },
+      "read": "User.objects.get(id=user_id)",
+      "subject": "{first_name or display_name or email} has been activated on Pi Dash",
+      "template": "emails/user/user_activation.html",
+      "to": "[user.email]"
+    },
+    "user_deactivation_email(current_site, user_id)": {
+      "context": {
+        "email": "str(user.email)",
+        "login_url": "current_site + '/login'"
+      },
+      "read": "User.objects.get(id=user_id)",
+      "subject": "{first_name or display_name or email} has been deactivated on Pi Dash",
+      "template": "emails/user/user_deactivation.html",
+      "to": "[user.email]"
+    },
+    "workspace_invitation(email, workspace_id, token, current_site, inviter)": {
+      "abs_url": "str(current_site) + relative_link",
+      "context": {
+        "abs_url": "abs_url",
+        "email": "email",
+        "first_name": "first_name or display_name or email",
+        "workspace_name": "workspace.name"
+      },
+      "exceptions": "except (Workspace.DoesNotExist, WorkspaceMemberInvite.DoesNotExist): silent return (NOTE: User.DoesNotExist NOT caught -> falls to log_exception path)",
+      "reads": [
+        "User.objects.get(email=inviter) (lookup BY EMAIL, inviter is an address)",
+        "Workspace.objects.get(pk=workspace_id)",
+        "WorkspaceMemberInvite.objects.get(token=token, email=email)"
+      ],
+      "relative_link": "/workspace-invitations/?invitation_id={invite.id}&slug={workspace.slug}&token={token}",
+      "subject": "{first_name or display_name or email} has invited you to join them in {workspace.name} on Pi Dash",
+      "template": "emails/invitations/workspace_invitation.html",
+      "write": "workspace_member_invite.message = text_content; .save() (plain-text body stored on the invite)"
+    }
+  }
+}

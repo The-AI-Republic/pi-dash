@@ -1,0 +1,19 @@
+{
+  "_fixture": "DEAD (no fixture, not ported)",
+  "_method": "verified by grep over apps/api (this run): import search, beat search, call-site read",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "_sources": [
+    "apps/api/pi_dash/bgtasks/project_invitation_task.py:1-86 (stays in place)",
+    "apps/api/pi_dash/app/views/project/invite.py:98-110",
+    "apps/api/pi_dash/celery.py:29-60 (beat schedule)"
+  ],
+  "disposition": "SKIP: no fixture, no test, Python stays in place",
+  "evidence": [
+    "zero imports of pi_dash.bgtasks.project_invitation_task anywhere under apps/api (grep, excl __pycache__)",
+    "only apparent call site invite.py:104-105 calls .delay() on `project_invitations`, the LIST returned by bulk_create(:98-99) \u2014 not on the task object; the loop variable `invitation` is never used",
+    "no beat entry naming project_invitation in celery.py (grep 'invitation' in celery.py: no match)",
+    "worker-plane CI 2026-09-24: 74 registered tasks, this one missing (per issue + oracle comment)",
+    "oracle rust-api/contract-tests/tasks_mail/test_mail_tasks.py MAIL_TASKS excludes it by design"
+  ],
+  "task": "pi_dash.bgtasks.project_invitation_task.project_invitation (email, project_id, token, current_site, invitor)"
+}
