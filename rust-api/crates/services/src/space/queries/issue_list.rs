@@ -1605,7 +1605,8 @@ mod tests {
         assert!(reaction_items_annotation_sql().ends_with("AS \"reaction_items\""));
         // Avatar FK column: User.avatar_asset is a ForeignKey
         // (db/models/user.py:69), so live Django renders avatar_asset_id on
-        // the actor join — a bare "avatar_asset" ref fails at plan time.
+        // the actor join — a bare "avatar_asset" ref fails at plan time
+        // (42P01/42703).
         for sql in [vote_items_annotation_sql(), reaction_items_annotation_sql()] {
             assert!(sql.contains("\"avatar_asset_id\""), "FK column ref");
             assert!(
