@@ -44,7 +44,7 @@ pub const STACK_EMAIL_NOTIFICATION_TASK: &str =
 pub const SEND_EMAIL_NOTIFICATION_TASK: &str =
     "pi_dash.bgtasks.email_notification_task.send_email_notification";
 /// `pi_dash.bgtasks.notification_task.notifications`
-/// (`notification_task.py:191`). Handler lands in PIDASHCONV-215.
+/// (`notification_task.py:191`). Handler in [`notifications`].
 pub const NOTIFICATIONS_TASK: &str = "pi_dash.bgtasks.notification_task.notifications";
 /// `pi_dash.bgtasks.magic_link_code_task.magic_link`
 /// (`magic_link_code_task.py:23`). Handler in [`auth_mail`].
@@ -120,6 +120,20 @@ pub fn is_mail_task(task: &str) -> bool {
 /// PIDASHCONV-21 proxy pass.
 pub fn assert_python_owned(registry: &Registry, task: &str) -> bool {
     !registry.owns(task) && is_mail_task(task)
+}
+
+/// Register the T4 `notifications` task name on `registry` (F-WIRE-MAIL name,
+/// plain `@shared_task`: default ack-on-success, no `autoretry_for` — the
+/// handler always acknowledges, mirroring the swallow-everything body).
+/// Like [`register_auth_mail_tasks`], this only builds the handler table —
+/// flipping the live worker to it is the domain gate's call (PIDASHCONV-218,
+/// after the PIDASHCONV-21 proxy pass), so the name still routes to
+/// `PythonOwned` (see [`crate::worker::route_for`]).
+pub fn register_notifications_task(registry: &mut Registry, pool: sqlx::PgPool) {
+    registry.register(
+        NOTIFICATIONS_TASK,
+        notifications::notifications_handler(pool),
+    );
 }
 
 /// Register all four T5 task names on `registry` (F-WIRE-MAIL names, plain
@@ -478,6 +492,24 @@ mod tests {
         // T5 names and the dead invitation task are NOT registered here.
         assert!(!registry.owns("pi_dash.bgtasks.magic_link_code_task.magic_link"));
         assert!(!registry.owns("pi_dash.bgtasks.project_invitation_task.project_invitation"));
+    }
+
+    #[tokio::test]
+    async fn registry_owns_only_the_notifications_name() {
+        // T4 (PIDASHCONV-215): registering the notifications task owns
+        // exactly `NOTIFICATIONS_TASK`; every neighbor stays Python-owned
+        // until the domain gate flips routing (PIDASHCONV-218).
+        let pool = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/nope").expect("lazy");
+        let mut registry = Registry::new();
+        register_notifications_task(&mut registry, pool);
+        assert!(registry.owns(NOTIFICATIONS_TASK));
+        assert!(registry.owns("pi_dash.bgtasks.notification_task.notifications"));
+        for name in TASK_NAMES {
+            if name != NOTIFICATIONS_TASK {
+                assert!(!registry.owns(name), "{name}");
+            }
+        }
+        assert!(assert_python_owned(&Registry::new(), NOTIFICATIONS_TASK));
     }
 
     #[test]
