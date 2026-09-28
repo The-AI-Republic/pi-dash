@@ -31,3 +31,7 @@ minijinja = { version = "2" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
+# D-04 seeding: sha256 assertions over the FIX-seed / FIX-scheduler golden
+# bodies in this crate's own tests; same locked sha2 0.11.x as pidash-db
+# (no lock churn).
+sha2 = { version = "0.11" }
