@@ -13,8 +13,11 @@
 //!   (`space/views/{project,meta,cycle,module,state,label}.py`).
 //! * [`intake_assets`] — intake-issue + file-asset read/write queries
 //!   (`space/views/{intake,asset}.py`).
+//! * [`social`] — comment / issue-reaction / comment-reaction / vote reads
+//!   (`space/views/issue.py`).
 //!
-//! Later layer issues extend this module (`issue_list` for PIDASHCONV-168,
-//! comments/reactions/votes); they add files here, never a fork.
+//! Later layer issues extend this module (`issue_list` for PIDASHCONV-168);
+//! they add files here, never a fork.
 pub mod intake_assets;
 pub mod project_meta;
+pub mod social;
