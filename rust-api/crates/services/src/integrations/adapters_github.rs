@@ -49,9 +49,14 @@
 //!   canonical form with `str(int(number))` (leading zeros stripped).
 //! * `credential_capabilities` keys off `auth_type` with a `"pat"`
 //!   default; `clone` is always `false`.
-//! * `_token` falls back to the raw token when decryption fails closed
-//!   (the golden's `token_missing.source` note); an empty token raises
-//!   `GitProviderError::Auth("GitHub token is missing")`.
+//! * `_token` returns the decrypted token verbatim — no raw fallback
+//!   (unlike GitLab's `_token`); an undecryptable token decrypts to `""`
+//!   and the transport rejects it with `Auth("empty token")`, exactly
+//!   like `GithubClient("")` raising `GithubAuthError`. An empty stored
+//!   token raises `GitProviderError::Auth("GitHub token is missing")`.
+//!   Either way the credential is rejected before any `int()` parse,
+//!   matching Python's `_client(credential)`-before-`int(issue_iid)`
+//!   evaluation order (PIDASHCONV-241).
 //!
 //! Deliberate approximations (unreachable with real GitHub payloads,
 //! documented here instead of a paragraph per call site):
@@ -494,15 +499,17 @@ fn json_type_name(value: &Value) -> &'static str {
 }
 
 impl<C: GithubClient> GitHubAdapter<C> {
-    /// `_token` (`github.py:87-91`): the stored PAT decrypted, falling back
-    /// to the raw value when decryption fails closed. An empty token raises
-    /// `GitProviderError::Auth("GitHub token is missing")`.
+    /// `_token` (`github.py:87-94`): the stored PAT decrypted verbatim —
+    /// unlike GitLab's `_token` (`gitlab.py:191-198`, `decrypt_data(token)
+    /// or token`), GitHub has no raw fallback, so an undecryptable token
+    /// yields `""`. An empty stored token raises
+    /// `GitProviderError::Auth("GitHub token is missing")`; an empty
+    /// decrypted token flows into `connect`, where the transport rejects
+    /// it (`Auth("empty token")`, like `GithubClient("")` raising
+    /// `GithubAuthError`), before any `int()` parse.
     ///
     /// `Keyring::decrypt` never fails outwardly (it yields `""`, mirroring
-    /// `decrypt_data`'s log-and-empty wart), so a non-empty input
-    /// decrypting to `""` *is* the failure signal — and the golden's
-    /// fallback branch. A stored plaintext token therefore also passes
-    /// through verbatim.
+    /// `decrypt_data`'s log-and-empty wart).
     fn token(&self, credential: &Value) -> Result<String, GitProviderError> {
         let raw = credential
             .get("token")
@@ -511,12 +518,7 @@ impl<C: GithubClient> GitHubAdapter<C> {
         if raw.is_empty() {
             return Err(GitProviderError::Auth("GitHub token is missing".to_owned()));
         }
-        let decrypted = self.keyring.decrypt(raw);
-        if decrypted.is_empty() {
-            Ok(raw.to_owned())
-        } else {
-            Ok(decrypted)
-        }
+        Ok(self.keyring.decrypt(raw))
     }
 
     /// `_client` (`github.py:92-96`): GitHub App credentials (with a truthy
@@ -1010,13 +1012,14 @@ mod tests {
     }
 
     fn test_adapter<C: GithubClient>() -> GitHubAdapter<C> {
-        // A secret the tests never encrypt with, so stored plaintext
-        // tokens exercise the raw-fallback branch.
         GitHubAdapter::new(Keyring::from_secret("test-secret-key"))
     }
 
+    /// A valid stored credential: "raw-pat" encrypted the way production
+    /// stores PATs, so `_token` decrypts it back verbatim.
     fn pat_credential() -> Value {
-        json!({"token": "raw-pat", "auth_type": "pat"})
+        let stored = Keyring::from_secret("test-secret-key").encrypt("raw-pat");
+        json!({"token": stored, "auth_type": "pat"})
     }
 
     fn parsed_repo() -> ParsedRepository {
@@ -1482,14 +1485,107 @@ mod tests {
     }
 
     #[test]
-    fn undecryptable_token_falls_back_to_raw() {
-        // "test-secret-key" never encrypted "raw-pat": decrypt fails
-        // closed, so the client receives the raw value (golden source
-        // note on adapters/github.py:87-94).
+    fn undecryptable_token_rejected_like_python() {
+        // `github.py:87-94` has no raw fallback (unlike GitLab): a stored
+        // token that fails decrypt yields `""`, and `GithubClient("")`
+        // raises — the `GitProviderAuthError: empty token` Django records
+        // for a bad credential with a numeric iid (PIDASHCONV-241 CASE1).
+        let adapter = test_adapter::<EmptyRejectingClient>();
+        assert_eq!(adapter.token(&raw_credential()), Ok(String::new()));
+        assert_eq!(
+            adapter.verify_provider_account(&raw_credential()),
+            Err(GitProviderError::Auth("empty token".into()))
+        );
+    }
+
+    #[test]
+    fn encrypted_pat_connects_with_decrypted_token() {
+        // The valid stored credential decrypts back to the PAT the
+        // transport is built with (production shape: Fernet-sealed).
         let adapter = test_adapter::<PatClient>();
         assert_eq!(
             adapter.verify_provider_account(&pat_credential()),
             Ok(json!({"login": "octocat"}))
+        );
+    }
+
+    /// Transport rejecting empty tokens exactly like the real client
+    /// (`ReqwestGithubClient::connect` → `Auth("empty token")`, mirroring
+    /// `GithubClient.__init__` in `utils/github_client.py:39-42`).
+    struct EmptyRejectingClient;
+    impl GithubClient for EmptyRejectingClient {
+        fn connect(auth: &ClientAuth) -> Result<Self, GithubError> {
+            match auth {
+                ClientAuth::Token(token) if token.is_empty() => {
+                    Err(GithubError::Auth("empty token".into()))
+                }
+                _ => Ok(EmptyRejectingClient),
+            }
+        }
+        fn get_authenticated_user(&self) -> Result<Value, GithubError> {
+            unimplemented!()
+        }
+        fn list_user_repos(&self, _page: i64) -> Result<(Vec<Value>, bool), GithubError> {
+            unimplemented!()
+        }
+        fn get_repo(&self, _owner: &str, _name: &str) -> Result<Value, GithubError> {
+            unimplemented!()
+        }
+        fn list_all_open_issues(
+            &self,
+            _owner: &str,
+            _name: &str,
+        ) -> Result<Vec<Value>, GithubError> {
+            unimplemented!()
+        }
+        fn list_issue_comments(
+            &self,
+            _owner: &str,
+            _name: &str,
+            _issue_number: i64,
+        ) -> Result<Vec<Value>, GithubError> {
+            unimplemented!()
+        }
+        fn post_issue_comment(
+            &self,
+            _owner: &str,
+            _name: &str,
+            _issue_number: i64,
+            _body: &str,
+        ) -> Result<Value, GithubError> {
+            unimplemented!()
+        }
+        fn get_pull_request(
+            &self,
+            _owner: &str,
+            _name: &str,
+            _number: i64,
+        ) -> Result<Value, GithubError> {
+            unimplemented!()
+        }
+    }
+
+    /// Credential whose token was never encrypted: decrypt fails closed.
+    fn raw_credential() -> Value {
+        json!({"token": "raw-pat", "auth_type": "pat"})
+    }
+
+    #[test]
+    fn empty_credential_rejected_before_iid_parse() {
+        // PIDASHCONV-241: Python evaluates `_client(credential)` before
+        // `int(issue_iid)` (`github.py:216`), so the undecryptable
+        // credential raises `GitProviderAuthError: empty token` even when
+        // the iid is also non-numeric. The fake's `post_issue_comment`
+        // is `unimplemented`: reaching the transport would panic, so a
+        // pass proves the credential is rejected first.
+        let adapter = test_adapter::<EmptyRejectingClient>();
+        assert_eq!(
+            adapter.post_issue_comment(&raw_credential(), &remote_repo(), "abc", "done"),
+            Err(GitProviderError::Auth("empty token".into()))
+        );
+        assert_eq!(
+            adapter.list_issue_comments(&raw_credential(), &remote_repo(), "abc"),
+            Err(GitProviderError::Auth("empty token".into()))
         );
     }
 
