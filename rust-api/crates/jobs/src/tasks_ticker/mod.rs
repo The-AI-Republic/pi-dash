@@ -6,6 +6,7 @@
 //! loop workers all call [`rrule::next_fire_from_rrule`] here rather than
 //! re-porting expansion.
 
+pub mod fire_binding;
 pub mod fire_tick;
 pub mod rrule;
 pub mod scan;
