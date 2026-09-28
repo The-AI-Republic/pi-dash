@@ -137,8 +137,11 @@ impl Overlay {
 ///
 /// The License group serves the D-01 instance console (`license`):
 /// `GET`/`PATCH /api/instances/` and
-/// `POST /api/instances/admins/sign-up-screen-visited/`; every other
-/// method on those paths proxies to Django.
+/// `POST /api/instances/admins/sign-up-screen-visited/` (PIDASHCONV-120),
+/// plus the configuration + workspace family
+/// (`license::config_workspace_routes`, PIDASHCONV-123): the five owned
+/// paths with their owned methods; every other method on those paths
+/// proxies to Django.
 fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
     match group {
         RouteGroup::Web => Router::new()
