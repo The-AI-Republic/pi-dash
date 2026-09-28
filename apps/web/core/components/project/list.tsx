@@ -19,14 +19,14 @@ import { useProject } from "@/hooks/store/use-project";
 import { useProjectFilter } from "@/hooks/store/use-project-filter";
 import { useUserPermissions } from "@/hooks/store/user";
 // local imports
-import { ProjectCard } from "./card";
+import { ProjectListItem } from "./list-item";
 
-type TProjectCardListProps = {
+type TProjectsListProps = {
   totalProjectIds?: string[];
   filteredProjectIds?: string[];
 };
 
-export const ProjectCardList = observer(function ProjectCardList(props: TProjectCardListProps) {
+export const ProjectsList = observer(function ProjectsList(props: TProjectsListProps) {
   const { totalProjectIds: totalProjectIdsProps, filteredProjectIds: filteredProjectIdsProps } = props;
   // pi dash hooks
   const { t } = useTranslation();
@@ -59,7 +59,9 @@ export const ProjectCardList = observer(function ProjectCardList(props: TProject
     return (
       <EmptyStateDetailed
         title={t("No active projects")}
-        description={t("Think of each project as the parent for goal-oriented work. Projects are where Jobs, Cycles, and Modules live and, along with your colleagues, help you achieve that goal. Create a new project or filter for archived projects.")}
+        description={t(
+          "Think of each project as the parent for goal-oriented work. Projects are where Jobs, Cycles, and Modules live and, along with your colleagues, help you achieve that goal. Create a new project or filter for archived projects."
+        )}
         assetKey="project"
         assetClassName="size-40"
         actions={[
@@ -102,11 +104,11 @@ export const ProjectCardList = observer(function ProjectCardList(props: TProject
 
   return (
     <ContentWrapper>
-      <div className="grid grid-cols-1 gap-8 md:grid-cols-2 lg:grid-cols-3">
+      <div className="flex flex-col divide-y divide-subtle overflow-hidden rounded-lg border border-subtle bg-layer-2">
         {filteredProjectIds.map((projectId) => {
           const projectDetails = getProjectById(projectId);
           if (!projectDetails) return;
-          return <ProjectCard key={projectDetails.id} project={projectDetails} />;
+          return <ProjectListItem key={projectDetails.id} project={projectDetails} />;
         })}
       </div>
     </ContentWrapper>
