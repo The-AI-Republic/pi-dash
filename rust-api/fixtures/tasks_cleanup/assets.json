@@ -1,0 +1,81 @@
+{
+  "_about": "D-09 file assets + storage metadata + S3 copy behaviour. Ported from 01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "_method": "Values produced by executing the named Python code under pi_dash.settings.test with no DB/S3 (venv /tmp/ct100-django-venv). Generators: /tmp/fx_d09b.py, /tmp/fx_d09c.py (throwaway).",
+  "_trace": [
+    "file_asset_task.py:21-26 delete_unuploaded_file_asset UPDATE SQL (soft delete!)",
+    "storage_metadata_task.py:15-30 get_asset_object_metadata protocol",
+    "copy_s3_object.py:18-30 get_entity_id_field golden",
+    "copy_s3_object.py:33-39 extract_asset_ids golden",
+    "copy_s3_object.py:42-52 replace_asset_ids golden",
+    "copy_s3_object.py:55-59 update_description protocol",
+    "copy_s3_object.py:63-83 sync_with_external_service protocol",
+    "copy_s3_object.py:86-119 copy_assets protocol",
+    "copy_s3_object.py:123-161 copy_s3_objects_of_description_and_assets protocol"
+  ],
+  "delete_unuploaded_file_asset": {
+    "update_sql": [
+      "UPDATE \"file_assets\" SET \"deleted_at\" = '2026-09-28 06:00:00+00:00' WHERE (\"file_assets\".\"deleted_at\" IS NULL AND \"file_assets\".\"created_at\" < '2026-09-21 06:00:00+00:00' AND NOT \"file_assets\".\"is_uploaded\")"
+    ],
+    "cutoff_env": "UNUPLOADED_ASSET_DELETE_DAYS default '7' (os.environ direct).",
+    "cutoff_frozen": "2026-09-21 06:00:00+00:00",
+    "trap": ".delete() on the default manager routes to SoftDeletionQuerySet.delete -> UPDATE file_assets SET deleted_at=now (db/mixins.py:49-53), scoped to deleted_at IS NULL. This sweep NEVER hard-deletes. Predicate: created_at < cutoff AND is_uploaded IS FALSE."
+  },
+  "get_asset_object_metadata": "FileAsset.objects.get(pk) (DoesNotExist -> silent); S3Storage().get_object_metadata(asset.asset.name) -> asset.storage_metadata; save(update_fields=['storage_metadata']); broad except -> log_exception. Returns None.",
+  "entity_id_fields": {
+    "WORKSPACE_LOGO": {
+      "workspace_id": "e1"
+    },
+    "ISSUE_ATTACHMENT": {
+      "issue_id": "e2"
+    },
+    "PAGE_DESCRIPTION": {
+      "page_id": "e3"
+    },
+    "COMMENT_DESCRIPTION": {
+      "comment_id": "e4"
+    },
+    "DRAFT_ISSUE_DESCRIPTION": {
+      "draft_issue_id": "e5"
+    },
+    "DRAFT_ISSUE_ATTACHMENT": {},
+    "BOGUS": {}
+  },
+  "entity_id_note": "DRAFT_ISSUE_ATTACHMENT exists on the enum but is ABSENT from the mapping -> {} (port as-is); unknown types -> {}.",
+  "extract_asset_ids": {
+    "golden": ["id-1"],
+    "no_match": [],
+    "broken_html_returns_empty": [],
+    "note": "BeautifulSoup(html, 'html.parser'); [tag.get('src') for tags if tag.get('src')]; ANY exception (incl. None input: TypeError) -> log_exception + []. Tag name passed by callers is 'image-component'."
+  },
+  "replace_asset_ids": {
+    "golden": "<p>t</p><image-component src=\"id-2\"></image-component><img src=\"keep\"/>",
+    "no_match_unchanged_except_reparse": "<p>t</p><image-component src=\"id-1\"></image-component><img src=\"keep\"/>",
+    "note": "Rewrites src where src == old_asset_id; returns str(soup) (re-serialized HTML); exception -> return ORIGINAL html."
+  },
+  "update_description": "updated=replace_asset_ids(entity.description_html, tag, duplicated_assets); entity.description_html=updated; entity.save() FULL save; returns updated html.",
+  "sync_with_external_service": {
+    "contract": "convert_document(html, variant='rich' iff entity_name=='PAGE' else 'document'); LiveConversionError -> log_exception + {} so the duplicate is still created (empty binary regenerated on first open).",
+    "returns": "{description_json, description_binary: b64-ascii}."
+  },
+  "copy_assets": {
+    "scope": "FileAsset.objects.filter(workspace, project_id, id__in=asset_ids).",
+    "destination_key": "{workspace.id}/{uuid4hex}-{original.attributes['name']} (KeyError if name missing \u2014 unguarded .get on attributes dict itself would be None-attr crash; port as-is).",
+    "duplicate_row": "attributes={name,type,size} subset; asset=destination_key; size copied; workspace; created_by=user_id; entity_type copied; project_id; storage_metadata copied; **get_entity_id_field(entity_type, entity_identifier). storage.copy_object(src_key, dst_key) per asset.",
+    "finalize": "iff any duplicated: filter(pk__in=new ids).update(is_uploaded=True).",
+    "pair_shape": "{new_asset_id: str, old_asset_id: str}."
+  },
+  "copy_s3_objects_of_description_and_assets": {
+    "entity_map": "{PAGE: Page, ISSUE: Issue}; anything else -> ValueError -> caught -> log_exception -> return [] (list, NOT None).",
+    "flow": "get entity (DoesNotExist -> [] via broad except); extract ids (tag 'image-component'); copy_assets; update_description; sync_with_external_service(updated_html); iff external_data non-empty: description_json = data.get(...) or {} (NOT NULL + default=dict trap: never store None); binary b64decoded iff present; entity.save(). Success path returns None (bare return); failure returns []."
+  },
+  "db_before_after": {
+    "delete_unuploaded_file_asset": {
+      "before": "file_assets rows is_uploaded=false, created_at < now()-7d, deleted_at NULL.",
+      "after": "Same rows with deleted_at = run timestamp; all other rows untouched."
+    },
+    "copy_s3_objects": {
+      "before": "Source entity with description_html referencing asset ids; source FileAsset rows uploaded.",
+      "after": "New FileAsset rows (is_uploaded=true) + new S3 keys; entity description_html rewritten to new ids; description_json/binary refreshed iff the live service answered."
+    }
+  }
+}
