@@ -26,12 +26,27 @@
 //!   archive/close beat task (projects windows, candidate SELECT, single
 //!   column bulk writes, per-issue `issue_activity` fan-out) and the
 //!   [`Registry`][crate::worker::Registry] wiring.
+//! * [`webhook_send`] — `save_webhook_log`,
+//!   `send_webhook_deactivation_email` and `webhook_send_task` from
+//!   `bgtasks/webhook_task.py` (PIDASHCONV-194): task names, `.delay()`
+//!   kwargs constructors, retry policy, and every pure decision (action
+//!   map, envelope, HMAC input rendering, log-document builder,
+//!   retry/deactivation choice, email builders).
+//!
+//! Ownership (webhook send path): these tasks stay Python-owned. No local
+//! handler is registered here — registering one would steal live traffic
+//! from the Python workers while the webhook-row fetch, HTTP send, mongo
+//! sink and SMTP send still live there. The domain gate flips ownership
+//! after the oracle replay passes on both backends. Until then
+//! [`webhook_send::is_webhook_task`] is the routing predicate the
+//! worker consults, and every name routes to `PythonOwned`.
 
 pub mod activity_dispatch;
 pub mod automation;
 pub mod link_crawl;
 pub mod sinks;
 pub mod visit_page;
+pub mod webhook_send;
 
 pub use activity_dispatch::{
     activity_json, bind_issue_activity, build_notifications_job, django_dumps, drf_datetime,
@@ -69,4 +84,7 @@ pub use sinks::{
 pub use visit_page::{
     is_visit_page_task, page_transaction_message, recent_visited_task_message,
     register_visit_page_handlers, PAGE_TRANSACTION_TASK_NAME, RECENT_VISITED_TASK_NAME,
+};
+pub use webhook_send::{
+    is_webhook_task, DEACTIVATION_EMAIL_TASK_NAME, WEBHOOK_SEND_TASK_NAME, WEBHOOK_TASK_NAMES,
 };

@@ -18,6 +18,10 @@
 //!   `get_entity_details` from `bgtasks/page_transaction_task.py:21-82`
 //!   (PIDASHCONV-201). The task entry point itself lives in `pidash-jobs`
 //!   (`tasks_webhooks::visit_page`).
+//! * [`webhook_data`] — `SERIALIZER_MAPPER` / `MODEL_MAPPER`,
+//!   `get_issue_prefetches` and `get_model_data` from
+//!   `bgtasks/webhook_task.py` (PIDASHCONV-194).
+>>>>>>> 5805fd2c (PIDASHCONV-194 Rust D-08 layer: webhook send path (get_model_data, save log, send + deactivation email))
 
 pub mod activity_issue;
 pub mod activity_misc;
@@ -25,6 +29,7 @@ pub mod activity_tracks;
 pub mod link_crawl;
 pub mod log_decode;
 pub mod page_extract;
+pub mod webhook_data;
 
 pub use log_decode::{
     is_role_event, preprocess_data_properties, resolve_role, safe_decode_body, Role,
