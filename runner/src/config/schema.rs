@@ -306,6 +306,18 @@ impl AgentKind {
         }
     }
 
+    /// Kebab-case wire names of every agent kind this binary understands —
+    /// exactly the spellings the machine-control `create_runner` path's
+    /// `parse_agent_kind` accepts. Advertised on machine-session open so the
+    /// cloud can gate the "Add runner" modal's agent options per machine.
+    pub fn supported_wire_names() -> Vec<String> {
+        <Self as clap::ValueEnum>::value_variants()
+            .iter()
+            .filter_map(<Self as clap::ValueEnum>::to_possible_value)
+            .map(|pv| pv.get_name().to_string())
+            .collect()
+    }
+
     /// Human-facing name for prompts and operator-facing messages, e.g.
     /// the missing-agent reminder `pidash runner add` prints.
     pub fn display_name(self) -> &'static str {
@@ -869,6 +881,21 @@ impl std::error::Error for ConfigError {}
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn supported_wire_names_are_the_kebab_case_cli_spellings() {
+        assert_eq!(
+            AgentKind::supported_wire_names(),
+            vec![
+                "codex",
+                "claude-code",
+                "cursor-agent",
+                "open-claw",
+                "grok",
+                "muse-code",
+            ]
+        );
+    }
 
     fn runner(name: &str, working_dir: &str) -> RunnerConfig {
         RunnerConfig {

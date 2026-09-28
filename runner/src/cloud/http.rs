@@ -2000,6 +2000,11 @@ impl MachineClient {
     }
 
     /// `POST …/sessions/` — open (or take over) the machine session.
+    ///
+    /// The body advertises every agent kind this binary's `create_runner`
+    /// handler can parse, so the cloud can gate the "Add runner" modal's
+    /// agent options per machine instead of letting an unsupported kind
+    /// bounce off `parse_agent_kind` with a raw error.
     pub async fn open_session(&self) -> Result<MachineOpenResponse, TransportError> {
         let url = format!("{}/sessions/", self.base());
         let resp = self
@@ -2007,7 +2012,9 @@ impl MachineClient {
             .http()
             .post(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.machine_token))
-            .json(&serde_json::json!({}))
+            .json(&serde_json::json!({
+                "supported_agents": AgentKind::supported_wire_names(),
+            }))
             .send()
             .await
             .map_err(classify_send_error)?;
