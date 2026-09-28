@@ -3751,14 +3751,16 @@ mod tests {
             let status = any_status(app.clone(), method, path).await;
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{method} {path}");
         }
-        // Sibling retrieve path stays on Django (owned by PIDASHCONV-175).
+        // Sibling retrieve path is Rust-owned too (PIDASHCONV-175
+        // `space::issues`, this branch): without pools its handler
+        // answers the 500 fallback, not the 502 proxy closed.
         let status = any_status(
             app,
             "GET",
             "/api/public/anchor/abc/issues/62d604a8-db82-44de-9e8c-a3e4a0f28371/",
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]

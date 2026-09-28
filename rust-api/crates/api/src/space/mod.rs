@@ -11,8 +11,7 @@
 //!   anchor/error mapping from
 //!   [`guards`](pidash_services::space::guards), and the project-lite leaf
 //!   from [`lite`](pidash_services::space::serializers::lite).
-//! * `issue` — `views/issue.py` list/retrieve + comments/reactions/votes
-//!   (PIDASHCONV-175/176).
+//! * [`issues`] — `views/issue.py` list/retrieve (PIDASHCONV-175).
 //! * [`social`] — `views/issue.py` comments, issue reactions, comment
 //!   reactions, votes (PIDASHCONV-176).
 //! * [`assets`] — `views/asset.py` S3 assets (PIDASHCONV-178).
@@ -46,6 +45,7 @@ use crate::state::AppState;
 pub mod assets;
 pub mod filters;
 pub mod intake;
+pub mod issues;
 pub mod project_meta;
 pub mod sanitize;
 pub mod social;
@@ -284,6 +284,7 @@ pub fn owned(
 pub fn routes() -> Router<AppState> {
     intake::routes()
         .merge(project_meta::routes())
+        .merge(issues::routes())
         .merge(social::routes())
         .merge(assets::routes())
 }
