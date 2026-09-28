@@ -160,6 +160,8 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
             .route("/robots.txt", any(web::robots_txt)),
         RouteGroup::App => crate::app_issues::routes(),
         RouteGroup::License => crate::license::routes(),
+        // Space handlers merge their routers here (intake: PIDASHCONV-177;
+        // sibling handler issues extend the merge; merges keep both sides).
         RouteGroup::Space => crate::space::routes(),
         RouteGroup::Loop => crate::r#loop::routes(),
         _ => Router::new(),
