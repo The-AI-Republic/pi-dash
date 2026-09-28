@@ -29,7 +29,7 @@ export const SubIssuesCollapsibleTitle = observer(function SubIssuesCollapsibleT
   const { t } = useTranslation();
   // store hooks
   const {
-    subIssues: { subIssuesByIssueId, stateDistributionByIssueId },
+    subIssues: { subIssuesByIssueId, stateDistributionByIssueId, subIssuePaginationByIssueId },
   } = useIssueDetail(issueServiceType);
   // derived values
   const subIssuesDistribution = stateDistributionByIssueId(parentIssueId);
@@ -39,7 +39,8 @@ export const SubIssuesCollapsibleTitle = observer(function SubIssuesCollapsibleT
 
   // calculate percentage of completed sub-issues
   const completedCount = subIssuesDistribution?.completed?.length ?? 0;
-  const totalCount = subIssues.length;
+  // the loaded list may be a page; the paginated total is the real child count
+  const totalCount = subIssuePaginationByIssueId(parentIssueId)?.totalCount ?? subIssues.length;
   const percentage = completedCount && totalCount ? (completedCount / totalCount) * 100 : 0;
 
   return (
