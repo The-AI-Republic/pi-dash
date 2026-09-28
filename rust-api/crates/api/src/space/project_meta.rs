@@ -1430,14 +1430,15 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        // Sibling social path stays on Django: no Rust route yet
-        // (PIDASHCONV-176) → proxy → 502 closed.
+        // Sibling social path is Rust-owned too (PIDASHCONV-176
+        // `space::social`, merged on this base): without pools its
+        // handler answers the 500 fallback, not the 502 proxy closed.
         let (status, _) = get_status(
             app,
             "/api/public/anchor/abc/issues/62d604a8-db82-44de-9e8c-a3e4a0f28371/comments/",
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]

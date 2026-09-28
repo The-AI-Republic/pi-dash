@@ -123,7 +123,6 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_services::space::guards::{self, AnchorLookup, ErrorBody, ExceptionKind};
 use pidash_services::space::queries::issue_list as list_q;
-use pidash_services::space::queries::issue_retrieve as retrieve_q;
 use pidash_services::space::queries::project_meta::BOARD_COLUMNS;
 
 use super::{guards_error, owned, QueryMap};
@@ -857,6 +856,9 @@ fn group_inner_expr(group_by: &str) -> Option<String> {
         "assignees__id" => Some("\"issue_assignee\".\"assignee_id\"".to_owned()),
         "issue_module__module_id" => Some("\"issue_module\".\"module_id\"".to_owned()),
         "cycle_id" => Some(bare_cycle_expr()),
+        // `F("state")` resolves through the `state` FK to `state_id`
+        // (verified live: `group_by=state` partitions by state id).
+        "state" => Some("\"issues\".\"state_id\"".to_owned()),
         "state_id" => Some("\"issues\".\"state_id\"".to_owned()),
         "project_id" => Some("\"issues\".\"project_id\"".to_owned()),
         "priority" => Some("\"issues\".\"priority\"".to_owned()),
@@ -892,6 +894,11 @@ fn group_select(group_by: &str) -> Option<Option<String>> {
             let expr = group_inner_expr(group_by).expect("checked above");
             Some(Some(format!("{expr} AS \"{group_by}\"")))
         }
+        // `F("state")` partitions by the FK target: project the FK column
+        // under the URL name so `__b."state"` resolves. `GROUP BY` needs no
+        // addition (`issues.state_id` is functionally dependent on the
+        // `"issues"."id"` PK already grouped).
+        "state" => Some(Some("\"issues\".\"state_id\" AS \"state\"".to_owned())),
         _ => Some(None),
     }
 }
@@ -1010,8 +1017,12 @@ fn group_values_plan(field: &str, scope: &BoardScope) -> GroupValuesPlan {
             sentinel: query.none_sentinel,
         };
     }
+    // `workspace_column` is already a quoted dotted path
+    // (`"states"."workspace_id"`); only `table`/`column`/`project_filter`
+    // arrive with trimmable quotes. Quoting it again emits `""states""`
+    // and 500s every DB-backed axis at plan time.
     let mut sql = format!(
-        "SELECT \"{table}\".\"{column}\" AS \"v\" FROM \"{table}\" WHERE (\"{workspace}\" = $1",
+        "SELECT \"{table}\".\"{column}\" AS \"v\" FROM \"{table}\" WHERE ({workspace} = $1",
         table = query.table.trim_matches('"'),
         column = query.column.trim_matches('"'),
         workspace = query.workspace_column,
@@ -1199,13 +1210,86 @@ fn fix_sort_order_numbers(body: &str) -> String {
 /// [`fix_sort_order_numbers`] at serialization. Everything else passes
 /// through as rendered (UUIDs/dates as strings, id-lists as arrays,
 /// vote/reaction items as arrays-or-null).
+/// Model/join columns of the list projection in `.values()` order
+/// (`grouper.py:84-97` minus the `cycle_id` annotation).
+const LIST_MODEL_ORDER: &[&str] = &[
+    "id",
+    "name",
+    "state_id",
+    "sort_order",
+    "estimate_point",
+    "priority",
+    "start_date",
+    "target_date",
+    "sequence_id",
+    "project_id",
+    "parent_id",
+    "created_by",
+    "state__group",
+];
+
+/// Annotation columns of the list projection in `.annotate()` order: the
+/// view's `cycle_id`, the grouper's id lists, the `on_results`
+/// aggregates (`views/issue.py:98-102`, `grouper.py:48-66,112-179`).
+/// Django emits concrete columns first, annotations after — verified live
+/// per mode (ungrouped and grouped alike).
+const LIST_ANNOT_ORDER: &[&str] = &[
+    "cycle_id",
+    "assignee_ids",
+    "label_ids",
+    "module_ids",
+    "vote_items",
+    "reaction_items",
+];
+
+/// A group traversal (`labels__id`, `assignees__id`,
+/// `issue_module__module_id`): a join column, so it sorts with the model
+/// block in `rest` order — never with the annotations.
+fn is_traversal(field: &str) -> bool {
+    matches!(
+        field,
+        "labels__id" | "assignees__id" | "issue_module__module_id"
+    )
+}
+
+/// Django column order for one shaped list row: model/join columns in
+/// `.values()` order (required columns, then any group traversals in
+/// `rest` order), then annotations in `.annotate()` order. A swapped-out
+/// m2m id list is NOT kept here: the multi-grouper appends it at the end
+/// itself (`result[mapped] = ...` on a missing key), and pre-keeping it
+/// would pin it in annotation position instead.
+fn list_wire_order(fields: &[String]) -> Vec<String> {
+    let mut ordered = Vec::with_capacity(fields.len() + 1);
+    for field in fields {
+        if LIST_MODEL_ORDER.contains(&field.as_str()) {
+            ordered.push(field.clone());
+        }
+    }
+    for field in fields {
+        if is_traversal(field) {
+            ordered.push(field.clone());
+        }
+    }
+    for field in LIST_ANNOT_ORDER {
+        if fields.iter().any(|f| f == field) {
+            ordered.push(field.to_string());
+        }
+    }
+    for field in fields {
+        if !ordered.iter().any(|f| f == field) {
+            ordered.push(field.clone());
+        }
+    }
+    ordered
+}
+
 fn shape_row(
     row: &Map<String, Value>,
     fields: &[String],
 ) -> Result<Map<String, Value>, HandlerError> {
     let mut out = Map::new();
-    for field in fields {
-        let value = row.get(field).unwrap_or(&Value::Null);
+    for field in list_wire_order(fields) {
+        let value = row.get(&field).unwrap_or(&Value::Null);
         if field == "sort_order" {
             if let Some(number) = value.as_f64() {
                 let rendered = serde_json::Number::from_f64(number)
@@ -1214,6 +1298,12 @@ fn shape_row(
                 out.insert(field.clone(), rendered);
                 continue;
             }
+        }
+        // Django's `ArrayAgg` deserializes a NULL aggregate as `[]`
+        // (verified live for voteless issues).
+        if (field == "vote_items" || field == "reaction_items") && value.is_null() {
+            out.insert(field.clone(), Value::Array(Vec::new()));
+            continue;
         }
         out.insert(field.clone(), value.clone());
     }
@@ -1666,7 +1756,7 @@ async fn grouped_response(
 /// `vote_items` annotation for retrieve (`views/issue.py:652-698`):
 /// verbatim from the queries layer (its vote branch is correct).
 fn retrieve_vote_items_sql() -> String {
-    "ARRAY_AGG(DISTINCT (CASE WHEN (\"votes\".\"id\" IS NOT NULL AND \"votes\".\"deleted_at\" IS NULL) THEN JSON_BUILD_OBJECT('vote', \"votes\".\"vote\", 'actor_details', JSON_BUILD_OBJECT('id', \"vote_actor\".\"id\", 'first_name', \"vote_actor\".\"first_name\", 'last_name', \"vote_actor\".\"last_name\", 'avatar', \"vote_actor\".\"avatar\", 'avatar_url', (CASE WHEN (\"vote_actor\".\"avatar_asset_id\" IS NOT NULL) THEN CONCAT('/api/assets/v2/static/', \"vote_actor\".\"avatar_asset_id\", '/') WHEN (\"vote_actor\".\"avatar_asset_id\" IS NULL) THEN \"vote_actor\".\"avatar\" ELSE NULL END), 'display_name', \"vote_actor\".\"display_name\") ) ELSE NULL END)) FILTER (WHERE CASE WHEN (\"votes\".\"id\" IS NOT NULL AND \"votes\".\"deleted_at\" IS NULL) THEN true ELSE false END) AS \"vote_items\"".to_string()
+    "ARRAY_AGG(DISTINCT (CASE WHEN (\"votes\".\"id\" IS NOT NULL AND \"votes\".\"deleted_at\" IS NULL) THEN JSONB_BUILD_OBJECT('vote', \"votes\".\"vote\", 'actor_details', JSONB_BUILD_OBJECT('id', \"vote_actor\".\"id\", 'first_name', \"vote_actor\".\"first_name\", 'last_name', \"vote_actor\".\"last_name\", 'avatar', \"vote_actor\".\"avatar\", 'avatar_url', (CASE WHEN (\"vote_actor\".\"avatar_asset_id\" IS NOT NULL) THEN CONCAT('/api/assets/v2/static/', \"vote_actor\".\"avatar_asset_id\", '/') WHEN (\"vote_actor\".\"avatar_asset_id\" IS NULL) THEN \"vote_actor\".\"avatar\" ELSE NULL END), 'display_name', \"vote_actor\".\"display_name\") ) ELSE NULL END)) FILTER (WHERE CASE WHEN (\"votes\".\"id\" IS NOT NULL AND \"votes\".\"deleted_at\" IS NULL) THEN true ELSE false END) AS \"vote_items\"".to_string()
 }
 
 /// `reaction_items` annotation for retrieve (`views/issue.py:699-745`).
@@ -1681,7 +1771,7 @@ fn retrieve_vote_items_sql() -> String {
 /// `issue_votes` does not have and cannot execute. Tracked by
 /// PIDASHCONV-234.
 fn retrieve_reaction_items_sql() -> String {
-    "ARRAY_AGG(DISTINCT (CASE WHEN (\"issue_reactions\".\"id\" IS NOT NULL AND \"issue_reactions\".\"deleted_at\" IS NULL) THEN JSON_BUILD_OBJECT('reaction', \"issue_reactions\".\"reaction\", 'actor_details', JSON_BUILD_OBJECT('id', \"reaction_actor\".\"id\", 'first_name', \"reaction_actor\".\"first_name\", 'last_name', \"reaction_actor\".\"last_name\", 'avatar', \"reaction_actor\".\"avatar\", 'avatar_url', (CASE WHEN (\"vote_actor\".\"avatar_asset_id\" IS NOT NULL) THEN CONCAT('/api/assets/v2/static/', \"vote_actor\".\"avatar_asset_id\", '/') WHEN (\"vote_actor\".\"avatar_asset_id\" IS NULL) THEN \"vote_actor\".\"avatar\" ELSE NULL END), 'display_name', \"reaction_actor\".\"display_name\") ) ELSE NULL END)) FILTER (WHERE CASE WHEN (\"issue_reactions\".\"id\" IS NOT NULL AND \"issue_reactions\".\"deleted_at\" IS NULL) THEN true ELSE false END) AS \"reaction_items\"".to_string()
+    "ARRAY_AGG(DISTINCT (CASE WHEN (\"issue_reactions\".\"id\" IS NOT NULL AND \"issue_reactions\".\"deleted_at\" IS NULL) THEN JSONB_BUILD_OBJECT('reaction', \"issue_reactions\".\"reaction\", 'actor_details', JSONB_BUILD_OBJECT('id', \"reaction_actor\".\"id\", 'first_name', \"reaction_actor\".\"first_name\", 'last_name', \"reaction_actor\".\"last_name\", 'avatar', \"reaction_actor\".\"avatar\", 'avatar_url', (CASE WHEN (\"vote_actor\".\"avatar_asset_id\" IS NOT NULL) THEN CONCAT('/api/assets/v2/static/', \"vote_actor\".\"avatar_asset_id\", '/') WHEN (\"vote_actor\".\"avatar_asset_id\" IS NULL) THEN \"vote_actor\".\"avatar\" ELSE NULL END), 'display_name', \"reaction_actor\".\"display_name\") ) ELSE NULL END)) FILTER (WHERE CASE WHEN (\"issue_reactions\".\"id\" IS NOT NULL AND \"issue_reactions\".\"deleted_at\" IS NULL) THEN true ELSE false END) AS \"reaction_items\"".to_string()
 }
 
 /// R1 single-issue read (`views/issue.py:600-771`): the manager scope,
@@ -1692,7 +1782,7 @@ fn retrieve_reaction_items_sql() -> String {
 /// `.first()` at `:771`.
 ///
 /// `$1` = issue id, `$2` = workspace slug, `$3` = project id. The joins
-/// mirror [`issue_retrieve_sql`](retrieve_q::issue_retrieve_sql); only the
+/// mirror `issue_retrieve_sql` in the queries layer; only the
 /// reaction `avatar_url` refs differ (see [`retrieve_reaction_items_sql`]).
 fn issue_retrieve_sql() -> String {
     format!(
@@ -1755,24 +1845,68 @@ async fn retrieve_issue_inner(
     };
     let row = obj(&row)?;
     let mut out = Map::new();
-    for field in retrieve_q::RETRIEVE_VALUES_FIELDS {
+    for field in RETRIEVE_WIRE_FIELDS {
         let value = row.get(*field).cloned().unwrap_or(Value::Null);
-        // `sort_order` is the only float among the 23 keys: normalize
-        // integral floats to `65535.0` like the list path (exponents are
-        // finished by `fix_sort_order_numbers` below).
-        if *field == "sort_order" {
-            if let Some(number) = value.as_f64() {
-                let rendered = serde_json::Number::from_f64(number)
-                    .map(Value::Number)
-                    .unwrap_or_else(|| value.clone());
-                out.insert((*field).to_owned(), rendered);
-                continue;
-            }
-        }
-        out.insert((*field).to_owned(), value);
+        out.insert((*field).to_owned(), shape_retrieve_value(field, value));
     }
     let body = serde_json::to_string(&out).expect("serializable row");
     Ok(json_ok(fix_sort_order_numbers(&body)))
+}
+
+/// Wire order of the 23 retrieve keys. This is NOT the `.values(...)`
+/// source order (`views/issue.py:746-770`, mirrored by the read-only
+/// `RETRIEVE_VALUES_FIELDS` in the queries layer): Django emits the concrete
+/// columns first and the six annotations afterwards in `.annotate()`
+/// order (`cycle_id`, then `label_ids`/`assignee_ids`/`module_ids`, then
+/// `vote_items`/`reaction_items`) — verified against the live SQL
+/// (`SELECT "issues"."id", COALESCE(...) AS "label_ids", ...` for
+/// `.values('id', 'vote_items', 'label_ids')`). The queryset is fixed, so
+/// this order is deterministic; byte identity depends on it.
+const RETRIEVE_WIRE_FIELDS: &[&str] = &[
+    "id",
+    "name",
+    "state_id",
+    "sort_order",
+    "description_json",
+    "description_html",
+    "description_stripped",
+    "description_binary",
+    "estimate_point",
+    "priority",
+    "start_date",
+    "target_date",
+    "sequence_id",
+    "project_id",
+    "parent_id",
+    "created_by",
+    "state__group",
+    "cycle_id",
+    "label_ids",
+    "assignee_ids",
+    "module_ids",
+    "vote_items",
+    "reaction_items",
+];
+
+/// Shape one retrieved column the way Django's field deserialization does:
+/// `sort_order` is the only float among the 23 keys (integral floats render
+/// `65535.0` like the list path; exponents are finished by
+/// `fix_sort_order_numbers`), and a `NULL` vote/reaction aggregate reads
+/// back as `[]` (Django's `ArrayAgg` returns the empty list, never null —
+/// verified live: `{'vote_items': []}` for a voteless issue).
+fn shape_retrieve_value(field: &str, value: Value) -> Value {
+    if field == "sort_order" {
+        if let Some(number) = value.as_f64() {
+            return serde_json::Number::from_f64(number)
+                .map(Value::Number)
+                .unwrap_or(value);
+        }
+        return value;
+    }
+    if (field == "vote_items" || field == "reaction_items") && value.is_null() {
+        return Value::Array(Vec::new());
+    }
+    value
 }
 
 #[cfg(test)]
@@ -2020,6 +2154,130 @@ mod tests {
         assert_eq!(
             raw_top_count(&[("a".to_owned(), 0), ("b".to_owned(), 3)]),
             3
+        );
+    }
+
+    #[test]
+    fn group_values_workspace_column_is_not_requoted() {
+        // The queries layer's `workspace_column` is already a quoted dotted
+        // path; wrapping it again emits `""states""` and 500s every
+        // DB-backed group axis at plan time.
+        let ws = uuid::Uuid::nil();
+        let scoped = BoardScope {
+            workspace_id: ws,
+            project_id: Some(uuid::Uuid::nil()),
+        };
+        let GroupValuesPlan::Sql { sql, .. } = group_values_plan("state_id", &scoped)
+        else {
+            panic!("state_id branch is a DB plan");
+        };
+        assert!(sql.contains("(\"states\".\"workspace_id\" = $1"));
+        assert!(!sql.contains("\"\""));
+    }
+
+    #[test]
+    fn retrieve_aggregates_use_jsonb_build_object() {
+        // Django's `JSONObject.as_postgresql` emits `JSONB_BUILD_OBJECT`
+        // (`comparison.py:169-174`); `ARRAY_AGG(DISTINCT ...)` over plain
+        // `json` has no equality operator and 500s at plan time, so the
+        // retrieve vote/reaction fragments must never say `JSON_BUILD_OBJECT`.
+        let sql = issue_retrieve_sql();
+        assert!(sql.contains("JSONB_BUILD_OBJECT"));
+        assert!(!sql.contains("JSON_BUILD_OBJECT"));
+    }
+
+    #[test]
+    fn list_wire_order_puts_traversal_with_model_columns() {
+        // Grouped-labels mode: `labels__id` sorts with the model block
+        // (after `state__group`, before the `cycle_id` annotation); the
+        // swapped-out `label_ids` is absent (the multi-grouper appends it).
+        let fields: Vec<String> = [
+            "id",
+            "name",
+            "state_id",
+            "sort_order",
+            "estimate_point",
+            "priority",
+            "start_date",
+            "target_date",
+            "sequence_id",
+            "project_id",
+            "parent_id",
+            "cycle_id",
+            "created_by",
+            "state__group",
+            "assignee_ids",
+            "module_ids",
+            "labels__id",
+            "vote_items",
+            "reaction_items",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let order = list_wire_order(&fields);
+        let pos = |k: &str| order.iter().position(|f| f == k).expect(k);
+        assert!(pos("state__group") < pos("labels__id"));
+        assert!(pos("labels__id") < pos("cycle_id"));
+        assert!(pos("cycle_id") < pos("assignee_ids"));
+        assert!(!order.iter().any(|f| f == "label_ids"));
+    }
+
+    #[test]
+    fn retrieve_wire_order_matches_django_column_order() {
+        // 23 keys, concrete columns first, annotations in `.annotate()`
+        // order — the live Django column order, not the `.values()` source
+        // order.
+        assert_eq!(
+            RETRIEVE_WIRE_FIELDS,
+            &[
+                "id",
+                "name",
+                "state_id",
+                "sort_order",
+                "description_json",
+                "description_html",
+                "description_stripped",
+                "description_binary",
+                "estimate_point",
+                "priority",
+                "start_date",
+                "target_date",
+                "sequence_id",
+                "project_id",
+                "parent_id",
+                "created_by",
+                "state__group",
+                "cycle_id",
+                "label_ids",
+                "assignee_ids",
+                "module_ids",
+                "vote_items",
+                "reaction_items",
+            ]
+        );
+    }
+
+    #[test]
+    fn retrieve_null_vote_reaction_items_read_back_empty() {
+        // Django's `ArrayAgg` deserializes a NULL aggregate as `[]`.
+        assert_eq!(
+            shape_retrieve_value("vote_items", Value::Null),
+            Value::Array(Vec::new())
+        );
+        assert_eq!(
+            shape_retrieve_value("reaction_items", Value::Null),
+            Value::Array(Vec::new())
+        );
+        // Non-null values pass through untouched.
+        let items = serde_json::json!([{"vote": 1}]);
+        assert_eq!(
+            shape_retrieve_value("vote_items", items.clone()),
+            items
+        );
+        assert_eq!(
+            shape_retrieve_value("label_ids", Value::Null),
+            Value::Null
         );
     }
 }
