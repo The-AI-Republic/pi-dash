@@ -1,0 +1,82 @@
+{
+  "_fixture": "F-NOTIF",
+  "_method": "executed: .venv-django python /tmp/probe_d07_pure.py (real bodies via AST exec; real json, real bs4, real uuid.UUID; model-touching helpers excluded \u2014 see notifications_task record)",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "_sources": [
+    "apps/api/pi_dash/bgtasks/notification_task.py:53-80 (get_new/get_removed)",
+    "apps/api/pi_dash/bgtasks/notification_task.py:115-129 (extract_mentions)",
+    "apps/api/pi_dash/bgtasks/notification_task.py:133-154 (comment helpers)"
+  ],
+  "extract_comment_mentions": {
+    "cases": [
+      {
+        "out": [
+          "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        ]
+      },
+      {
+        "in": "no-mentions",
+        "out": []
+      }
+    ]
+  },
+  "extract_mentions": {
+    "cases": [
+      {
+        "in": "new-desc",
+        "out": [
+          "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        ]
+      },
+      {
+        "in": "malformed-json",
+        "out": []
+      },
+      {
+        "in": "missing-key",
+        "out": []
+      }
+    ]
+  },
+  "get_new_comment_mentions": {
+    "cases": [
+      {
+        "old": "comment_old",
+        "out": [
+          "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        ]
+      },
+      {
+        "old": null,
+        "out": [
+          "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        ]
+      },
+      {
+        "old": "same",
+        "out": []
+      }
+    ]
+  },
+  "get_new_mentions": {
+    "out": [
+      "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    ]
+  },
+  "get_removed_mentions": [
+    {
+      "out": []
+    },
+    {
+      "out": [
+        "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+      ]
+    }
+  ],
+  "rules": [
+    "only mention-component with entity_name='user_mention' match; identifiers deduped via set",
+    "extract_mentions: any Exception (malformed JSON, missing description_html) -> []",
+    "get_new_comment_mentions with old_value None returns ALL newer mentions"
+  ]
+}

@@ -1,0 +1,81 @@
+{
+  "EmailNotificationLog_shape": "same + issue.project_id, issue.workspace_slug, activity_time=activity.created_at; triggered_by=actor, receiver=subscriber, entity_identifier=issue_id, entity_name='issue'",
+  "Notification_shape": {
+    "data.issue": [
+      "id",
+      "name",
+      "identifier",
+      "sequence_id",
+      "state_name",
+      "state_group"
+    ],
+    "data.issue_activity": [
+      "id",
+      "verb",
+      "field",
+      "actor",
+      "new_value",
+      "old_value",
+      "issue_comment (stripped text or '')",
+      "old/new_identifier or None"
+    ],
+    "sender": "per-subscriber branch",
+    "title": "activity.comment"
+  },
+  "PORT_BUG_3": "new_mentions email logs (:573-576 description-branch, :622-625 per-activity branch) set receiver_id=subscriber \u2014 the STALE loop variable from the subscriber loop, not mention_id. If issue_subscribers is empty the name is unbound -> NameError -> outer except. Port verbatim.",
+  "PORT_NOTE_uuid_filter": "comment_mentions filtered by `UUID(mention) in set(project_members)`: a non-UUID mention raises ValueError -> whole task dies via outer except (print + return, partial in-memory bulks discarded). Port verbatim.",
+  "_fixture": "F-NOTIF",
+  "_method": "source-derived record (multi-table writes; live coverage is the worker-plane oracle). Branch tables and bulk shapes transcribed verbatim.",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "_sources": [
+    "apps/api/pi_dash/bgtasks/notification_task.py:37-50 (update_mentions_for_issue)",
+    "apps/api/pi_dash/bgtasks/notification_task.py:84-111 (extract_mentions_as_subscribers)",
+    "apps/api/pi_dash/bgtasks/notification_task.py:157-187 (create_mention_notification)",
+    "apps/api/pi_dash/bgtasks/notification_task.py:190-674 (notifications task)"
+  ],
+  "early_path_effect": "bare return: zero writes, zero reads (13 types)",
+  "early_path_types": [
+    "cycle.activity.created",
+    "cycle.activity.deleted",
+    "module.activity.created",
+    "module.activity.deleted",
+    "issue_reaction.activity.created",
+    "issue_reaction.activity.deleted",
+    "comment_reaction.activity.created",
+    "comment_reaction.activity.deleted",
+    "issue_vote.activity.created",
+    "issue_vote.activity.deleted",
+    "issue_draft.activity.created",
+    "issue_draft.activity.updated",
+    "issue_draft.activity.deleted"
+  ],
+  "exceptions": "whole body in try; except Exception as e: print(e); return (stdout print, NOT log_exception)",
+  "input_coercion": "issue_activities_created = json.loads(...) if not None else None",
+  "member_gate": "project_members = ProjectMember active values_list(member_id, flat); new_mentions = get_new_mentions(...) \u2229 str(members) (UUID objects would never match: comparison is against str(member))",
+  "mention_notifications": {
+    "comment_mentions": "create_mention_notification(message=f'{display} has mentioned you in a comment in issue {name}'); email field forced to 'mention' iff preference.mention",
+    "description_mentions_otherwise": "one create_mention_notification per activity",
+    "description_mentions_with_actor_last_activity": "single Notification 'You have been mentioned in the issue {name}'"
+  },
+  "preference_reads": "UserNotificationPreference.objects.get(user_id=...) per subscriber and per mention_id (DoesNotExist -> outer except, nothing persisted)",
+  "send_email_rules": [
+    "field==state and preference.state_change",
+    "field==state and preference.issue_completed and completed-State row exists for new_identifier",
+    "field==comment and preference.comment",
+    "preference.property_change (catch-all)",
+    "else False"
+  ],
+  "skips": [
+    "activity issue_detail.id != issue_id",
+    "field == 'description' (no subscriber mail, still mention-processed)"
+  ],
+  "subscriber_query": "IssueSubscriber filter(project, issue, subscriber__in=Subquery(project_members)) .exclude(subscriber__in=new+comment+[actor]).values_list(subscriber, flat); then drop uuid.UUID(actor_id); actor==creator -> 'in_app:issue_activities:created', assignee-only -> ':assigned', else ':subscribed'",
+  "writes": [
+    "IssueSubscriber.bulk_create(mention+comment subscribers, batch 100, ignore_conflicts=True)",
+    "update_mentions_for_issue: bulk_create IssueMention(mention_id, issue, project, workspace_id=project.workspace_id) batch 100; IssueMention.filter(issue, mention__in=removed).delete()",
+    "Notification.bulk_create(batch 100)",
+    "EmailNotificationLog.bulk_create(batch 100, ignore_conflicts=True)",
+    "last_activity = IssueActivity.filter(issue).order_by(-created_at).first() (read AFTER subscriber bulks)",
+    "subscriber flag True -> IssueSubscriber.get_or_create(actor) inside broad try/except-pass"
+  ]
+}

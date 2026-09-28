@@ -1,0 +1,53 @@
+{
+  "_fixture": "F-AUTH",
+  "_method": "source-derived subjects/contexts (no DB reads in any of the 4 tasks); templates executed in F-AUTH.rendered.json",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "_sources": [
+    "apps/api/pi_dash/bgtasks/magic_link_code_task.py:23-64",
+    "apps/api/pi_dash/bgtasks/forgot_password_task.py:23-72",
+    "apps/api/pi_dash/bgtasks/user_email_update_task.py:22-65,67-114"
+  ],
+  "common_send_shape": "get_email_configuration 7-tuple; get_connection(host, int(port), username, password, use_tls==(\"1\"), use_ssl==(\"1\")); EmailMultiAlternatives(subject, text, EMAIL_FROM, [email]); attach_alternative(html); send(); broad except -> log_exception(e), return",
+  "log_lines": [
+    "magic_link/forgot/update_magic: 'Email sent successfully.'",
+    "forgot_password: 'Email sent successfully' (no trailing period)"
+  ],
+  "tasks": {
+    "forgot_password(first_name, email, uidb64, token, current_site)": {
+      "abs_url": "str(current_site) + relative_link",
+      "context": {
+        "email": "email",
+        "first_name": "first_name",
+        "forgot_password_url": "abs_url"
+      },
+      "relative_link": "/accounts/reset-password/?uidb64={uidb64}&token={token}&email={email}",
+      "subject": "A new password to your Pi Dash account has been requested",
+      "template": "emails/auth/forgot_password.html"
+    },
+    "magic_link(email, key, token)": {
+      "PORT_NOTE_unused_arg": "`key` is accepted positionally but never referenced in the body. Port the signature verbatim.",
+      "context": {
+        "code": "token",
+        "email": "email"
+      },
+      "subject": "Your unique Pi Dash login code is {token}",
+      "template": "emails/auth/magic_signin.html"
+    },
+    "send_email_update_confirmation(email)": {
+      "context": {
+        "email": "email"
+      },
+      "log": "f'Email update confirmation sent successfully to {email}.' (only task with interpolated log)",
+      "subject": "Pi Dash email address successfully updated",
+      "template": "emails/user/email_updated.html"
+    },
+    "send_email_update_magic_code(email, token)": {
+      "context": {
+        "code": "token",
+        "email": "email"
+      },
+      "subject": "Verify your new email address",
+      "template": "emails/auth/magic_signin.html (same file as magic_link, different subject)"
+    }
+  }
+}
