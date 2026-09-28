@@ -356,3 +356,7 @@ def reconcile_agent_run_terminal_effects() -> int:
 # Cloud Agent is not a separate Django app/service. Importing its tasks from an
 # installed app makes Celery autodiscovery register them on every normal worker.
 from pi_dash.cloud_agent import tasks as cloud_agent_tasks  # noqa: E402,F401
+
+# Same for managed-runner maintenance: pi_dash.managed_runner is not an
+# installed app, so its beat-published sweep must be imported here to register.
+from pi_dash.managed_runner import tasks as managed_runner_tasks  # noqa: E402,F401
