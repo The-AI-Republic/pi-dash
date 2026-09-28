@@ -123,7 +123,8 @@ pub const ISSUE_ACTIVITY_COMMENT: &str = "created the issue";
 /// `ProjectMember.role` for the creator and every bulk member (`:58,:71`).
 pub const PROJECT_MEMBER_ROLE: i32 = 20;
 
-/// `create_labels` always inserts 50 rows (`:134-142`).
+/// `create_labels` attempts 50 rows with conflicts ignored (`:130-143`);
+/// seeded Faker yields 40 distinct (project, name) pairs, so 40 persist.
 pub const LABEL_ROWS: i64 = 50;
 
 /// Sort-order seed and step (`:289-291,318`).

@@ -542,7 +542,11 @@ def test_create_dummy_data_before_after(db_conn, broker_url):
     assert delta["projects"] == 1
     assert delta["project_members"] == 3  # creator + 2 member emails
     assert delta["states"] == 5
-    assert delta["labels"] == 50
+    # 50 attempts with ignore_conflicts: seeded Faker (seed 0, color_name +
+    # hex_color interleaved) yields 40 distinct (project, name) pairs, so 10
+    # conflict and 40 rows persist (dummy_data_task.py:126-143, Label Meta
+    # unique_project_name_when_not_deleted).
+    assert delta["labels"] == 40
     assert delta["cycles"] == 3  # off-by-one: cycle_count + 1
     assert delta["modules"] == 2
     assert delta["pages"] == 4
@@ -588,7 +592,7 @@ def test_create_dummy_data_before_after(db_conn, broker_url):
             assert (row["snoozed_till"] is not None) == (row["status"] == 0)
 
     # Sampled links stay within their draw bounds (3 assignees in pool,
-    # 50 labels, randint(0, 5) multi-links over 6 issues).
+    # 40 persisted labels, randint(0, 5) multi-links over 6 issues).
     assert 0 <= delta["page_labels"] <= 2 * 49
     assert 0 <= delta["issue_assignees"] <= 2 * 2
     assert 0 <= delta["issue_labels"] <= 6 * 5
