@@ -10,10 +10,13 @@
 //!   (`composer.py`, up to `compile_template` + `_user_for_run`; turn
 //!   builders own to PIDASHCONV-142).
 //! * [`validation`] — save-time override validation (`validation.py`).
+//! * [`context`] — template context variables + first/scheduler/direct
+//!   turn builders (`context.py`, `composer.py` turn builders).
 //!
 //! Wiring note: the crate root declares `pub mod prompting;` (seam for
 //! this issue's new files); every file under this module is new.
 pub mod composer;
+pub mod context;
 pub mod recipes;
 pub mod registry;
 pub mod renderer;
