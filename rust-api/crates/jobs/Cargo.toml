@@ -14,6 +14,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 rrule = { version = "0.14", features = ["exrule", "by-easter"] }
 thiserror = "2"
+rand = "0.9"
 tokio = { version = "1.53.1", features = ["time", "sync", "macros", "rt-multi-thread", "net", "io-util"] }
 tracing = "0.1.44"
 # D-07 tasks_mail (PIDASHCONV-216): template render (Django `{{ var }}`

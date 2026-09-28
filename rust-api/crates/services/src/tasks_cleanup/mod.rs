@@ -44,15 +44,15 @@
 pub mod assets;
 pub mod cleanup;
 pub mod deletion;
-pub mod exports;
-pub mod workspace_seed;
+//! D-09 bgtasks: cleanup, versions, exports, deletion (task layer).
+//!
+//! Pure planning kernels for the `apps/api/pi_dash/bgtasks/` ports. Each
+//! submodule owns one Python task file's counts, literals, ordering and
+//! payload shape; the jobs-layer `tasks_cleanup` module owns execution and
+//! worker registration. Logic stays DB-free here so the fixture vectors
+//! replay as unit tests.
 
-pub use deletion::{
-    hard_delete, parse_soft_delete_call, restore_related_objects, soft_delete_related_objects,
-    DeletionError, HardDeleteOutcome, SoftDeleteOutcome, SoftDeleteTarget,
-};
+//! Wiring note: the crate root declares `pub mod tasks_cleanup;`
+//! (foundation change, tracked separately).
 
-// D-09 version-task decisions (stage 5, PIDASHCONV-188): pure logic behind
-// `issue_version_sync.py`, `issue_description_version_sync.py`,
-// `issue_description_version_task.py` and `page_version_task.py`.
-pub mod versions;
+pub mod dummy_data;
