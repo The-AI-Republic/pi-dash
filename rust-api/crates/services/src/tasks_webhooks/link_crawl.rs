@@ -94,10 +94,8 @@ pub fn url_scheme(url: &str) -> String {
 /// Strips userinfo (`user@`), ports (`:8080`) and IPv6 brackets, mirroring
 /// `urlparse(url).hostname` (which also lower-cases).
 pub fn url_hostname(url: &str) -> Option<String> {
-    let after = match url.find("://") {
-        Some(i) => &url[i + 3..],
-        None => return None,
-    };
+    let sep = url.find("://")?;
+    let after = &url[sep + 3..];
     let authority = after
         .find(['/', '?', '#'])
         .map(|i| &after[..i])
