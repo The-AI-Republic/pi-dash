@@ -21,8 +21,14 @@
 //!   27-type mapper, `bulk_create`, notifications enqueue, and the
 //!   [`Registry`][crate::worker::Registry] wiring. The pure row builders
 //!   live in `pidash-services` (`tasks_webhooks::activity_misc`).
+//! * [`automation`] — `bgtasks/issue_automation_task.py`
+//!   `archive_and_close_old_issues` (PIDASHCONV-199): the daily
+//!   archive/close beat task (projects windows, candidate SELECT, single
+//!   column bulk writes, per-issue `issue_activity` fan-out) and the
+//!   [`Registry`][crate::worker::Registry] wiring.
 
 pub mod activity_dispatch;
+pub mod automation;
 pub mod link_crawl;
 pub mod sinks;
 pub mod visit_page;
@@ -40,6 +46,14 @@ pub use activity_dispatch::{
     TOUCH_ISSUE_SQL,
 };
 
+pub use automation::{
+    actor_string, archive_current_instance, archive_requested_data, build_issue_activity_job,
+    close_requested_data, cutoff_for, find_candidate_issues_sql, is_automation_task,
+    module_day_for, register_automation_handlers, run_archive_and_close, AutomationError,
+    ARCHIVE_AND_CLOSE_TASK, ARCHIVE_ISSUES_SQL, ARCHIVE_PROJECTS_SQL, BULK_BATCH_SIZE,
+    CLOSED_STATE_GROUPS, CLOSE_ISSUES_SQL, CLOSE_PROJECTS_SQL, FIND_CANCELLED_STATE_SQL,
+    OPEN_STATE_GROUPS,
+};
 pub use link_crawl::{register_link_crawl_handler, TASK_NAMES};
 pub use sinks::{
     build_capture_request, capture_url, determine_server_host, insert_api_activity_log, iso_now,
