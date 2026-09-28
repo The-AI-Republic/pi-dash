@@ -375,16 +375,19 @@ pub fn asset_metadata_message(asset_id: &str) -> CeleryTaskMessage {
 /// `:381-386`, `:469-473`, `:551-555`):
 /// `ProjectMember.objects.filter(project_id, member, is_active=True).exists()`.
 /// Table `project_members` (`db/models/project.py` Meta); the default
-/// manager has no soft-delete filter, so every row counts.
+/// manager is `SoftDeletionManager` (`db/mixins.py:56-58`), so soft-deleted
+/// rows are excluded via `deleted_at IS NULL`.
 /// `$1` = project id, `$2` = member (user) id.
-pub const MEMBER_EXISTS_SQL: &str = "SELECT 1 AS a FROM project_members WHERE project_id = $1 AND member_id = $2 AND is_active = TRUE LIMIT 1";
+pub const MEMBER_EXISTS_SQL: &str = "SELECT 1 AS a FROM project_members WHERE project_id = $1 AND member_id = $2 AND is_active = TRUE AND deleted_at IS NULL LIMIT 1";
 
 /// `ProjectPublicMember.objects.get_or_create(project_id, member)` — the
 /// GET half (`views/issue.py:289-291` and siblings). Table
 /// `project_public_members` (`db/models/project.py:442-461`); the default
-/// manager has no soft-delete filter. `$1` = project id, `$2` = member id.
+/// manager is `SoftDeletionManager` (`db/mixins.py:56-58`), so soft-deleted
+/// rows are excluded via `deleted_at IS NULL` (consistent with the partial
+/// unique index on live rows). `$1` = project id, `$2` = member id.
 pub const PUBLIC_MEMBER_GET_SQL: &str =
-    "SELECT id FROM project_public_members WHERE project_id = $1 AND member_id = $2 LIMIT 1";
+    "SELECT id FROM project_public_members WHERE project_id = $1 AND member_id = $2 AND deleted_at IS NULL LIMIT 1";
 
 /// The CREATE half of the same `get_or_create`: `id` is `uuid4`
 /// (`BaseModel`, `db/models/base.py:18`), timestamps are automatic,
@@ -712,6 +715,9 @@ mod tests {
         parse_postgres(PUBLIC_MEMBER_INSERT_SQL);
         assert!(MEMBER_EXISTS_SQL.contains("project_members"));
         assert!(MEMBER_EXISTS_SQL.contains("is_active"));
+        // Django's default manager filters soft-deleted rows on both reads.
+        assert!(MEMBER_EXISTS_SQL.contains("deleted_at IS NULL"));
+        assert!(PUBLIC_MEMBER_GET_SQL.contains("deleted_at IS NULL"));
         assert!(PUBLIC_MEMBER_GET_SQL.contains("project_public_members"));
         assert!(PUBLIC_MEMBER_INSERT_SQL.contains("project_public_members"));
         assert!(PUBLIC_MEMBER_INSERT_SQL.contains("workspace_id"));
