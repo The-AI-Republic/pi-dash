@@ -48,6 +48,14 @@
 //!   different notions of "triage" that agree on seeded data.
 //! * Create recomputes `description_stripped` via `strip_tags`; the update
 //!   path keeps the `_safe_render` value (no `save()`, no recompute).
+//! * The `.strip()` on the mirror `comment_stripped`
+//!   (`git_sync_task.py:153`) is dead: `update_or_create` always runs the
+//!   full `IssueComment.save()`, which recomputes the column from
+//!   `comment_html` without stripping (`issue.py:606`).
+//! * The new-comment `Description` row keeps entities (`Description.save`
+//!   re-strips with Django semantics, `description.py:22-28`) while the
+//!   description refresh on the update path writes the decoded recompute
+//!   (`filter().update`, no `save()`).
 //! * The metadata read-modify-writes (`_reconcile_upstream_gone`, the
 //!   completion guard) are non-atomic, as in Python.
 //! * `GIT_SYNC_ENABLED` exists nowhere in `settings/common.py`, so the
@@ -367,12 +375,102 @@ fn sanitize_html(rendered: &str) -> Option<String> {
     Some(builder.clean(rendered).to_string())
 }
 
+/// `pi_dash.utils.html_processor.strip_tags` (`html_processor.py:11-31`):
+/// the `MLStripper` (`HTMLParser` with `convert_charrefs=True`) — tags
+/// dropped, character references in text decoded. This is NOT Django's
+/// `strip_tags` (regex, entities kept), which
+/// [`tasks_mail::mail_send::strip_tags`][crate::tasks_mail] already ports:
+/// every call site this module mirrors (`_safe_render`,
+/// `github_sync_task.py:40`; `Issue.save` / `IssueComment.save`,
+/// `issue.py:21`) imports the html_processor one. Tag removal reuses the
+/// shared scanner; only the charref layer is new.
+pub fn strip_html_text(html: &str) -> String {
+    decode_char_refs(&strip_tags(html))
+}
+
+/// Decode one `&...;` reference body (no leading `&`, no trailing `;`)
+/// the way `convert_charrefs` does: the named references a serializer can
+/// emit (`&amp; &lt; &gt; &quot; &apos; &nbsp;` — Django's `escape` and the
+/// html5ever serializer never emit any other named reference literally)
+/// plus decimal/hex numeric references (unrepresentable code points become
+/// U+FFFD). Anything else stays verbatim. `None` means "not a reference".
+fn decode_char_ref(body: &str) -> Option<char> {
+    if let Some(stripped) = body.strip_prefix('#') {
+        let (digits, radix) = match stripped.strip_prefix(['x', 'X']) {
+            Some(hex) => (hex, 16),
+            None => (stripped, 10),
+        };
+        if digits.is_empty()
+            || !digits
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && (radix == 16 || b.is_ascii_digit()))
+        {
+            return None;
+        }
+        // The HTML5 numeric-reference table maps NUL to U+FFFD (like
+        // surrogates and out-of-range code points); every other value
+        // yields its character. (CPython additionally drops C0 controls
+        // and noncharacters, but a serializer never emits those as
+        // references, so they stay out of this function's domain.)
+        return Some(match u32::from_str_radix(digits, radix).ok() {
+            Some(0) | None => '\u{FFFD}',
+            Some(code) => char::from_u32(code).unwrap_or('\u{FFFD}'),
+        });
+    }
+    match body {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "nbsp" => Some('\u{a0}'),
+        _ => None,
+    }
+}
+
+/// `&...;` decoding over tag-free text (`convert_charrefs=True`): known
+/// references decode, unknown or unterminated sequences stay verbatim.
+/// Single left-to-right pass with no rescan of replacements, exactly like
+/// the parser (`&amp;amp;` becomes `&amp;`, never `&`). Only
+/// semicolon-terminated references decode: every input here is serializer
+/// output (ammonia / Django `escape`), which always terminates references
+/// with `;`, so the legacy no-semicolon forms are unreachable.
+pub fn decode_char_refs(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('&') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        match after
+            .find(';')
+            .map(|end| (&after[..end], &after[end + 1..]))
+        {
+            Some((body, tail)) if !body.is_empty() => match decode_char_ref(body) {
+                Some(ch) => {
+                    out.push(ch);
+                    rest = tail;
+                }
+                None => {
+                    out.push('&');
+                    rest = after;
+                }
+            },
+            _ => {
+                out.push('&');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Render an upstream body to `(html, stripped)`
 /// (`github_sync_task.py:83-95`): markdown render, sanitized through the
 /// same allow-list that protects user-written content, falling back to
 /// fully-escaped plain text if the sanitizer rejects outright; the
-/// stripped form is Django `strip_tags` of the safe HTML (reused from
-/// [`tasks_mail::mail_send`][crate::tasks_mail], never forked).
+/// stripped form is html_processor [`strip_html_text`] of the safe HTML
+/// (`github_sync_task.py:40,95`).
 pub fn safe_render(body: Option<&str>) -> (String, String) {
     let rendered = markdown_to_html(body);
     let safe_html = match sanitize_html(&rendered) {
@@ -382,7 +480,7 @@ pub fn safe_render(body: Option<&str>) -> (String, String) {
             django_escape(body.unwrap_or("")).replace('\n', "<br/>")
         ),
     };
-    let stripped = strip_tags(&safe_html);
+    let stripped = strip_html_text(&safe_html);
     (safe_html, stripped)
 }
 
@@ -1508,7 +1606,11 @@ const INSERT_ISSUE_SEQUENCE_SQL: &str = "INSERT INTO issue_sequences (id, create
 
 /// `Description.objects.create(…)` for a new mirror comment
 /// (`issue.py:625`): `WorkspaceBaseModel` columns; `description_stripped`
-/// recomputed by `Description.save` (same [`strip_tags`] call).
+/// recomputed by `Description.save` — which imports DJANGO's `strip_tags`
+/// (`description.py:6`, entities kept), overwriting the decoded value the
+/// caller passed (`description.py:22-28`). Hence the Django
+/// [`strip_tags`] call here, unlike every other stripped write in this
+/// module.
 const INSERT_DESCRIPTION_SQL: &str = "INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, description_json, description_html, description_binary, description_stripped) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, NULL, $10)";
 
 /// `IssueComment.objects.create` column list: array defaults `'{}'`,
@@ -1581,12 +1683,13 @@ async fn create_issue(
             .await
             .map_err(db_error)?,
     };
-    // `state.group == "completed"` stamps `completed_at` (`issue.py:306`).
-    let (state_id, completed_at) = match state {
-        Some((id, group)) if group == "completed" => (Some(id), Some(*now)),
-        Some((id, _)) => (Some(id), None),
-        None => (None, None),
-    };
+    // `completed_at` stays NULL here: this create call never passes a
+    // state, so `Issue.save` takes the `state is None` branch
+    // (`issue.py:288-296`) — it resolves the default state but stamps
+    // `completed_at` only when the state was already set (`issue.py:302-309`,
+    // which this path never reaches).
+    let state_id: Option<Uuid> = state.map(|(id, _group)| id);
+    let completed_at: Option<DateTime<Utc>> = None;
     let max_sequence: Option<i64> = sqlx::query_scalar(MAX_SEQUENCE_SQL)
         .bind(scan.project_id)
         .fetch_optional(&mut **tx)
@@ -1602,8 +1705,9 @@ async fn create_issue(
         .map_err(db_error)?
         .flatten();
     let sort_order = max_sort.map(|largest| largest + 10000.0).unwrap_or(65535.0);
-    // `save()` recomputes the stripped form (`issue.py:327-331`).
-    let stripped = strip_tags(description_html);
+    // `save()` recomputes the stripped form (`issue.py:330-334`) with the
+    // html_processor stripper, decoding entities.
+    let stripped = strip_html_text(description_html);
     let issue_id = Uuid::new_v4();
     sqlx::query(INSERT_ISSUE_SQL)
         .bind(issue_id)
@@ -1794,10 +1898,18 @@ pub async fn upsert_comment(
     let provider_name = display_name(&scan.provider);
     let (safe_html, safe_stripped) = safe_render(Some(&remote.body));
     // `comment_html` / `comment_stripped` (`git_sync_task.py:152-153`):
-    // the trailing `.strip()` applies to the whole prefixed string.
+    // the trailing `.strip()` applies to the whole prefixed string — but
+    // the value never reaches the database as-is. `update_or_create` calls
+    // the full `IssueComment.save()`, which unconditionally recomputes
+    // `comment_stripped = strip_tags(comment_html)` (`issue.py:606`,
+    // html_processor semantics, no `.strip()`), so the stored column keeps
+    // e.g. `"[GitHub] "` for empty bodies. The trimmed expression is a
+    // dead intermediate (ported bug, listed in the module docs).
     let comment_html = format!("<p>[{provider_name}] </p>{safe_html}");
-    let comment_stripped = format!("[{provider_name}] {safe_stripped}");
-    let comment_stripped = comment_stripped.trim().to_owned();
+    let _trimmed = format!("[{provider_name}] {safe_stripped}")
+        .trim()
+        .to_owned();
+    let comment_stripped = strip_html_text(&comment_html);
     let remote_id = remote.external_id.clone();
     let existing: Option<(Uuid, String, String, Value, Option<Uuid>)> =
         sqlx::query_as(ISSUE_COMMENT_LOOKUP_SQL)
@@ -1864,7 +1976,13 @@ pub async fn upsert_comment(
                 .map_err(db_error)?;
             // Change-tracked description refresh (`issue.py:629-646`):
             // only the render triple, only when it changed, only with a
-            // description row to write to.
+            // description row to write to. The comparison runs against the
+            // save()-recomputed values (decoded, unstripped), which is what
+            // the database holds. The description refresh is a plain
+            // `filter().update` (no `Description.save`), so it writes the
+            // same recomputed triple — unlike the create path, where
+            // `Description.save` overwrites the stripped form with Django
+            // semantics (`description.py:22-28`).
             let changed = old_html != comment_html
                 || old_stripped != comment_stripped
                 || old_json != json!({});
@@ -1873,7 +1991,7 @@ pub async fn upsert_comment(
                     sqlx::query(UPDATE_COMMENT_DESCRIPTION_SQL)
                         .bind(description_id)
                         .bind(&comment_html)
-                        .bind(strip_tags(&comment_html))
+                        .bind(&comment_stripped)
                         .bind(json!({}))
                         .bind(scan.actor_id)
                         .bind(*now)
@@ -2622,7 +2740,10 @@ mod tests {
     }
 
     // Golden render vectors, generated from `nh3==0.2.18` (the
-    // `base.txt:96` pin) through the exact `_safe_render` pipeline.
+    // `base.txt:96` pin) through the exact `_safe_render` pipeline: the
+    // HTML column is the sanitizer output, the stripped column is
+    // `html_processor.strip_tags` of it (entities decoded — verified
+    // against CPython's `MLStripper`, not assumed).
     #[test]
     fn safe_render_matches_nh3_goldens() {
         const GOLDENS: [(Option<&str>, &str, &str); 16] = [
@@ -2634,12 +2755,12 @@ mod tests {
             (
                 Some("<b>bold</b>"),
                 "<p>&lt;b&gt;bold&lt;/b&gt;</p>",
-                "&lt;b&gt;bold&lt;/b&gt;",
+                "<b>bold</b>",
             ),
             (
                 Some("<script>alert(1)</script>"),
                 "<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>",
-                "&lt;script&gt;alert(1)&lt;/script&gt;",
+                "<script>alert(1)</script>",
             ),
             (
                 Some("[link](http://example.com)"),
@@ -2649,12 +2770,12 @@ mod tests {
             (
                 Some("<a href=\"javascript:alert(1)\">x</a>"),
                 "<p>&lt;a href=\"javascript:alert(1)\"&gt;x&lt;/a&gt;</p>",
-                "&lt;a href=\"javascript:alert(1)\"&gt;x&lt;/a&gt;",
+                "<a href=\"javascript:alert(1)\">x</a>",
             ),
             (
                 Some("AT&T <Q> \"quoted\" 'apos'"),
                 "<p>AT&amp;T &lt;Q&gt; \"quoted\" 'apos'</p>",
-                "AT&amp;T &lt;Q&gt; \"quoted\" 'apos'",
+                "AT&T <Q> \"quoted\" 'apos'",
             ),
             (
                 Some("line1\nline2\n\nline3"),
@@ -2664,7 +2785,7 @@ mod tests {
             (
                 Some("<p>   </p>"),
                 "<p>&lt;p&gt;   &lt;/p&gt;</p>",
-                "&lt;p&gt;   &lt;/p&gt;",
+                "<p>   </p>",
             ),
             (Some("Title\n====="), "<p>Title<br>=====</p>", "Title====="),
             (
@@ -2675,12 +2796,12 @@ mod tests {
             (
                 Some("<img src=\"https://x.test/a.png\" onerror=\"alert(1)\" alt=\"a\">"),
                 "<p>&lt;img src=\"https://x.test/a.png\" onerror=\"alert(1)\" alt=\"a\"&gt;</p>",
-                "&lt;img src=\"https://x.test/a.png\" onerror=\"alert(1)\" alt=\"a\"&gt;",
+                "<img src=\"https://x.test/a.png\" onerror=\"alert(1)\" alt=\"a\">",
             ),
             (
                 Some("<mention-component id=\"7\">@bob</mention-component>"),
                 "<p>&lt;mention-component id=\"7\"&gt;@bob&lt;/mention-component&gt;</p>",
-                "&lt;mention-component id=\"7\"&gt;@bob&lt;/mention-component&gt;",
+                "<mention-component id=\"7\">@bob</mention-component>",
             ),
         ];
         for (input, html, stripped) in GOLDENS {
@@ -2689,6 +2810,35 @@ mod tests {
                 (html.to_owned(), stripped.to_owned()),
                 "input {input:?}"
             );
+        }
+    }
+
+    // `strip_html_text` ports `html_processor.strip_tags` (`MLStripper`,
+    // `convert_charrefs=True`): tags dropped, references decoded. Every
+    // vector below was verified against CPython's `HTMLParser` running the
+    // repo's exact stripper — including the trailing-space prefix rows the
+    // mirror comment writer stores verbatim (`issue.py:606` recomputes
+    // without `.strip()`).
+    #[test]
+    fn strip_html_text_matches_mlstripper() {
+        for (input, expected) in [
+            ("<p></p>", ""),
+            ("<p>Hello</p>", "Hello"),
+            ("<p>a<br>b</p>", "ab"),
+            ("<p>&lt;b&gt;bold&lt;/b&gt;</p>", "<b>bold</b>"),
+            ("<p>AT&amp;T &lt;Q&gt;</p>", "AT&T <Q>"),
+            ("<p>A&nbsp;B&#39;C&#x27;D&quot;E</p>", "A\u{a0}B'C'D\"E"),
+            ("<p>[GitHub] </p><p></p>", "[GitHub] "),
+            ("<p>[GitHub] </p><p>Hello</p>", "[GitHub] Hello"),
+            ("a &amp;amp; b", "a &amp; b"),
+            ("a &unknown; b", "a &unknown; b"),
+            ("a &#65;&#x42; c", "a AB c"),
+            ("a &#0; b", "a \u{FFFD} b"),
+            ("a &#x110000; c", "a \u{FFFD} c"),
+            ("<p>unclosed", "unclosed"),
+            ("<p>a</p><!-- c --><p>b</p>", "ab"),
+        ] {
+            assert_eq!(strip_html_text(input), expected, "strip {input:?}");
         }
     }
 
