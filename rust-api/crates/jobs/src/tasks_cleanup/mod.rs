@@ -253,3 +253,7 @@ pub use workspace_seed::{register_workspace_seed, TASK_NAME as WORKSPACE_SEED_TA
 pub mod versions;
 
 pub use versions::register_versions;
+/// Sibling submodule: [`dummy_data`] ports
+/// `apps/api/pi_dash/bgtasks/dummy_data_task.py` (execution + registry
+/// wiring); see its module docs.
+pub mod dummy_data;

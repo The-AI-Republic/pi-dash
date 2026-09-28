@@ -44,6 +44,14 @@
 pub mod assets;
 pub mod cleanup;
 pub mod deletion;
+// D-09 bgtasks: cleanup, versions, exports, deletion (task layer).
+// The `dummy_data` submodule below owns one Python task file's counts,
+// literals, ordering and payload shape; the jobs-layer `tasks_cleanup`
+// module owns execution and worker registration. Wiring note: the crate
+// root declares `pub mod tasks_cleanup;` (foundation change, tracked
+// separately).
+
+pub mod dummy_data;
 pub mod exports;
 pub mod workspace_seed;
 

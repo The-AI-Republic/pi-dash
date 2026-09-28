@@ -65,7 +65,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use rand::SeedableRng;
+use rand08::SeedableRng;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -625,7 +625,7 @@ pub async fn fire_tick(
     seam: &Arc<dyn FireTickSeam>,
     ticker_id: Uuid,
     now: DateTime<Utc>,
-    rng: &mut impl rand::Rng,
+    rng: &mut impl rand08::Rng,
 ) -> Result<bool, Error> {
     let mut tx = pool.begin().await?;
     let read = match read_claim(&mut tx, ticker_id).await? {
@@ -755,7 +755,7 @@ pub fn register_fire_tick(registry: &mut Registry, pool: PgPool, seam: Arc<dyn F
                     };
                     let now = Utc::now();
                     // `StdRng` (not `thread_rng`): the handler future must be `Send`.
-                    let mut rng = rand::rngs::StdRng::from_entropy();
+                    let mut rng = rand08::rngs::StdRng::from_entropy();
                     fire_tick(&pool, &seam, ticker_id, now, &mut rng)
                         .await
                         .map(|_| Verdict::Ack)

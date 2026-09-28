@@ -471,3 +471,129 @@ def _column_is_null(conn, table: str, pk, column: str) -> bool:
         )
         row = cur.fetchone()
         return row is not None and row[column] is None
+
+
+def _workspace_total(conn, table: str, workspace_id) -> int:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f'SELECT count(*) AS n FROM "{table}" WHERE workspace_id = %s::uuid',
+            (str(workspace_id),),
+        )
+        return cur.fetchone()["n"]
+
+
+def test_create_dummy_data_before_after(db_conn, broker_url):
+    """DB before/after for `create_dummy_data` across every count param.
+
+    Django source: `pi_dash/bgtasks/dummy_data_task.py:488-553`.
+    Counts: issue_count=4, cycle_count=2, module_count=2, pages_count=4,
+    intake_issue_count=2. Deterministic deltas are asserted exactly;
+    sampled link tables (unseeded `random`) are asserted within their
+    draw bounds, and the `create_issue_parent` no-op bug is pinned at
+    zero persisted parent links.
+    """
+    owner = seed_helpers.user(db_conn, "contract-dummy-owner")
+    workspace = seed_helpers.workspace(db_conn, "contractdummy", owner["id"])
+    member_a = seed_helpers.user(db_conn, "contract-dummy-a")
+    member_b = seed_helpers.user(db_conn, "contract-dummy-b")
+    members = [member_a["email"], member_b["email"]]
+    wid = workspace["id"]
+
+    tables = [
+        "projects",
+        "project_members",
+        "states",
+        "labels",
+        "cycles",
+        "modules",
+        "pages",
+        "project_pages",
+        "page_labels",
+        "issues",
+        "issue_sequences",
+        "issue_activities",
+        "intakes",
+        "intake_issues",
+        "issue_assignees",
+        "issue_labels",
+        "cycle_issues",
+        "module_issues",
+    ]
+    before = {table: _workspace_total(db_conn, table, wid) for table in tables}
+
+    celery_wire.publish(
+        f"{M}.dummy_data_task.create_dummy_data",
+        args=[workspace["slug"], owner["email"], members, 4, 2, 2, 4, 2],
+    )
+
+    def _finished():
+        done = (
+            _workspace_total(db_conn, "issues", wid) - before["issues"] == 6
+            and _workspace_total(db_conn, "issue_activities", wid) - before["issue_activities"] == 6
+            and _workspace_total(db_conn, "intake_issues", wid) - before["intake_issues"] == 2
+            and _workspace_total(db_conn, "cycle_issues", wid) - before["cycle_issues"] == 2
+        )
+        return done or None
+
+    wait_for(_finished, what="dummy data run finished")
+    after = {table: _workspace_total(db_conn, table, wid) for table in tables}
+    delta = {table: after[table] - before[table] for table in tables}
+
+    assert delta["projects"] == 1
+    assert delta["project_members"] == 3  # creator + 2 member emails
+    assert delta["states"] == 5
+    # 50 attempts with ignore_conflicts: seeded Faker (seed 0, color_name +
+    # hex_color interleaved) yields 40 distinct (project, name) pairs, so 10
+    # conflict and 40 rows persist (dummy_data_task.py:126-143, Label Meta
+    # unique_project_name_when_not_deleted).
+    assert delta["labels"] == 40
+    assert delta["cycles"] == 3  # off-by-one: cycle_count + 1
+    assert delta["modules"] == 2
+    assert delta["pages"] == 4
+    assert delta["project_pages"] == 4
+    assert delta["issues"] == 6  # 4 + 2 intake
+    assert delta["issue_sequences"] == 6
+    assert delta["issue_activities"] == 6
+    assert delta["intakes"] == 1
+    assert delta["intake_issues"] == 2
+    assert delta["cycle_issues"] == 2  # int(issue_count / 2), one link each
+
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            'SELECT id FROM "projects" WHERE workspace_id = %s::uuid ORDER BY created_at DESC LIMIT 1',
+            (str(wid),),
+        )
+        pid = cur.fetchone()["id"]
+        # create_issue_parent persists nothing (ported bug): no parent links.
+        cur.execute(
+            'SELECT count(*) AS n FROM "issues" WHERE project_id = %s::uuid AND parent_id IS NOT NULL',
+            (str(pid),),
+        )
+        assert cur.fetchone()["n"] == 0
+        # Fresh project: sequence_ids run 1..6 across both issue batches.
+        cur.execute(
+            'SELECT sequence_id FROM "issues" WHERE project_id = %s::uuid ORDER BY sequence_id',
+            (str(pid),),
+        )
+        assert [row["sequence_id"] for row in cur.fetchall()] == [1, 2, 3, 4, 5, 6]
+        cur.execute(
+            'SELECT identifier FROM "projects" WHERE id = %s::uuid',
+            (str(pid),),
+        )
+        identifier = cur.fetchone()["identifier"]
+        assert identifier == identifier.upper()
+        assert 2 <= len(identifier) <= 12
+        cur.execute(
+            'SELECT status, snoozed_till FROM "intake_issues" WHERE project_id = %s::uuid',
+            (str(pid),),
+        )
+        for row in cur.fetchall():
+            assert row["status"] in (-2, -1, 0, 1, 2)
+            assert (row["snoozed_till"] is not None) == (row["status"] == 0)
+
+    # Sampled links stay within their draw bounds (3 assignees in pool,
+    # 40 persisted labels, randint(0, 5) multi-links over 6 issues).
+    assert 0 <= delta["page_labels"] <= 2 * 49
+    assert 0 <= delta["issue_assignees"] <= 2 * 2
+    assert 0 <= delta["issue_labels"] <= 6 * 5
+    assert 0 <= delta["module_issues"] <= 6 * 5
