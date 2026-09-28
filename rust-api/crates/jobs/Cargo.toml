@@ -18,6 +18,11 @@ tokio = { version = "1.53.1", features = ["time", "sync", "macros", "rt-multi-th
 tracing = "0.1.44"
 sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "uuid", "chrono", "json"] }
 amqprs = "2.1.5"
+# D-08 sinks: PostHog `/batch/` POST (same TLS stack as pidash-api: rustls
+# with bundled roots, no system TLS dependency in CI) + BSON document
+# build for the mongo log path (shares the locked bson via mongodb).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
+bson = "2"
 sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid"] }
 sha2 = "0.10"
 rand = "0.8"

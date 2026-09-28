@@ -28,6 +28,7 @@ pub mod space;
 pub mod tasks_cleanup;
 pub mod tasks_mail;
 pub mod tasks_ticker;
+pub mod tasks_webhooks;
 pub mod worker;
 
 pub use amqp::{AmqpConfig, AmqpError, Publisher, CELERY_EXCHANGE, CELERY_ROUTING_KEY};
