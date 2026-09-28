@@ -756,11 +756,15 @@ fn order_key_expr(mapped: &str) -> (String, bool) {
             )
         }
         "state_order" => {
-            // `order_queryset.py:26`: ascending keeps `STATE_ORDER`
-            // as-is; the mapped key already encodes the direction, so
-            // the `CASE` always lists backlog-first (`order_by_sql`
-            // renders the same shape).
-            let cases: Vec<String> = list_q::STATE_GROUP_ORDER
+            // `order_queryset.py:26`: `STATE_ORDER` as-is for the ascending
+            // spelling, reversed for `-state__group` (same shape as
+            // `order_by_sql`); the mapped key's direction applies on top.
+            let order: Vec<&&str> = if desc {
+                list_q::STATE_GROUP_ORDER.iter().rev().collect()
+            } else {
+                list_q::STATE_GROUP_ORDER.iter().collect()
+            };
+            let cases: Vec<String> = order
                 .iter()
                 .enumerate()
                 .map(|(i, g)| format!("WHEN \"states\".\"group\" = '{g}' THEN {i}"))
@@ -1100,6 +1104,24 @@ async fn group_total_pairs(
         .collect()
 }
 
+/// Envelope total over the filtered set for the grouped branches:
+/// `queryset.count()` counts base rows (one per issue after grouping),
+/// so the joins' fanout must collapse in `COUNT(DISTINCT ...)`.
+fn grouped_total_sql(from_sql: &str, where_sql: &str) -> String {
+    format!("SELECT COUNT(DISTINCT \"issues\".\"id\") AS \"count\" {from_sql} {where_sql}")
+}
+
+/// Raw top count behind grouped `max_hits`
+/// (`...order_by("-count")[0]["count"]`, `paginator.py:280-287,467-474`):
+/// the `1-if-zero` adjustment applies to per-cell totals only, never here.
+fn raw_top_count(group_totals: &[(String, i64)]) -> i64 {
+    group_totals
+        .iter()
+        .map(|(_, count)| *count)
+        .max()
+        .unwrap_or(0)
+}
+
 /// Per-group/sub-group totals (`paginator.py:511-518`): sub counts
 /// overwrite plainly (no `1-if-zero` — kernel
 /// [`sub_total_dicts`](paginator::sub_total_dicts)).
@@ -1296,18 +1318,26 @@ async fn list_issues_inner(
         return Ok(guards_error(guards::same_group_by()));
     }
 
+    // Eager `paginate`-kwarg order: `issue_group_values` evaluates before
+    // `paginate` parses `per_page`/cursor, so queryset-needing axes
+    // (`target_date`/`start_date`/`created_by`, `grouper.py:233-250`) 500
+    // before malformed pagination input can 400.
+    for axis in [&group_by, &sub_group_by] {
+        if !axis.is_empty() && group_needs_queryset(axis) {
+            return Err(HandlerError::ServerError);
+        }
+    }
+
     let per_page = paginator::parse_per_page(multi_last(&multi, "per_page").as_deref(), 1000, 1000)
         .map_err(page_denial)?;
     let cursor_raw = multi_last(&multi, "cursor").unwrap_or_else(|| format!("{per_page}:0:0"));
     let cursor = Cursor::from_string(&cursor_raw).map_err(page_denial)?;
 
-    // Eager `paginate`-kwarg order: `issue_group_values` raises before any
-    // SQL runs for queryset-needing or unknown axes.
+    // Unknown axes: `issue_group_values` answers `[]` without raising
+    // (`grouper.py:252`), so malformed pagination input still wins the
+    // 400 here; the 500 lands at evaluation like Django's `FieldError`.
     for axis in [&group_by, &sub_group_by] {
-        if axis.is_empty() {
-            continue;
-        }
-        if group_needs_queryset(axis) || group_inner_expr(axis).is_none() {
+        if !axis.is_empty() && group_inner_expr(axis).is_none() {
             return Err(HandlerError::ServerError);
         }
     }
@@ -1555,14 +1585,15 @@ async fn grouped_response(
             .map(|(group, count)| (group.clone(), *count))
             .collect::<Vec<_>>(),
     );
-    // `max` runs over the ADJUSTED dict (`paginator.py:291-295`): an
-    // all-zero window still reports one page, not zero.
-    let top_group_count = totals.values().copied().max().unwrap_or(0);
+    // `max_hits` runs over the RAW top count (`...order_by("-count")[0]`,
+    // `paginator.py:280-287,467-474`); the `1-if-zero` rule (`:291-295`)
+    // feeds the per-cell `total_results` only.
+    let top_group_count = raw_top_count(&group_totals);
+    // `hits = queryset.count()` (`paginator.py:276,462`): distinct issues,
+    // not joined rows — every m2m/vote/reaction join fans out, so this
+    // must stay `COUNT(DISTINCT ...)` like the ungrouped total.
     let total_count = {
-        let sql = format!(
-            "SELECT COUNT(*) AS \"count\" {} {}",
-            list.from_sql, list.where_sql
-        );
+        let sql = grouped_total_sql(list.from_sql, list.where_sql);
         fetch_all_objects(pool, &sql, list.params)
             .await?
             .first()
@@ -1942,5 +1973,53 @@ mod tests {
         assert!(min_values_sql("labels__name").is_some());
         assert!(min_values_sql("-assignees__first_name").is_some());
         assert!(min_values_sql("bogus").is_none());
+    }
+
+    #[test]
+    fn state_order_case_reverses_for_descending() {
+        // `order_queryset.py:26`: ascending keeps `STATE_ORDER` as-is,
+        // `-state__group` reverses it (the direction applies on top).
+        let (asc_expr, asc_desc) = order_key_expr("state_order");
+        assert!(!asc_desc);
+        let backlog = asc_expr
+            .find("WHEN \"states\".\"group\" = 'backlog'")
+            .expect("backlog arm");
+        let cancelled = asc_expr
+            .find("WHEN \"states\".\"group\" = 'cancelled'")
+            .expect("cancelled arm");
+        assert!(backlog < cancelled);
+        let (desc_expr, desc_desc) = order_key_expr("-state_order");
+        assert!(desc_desc);
+        let backlog = desc_expr
+            .find("WHEN \"states\".\"group\" = 'backlog'")
+            .expect("backlog arm");
+        let cancelled = desc_expr
+            .find("WHEN \"states\".\"group\" = 'cancelled'")
+            .expect("cancelled arm");
+        assert!(cancelled < backlog);
+    }
+
+    #[test]
+    fn grouped_envelope_total_counts_distinct_issues() {
+        // `hits = queryset.count()`: join fanout must collapse, like the
+        // ungrouped total.
+        let sql = grouped_total_sql("FROM ...", "WHERE (...)");
+        assert!(sql.contains("COUNT(DISTINCT \"issues\".\"id\")"));
+        assert!(!sql.contains("COUNT(*)"));
+    }
+
+    #[test]
+    fn grouped_max_hits_uses_raw_top_count() {
+        // `...order_by("-count")[0]["count"]` reads the raw DB count: an
+        // all-zero group list reports zero pages, not one.
+        assert_eq!(raw_top_count(&[]), 0);
+        assert_eq!(
+            raw_top_count(&[("a".to_owned(), 0), ("b".to_owned(), 0)]),
+            0
+        );
+        assert_eq!(
+            raw_top_count(&[("a".to_owned(), 0), ("b".to_owned(), 3)]),
+            3
+        );
     }
 }
