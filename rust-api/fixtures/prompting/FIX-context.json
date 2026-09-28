@@ -1,0 +1,173 @@
+{
+  "bugs": [],
+  "data": {
+    "builders": {
+      "build_context": {
+        "comments_section": "(no comments on this issue yet)",
+        "extra_toolsets": false,
+        "extra_toolsets_schema_tool": "",
+        "issue_identifier": "FX-1",
+        "issue_keys": [
+          "assignees",
+          "description",
+          "id",
+          "identifier",
+          "labels",
+          "priority",
+          "project_states",
+          "state",
+          "state_group",
+          "target_date",
+          "title",
+          "url"
+        ],
+        "issue_priority": "high",
+        "parent_done_payload": "(no parent run done payload available)",
+        "relation_keys": [
+          "blocked_by",
+          "blocking",
+          "children",
+          "has_open_blockers",
+          "lineage",
+          "open_blockers",
+          "other_relations",
+          "parent",
+          "related"
+        ],
+        "repo_keys": [
+          "base_branch",
+          "code_review_term",
+          "full_name",
+          "host_url",
+          "provider",
+          "provider_display_name",
+          "url",
+          "work_branch"
+        ],
+        "run": {
+          "attempt": 1,
+          "executor_kind": "local_runner",
+          "id": "505ea301-7048-4029-9e80-d01a39492597",
+          "kind": "coding-task",
+          "trigger": "tick",
+          "turn_number": 1
+        },
+        "tick": null,
+        "top_keys": [
+          "available_tools",
+          "blocked_by",
+          "blocking",
+          "children",
+          "code_reviews",
+          "comments_section",
+          "extra_toolsets",
+          "extra_toolsets_schema_tool",
+          "has_open_blockers",
+          "issue",
+          "limits",
+          "lineage",
+          "open_blockers",
+          "other_relations",
+          "parent",
+          "parent_done_payload",
+          "project",
+          "related",
+          "repo",
+          "run",
+          "tick",
+          "unavailable_capabilities",
+          "workpad_body",
+          "workspace"
+        ],
+        "workpad_body": ""
+      },
+      "human_triggers": ["comment_and_run", "direct", "run_ai", "state_transition"],
+      "run_is_human_triggered_tick": false,
+      "scheduler_context": {
+        "has_issue_key": false,
+        "run": {
+          "attempt": 1,
+          "executor_kind": "local_runner",
+          "id": "505ea301-7048-4029-9e80-d01a39492597",
+          "kind": "scheduler",
+          "turn_number": 1
+        },
+        "scheduler": {
+          "description": "Scans the project for common security vulnerabilities and files Pi Dash issues for any new findings.",
+          "name": "Security Audit",
+          "slug": "security-audit"
+        },
+        "task_body_len": 1091,
+        "top_keys": [
+          "available_tools",
+          "extra_toolsets",
+          "extra_toolsets_schema_tool",
+          "limits",
+          "project",
+          "run",
+          "scheduler",
+          "scheduler_task_body",
+          "unavailable_capabilities",
+          "workspace"
+        ]
+      },
+      "task_body_cloud": "Scan this project's source code for potential security vulnerabilities\n(injection, auth bypass, secret leakage, unsafe deserialization, SSRF,\ninsecure defaults).\n\nFor each finding, create a Pi Dash issue using the `pi-dash` CLI:\n    pi-dash issue create \\\n      --title \"[security] <short summary>\" \\\n      --description \"<file path, line range, vulnerable snippet,\n                     severity (high|medium|low), and suggested fix>\"\n\nBefore creating an issue, list existing open issues with the\n\"[security]\" title prefix and skip any finding that already has a\ncorresponding open issue (de-dupe by file + rule, not by exact title).\n\nFocus on auth.\n\nSearch for duplicates and create at most one Pi Dash backlog issue for the most important new finding.",
+      "task_body_cloud_run_differs": true,
+      "task_body_local": "Scan this project's source code for potential security vulnerabilities\n(injection, auth bypass, secret leakage, unsafe deserialization, SSRF,\ninsecure defaults).\n\nFor each finding, create a Pi Dash issue using the `pi-dash` CLI:\n    pi-dash issue create \\\n      --title \"[security] <short summary>\" \\\n      --description \"<file path, line range, vulnerable snippet,\n                     severity (high|medium|low), and suggested fix>\"\n\nBefore creating an issue, list existing open issues with the\n\"[security]\" title prefix and skip any finding that already has a\ncorresponding open issue (de-dupe by file + rule, not by exact title).\n\nFocus on auth.\n\n## Work mode: create issues\n\nFor each distinct finding, file a Pi Dash issue with the `pidash` CLI:\n    pidash issue create --project <PROJ> --title \"<short summary>\" \\\n        --description \"<file path, line range, evidence, severity, suggested fix>\"\nBefore creating an issue, list existing open issues and skip any finding that already has a corresponding open issue (de-dupe by file + root cause, not by exact title). Do NOT modify code.",
+      "trace": "context.py:521-643 (build_context), 646-663 (build_scheduler_task_body: prompt + extra_context + outcome directive joined by blank lines), 666-718 (build_scheduler_context: no issue keys, cloud branch 677-689 replaces directive); helpers 22-32 (description fallback), 35-43 (identifier), 55-69 (ancestor cap 50), 332-338 (_humanize_interval), 497-518 (extra_toolsets_vars)"
+    },
+    "helpers": {
+      "actor_label_display_wins": "D",
+      "actor_label_email_fallback": "e@x.y",
+      "actor_label_none": "Unknown",
+      "ancestor_chain_len_3": 3,
+      "ancestor_cycle_terminates_len": 2,
+      "closed_state_groups": ["cancelled", "completed"],
+      "comment_labels": {
+        "agent_bot": "AI agent: Helper (submitted by a@b.c)",
+        "agent_human_token": "AI agent: Helper (submitted by H)",
+        "bot_actor": "AI agent: Pi Dash Agent",
+        "human": "Human: a@b.c",
+        "integration": "Integration: GH",
+        "none_actor": "Unknown",
+        "system": "System: Scheduler",
+        "system_bare": "System: Pi Dash"
+      },
+      "description_fallback_empty": "",
+      "description_passthrough": "line1\nline2",
+      "directional_labels": {
+        "blocked_by": "Blocked by",
+        "blocking": "Blocking",
+        "finish_after": "Finishes after",
+        "finish_before": "Finishes before",
+        "implemented_by": "Implemented by",
+        "implements": "Implements",
+        "start_after": "Starts after",
+        "start_before": "Starts before"
+      },
+      "extra_toolsets_off": {
+        "extra_toolsets": false,
+        "extra_toolsets_schema_tool": ""
+      },
+      "extra_toolsets_on_shape": ["extra_toolsets", "extra_toolsets_schema_tool"],
+      "humanize_interval": {
+        "0": "0 hours",
+        "10800": "3 hours",
+        "3600": "1 hour",
+        "5400": "90 minutes",
+        "60": "1 minute",
+        "90": "2 minutes"
+      },
+      "issue_identifier": "TP-12",
+      "max_relationship_items": 25,
+      "trace": "context.py:22-32 (_issue_description_markdown), 35-43 (_issue_identifier), 55-69 (_ancestor_chain: visited-set + depth cap 50), 257-265 (_actor_label), 268-294 (_comment_author_label), 332-338 (_humanize_interval), 497-518 (extra_toolsets_vars), 721-731 (_compute_attempt: prior count + 1)"
+    }
+  },
+  "fixture_id": "FIX-context",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world).",
+  "notes": [],
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "prompting/context.py:22-69 (description/identifier/ancestor helpers), 72-77 (_MAX_RELATIONSHIP_ITEMS=25), 80-246 (children/related/directional relations + open_blockers), 249-294 (url/actor/comment labels), 297-329 (_comments_section), 332-398 (_humanize_interval/_tick_context), 401-431 (parent payload/run kind), 434-494 (_repo_context/_code_reviews_context), 497-518 (extra_toolsets_vars), 521-643 (build_context), 646-663 (build_scheduler_task_body), 666-718 (build_scheduler_context), 721-731 (_compute_attempt)"
+  ]
+}

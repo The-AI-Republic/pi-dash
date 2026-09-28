@@ -1,0 +1,327 @@
+{
+  "bugs": [],
+  "data": {
+    "models": {
+      "default_name_const": "coding-task",
+      "is_global_default_none": true,
+      "is_workspace_level_none": true,
+      "prompt_section_override": {
+        "columns": [
+          {
+            "blank": false,
+            "choices": null,
+            "column": "id",
+            "default": "callable:function",
+            "fk": null,
+            "max_length": 32,
+            "name": "id",
+            "null": false,
+            "on_delete": null,
+            "related": null,
+            "type": "UUIDField"
+          },
+          {
+            "blank": false,
+            "choices": null,
+            "column": "workspace_id",
+            "default": "callable:type",
+            "fk": "Workspace",
+            "max_length": null,
+            "name": "workspace",
+            "null": false,
+            "on_delete": "function",
+            "related": "prompt_section_overrides",
+            "type": "ForeignKey"
+          },
+          {
+            "blank": true,
+            "choices": null,
+            "column": "user_id",
+            "default": "callable:type",
+            "fk": "User",
+            "max_length": null,
+            "name": "user",
+            "null": true,
+            "on_delete": "function",
+            "related": "prompt_section_overrides",
+            "type": "ForeignKey"
+          },
+          {
+            "blank": false,
+            "choices": null,
+            "column": "section_key",
+            "default": "callable:type",
+            "fk": null,
+            "max_length": 64,
+            "name": "section_key",
+            "null": false,
+            "on_delete": null,
+            "related": null,
+            "type": "CharField"
+          },
+          {
+            "blank": false,
+            "choices": null,
+            "column": "body",
+            "default": "callable:type",
+            "fk": null,
+            "max_length": null,
+            "name": "body",
+            "null": false,
+            "on_delete": null,
+            "related": null,
+            "type": "TextField"
+          },
+          {
+            "blank": false,
+            "choices": null,
+            "column": "is_active",
+            "default": "True",
+            "fk": null,
+            "max_length": null,
+            "name": "is_active",
+            "null": false,
+            "on_delete": null,
+            "related": null,
+            "type": "BooleanField"
+          },
+          {
+            "blank": false,
+            "choices": null,
+            "column": "version",
+            "default": "1",
+            "fk": null,
+            "max_length": null,
+            "name": "version",
+            "null": false,
+            "on_delete": null,
+            "related": null,
+            "type": "PositiveIntegerField"
+          },
+          {
+            "blank": false,
+            "choices": null,
+            "column": "needs_attention",
+            "default": "False",
+            "fk": null,
+            "max_length": null,
+            "name": "needs_attention",
+            "null": false,
+            "on_delete": null,
+            "related": null,
+            "type": "BooleanField"
+          },
+          {
+            "blank": true,
+            "choices": null,
+            "column": "updated_by_id",
+            "default": "callable:type",
+            "fk": "User",
+            "max_length": null,
+            "name": "updated_by",
+            "null": true,
+            "on_delete": "function",
+            "related": "prompt_section_overrides_updated",
+            "type": "ForeignKey"
+          },
+          {
+            "blank": true,
+            "choices": null,
+            "column": "created_at",
+            "default": "callable:type",
+            "fk": null,
+            "max_length": null,
+            "name": "created_at",
+            "null": false,
+            "on_delete": null,
+            "related": null,
+            "type": "DateTimeField"
+          },
+          {
+            "blank": true,
+            "choices": null,
+            "column": "updated_at",
+            "default": "callable:type",
+            "fk": null,
+            "max_length": null,
+            "name": "updated_at",
+            "null": false,
+            "on_delete": null,
+            "related": null,
+            "type": "DateTimeField"
+          }
+        ],
+        "constraints": [
+          {
+            "condition": "(AND: ('is_active', True), ('user__isnull', True))",
+            "fields": ["workspace", "section_key"],
+            "name": "prompt_section_override_one_active_ws",
+            "type": "UniqueConstraint"
+          },
+          {
+            "condition": "(AND: ('is_active', True), ('user__isnull', False))",
+            "fields": ["workspace", "user", "section_key"],
+            "name": "prompt_section_override_one_active_user",
+            "type": "UniqueConstraint"
+          }
+        ],
+        "db_table": "prompt_section_override",
+        "indexes": [
+          {
+            "fields": ["workspace", "user", "section_key", "is_active"],
+            "name": "prompt_sec_overrid_ws_usr_idx"
+          }
+        ]
+      },
+      "prompt_template": {
+        "columns": [
+          {
+            "blank": false,
+            "choices": null,
+            "column": "id",
+            "default": "callable:function",
+            "fk": null,
+            "max_length": 32,
+            "name": "id",
+            "null": false,
+            "on_delete": null,
+            "related": null,
+            "type": "UUIDField"
+          },
+          {
+            "blank": true,
+            "choices": null,
+            "column": "workspace_id",
+            "default": "callable:type",
+            "fk": "Workspace",
+            "max_length": null,
+            "name": "workspace",
+            "null": true,
+            "on_delete": "function",
+            "related": "prompt_templates",
+            "type": "ForeignKey"
+          },
+          {
+            "blank": false,
+            "choices": null,
+            "column": "name",
+            "default": "'coding-task'",
+            "fk": null,
+            "max_length": 64,
+            "name": "name",
+            "null": false,
+            "on_delete": null,
+            "related": null,
+            "type": "CharField"
+          },
+          {
+            "blank": false,
+            "choices": null,
+            "column": "body",
+            "default": "callable:type",
+            "fk": null,
+            "max_length": null,
+            "name": "body",
+            "null": false,
+            "on_delete": null,
+            "related": null,
+            "type": "TextField"
+          },
+          {
+            "blank": false,
+            "choices": null,
+            "column": "is_active",
+            "default": "True",
+            "fk": null,
+            "max_length": null,
+            "name": "is_active",
+            "null": false,
+            "on_delete": null,
+            "related": null,
+            "type": "BooleanField"
+          },
+          {
+            "blank": false,
+            "choices": null,
+            "column": "version",
+            "default": "1",
+            "fk": null,
+            "max_length": null,
+            "name": "version",
+            "null": false,
+            "on_delete": null,
+            "related": null,
+            "type": "PositiveIntegerField"
+          },
+          {
+            "blank": true,
+            "choices": null,
+            "column": "updated_by_id",
+            "default": "callable:type",
+            "fk": "User",
+            "max_length": null,
+            "name": "updated_by",
+            "null": true,
+            "on_delete": "function",
+            "related": "prompt_templates_updated",
+            "type": "ForeignKey"
+          },
+          {
+            "blank": true,
+            "choices": null,
+            "column": "created_at",
+            "default": "callable:type",
+            "fk": null,
+            "max_length": null,
+            "name": "created_at",
+            "null": false,
+            "on_delete": null,
+            "related": null,
+            "type": "DateTimeField"
+          },
+          {
+            "blank": true,
+            "choices": null,
+            "column": "updated_at",
+            "default": "callable:type",
+            "fk": null,
+            "max_length": null,
+            "name": "updated_at",
+            "null": false,
+            "on_delete": null,
+            "related": null,
+            "type": "DateTimeField"
+          }
+        ],
+        "constraints": [
+          {
+            "condition": "(AND: ('is_active', True))",
+            "fields": ["workspace", "name"],
+            "name": "prompt_template_one_active_per_ws_name",
+            "type": "UniqueConstraint"
+          }
+        ],
+        "db_table": "prompt_template",
+        "indexes": [
+          {
+            "fields": ["workspace", "name", "is_active"],
+            "name": "prompt_temp_workspa_e56e29_idx"
+          }
+        ]
+      },
+      "str_override_ws": "PromptSectionOverride<ws=None:workspace:intro:v1>",
+      "str_template_global": "PromptTemplate<global:coding-task:v1>",
+      "trace": "prompting/models.py:19-62 (PromptTemplate), 65-140 (PromptSectionOverride)"
+    }
+  },
+  "fixture_id": "FIX-models",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world).",
+  "notes": [
+    "PromptSectionOverride needs Django 4.2-compatible twin partial-unique constraints (models.py:116-125) because NULLs are DISTINCT; port both names verbatim."
+  ],
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "prompting/models.py:19-62 (PromptTemplate + __str__ 56-58 + is_global_default 60-62)",
+    "prompting/models.py:65-140 (PromptSectionOverride + __str__ 134-136 + is_workspace_level 138-140)"
+  ]
+}
