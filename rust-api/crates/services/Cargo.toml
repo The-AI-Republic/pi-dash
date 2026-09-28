@@ -10,8 +10,11 @@ pidash-auth = { path = "../auth" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 thiserror = { version = "2" }
-flate2 = { version = "1" }
+# D-05 GitHub adapter datetimes: same locked chrono 0.4.45 as pidash-db
+# (no lock churn); std only, datetimes render to strings manually.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 crc32fast = { version = "1" }
+flate2 = { version = "1" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

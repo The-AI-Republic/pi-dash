@@ -9,6 +9,7 @@
 pub mod app_issues;
 pub mod extensions;
 pub mod health;
+pub mod integrations;
 pub mod license;
 pub mod space;
 pub mod tasks_cleanup;
