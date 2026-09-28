@@ -45,7 +45,6 @@ class WorkspaceProjectDeployBoardEndpoint(BaseAPIView):
             "description",
             "emoji",
             "icon_prop",
-            "cover_image",
         )
 
         return Response(projects, status=status.HTTP_200_OK)

@@ -92,7 +92,6 @@ _RESOLVER_CONFIG = {
     "LLM_MODEL": {"source": "db", "default": "gpt-4o-mini"},
     "GPT_ENGINE": {"source": "db", "default": "gpt-3.5-turbo"},  # deprecated, use LLM_MODEL
     # --- Misc -------------------------------------------------------------
-    "UNSPLASH_ACCESS_KEY": {"source": "db", "default": "", "secret": True},
     # Read by the instances endpoint from the env only (never seeded to DB).
     "SLACK_CLIENT_ID": {"source": "env", "default": None},
     # --- Analytics (never seeded to DB; always env) -----------------------
@@ -283,7 +282,7 @@ def _load_env_overrides() -> dict[str, str]:
 def _build_config() -> dict[str, dict]:
     config = {key: dict(entry) for key, entry in _RESOLVER_CONFIG.items()}
     # Infra keys are env-sourced; never override an already-declared resolver
-    # key (e.g. UNSPLASH_ACCESS_KEY stays db-managed for the admin UI).
+    # key (e.g. LLM_API_KEY stays db-managed for the admin UI).
     for key, default in _ENV_INFRA.items():
         config.setdefault(key, {"source": "env", "default": default})
     overrides = {**_load_env_overrides(), **CONFIG_SOURCE_OVERRIDES}
