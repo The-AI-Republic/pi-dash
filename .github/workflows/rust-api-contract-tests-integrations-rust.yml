@@ -5,9 +5,10 @@ name: rust-api-contract-tests-integrations-rust
 # Django worker (and beat) stay STOPPED and the Rust worker
 # (`pidash-api worker`) serves rust_job_queue instead. The replay suite
 # (integrations/test_rust_replay.py) seeds rust_job_queue rows with the
-# exact Celery v2 payloads and runs the same DB before/after assertions;
-# the 3 still-Python-owned legacy github_sync_task names assert observable
-# AMQP forwarding while the Django worker is stopped.
+# exact Celery v2 payloads and runs the same DB before/after assertions
+# for all 6 Rust-owned D-05 task names (PIDASHCONV-238 registers the
+# git_sync + github_sync handlers in the binary) with the Django worker
+# stopped.
 
 on:
   push:
