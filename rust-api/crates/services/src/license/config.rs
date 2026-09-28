@@ -70,7 +70,14 @@ pub fn source_of(registry: &ConfigRegistry, key: &str) -> ConfigSource {
 /// * `EMAIL_PORT` defaults to the env value or integer `587`;
 /// * `EMAIL_USE_TLS` / `EMAIL_USE_SSL` default to `"1"` / `"0"`;
 /// * `EMAIL_FROM` defaults to `"Team Pi Dash <team@airepublic.com>"`.
-pub fn email_items_with(getenv: &dyn Fn(&str) -> Option<String>) -> Vec<LegacyItem> {
+///
+/// The reader is generic over a `Send + Sync` closure so callers can inject a
+/// map-backed stub in tests while the async composition below stays `Send`
+/// (a bare `&dyn Fn` across the `await` made the future `!Send`).
+pub fn email_items_with<F>(getenv: &F) -> Vec<LegacyItem>
+where
+    F: Fn(&str) -> Option<String> + Send + Sync + ?Sized,
+{
     let env_or_null = |key: &str| match getenv(key) {
         Some(v) => ConfigValue::Str(v),
         None => ConfigValue::Null,
@@ -115,7 +122,10 @@ pub fn email_items() -> Vec<LegacyItem> {
 /// Port of `get_email_configuration` (`instance_value.py:57-74`): the 7-tuple
 /// in [`EMAIL_KEYS`] order, each entry the decrypted DB row or the call-time
 /// env/default fallback.
-pub async fn get_email_configuration<S: ConfigStore>(
+///
+/// The returned future is `Send` (the `Sync` bounds below), so axum handlers
+/// on the multi-threaded runtime can await it directly.
+pub async fn get_email_configuration<S: ConfigStore + Sync>(
     store: &S,
     keyring: &Keyring,
     registry: &ConfigRegistry,
@@ -125,12 +135,17 @@ pub async fn get_email_configuration<S: ConfigStore>(
 
 /// [`get_email_configuration`] with an injectable environment reader (call-time
 /// defaults without touching the process environment; used by tests).
-pub async fn get_email_configuration_with<S: ConfigStore>(
+/// `Send + Sync` on the reader keeps the future `Send`.
+pub async fn get_email_configuration_with<S, F>(
     store: &S,
     keyring: &Keyring,
     registry: &ConfigRegistry,
-    getenv: &dyn Fn(&str) -> Option<String>,
-) -> Result<Vec<ConfigValue>, ConfigError> {
+    getenv: &F,
+) -> Result<Vec<ConfigValue>, ConfigError>
+where
+    S: ConfigStore + Sync,
+    F: Fn(&str) -> Option<String> + Send + Sync + ?Sized,
+{
     let items = email_items_with(getenv);
     get_configuration_values(registry, store, keyring, &items).await
 }
@@ -337,6 +352,26 @@ mod tests {
         env.insert("EMAIL_PORT".to_owned(), "2525".to_owned());
         let items = email_items_with(&|k| env.get(k).cloned());
         assert_eq!(items[3].default, ConfigValue::Str("2525".to_owned()));
+    }
+
+    #[test]
+    fn email_configuration_future_is_send() {
+        // The futures once held a bare `&dyn Fn` reader across an await,
+        // making them `!Send` and unusable in multi-threaded axum handlers
+        // (found by the PIDASHCONV-123 review). This fails to compile if the
+        // future ever stops being `Send`.
+        fn assert_send<T: Send>(_: T) {}
+        let store = MemStore::default();
+        let keyring = keyring();
+        let registry = registry();
+        assert_send(get_email_configuration(&store, &keyring, &registry));
+        let empty: HashMap<String, String> = HashMap::new();
+        assert_send(get_email_configuration_with(
+            &store,
+            &keyring,
+            &registry,
+            &|key: &str| empty.get(key).cloned(),
+        ));
     }
 
     #[test]

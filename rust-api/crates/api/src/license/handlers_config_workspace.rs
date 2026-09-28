@@ -492,15 +492,9 @@ async fn email_credential_check(
         pidash_services::license::encryption::Keyring::from_secret(&state.settings().secret_key);
     let registry = pidash_db::config::registry::global();
     let store = pidash_db::config::PgConfigStore::new(pool.clone());
-    // NOTE: `services::license::config::get_email_configuration` is not
-    // used here: its future holds a bare `&dyn Fn` environment reader
-    // across an await, so it is `!Send` and cannot run on the
-    // multi-threaded runtime (filed separately). The equivalent composition
-    // — `email_items()` (call-time env defaults) over the legacy batch
-    // shim — is `Send` with the concrete store and behaves identically.
-    let items = pidash_services::license::config::email_items();
     let values =
-        match pidash_db::config::get_configuration_values(registry, &store, &keyring, &items).await
+        match pidash_services::license::config::get_email_configuration(&store, &keyring, registry)
+            .await
         {
             Ok(values) => values,
             Err(_) => return Denial::ServerError.into_response(),
@@ -807,9 +801,7 @@ mod smtp {
         async fn write_str(&mut self, command: &str) -> Result<(), MailError> {
             let bytes = format!("{command}\r\n");
             match self {
-                Io::Plain(buf) => {
-                    buf.get_mut().write_all(bytes.as_bytes()).await
-                }
+                Io::Plain(buf) => buf.get_mut().write_all(bytes.as_bytes()).await,
                 Io::Tls(buf) => buf.get_mut().write_all(bytes.as_bytes()).await,
             }
             .map_err(map_io)?;
@@ -1314,9 +1306,7 @@ mod smtp {
         #[tokio::test]
         async fn multiline_reply_reads_past_first_line() {
             use tokio::io::AsyncWriteExt;
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             tokio::spawn(async move {
                 let (mut server, _) = listener.accept().await.unwrap();
@@ -1331,13 +1321,11 @@ mod smtp {
             });
             let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
             let mut io = Io::Plain(tokio::io::BufReader::new(stream));
-            let (code, text) = tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                io.read_reply(),
-            )
-            .await
-            .expect("multiline reply must not stall")
-            .unwrap();
+            let (code, text) =
+                tokio::time::timeout(std::time::Duration::from_secs(3), io.read_reply())
+                    .await
+                    .expect("multiline reply must not stall")
+                    .unwrap();
             assert_eq!(code, 250);
             assert!(text.contains("AUTH LOGIN PLAIN"), "got: {text:?}");
             assert!(text.contains("OK"), "got: {text:?}");
@@ -1360,9 +1348,7 @@ mod smtp {
             fake: FakeSmtp,
         ) -> (std::net::SocketAddr, tokio::task::JoinHandle<Vec<String>>) {
             use tokio::io::AsyncBufReadExt;
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let handle = tokio::spawn(async move {
                 let (stream, _) = listener.accept().await.unwrap();
@@ -1417,7 +1403,8 @@ mod smtp {
                         };
                         if !fake.reject_plain {
                             if let Ok(decoded) = base64_decode(&response) {
-                                let want = format!("\0{}\0{}", fake.expect_user, fake.expect_password);
+                                let want =
+                                    format!("\0{}\0{}", fake.expect_user, fake.expect_password);
                                 ok = decoded == want.as_bytes();
                             }
                         }
@@ -1425,7 +1412,11 @@ mod smtp {
                         send(
                             &mut writer,
                             &mut transcript,
-                            if ok { "235 authenticated" } else { "535 bad credentials" },
+                            if ok {
+                                "235 authenticated"
+                            } else {
+                                "535 bad credentials"
+                            },
                         )
                         .await;
                     } else if up.starts_with("AUTH LOGIN") {
@@ -1456,7 +1447,11 @@ mod smtp {
                         send(
                             &mut writer,
                             &mut transcript,
-                            if ok { "235 authenticated" } else { "535 bad credentials" },
+                            if ok {
+                                "235 authenticated"
+                            } else {
+                                "535 bad credentials"
+                            },
                         )
                         .await;
                     } else if up.starts_with("MAIL FROM") {
