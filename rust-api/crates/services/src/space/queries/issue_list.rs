@@ -375,7 +375,10 @@ pub fn compile_issue_filters(
             }
             "estimate_point" => {
                 if let Some(tokens) = get_tokens(raw) {
-                    let (c, n) = in_conjunct("\"issues\".\"estimate_point\"", &tokens, next);
+                    // `estimate_point` is a FK (`issue.py:130-136`), so the
+                    // physical column is `estimate_point_id`
+                    // (`estimate_point__in` resolves to it in Django).
+                    let (c, n) = in_conjunct("\"issues\".\"estimate_point_id\"", &tokens, next);
                     conjuncts.push(c);
                     params.extend(tokens);
                     next = n;
@@ -1424,6 +1427,24 @@ mod tests {
         assert!(both
             .conjuncts
             .contains(&"\"issues\".\"start_date\" IS NOT NULL".to_string()));
+    }
+
+    #[test]
+    fn filters_estimate_point_hits_physical_fk_column() {
+        // `Issue.estimate_point` is a FK (`issue.py:130-136`): Django renders
+        // `estimate_point__in` as `"issues"."estimate_point_id" IN (...)`.
+        let c = compile_issue_filters(
+            &qp(&[("estimate_point", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")]),
+            3,
+        );
+        assert_eq!(
+            c.conjuncts,
+            vec!["\"issues\".\"estimate_point_id\" IN ($3)".to_string()]
+        );
+        assert_eq!(
+            c.params,
+            vec!["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string()]
+        );
     }
 
     #[test]
