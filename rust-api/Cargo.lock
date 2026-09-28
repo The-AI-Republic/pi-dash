@@ -1765,6 +1765,7 @@ dependencies = [
  "pidash-auth",
  "pidash-db",
  "pidash-types",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",
