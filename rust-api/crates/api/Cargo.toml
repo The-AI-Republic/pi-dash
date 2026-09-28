@@ -8,10 +8,10 @@ pidash-types = { path = "../types" }
 pidash-db = { path = "../db" }
 pidash-auth = { path = "../auth" }
 pidash-services = { path = "../services" }
-# Space public-API handlers (D-02): transactional `issue_activity` enqueue
-# into `rust_job_queue` (the worker forwards Python-owned names to the
-# broker); the crate is a path dependency, so the lockfile gains no new
-# downloads from it.
+# Space public-API handlers (D-02): transactional `issue_activity`
+# (+ `soft_delete_related_objects`) enqueue into `rust_job_queue`
+# (the worker forwards Python-owned names to the broker); the crate is
+# a path dependency, so the lockfile gains no new downloads from it.
 pidash-jobs = { path = "../jobs" }
 # Space intake `description_html` sanitization: `nh3` (the Python side) is
 # bindings for this exact crate, so the same tags/attributes/schemes give
