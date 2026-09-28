@@ -621,6 +621,15 @@ impl CleanupTask {
             CleanupTask::WebhookLogs => webhook_logs_sql(cutoff),
         }
     }
+
+    /// Executable form of [`CleanupTask::select_sql`]: the cutoff bound as
+    /// a quoted literal. The builders emit Django's `str(query)` debug form
+    /// (datetime bounds unquoted, exactly as the fixture records them);
+    /// Postgres rejects that, so execution quotes it. The cutoff is always
+    /// rendered internally by [`render_cutoff`], never user input.
+    pub fn select_sql_for_exec(&self, cutoff: &str) -> String {
+        self.select_sql(&format!("'{cutoff}'"))
+    }
 }
 
 /// Outcome of one task run, mirroring the `logger.info(…, extra={…})`
@@ -695,7 +704,7 @@ pub async fn run_cleanup(
     if mongo_available {
         tracing::info!("MongoDB collection '{collection}' connected successfully");
     }
-    let sql = task.select_sql(cutoff);
+    let sql = task.select_sql_for_exec(cutoff);
     let table = task.table();
     let deleter = PgDeleter::new(pool);
 
@@ -815,6 +824,27 @@ mod tests {
         assert_eq!(
             webhook_logs_sql(FROZEN_CUTOFF),
             q["webhook_logs_sql"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn executed_cutoff_is_a_quoted_literal() {
+        // The builders emit Django's `str(query)` debug form (bound
+        // unquoted); execution must quote it or Postgres rejects the
+        // statement. The window tasks take no bound, so they are unchanged.
+        let q = fixture_querysets();
+        let exec = CleanupTask::ApiLogs.select_sql_for_exec(FROZEN_CUTOFF);
+        assert_eq!(
+            exec,
+            q["api_logs_sql"]
+                .as_str()
+                .unwrap()
+                .replace(FROZEN_CUTOFF, &format!("'{FROZEN_CUTOFF}'"))
+        );
+        assert!(exec.contains(&format!("<= '{FROZEN_CUTOFF}'")));
+        assert_eq!(
+            CleanupTask::PageVersions.select_sql_for_exec(FROZEN_CUTOFF),
+            page_versions_sql()
         );
     }
 

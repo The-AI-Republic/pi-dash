@@ -30,5 +30,5 @@
 //! Port of the task wiring of `apps/api/pi_dash/bgtasks/cleanup_task.py`
 //! (`:92-:163`, `:422-:479`).
 
-pub mod exports;
 pub mod cleanup;
+pub mod exports;
