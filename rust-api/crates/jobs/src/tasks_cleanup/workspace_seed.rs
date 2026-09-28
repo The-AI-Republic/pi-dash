@@ -1378,7 +1378,8 @@ impl SeedStore for PgSeedStore {
                display_name, first_name, last_name, avatar, avatar_asset_id, cover_image,
                cover_image_asset_id, date_joined, created_at, updated_at, last_location,
                created_location, is_superuser, is_managed, is_password_expired, is_active,
-               is_staff, is_email_verified, is_password_autoset, token, user_timezone,
+               is_staff, is_email_verified, is_password_autoset, is_password_reset_required,
+               token, user_timezone,
                last_active, last_login_time, last_logout_time, last_login_ip, last_logout_ip,
                last_login_medium, last_login_uagent, token_updated_at, is_bot, bot_type,
                is_email_valid, masked_at)
@@ -1386,7 +1387,7 @@ impl SeedStore for PgSeedStore {
                'Pi Dash', 'Pi Dash', '', '', NULL, NULL,
                NULL, $5, $5, $5, '',
                '', false, false, false, true,
-               false, false, true, '', 'UTC',
+               false, false, true, false, '', 'UTC',
                $5, NULL, NULL, '', '',
                'email', '', NULL, true, 'WORKSPACE_SEED',
                false, NULL)
