@@ -24,6 +24,7 @@ pub mod celery;
 pub mod queue;
 pub mod schedule;
 pub mod scheduler;
+pub mod space;
 pub mod tasks_ticker;
 pub mod worker;
 
