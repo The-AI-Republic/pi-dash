@@ -44,15 +44,11 @@
 pub mod assets;
 pub mod cleanup;
 pub mod deletion;
-//! D-09 bgtasks: cleanup, versions, exports, deletion (task layer).
-//!
-//! Pure planning kernels for the `apps/api/pi_dash/bgtasks/` ports. Each
-//! submodule owns one Python task file's counts, literals, ordering and
-//! payload shape; the jobs-layer `tasks_cleanup` module owns execution and
-//! worker registration. Logic stays DB-free here so the fixture vectors
-//! replay as unit tests.
-
-//! Wiring note: the crate root declares `pub mod tasks_cleanup;`
-//! (foundation change, tracked separately).
+// D-09 bgtasks: cleanup, versions, exports, deletion (task layer).
+// The `dummy_data` submodule below owns one Python task file's counts,
+// literals, ordering and payload shape; the jobs-layer `tasks_cleanup`
+// module owns execution and worker registration. Wiring note: the crate
+// root declares `pub mod tasks_cleanup;` (foundation change, tracked
+// separately).
 
 pub mod dummy_data;
