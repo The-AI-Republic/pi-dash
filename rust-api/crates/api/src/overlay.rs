@@ -153,6 +153,11 @@ impl Overlay {
 /// PIDASHCONV-159): `GET`/`PATCH /api/users/me/auto-pm/` and
 /// `PATCH /api/users/me/auto-pm/jobs/{slug}/`; every other method on
 /// those paths proxies to Django.
+///
+/// The Prompting group serves the D-04 prompt-section surface
+/// (`prompting`, PIDASHCONV-158): the four owned paths (section list,
+/// section detail PUT/DELETE, compiled, preview) with their owned
+/// methods; every other method on those paths proxies to Django.
 fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
     match group {
         RouteGroup::Web => Router::new()
@@ -164,6 +169,9 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // sibling handler issues extend the merge; merges keep both sides).
         RouteGroup::Space => crate::space::routes(),
         RouteGroup::Loop => crate::r#loop::routes(),
+        // Prompting handlers merge their router here (PIDASHCONV-158);
+        // sibling handler issues extend the merge; merges keep both sides.
+        RouteGroup::Prompting => crate::prompting::routes(),
         _ => Router::new(),
     }
 }
