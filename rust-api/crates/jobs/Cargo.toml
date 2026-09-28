@@ -20,8 +20,10 @@ sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "uuid", "ch
 amqprs = "2.1.5"
 # D-08 sinks: PostHog `/batch/` POST (same TLS stack as pidash-api: rustls
 # with bundled roots, no system TLS dependency in CI) + BSON document
-# build for the mongo log path (shares the locked bson via mongodb).
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
+# build for the mongo log path (shares the locked bson via mongodb);
+# D-08 link crawler live HTTPS adapter adds `blocking` (redirects off; the
+# pure redirect loop in pidash-services owns hop validation).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-webpki-roots"] }
 bson = "2"
 sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid"] }
 sha2 = "0.10"
