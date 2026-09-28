@@ -42,7 +42,10 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 bson = "2"
 sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid"] }
 sha2 = "0.10"
-rand = "0.8"
+# Sibling D-10 (tasks_ticker/fire_tick) pins rand 0.8 while dummy_data
+# (PIDASHCONV-191) needs rand 0.9 APIs (`random_range`, `from_os_rng`):
+# keep both via an alias rather than dropping either side.
+rand08 = { package = "rand", version = "0.8" }
 
 [dev-dependencies]
 sqlparser = "0.63.0"

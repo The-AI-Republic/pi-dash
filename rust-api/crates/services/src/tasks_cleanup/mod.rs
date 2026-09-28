@@ -52,3 +52,15 @@ pub mod deletion;
 // separately).
 
 pub mod dummy_data;
+pub mod exports;
+pub mod workspace_seed;
+
+pub use deletion::{
+    hard_delete, parse_soft_delete_call, restore_related_objects, soft_delete_related_objects,
+    DeletionError, HardDeleteOutcome, SoftDeleteOutcome, SoftDeleteTarget,
+};
+
+// D-09 version-task decisions (stage 5, PIDASHCONV-188): pure logic behind
+// `issue_version_sync.py`, `issue_description_version_sync.py`,
+// `issue_description_version_task.py` and `page_version_task.py`.
+pub mod versions;
