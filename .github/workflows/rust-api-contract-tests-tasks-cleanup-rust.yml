@@ -1,0 +1,189 @@
+name: rust-api-contract-tests-tasks-cleanup-rust
+
+# PIDASHCONV-225: Rust-side replay of the tasks_cleanup oracle.
+# Mirrors the worker-plane job in rust-api-contract-tests.yml, except the
+# Django worker (and beat) stay STOPPED and the Rust worker
+# (`pidash-api worker`) serves rust_job_queue instead. The replay suite
+# (tasks_cleanup/test_rust_replay.py) seeds rust_job_queue rows with the
+# exact Celery v2 payloads and runs the same DB before/after assertions;
+# the 4 Python-owned export tasks assert observable AMQP forwarding while
+# the Django worker is stopped.
+
+on:
+  push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-contract-tests-tasks-cleanup-rust.yml"
+  pull_request:
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-contract-tests-tasks-cleanup-rust.yml"
+
+jobs:
+  tasks-cleanup-rust-replay:
+    name: tasks_cleanup oracle vs Rust worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:15.7-alpine
+        env:
+          POSTGRES_USER: pi_dash
+          POSTGRES_PASSWORD: pi_dash
+          POSTGRES_DB: pi_dash
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: valkey/valkey:7.2.11-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      rabbitmq:
+        image: rabbitmq:3.13.6-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: pi_dash
+          RABBITMQ_DEFAULT_PASS: pi_dash
+          RABBITMQ_DEFAULT_VHOST: pi_dash
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.local
+      POSTGRES_USER: pi_dash
+      POSTGRES_PASSWORD: pi_dash
+      POSTGRES_DB: pi_dash
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://localhost:6379/
+      RABBITMQ_HOST: localhost
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: pi_dash
+      RABBITMQ_PASSWORD: pi_dash
+      RABBITMQ_VHOST: pi_dash
+      WEB_URL: http://localhost
+      APP_BASE_URL: http://localhost
+      EMAIL_BACKEND: django.core.mail.backends.smtp.EmailBackend
+      EMAIL_HOST: localhost
+      EMAIL_PORT: "1025"
+      EMAIL_USE_TLS: "0"
+      EMAIL_USE_SSL: "0"
+      EMAIL_FROM: Pi Dash Contract <contract@example.com>
+      HARD_DELETE_AFTER_DAYS: "0"
+      UNUPLOADED_ASSET_DELETE_DAYS: "0"
+      USE_MINIO: "1"
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_STORAGE_BUCKET_NAME: pi-dash-contract
+      AWS_S3_ENDPOINT_URL: http://localhost:4566
+      BASE_URL: http://localhost:8000
+      DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
+      CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
+      CONTRACT_TASK_TIMEOUT: "60"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.x"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements.txt
+            apps/api/requirements/base.txt
+            apps/api/requirements/test.txt
+            rust-api/contract-tests/requirements.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-api
+
+      - name: Install API dependencies
+        working-directory: apps/api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements/test.txt
+          pip install "django-debug-toolbar==4.3.0"
+
+      - name: Install contract-test dependencies
+        working-directory: rust-api/contract-tests
+        run: pip install -r requirements.txt
+
+      - name: Migrate contract database
+        working-directory: apps/api
+        run: python manage.py migrate --no-input
+
+      - name: Start S3 (LocalStack)
+        run: |
+          docker run -d --name contract-s3 -p 4566:4566 \
+            -e SERVICES=s3 \
+            localstack/localstack:4.5.0
+          for i in $(seq 1 45); do
+            curl -sf http://localhost:4566/_localstack/health && break
+            sleep 2
+          done
+
+      - name: Create S3 bucket
+        run: |
+          pip install minio
+          python - <<'EOF'
+          import time
+          from minio import Minio
+          client = Minio("localhost:4566", access_key="minioadmin",
+                         secret_key="minioadmin", secure=False)
+          for _ in range(30):
+              try:
+                  if not client.bucket_exists("pi-dash-contract"):
+                      client.make_bucket("pi-dash-contract")
+                  break
+              except Exception:
+                  time.sleep(2)
+          else:
+              raise RuntimeError("S3 never became ready")
+          EOF
+
+      - name: Build Rust worker
+        working-directory: rust-api
+        run: cargo build --bin pidash-api
+
+      - name: Start Rust worker (Django worker stays stopped)
+        working-directory: rust-api
+        run: |
+          nohup ./target/debug/pidash-api worker \
+            > /tmp/contract-rust-worker.log 2>&1 &
+          for i in $(seq 1 30); do
+            grep -q "worker + scheduler loops started" /tmp/contract-rust-worker.log && break
+            sleep 2
+          done
+          grep -q "worker + scheduler loops started" /tmp/contract-rust-worker.log
+
+      - name: Run tasks_cleanup Rust replay
+        working-directory: rust-api/contract-tests
+        # Same plugin dodge as the Django oracle job: the API install puts
+        # pytest-django in this interpreter; the replay never touches Django.
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django tasks_cleanup/test_rust_replay.py -v
+
+      - name: Upload worker log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-rust-worker-log
+          path: /tmp/contract-rust-worker.log
