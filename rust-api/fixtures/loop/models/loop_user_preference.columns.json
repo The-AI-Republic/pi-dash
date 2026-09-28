@@ -1,0 +1,104 @@
+{
+ "columns": [
+  {
+   "blank": true,
+   "name": "created_at",
+   "nullable": false,
+   "type": "timestamp with time zone"
+  },
+  {
+   "blank": true,
+   "name": "updated_at",
+   "nullable": false,
+   "type": "timestamp with time zone"
+  },
+  {
+   "blank": false,
+   "column": "created_by_id",
+   "fk_to": "db.User",
+   "name": "created_by",
+   "nullable": true,
+   "on_delete": "SET_NULL",
+   "related_name": "loopuserpreference_created_by",
+   "type": "uuid"
+  },
+  {
+   "blank": false,
+   "column": "updated_by_id",
+   "fk_to": "db.User",
+   "name": "updated_by",
+   "nullable": true,
+   "on_delete": "SET_NULL",
+   "related_name": "loopuserpreference_updated_by",
+   "type": "uuid"
+  },
+  {
+   "blank": true,
+   "name": "deleted_at",
+   "nullable": true,
+   "type": "timestamp with time zone"
+  },
+  {
+   "blank": false,
+   "default": "uuid4 (callable, per-row)",
+   "name": "id",
+   "nullable": false,
+   "pk": true,
+   "type": "uuid"
+  },
+  {
+   "blank": false,
+   "column": "user_id",
+   "fk_to": "db.User",
+   "name": "user",
+   "nullable": false,
+   "on_delete": "CASCADE",
+   "related_name": "loop_preferences",
+   "type": "uuid"
+  },
+  {
+   "blank": true,
+   "column": "job_id",
+   "fk_to": "db.LoopJob",
+   "name": "job",
+   "nullable": true,
+   "on_delete": "CASCADE",
+   "related_name": "user_preferences",
+   "type": "uuid"
+  },
+  {
+   "blank": false,
+   "default": true,
+   "name": "enabled",
+   "nullable": false,
+   "type": "boolean"
+  }
+ ],
+ "constraints": [
+  {
+   "condition": "(AND: ('deleted_at__isnull', True))",
+   "fields": [
+    "user",
+    "job"
+   ],
+   "name": "loop_pref_unique_user_job_when_active",
+   "type": "UniqueConstraint"
+  },
+  {
+   "condition": "(AND: ('deleted_at__isnull', True), ('job__isnull', True))",
+   "fields": [
+    "user"
+   ],
+   "name": "loop_pref_unique_user_master_when_active",
+   "type": "UniqueConstraint"
+  }
+ ],
+ "db_table": "loop_user_preferences",
+ "indexes": [],
+ "method": "Ran model _meta introspection under pi_dash.settings.test (no DB).",
+ "model": "LoopUserPreference",
+ "ordering": [
+  "-created_at"
+ ],
+ "source": "apps/api/pi_dash/db/models/loop.py:143-182 (Meta 163-179, two partial uniques 168-179)"
+}

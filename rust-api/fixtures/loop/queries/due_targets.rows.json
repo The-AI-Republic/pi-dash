@@ -1,0 +1,20 @@
+{
+ "method": "Ran due_targets() on scratch DB pidash_loop_fx; rows serialized (uuids isoformat).",
+ "rows": [
+  {
+   "id": "49ba8fd1-f22f-4ca0-ae96-24d722c35934",
+   "job_slug": "fxloop-job",
+   "next_run_at": "2026-09-28T04:27:09.657296+00:00",
+   "user_email": "fxloop-member@e.com",
+   "workspace_slug": "fxloop-ws"
+  },
+  {
+   "id": "cf014988-eb26-4ab6-a87d-ff7897a2a8a5",
+   "job_slug": "fxloop-job",
+   "next_run_at": "2026-09-28T04:27:09.657296+00:00",
+   "user_email": "fxloop-guest@e.com",
+   "workspace_slug": "fxloop-ws"
+  }
+ ],
+ "source": "apps/api/pi_dash/loop/eligibility.py:88-100"
+}

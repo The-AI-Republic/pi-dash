@@ -1,0 +1,7 @@
+{
+ "create_conflict_exists": true,
+ "create_no_conflict_exists": false,
+ "method": "Ran the exact filter().exists() queries on scratch DB pidash_loop_fx; end-to-end 409s in handlers/admin_crud.golden.json.",
+ "patch_self_not_conflict": false,
+ "source": "apps/api/pi_dash/loop/admin_views.py:119-120 (create), 159-162 (patch self-exclusion)"
+}
