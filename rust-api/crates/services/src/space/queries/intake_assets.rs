@@ -327,8 +327,12 @@ pub fn asset_get_sql() -> String {
 /// (QUIRK-unconditional-comment-id); `is_uploaded` starts false. `size`
 /// falls back to `settings.FILE_SIZE_LIMIT` with an unguarded `int()` and no
 /// max check (`:78`); `type` defaults to `"image/jpeg"` (`:77`).
+/// `is_deleted=false`, `is_archived=false`, `storage_metadata='{}'` are the
+/// Django field defaults the ORM always emits (`db/models/asset.py:56-62`);
+/// both booleans are `NOT NULL` without a database default, so omitting them
+/// fails live with `null value in column "is_deleted"`.
 pub fn asset_insert_sql() -> String {
-    "INSERT INTO \"file_assets\" (\"id\", \"created_at\", \"updated_at\", \"attributes\", \"asset\", \"size\", \"workspace_id\", \"created_by_id\", \"entity_type\", \"project_id\", \"comment_id\", \"is_uploaded\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false)".to_string()
+    "INSERT INTO \"file_assets\" (\"id\", \"created_at\", \"updated_at\", \"attributes\", \"asset\", \"size\", \"workspace_id\", \"created_by_id\", \"entity_type\", \"project_id\", \"comment_id\", \"is_uploaded\", \"is_deleted\", \"is_archived\", \"storage_metadata\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false, false, false, '{}')".to_string()
 }
 
 /// A3 patch get: `FileAsset.objects.get(id=pk, workspace=...)`
@@ -651,8 +655,11 @@ mod tests {
     fn asset_insert_matches_fixture_a2() {
         let sql = asset_insert_sql();
         // comment_id is bound unconditionally, whatever the entity type.
-        assert!(sql.contains("\"comment_id\", \"is_uploaded\""));
-        assert!(sql.ends_with(", $10, $11, false)"));
+        assert!(sql.contains("\"comment_id\", \"is_uploaded\", \"is_deleted\", \"is_archived\", \"storage_metadata\""));
+        // Same $1..$11 order as before, plus the three Django-default
+        // literals (db/models/asset.py:56-62); the NOT NULL booleans have no
+        // database default, so the builder must carry them.
+        assert!(sql.ends_with(", $10, $11, false, false, false, '{}')"));
         assert_builder_contains(
             &sql,
             &[
