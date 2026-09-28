@@ -621,9 +621,8 @@ assertions. Behavioural DB/sink coverage per group:
 - webhooks: POST success (headers, HMAC signature, `create` mapping,
   `webhook_logs` row), first-failure `retry_count=0` row, redelivery with
   distinct `X-Pi Dash-Delivery` ids, `model_activity → webhook_activity →
-webhook_send_task` chain, deactivation mail, `process_logs`
-  published-but-never-executed (stock non-registration pin, FX-LOG-01);
-  `track_event` and light tasks consumed + acked.
+webhook_send_task` chain, deactivation mail, `process_logs` Postgres
+  fallback row; `track_event` and light tasks consumed + acked.
 - cleanup: all five deletes behaviourally (page versions keep newest 20),
   unuploaded-asset delete, expired-exporter URL clear, tombstone hard
   delete, countdown ETA through the real worker, redelivery no-op.

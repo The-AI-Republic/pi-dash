@@ -10,7 +10,6 @@ timing is pinned by options parity while the suite behaviorally covers the
 first-attempt failure log row, the success path, and redelivery.
 """
 
-import time
 import uuid
 
 import pytest
@@ -115,39 +114,25 @@ def test_fan_out_call_sites():
 
 #: Tasks the live Django worker registers (Celery broadcast inspect). NOTE
 #: (PIDASHCONV-242, FX-LOG-01): ``pi_dash.bgtasks.logger_task.process_logs``
-#: is deliberately absent. Stock Django never imports the module at worker
-#: boot — it is in neither ``CELERY_IMPORTS`` (settings/common.py:409) nor
-#: ``bgtasks/apps.py ready()`` — so the ``@shared_task`` never registers and
-#: any published ``process_logs`` job is consumed but never executed (no
-#: ``api_activity_logs`` row). Unchanged since the initial commit: stock
-#: behavior, not drift. Same precedent as the dead
-#: ``project_invitation_task`` (tasks_mail oracle): pin the absence instead
-#: of requiring registration. Wire + task-option parity above still cover
-#: the publisher side (``middleware/logger.py:149`` really emits it), and
-#: the Rust worker matches non-execution (parity decision in the
-#: PIDASHCONV-242 workpad/PR; gate PIDASHCONV-203 must not register
-#: ``PROCESS_LOGS_TASK`` when wiring D-08).
-REGISTERED_WEBHOOK_TASKS = {
-    name for name in WEBHOOK_TASKS if name != f"{M}.logger_task.process_logs"
-}
+#: IS registered in the canonical worker-plane env
+#: (``DJANGO_SETTINGS_MODULE=pi_dash.settings.local``). The module is in
+#: neither ``CELERY_IMPORTS`` (settings/common.py:409) nor
+#: ``bgtasks/apps.py ready()``; its only static importer is request-time
+#: ``middleware/logger.py:19``. Under local settings, though,
+#: ``debug_toolbar``'s ``check_middleware`` system check import-strings every
+#: ``MIDDLEWARE`` entry during ``celery worker`` boot
+#: (``DjangoWorkerFixup.validate_models`` → ``run_checks()``), which imports
+#: the middleware module and registers the ``@shared_task`` as a side
+#: effect — so the worker answers inspect with ``process_logs`` present and
+#: executes published jobs (``api_activity_logs`` row written). Stacks
+#: booted without ``debug_toolbar`` (e.g. test settings) see the task
+#: absent; that env is non-canonical for this suite. The Rust worker matches
+#: execution (parity decision in the PIDASHCONV-242 workpad/PR; gate
+#: PIDASHCONV-203 must register ``PROCESS_LOGS_TASK`` when wiring D-08).
 
 
 def test_worker_registration(broker_url):
-    broker_probe.wait_for_registration(REGISTERED_WEBHOOK_TASKS)
-
-
-def test_process_logs_not_registered(broker_url):
-    """Stock bug pin (FX-LOG-01): the worker answers inspect but never
-    registered ``process_logs`` (see NOTE on REGISTERED_WEBHOOK_TASKS)."""
-    found = broker_probe.wait_for_registration(
-        {f"{M}.event_tracking_task.track_event"},
-        what="D-08 sink witness registration",
-    )
-    assert f"{M}.logger_task.process_logs" not in found, (
-        "process_logs became registered (Django now imports logger_task at "
-        "worker boot?) — re-sync the oracle "
-        f"(registered sample: {sorted(found)[:10]}, total {len(found)})"
-    )
+    broker_probe.wait_for_registration(set(WEBHOOK_TASKS))
 
 
 def _seed_workspace_with_hook(db_conn, webhook_sink, **flags):
@@ -324,17 +309,9 @@ def test_deactivation_email_delivers(db_conn, broker_url, smtp_sink):
     assert any(receiver["email"] in m["rcpt_tos"] for m in delivered)
 
 
-def test_process_logs_published_but_never_executed(db_conn, broker_url):
-    """Stock bug pin (FX-LOG-01): without Mongo configured, process_logs
-    WOULD fall back to Postgres (logger_task.py:97-100) — but the task is
-    never registered at worker boot (see NOTE on REGISTERED_WEBHOOK_TASKS),
-    so the published job is consumed and dropped: no ``api_activity_logs``
-    row ever appears. The queue drain proves the worker took the message;
-    the grace poll proves nothing executed it (a future Django fix that
-    registers the task would write the probe row here and fail loudly).
-    Rust parity: the Rust worker matches non-execution (see NOTE above)."""
+def test_process_logs_writes_postgres_row(db_conn, broker_url):
+    """Without Mongo configured, process_logs falls back to Postgres."""
     before = snapshot(db_conn, ["api_activity_logs"])
-    baseline = broker_probe.queue_depth()
     celery_wire.publish(
         f"{M}.logger_task.process_logs",
         args=[
@@ -347,19 +324,11 @@ def test_process_logs_published_but_never_executed(db_conn, broker_url):
             {},
         ],
     )
-    broker_probe.wait_for_queue_drain(
-        baseline=baseline, what="process_logs consumed (dropped)"
+    after = wait_for(
+        lambda: _added_rows(db_conn, "api_activity_logs", before) or None,
+        what="api_activity_logs row",
     )
-    deadline = time.monotonic() + 10.0
-    while True:
-        new_rows = _added_rows(db_conn, "api_activity_logs", before)
-        assert not new_rows, (
-            "process_logs executed unexpectedly (Django now registers "
-            f"logger_task?) — re-sync the oracle: {new_rows!r}"
-        )
-        if time.monotonic() >= deadline:
-            break
-        time.sleep(0.5)
+    assert after[0]["path"] == "/contract/probe"
 
 
 def test_track_event_consumed_without_crash(db_conn, broker_url):
