@@ -13,6 +13,7 @@
 //! - [`filterset`]: the `IssueFilterSet` declaration and leaf compiler (F-07).
 //! - [`issue_filters`]: the legacy `issue_filters` query-param compiler (F-07).
 //! - [`soft_delete`]: soft-delete read scope, write statements, view DDL.
+//! - [`space`]: space public API (D-02) read columns + manager scopes.
 //! - [`tx`]: transaction wrapper with post-commit actions.
 //! - [`migrations`]: private migration directory convention (F-10).
 //!
@@ -28,6 +29,7 @@ pub mod license;
 pub mod migrations;
 pub mod pool;
 pub mod soft_delete;
+pub mod space;
 pub mod tasks_ticker;
 pub mod tx;
 
