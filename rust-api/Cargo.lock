@@ -2437,6 +2437,7 @@ dependencies = [
 name = "pidash-api"
 version = "0.1.0"
 dependencies = [
+ "ammonia",
  "axum",
  "bytes",
  "chrono",
@@ -2448,6 +2449,7 @@ dependencies = [
  "md-5 0.10.6",
  "pidash-auth",
  "pidash-db",
+ "pidash-jobs",
  "pidash-services",
  "pidash-types",
  "reqwest",

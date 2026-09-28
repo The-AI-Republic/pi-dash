@@ -8,6 +8,15 @@ pidash-types = { path = "../types" }
 pidash-db = { path = "../db" }
 pidash-auth = { path = "../auth" }
 pidash-services = { path = "../services" }
+# Space public-API handlers (D-02): transactional `issue_activity` enqueue
+# into `rust_job_queue` (the worker forwards Python-owned names to the
+# broker); the crate is a path dependency, so the lockfile gains no new
+# downloads from it.
+pidash-jobs = { path = "../jobs" }
+# Space intake `description_html` sanitization: `nh3` (the Python side) is
+# bindings for this exact crate, so the same tags/attributes/schemes give
+# the same bytes. Pinned to the 4.x line nh3 0.2.18 builds on.
+ammonia = "4"
 axum = "0.8"
 bytes = "1"
 flate2 = "1"
