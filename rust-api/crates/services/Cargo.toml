@@ -7,13 +7,13 @@ edition = "2021"
 pidash-types = { path = "../types" }
 pidash-db = { path = "../db" }
 pidash-auth = { path = "../auth" }
-chrono = { version = "0.4.45" }
+# D-05 GitHub adapter datetimes: same locked chrono 0.4.45 as pidash-db
+# (no lock churn); std only, datetimes render to strings manually.
+# D-09 workspace seed uses NaiveDate through the same std-only feature set.
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 thiserror = { version = "2" }
-# D-05 GitHub adapter datetimes: same locked chrono 0.4.45 as pidash-db
-# (no lock churn); std only, datetimes render to strings manually.
-chrono = { version = "0.4", default-features = false, features = ["std"] }
 crc32fast = { version = "1" }
 flate2 = { version = "1" }
 

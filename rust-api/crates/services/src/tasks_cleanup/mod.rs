@@ -29,10 +29,9 @@
 //!
 //! Port of the task wiring of `apps/api/pi_dash/bgtasks/cleanup_task.py`
 //! (`:92-:163`, `:422-:479`).
+//!
+//! * [`workspace_seed`] — `bgtasks/workspace_seed_task.py` (PIDASHCONV-190).
 
 pub mod cleanup;
 pub mod exports;
-
-//! * [`workspace_seed`] — `bgtasks/workspace_seed_task.py` (PIDASHCONV-190).
-
 pub mod workspace_seed;
