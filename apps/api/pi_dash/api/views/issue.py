@@ -69,7 +69,6 @@ from pi_dash.api.serializers import (
 from pi_dash.app.permissions import (
     ProjectEntityPermission,
     ProjectLitePermission,
-    ProjectMemberPermission,
 )
 from pi_dash.bgtasks.issue_activities_task import issue_activity
 from pi_dash.db.models import (
@@ -1332,7 +1331,9 @@ class LabelListCreateAPIEndpoint(BaseAPIView):
 
     serializer_class = LabelSerializer
     model = Label
-    permission_classes = [ProjectMemberPermission]
+    # Labels are project entities: create must check the caller's *project*
+    # role like update/delete do, not the workspace role (PDASHOSS01-239).
+    permission_classes = [ProjectEntityPermission]
     use_read_replica = True
 
     def get_queryset(self):
@@ -1458,7 +1459,7 @@ class LabelDetailAPIEndpoint(LabelListCreateAPIEndpoint):
 
     serializer_class = LabelSerializer
     model = Label
-    permission_classes = [ProjectMemberPermission]
+    permission_classes = [ProjectEntityPermission]
     use_read_replica = True
 
     @label_docs(
