@@ -35,9 +35,10 @@
 //! - the 2h `cache_response` on GET plus `invalidate_cache` on POST/DELETE
 //!   are not reproduced: they are freshness-only (the invalidation keeps
 //!   every contract-visible read consistent), so Rust always reads fresh.
-//! - DELETE skips the `soft_delete_related_objects.delay` publish:
-//!   `InstanceAdmin` has no reverse relations, so the task no-ops (pilot
-//!   precedent for deferred publishes never consumed by the suite).
+//! - DELETE publishes no `soft_delete_related_objects` task because Python
+//!   publishes none either: queryset `.delete()` is a bare
+//!   `update(deleted_at=…)` (`db/mixins.py`), and the `.delay` only fires
+//!   in the instance `delete()` path, which this endpoint never takes.
 //! - fixture BUG-2 ("unknown-user POST is Django 500") is NOT ported:
 //!   DRF's `dispatch` calls `self.handle_exception` inside its own try, so
 //!   a handler-body `DoesNotExist` answers the 404 branch before
@@ -492,19 +493,73 @@ fn parse_json_body(body: &[u8]) -> Result<Value, Denial> {
     }
 }
 
-/// Adapt a JSON number to the integer `role` column the way the ORM +
-/// Postgres do: integers that fit, plus integral floats inside the range
-/// (numeric→integer assignment cast); anything else errors → generic 500.
+/// Adapt a JSON `role` value to the integer column the way
+/// `request.data.get("role", 20)` + the ORM do (pinned against Django 4.2
+/// `IntegerField.get_prep_value`): absent → 20; explicit null hits the NOT
+/// NULL column → `IntegrityError` → invalid-payload 400; bools adapt as
+/// ints (`True` → 1, `False` → 0 — `bool` subclasses `int`); integers that
+/// fit pass through; EVERY float truncates toward zero (`int(20.5)` → 20,
+/// so no `fract() == 0.0` gate); numeric strings parse with `int()`
+/// semantics (surrounding whitespace tolerated, `"20.5"`/`"abc"` →
+/// `ValueError` → generic 500); anything else errors → generic 500.
+/// A parsed negative still 400s, but at the INSERT: the
+/// `PositiveIntegerField` CHECK (`role >= 0`) raises `IntegrityError`.
+fn role_from_value(value: Option<&Value>) -> Result<i32, Denial> {
+    match value {
+        None => Ok(20),
+        Some(Value::Null) => Err(Denial::InvalidPayload),
+        Some(Value::Bool(true)) => Ok(1),
+        Some(Value::Bool(false)) => Ok(0),
+        Some(Value::Number(n)) => role_from_number(n),
+        Some(Value::String(s)) => s.trim().parse::<i32>().map_err(|_| Denial::ServerError),
+        Some(_) => Err(Denial::ServerError),
+    }
+}
+
+/// Adapt a JSON number to the integer `role` column: integers that fit,
+/// plus every finite float in range truncated toward zero (Django
+/// `int(value)`); out-of-range and unparsable numbers error out →
+/// generic 500 (Postgres numeric overflow surfaces as `DataError`, which
+/// `handle_exception` does not catch, so 500 either way).
 fn role_from_number(n: &serde_json::Number) -> Result<i32, Denial> {
     if let Some(v) = n.as_i64() {
         return i32::try_from(v).map_err(|_| Denial::ServerError);
     }
     if let Some(v) = n.as_f64() {
-        if v.fract() == 0.0 && v >= f64::from(i32::MIN) && v <= f64::from(i32::MAX) {
-            return Ok(v as i32);
+        if v.is_finite() && v >= f64::from(i32::MIN) && v <= f64::from(i32::MAX) {
+            return Ok(v.trunc() as i32);
         }
     }
     Err(Denial::ServerError)
+}
+
+/// Adapt the `email` value to the `User.objects.get(email=…)` lookup the
+/// way `request.data` + the ORM do: `request.data.get("email", False)` +
+/// `if not email` 400s on missing, null, `""`, `false`, numeric zero, and
+/// EMPTY containers; every other value reaches the lookup, where
+/// `CharField.get_prep_value` stringifies it (`True` → `"True"`,
+/// `[1]` → `"[1]"`) and an unknown address 404s. Container spellings
+/// differ textually from CPython `str()` (`["a"]` vs `['a']`), but either
+/// spelling only decides which unknown address 404s.
+fn lookup_email(value: Option<&Value>) -> Result<String, Denial> {
+    match value {
+        Some(Value::String(s)) if !s.is_empty() => Ok(s.clone()),
+        Some(Value::Bool(true)) => Ok("True".to_owned()),
+        Some(Value::Number(n)) if n.as_i64() != Some(0) && n.as_f64() != Some(0.0) => {
+            Ok(n.to_string())
+        }
+        Some(Value::Array(items)) if !items.is_empty() => {
+            Ok(Value::Array(items.clone()).to_string())
+        }
+        Some(Value::Object(map)) if !map.is_empty() => Ok(Value::Object(map.clone()).to_string()),
+        None
+        | Some(Value::Null)
+        | Some(Value::String(_))
+        | Some(Value::Bool(_))
+        | Some(Value::Number(_))
+        | Some(Value::Array(_))
+        | Some(Value::Object(_)) => Err(Denial::BadError("Email is required".to_owned())),
+    }
 }
 
 fn json_response(status: StatusCode, body: Value) -> Response {
@@ -527,33 +582,8 @@ async fn create_admin(
     let tz = actor_timezone(pool, &actor).await?;
 
     let data = parse_json_body(&body)?;
-    // `request.data.get("email", False)` + `if not email`: missing, null,
-    // empty, `false`, and numeric zero all 400; truthy scalars go to the
-    // `User.objects.get(email=…)` lookup (and 404); containers cannot adapt
-    // to the ORM lookup at all (500 path).
-    let email = match data.get("email") {
-        Some(Value::String(s)) if !s.is_empty() => s.clone(),
-        Some(Value::Bool(true)) => "true".to_owned(),
-        Some(Value::Number(n)) if n.as_i64() != Some(0) && n.as_f64() != Some(0.0) => n.to_string(),
-        Some(Value::Array(_)) | Some(Value::Object(_)) => return Err(Denial::ServerError),
-        None
-        | Some(Value::Null)
-        | Some(Value::String(_))
-        | Some(Value::Bool(_))
-        | Some(Value::Number(_)) => {
-            return Err(Denial::BadError("Email is required".to_owned()));
-        }
-    };
-    // `request.data.get("role", 20)`: absent → 20; explicit null hits the
-    // NOT NULL column → `IntegrityError` → invalid-payload 400; a
-    // non-integer errors out of the ORM → generic 500. Integral floats
-    // adapt through Postgres's numeric→integer assignment cast.
-    let role = match data.get("role") {
-        None => 20,
-        Some(Value::Null) => return Err(Denial::InvalidPayload),
-        Some(Value::Number(n)) => role_from_number(n)?,
-        Some(_) => return Err(Denial::ServerError),
-    };
+    let email = lookup_email(data.get("email"))?;
+    let role = role_from_value(data.get("role"))?;
     if instance_first(pool).await?.is_none() {
         // Near-dead: the permission gate above already denied the
         // instance-less case with the default 403. Kept for order parity.
@@ -590,7 +620,13 @@ async fn create_admin(
     .await;
     let admin_id = match created {
         Ok((id,)) => id,
-        Err(sqlx::Error::Database(db)) if db.code().as_deref() == Some("23505") => {
+        // `23505` is the `unique_together(instance, user)` violation;
+        // `23514` is the `PositiveIntegerField` CHECK (`role >= 0`). Both
+        // are `IntegrityError` → invalid-payload 400; nothing else on this
+        // INSERT can raise a CHECK.
+        Err(sqlx::Error::Database(db))
+            if matches!(db.code().as_deref(), Some("23505" | "23514")) =>
+        {
             return Err(Denial::InvalidPayload);
         }
         Err(_) => return Err(Denial::ServerError),
@@ -733,8 +769,11 @@ async fn delete_admin(
     let actor = authed_user(pool, &extension).await?;
     let instance_id = require_instance_admin(pool, &actor).await?;
 
-    // The manager's `deleted_at IS NULL` rides the filter; the celery
-    // `soft_delete_related_objects` publish is a documented no-op here.
+    // The manager's `deleted_at IS NULL` rides the filter. Queryset
+    // `.delete()` is `update(deleted_at=…)` (`mixins.py:SoftDeletionQuerySet`):
+    // no `updated_at` touch, no signals, and no `soft_delete_related_objects`
+    // publish — that `.delay` only fires in the instance `delete()` path, so
+    // there is nothing to skip.
     sqlx::query(
         "UPDATE instance_admins SET deleted_at = $1 WHERE instance_id = $2 AND id = $3 AND deleted_at IS NULL",
     )
@@ -1129,19 +1168,67 @@ mod tests {
     }
 
     #[test]
-    fn role_numbers_follow_the_orm_column() {
-        let num = |raw: &str| {
-            role_from_number(
-                serde_json::from_str::<Value>(raw)
-                    .expect("number")
-                    .as_number()
-                    .expect("number"),
-            )
+    fn role_values_follow_the_orm_column() {
+        let role = |raw: &str| {
+            let data: Value = serde_json::from_str(raw).expect("json");
+            role_from_value(data.get("role"))
         };
-        assert_eq!(num("20").expect("int"), 20);
-        assert_eq!(num("20.0").expect("integral float"), 20);
-        assert!(num("2147483648").is_err());
-        assert!(num("20.5").is_err());
+        // Absent -> default 20; plain ints pass through.
+        assert_eq!(role("{}").expect("default"), 20);
+        assert_eq!(role(r#"{"role":20}"#).expect("int"), 20);
+        assert_eq!(role(r#"{"role":5}"#).expect("low role"), 5);
+        // `bool` subclasses `int`: True -> 1, False -> 0.
+        assert_eq!(role(r#"{"role":true}"#).expect("bool"), 1);
+        assert_eq!(role(r#"{"role":false}"#).expect("bool"), 0);
+        // `int(value)` truncates every float toward zero, including
+        // negatives (-0.5 -> 0); a parsed negative still 400s, but at the
+        // INSERT CHECK, so the adapter returns it.
+        assert_eq!(role(r#"{"role":20.0}"#).expect("integral float"), 20);
+        assert_eq!(role(r#"{"role":20.9}"#).expect("truncation"), 20);
+        assert_eq!(role(r#"{"role":-0.5}"#).expect("negative truncation"), 0);
+        assert_eq!(role(r#"{"role":-1}"#).expect("negative parses"), -1);
+        // Numeric strings parse with `int()` semantics (surrounding
+        // whitespace tolerated); `"20.5"`/`"abc"` are `ValueError` -> 500.
+        assert_eq!(role(r#"{"role":"20"}"#).expect("string"), 20);
+        assert_eq!(role(r#"{"role":" 20 "}"#).expect("padded"), 20);
+        assert!(role(r#"{"role":"20.5"}"#).is_err());
+        assert!(role(r#"{"role":"abc"}"#).is_err());
+        // Explicit null is the NOT NULL column -> invalid-payload 400;
+        // out-of-range ints and containers are generic 500s.
+        assert!(matches!(
+            role(r#"{"role":null}"#),
+            Err(Denial::InvalidPayload)
+        ));
+        assert!(role(r#"{"role":2147483648}"#).is_err());
+        assert!(role(r#"{"role":[20]}"#).is_err());
+    }
+
+    #[test]
+    fn lookup_email_matches_request_data_truthiness() {
+        let email = |raw: &str| {
+            let data: Value = serde_json::from_str(raw).expect("json");
+            lookup_email(data.get("email"))
+        };
+        // `if not email`: missing, null, empty string, false, zero, and
+        // EMPTY containers all 400.
+        for raw in [
+            "{}",
+            r#"{"email":null}"#,
+            r#"{"email":""}"#,
+            r#"{"email":false}"#,
+            r#"{"email":0}"#,
+            r#"{"email":0.0}"#,
+            r#"{"email":[]}"#,
+            r#"{"email":{}}"#,
+        ] {
+            assert!(matches!(email(raw), Err(Denial::BadError(_))), "{raw}");
+        }
+        // Everything else reaches the lookup stringified like
+        // `CharField.get_prep_value` (`True` -> `"True"`).
+        assert_eq!(email(r#"{"email":"a@b.c"}"#).expect("str"), "a@b.c");
+        assert_eq!(email(r#"{"email":true}"#).expect("bool"), "True");
+        assert_eq!(email(r#"{"email":20}"#).expect("int"), "20");
+        assert_eq!(email(r#"{"email":[1]}"#).expect("list"), "[1]");
     }
 
     #[test]
