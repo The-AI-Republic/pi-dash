@@ -15,7 +15,7 @@
 //!   (PIDASHCONV-175/176).
 //! * [`social`] — `views/issue.py` comments, issue reactions, comment
 //!   reactions, votes (PIDASHCONV-176).
-//! * `asset` — `views/asset.py` (PIDASHCONV-178).
+//! * [`assets`] — `views/asset.py` S3 assets (PIDASHCONV-178).
 //!
 //! [`routes`] merges the owned route groups; every other method on the
 //! owned paths proxies to Django through the edge fallback (its
@@ -43,6 +43,7 @@ use axum::Router;
 
 use crate::state::AppState;
 
+pub mod assets;
 pub mod filters;
 pub mod intake;
 pub mod project_meta;
@@ -284,4 +285,5 @@ pub fn routes() -> Router<AppState> {
     intake::routes()
         .merge(project_meta::routes())
         .merge(social::routes())
+        .merge(assets::routes())
 }
