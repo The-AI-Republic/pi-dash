@@ -2255,6 +2255,7 @@ dependencies = [
  "pidash-db",
  "pidash-services",
  "pidash-types",
+ "rand 0.8.8",
  "rrule",
  "sea-query",
  "serde",
