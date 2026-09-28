@@ -196,6 +196,11 @@ pub fn load_cli_token(paths: &Paths) -> Result<Option<String>> {
 /// overwrite `[cli]` when this host is already enrolled with a different
 /// cloud, but `pidash auth login --force` sets this to rebind the host's
 /// `[daemon].cloud_url` to the new cloud instead of bailing.
+///
+/// A forced rebind to a *different* cloud clears `[cli].default_project`
+/// (the slug names a project on the old cloud); a same-cloud re-login
+/// preserves it. Registered `[[runner]]` blocks are left untouched but a
+/// warning is printed, since they still reference the old cloud.
 pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str, force: bool) -> Result<()> {
     let mut cfg = if paths.config_path().exists() {
         file::load_config(paths)?
@@ -216,6 +221,7 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str, force: bool)
     };
     // Pre-existing config? Don't quietly rebind it to a different cloud
     // unless the caller explicitly forces it (`pidash auth login --force`).
+    let mut cross_cloud_rebind = false;
     if !cfg.daemon.cloud_url.is_empty() && cfg.daemon.cloud_url != cloud_url {
         if !force {
             anyhow::bail!(
@@ -225,13 +231,39 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str, force: bool)
             );
         }
         // Forced re-enrollment: rebind the daemon to the new cloud.
+        // Registered runners are NOT rebound — their workspace/project
+        // slugs still name the old cloud's resources, so warn loudly.
+        if !cfg.runners.is_empty() {
+            eprintln!(
+                "warning: {} registered runner(s) still reference the previous cloud {}:",
+                cfg.runners.len(),
+                cfg.daemon.cloud_url
+            );
+            for r in &cfg.runners {
+                eprintln!(
+                    "  - {} (workspace {})",
+                    r.name,
+                    r.workspace_slug.as_deref().unwrap_or("<unknown>")
+                );
+            }
+            eprintln!("  Remove and re-register them against the new cloud (`pidash runner remove` / `pidash runner add`).");
+        }
         cfg.daemon.cloud_url = cloud_url.to_string();
+        cross_cloud_rebind = true;
     }
     if cfg.daemon.cloud_url.is_empty() {
         cfg.daemon.cloud_url = cloud_url.to_string();
     }
     let preserved_workspace = cfg.cli.as_ref().and_then(|c| c.workspace_slug.clone());
-    let preserved_default_project = cfg.cli.as_ref().and_then(|c| c.default_project.clone());
+    // A same-cloud re-login (token refresh) keeps the user's default
+    // project; a forced cross-cloud rebind must not — the slug names a
+    // project on the cloud we just left, and resolve_create_project
+    // would keep 404ing against it on the new cloud.
+    let preserved_default_project = if cross_cloud_rebind {
+        None
+    } else {
+        cfg.cli.as_ref().and_then(|c| c.default_project.clone())
+    };
     cfg.cli = Some(CliSection {
         token: Some(token.to_string()),
         workspace_slug: preserved_workspace,
@@ -953,6 +985,41 @@ mod tests {
         let cfg = file::load_config(&paths).unwrap();
         assert_eq!(cfg.daemon.cloud_url, "https://two.example.com");
         assert_eq!(cfg.cli.and_then(|c| c.token).as_deref(), Some("tok-2"));
+    }
+
+    #[test]
+    fn write_cli_token_force_rebind_clears_default_project() {
+        // A forced cross-cloud re-enroll must not carry [cli].default_project
+        // over: the slug names a project that only exists on the old cloud,
+        // and `pidash issue create` would keep 404ing against it.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        write_cli_token(&paths, "https://one.example.com", "tok-1", false).unwrap();
+        write_cli_default_project(&paths, "alpha-proj").unwrap();
+        write_cli_token(&paths, "https://two.example.com", "tok-2", true)
+            .expect("forced rebind to a different cloud should succeed");
+        assert_eq!(load_cli_default_project(&paths).unwrap(), None);
+    }
+
+    #[test]
+    fn write_cli_token_same_cloud_relogin_preserves_default_project() {
+        // Same-cloud re-logins (token refresh) keep the user's default
+        // project — with or without --force, only an actual cloud-URL
+        // change clears it.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        write_cli_token(&paths, "https://one.example.com", "tok-1", false).unwrap();
+        write_cli_default_project(&paths, "alpha-proj").unwrap();
+        write_cli_token(&paths, "https://one.example.com", "tok-2", false).unwrap();
+        assert_eq!(
+            load_cli_default_project(&paths).unwrap().as_deref(),
+            Some("alpha-proj")
+        );
+        write_cli_token(&paths, "https://one.example.com", "tok-3", true).unwrap();
+        assert_eq!(
+            load_cli_default_project(&paths).unwrap().as_deref(),
+            Some("alpha-proj")
+        );
     }
 
     #[test]
