@@ -12,6 +12,9 @@ pidash-services = { path = "../services" }
 # (+ `soft_delete_related_objects`) enqueue into `rust_job_queue`
 # (the worker forwards Python-owned names to the broker); the crate is
 # a path dependency, so the lockfile gains no new downloads from it.
+# Space asset handlers also use it for the PATCH metadata task message
+# builder plus the AMQP coexistence publisher. pidash-jobs depends only
+# on types/db/services, so no cycle is introduced.
 pidash-jobs = { path = "../jobs" }
 # Space intake `description_html` sanitization: `nh3` (the Python side) is
 # bindings for this exact crate, so the same tags/attributes/schemes give
