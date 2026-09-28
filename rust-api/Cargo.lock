@@ -2571,6 +2571,7 @@ dependencies = [
  "chrono",
  "crc32fast",
  "flate2",
+ "minijinja",
  "pidash-auth",
  "pidash-db",
  "pidash-types",

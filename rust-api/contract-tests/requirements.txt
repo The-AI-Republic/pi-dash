@@ -26,3 +26,8 @@ kombu>=5.3
 # PIDASHCONV-99 (runner websocket oracle): WS client for the ws/runner/
 # close-code suite (test_ws_close.py). Handshake-only; no Django imports.
 websockets>=15
+
+# PIDASHCONV-138 (prompting data plane): Jinja2 sandbox for the dual-engine
+# render check (test_data_plane_dual_engine.py). Same engine the Django
+# renderer uses; compared against minijinja, never Django imports.
+jinja2>=3.1
