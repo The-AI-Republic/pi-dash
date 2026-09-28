@@ -1,0 +1,9 @@
+{
+  "_trace": "db/models/issue_agent_ticker.py:35-38 defaults/infinite/jitter; db/models/scheduler.py:22 LAST_ERROR_MAX_LEN",
+  "_method": "imported live module constants",
+  "default_interval_seconds": 10800,
+  "default_max_ticks": 10,
+  "infinite_max_ticks": -1,
+  "jitter_fraction": 0.1,
+  "last_error_max_len": 1000
+}

@@ -1,0 +1,57 @@
+{
+  "_trace": "bgtasks/_rrule.py:269-336 (empty single-shot 321-328; tzid informational 290-293; None on parse error 334-336)",
+  "_method": "ran next_fire_from_rrule live with fixed instants",
+  "vectors": [
+    {
+      "name": "daily",
+      "next": "2026-01-02T09:00:00+00:00"
+    },
+    {
+      "name": "minutely_interval",
+      "next": "2026-01-01T00:15:00+00:00"
+    },
+    {
+      "name": "single_shot_ahead",
+      "next": "2026-06-01T09:00:00+00:00"
+    },
+    {
+      "name": "single_shot_past",
+      "next": null
+    },
+    {
+      "name": "exdates_skip",
+      "next": "2026-01-03T09:00:00+00:00"
+    },
+    {
+      "name": "rdates_append",
+      "next": "2026-01-01T15:00:00+00:00"
+    },
+    {
+      "name": "single_shot_rdate_ahead",
+      "next": "2026-01-05T09:00:00+00:00"
+    },
+    {
+      "name": "parse_error",
+      "next": null
+    },
+    {
+      "name": "tzid_informational_utc",
+      "next": "2026-01-02T09:00:00+00:00"
+    },
+    {
+      "name": "tzid_informational_other",
+      "next": "2026-01-02T09:00:00+00:00"
+    },
+    {
+      "name": "quirk-single-shot-naive-exdate-no-match",
+      "dtstart": "2026-06-01T09:00:00+00:00",
+      "exdate_naive": "2026-06-01T09:00:00",
+      "next": "2026-06-01T09:00:00+00:00",
+      "note": "naive exdate never excludes (tuple membership aware==naive is False); aware exdate at same instant -> None. _rrule.py:323,395"
+    },
+    {
+      "name": "single-shot-aware-exdate-excluded",
+      "next": null
+    }
+  ]
+}

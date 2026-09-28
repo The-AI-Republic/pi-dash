@@ -1,0 +1,16 @@
+{
+  "_trace": "bgtasks/_rrule.py:339-406 (xafter lazy loop 386-393; cap/has_more 392-393)",
+  "_method": "ran occurrences_between live with fixed windows",
+  "daily_window_count": 7,
+  "daily_window_has_more": false,
+  "daily_window_first": "2026-01-01T09:00:00+00:00",
+  "daily_window_last": "2026-01-07T09:00:00+00:00",
+  "minutely_cap_count": 100,
+  "minutely_cap_has_more": true,
+  "single_shot_in_window": [
+    "2026-01-03T09:00:00+00:00"
+  ],
+  "single_shot_has_more": false,
+  "single_shot_naive_exdate_count": 1,
+  "single_shot_naive_exdate_note": "naive exdate does not exclude single-shot (membership compare); _rrule.py:395,400"
+}

@@ -1,0 +1,224 @@
+{
+  "_trace": "db/models/issue_agent_ticker.py:75-176 (Meta 167-176); base/audit cols via _meta",
+  "_method": "model _meta introspection under pi_dash.settings.test, no DB",
+  "model": "db.IssueAgentTicker",
+  "db_table": "issue_agent_ticker",
+  "ordering": [],
+  "fields": [
+    {
+      "name": "created_at",
+      "type": "DateTimeField",
+      "column": "created_at",
+      "null": false,
+      "blank": true,
+      "default": "<NOT_PROVIDED>"
+    },
+    {
+      "name": "updated_at",
+      "type": "DateTimeField",
+      "column": "updated_at",
+      "null": false,
+      "blank": true,
+      "default": "<NOT_PROVIDED>"
+    },
+    {
+      "name": "created_by",
+      "type": "ForeignKey",
+      "column": "created_by_id",
+      "null": true,
+      "blank": false,
+      "default": "<NOT_PROVIDED>",
+      "related_model": "db.User",
+      "on_delete": "SET_NULL",
+      "related_name": "issueagentticker_created_by"
+    },
+    {
+      "name": "updated_by",
+      "type": "ForeignKey",
+      "column": "updated_by_id",
+      "null": true,
+      "blank": false,
+      "default": "<NOT_PROVIDED>",
+      "related_model": "db.User",
+      "on_delete": "SET_NULL",
+      "related_name": "issueagentticker_updated_by"
+    },
+    {
+      "name": "deleted_at",
+      "type": "DateTimeField",
+      "column": "deleted_at",
+      "null": true,
+      "blank": true,
+      "default": "<NOT_PROVIDED>"
+    },
+    {
+      "name": "id",
+      "type": "UUIDField",
+      "column": "id",
+      "null": false,
+      "blank": false,
+      "max_length": 32,
+      "default": "<callable uuid4>"
+    },
+    {
+      "name": "issue",
+      "type": "OneToOneField",
+      "column": "issue_id",
+      "null": false,
+      "blank": false,
+      "default": "<NOT_PROVIDED>",
+      "related_model": "db.Issue",
+      "on_delete": "CASCADE",
+      "related_name": "agent_ticker"
+    },
+    {
+      "name": "used",
+      "type": "IntegerField",
+      "column": "used",
+      "null": false,
+      "blank": false,
+      "default": 0
+    },
+    {
+      "name": "granted",
+      "type": "IntegerField",
+      "column": "granted",
+      "null": false,
+      "blank": false,
+      "default": 0
+    },
+    {
+      "name": "waited",
+      "type": "IntegerField",
+      "column": "waited",
+      "null": false,
+      "blank": false,
+      "default": 0
+    },
+    {
+      "name": "user_disabled",
+      "type": "BooleanField",
+      "column": "user_disabled",
+      "null": false,
+      "blank": false,
+      "default": false
+    },
+    {
+      "name": "next_run_at",
+      "type": "DateTimeField",
+      "column": "next_run_at",
+      "null": true,
+      "blank": true,
+      "default": "<NOT_PROVIDED>"
+    },
+    {
+      "name": "last_tick_at",
+      "type": "DateTimeField",
+      "column": "last_tick_at",
+      "null": true,
+      "blank": true,
+      "default": "<NOT_PROVIDED>"
+    },
+    {
+      "name": "enabled",
+      "type": "BooleanField",
+      "column": "enabled",
+      "null": false,
+      "blank": false,
+      "default": true
+    },
+    {
+      "name": "disarm_reason",
+      "type": "CharField",
+      "column": "disarm_reason",
+      "null": false,
+      "blank": true,
+      "max_length": 32,
+      "default": "",
+      "choices": [
+        [
+          "",
+          "None"
+        ],
+        [
+          "left_ticking_state",
+          "Left Ticking State"
+        ],
+        [
+          "cap_hit",
+          "Cap Hit"
+        ],
+        [
+          "pool_spent",
+          "Pool Spent"
+        ],
+        [
+          "terminal_signal",
+          "Terminal Signal"
+        ],
+        [
+          "user_disabled",
+          "User Disabled"
+        ]
+      ]
+    },
+    {
+      "name": "pending_entry",
+      "type": "BooleanField",
+      "column": "pending_entry",
+      "null": false,
+      "blank": false,
+      "default": false
+    },
+    {
+      "name": "pending_entry_free",
+      "type": "BooleanField",
+      "column": "pending_entry_free",
+      "null": false,
+      "blank": false,
+      "default": false
+    },
+    {
+      "name": "pending_entry_actor",
+      "type": "ForeignKey",
+      "column": "pending_entry_actor_id",
+      "null": true,
+      "blank": true,
+      "default": "<NOT_PROVIDED>",
+      "related_model": "db.User",
+      "on_delete": "SET_NULL",
+      "related_name": "+"
+    },
+    {
+      "name": "pending_entry_trigger",
+      "type": "CharField",
+      "column": "pending_entry_trigger",
+      "null": false,
+      "blank": true,
+      "max_length": 24,
+      "default": ""
+    },
+    {
+      "name": "resume_parent_run",
+      "type": "ForeignKey",
+      "column": "resume_parent_run_id",
+      "null": true,
+      "blank": true,
+      "default": "<NOT_PROVIDED>",
+      "related_model": "runner.AgentRun",
+      "on_delete": "SET_NULL",
+      "related_name": "+"
+    }
+  ],
+  "reverse_relations": [],
+  "constraints": [],
+  "indexes": [
+    {
+      "name": "iaticker_enabled_next_run_idx",
+      "fields": [
+        "enabled",
+        "next_run_at"
+      ]
+    }
+  ]
+}

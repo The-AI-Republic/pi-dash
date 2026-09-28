@@ -1,0 +1,84 @@
+{
+  "_trace": "bgtasks/agent_ticker.py:57-69; rows seeded via orchestration.scheduling.arm_ticker + field tweaks",
+  "_method": "live rows on pidash_ticker_fx; pool=10 (T8 pool=-1 infinite)",
+  "now": "2026-09-28T12:00:00+00:00",
+  "rows": [
+    {
+      "label": "T1-due-under-cap",
+      "seed": {
+        "pool": 10,
+        "used": 0,
+        "next_ago_s": 300,
+        "enabled": true
+      },
+      "fanned": true
+    },
+    {
+      "label": "T2-future",
+      "seed": {
+        "pool": 10,
+        "used": 0,
+        "next_ago_s": -7200,
+        "enabled": true
+      },
+      "fanned": false
+    },
+    {
+      "label": "T3-disabled",
+      "seed": {
+        "pool": 10,
+        "used": 0,
+        "enabled": false
+      },
+      "fanned": false
+    },
+    {
+      "label": "T4-at-cap",
+      "seed": {
+        "pool": 10,
+        "used": 10,
+        "enabled": true
+      },
+      "fanned": false
+    },
+    {
+      "label": "T5-spent-pool-pending",
+      "seed": {
+        "pool": 10,
+        "used": 10,
+        "pending": true,
+        "free": true,
+        "next_ago_s": 60,
+        "enabled": true
+      },
+      "fanned": true
+    },
+    {
+      "label": "T6-granted",
+      "seed": {
+        "pool": 10,
+        "used": 10,
+        "granted": 3,
+        "next_ago_s": 200,
+        "enabled": true
+      },
+      "fanned": true
+    },
+    {
+      "label": "T7-waited",
+      "seed": {
+        "pool": 10,
+        "used": 10,
+        "waited": 1,
+        "next_ago_s": 100,
+        "enabled": true
+      },
+      "fanned": true
+    },
+    {
+      "label": "T8-infinite",
+      "seed": {},
+      "fanned": true
+    }
+  ]
+}

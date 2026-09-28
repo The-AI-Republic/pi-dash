@@ -1,0 +1,61 @@
+{
+  "_trace": "db/models/issue_agent_ticker.py:41-61 TickerDisarmReason; db/models/scheduler.py:25-27 SchedulerSource, 30-45 OutcomeMode, 52-93 OUTCOME_MODE_DIRECTIVES, 96-104 outcome_mode_directive",
+  "_method": "read .choices live + OUTCOME_MODE_DIRECTIVES verbatim + fallback probe",
+  "ticker_disarm_reason": [
+    {
+      "value": "",
+      "label": "None"
+    },
+    {
+      "value": "left_ticking_state",
+      "label": "Left Ticking State"
+    },
+    {
+      "value": "cap_hit",
+      "label": "Cap Hit"
+    },
+    {
+      "value": "pool_spent",
+      "label": "Pool Spent"
+    },
+    {
+      "value": "terminal_signal",
+      "label": "Terminal Signal"
+    },
+    {
+      "value": "user_disabled",
+      "label": "User Disabled"
+    }
+  ],
+  "scheduler_source": [
+    {
+      "value": "builtin",
+      "label": "Builtin"
+    },
+    {
+      "value": "manifest",
+      "label": "Manifest"
+    }
+  ],
+  "outcome_mode": [
+    {
+      "value": "create_issue",
+      "label": "Create issues"
+    },
+    {
+      "value": "apply_fix",
+      "label": "Apply fix (open PR)"
+    },
+    {
+      "value": "fix_and_review",
+      "label": "Fix & open for review"
+    }
+  ],
+  "outcome_mode_directives": {
+    "create_issue": "## Work mode: create issues\n\nFor each distinct finding, file a Pi Dash issue with the `pidash` CLI:\n    pidash issue create --project <PROJ> --title \"<short summary>\" \\\n        --description \"<file path, line range, evidence, severity, suggested fix>\"\nBefore creating an issue, list existing open issues and skip any finding that already has a corresponding open issue (de-dupe by file + root cause, not by exact title). Do NOT modify code.",
+    "apply_fix": "## Work mode: apply fix\n\nFor each finding you are confident about, implement the fix and open a pull request for human review \u2014 do NOT merge it. Keep one PR per logical fix where practical. If a fix is risky, ambiguous, or larger than a focused change, do NOT force it: create a Pi Dash issue describing the finding instead (same form as create-issue mode).",
+    "fix_and_review": "## Work mode: file issue and delegate fix\n\nDo NOT modify code or open a pull request in this run \u2014 the fix is delegated to the issue agent. For each distinct finding, do ALL of the following:\n1. File a Pi Dash issue with the `pidash` CLI (de-dupe against existing open issues by file + root cause, as in create-issue mode), and note the issue identifier it returns. Write the description so an AI agent can implement the fix without re-investigating: file path(s) and line range, the evidence you observed, root cause, severity, a concrete suggested fix, and how to validate it:\n    pidash issue create --project <PROJ> --title \"<short summary>\" \\\n        --description \"<agent-ready technical details>\"\n2. Move the issue to In Progress \u2014 this automatically delegates it to the coding agent, which implements the fix and opens a pull request for human review:\n    pidash issue patch <IDENT> --state \"In Progress\"\nIf a finding is risky, ambiguous, or larger than a focused change, still file the issue but leave it in its default state (do NOT move it to In Progress) and describe the open questions in the issue description instead."
+  },
+  "outcome_mode_directive_unknown_fallback": "## Work mode: create issues\n\nFor each distinct finding, file",
+  "outcome_mode_directive_fallback_is_create_issue": true
+}
