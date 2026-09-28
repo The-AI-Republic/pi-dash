@@ -330,7 +330,7 @@ pub struct IssueStateIntakeRow<'a> {
     pub created_via: Option<&'a str>,
     pub assigned_pod: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
-    pub state_detail: StateLiteView<'a>,
+    pub state_detail: Option<StateLiteView<'a>>,
     pub project_detail: ProjectLiteView<'a>,
     pub label_details: Vec<LabelLiteView<'a>>,
     pub assignee_details: Vec<UserLiteView<'a>>,
@@ -341,10 +341,12 @@ pub struct IssueStateIntakeRow<'a> {
 
 /// `IssueStateIntakeSerializer.to_representation` output
 /// (`intake.py:34-47`): the seven declared fields first (DRF `exclude`
-/// order), then every `Issue` column except `workpad`.
+/// order), then every `Issue` column except `workpad`. `state` is nullable
+/// (`issue.py:119-125`), so `state_detail` is `None` when it is — DRF
+/// renders `None` for a null nest source.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IssueStateIntakeView<'a> {
-    pub state_detail: StateLiteView<'a>,
+    pub state_detail: Option<StateLiteView<'a>>,
     pub project_detail: ProjectLiteView<'a>,
     pub label_details: Vec<LabelLiteView<'a>>,
     pub assignee_details: Vec<UserLiteView<'a>>,
@@ -706,6 +708,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn issue_state_intake_renders_null_state_detail() {
+        // `Issue.state` is nullable (`issue.py:119-125`); DRF renders
+        // `None` for the null `state_detail` source instead of a lite
+        // object.
+        let mut row = sample_issue_state_intake_row();
+        row.state = None;
+        row.state_detail = None;
+        let produced =
+            serde_json::to_value(issue_state_intake_to_representation(&row)).expect("serializes");
+        assert_eq!(produced.get("state"), Some(&Value::Null));
+        assert_eq!(produced.get("state_detail"), Some(&Value::Null));
+    }
+
     // Shared representative inbox row. The row borrows its JSON literals, so
     // the helper leaks them to 'static (test-only; production callers borrow
     // live data).
@@ -749,12 +765,12 @@ mod tests {
             created_via: None,
             assigned_pod: None,
             agent_executor: None,
-            state_detail: StateLiteView {
+            state_detail: Some(StateLiteView {
                 id: "44444444-4444-4444-4444-444444444444",
                 name: "In Progress",
                 color: "#ff0000",
                 group: "started",
-            },
+            }),
             project_detail: ProjectLiteView {
                 id: "33333333-3333-3333-3333-333333333333",
                 identifier: "WEB",

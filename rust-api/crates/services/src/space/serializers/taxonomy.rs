@@ -304,18 +304,17 @@ pub struct LabelRow<'a> {
     pub external_source: Option<&'a str>,
     pub external_id: Option<&'a str>,
     pub workspace_detail: WorkspaceLiteView<'a>,
-    pub project_detail: ProjectLiteView<'a>,
+    pub project_detail: Option<ProjectLiteView<'a>>,
 }
 
 /// `LabelSerializer.to_representation` output (`issue.py:50-57`): the two
 /// declared nests first (DRF `__all__` order), then every `Label` column.
-/// `project_detail` renders the lite shape even when `project` is null —
-/// the caller resolves the nest from the nullable FK (DRF would render
-/// `None` for a null source; rows the space API serves always carry one).
+/// `project` is nullable (`workspace.py:187`), so `project_detail` is
+/// `None` when it is — DRF renders `None` for a null nest source.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LabelView<'a> {
     pub workspace_detail: WorkspaceLiteView<'a>,
-    pub project_detail: ProjectLiteView<'a>,
+    pub project_detail: Option<ProjectLiteView<'a>>,
     pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
@@ -673,7 +672,7 @@ mod tests {
                 slug: "acme",
                 id: "22222222-2222-2222-2222-222222222222",
             },
-            project_detail: ProjectLiteView {
+            project_detail: Some(ProjectLiteView {
                 id: "33333333-3333-3333-3333-333333333333",
                 identifier: "WEB",
                 name: "Web",
@@ -681,7 +680,7 @@ mod tests {
                 icon_prop: &icon,
                 emoji: Some("🚀"),
                 description: "Ship it",
-            },
+            }),
         };
         let produced = serde_json::to_value(label_to_representation(&row)).expect("serializes");
         let mut expected: Vec<String> =
@@ -710,6 +709,39 @@ mod tests {
             produced.get("color").and_then(Value::as_str),
             Some("#ff0000")
         );
+    }
+
+    #[test]
+    fn label_view_renders_null_project_detail_for_workspace_label() {
+        // `Label.project` is nullable (`workspace.py:187`: workspace-level
+        // labels); DRF renders `None` for the null `project_detail` source
+        // instead of a lite object.
+        let row = LabelRow {
+            id: "77777777-7777-7777-7777-777777777777",
+            created_at: None,
+            updated_at: None,
+            created_by: None,
+            updated_by: None,
+            deleted_at: None,
+            workspace: "22222222-2222-2222-2222-222222222222",
+            project: None,
+            parent: None,
+            name: "Workspace tag",
+            description: "",
+            color: "#00ff00",
+            sort_order: 65535.0,
+            external_source: None,
+            external_id: None,
+            workspace_detail: WorkspaceLiteView {
+                name: "Acme",
+                slug: "acme",
+                id: "22222222-2222-2222-2222-222222222222",
+            },
+            project_detail: None,
+        };
+        let produced = serde_json::to_value(label_to_representation(&row)).expect("serializes");
+        assert_eq!(produced.get("project"), Some(&Value::Null));
+        assert_eq!(produced.get("project_detail"), Some(&Value::Null));
     }
 
     #[test]
