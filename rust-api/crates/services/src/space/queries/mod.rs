@@ -1,6 +1,6 @@
 //! Space public-API read queries (D-02, stage 4).
 //!
-//! Ports the `SELECT` shapes Django emits for the space `views/` reads.
+//! Ports the read/write query shapes Django emits for the space `views/`.
 //! Each builder returns the SQL text (Postgres `$N` placeholders where
 //! Django renders `%s`, per the `db/src/license/queries.rs` precedent) and
 //! the row structs carry the exact wire key order of the matching
@@ -11,8 +11,10 @@
 //!
 //! * [`project_meta`] — project/meta/cycle/module/state/label reads
 //!   (`space/views/{project,meta,cycle,module,state,label}.py`).
+//! * [`intake_assets`] — intake-issue + file-asset read/write queries
+//!   (`space/views/{intake,asset}.py`).
 //!
 //! Later layer issues extend this module (`issue_list` for PIDASHCONV-168,
-//! comments/reactions/votes, intake, assets); they add files here, never a
-//! fork.
+//! comments/reactions/votes); they add files here, never a fork.
+pub mod intake_assets;
 pub mod project_meta;
