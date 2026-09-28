@@ -1763,6 +1763,8 @@ dependencies = [
 name = "pidash-services"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
+ "flate2",
  "pidash-auth",
  "pidash-db",
  "pidash-types",

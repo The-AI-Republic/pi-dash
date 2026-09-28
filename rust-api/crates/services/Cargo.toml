@@ -10,6 +10,8 @@ pidash-auth = { path = "../auth" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 thiserror = { version = "2" }
+flate2 = { version = "1" }
+crc32fast = { version = "1" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

@@ -10,6 +10,7 @@ pub mod health;
 pub mod ids;
 pub mod integrations;
 pub mod license;
+pub mod tasks_cleanup;
 
 pub use error::Error;
 pub use health::HealthStatus;
