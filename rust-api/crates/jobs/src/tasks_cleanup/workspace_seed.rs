@@ -260,7 +260,10 @@ pub trait SeedStore {
     ) -> impl std::future::Future<Output = Result<Option<i64>, String>> + Send;
 
     /// `Issue.objects.filter(project, state).aggregate(Max("sort_order"))`
-    /// (`issue.py:335-337`): `IssueManager` scope.
+    /// (`issue.py:335-337`): the plain soft-delete manager (`Issue.objects`
+    /// is inherited from `SoftDeleteModel`, not the triage/archived/draft
+    /// excluding `issue_objects = IssueManager()`), so only `deleted_at IS
+    /// NULL` applies.
     fn max_issue_sort_order(
         &self,
         project_id: uuid::Uuid,
@@ -281,7 +284,8 @@ pub trait SeedStore {
     ) -> impl std::future::Future<Output = Result<Option<String>, String>> + Send;
 
     /// `Pod.default_for_project_id` (`runner/models.py:174-176`): the
-    /// default pod for the project, if one exists.
+    /// default pod for the project, if one exists. `Pod.objects` is the
+    /// `PodManager`, so soft-deleted pods are excluded.
     fn default_pod_for_project(
         &self,
         project_id: uuid::Uuid,
@@ -1303,15 +1307,12 @@ impl SeedStore for PgSeedStore {
         project_id: uuid::Uuid,
         state_id: uuid::Uuid,
     ) -> Result<Option<f64>, String> {
-        // `IssueManager` scope: triage-state, archived, project-archived
-        // and draft rows excluded.
+        // Plain `Issue.objects` scope: soft-delete only. (`issue_objects`
+        // would exclude triage/archived/draft, but `Issue.save` queries
+        // through `Issue.objects`.)
         sqlx::query_scalar(
-            "SELECT MAX(i.sort_order) FROM issues i
-             WHERE i.project_id = $1 AND i.state_id = $2 AND i.deleted_at IS NULL
-               AND i.archived_at IS NULL AND NOT i.is_draft
-               AND (SELECT archived_at FROM projects WHERE id = $1) IS NULL
-               AND NOT EXISTS (SELECT 1 FROM states s
-                 WHERE s.id = i.state_id AND s.\"group\" = 'triage')",
+            "SELECT MAX(sort_order) FROM issues
+             WHERE project_id = $1 AND state_id = $2 AND deleted_at IS NULL",
         )
         .bind(project_id)
         .bind(state_id)
@@ -1352,10 +1353,10 @@ impl SeedStore for PgSeedStore {
         &self,
         project_id: uuid::Uuid,
     ) -> Result<Option<uuid::Uuid>, String> {
-        // `Pod.default_for_project_id`: plain manager, no soft-delete
-        // filter (`runner/models.py:174-176`).
+        // `Pod.default_for_project_id` (`runner/models.py:174-176`):
+        // `PodManager` excludes soft-deleted pods.
         Ok(
-            sqlx::query_scalar("SELECT id FROM pod WHERE project_id = $1 AND is_default LIMIT 1")
+            sqlx::query_scalar("SELECT id FROM pod WHERE project_id = $1 AND is_default AND deleted_at IS NULL LIMIT 1")
                 .bind(project_id)
                 .fetch_optional(&self.pool)
                 .await

@@ -190,7 +190,9 @@ pub fn slugify(name: &str) -> String {
     let mut out = String::with_capacity(normalized.len());
     let mut prev_dash = true; // leading separators are dropped
     for ch in normalized.chars() {
-        if ch.is_ascii_alphanumeric() {
+        // Django drops `[^\w\s-]` but `\w` includes `_`, so underscores are
+        // kept verbatim (and stripped at the ends by `.strip("-_")` below).
+        if ch.is_ascii_alphanumeric() || ch == '_' {
             out.push(ch.to_ascii_lowercase());
             prev_dash = false;
         } else if !prev_dash {
@@ -198,10 +200,7 @@ pub fn slugify(name: &str) -> String {
             prev_dash = true;
         }
     }
-    while out.ends_with('-') {
-        out.pop();
-    }
-    out
+    out.trim_matches(|c| c == '-' || c == '_').to_owned()
 }
 
 /// `strip_tags` (`pi_dash/utils/html_processor.py:28-31`): stdlib
@@ -423,9 +422,9 @@ pub fn next_view_sort_order(max_sort_order: Option<f64>) -> Option<f64> {
 }
 
 /// `Issue.save` (`issue.py:335-339`): `max(sort_order in project+state) +
-/// 10000`, else the seed `sort_order` is kept. Uses the default
-/// `IssueManager` scope (triage/archived/draft excluded); the jobs layer
-/// binds it.
+/// 10000`, else the seed `sort_order` is kept. Runs through plain
+/// `Issue.objects` (soft-delete only, not the `issue_objects`
+/// `IssueManager` scope); the jobs layer binds it.
 pub fn next_issue_sort_order(max_sort_order: Option<f64>) -> Option<f64> {
     max_sort_order.map(|largest| largest + 10_000.0)
 }
@@ -819,6 +818,10 @@ mod tests {
         assert_eq!(slugify("Done"), "done");
         assert_eq!(slugify("Cancelled"), "cancelled");
         assert_eq!(slugify("Triage"), "triage");
+        // Django keeps interior underscores (`\w`) but strips them at the
+        // ends (`.strip("-_")`).
+        assert_eq!(slugify("a_b"), "a_b");
+        assert_eq!(slugify("_lead_"), "lead");
     }
 
     #[test]
