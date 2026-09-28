@@ -45,8 +45,15 @@ pub enum IssueCommand {
     /// the workspace default project from Pi Dash cloud.
     Create(CreateArgs),
     /// List work items in a project. Returns the server's paginated envelope
-    /// (`{count, next_cursor, prev_cursor, results: [...]}`) — pass `--cursor`
-    /// from a prior page to walk pages. Narrow the list with `--state`,
+    /// (`{grouped_by, sub_grouped_by, total_count, next_cursor, prev_cursor,
+    /// next_page_results, prev_page_results, count, total_pages,
+    /// total_results, extra_stats, results: [...]}`). One invocation fetches
+    /// one page — at most `per_page` items (server default and max: 1000) —
+    /// so `count` alone cannot tell a complete list from a truncated one:
+    /// when `next_page_results` is `true` the list is truncated at `count`
+    /// of `total_count` items, and passing `next_cursor` back via `--cursor`
+    /// fetches the next page. A note on stderr flags the truncation; stdout
+    /// stays the bare envelope. Narrow the list with `--state`,
     /// `--state-group`, `--parent`, `--label`, `--priority`; `--fields`
     /// trims each item.
     List(ListArgs),
@@ -279,7 +286,8 @@ pub struct ListArgs {
     #[arg(long)]
     pub cursor: Option<String>,
 
-    /// Items per page. Server-side default applies if omitted.
+    /// Items per page. The server default (1000) is also the maximum, so a
+    /// project with more items can only be read by walking `--cursor` pages.
     #[arg(long)]
     pub per_page: Option<u32>,
 
@@ -626,7 +634,34 @@ async fn cmd_list(client: &ApiClient, args: ListArgs) -> Result<(), CliError> {
         "{}",
         serde_json::to_string(&resp).expect("serialize JSON value")
     );
+    if let Some(note) = pagination_note(&resp) {
+        eprintln!("{note}");
+    }
     Ok(())
+}
+
+/// The truncation warning the list commands print to stderr when the server
+/// reports another page (`next_page_results: true`), so a caller piping
+/// stdout still learns the list is incomplete. Stdout stays the bare
+/// envelope. `None` on the final page — and on envelopes from servers old
+/// enough to omit the field, which cannot be told apart from complete ones.
+/// `pub(super)` so the sibling `page list` prints the same note.
+pub(super) fn pagination_note(resp: &Value) -> Option<String> {
+    if resp.get("next_page_results").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let shown = match (
+        resp.get("count").and_then(Value::as_u64),
+        resp.get("total_count").and_then(Value::as_u64),
+    ) {
+        (Some(count), Some(total)) => format!("{count} of {total} results"),
+        _ => "more results available".to_string(),
+    };
+    let more = match resp.get("next_cursor").and_then(Value::as_str) {
+        Some(cursor) if !cursor.is_empty() => format!("pass --cursor {cursor} for more"),
+        _ => "pass --cursor from next_cursor for more".to_string(),
+    };
+    Some(format!("note: {shown}; {more}"))
 }
 
 /// Fetch one page of `pidash issue list`. Resolves `--parent PROJ-123` to a
@@ -1213,6 +1248,48 @@ mod tests {
     #[test]
     fn build_query_string_empty_yields_empty() {
         assert_eq!(build_query_string(&[]), "");
+    }
+
+    // --- pagination note ---------------------------------------------------
+
+    #[test]
+    fn pagination_note_fires_only_when_the_server_reports_another_page() {
+        let truncated = json!({
+            "count": 1000, "total_count": 4200,
+            "next_cursor": "1000:1:0", "next_page_results": true,
+        });
+        assert_eq!(
+            pagination_note(&truncated).as_deref(),
+            Some("note: 1000 of 4200 results; pass --cursor 1000:1:0 for more")
+        );
+
+        let last_page = json!({
+            "count": 200, "total_count": 4200,
+            "next_cursor": "1000:5:0", "next_page_results": false,
+        });
+        assert_eq!(pagination_note(&last_page), None);
+    }
+
+    #[test]
+    fn pagination_note_stays_silent_when_the_field_is_absent() {
+        // Servers predating `next_page_results` in the envelope: a complete
+        // list and a truncated one are indistinguishable, so say nothing.
+        assert_eq!(pagination_note(&json!({"count": 1000, "results": []})), None);
+    }
+
+    #[test]
+    fn pagination_note_degrades_gracefully_on_partial_envelopes() {
+        let no_counts = json!({"next_page_results": true, "next_cursor": "1000:1:0"});
+        assert_eq!(
+            pagination_note(&no_counts).as_deref(),
+            Some("note: more results available; pass --cursor 1000:1:0 for more")
+        );
+
+        let no_cursor = json!({"next_page_results": true, "count": 1000, "total_count": 4200});
+        assert_eq!(
+            pagination_note(&no_cursor).as_deref(),
+            Some("note: 1000 of 4200 results; pass --cursor from next_cursor for more")
+        );
     }
 
     // --- description source ----------------------------------------------
