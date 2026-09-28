@@ -367,15 +367,9 @@ fn find_close_tag(bytes: &[u8], from: usize, name: &str) -> Option<usize> {
                     return tag_end(bytes, open + 2);
                 }
             }
-            match tag_end(bytes, open + 2) {
-                Some(end) => pos = end,
-                None => return None,
-            }
+            pos = tag_end(bytes, open + 2)?;
         } else {
-            match tag_end(bytes, open + 1) {
-                Some(end) => pos = end,
-                None => return None,
-            }
+            pos = tag_end(bytes, open + 1)?;
         }
     }
     None
