@@ -244,7 +244,7 @@ def test_rust_activity_chain_entry_forwards_to_python(db_conn, broker_url):
 def test_rust_webhook_activity_forwards_to_python(db_conn, broker_url):
     """Fan-out midpoint, Rust side: forwards with the oracle arg shape."""
     chain = seed_helpers.issue_chain(db_conn, "rustreplayfanout")
-    owner, workspace = chain["owner"], chain["workspace"]
+    owner, workspace, issue = chain["owner"], chain["workspace"], chain["issue"]
     _publish_and_observe_forward(
         WEBHOOK_ACTIVITY,
         kwargs={
@@ -256,6 +256,12 @@ def test_rust_webhook_activity_forwards_to_python(db_conn, broker_url):
             "actor_id": str(owner["id"]),
             "slug": workspace["slug"],
             "current_site": "example.com",
+            # Required by the Python signature (webhook_task.py:378-390);
+            # same values model_activity passes on the created path, so the
+            # forwarded payload stays executable on the Python plane.
+            "event_id": str(issue["id"]),
+            "old_identifier": None,
+            "new_identifier": None,
         },
     )
 
