@@ -194,7 +194,14 @@ impl EdgeHandle {
     /// Build from explicit parts. `upstream` must be a base URL with no
     /// trailing slash, e.g. `http://127.0.0.1:8000`.
     pub fn new(upstream: impl Into<String>, flags: EdgeFlags) -> Result<Self, reqwest::Error> {
-        let client = reqwest::Client::builder().timeout(PROXY_TIMEOUT).build()?;
+        // A transparent proxy must never follow redirects itself: the
+        // upstream 3xx (status, Location, Set-Cookie, body) is forwarded
+        // as-is so the original caller sees it (PIDASHCONV-226: Django's
+        // POST /auth/sign-in/ 302 carries the session cookie).
+        let client = reqwest::Client::builder()
+            .timeout(PROXY_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
         Ok(Self {
             inner: Arc::new(EdgeState {
                 upstream: upstream.into().trim_end_matches('/').to_owned(),
