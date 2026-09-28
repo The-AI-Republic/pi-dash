@@ -1,0 +1,195 @@
+{
+  "_trace": "bgtasks/scheduler.py:144-283 per-case traces in each record",
+  "_method": "live fire_scheduler_binding on pidash_ticker_fx; T0 frozen; dispatch_scheduler_run REAL for happy path, monkeypatched for pointer/rollback cases; drain stubbed, on_commit eager",
+  "now": "2026-09-28T12:00:00+00:00",
+  "cases": [
+    {
+      "name": "happy-claim-advance",
+      "trace": "bgtasks/scheduler.py:156-205 claim + next_run_at advance + last_error clear; 229-261 pointer",
+      "before": {
+        "enabled": true,
+        "next_run_at": null,
+        "last_run_id": null,
+        "last_run_status": null,
+        "last_error": "",
+        "last_error_len": 0
+      },
+      "fire_result": true,
+      "after": {
+        "enabled": true,
+        "next_run_at": "2026-09-28T12:01:00+00:00",
+        "last_run_id": "8179613e-902b-4b42-8625-ca696618d86e",
+        "last_run_status": "queued",
+        "last_error": "",
+        "last_error_len": 0
+      }
+    },
+    {
+      "name": "last-run-in-flight-skip",
+      "trace": "bgtasks/scheduler.py:86-96 _is_last_run_in_flight; 50-62 NON_TERMINAL_STATUSES; 174-180 skip",
+      "non_terminal_statuses": [
+        "assigned",
+        "awaiting_approval",
+        "awaiting_reauth",
+        "blocked",
+        "cancel_requested",
+        "paused_awaiting_input",
+        "queued",
+        "running",
+        "waiting_for_worktree"
+      ],
+      "skips": [
+        {
+          "status": "assigned",
+          "fire_result": false,
+          "next_run_at_unchanged": true
+        },
+        {
+          "status": "awaiting_approval",
+          "fire_result": false,
+          "next_run_at_unchanged": true
+        },
+        {
+          "status": "awaiting_reauth",
+          "fire_result": false,
+          "next_run_at_unchanged": true
+        },
+        {
+          "status": "blocked",
+          "fire_result": false,
+          "next_run_at_unchanged": true
+        },
+        {
+          "status": "cancel_requested",
+          "fire_result": false,
+          "next_run_at_unchanged": true
+        },
+        {
+          "status": "paused_awaiting_input",
+          "fire_result": false,
+          "next_run_at_unchanged": true
+        },
+        {
+          "status": "queued",
+          "fire_result": false,
+          "next_run_at_unchanged": true
+        },
+        {
+          "status": "running",
+          "fire_result": false,
+          "next_run_at_unchanged": true
+        },
+        {
+          "status": "waiting_for_worktree",
+          "fire_result": false,
+          "next_run_at_unchanged": true
+        }
+      ]
+    },
+    {
+      "name": "bad-rrule-disable",
+      "trace": "bgtasks/scheduler.py:182-196 (last_error truncated to 1000; enabled=False; next_run_at=None)",
+      "before": {
+        "enabled": true,
+        "next_run_at": "2026-09-28T11:59:55+00:00",
+        "last_run_id": null,
+        "last_run_status": null,
+        "last_error": "",
+        "last_error_len": 0
+      },
+      "fire_result": false,
+      "after": {
+        "enabled": false,
+        "next_run_at": null,
+        "last_run_id": null,
+        "last_run_status": null,
+        "last_error": "invalid rrule: dtstart=datetime.datetime(2026, 9, 27, 12, 0, tzinfo=datetime.timezone.utc) rrule='this is not a real rrule'",
+        "last_error_len": 123
+      }
+    },
+    {
+      "name": "bad-rrule-truncation-1000",
+      "trace": "bgtasks/scheduler.py:188-190 [:LAST_ERROR_MAX_LEN]; db/models/scheduler.py:22",
+      "before": {
+        "enabled": true,
+        "next_run_at": "2026-09-28T11:59:55+00:00",
+        "last_run_id": null,
+        "last_run_status": null,
+        "last_error": "",
+        "last_error_len": 0
+      },
+      "fire_result": false,
+      "after": {
+        "enabled": false,
+        "next_run_at": null,
+        "last_run_id": null,
+        "last_run_status": null,
+        "last_error": "invalid rrule: dtstart=datetime.datetime(2026, 9, 27, 12, 0, tzinfo=datetime.timezone.utc) rrule='X-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        "last_error_len": 1000
+      }
+    },
+    {
+      "name": "failed-run-pointer",
+      "trace": "bgtasks/scheduler.py:235-251 (last_run set; last_error 'prompt build failed: ...' wording; next_run_at stays advanced)",
+      "before": {
+        "enabled": true,
+        "next_run_at": null,
+        "last_run_id": null,
+        "last_run_status": null,
+        "last_error": "",
+        "last_error_len": 0
+      },
+      "fire_result": true,
+      "after": {
+        "enabled": true,
+        "next_run_at": "2026-09-28T12:01:00+00:00",
+        "last_run_id": "9581dc06-fd5b-4149-b68f-844e060e3e25",
+        "last_run_status": "failed",
+        "last_error": "prompt build failed: prompt build failed: 'x' is undefined",
+        "last_error_len": 58
+      }
+    },
+    {
+      "name": "healthy-run-clears-error",
+      "trace": "bgtasks/scheduler.py:200-205 claim clears; 244-248 healthy clears",
+      "before": {
+        "enabled": true,
+        "next_run_at": null,
+        "last_run_id": null,
+        "last_run_status": null,
+        "last_error": "stale error from a prior tick",
+        "last_error_len": 29
+      },
+      "fire_result": true,
+      "after": {
+        "enabled": true,
+        "next_run_at": "2026-09-28T12:01:00+00:00",
+        "last_run_id": "54f5dd9a-5094-4846-907c-5119e004a22d",
+        "last_run_status": "queued",
+        "last_error": "",
+        "last_error_len": 0
+      }
+    },
+    {
+      "name": "dispatch-none-rollback",
+      "trace": "bgtasks/scheduler.py:263-283 (next_run_at restored; last_error 'dispatch failed: ...' wording)",
+      "before": {
+        "enabled": true,
+        "next_run_at": null,
+        "last_run_id": null,
+        "last_run_status": null,
+        "last_error": "",
+        "last_error_len": 0
+      },
+      "fire_result": false,
+      "after": {
+        "enabled": true,
+        "next_run_at": null,
+        "last_run_id": null,
+        "last_run_status": null,
+        "last_error": "dispatch failed: no default pod for workspace test",
+        "last_error_len": 50
+      }
+    }
+  ]
+}

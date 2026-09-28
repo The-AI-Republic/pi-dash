@@ -1,0 +1,56 @@
+{
+  "_trace": "bgtasks/scheduler.py:115-128",
+  "_method": "live rows on pidash_ticker_fx; B5 simulates async-cascade window (scheduler tombstoned, binding not)",
+  "now": "2026-09-28T12:00:00+00:00",
+  "rows": [
+    {
+      "label": "B1-null-due",
+      "enabled": true,
+      "scheduler": "fx-sched",
+      "next_run_at": null,
+      "fanned": true
+    },
+    {
+      "label": "B2-future",
+      "enabled": true,
+      "scheduler": "fx-sched",
+      "next_run_at": "2026-09-28T13:00:00+00:00",
+      "fanned": false
+    },
+    {
+      "label": "B3-disabled",
+      "enabled": false,
+      "scheduler": "fx-sched",
+      "next_run_at": "2026-09-28T11:59:55+00:00",
+      "fanned": false
+    },
+    {
+      "label": "B4-sched-off",
+      "enabled": true,
+      "scheduler": null,
+      "next_run_at": null,
+      "fanned": false
+    },
+    {
+      "label": "B5-sched-gone",
+      "enabled": true,
+      "scheduler": null,
+      "next_run_at": null,
+      "fanned": false
+    },
+    {
+      "label": "B6-past-due",
+      "enabled": true,
+      "scheduler": "fx-sched",
+      "next_run_at": "2026-09-28T11:59:55+00:00",
+      "fanned": true
+    },
+    {
+      "label": "B7-proj-gone",
+      "enabled": true,
+      "scheduler": "fx-sched",
+      "next_run_at": null,
+      "fanned": false
+    }
+  ]
+}
