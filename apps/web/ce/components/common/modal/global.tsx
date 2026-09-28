@@ -4,14 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { lazy, Suspense } from "react";
 import { observer } from "mobx-react";
-
-const ProfileSettingsModal = lazy(() =>
-  import("@/components/settings/profile/modal").then((module) => ({
-    default: module.ProfileSettingsModal,
-  }))
-);
 
 type TGlobalModalsProps = {
   workspaceSlug: string;
@@ -20,13 +13,9 @@ type TGlobalModalsProps = {
 /**
  * GlobalModals component manages all workspace-level modals across Pi Dash applications.
  *
- * This includes:
- * - Profile settings modal
+ * No modals are mounted here in the community edition at the moment; this stays
+ * as the extension point the enterprise overlay builds on.
  */
 export const GlobalModals = observer(function GlobalModals(_props: TGlobalModalsProps) {
-  return (
-    <Suspense fallback={null}>
-      <ProfileSettingsModal />
-    </Suspense>
-  );
+  return null;
 });
