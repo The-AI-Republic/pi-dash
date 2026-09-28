@@ -21,6 +21,7 @@ import { useInstance } from "@/hooks/store/use-instance";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 import { useUser, useUserProfile } from "@/hooks/store/user";
 // local components
+import { getInitialOnboardingStep } from "./flow";
 import { OnboardingHeader } from "./header";
 import { OnboardingStepRoot } from "./steps";
 
@@ -30,7 +31,7 @@ type Props = {
 };
 
 export const OnboardingRoot = observer(function OnboardingRoot({ invitations = [], joinRequests = [] }: Props) {
-  const [currentStep, setCurrentStep] = useState<TOnboardingStep>(EOnboardingSteps.CLI_INSTALL);
+  const [currentStep, setCurrentStep] = useState<TOnboardingStep>(getInitialOnboardingStep);
   // store hooks
   const { data: user } = useUser();
   const { data: userProfile, updateUserProfile, finishUserOnboarding } = useUserProfile();
