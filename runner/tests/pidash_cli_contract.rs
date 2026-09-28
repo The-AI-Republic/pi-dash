@@ -2099,3 +2099,84 @@ async fn issue_patch_add_and_remove_share_one_label_lookup() {
     assert_eq!(label_gets, 1, "add + remove must share one label lookup");
     assert_eq!(recorded.len(), 3, "expected issue GET, labels GET, PATCH");
 }
+
+// ---------------------------------------------------------------------------
+// `pidash project runners` — the cloud view of a project's runners
+// (PDASHOSS01-245). Resolution is identifier → UUID via the project list,
+// then a GET on the token-auth v1 runners route.
+// ---------------------------------------------------------------------------
+
+const PROJECTS_PAGE: &str = r#"{"results":[{"id":"00000000-0000-0000-0000-0000000000aa","identifier":"ENG","name":"Engineering"}]}"#;
+const RUNNERS_PAGE: &str = r#"[{"id":"00000000-0000-0000-0000-0000000000r1","name":"mac-mini","status":"online","last_heartbeat_at":"2026-09-27T12:00:00Z"}]"#;
+
+fn runners_args(project: &str) -> pidash::cli::project::RunnersArgs {
+    pidash::cli::project::RunnersArgs {
+        project: project.to_string(),
+        pod: None,
+        include_bundled: false,
+    }
+}
+
+#[tokio::test]
+async fn project_runners_resolves_identifier_and_prints_the_cloud_list() {
+    let fake = start_fake(Box::new(|req| {
+        if req.path.ends_with("/runners/") {
+            CannedResponse::ok(RUNNERS_PAGE)
+        } else {
+            CannedResponse::ok(PROJECTS_PAGE)
+        }
+    }))
+    .await;
+    let client = client(&fake);
+    let runners =
+        pidash::cli::project::list_project_runners(&client, &runners_args("eng"))
+            .await
+            .expect("runner list");
+    assert_eq!(runners[0]["name"], "mac-mini");
+    assert_eq!(runners[0]["status"], "online");
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 2, "expected projects GET then runners GET");
+    assert_eq!(recorded[0].path, "/api/v1/workspaces/acme/projects/");
+    assert_eq!(
+        recorded[1].path,
+        "/api/v1/workspaces/acme/projects/00000000-0000-0000-0000-0000000000aa/runners/"
+    );
+    assert_eq!(recorded[1].api_key.as_deref(), Some("test-token"));
+}
+
+#[tokio::test]
+async fn project_runners_forwards_pod_and_include_bundled_filters() {
+    let fake = start_fake(Box::new(|req| {
+        if req.path.ends_with("include_bundled=true") {
+            CannedResponse::ok("[]")
+        } else {
+            CannedResponse::ok(PROJECTS_PAGE)
+        }
+    }))
+    .await;
+    let client = client(&fake);
+    let mut args = runners_args("ENG");
+    args.pod = Some("00000000-0000-0000-0000-0000000000dd".into());
+    args.include_bundled = true;
+    pidash::cli::project::list_project_runners(&client, &args)
+        .await
+        .expect("runner list");
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(
+        recorded[1].path,
+        "/api/v1/workspaces/acme/projects/00000000-0000-0000-0000-0000000000aa/runners/\
+         ?pod=00000000-0000-0000-0000-0000000000dd&include_bundled=true"
+    );
+}
+
+#[tokio::test]
+async fn project_runners_unknown_project_exits_not_found_without_a_runners_call() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PROJECTS_PAGE))).await;
+    let client = client(&fake);
+    let err = pidash::cli::project::list_project_runners(&client, &runners_args("NOPE"))
+        .await
+        .expect_err("unknown project must fail");
+    assert_eq!(err.exit_code, EXIT_NOT_FOUND);
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "must stop after the failed resolution");
+}

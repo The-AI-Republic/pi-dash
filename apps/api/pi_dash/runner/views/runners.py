@@ -4,6 +4,7 @@
 
 from datetime import timedelta
 
+from django.core.exceptions import PermissionDenied
 from django.db import transaction
 from django.db.models import Count, Exists, Max, OuterRef, Q
 from django.utils import timezone
@@ -30,7 +31,6 @@ from pi_dash.runner.services.permissions import (
     can_view_dev_machine,
     can_view_runner,
     is_workspace_member,
-    runner_visible_to_user_q,
 )
 from pi_dash.runner.services.pubsub import (
     close_runner_session,
@@ -40,6 +40,10 @@ from pi_dash.runner.services.runner_delete import (
     delete_dev_machine as delete_dev_machine_svc,
     delete_runner as delete_runner_svc,
     parse_purge_local,
+)
+from pi_dash.runner.services.runner_directory import (
+    parse_include_bundled,
+    project_runners_queryset,
 )
 
 # A machine counts as "control online" (able to execute cloud-pushed
@@ -306,30 +310,20 @@ class RunnerListEndpoint(APIView):
                 {"error": "workspace is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if not is_workspace_member(request.user, workspace_id):
+        # The visibility/filter rules (membership, private-runner ownership,
+        # bundled exclusion, project/pod narrowing) are shared with the
+        # token-auth /api/v1/ list and the MCP tool via runner_directory —
+        # change them there, not here.
+        try:
+            qs = project_runners_queryset(
+                request.user,
+                workspace_id,
+                project_id=request.query_params.get("project"),
+                pod_id=request.query_params.get("pod"),
+                include_bundled=parse_include_bundled(request.query_params),
+            )
+        except PermissionDenied:
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
-        qs = (
-            Runner.objects.filter(workspace_id=workspace_id)
-            .filter(runner_visible_to_user_q(request.user))
-            # ``pod__project`` and ``dev_machine`` are read by the runner
-            # serializer's nested mini serializers; join them to avoid N+1.
-            .select_related("pod__project", "dev_machine")
-            .order_by("-updated_at")
-        )
-        pod_id = request.query_params.get("pod")
-        if pod_id:
-            qs = qs.filter(pod_id=pod_id)
-        # Desktop-bundled runners are an implementation detail of the app: the
-        # user never registered them and cannot meaningfully manage them here,
-        # so they stay out of the "Add runner" / runner-management lists unless
-        # explicitly asked for (support and admin tooling pass the flag).
-        if request.query_params.get("include_bundled") not in ("1", "true", "yes"):
-            from pi_dash.runner.models import RunnerProvisioning
-
-            qs = qs.exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
-        project_id = request.query_params.get("project")
-        if project_id:
-            qs = qs.filter(pod__project_id=project_id)
         return Response(RunnerSerializer(qs, many=True).data)
 
 
