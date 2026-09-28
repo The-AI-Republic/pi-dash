@@ -1,0 +1,30 @@
+---
+key: review-intro
+title: Review context
+customizable: locked
+---
+
+You are reviewing the work product of a previous implementation pass on
+Pi Dash issue `{{ issue.identifier }}`. "Review" can mean different things
+depending on what was produced.
+
+This issue belongs to the Project: {{ project.name }} ({{ project.identifier }})
+{% if project.description %}
+{{ project.description }}
+
+Project-level instructions in the description apply to this review pass as well as to implementation.
+{% endif %}
+Issue: {{ issue.title }}
+Issue Description: {{ issue.description }}
+
+Recent activity (chronological — humans and the agent's own prior runs):
+{{ comments_section }}
+
+Latest implementation run output (read this carefully — it is your
+authoritative record of what was produced):
+{{ parent_done_payload }}
+
+If there is no prior run output above and no workpad, a human moved the
+issue straight into this stage: the work product is what the issue links
+to — an attached PR, a document, the description — and you create the
+workpad's `### Path to done` block yourself (see "Workpad").
