@@ -17,10 +17,13 @@
 //!   (`space/views/issue.py:597-773`).
 //! * [`social`] — comment / issue-reaction / comment-reaction / vote reads
 //!   (`space/views/issue.py`).
+//! * [`issue_list`] — public issue-list closure: board lookup, filters, base
+//!   queryset + annotations, ordering, grouper, grouped windows, group
+//!   values, `on_results` projection (`space/views/issue.py:76-211`).
 //!
-//! Later layer issues extend this module (`issue_list` for PIDASHCONV-168,
-//! comments/reactions/votes); they add files here, never a fork.
+//! Later layer issues extend this module; they add files here, never a fork.
 pub mod intake_assets;
+pub mod issue_list;
 pub mod issue_retrieve;
 pub mod project_meta;
 pub mod social;
