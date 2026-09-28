@@ -791,6 +791,29 @@ fn render_field_errors(errors: &[(String, Vec<String>)]) -> String {
     body
 }
 
+/// Error for a non-object PATCH body. Whole-body `null` is repackaged by
+/// DRF's `Serializer.errors` as `non_field_errors: ["No data provided"]`
+/// (`serializers.py:575-583`); every other shape gets the `invalid`
+/// message with `type(data).__name__` (`serializers.py:340,485`).
+fn non_object_error(value: &serde_json::Value) -> HandlerError {
+    if value.is_null() {
+        return HandlerError::FieldErrors(
+            r#"{"non_field_errors":["No data provided"]}"#.to_owned(),
+        );
+    }
+    HandlerError::BadDetail(
+        serde_json::json!({
+            "non_field_errors": [
+                format!(
+                    "Invalid data. Expected a dictionary, but got {}.",
+                    datatype_name(value)
+                )
+            ]
+        })
+        .to_string(),
+    )
+}
+
 /// `InstanceEndpoint.patch` (`instance.py:176-183`): `PATCH` requires
 /// `InstanceAdminPermission` (`get_permissions`, `:29-32`); partial
 /// serializer save; `400` on errors.
@@ -813,19 +836,7 @@ async fn patch_instance(
     let value = patch_body(&headers, &body)?;
     let object = match &value {
         serde_json::Value::Object(object) => object.clone(),
-        other => {
-            return Err(HandlerError::BadDetail(
-                serde_json::json!({
-                    "non_field_errors": [
-                        format!(
-                            "Invalid data. Expected a dictionary, but got {}.",
-                            datatype_name(other)
-                        )
-                    ]
-                })
-                .to_string(),
-            ));
-        }
+        other => return Err(non_object_error(other)),
     };
     let sets = validate_partial(&object).map_err(|rejection| {
         let PatchRejection::FieldErrors(errors) = rejection;
@@ -1540,19 +1551,20 @@ mod tests {
         // The full non-field-errors body for a bare big-int PATCH body.
         let value: serde_json::Value =
             serde_json::from_str("340282366920938463463374607431768211455").expect("json");
-        let body = serde_json::json!({
-            "non_field_errors": [
-                format!(
-                    "Invalid data. Expected a dictionary, but got {}.",
-                    datatype_name(&value)
-                )
-            ]
-        })
-        .to_string();
+        let (status, body) = match non_object_error(&value) {
+            HandlerError::BadDetail(body) => (400, body),
+            other => panic!("unexpected error shape: {other:?}"),
+        };
+        assert_eq!(status, 400);
         assert_eq!(
             body,
             r#"{"non_field_errors":["Invalid data. Expected a dictionary, but got int."]}"#
         );
+        // Whole-body `null` is repackaged, not the `invalid` message.
+        let value = serde_json::Value::Null;
+        let (status, body) = non_object_error(&value).status_and_body();
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(body, r#"{"non_field_errors":["No data provided"]}"#);
     }
 
     #[test]
