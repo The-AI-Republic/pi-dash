@@ -68,6 +68,25 @@ async fn stub_app() -> axum::Router {
         }))
         .into_response()
     }
+    async fn sign_in(req: Request) -> Response {
+        // Mirrors Django POST /auth/sign-in/: 302 to / with the session
+        // cookie set on the redirect itself (PIDASHCONV-226).
+        assert_eq!(req.method(), axum::http::Method::POST);
+        let mut response = (
+            StatusCode::FOUND,
+            [("content-type", "text/html; charset=utf-8")],
+            "redirecting",
+        )
+            .into_response();
+        response
+            .headers_mut()
+            .insert(axum::http::header::LOCATION, "/".parse().expect("location"));
+        response.headers_mut().append(
+            axum::http::header::SET_COOKIE,
+            "session-id=stub-session; Path=/".parse().expect("cookie"),
+        );
+        response
+    }
     async fn relay(_headers: HeaderMap) -> Response {
         let mut response = (StatusCode::CREATED, "created").into_response();
         response.headers_mut().append(
@@ -91,6 +110,7 @@ async fn stub_app() -> axum::Router {
         .route("/robots.txt", any(robots))
         .route("/api/v1/things", any(echo))
         .route("/api/v1/relay", any(relay))
+        .route("/auth/sign-in/", any(sign_in))
         .fallback((StatusCode::NOT_FOUND, "stub 404"))
 }
 
@@ -142,6 +162,15 @@ async fn spawn_edge(upstream: &str) -> Edge {
 
 fn client() -> reqwest::Client {
     reqwest::Client::new()
+}
+
+/// A client that never follows redirects: asserting passthrough of a 302
+/// requires seeing the 302 itself, not the followed response.
+fn no_follow_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("no-follow client")
 }
 
 #[tokio::test]
@@ -303,6 +332,34 @@ async fn proxy_relays_status_and_multi_value_headers() {
     let multi: Vec<_> = response.headers().get_all("x-multi").iter().collect();
     assert_eq!(multi.len(), 2);
     assert_eq!(response.bytes().await.expect("body").as_ref(), b"created");
+}
+
+#[tokio::test]
+async fn proxy_forwards_redirect_without_following() {
+    // PIDASHCONV-226: the proxy must forward the upstream 302 as-is
+    // (status, Location, Set-Cookie, body) instead of following it and
+    // returning the redirect target's response with the cookies dropped.
+    let (stub_base, _stub) = spawn(stub_app().await).await;
+    let edge = spawn_edge(&stub_base).await;
+    let client = no_follow_client();
+
+    let response = client
+        .post(format!("{}/auth/sign-in/", edge.base))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(response.status(), 302);
+    assert_eq!(response.headers()["location"], "/");
+    let cookies: Vec<_> = response.headers().get_all("set-cookie").iter().collect();
+    assert_eq!(cookies.len(), 1);
+    assert!(cookies[0]
+        .to_str()
+        .expect("cookie")
+        .starts_with("session-id=stub-session"));
+    assert_eq!(
+        response.bytes().await.expect("body").as_ref(),
+        b"redirecting"
+    );
 }
 
 #[tokio::test]
