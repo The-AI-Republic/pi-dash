@@ -7,7 +7,7 @@
 import { useState, useEffect } from "react";
 import { observer } from "mobx-react";
 import { useRouter } from "next/navigation";
-import { ChevronsUpDown, Globe, LogOut, Settings } from "lucide-react";
+import { ChevronsUpDown, LogOut, Settings } from "lucide-react";
 // pi dash imports
 import { GOD_MODE_URL } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
@@ -21,8 +21,6 @@ import { AppSidebarItem } from "@/components/sidebar/sidebar-item";
 import { useAppTheme } from "@/hooks/store/use-app-theme";
 import { useCommandPalette } from "@/hooks/store/use-command-palette";
 import { useUser } from "@/hooks/store/user";
-// pi dash web components
-import { PaidPlanUpgradeModal } from "@/pi-dash-web/components/license";
 
 type Props = {
   variant?: "compact" | "sidebar";
@@ -31,7 +29,6 @@ type Props = {
 export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact" }: Props) {
   // states
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
-  const [isCommunityModalOpen, setIsCommunityModalOpen] = useState(false);
   // router
   const router = useRouter();
   // store hooks
@@ -115,9 +112,6 @@ export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact"
 
   return (
     <>
-      {isCommunityModalOpen && (
-        <PaidPlanUpgradeModal isOpen={isCommunityModalOpen} handleClose={() => setIsCommunityModalOpen(false)} />
-      )}
       <CustomMenu
         className={cn("flex items-center", isSidebarVariant && "w-full")}
         customButton={isSidebarVariant ? sidebarTrigger : compactTrigger}
@@ -171,10 +165,6 @@ export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact"
             {t("Settings")}
           </CustomMenu.MenuItem>
         </div>
-        <CustomMenu.MenuItem onClick={() => setIsCommunityModalOpen(true)} className="flex items-center gap-2">
-          <Globe className="size-3.5 shrink-0" />
-          {t("Community")}
-        </CustomMenu.MenuItem>
         <CustomMenu.MenuItem onClick={handleSignOut} className="flex items-center gap-2">
           <LogOut className="size-3.5 shrink-0" />
           {t("Sign out")}
