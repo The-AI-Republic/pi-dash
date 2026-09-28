@@ -171,7 +171,6 @@ pub struct RemoteCodeReview {
 pub struct ProviderWebhookEvent {
     pub provider: String,
     pub event: String,
-    #[serde(default)]
     pub action: String,
     #[serde(default = "empty_object")]
     pub repository_ref: Value,
@@ -514,6 +513,13 @@ mod tests {
             payload: json!({}),
         })
         .expect("value");
+        // `action` is required in Python (no default): an absent key fails.
+        assert!(serde_json::from_value::<ProviderWebhookEvent>(json!({
+            "provider": "gitlab",
+            "event": "Issue Hook"
+        }))
+        .is_err());
+
         for (key, expected) in defaults.as_object().expect("defaults object") {
             if key == "provider" || key == "event" {
                 continue;
