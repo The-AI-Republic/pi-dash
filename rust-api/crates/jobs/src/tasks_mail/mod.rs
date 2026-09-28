@@ -16,6 +16,8 @@
 //!
 //! T5 (PIDASHCONV-216) adds [`auth_mail`] (the four auth mail tasks) and
 //! [`mail_send`] (the shared send pipeline T6 reuses, never forks).
+//! T6 (PIDASHCONV-217) adds [`membership_mail`] (the four membership mail
+//! tasks) via [`register_membership_mail_tasks`].
 //! [`register_auth_mail_tasks`] only builds the handler table — flipping
 //! the live worker to these handlers is the domain gate's call
 //! (PIDASHCONV-218, after the PIDASHCONV-21 proxy pass), so every name in
@@ -28,6 +30,7 @@
 pub mod auth_mail;
 pub mod email_notification;
 pub mod mail_send;
+pub mod membership_mail;
 pub mod notifications;
 
 use crate::worker::Registry;
@@ -50,11 +53,13 @@ pub const MAGIC_LINK_TASK: &str = "pi_dash.bgtasks.magic_link_code_task.magic_li
 /// (`forgot_password_task.py:23`). Handler in [`auth_mail`].
 pub const FORGOT_PASSWORD_TASK: &str = "pi_dash.bgtasks.forgot_password_task.forgot_password";
 /// `pi_dash.bgtasks.user_activation_email_task.user_activation_email`
-/// (`user_activation_email_task.py:23`). Handler lands in PIDASHCONV-216.
+/// (`user_activation_email_task.py:23`). Handler in [`membership_mail`]
+/// (T6, PIDASHCONV-217).
 pub const USER_ACTIVATION_EMAIL_TASK: &str =
     "pi_dash.bgtasks.user_activation_email_task.user_activation_email";
 /// `pi_dash.bgtasks.user_deactivation_email_task.user_deactivation_email`
-/// (`user_deactivation_email_task.py:23`). Handler lands in PIDASHCONV-216.
+/// (`user_deactivation_email_task.py:23`). Handler in [`membership_mail`]
+/// (T6, PIDASHCONV-217).
 pub const USER_DEACTIVATION_EMAIL_TASK: &str =
     "pi_dash.bgtasks.user_deactivation_email_task.user_deactivation_email";
 /// `pi_dash.bgtasks.user_email_update_task.send_email_update_confirmation`
@@ -66,11 +71,13 @@ pub const SEND_EMAIL_UPDATE_CONFIRMATION_TASK: &str =
 pub const SEND_EMAIL_UPDATE_MAGIC_CODE_TASK: &str =
     "pi_dash.bgtasks.user_email_update_task.send_email_update_magic_code";
 /// `pi_dash.bgtasks.project_add_user_email_task.project_add_user_email`
-/// (`project_add_user_email_task.py:25`). Handler lands in PIDASHCONV-217.
+/// (`project_add_user_email_task.py:25`). Handler in [`membership_mail`]
+/// (T6, PIDASHCONV-217).
 pub const PROJECT_ADD_USER_EMAIL_TASK: &str =
     "pi_dash.bgtasks.project_add_user_email_task.project_add_user_email";
 /// `pi_dash.bgtasks.workspace_invitation_task.workspace_invitation`
-/// (`workspace_invitation_task.py:23`). Handler lands in PIDASHCONV-217.
+/// (`workspace_invitation_task.py:23`). Handler in [`membership_mail`]
+/// (T6, PIDASHCONV-217).
 pub const WORKSPACE_INVITATION_TASK: &str =
     "pi_dash.bgtasks.workspace_invitation_task.workspace_invitation";
 
@@ -80,6 +87,10 @@ pub const WORKSPACE_INVITATION_TASK: &str =
 pub use auth_mail::{
     forgot_password_handler, magic_link_handler, update_confirm_handler, update_magic_handler,
     AUTH_MAIL_TASKS, UPDATE_CONFIRM_TASK, UPDATE_MAGIC_TASK,
+};
+pub use membership_mail::{
+    project_add_user_email_handler, user_activation_email_handler, user_deactivation_email_handler,
+    workspace_invitation_handler, MEMBERSHIP_MAIL_TASKS,
 };
 
 /// Every live D-07 Celery task name (11 tasks; `project_invitation_task.py`
@@ -125,6 +136,28 @@ pub fn register_auth_mail_tasks(registry: &mut Registry, pool: sqlx::PgPool) {
         update_magic_handler(pool.clone()),
     );
     registry.register(auth_mail::UPDATE_CONFIRM_TASK, update_confirm_handler(pool));
+}
+
+/// Register all four T6 task names on `registry` (F-WIRE-MAIL names, plain
+/// `@shared_task`: default ack-on-success, no `autoretry_for` — handlers
+/// always acknowledge, mirroring the swallow-everything bodies).
+pub fn register_membership_mail_tasks(registry: &mut Registry, pool: sqlx::PgPool) {
+    registry.register(
+        membership_mail::USER_ACTIVATION_EMAIL_TASK,
+        user_activation_email_handler(pool.clone()),
+    );
+    registry.register(
+        membership_mail::USER_DEACTIVATION_EMAIL_TASK,
+        user_deactivation_email_handler(pool.clone()),
+    );
+    registry.register(
+        membership_mail::PROJECT_ADD_USER_EMAIL_TASK,
+        project_add_user_email_handler(pool.clone()),
+    );
+    registry.register(
+        membership_mail::WORKSPACE_INVITATION_TASK,
+        workspace_invitation_handler(pool),
+    );
 }
 
 /// Shared mention-component parser.
@@ -431,6 +464,19 @@ mod tests {
         // Neighbors stay Python-owned: T6 names and the dead invitation
         // task are NOT registered here.
         assert!(!registry.owns("pi_dash.bgtasks.user_activation_email_task.user_activation_email"));
+        assert!(!registry.owns("pi_dash.bgtasks.project_invitation_task.project_invitation"));
+    }
+
+    #[tokio::test]
+    async fn membership_registry_owns_exactly_the_four_names() {
+        let pool = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/nope").expect("lazy");
+        let mut registry = Registry::new();
+        register_membership_mail_tasks(&mut registry, pool);
+        for name in MEMBERSHIP_MAIL_TASKS {
+            assert!(registry.owns(name), "{name}");
+        }
+        // T5 names and the dead invitation task are NOT registered here.
+        assert!(!registry.owns("pi_dash.bgtasks.magic_link_code_task.magic_link"));
         assert!(!registry.owns("pi_dash.bgtasks.project_invitation_task.project_invitation"));
     }
 
