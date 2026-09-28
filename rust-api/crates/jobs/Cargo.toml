@@ -26,6 +26,10 @@ bson = "2"
 sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid"] }
 sha2 = "0.10"
 rand = "0.8"
+# D-08 link crawler live HTTPS adapter (redirects off; the pure redirect
+# loop in pidash-services owns hop validation). Same locked reqwest 0.12
+# already vendored via pidash-api: no new downloads.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
 sqlparser = "0.63.0"

@@ -1,14 +1,21 @@
-//! D-08 logging + event-tracking sinks (jobs layer).
+//! Webhook + activity + logging background tasks (D-08, jobs layer).
 //!
-//! Port of the task entry points of
-//! `apps/api/pi_dash/bgtasks/logger_task.py:22-100` and
-//! `apps/api/pi_dash/bgtasks/event_tracking_task.py:24-81`:
-//! Celery task names, `(args, kwargs)` extraction, the
-//! mongo-else-postgres routing, the PostHog `/batch/` payload, and the
-//! [`Registry`][crate::worker::Registry] wiring.
+//! Port of the `@shared_task` entry points of `apps/api/pi_dash/bgtasks/`.
+//! Each module owns the Celery wire surface (task names, payload parsing)
+//! and registers [`Registry`] handlers that run the pipeline in
+//! `pidash-services` (`tasks_webhooks/`). Unregistered names stay
+//! Python-owned and forward over AMQP until their port registers here.
+//!
+//! * [`link_crawl`] — `bgtasks/work_item_link_task.py` (PIDASHCONV-200).
+//! * [`sinks`] — `bgtasks/logger_task.py` + `bgtasks/event_tracking_task.py`
+//!   (PIDASHCONV-202): Celery task names, `(args, kwargs)` extraction, the
+//!   mongo-else-postgres routing, the PostHog `/batch/` payload, and the
+//!   [`Registry`][crate::worker::Registry] wiring.
 
+pub mod link_crawl;
 pub mod sinks;
 
+pub use link_crawl::{register_link_crawl_handler, TASK_NAMES};
 pub use sinks::{
     build_capture_request, capture_url, determine_server_host, insert_api_activity_log, iso_now,
     lookup_workspace_owner, mongo_log_to_document, parse_activity_log_row, parse_process_logs_call,
