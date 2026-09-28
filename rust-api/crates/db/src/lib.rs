@@ -30,6 +30,7 @@ pub mod migrations;
 pub mod pool;
 pub mod soft_delete;
 pub mod space;
+pub mod tasks_cleanup;
 pub mod tasks_ticker;
 pub mod tx;
 

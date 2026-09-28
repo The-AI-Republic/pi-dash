@@ -150,9 +150,14 @@ async fn worker(concurrency: u32) -> MainResult {
             None
         }
     };
-    // Empty registry: no task group has a Rust handler yet (the D-07…D-10
-    // ports register theirs), so every claimed job forwards to Python.
-    let registry = pidash_jobs::Registry::new();
+    // Task handlers register here (the D-07…D-10 ports register theirs);
+    // any still-unregistered name forwards to Python.
+    let mut registry = pidash_jobs::Registry::new();
+    let mongo = pidash_db::tasks_cleanup::cleanup_queries::MongoSink::from_env().await;
+    if mongo.is_none() {
+        tracing::info!("MongoDB not configured; cleanup tasks will delete from Postgres only");
+    }
+    pidash_jobs::tasks_cleanup::register_cleanup_handlers(&mut registry, pools.clone(), mongo);
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,
         ..Default::default()
