@@ -6,6 +6,7 @@
 //! `src/<domain>/` and are merged into [`build_router`].
 //!
 //! - [`paginator`]: cursor paginator kernel (F-07).
+//! - [`prompting`]: D-04 prompt-section handlers (guards + 4 routes).
 //! - [`serializer`]: DRF-compatible JSON kernel (F-07).
 //! - [`middleware`]: `MIDDLEWARE` equivalents (F-08), wrapping every app
 //!   [`build_app`] builds.
@@ -28,6 +29,7 @@ pub mod middleware;
 pub mod overlay;
 pub mod paginator;
 pub mod permissions;
+pub mod prompting;
 pub mod routes;
 pub mod serializer;
 pub mod space;
