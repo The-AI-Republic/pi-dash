@@ -215,6 +215,16 @@ pub fn null_fk_one_to_one_sql(
 /// fk = parent_pk [AND deleted_at IS NULL]`. A queryset `update()` never
 /// touches `updated_at`, and the related manager is scoped to live rows,
 /// hence the `deleted_at IS NULL` guard on tables that have the column.
+///
+/// `issues` children additionally carry the `IssueManager` guards
+/// (`db/models/issue.py:82-97`): the reverse related manager is built from
+/// the *child* model's default manager
+/// (`related_descriptors.py:597-602`), and `Issue`'s default manager
+/// excludes triage-state, archived, draft, and archived-project rows. The
+/// join-shaped predicates use `NOT EXISTS` subqueries so nullable FKs keep
+/// Django's `exclude()` NULL-preserving semantics (a bare `NOT (group =
+/// 'triage')` over a left join would drop NULL-state rows; `NOT EXISTS`
+/// retains them).
 pub fn null_fk_bulk_sql(
     child_table: &str,
     fk_col: &str,
@@ -227,6 +237,67 @@ pub fn null_fk_bulk_sql(
         .and_where(Expr::col(Alias::new(fk_col.to_owned())).eq(*parent_pk));
     if scope_live {
         stmt.and_where(Expr::col(Alias::new(DELETED_AT.to_owned())).is_null());
+    }
+    if child_table == "issues" {
+        // `IssueManager.get_queryset()`: `.exclude(archived_at__isnull=False)`
+        // and `.exclude(is_draft=True)` — plain column predicates.
+        stmt.and_where(
+            Expr::col((
+                Alias::new(child_table.to_owned()),
+                Alias::new("archived_at".to_owned()),
+            ))
+            .is_null(),
+        );
+        stmt.and_where(
+            Expr::col((
+                Alias::new(child_table.to_owned()),
+                Alias::new("is_draft".to_owned()),
+            ))
+            .eq(false),
+        );
+        // `.exclude(state__group=TRIAGE)`: NULL-state rows are retained.
+        let mut triage = Query::select();
+        triage
+            .expr(Expr::val(1))
+            .from(Alias::new("states".to_owned()))
+            .and_where(
+                Expr::col((Alias::new("states".to_owned()), Alias::new("id".to_owned()))).equals((
+                    Alias::new(child_table.to_owned()),
+                    Alias::new("state_id".to_owned()),
+                )),
+            )
+            .and_where(
+                Expr::col((
+                    Alias::new("states".to_owned()),
+                    Alias::new("group".to_owned()),
+                ))
+                .eq("triage"),
+            );
+        stmt.and_where(Expr::exists(triage).not());
+        // `.exclude(project__archived_at__isnull=False)`: same
+        // NULL-preserving shape for the nullable project FK.
+        let mut archived_project = Query::select();
+        archived_project
+            .expr(Expr::val(1))
+            .from(Alias::new("projects".to_owned()))
+            .and_where(
+                Expr::col((
+                    Alias::new("projects".to_owned()),
+                    Alias::new("id".to_owned()),
+                ))
+                .equals((
+                    Alias::new(child_table.to_owned()),
+                    Alias::new("project_id".to_owned()),
+                )),
+            )
+            .and_where(
+                Expr::col((
+                    Alias::new("projects".to_owned()),
+                    Alias::new("archived_at".to_owned()),
+                ))
+                .is_not_null(),
+            );
+        stmt.and_where(Expr::exists(archived_project).not());
     }
     stmt.to_string(PostgresQueryBuilder)
 }
@@ -696,13 +767,36 @@ mod tests {
             "UPDATE \"pages\" SET \"workspace_id\" = NULL, \"updated_at\" = '2026-09-28 06:00:00+00:00' WHERE \"id\" = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'"
         );
         assert_eq!(
-            null_fk_bulk_sql("issues", "project_id", &parent, true),
-            "UPDATE \"issues\" SET \"project_id\" = NULL WHERE \"project_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL"
+            null_fk_bulk_sql("issue_comments", "issue_id", &parent, true),
+            "UPDATE \"issue_comments\" SET \"issue_id\" = NULL WHERE \"issue_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL"
         );
         assert_eq!(
-            null_fk_bulk_sql("issues", "project_id", &parent, false),
-            "UPDATE \"issues\" SET \"project_id\" = NULL WHERE \"project_id\" = '12345678-1234-1234-1234-1234567890ab'"
+            null_fk_bulk_sql("issue_comments", "issue_id", &parent, false),
+            "UPDATE \"issue_comments\" SET \"issue_id\" = NULL WHERE \"issue_id\" = '12345678-1234-1234-1234-1234567890ab'"
         );
+    }
+
+    #[test]
+    fn issues_bulk_null_carries_issue_manager_scoping() {
+        // D1: the reverse related manager inherits the child default
+        // manager, and `Issue`'s is `IssueManager` (triage / archived /
+        // draft / archived-project exclusions). Soft-deleting an
+        // `EstimatePoint` or `IssueType` must leave those rows' FKs alone.
+        let parent = uuid("12345678-1234-1234-1234-1234567890ab");
+        assert_eq!(
+            null_fk_bulk_sql("issues", "estimate_point_id", &parent, true),
+            "UPDATE \"issues\" SET \"estimate_point_id\" = NULL WHERE \"estimate_point_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = FALSE AND (NOT EXISTS(SELECT 1 FROM \"states\" WHERE \"states\".\"id\" = \"issues\".\"state_id\" AND \"states\".\"group\" = 'triage')) AND (NOT EXISTS(SELECT 1 FROM \"projects\" WHERE \"projects\".\"id\" = \"issues\".\"project_id\" AND \"projects\".\"archived_at\" IS NOT NULL))"
+        );
+        assert_eq!(
+            null_fk_bulk_sql("issues", "type_id", &parent, true),
+            "UPDATE \"issues\" SET \"type_id\" = NULL WHERE \"type_id\" = '12345678-1234-1234-1234-1234567890ab' AND \"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = FALSE AND (NOT EXISTS(SELECT 1 FROM \"states\" WHERE \"states\".\"id\" = \"issues\".\"state_id\" AND \"states\".\"group\" = 'triage')) AND (NOT EXISTS(SELECT 1 FROM \"projects\" WHERE \"projects\".\"id\" = \"issues\".\"project_id\" AND \"projects\".\"archived_at\" IS NOT NULL))"
+        );
+        // The triage / project guards retain NULL-FK rows (Django
+        // `exclude()` left-join semantics): no bare `NOT (group = ...)`
+        // that three-valued logic would turn against NULLs.
+        let sql = null_fk_bulk_sql("issues", "estimate_point_id", &parent, true);
+        assert!(sql.contains("NOT EXISTS"), "{sql}");
+        assert!(!sql.contains("NOT (\"states\""), "{sql}");
     }
 
     #[test]

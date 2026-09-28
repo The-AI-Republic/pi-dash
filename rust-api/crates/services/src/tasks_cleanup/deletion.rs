@@ -14,6 +14,10 @@
 //! - Relations first, self last. `DO_NOTHING` skips. `SET_NULL` nulls
 //!   (one-to-one: single-row `save(update_fields)` with the `auto_now`
 //!   bump; to-many: scoped queryset `update`, no `updated_at` touch).
+//!   To-many nulling into `issues` carries the `IssueManager` guards
+//!   (triage / archived / draft / archived-project rows are preserved,
+//!   NULL-FK rows retained) — the reverse manager inherits the child
+//!   default manager.
 //!   Everything else takes the CASCADE branch: one-to-one stamps with a
 //!   full save and recurses depth-first; to-many hits ported bug BUG-DEL-1
 //!   (the manager is called as a function, `TypeError`, caught at `:97`,
