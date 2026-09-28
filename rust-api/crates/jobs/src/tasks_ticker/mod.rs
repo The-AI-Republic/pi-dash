@@ -7,3 +7,4 @@
 //! re-porting expansion.
 
 pub mod rrule;
+pub mod scan;

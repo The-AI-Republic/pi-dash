@@ -1749,6 +1749,7 @@ dependencies = [
  "pidash-db",
  "pidash-types",
  "rrule",
+ "sea-query",
  "serde",
  "serde_json",
  "sqlparser",
