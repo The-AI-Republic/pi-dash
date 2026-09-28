@@ -245,9 +245,10 @@ pub fn triage_insert_sql() -> String {
     "INSERT INTO \"states\" (\"id\", \"created_at\", \"updated_at\", \"name\", \"group\", \"project_id\", \"workspace_id\", \"color\", \"sequence\", \"default\") VALUES ($1, $2, $3, 'Triage', 'triage', $4, $5, '#4E5355', 65000, false)".to_string()
 }
 
-/// N3 Issue INSERT (`views/intake.py:145-152`). `$1` = name, `$2` =
-/// description_json, `$3` = description_html, `$4` = priority, `$5` =
-/// project id, `$6` = triage state id. Python-side fallbacks (`:146-149`):
+/// N3 Issue INSERT (`views/intake.py:145-152`). `$1` = id, `$2` =
+/// created_at, `$3` = updated_at, `$4` = name, `$5` = description_json, `$6`
+/// = description_html, `$7` = priority, `$8` = project id, `$9` = triage
+/// state id. Python-side fallbacks (`:146-149`):
 /// description_json `{}` / description_html `"<p></p>"` / priority `"low"`
 /// (NOT the validated `"none"` — QUIRK-priority-default); a present-but-null
 /// key passes `None` through. No `workspace_id` kwarg
@@ -330,10 +331,16 @@ pub fn asset_insert_sql() -> String {
     "INSERT INTO \"file_assets\" (\"id\", \"created_at\", \"updated_at\", \"attributes\", \"asset\", \"size\", \"workspace_id\", \"created_by_id\", \"entity_type\", \"project_id\", \"comment_id\", \"is_uploaded\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false)".to_string()
 }
 
-/// A3/A4 scoped get: `FileAsset.objects.get(id=pk, workspace=...)`
-/// (`views/asset.py:143` patch; `:163` delete adds `project_id`). `$1` =
-/// asset id, `$2` = workspace id, `$3` = project id (`None` renders the
-/// patch shape — patch passes no project scoping).
+/// A3 patch get: `FileAsset.objects.get(id=pk, workspace=...)`
+/// (`views/asset.py:143`) — patch passes NO project scoping. `$1` = asset
+/// id, `$2` = workspace id.
+pub fn asset_patch_get_sql() -> String {
+    "SELECT \"file_assets\".* FROM \"file_assets\" WHERE (\"file_assets\".\"deleted_at\" IS NULL AND \"file_assets\".\"id\" = $1 AND \"file_assets\".\"workspace_id\" = $2)".to_string()
+}
+
+/// A4 delete get: `FileAsset.objects.get(id=pk, workspace=...,
+/// project_id=...)` (`views/asset.py:163`). `$1` = asset id, `$2` =
+/// workspace id, `$3` = project id.
 pub fn asset_scoped_get_sql() -> String {
     "SELECT \"file_assets\".* FROM \"file_assets\" WHERE (\"file_assets\".\"deleted_at\" IS NULL AND \"file_assets\".\"id\" = $1 AND \"file_assets\".\"workspace_id\" = $2 AND \"file_assets\".\"project_id\" = $3)".to_string()
 }
@@ -680,6 +687,20 @@ mod tests {
         let sql = asset_patch_sql();
         assert!(sql.contains("SET \"attributes\" = $2, \"is_uploaded\" = true"));
         assert!(sql.ends_with("WHERE \"file_assets\".\"id\" = $1"));
+    }
+
+    #[test]
+    fn asset_patch_get_has_no_project_scoping() {
+        // Fixture A3 records the patch lookup as `get(id=pk, workspace)`:
+        // unlike delete (:163), patch passes no project scoping, so the
+        // builder must not emit a project conjunct.
+        let patch = asset_patch_get_sql();
+        assert!(patch.contains("\"file_assets\".\"deleted_at\" IS NULL"));
+        assert!(patch.contains("\"file_assets\".\"id\" = $1"));
+        assert!(patch.contains("\"file_assets\".\"workspace_id\" = $2"));
+        assert!(!patch.contains("project_id"), "{patch}");
+        // Delete keeps the project conjunct.
+        assert!(asset_scoped_get_sql().contains("\"file_assets\".\"project_id\" = $3"));
     }
 
     #[test]
