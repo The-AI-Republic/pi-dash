@@ -42,6 +42,13 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 bson = "2"
 sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid"] }
 crc32fast = { version = "1" }
+# D-05 git sync (PIDASHCONV-147): the nh3 sanitizer in `_safe_render`
+# (`utils/content_validator.py`) is Python bindings for ammonia, so the same
+# engine with the transcribed allowlist renders byte-identical output.
+ammonia = "4"
+# D-05 git sync (PIDASHCONV-147): GitHub App installation-token mint
+# (`utils/github_app_auth.py`, RS256 app JWT).
+jsonwebtoken = "9"
 sha2 = "0.10"
 # Sibling D-10 (tasks_ticker/fire_tick) pins rand 0.8 while dummy_data
 # (PIDASHCONV-191) needs rand 0.9 APIs (`random_range`, `from_os_rng`):
