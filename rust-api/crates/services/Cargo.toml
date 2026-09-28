@@ -18,6 +18,8 @@ thiserror = { version = "2" }
 crc32fast = { version = "1" }
 flate2 = { version = "1" }
 # Version-task row builders carry typed UUIDs and timestamps.
+# D-08 activity trackers also use it for is_valid_uuid parity
+# (pi_dash/utils/uuid.py); same locked uuid 1.x as pidash-db.
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
