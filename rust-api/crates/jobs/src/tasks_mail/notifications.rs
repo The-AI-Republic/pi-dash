@@ -722,7 +722,10 @@ pub fn bind_input(job: &crate::queue::JobRow) -> Result<NotificationsInput, Task
     }
 }
 
-/// One `Notification` bulk row for the subscriber branch (`:364-406`).
+/// One `Notification` bulk row for the subscriber branch (`:364-406`) and the
+/// mention branches (`:465-520`, `:530-571`, `:611-659`). `message` is the
+/// `JSONField(null=True)` column: the subscriber branch never sets it
+/// (`None`, stored `NULL`); every mention row carries its mention text.
 #[derive(Debug, Clone)]
 pub struct NewNotification {
     pub id: Uuid,
@@ -733,7 +736,26 @@ pub struct NewNotification {
     pub entity_identifier: Uuid,
     pub title: Option<String>,
     pub sender: &'static str,
+    pub message: Option<Value>,
     pub data: Value,
+}
+
+/// Map one built mention row onto its bulk `Notification` row (`:469-477`,
+/// `:612-620`): the mention text rides the `message` column, `title` keeps
+/// the `""` default, `sender` is the mention sender.
+fn mention_bulk_row(notification: NewMentionNotification) -> NewNotification {
+    NewNotification {
+        id: notification.id,
+        workspace_id: notification.workspace_id,
+        project_id: notification.project_id,
+        triggered_by_id: notification.triggered_by_id,
+        receiver_id: notification.receiver_id,
+        entity_identifier: notification.entity_identifier,
+        title: Some(String::new()),
+        sender: MENTION_SENDER,
+        message: Some(Value::String(notification.message)),
+        data: notification.data,
+    }
 }
 
 /// One `EmailNotificationLog` bulk row (`:409-450`, `:481-519`, `:573-609`,
@@ -761,9 +783,15 @@ pub struct LastActivity {
 }
 
 /// `str(last_activity.created_at)`: Django renders an aware datetime as
-/// `YYYY-MM-DD HH:MM:SS+HH:MM` (`USE_TZ=True`, so UTC).
+/// `YYYY-MM-DD HH:MM:SS[.ffffff]+HH:MM` (`USE_TZ=True`, so UTC) — the
+/// fractional part appears only when microseconds are nonzero, exactly like
+/// `datetime.isoformat(sep=" ")`.
 pub fn django_str_datetime(moment: &DateTime<Utc>) -> String {
-    moment.format("%Y-%m-%d %H:%M:%S%:z").to_string()
+    if moment.timestamp_subsec_nanos() == 0 {
+        moment.format("%Y-%m-%d %H:%M:%S%:z").to_string()
+    } else {
+        moment.format("%Y-%m-%d %H:%M:%S%.6f%:z").to_string()
+    }
 }
 
 /// Per-subscriber `sender` branch (`:311-317`): the creator reads
@@ -966,7 +994,9 @@ async fn insert_notification_chunk(
         builder.push_bind(row.entity_identifier);
         builder.push(", 'issue', ");
         builder.push_bind(row.title.clone());
-        builder.push(", NULL, ");
+        builder.push(", ");
+        builder.push_bind(row.message.clone());
+        builder.push(", ");
         builder.push_bind(MESSAGE_HTML_DEFAULT);
         builder.push(", NULL, ");
         builder.push_bind(row.sender);
@@ -1333,6 +1363,9 @@ pub async fn run_notifications(
                 entity_identifier: input.issue_id,
                 title: title_from_value(activity.get("comment")),
                 sender,
+                // The subscriber branch never sets `message` (`:364-406`),
+                // so the column stays `NULL` like Django's unset default.
+                message: None,
                 data: Value::Object(data),
             });
             if send_email {
@@ -1411,17 +1444,7 @@ pub async fn run_notifications(
                     data: Value::Object(email_data),
                 });
             }
-            bulk_notifications.push(NewNotification {
-                id: notification.id,
-                workspace_id: notification.workspace_id,
-                project_id: notification.project_id,
-                triggered_by_id: notification.triggered_by_id,
-                receiver_id: notification.receiver_id,
-                entity_identifier: notification.entity_identifier,
-                title: Some(String::new()),
-                sender: MENTION_SENDER,
-                data: notification.data,
-            });
+            bulk_notifications.push(mention_bulk_row(notification));
         }
     }
 
@@ -1488,6 +1511,12 @@ pub async fn run_notifications(
                     entity_identifier: input.issue_id,
                     title: Some(String::new()),
                     sender: MENTION_SENDER,
+                    // `message=` rides the column (`:539`): Django stores
+                    // the string as a JSON string, hence `Value::String`.
+                    message: Some(Value::String(format!(
+                        "You have been mentioned in the issue {issue}",
+                        issue = shape.name
+                    ))),
                     data: Value::Object(data),
                 });
                 if preference.mention {
@@ -1571,17 +1600,7 @@ pub async fn run_notifications(
                             data: Value::Object(email_data),
                         });
                     }
-                    bulk_notifications.push(NewNotification {
-                        id: notification.id,
-                        workspace_id: notification.workspace_id,
-                        project_id: notification.project_id,
-                        triggered_by_id: notification.triggered_by_id,
-                        receiver_id: notification.receiver_id,
-                        entity_identifier: notification.entity_identifier,
-                        title: Some(String::new()),
-                        sender: MENTION_SENDER,
-                        data: notification.data,
-                    });
+                    bulk_notifications.push(mention_bulk_row(notification));
                 }
             }
         }
@@ -2270,6 +2289,44 @@ mod tests {
         assert_eq!(
             django_str_datetime(&moment.with_timezone(&chrono::Utc)),
             "2026-09-01 12:00:00+00:00"
+        );
+        // `str()` keeps microseconds when nonzero (`:605`); `created_at`
+        // values from Postgres virtually always carry them.
+        let moment =
+            chrono::DateTime::parse_from_rfc3339("2026-09-01T12:00:00.123456Z").expect("test time");
+        assert_eq!(
+            django_str_datetime(&moment.with_timezone(&chrono::Utc)),
+            "2026-09-01 12:00:00.123456+00:00"
+        );
+    }
+
+    #[test]
+    fn mention_bulk_row_carries_message_column() {
+        // Review finding (PIDASHCONV-215): the `message` column is the
+        // mention text on every mention row (`create_mention_notification`
+        // sets `message=`, `:157-187`) and stays `NULL` on subscriber rows
+        // (`:364-406` never set it). The bulk writer binds this field, so
+        // dropping it here would write `NULL` for every mention row.
+        let shape = test_shape();
+        let activity = activity_fixture();
+        let actor = Uuid::parse_str(MENTION_A).expect("test uuid");
+        let mention = Uuid::parse_str(MENTION_B).expect("test uuid");
+        let built = create_mention_notification(
+            &shape,
+            "You have been mentioned in the issue Test issue".to_owned(),
+            actor,
+            mention,
+            &activity,
+        );
+        let row = mention_bulk_row(built);
+        assert_eq!(row.sender, MENTION_SENDER);
+        assert_eq!(row.title, Some(String::new()));
+        assert_eq!(row.receiver_id, mention);
+        assert_eq!(
+            row.message,
+            Some(Value::String(
+                "You have been mentioned in the issue Test issue".to_owned()
+            ))
         );
     }
 
