@@ -40,6 +40,9 @@ export interface UseDictationOptions {
 }
 
 export interface UseDictation {
+  /** Instance kill switch. False until the config loads, so dictation stays
+   * hidden while loading and when the config read fails. */
+  isEnabled: boolean;
   status: DictationStatus;
   /** Milliseconds elapsed in the current recording (0 when not recording). */
   elapsedMs: number;
@@ -107,6 +110,7 @@ export function useDictation({ onResult }: UseDictationOptions): UseDictation {
   const { data: config } = useSWR<IUserSTTConfig>("assistant-stt-config", () => service.getSTTConfig(), {
     shouldRetryOnError: false,
   });
+  const isEnabled = config?.enabled === true;
   const knownUnconfigured = config ? !config.has_api_key : false;
 
   const clearTimers = useCallback(() => {
@@ -186,6 +190,7 @@ export function useDictation({ onResult }: UseDictationOptions): UseDictation {
       setStatus("error");
       return;
     }
+    if (!isEnabled) return;
     if (status === "recording" || status === "requesting" || status === "transcribing") return;
     if (knownUnconfigured) {
       setStatus("unconfigured");
@@ -262,7 +267,7 @@ export function useDictation({ onResult }: UseDictationOptions): UseDictation {
     }, TICK_MS);
     // Auto-stop at the cap so the upload stays under the size limit.
     capRef.current = setTimeout(() => stop(), MAX_RECORDING_MS);
-  }, [isSupported, status, knownUnconfigured, clearTimers, releaseStream, transcribe, stop, cancel]);
+  }, [isSupported, isEnabled, status, knownUnconfigured, clearTimers, releaseStream, transcribe, stop, cancel]);
 
   const reset = useCallback(() => {
     setErrorMessage(null);
@@ -289,6 +294,7 @@ export function useDictation({ onResult }: UseDictationOptions): UseDictation {
   }, [clearTimers, releaseStream]);
 
   return {
+    isEnabled,
     status,
     elapsedMs,
     errorMessage,

@@ -9,7 +9,7 @@ import { observer } from "mobx-react";
 import useSWR from "swr";
 import { setToast, TOAST_TYPE } from "@pi-dash/propel/toast";
 import { AssistantService } from "@pi-dash/services";
-import type { IUserLLMConfig, TAssistantProviderKind } from "@pi-dash/types";
+import type { IUserLLMConfig, IUserSTTConfig, TAssistantProviderKind } from "@pi-dash/types";
 import { Button } from "@pi-dash/ui";
 import { AssistantMCPServersSettings } from "./assistant-mcp-servers";
 import { DictationSettings } from "./dictation-settings";
@@ -25,6 +25,11 @@ const KNOWN_MODELS = [
 
 export const AIAssistantProfileSettings = observer(function AIAssistantProfileSettings() {
   const { data: config, mutate } = useSWR<IUserLLMConfig>("assistant-llm-config", () => service.getLLMConfig());
+  // Same SWR key the dictation section and composer use; `enabled` is the
+  // VOICE_DICTATION_ENABLED kill switch.
+  const { data: sttConfig } = useSWR<IUserSTTConfig>("assistant-stt-config", () => service.getSTTConfig(), {
+    shouldRetryOnError: false,
+  });
 
   const [provider, setProvider] = useState<TAssistantProviderKind>("openai_compatible");
   const [baseUrl, setBaseUrl] = useState("");
@@ -169,9 +174,11 @@ export const AIAssistantProfileSettings = observer(function AIAssistantProfileSe
         </div>
       )}
 
-      <div className="mt-2 border-t border-subtle pt-5">
-        <DictationSettings />
-      </div>
+      {sttConfig?.enabled && (
+        <div className="mt-2 border-t border-subtle pt-5">
+          <DictationSettings />
+        </div>
+      )}
 
       <div className="mt-2 border-t border-subtle pt-5">
         <AssistantMCPServersSettings />

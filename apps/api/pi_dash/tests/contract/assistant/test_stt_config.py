@@ -33,6 +33,51 @@ def client_for(user):
     return c
 
 
+@pytest.fixture(autouse=True)
+def dictation_enabled(settings):
+    settings.VOICE_DICTATION_ENABLED = True
+
+
+# --- kill switch ---
+
+
+def test_stt_config_get_reports_enabled(world, kms_crypto):
+    res = client_for(world.member).get(CONFIG_URL)
+    assert res.status_code == 200
+    assert res.data["enabled"] is True
+
+
+def test_stt_config_disabled_get_reports_disabled(world, kms_crypto, settings):
+    settings.VOICE_DICTATION_ENABLED = False
+    res = client_for(world.member).get(CONFIG_URL)
+    assert res.status_code == 200
+    assert res.data["enabled"] is False
+
+
+def test_stt_config_disabled_refuses_writes(world, kms_crypto, settings, mocker):
+    configure_stt(world.member)
+    settings.VOICE_DICTATION_ENABLED = False
+    post = mocker.patch("httpx.post")
+    c = client_for(world.member)
+
+    res = c.put(
+        CONFIG_URL,
+        {"base_url": "https://api.example.com/v1", "model_name": "whisper-1", "api_key": "sk-12345678"},
+        format="json",
+    )
+    assert res.status_code == 404
+    assert res.data["error"] == "dictation_disabled"
+
+    res = c.post(TEST_URL)
+    assert res.status_code == 404
+    assert res.data["error"] == "dictation_disabled"
+    post.assert_not_called()
+
+    res = c.delete(CONFIG_URL)
+    assert res.status_code == 404
+    assert res.data["error"] == "dictation_disabled"
+
+
 # --- config CRUD ---
 
 

@@ -74,6 +74,7 @@ beforeEach(() => {
   getUserMedia.mockReset().mockResolvedValue(makeStream());
   transcribeAudio.mockReset().mockResolvedValue({ text: "hello world" });
   getSTTConfig.mockReset().mockResolvedValue({
+    enabled: true,
     base_url: "https://x",
     model_name: "whisper-1",
     has_api_key: true,
@@ -88,8 +89,29 @@ afterEach(() => {
 });
 
 describe("useDictation", () => {
+  it("stays inert when the VOICE_DICTATION_ENABLED kill switch is off", async () => {
+    getSTTConfig.mockResolvedValue({
+      enabled: false,
+      base_url: "",
+      model_name: "",
+      has_api_key: false,
+      last_verified_at: null,
+    });
+    const { result } = renderHook(() => useDictation({ onResult: vi.fn() }), { wrapper });
+    await waitFor(() => expect(getSTTConfig).toHaveBeenCalled());
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(result.current.isEnabled).toBe(false);
+    expect(result.current.status).toBe("idle");
+    expect(getUserMedia).not.toHaveBeenCalled();
+  });
+
   it("routes to not-configured when the endpoint has no key, without recording", async () => {
     getSTTConfig.mockResolvedValue({
+      enabled: true,
       base_url: "",
       model_name: "",
       has_api_key: false,
@@ -110,7 +132,7 @@ describe("useDictation", () => {
   it("surfaces permission-denied distinctly from a generic error", async () => {
     getUserMedia.mockRejectedValue(Object.assign(new Error("no"), { name: "NotAllowedError" }));
     const { result } = renderHook(() => useDictation({ onResult: vi.fn() }), { wrapper });
-    await waitFor(() => expect(result.current.isUnconfigured).toBe(false));
+    await waitFor(() => expect(result.current.isEnabled).toBe(true));
 
     await act(async () => {
       await result.current.start();
@@ -122,7 +144,7 @@ describe("useDictation", () => {
   it("records, transcribes, and appends the recognized text", async () => {
     const onResult = vi.fn();
     const { result } = renderHook(() => useDictation({ onResult }), { wrapper });
-    await waitFor(() => expect(result.current.isUnconfigured).toBe(false));
+    await waitFor(() => expect(result.current.isEnabled).toBe(true));
 
     await act(async () => {
       await result.current.start();
@@ -146,7 +168,7 @@ describe("useDictation", () => {
     transcribeAudio.mockRejectedValue({ error: "stt_config_missing", detail: "Configure dictation in Settings." });
     const onResult = vi.fn();
     const { result } = renderHook(() => useDictation({ onResult }), { wrapper });
-    await waitFor(() => expect(result.current.isUnconfigured).toBe(false));
+    await waitFor(() => expect(result.current.isEnabled).toBe(true));
 
     await act(async () => {
       await result.current.start();
@@ -167,7 +189,7 @@ describe("useDictation", () => {
       detail: "The dictation provider rejected the API key.",
     });
     const { result } = renderHook(() => useDictation({ onResult: vi.fn() }), { wrapper });
-    await waitFor(() => expect(result.current.isUnconfigured).toBe(false));
+    await waitFor(() => expect(result.current.isEnabled).toBe(true));
 
     await act(async () => {
       await result.current.start();
@@ -184,7 +206,7 @@ describe("useDictation", () => {
   it("discards an accidental sub-threshold tap without transcribing", async () => {
     const onResult = vi.fn();
     const { result } = renderHook(() => useDictation({ onResult }), { wrapper });
-    await waitFor(() => expect(result.current.isUnconfigured).toBe(false));
+    await waitFor(() => expect(result.current.isEnabled).toBe(true));
 
     await act(async () => {
       await result.current.start();
@@ -201,7 +223,7 @@ describe("useDictation", () => {
 
   it("releases the microphone stream on unmount", async () => {
     const { result, unmount } = renderHook(() => useDictation({ onResult: vi.fn() }), { wrapper });
-    await waitFor(() => expect(result.current.isUnconfigured).toBe(false));
+    await waitFor(() => expect(result.current.isEnabled).toBe(true));
     await act(async () => {
       await result.current.start();
     });
