@@ -18,9 +18,11 @@
 //!   layer, not this shape.
 //!
 //! Key order notes for the future handlers layer (Python dict insertion
-//! order; the workspace `serde_json` here has no `preserve_order`, so unit
-//! tests below establish byte-identity in the sorted-keys canonical form
-//! the goldens are stored in):
+//! order). Sibling crates (`api`, `jobs`) enable `serde_json/preserve_order`,
+//! so under `cargo test --workspace` feature unification turns it on for
+//! these tests too; the tests below therefore establish byte-identity in a
+//! sorted-keys canonical form (both sides canonicalized through the same
+//! recursive sorter), which is also the form the goldens are stored in:
 //!
 //! * public: `slug, name, description, interval_label, enabled`
 //! * admin: `id, slug, name, public_name, public_description, prompt,
@@ -151,19 +153,34 @@ mod tests {
             .expect("golden parses")
     }
 
-    /// Field-for-field equality plus byte-identical replay: under this
-    /// workspace's `serde_json` (sorted keys, no `preserve_order`)
-    /// `to_string` is deterministic, so string equality is byte equality
-    /// of the canonical form the goldens are stored in.
+    /// Field-for-field equality plus byte-identical replay in canonical
+    /// (sorted-keys) form. Both sides are canonicalized through the same
+    /// recursive sorter before the string comparison, so the check is
+    /// hermetic: it passes whether or not `serde_json/preserve_order` is
+    /// enabled by workspace feature unification (`api` and `jobs` enable
+    /// it, so `cargo test --workspace` turns it on for these tests too).
+    fn canonical(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut entries: Vec<(String, Value)> =
+                    map.iter().map(|(k, v)| (k.clone(), canonical(v))).collect();
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
+                Value::Object(entries.into_iter().collect())
+            }
+            Value::Array(items) => Value::Array(items.iter().map(canonical).collect()),
+            _ => value.clone(),
+        }
+    }
+
     fn assert_replay(produced: &Value, expected: &Value) {
         assert_eq!(
             produced, expected,
             "field-for-field mismatch against golden output"
         );
         assert_eq!(
-            serde_json::to_string(produced).expect("serializes"),
-            serde_json::to_string(expected).expect("serializes"),
-            "byte-identical replay mismatch"
+            serde_json::to_string(&canonical(produced)).expect("serializes"),
+            serde_json::to_string(&canonical(expected)).expect("serializes"),
+            "byte-identical replay mismatch (canonical sorted-keys form)"
         );
     }
 
@@ -241,19 +258,19 @@ mod tests {
                 "whitelist leak: {leaked} present"
             );
         }
-        let keys: Vec<&str> = produced
+        // Set-equality over keys: sorted before comparing so the check
+        // holds whether or not `preserve_order` is unified on.
+        let mut keys: Vec<&str> = produced
             .as_object()
             .expect("object")
             .keys()
             .map(String::as_str)
             .collect();
-        let mut sorted = keys.clone();
-        sorted.sort_unstable();
-        assert_eq!(keys, sorted, "canonical key order");
+        keys.sort_unstable();
+        let mut expected_keys: Vec<&str> = PUBLIC_JOB_KEYS.to_vec();
+        expected_keys.sort_unstable();
+        assert_eq!(keys, expected_keys, "exactly the 5 whitelisted keys");
         assert_eq!(keys.len(), PUBLIC_JOB_KEYS.len(), "exactly 5 keys");
-        for key in PUBLIC_JOB_KEYS {
-            assert!(keys.contains(key), "missing whitelisted key {key}");
-        }
     }
 
     #[test]
