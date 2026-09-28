@@ -142,6 +142,10 @@ impl Overlay {
 /// (`license::config_workspace_routes`, PIDASHCONV-123): the five owned
 /// paths with their owned methods; every other method on those paths
 /// proxies to Django.
+///
+/// The Space group serves the D-02 project/meta/taxonomy family (`space`):
+/// the nine owned GETs (PIDASHCONV-174). Sibling `api/public/` paths have
+/// no Rust route and keep proxying to Django through the fallback.
 fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
     match group {
         RouteGroup::Web => Router::new()
@@ -149,6 +153,7 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
             .route("/robots.txt", any(web::robots_txt)),
         RouteGroup::App => crate::app_issues::routes(),
         RouteGroup::License => crate::license::routes(),
+        RouteGroup::Space => crate::space::routes(),
         _ => Router::new(),
     }
 }
