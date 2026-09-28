@@ -94,6 +94,12 @@ jobs:
       DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
       CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
       CONTRACT_TASK_TIMEOUT: "60"
+      # The Rust worker joins SEED_DIR directly with the seed filenames
+      # (services workspace_seed::read_seed_file), while Django uses
+      # SEED_DIR/"data". Point at the data dir itself so workspace_seed
+      # actually seeds; an unset dir silently yields an empty seed and the
+      # seed replay test times out waiting for its project row.
+      SEED_DIR: ${{ github.workspace }}/apps/api/pi_dash/seeds/data
     steps:
       - uses: actions/checkout@v6
 

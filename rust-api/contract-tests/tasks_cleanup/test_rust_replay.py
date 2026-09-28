@@ -20,6 +20,10 @@ running against the same DATABASE_URL::
     export DATABASE_URL=postgresql://...  # your own scratch database
     export CELERY_BROKER_URL=amqp://...   # same broker the Rust worker uses
     export HARD_DELETE_AFTER_DAYS=0 UNUPLOADED_ASSET_DELETE_DAYS=0
+    export SEED_DIR=$PWD/../apps/api/pi_dash/seeds/data  # from rust-api/;
+    # the *data* dir itself: the worker joins SEED_DIR with the filenames
+    # directly (Django appends "data" to its own SEED_DIR). Without this the
+    # seed run succeeds empty and the seed test times out.
     pidash-api worker &  # Rust worker; Django worker stopped
     pytest -p no:django tasks_cleanup/test_rust_replay.py
 
