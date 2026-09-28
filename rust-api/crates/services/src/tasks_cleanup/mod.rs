@@ -32,3 +32,7 @@
 
 pub mod cleanup;
 pub mod exports;
+
+//! * [`workspace_seed`] — `bgtasks/workspace_seed_task.py` (PIDASHCONV-190).
+
+pub mod workspace_seed;

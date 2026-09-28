@@ -16,6 +16,8 @@
 //! live there. The domain gate flips ownership after the oracle replay
 //! passes on both backends. Until then [`is_export_task`] is the routing
 //! predicate the worker consults, and every name routes to `PythonOwned`.
+//!
+//! * [`workspace_seed`] — `bgtasks/workspace_seed_task.py` (PIDASHCONV-190).
 
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Map, Value};
@@ -220,3 +222,7 @@ mod tests {
         );
     }
 }
+
+pub mod workspace_seed;
+
+pub use workspace_seed::{register_workspace_seed, TASK_NAME as WORKSPACE_SEED_TASK_NAME};
