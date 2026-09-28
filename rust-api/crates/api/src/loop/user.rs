@@ -168,13 +168,17 @@ async fn actor(
     state: &AppState,
     pool: &sqlx::PgPool,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
-) -> Result<crate::license::Actor, Response> {
+) -> Result<crate::license::Actor, Denial> {
+    // `resolve_actor` only ever errs with the license-layer 500, so the
+    // mapping is exact; the small `Denial` error keeps
+    // `clippy::result_large_err` quiet (same shape as
+    // `license::require_admin`).
     match crate::license::resolve_actor(pool, state.settings().secret_key.as_bytes(), extension)
         .await
     {
         Ok(Some(actor)) => Ok(actor),
-        Ok(None) => Err(Denial::Unauthorized.into_response()),
-        Err(denial) => Err(denial.into_response()),
+        Ok(None) => Err(Denial::Unauthorized),
+        Err(_) => Err(Denial::ServerError),
     }
 }
 
@@ -378,7 +382,7 @@ async fn get_settings(
     };
     let actor = match actor(&state, &pool, extension).await {
         Ok(actor) => actor,
-        Err(response) => return response,
+        Err(denial) => return denial.into_response(),
     };
     match read_settings(&pool, actor.id).await {
         Ok(body) => crate::license::json_response(&body),
@@ -399,7 +403,7 @@ async fn patch_settings(
     };
     let actor = match actor(&state, &pool, extension).await {
         Ok(actor) => actor,
-        Err(response) => return response,
+        Err(denial) => return denial.into_response(),
     };
     let enabled = match parse_enabled(&body) {
         Ok(enabled) => enabled,
@@ -431,7 +435,7 @@ async fn patch_job(
     };
     let actor = match actor(&state, &pool, extension).await {
         Ok(actor) => actor,
-        Err(response) => return response,
+        Err(denial) => return denial.into_response(),
     };
     // `filter(slug, enabled=True, deleted_at__isnull=True).first()`:
     // at most one live row per slug (partial unique), so `LIMIT 1` without
