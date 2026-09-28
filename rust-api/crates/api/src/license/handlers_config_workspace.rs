@@ -33,10 +33,11 @@
 //!   (`default_per_page=10`, `max_per_page=10`, 12-key envelope).
 //! - `POST /api/instances/workspaces/` — `.post` (`workspace.py:71-110`):
 //!   `name`+`slug`-required 400; 80/48 length 400; serializer validation
-//!   (any failure raises through `is_valid(raise_exception=True)` into the
-//!   app-base `ValidationError` branch: 400
-//!   `{"error": "Please provide valid detail"}` — the trailing
-//!   per-field-list return is dead code); `save(owner=request.user)` plus a
+//!   (any failure raises a DRF `ValidationError` through
+//!   `is_valid(raise_exception=True)`, which the base `handle_exception`
+//!   delegates to DRF first, so the response is the raw detail dict — the
+//!   trailing per-field-list return is dead code); `save(owner=request.user)`
+//!   plus a
 //!   `WorkspaceMember(role=20)` row; `IntegrityError` containing
 //!   `"already exists"` is 409, anything else falls off the `except` block
 //!   (500, BUG-3).
@@ -62,14 +63,16 @@
 //!   practice and ported as written.
 //! - The trailing `return Response([...serializer.errors...], 400)`
 //!   (`workspace.py:100-103`) is dead code: `is_valid(raise_exception=True)`
-//!   raises on any field error, which the app-base `handle_exception`
-//!   renders as 400 `{"error": "Please provide valid detail"}`.
+//!   raises a DRF `ValidationError` on any field error, which the base
+//!   `handle_exception` delegates to DRF first, so the response is the raw
+//!   detail dict (ported as `detail_response`).
 //! - The restricted-slug check is a case-sensitive `in`
 //!   (`workspace.py:31`); `"API"` is available, `"api"` is not.
 //! - `disable-email` overwrites an encrypted `EMAIL_HOST_PASSWORD` with `""`
 //!   in the clear (`is_encrypted` untouched).
-//! - POST performs no stripping (`"  x  "` stores verbatim); PATCH strips
-//!   every value (`str(raw).strip()`, `None` first becoming `""`).
+//! - POST performs no view-level stripping (unlike PATCH's explicit
+//!   `str(raw).strip()`); DRF `CharField` trimming still applies and is
+//!   ported per field.
 //! - Response caching (`cache_response` 2h on the GETs, `invalidate_cache`
 //!   on the writes) has no Rust counterpart: the contract suites cannot
 //!   observe it, and an uninvalidated cache would only risk stale reads.
@@ -77,9 +80,8 @@
 //!   N+1 (no `select_related("owner")` on the list path); the emitted row
 //!   SQL matches the fixtures exactly.
 //! - SMTP trust anchors are Mozilla roots (`webpki-roots`), while
-//!   `smtplib` uses the system store; `AUTH CRAM-MD5` is not offered (only
-//!   `PLAIN`/`LOGIN`), so a CRAM-MD5-only server answers the generic
-//!   fallthrough instead of attempting the challenge.
+//!   `smtplib` uses the system store; `AUTH` follows smtplib's preferred
+//!   order (`CRAM-MD5`, `PLAIN`, `LOGIN`, with `LOGIN` initial-response).
 //! - `str(float)` for PATCH values uses shortest-round-trip rendering,
 //!   which matches CPython `repr` except for very large/small exponents.
 
@@ -785,8 +787,10 @@ mod smtp {
                     return Err(MailError::Failed);
                 }
                 let trimmed = line.trim_end_matches(['\r', '\n']);
-                if trimmed.len() >= 3 {
-                    if let Ok(parsed) = trimmed[..3].parse::<i32>() {
+                // `get`, not indexing: non-ASCII reply bytes would panic on
+                // a non-char-boundary and escape the fallthrough as a 500.
+                if let Some(prefix) = trimmed.get(..3) {
+                    if let Ok(parsed) = prefix.parse::<i32>() {
                         code = parsed;
                     }
                     text.push_str(trimmed.get(4..).unwrap_or(""));
@@ -1355,7 +1359,7 @@ mod smtp {
         async fn run_fake_smtp(
             fake: FakeSmtp,
         ) -> (std::net::SocketAddr, tokio::task::JoinHandle<Vec<String>>) {
-            use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+            use tokio::io::AsyncBufReadExt;
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
                 .unwrap();
