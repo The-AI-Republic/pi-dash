@@ -24,6 +24,7 @@ pub mod celery;
 pub mod queue;
 pub mod schedule;
 pub mod scheduler;
+pub mod tasks_ticker;
 pub mod worker;
 
 pub use amqp::{AmqpConfig, AmqpError, Publisher, CELERY_EXCHANGE, CELERY_ROUTING_KEY};
