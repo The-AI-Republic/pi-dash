@@ -22,6 +22,14 @@
 pub mod amqp;
 pub mod celery;
 pub mod integrations;
+/// Loop turn dispatch: thread rotation + turn creation + run enqueue
+/// (D-03, PIDASHCONV-157): same explicit-path form as [`loop_scan`].
+#[path = "loop/dispatch.rs"]
+pub mod loop_dispatch;
+/// Loop per-target fire claim + re-check (D-03, PIDASHCONV-157): same
+/// explicit-path form as [`loop_scan`].
+#[path = "loop/fire.rs"]
+pub mod loop_fire;
 /// Loop auto-PM beat scanner (D-03, PIDASHCONV-156). `loop` is a Rust
 /// keyword, so the module lives at `loop/scan.rs` via an explicit path —
 /// the single file the issue owns, no `mod.rs`.
