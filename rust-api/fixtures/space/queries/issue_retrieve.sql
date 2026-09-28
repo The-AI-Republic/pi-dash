@@ -59,8 +59,8 @@ SELECT "issues"."id", "issues"."name", "issues"."state_id", "issues"."sort_order
     AND U0."issue_id" = ("issues"."id")) LIMIT 1) AS "cycle_id",
   "issues"."created_by_id" AS "created_by", "states"."group" AS "state__group",
   ARRAY_AGG(DISTINCT (CASE WHEN ("votes"."id" IS NOT NULL
-    AND "votes"."deleted_at" IS NULL) THEN JSON_BUILD_OBJECT('vote', "votes"."vote",
-    'actor_details', JSON_BUILD_OBJECT('id', "vote_actor"."id",
+    AND "votes"."deleted_at" IS NULL) THEN JSONB_BUILD_OBJECT('vote', "votes"."vote",
+    'actor_details', JSONB_BUILD_OBJECT('id', "vote_actor"."id",
       'first_name', "vote_actor"."first_name", 'last_name', "vote_actor"."last_name",
       'avatar', "vote_actor"."avatar",
       'avatar_url', (CASE WHEN ("vote_actor"."avatar_asset_id" IS NOT NULL)
@@ -71,17 +71,18 @@ SELECT "issues"."id", "issues"."name", "issues"."state_id", "issues"."sort_order
     FILTER (WHERE CASE WHEN ("votes"."id" IS NOT NULL
       AND "votes"."deleted_at" IS NULL) THEN true ELSE false END) AS "vote_items",
   ARRAY_AGG(DISTINCT (CASE WHEN ("issue_reactions"."id" IS NOT NULL
-    AND "issue_reactions"."deleted_at" IS NULL) THEN JSON_BUILD_OBJECT(
+    AND "issue_reactions"."deleted_at" IS NULL) THEN JSONB_BUILD_OBJECT(
     'reaction', "issue_reactions"."reaction",
-    'actor_details', JSON_BUILD_OBJECT('id', "reaction_actor"."id",
+    'actor_details', JSONB_BUILD_OBJECT('id', "reaction_actor"."id",
       'first_name', "reaction_actor"."first_name",
       'last_name', "reaction_actor"."last_name",
       'avatar', "reaction_actor"."avatar",
       -- BUG-PORT views/issue.py:713,716,722: avatar branches read the VOTE
-      -- actor columns (votes__actor__*) instead of issue_reactions__actor__*.
-      'avatar_url', (CASE WHEN ("votes"."actor_avatar_asset" IS NOT NULL)
-        THEN CONCAT('/api/assets/v2/static/', "votes"."actor_avatar_asset", '/')
-        WHEN ("votes"."actor_avatar_asset" IS NULL) THEN "votes"."actor_avatar"
+      -- actor traversal (votes__actor__*) instead of issue_reactions__actor__*,
+      -- rendered through the vote_actor join reused from vote_items.
+      'avatar_url', (CASE WHEN ("vote_actor"."avatar_asset_id" IS NOT NULL)
+        THEN CONCAT('/api/assets/v2/static/', "vote_actor"."avatar_asset_id", '/')
+        WHEN ("vote_actor"."avatar_asset_id" IS NULL) THEN "vote_actor"."avatar"
         ELSE NULL END),
       'display_name', "reaction_actor"."display_name") ) ELSE NULL END))
     FILTER (WHERE CASE WHEN ("issue_reactions"."id" IS NOT NULL

@@ -54,8 +54,12 @@
 //!   `avatar_url` inner `When`s read `votes__actor__avatar_asset` /
 //!   `votes__actor__avatar` (copy-pasted from `vote_items` at `:665-677`)
 //!   instead of `issue_reactions__actor__avatar_asset` /
-//!   `issue_reactions__actor__avatar`. [`issue_retrieve_sql`] keeps the
-//!   wrong `votes` refs verbatim; the fixture records them at
+//!   `issue_reactions__actor__avatar`. Django resolves that traversal
+//!   through the join it reuses from `vote_items` (same `votes__actor`
+//!   path), i.e. the `vote_actor` users alias — never a column on `votes`
+//!   itself (`issue_votes` has only `issue`, `actor`, `vote` per
+//!   `db/models/issue.py:780-800`). [`issue_retrieve_sql`] emits the
+//!   `vote_actor` refs; the fixture records them at
 //!   `issue_retrieve.sql:80-85`.
 //! * QUIRK-unscoped-board-get (`issue.py:598`): the retrieve board lookup is
 //!   `.get(anchor=anchor)` with NO `entity_name="project"` scoping. Kept.
@@ -160,7 +164,7 @@ fn cycle_id_sql() -> String {
 /// `{"vote", "actor_details"}` object per live vote; empty set aggregates
 /// to NULL (no `Coalesce` — the null shape is the contract).
 fn vote_items_sql() -> String {
-    "ARRAY_AGG(DISTINCT (CASE WHEN (\"votes\".\"id\" IS NOT NULL AND \"votes\".\"deleted_at\" IS NULL) THEN JSON_BUILD_OBJECT('vote', \"votes\".\"vote\", 'actor_details', JSON_BUILD_OBJECT('id', \"vote_actor\".\"id\", 'first_name', \"vote_actor\".\"first_name\", 'last_name', \"vote_actor\".\"last_name\", 'avatar', \"vote_actor\".\"avatar\", 'avatar_url', (CASE WHEN (\"vote_actor\".\"avatar_asset_id\" IS NOT NULL) THEN CONCAT('/api/assets/v2/static/', \"vote_actor\".\"avatar_asset_id\", '/') WHEN (\"vote_actor\".\"avatar_asset_id\" IS NULL) THEN \"vote_actor\".\"avatar\" ELSE NULL END), 'display_name', \"vote_actor\".\"display_name\") ) ELSE NULL END)) FILTER (WHERE CASE WHEN (\"votes\".\"id\" IS NOT NULL AND \"votes\".\"deleted_at\" IS NULL) THEN true ELSE false END) AS \"vote_items\"".to_string()
+    "ARRAY_AGG(DISTINCT (CASE WHEN (\"votes\".\"id\" IS NOT NULL AND \"votes\".\"deleted_at\" IS NULL) THEN JSONB_BUILD_OBJECT('vote', \"votes\".\"vote\", 'actor_details', JSONB_BUILD_OBJECT('id', \"vote_actor\".\"id\", 'first_name', \"vote_actor\".\"first_name\", 'last_name', \"vote_actor\".\"last_name\", 'avatar', \"vote_actor\".\"avatar\", 'avatar_url', (CASE WHEN (\"vote_actor\".\"avatar_asset_id\" IS NOT NULL) THEN CONCAT('/api/assets/v2/static/', \"vote_actor\".\"avatar_asset_id\", '/') WHEN (\"vote_actor\".\"avatar_asset_id\" IS NULL) THEN \"vote_actor\".\"avatar\" ELSE NULL END), 'display_name', \"vote_actor\".\"display_name\") ) ELSE NULL END)) FILTER (WHERE CASE WHEN (\"votes\".\"id\" IS NOT NULL AND \"votes\".\"deleted_at\" IS NULL) THEN true ELSE false END) AS \"vote_items\"".to_string()
 }
 
 /// `reaction_items` annotation (`issue.py:699-744`): one
@@ -168,11 +172,14 @@ fn vote_items_sql() -> String {
 /// aggregates to NULL (no `Coalesce`).
 ///
 /// BUG-reaction-avatar (`issue.py:713,716,722`): the `avatar_url` inner
-/// `When`s read the VOTE actor columns (`votes__actor__*`) instead of
-/// `issue_reactions__actor__*`. The wrong `votes` refs below are the port,
-/// not a typo.
+/// `When`s read the VOTE actor traversal (`votes__actor__*`) instead of
+/// `issue_reactions__actor__*`. Django renders that traversal through the
+/// `vote_actor` users join it reuses from `vote_items` (same `votes__actor`
+/// path), so the refs below name `vote_actor` — `votes`-side columns would
+/// be a plan-time failure (`issue_votes` has no `actor_avatar*` columns),
+/// not the port.
 fn reaction_items_sql() -> String {
-    "ARRAY_AGG(DISTINCT (CASE WHEN (\"issue_reactions\".\"id\" IS NOT NULL AND \"issue_reactions\".\"deleted_at\" IS NULL) THEN JSON_BUILD_OBJECT('reaction', \"issue_reactions\".\"reaction\", 'actor_details', JSON_BUILD_OBJECT('id', \"reaction_actor\".\"id\", 'first_name', \"reaction_actor\".\"first_name\", 'last_name', \"reaction_actor\".\"last_name\", 'avatar', \"reaction_actor\".\"avatar\", 'avatar_url', (CASE WHEN (\"votes\".\"actor_avatar_asset\" IS NOT NULL) THEN CONCAT('/api/assets/v2/static/', \"votes\".\"actor_avatar_asset\", '/') WHEN (\"votes\".\"actor_avatar_asset\" IS NULL) THEN \"votes\".\"actor_avatar\" ELSE NULL END), 'display_name', \"reaction_actor\".\"display_name\") ) ELSE NULL END)) FILTER (WHERE CASE WHEN (\"issue_reactions\".\"id\" IS NOT NULL AND \"issue_reactions\".\"deleted_at\" IS NULL) THEN true ELSE false END) AS \"reaction_items\"".to_string()
+    "ARRAY_AGG(DISTINCT (CASE WHEN (\"issue_reactions\".\"id\" IS NOT NULL AND \"issue_reactions\".\"deleted_at\" IS NULL) THEN JSONB_BUILD_OBJECT('reaction', \"issue_reactions\".\"reaction\", 'actor_details', JSONB_BUILD_OBJECT('id', \"reaction_actor\".\"id\", 'first_name', \"reaction_actor\".\"first_name\", 'last_name', \"reaction_actor\".\"last_name\", 'avatar', \"reaction_actor\".\"avatar\", 'avatar_url', (CASE WHEN (\"vote_actor\".\"avatar_asset_id\" IS NOT NULL) THEN CONCAT('/api/assets/v2/static/', \"vote_actor\".\"avatar_asset_id\", '/') WHEN (\"vote_actor\".\"avatar_asset_id\" IS NULL) THEN \"vote_actor\".\"avatar\" ELSE NULL END), 'display_name', \"reaction_actor\".\"display_name\") ) ELSE NULL END)) FILTER (WHERE CASE WHEN (\"issue_reactions\".\"id\" IS NOT NULL AND \"issue_reactions\".\"deleted_at\" IS NULL) THEN true ELSE false END) AS \"reaction_items\"".to_string()
 }
 
 /// R1 single-issue read (`views/issue.py:600-771`).
@@ -449,7 +456,13 @@ mod tests {
         assert_builder_contains(
             &sql,
             params,
-            &fixture_fragment("JSON_BUILD_OBJECT('vote', \"votes\".\"vote\""),
+            &fixture_fragment("JSONB_BUILD_OBJECT('vote', \"votes\".\"vote\""),
+        );
+        // Django's JSONObject renders JSONB_BUILD_OBJECT; the json variant
+        // has no equality operator, so DISTINCT over it fails at plan time.
+        assert!(
+            !squashed(&sql).contains("JSON_BUILD_OBJECT"),
+            "no json variant in vote/reaction aggregates"
         );
         assert_builder_contains(
             &sql,
@@ -480,19 +493,33 @@ mod tests {
         );
         assert!(
             squashed(&sql)
-                .contains("JSON_BUILD_OBJECT('reaction', \"issue_reactions\".\"reaction\""),
+                .contains("JSONB_BUILD_OBJECT('reaction', \"issue_reactions\".\"reaction\""),
             "reaction identity"
         );
-        // ... but the avatar_url branches read the VOTE actor columns
+        // ... but the avatar_url branches read the VOTE actor traversal
         // (issue.py:713,716,722) instead of issue_reactions__actor__*.
+        // Django renders that traversal through the join it reuses from
+        // vote_items (same votes__actor path), i.e. the vote_actor users
+        // alias: "vote_actor"."avatar_asset_id" / "vote_actor"."avatar".
+        // "votes"."actor_avatar*" names no real column (issue_votes has
+        // only issue, actor, vote) and would fail at plan time.
         assert_builder_contains(
             &sql,
             params,
             &fixture_fragment(
-                "'avatar_url', (CASE WHEN (\"votes\".\"actor_avatar_asset\" IS NOT NULL) THEN CONCAT('/api/assets/v2/static/', \"votes\".\"actor_avatar_asset\", '/') WHEN (\"votes\".\"actor_avatar_asset\" IS NULL) THEN \"votes\".\"actor_avatar\" ELSE NULL END)",
+                "'avatar_url', (CASE WHEN (\"vote_actor\".\"avatar_asset_id\" IS NOT NULL) THEN CONCAT('/api/assets/v2/static/', \"vote_actor\".\"avatar_asset_id\", '/') WHEN (\"vote_actor\".\"avatar_asset_id\" IS NULL) THEN \"vote_actor\".\"avatar\" ELSE NULL END)",
             ),
         );
-        // The builder must NOT contain a corrected reaction-actor avatar ref.
+        assert!(
+            !squashed(&sql).contains("actor_avatar_asset"),
+            "no unexecutable votes-side avatar ref"
+        );
+        assert!(
+            !squashed(&sql).contains("\"votes\".\"actor_avatar\""),
+            "no unexecutable votes-side avatar ref"
+        );
+        // The builder must NOT contain a corrected reaction-actor avatar ref:
+        // the ported bug reads the VOTE actor, not the reaction actor.
         assert!(
             !sql.contains("reaction_actor\".\"avatar_asset"),
             "bug port: no corrected avatar_asset ref in reaction branch"

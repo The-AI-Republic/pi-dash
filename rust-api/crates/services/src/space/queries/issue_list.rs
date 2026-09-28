@@ -1035,13 +1035,13 @@ pub fn on_results_fields(group_by: &str, sub_group_by: &str) -> Vec<String> {
 /// then JSONObject(vote, actor_details)), default=None))` with the
 /// `avatar_url` fallback (`grouper.py:112-145`).
 pub fn vote_items_annotation_sql() -> String {
-    "ARRAY_AGG(DISTINCT CASE WHEN (\"votes\".\"id\" IS NOT NULL AND \"votes\".\"deleted_at\" IS NULL) THEN JSONB_BUILD_OBJECT('vote', \"votes\".\"vote\", 'actor_details', JSONB_BUILD_OBJECT('id', \"vote_actor\".\"id\", 'first_name', \"vote_actor\".\"first_name\", 'last_name', \"vote_actor\".\"last_name\", 'avatar', \"vote_actor\".\"avatar\", 'avatar_url', CASE WHEN \"vote_actor\".\"avatar_asset\" IS NOT NULL THEN CONCAT('/api/assets/v2/static/', \"vote_actor\".\"avatar_asset\", '/') ELSE \"vote_actor\".\"avatar\" END, 'display_name', \"vote_actor\".\"display_name\")) ELSE NULL END) FILTER (WHERE (\"votes\".\"id\" IS NOT NULL AND \"votes\".\"deleted_at\" IS NULL)) AS \"vote_items\"".to_string()
+    "ARRAY_AGG(DISTINCT CASE WHEN (\"votes\".\"id\" IS NOT NULL AND \"votes\".\"deleted_at\" IS NULL) THEN JSONB_BUILD_OBJECT('vote', \"votes\".\"vote\", 'actor_details', JSONB_BUILD_OBJECT('id', \"vote_actor\".\"id\", 'first_name', \"vote_actor\".\"first_name\", 'last_name', \"vote_actor\".\"last_name\", 'avatar', \"vote_actor\".\"avatar\", 'avatar_url', CASE WHEN \"vote_actor\".\"avatar_asset_id\" IS NOT NULL THEN CONCAT('/api/assets/v2/static/', \"vote_actor\".\"avatar_asset_id\", '/') ELSE \"vote_actor\".\"avatar\" END, 'display_name', \"vote_actor\".\"display_name\")) ELSE NULL END) FILTER (WHERE (\"votes\".\"id\" IS NOT NULL AND \"votes\".\"deleted_at\" IS NULL)) AS \"vote_items\"".to_string()
 }
 
 /// `reaction_items` annotation: same shape over `issue_reactions`
 /// (`grouper.py:146-179`).
 pub fn reaction_items_annotation_sql() -> String {
-    "ARRAY_AGG(DISTINCT CASE WHEN (\"issue_reactions\".\"id\" IS NOT NULL AND \"issue_reactions\".\"deleted_at\" IS NULL) THEN JSONB_BUILD_OBJECT('reaction', \"issue_reactions\".\"reaction\", 'actor_details', JSONB_BUILD_OBJECT('id', \"reaction_actor\".\"id\", 'first_name', \"reaction_actor\".\"first_name\", 'last_name', \"reaction_actor\".\"last_name\", 'avatar', \"reaction_actor\".\"avatar\", 'avatar_url', CASE WHEN \"reaction_actor\".\"avatar_asset\" IS NOT NULL THEN CONCAT('/api/assets/v2/static/', \"reaction_actor\".\"avatar_asset\", '/') ELSE \"reaction_actor\".\"avatar\" END, 'display_name', \"reaction_actor\".\"display_name\")) ELSE NULL END) FILTER (WHERE (\"issue_reactions\".\"id\" IS NOT NULL AND \"issue_reactions\".\"deleted_at\" IS NULL)) AS \"reaction_items\"".to_string()
+    "ARRAY_AGG(DISTINCT CASE WHEN (\"issue_reactions\".\"id\" IS NOT NULL AND \"issue_reactions\".\"deleted_at\" IS NULL) THEN JSONB_BUILD_OBJECT('reaction', \"issue_reactions\".\"reaction\", 'actor_details', JSONB_BUILD_OBJECT('id', \"reaction_actor\".\"id\", 'first_name', \"reaction_actor\".\"first_name\", 'last_name', \"reaction_actor\".\"last_name\", 'avatar', \"reaction_actor\".\"avatar\", 'avatar_url', CASE WHEN \"reaction_actor\".\"avatar_asset_id\" IS NOT NULL THEN CONCAT('/api/assets/v2/static/', \"reaction_actor\".\"avatar_asset_id\", '/') ELSE \"reaction_actor\".\"avatar\" END, 'display_name', \"reaction_actor\".\"display_name\")) ELSE NULL END) FILTER (WHERE (\"issue_reactions\".\"id\" IS NOT NULL AND \"issue_reactions\".\"deleted_at\" IS NULL)) AS \"reaction_items\"".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1603,6 +1603,18 @@ mod tests {
         }
         assert!(vote_items_annotation_sql().ends_with("AS \"vote_items\""));
         assert!(reaction_items_annotation_sql().ends_with("AS \"reaction_items\""));
+        // Avatar FK column: User.avatar_asset is a ForeignKey
+        // (db/models/user.py:69), so live Django renders avatar_asset_id on
+        // the actor join — a bare "avatar_asset" ref fails at plan time.
+        for sql in [vote_items_annotation_sql(), reaction_items_annotation_sql()] {
+            assert!(sql.contains("\"avatar_asset_id\""), "FK column ref");
+            assert!(
+                !sql.contains("\"avatar_asset\" IS NOT NULL"),
+                "no bare avatar_asset ref"
+            );
+        }
+        assert!(vote_items_annotation_sql().contains("\"vote_actor\".\"avatar_asset_id\""));
+        assert!(reaction_items_annotation_sql().contains("\"reaction_actor\".\"avatar_asset_id\""));
     }
 
     fn fixture_row() -> serde_json::Value {
