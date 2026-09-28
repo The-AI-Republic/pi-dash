@@ -189,14 +189,11 @@ pub(crate) fn mention_ids_in_html(html: &str) -> Option<Vec<String>> {
                 key == "entity_name" && value.as_deref() == Some("user_mention")
             });
             if is_user_mention {
-                match attrs
+                let identifier = attrs
                     .iter()
                     .find(|(key, _)| key == "entity_identifier")
-                    .and_then(|(_, value)| value.clone())
-                {
-                    Some(identifier) => ids.push(identifier),
-                    None => return None,
-                }
+                    .and_then(|(_, value)| value.clone())?;
+                ids.push(identifier);
             }
         }
         pos = close;

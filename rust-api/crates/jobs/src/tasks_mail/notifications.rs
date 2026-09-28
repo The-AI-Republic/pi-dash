@@ -58,14 +58,16 @@ pub const ISSUE_MENTION_INSERT_SQL: &str = "INSERT INTO issue_mentions (id, crea
 pub const ISSUE_MENTION_SOFT_DELETE_SQL: &str = "UPDATE issue_mentions SET deleted_at = $1 WHERE deleted_at IS NULL AND issue_id = $2 AND mention_id = ANY($3)";
 
 /// Guard reads in `extract_mentions_as_subscribers`, one per candidate, in
-/// Python evaluation order. Every `EXISTS` carries the default manager's
-/// `deleted_at IS NULL` scope.
+/// Python evaluation order. Every read carries the default manager's
+/// `deleted_at IS NULL` scope (`SoftDeletionManager`), including the
+/// `issues` creator check and the `projects` workspace lookup.
 pub const SUBSCRIBER_GUARD_SQL: &str = "SELECT EXISTS(SELECT 1 FROM issue_subscribers WHERE deleted_at IS NULL AND issue_id = $1 AND subscriber_id = $2 AND project_id = $3)";
 pub const ASSIGNEE_GUARD_SQL: &str = "SELECT EXISTS(SELECT 1 FROM issue_assignees WHERE deleted_at IS NULL AND project_id = $1 AND issue_id = $2 AND assignee_id = $3)";
 pub const CREATOR_GUARD_SQL: &str =
-    "SELECT EXISTS(SELECT 1 FROM issues WHERE project_id = $1 AND id = $2 AND created_by_id = $3)";
+    "SELECT EXISTS(SELECT 1 FROM issues WHERE deleted_at IS NULL AND project_id = $1 AND id = $2 AND created_by_id = $3)";
 pub const MEMBER_GUARD_SQL: &str = "SELECT EXISTS(SELECT 1 FROM project_members WHERE deleted_at IS NULL AND project_id = $1 AND member_id = $2 AND is_active = TRUE)";
-pub const PROJECT_WORKSPACE_SQL: &str = "SELECT workspace_id FROM projects WHERE id = $1";
+pub const PROJECT_WORKSPACE_SQL: &str =
+    "SELECT workspace_id FROM projects WHERE deleted_at IS NULL AND id = $1";
 
 /// Port of `update_mentions_for_issue(issue, project, new_mentions,
 /// removed_mention)` (`:37-52`).
@@ -346,6 +348,8 @@ mod tests {
         assert!(MEMBER_GUARD_SQL.contains("FROM project_members"));
         assert!(MEMBER_GUARD_SQL.contains("is_active = TRUE"));
         assert!(PROJECT_WORKSPACE_SQL.contains("FROM projects"));
+        assert!(CREATOR_GUARD_SQL.contains("deleted_at IS NULL"));
+        assert!(PROJECT_WORKSPACE_SQL.contains("deleted_at IS NULL"));
         assert_eq!(BULK_BATCH_SIZE, 100);
     }
 }
