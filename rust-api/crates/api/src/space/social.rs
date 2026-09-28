@@ -30,12 +30,12 @@
 //! CommentReactions, Votes}`, BUG-reaction-list-auth).
 //!
 //! Response shapes (app serializers, `app/serializers/issue.py:900-989`):
-//! `__all__` renders declared fields first (`id` from `BaseSerializer`,
-//! then the subclass declarations) in creation order, then model fields
-//! in definition order; explicit `Meta.fields` lists render in list order.
-//! `is_member` is a read-only annotation that only exists on the list
-//! queryset, so create/partial_update responses omit the key (DRF
-//! `SkipField`), while list/retrieve include it.
+//! `__all__` renders pk, declared fields (`id` from `BaseSerializer`, then
+//! the subclass declarations) in creation order, concrete model fields,
+//! then forward relations (DRF `get_default_field_names`); explicit
+//! `Meta.fields` lists render in list order. `is_member` is a read-only
+//! annotation that only exists on the list queryset, so create/partial_update
+//! responses omit the key (DRF `SkipField`), while list/retrieve include it.
 //!
 //! Write side effects, in Python order (invisible over HTTP, kept anyway):
 //! comment create saves, delays `comment.activity.created` with the
@@ -718,10 +718,19 @@ async fn ensure_public_member(
 // Shared nests: users, assets, lite leaves
 // ---------------------------------------------------------------------------
 
-/// `SELECT` for the user row behind `actor_detail` nests. Forward-FK
-/// semantics carry the soft-deletion guard.
+/// `SELECT` for the user row behind `actor_detail` nests. Unlike every
+/// other forward FK here, this carries no soft-deletion guard: `User`
+/// (`db/models/user.py:56`, `AbstractBaseUser` + `PermissionsMixin`) has no
+/// `deleted_at` column, so Django emits no filter for it.
 fn user_detail_sql() -> String {
-    "SELECT \"users\".\"id\", \"users\".\"first_name\", \"users\".\"last_name\", \"users\".\"avatar\", \"users\".\"avatar_asset_id\", \"users\".\"is_bot\", \"users\".\"display_name\" FROM \"users\" WHERE (\"users\".\"deleted_at\" IS NULL AND \"users\".\"id\" = $1)".to_string()
+    "SELECT \"users\".\"id\", \"users\".\"first_name\", \"users\".\"last_name\", \"users\".\"avatar\", \"users\".\"avatar_asset_id\", \"users\".\"is_bot\", \"users\".\"display_name\" FROM \"users\" WHERE (\"users\".\"id\" = $1)".to_string()
+}
+
+/// `SELECT` for the `display_name` behind reaction/vote rows
+/// (`source="actor.display_name"`). Same unguarded `users` read as
+/// [`user_detail_sql`]: no `deleted_at` column exists to filter on.
+fn display_name_sql() -> String {
+    "SELECT display_name FROM users WHERE id = $1".to_string()
 }
 
 /// `SELECT` for the logo/cover asset row behind `*_url` properties (the
@@ -831,7 +840,10 @@ async fn render_actor_detail(
         id: req_str(o, "id")?,
         first_name: opt_str(o, "first_name")?.unwrap_or_default(),
         last_name: opt_str(o, "last_name")?.unwrap_or_default(),
-        avatar: avatar.filter(|text| !text.is_empty()),
+        // `avatar` is the raw column: DRF renders `""` verbatim. Only the
+        // `avatar_url` property folds falsy values to `None`
+        // (`db/models/user.py:143-151`, via `logo_or_cover_url` above).
+        avatar,
         avatar_url,
         is_bot: req_bool(o, "is_bot")?,
         display_name: opt_str(o, "display_name")?.unwrap_or_default(),
@@ -960,10 +972,11 @@ struct CommentReactionView {
 }
 
 /// App `IssueCommentSerializer` (`app/serializers/issue.py:948-972`):
-/// declared fields first (`id`, then the subclass declarations in
-/// creation order), then model definition order. `is_member` is only
-/// present on queryset-annotated rows (list/retrieve), never on
-/// create/update responses.
+/// `Meta.fields = "__all__"`, which DRF orders as pk, declared fields in
+/// creation order, concrete model fields, then forward relations
+/// (`get_default_field_names`). `is_member` is only present on
+/// queryset-annotated rows (list/retrieve), never on create/update
+/// responses.
 #[derive(Debug, Serialize)]
 struct CommentView {
     id: String,
@@ -977,19 +990,12 @@ struct CommentView {
     is_synced: bool,
     created_at: String,
     updated_at: String,
-    created_by: Option<String>,
-    updated_by: Option<String>,
     deleted_at: Option<String>,
-    project: Option<String>,
-    workspace: Option<String>,
     comment_stripped: Option<String>,
     comment_json: Value,
     comment_html: Option<String>,
-    description: Option<String>,
     attachments: Value,
     labels: Value,
-    issue: Option<String>,
-    actor: Option<String>,
     access: Option<String>,
     external_source: Option<String>,
     external_id: Option<String>,
@@ -997,6 +1003,13 @@ struct CommentView {
     speaker_label: Option<String>,
     speaker_agent_run_id: Option<String>,
     edited_at: Option<String>,
+    created_by: Option<String>,
+    updated_by: Option<String>,
+    project: Option<String>,
+    workspace: Option<String>,
+    description: Option<String>,
+    issue: Option<String>,
+    actor: Option<String>,
     parent: Option<String>,
 }
 
@@ -1282,12 +1295,11 @@ async fn render_comment_reaction_row(
 /// `display_name` for reaction rows (`source="actor.display_name"`).
 async fn fetch_display_name(pool: &sqlx::PgPool, user_id: &str) -> Result<String, HandlerError> {
     let id = uuid::Uuid::parse_str(user_id).map_err(|_| HandlerError::ServerError)?;
-    let row: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT display_name FROM users WHERE id = $1 AND deleted_at IS NULL")
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| HandlerError::ServerError)?;
+    let row: Option<(Option<String>,)> = sqlx::query_as(&display_name_sql())
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     row.map(|row| row.0.unwrap_or_default())
         .ok_or(HandlerError::ServerError)
 }
@@ -1623,6 +1635,18 @@ fn looks_like_url(value: &str) -> bool {
     !host.is_empty()
 }
 
+/// `SELECT` for the `PrimaryKeyRelatedField` liveness probe behind
+/// [`check_nullable_fk`]. Soft-deletable tables probe through the manager's
+/// `deleted_at IS NULL` filter; `users` has no such column (`User` is never
+/// soft-deleted, like [`user_detail_sql`]), so its probe is unguarded.
+fn nullable_fk_sql(table: &str) -> String {
+    if table == "users" {
+        format!("SELECT id FROM {table} WHERE id = $1")
+    } else {
+        format!("SELECT id FROM {table} WHERE id = $1 AND deleted_at IS NULL")
+    }
+}
+
 /// A writable nullable FK input (`actor`, `parent`, `description`): absent
 /// leaves the column alone, explicit null clears it, otherwise the value
 /// must name a live row, like `PrimaryKeyRelatedField`.
@@ -1640,7 +1664,7 @@ async fn check_nullable_fk(
     let Some(id) = inner else {
         return Ok(Some(None));
     };
-    let sql = format!("SELECT id FROM {table} WHERE id = $1 AND deleted_at IS NULL");
+    let sql = nullable_fk_sql(table);
     let row: Option<(uuid::Uuid,)> = sqlx::query_as(&sql)
         .bind(id)
         .fetch_optional(pool)
@@ -1991,18 +2015,11 @@ async fn comment_create_inner(
         .comment_json
         .clone()
         .unwrap_or_else(|| Value::Object(Default::default()));
-    let attachments = input
-        .attachments
-        .clone()
-        .map(|items| items.into_iter().map(Value::String).collect::<Vec<_>>())
-        .map(Value::Array)
-        .unwrap_or_else(|| Value::Array(Vec::new()));
-    let labels = input
-        .labels
-        .clone()
-        .map(|items| items.into_iter().map(Value::String).collect::<Vec<_>>())
-        .map(Value::Array)
-        .unwrap_or_else(|| Value::Array(Vec::new()));
+    // `attachments`/`labels` are Postgres `varchar[]` (`ArrayField`,
+    // `db/models/issue.py:563-566`), not jsonb: they bind as string lists
+    // (sqlx encodes `&[String]` as an array), never as JSON values.
+    let attachments = input.attachments.clone().unwrap_or_default();
+    let labels = input.labels.clone().unwrap_or_default();
     insert_comment(
         pool,
         &comment_id,
@@ -2035,10 +2052,18 @@ async fn comment_create_inner(
         .execute(pool)
         .await
         .map_err(|_| HandlerError::ServerError)?;
+    // The description link is a second `save(update_fields=["description_id"])`
+    // (`IssueComment.save`, `:619-621`): with `adding=False` the base save
+    // stamps `updated_by`/`updated_at` again, so a created comment always
+    // carries its actor as `updated_by` (unlike reactions/votes, whose
+    // models never re-save).
+    let relinked_at = chrono::Utc::now();
     sqlx::query(
-        "UPDATE issue_comments SET description_id = $1 WHERE id = $2 AND deleted_at IS NULL",
+        "UPDATE issue_comments SET description_id = $1, updated_by_id = $2, updated_at = $3 WHERE id = $4 AND deleted_at IS NULL",
     )
     .bind(description_id)
+    .bind(actor.id)
+    .bind(relinked_at)
     .bind(comment_id)
     .execute(pool)
     .await
@@ -2063,6 +2088,23 @@ async fn comment_create_inner(
     serde_json::to_string(&value).map_err(|_| HandlerError::ServerError)
 }
 
+/// Decode a `row_to_json` array back into the string list for `varchar[]`
+/// writes (`attachments`/`labels`). A null renders as the empty list (the
+/// model default); anything but strings is a 500 like the read side.
+fn string_list(value: &Value) -> Result<Vec<String>, HandlerError> {
+    match value {
+        Value::Null => Ok(Vec::new()),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::String(text) => Ok(text.clone()),
+                _ => Err(HandlerError::ServerError),
+            })
+            .collect(),
+        _ => Err(HandlerError::ServerError),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn insert_comment(
     pool: &sqlx::PgPool,
@@ -2075,8 +2117,8 @@ async fn insert_comment(
     stripped: &str,
     comment_json: &Value,
     html: &str,
-    attachments: &Value,
-    labels: &Value,
+    attachments: &[String],
+    labels: &[String],
     input: &CommentInput,
 ) -> Result<(), HandlerError> {
     let issue = uuid::Uuid::parse_str(issue_id).map_err(|_| HandlerError::ServerError)?;
@@ -2310,16 +2352,16 @@ async fn apply_comment_update(
         .comment_json
         .clone()
         .unwrap_or_else(|| old.comment_json.clone());
-    let attachments = input
-        .attachments
-        .clone()
-        .map(|items| Value::Array(items.into_iter().map(Value::String).collect()))
-        .unwrap_or_else(|| old.attachments.clone());
-    let labels = input
-        .labels
-        .clone()
-        .map(|items| Value::Array(items.into_iter().map(Value::String).collect()))
-        .unwrap_or_else(|| old.labels.clone());
+    // `varchar[]` binds (see `insert_comment`): fresh input binds as-is,
+    // otherwise the stored JSON array decodes back into the string list.
+    let attachments = match input.attachments.clone() {
+        Some(items) => items,
+        None => string_list(&old.attachments)?,
+    };
+    let labels = match input.labels.clone() {
+        Some(items) => items,
+        None => string_list(&old.labels)?,
+    };
     let html_changed = input.comment_html.is_some();
     let stripped_value = if html_changed {
         stripped.to_owned()
@@ -2335,8 +2377,8 @@ async fn apply_comment_update(
         .bind(&stripped_value)
         .bind(&comment_json)
         .bind(html_value)
-        .bind(&attachments)
-        .bind(&labels)
+        .bind(attachments.as_slice())
+        .bind(labels.as_slice())
         .bind(access)
         .bind(external_source)
         .bind(external_id)
@@ -2355,7 +2397,49 @@ async fn apply_comment_update(
     let stripped_changed = stripped_value != old.comment_stripped.clone().unwrap_or_default();
     let html_changed = new_html != old_html;
     let json_changed = comment_json != old.comment_json;
-    if (stripped_changed || html_changed || json_changed) && old.description_id.is_some() {
+    if old.description_id.is_none() {
+        // A missing link creates + links a Description even on update
+        // (`IssueComment.save`, `:618-621`): audit/user defaults are the
+        // pre-save row, the tracked text is the new row, and the link is a
+        // second save stamping `updated_by`/`updated_at` again.
+        let workspace_id = old
+            .workspace_id
+            .as_deref()
+            .map(uuid::Uuid::parse_str)
+            .transpose()
+            .map_err(|_| HandlerError::ServerError)?
+            .ok_or(HandlerError::ServerError)?;
+        let project_id = old
+            .project_id
+            .as_deref()
+            .map(uuid::Uuid::parse_str)
+            .transpose()
+            .map_err(|_| HandlerError::ServerError)?
+            .ok_or(HandlerError::ServerError)?;
+        let description_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, description_stripped, description_json, description_html, description_binary) VALUES ($1, $2, $2, $3, $4, NULL, $5, $6, $7, $8, $9, NULL)")
+            .bind(description_id)
+            .bind(now)
+            .bind(parse_old_uuid(&old.created_by)?)
+            .bind(parse_old_uuid(&old.updated_by)?)
+            .bind(workspace_id)
+            .bind(project_id)
+            .bind(&stripped_value)
+            .bind(&comment_json)
+            .bind(&new_html)
+            .execute(pool)
+            .await
+            .map_err(|_| HandlerError::ServerError)?;
+        let relinked_at = chrono::Utc::now();
+        sqlx::query("UPDATE issue_comments SET description_id = $1, updated_by_id = $2, updated_at = $3 WHERE id = $4 AND deleted_at IS NULL")
+            .bind(description_id)
+            .bind(actor_id)
+            .bind(relinked_at)
+            .bind(comment_id)
+            .execute(pool)
+            .await
+            .map_err(|_| HandlerError::ServerError)?;
+    } else if stripped_changed || html_changed || json_changed {
         let description_id = uuid::Uuid::parse_str(old.description_id.as_deref().unwrap_or(""))
             .map_err(|_| HandlerError::ServerError)?;
         sqlx::query("UPDATE descriptions SET description_html = $1, description_stripped = $2, description_json = $3, updated_by_id = $4, updated_at = $5 WHERE id = $6")
@@ -2446,21 +2530,23 @@ async fn comment_destroy_inner(
 // ---------------------------------------------------------------------------
 
 /// App `IssueReactionSerializer` (`app/serializers/issue.py:900-908`):
-/// declared `id` + `actor_detail` first, then model definition order.
+/// `Meta.fields = "__all__"`: pk, declared `actor_detail`, concrete model
+/// fields, then forward relations (`get_default_field_names`, like
+/// [`CommentView`]).
 #[derive(Debug, Serialize)]
 struct IssueReactionView {
     id: String,
     actor_detail: ActorDetailView,
     created_at: String,
     updated_at: String,
+    deleted_at: Option<String>,
+    reaction: String,
     created_by: Option<String>,
     updated_by: Option<String>,
-    deleted_at: Option<String>,
     project: Option<String>,
     workspace: Option<String>,
     actor: String,
     issue: String,
-    reaction: String,
 }
 
 async fn render_issue_reaction(
@@ -3372,7 +3458,7 @@ mod tests {
     }
 
     #[test]
-    fn comment_key_order_is_declared_first_then_model_order() {
+    fn comment_key_order_matches_drf_all_fields() {
         let view = CommentView {
             id: "c".to_owned(),
             actor_detail: Some(actor_detail_fixture()),
@@ -3446,19 +3532,12 @@ mod tests {
                 "is_synced",
                 "created_at",
                 "updated_at",
-                "created_by",
-                "updated_by",
                 "deleted_at",
-                "project",
-                "workspace",
                 "comment_stripped",
                 "comment_json",
                 "comment_html",
-                "description",
                 "attachments",
                 "labels",
-                "issue",
-                "actor",
                 "access",
                 "external_source",
                 "external_id",
@@ -3466,6 +3545,13 @@ mod tests {
                 "speaker_label",
                 "speaker_agent_run_id",
                 "edited_at",
+                "created_by",
+                "updated_by",
+                "project",
+                "workspace",
+                "description",
+                "issue",
+                "actor",
                 "parent",
             ]
             .map(str::to_owned)
@@ -3553,14 +3639,14 @@ mod tests {
             actor_detail: actor_detail_fixture(),
             created_at: "2026-09-28T00:00:00Z".to_owned(),
             updated_at: "2026-09-28T00:00:00Z".to_owned(),
+            deleted_at: None,
+            reaction: "rocket".to_owned(),
             created_by: None,
             updated_by: None,
-            deleted_at: None,
             project: Some("p".to_owned()),
             workspace: Some("w".to_owned()),
             actor: "a1".to_owned(),
             issue: "i".to_owned(),
-            reaction: "rocket".to_owned(),
         };
         assert_eq!(
             object_keys(&serde_json::to_value(&reaction).expect("serializes")),
@@ -3569,14 +3655,14 @@ mod tests {
                 "actor_detail",
                 "created_at",
                 "updated_at",
+                "deleted_at",
+                "reaction",
                 "created_by",
                 "updated_by",
-                "deleted_at",
                 "project",
                 "workspace",
                 "actor",
                 "issue",
-                "reaction",
             ]
             .map(str::to_owned)
             .to_vec()
@@ -3705,6 +3791,42 @@ mod tests {
         assert!(!sql.contains("unknown"));
         assert_eq!(params.len(), 5);
         assert_eq!(params[2], SqlParam::Null);
+    }
+
+    #[test]
+    fn user_reads_carry_no_soft_delete_guard() {
+        // `User` has no `deleted_at` column (`db/models/user.py:56`), so
+        // every `users` read must filter on the id alone; PIDASHCONV-237
+        // regressed all seven social paths with a guard the schema rejects.
+        assert!(!user_detail_sql().contains("deleted_at"));
+        assert!(user_detail_sql().contains("\"users\".\"id\" = $1"));
+        assert!(!display_name_sql().contains("deleted_at"));
+        assert_eq!(
+            nullable_fk_sql("users"),
+            "SELECT id FROM users WHERE id = $1"
+        );
+        // Soft-deletable tables keep the manager's filter.
+        for table in ["issue_comments", "descriptions"] {
+            assert_eq!(
+                nullable_fk_sql(table),
+                format!("SELECT id FROM {table} WHERE id = $1 AND deleted_at IS NULL")
+            );
+        }
+    }
+
+    #[test]
+    fn varchar_arrays_decode_to_string_lists() {
+        // `attachments`/`labels` are `varchar[]`, bound as string lists;
+        // the stored JSON array decodes back the same way on update.
+        assert_eq!(
+            string_list(&Value::Null).expect("null"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            string_list(&serde_json::json!(["a", "b"])).expect("array"),
+            vec!["a".to_owned(), "b".to_owned()]
+        );
+        assert!(string_list(&serde_json::json!([1])).is_err());
     }
 
     fn test_router() -> Router {
