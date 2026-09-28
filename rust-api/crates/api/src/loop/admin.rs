@@ -642,6 +642,45 @@ fn prepare_write(cleaned: &Map<String, Value>) -> Result<PreparedWrite, Denial> 
     })
 }
 
+/// Columns a PATCH writes, in bind order: every key present in `cleaned`,
+/// including explicit nulls. Python `setattr(job, key, None)` + `save()`
+/// writes NULL (the NOT NULL columns answer the `IntegrityError` 400), so
+/// an explicit null must bind NULL — skipping the column would wrongly
+/// answer 200 unchanged (the Porting guide's `None`-vs-absent trap).
+fn patch_columns(cleaned: &Map<String, Value>) -> Vec<&'static str> {
+    const ALL: [&str; 10] = [
+        "slug",
+        "name",
+        "public_name",
+        "public_description",
+        "prompt",
+        "min_role",
+        "enabled",
+        "dtstart",
+        "rrule",
+        "tzid",
+    ];
+    ALL.into_iter()
+        .filter(|col| cleaned.contains_key(*col))
+        .collect()
+}
+
+/// Create-time value for an optional-with-default column: the model default
+/// applies only when the key is absent. An explicit null binds NULL (the
+/// `IntegrityError` 400), never the default.
+fn or_default_when_absent<T>(
+    cleaned: &Map<String, Value>,
+    key: &str,
+    prepared: Option<T>,
+    default: T,
+) -> Option<T> {
+    if cleaned.contains_key(key) {
+        prepared
+    } else {
+        Some(default)
+    }
+}
+
 /// Map a write error the way `BaseAPIView.handle_exception` does:
 /// unique/CHECK/NOT NULL violations are `IntegrityError` → 400
 /// invalid-payload; everything else (truncation `DataError`, …) is the
@@ -726,13 +765,23 @@ async fn create_job(
     .bind(write.slug.unwrap_or(slug))
     .bind(write.name)
     .bind(write.public_name)
-    .bind(write.public_description.unwrap_or_default())
+    .bind(or_default_when_absent(
+        &cleaned,
+        "public_description",
+        write.public_description,
+        String::new(),
+    ))
     .bind(write.prompt)
     .bind(write.min_role.unwrap_or(15))
-    .bind(write.enabled.unwrap_or(true))
-    .bind(write.dtstart.unwrap_or(now))
+    .bind(or_default_when_absent(&cleaned, "enabled", write.enabled, true))
+    .bind(or_default_when_absent(&cleaned, "dtstart", write.dtstart, now))
     .bind(write.rrule)
-    .bind(write.tzid.unwrap_or_else(|| "UTC".to_owned()))
+    .bind(or_default_when_absent(
+        &cleaned,
+        "tzid",
+        write.tzid,
+        "UTC".to_owned(),
+    ))
     .bind(now)
     .bind(now)
     .bind(actor)
@@ -823,50 +872,21 @@ async fn patch_job(
         }
     }
 
-    let write = prepare_write(&cleaned)?;
+    let mut write = prepare_write(&cleaned)?;
     let now = Utc::now();
     // `setattr` + `save()`: only cleaned columns plus the `auto_now`
-    // `updated_at` (and the audit `updated_by`) move.
+    // `updated_at` (and the audit `updated_by`) move. Columns come from
+    // one helper so the SET list and the binds cannot drift apart; an
+    // explicit null binds NULL (never skips).
+    let columns = patch_columns(&cleaned);
     let mut sets = vec![
         "updated_at = $1".to_owned(),
         "updated_by_id = $2".to_owned(),
     ];
     let mut next = 3i64;
-    macro_rules! push_set {
-        ($col:literal) => {{
-            sets.push(format!("{} = ${}", $col, next));
-            next += 1;
-        }};
-    }
-    if write.slug.is_some() {
-        push_set!("slug");
-    }
-    if write.name.is_some() {
-        push_set!("name");
-    }
-    if write.public_name.is_some() {
-        push_set!("public_name");
-    }
-    if write.public_description.is_some() {
-        push_set!("public_description");
-    }
-    if write.prompt.is_some() {
-        push_set!("prompt");
-    }
-    if write.min_role.is_some() {
-        push_set!("min_role");
-    }
-    if write.enabled.is_some() {
-        push_set!("enabled");
-    }
-    if write.dtstart.is_some() {
-        push_set!("dtstart");
-    }
-    if write.rrule.is_some() {
-        push_set!("rrule");
-    }
-    if write.tzid.is_some() {
-        push_set!("tzid");
+    for col in &columns {
+        sets.push(format!("{col} = ${next}"));
+        next += 1;
     }
     let sql = format!(
         "UPDATE loop_jobs SET {} WHERE id = ${} AND deleted_at IS NULL RETURNING {JOB_ROW_SELECT}",
@@ -874,36 +894,20 @@ async fn patch_job(
         next
     );
     let mut query = sqlx::query_as::<_, JobRow>(&sql).bind(now).bind(actor);
-    // Bind order follows the `push_set!` order above.
-    if let Some(v) = write.slug {
-        query = query.bind(v);
-    }
-    if let Some(v) = write.name {
-        query = query.bind(v);
-    }
-    if let Some(v) = write.public_name {
-        query = query.bind(v);
-    }
-    if let Some(v) = write.public_description {
-        query = query.bind(v);
-    }
-    if let Some(v) = write.prompt {
-        query = query.bind(v);
-    }
-    if let Some(v) = write.min_role {
-        query = query.bind(v);
-    }
-    if let Some(v) = write.enabled {
-        query = query.bind(v);
-    }
-    if let Some(v) = write.dtstart {
-        query = query.bind(v);
-    }
-    if let Some(v) = write.rrule {
-        query = query.bind(v);
-    }
-    if let Some(v) = write.tzid {
-        query = query.bind(v);
+    for col in &columns {
+        match *col {
+            "slug" => query = query.bind(write.slug.take()),
+            "name" => query = query.bind(write.name.take()),
+            "public_name" => query = query.bind(write.public_name.take()),
+            "public_description" => query = query.bind(write.public_description.take()),
+            "prompt" => query = query.bind(write.prompt.take()),
+            "min_role" => query = query.bind(write.min_role.take()),
+            "enabled" => query = query.bind(write.enabled.take()),
+            "dtstart" => query = query.bind(write.dtstart.take()),
+            "rrule" => query = query.bind(write.rrule.take()),
+            "tzid" => query = query.bind(write.tzid.take()),
+            _ => unreachable!("patch_columns only yields writable columns"),
+        }
     }
     let query = query.bind(job_id);
     let row: Option<JobRow> = query.fetch_optional(pool).await.map_err(map_write_error)?;
@@ -1327,6 +1331,62 @@ mod tests {
             run_completed_at: None,
         };
         assert_eq!(&render_target_row(&skipped_row), skipped);
+    }
+
+    #[test]
+    fn patch_columns_include_explicit_nulls_in_order() {
+        // The `None`-vs-absent trap: an explicit null is a write (binds
+        // NULL), so the PATCH column list keys on presence, not on the
+        // prepared value.
+        let cleaned = guards::validate_writes(
+            &json!({"name": null, "enabled": null, "dtstart": null, "tzid": "UTC"}),
+            true,
+        )
+        .expect("nulls validate clean");
+        assert_eq!(
+            patch_columns(&cleaned),
+            vec!["name", "enabled", "dtstart", "tzid"]
+        );
+        let write = prepare_write(&cleaned).expect("prepares");
+        assert!(write.name.is_none());
+        assert!(write.enabled.is_none());
+        assert!(write.dtstart.is_none());
+        assert!(!write.dtstart_was_string);
+        assert_eq!(write.tzid.as_deref(), Some("UTC"));
+        let empty = guards::validate_writes(&json!({}), true).expect("empty patch validates");
+        assert!(patch_columns(&empty).is_empty());
+    }
+
+    #[test]
+    fn create_defaults_apply_only_when_absent() {
+        // Absent keys take the model defaults; explicit nulls stay null so
+        // the NOT NULL columns answer the `IntegrityError` 400.
+        let absent = guards::validate_writes(&json!({}), true).expect("empty patch validates");
+        assert_eq!(
+            or_default_when_absent(&absent, "enabled", None, true),
+            Some(true)
+        );
+        assert_eq!(
+            or_default_when_absent(&absent, "public_description", None, String::new()),
+            Some(String::new())
+        );
+        let nulled =
+            guards::validate_writes(&json!({"enabled": null, "public_description": null}), true)
+                .expect("nulls validate clean");
+        let prepared = prepare_write(&nulled).expect("prepares");
+        assert_eq!(
+            or_default_when_absent(&nulled, "enabled", prepared.enabled, true),
+            None
+        );
+        assert_eq!(
+            or_default_when_absent(
+                &nulled,
+                "public_description",
+                prepared.public_description,
+                String::new()
+            ),
+            None
+        );
     }
 
     #[test]
