@@ -310,8 +310,8 @@ def test_complete_endpoint_marks_terminal_and_drains(db, api_client, runner_toke
 
 @pytest.mark.unit
 def test_complete_endpoint_clears_stale_error(db, api_client, runner_token, assigned_run):
-    assigned_run.error = "daemon shutdown requested"
-    assigned_run.save(update_fields=["error"])
+    assigned_run.error_details = {"message": "daemon shutdown requested"}
+    assigned_run.save(update_fields=["error_details"])
 
     resp = api_client.post(
         f"/api/v1/runner/runs/{assigned_run.id}/complete/",
@@ -359,8 +359,8 @@ def test_late_complete_does_not_overwrite_failed_run(db, api_client, runner_toke
 def test_late_started_does_not_revive_failed_run(db, api_client, runner_token, assigned_run):
     assigned_run.status = AgentRunStatus.FAILED
     assigned_run.ended_at = timezone.now()
-    assigned_run.error = "reaped by heartbeat"
-    assigned_run.save(update_fields=["status", "ended_at", "error"])
+    assigned_run.error_details = {"message": "reaped by heartbeat"}
+    assigned_run.save(update_fields=["status", "ended_at", "error_details"])
 
     resp = api_client.post(
         f"/api/v1/runner/runs/{assigned_run.id}/started/",
@@ -445,8 +445,8 @@ def test_late_resume_unavailable_does_not_requeue_failed_run(
 ):
     assigned_run.status = AgentRunStatus.FAILED
     assigned_run.ended_at = timezone.now()
-    assigned_run.error = "reaped by heartbeat"
-    assigned_run.save(update_fields=["status", "ended_at", "error"])
+    assigned_run.error_details = {"message": "reaped by heartbeat"}
+    assigned_run.save(update_fields=["status", "ended_at", "error_details"])
 
     resp = api_client.post(
         f"/api/v1/runner/runs/{assigned_run.id}/fail/",
@@ -519,8 +519,8 @@ def test_late_assign_rejected_busy_does_not_requeue_failed_run(
 ):
     assigned_run.status = AgentRunStatus.FAILED
     assigned_run.ended_at = timezone.now()
-    assigned_run.error = "reaped by heartbeat"
-    assigned_run.save(update_fields=["status", "ended_at", "error"])
+    assigned_run.error_details = {"message": "reaped by heartbeat"}
+    assigned_run.save(update_fields=["status", "ended_at", "error_details"])
 
     resp = api_client.post(
         f"/api/v1/runner/runs/{assigned_run.id}/fail/",

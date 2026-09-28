@@ -438,7 +438,9 @@ def finalize_run_terminal(
         updates["error"] = error_detail[:16000]
     if new_status == AgentRunStatus.REFUSED:
         # A safety-classifier decline. Record the category (always set, so the
-        # column is queryable) and surface the explanation, if any, in `error`.
+        # generated ``refusal_category`` column stays queryable) and surface
+        # the explanation, if any, in `error`. Both land in ``error_details``;
+        # ``finalize_agent_run`` does the folding.
         updates["refusal_category"] = _normalize_refusal_category(refusal_category)
         if error_detail:
             updates["error"] = error_detail[:16000]

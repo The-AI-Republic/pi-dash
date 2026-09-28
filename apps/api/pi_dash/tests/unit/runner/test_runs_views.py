@@ -156,7 +156,7 @@ def test_get_run_detail_exposes_error_diagnostic(db, session_client, workspace, 
         pod=Pod.default_for_project(project),
         prompt="broken auth",
         status=AgentRunStatus.FAILED,
-        error=error,
+        error_details={"message": error},
     )
 
     resp = session_client.get(f"/api/runners/runs/{run.id}/")

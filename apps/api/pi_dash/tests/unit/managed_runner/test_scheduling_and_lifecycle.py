@@ -158,7 +158,7 @@ def _waiting_run(project, user, runner, *, age=timedelta(0)):
         executor_kind=AgentExecutorKind.MANAGED_RUNNER,
         pinned_runner=runner,
         status=AgentRunStatus.QUEUED,
-        error_code=ManagedRunnerReason.NOT_CONNECTED,
+        error_details={"code": ManagedRunnerReason.NOT_CONNECTED},
         prompt="",
     )
     if age:

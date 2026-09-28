@@ -59,3 +59,48 @@ class JSONKeyBigIntegerField(models.BigIntegerField):
 
     def pre_save(self, model_instance, add):
         return _ColumnDefault()
+
+
+class JSONKeyTextField(models.TextField):
+    """A read-only ``text`` column Postgres derives from one key of a JSON
+    column: ``GENERATED ALWAYS AS (COALESCE(<json_column> ->> '<key>', ''))
+    STORED``.
+
+    The text sibling of :class:`JSONKeyBigIntegerField`, for a value that
+    lives inside a JSON bag but is still wanted as a grouping dimension —
+    ``values("refusal_category").annotate(Count("id"))`` gets a real column
+    with real planner statistics instead of an expression index whose
+    selectivity the planner has to guess at.
+
+    The ``COALESCE`` matters: the folded column it replaces was
+    ``blank=True, default=""``, so a row without the key must read back as
+    ``""`` and not ``None`` or the API contract changes shape.
+
+    Writes are impossible by construction — see
+    :class:`JSONKeyBigIntegerField`.
+    """
+
+    db_returning = True
+
+    def __init__(self, *args, source: str, key: str, **kwargs):
+        self.source = source
+        self.key = key
+        kwargs["null"] = True
+        kwargs["blank"] = True
+        kwargs["editable"] = False
+        super().__init__(*args, **kwargs)
+
+    def deconstruct(self):
+        name, path, args, kwargs = super().deconstruct()
+        for implied in ("null", "blank", "editable"):
+            kwargs.pop(implied, None)
+        kwargs["source"] = self.source
+        kwargs["key"] = self.key
+        return name, path, args, kwargs
+
+    def db_type(self, connection):
+        source = connection.ops.quote_name(self.source)
+        return f"text GENERATED ALWAYS AS (COALESCE({source} ->> '{self.key}', '')) STORED"
+
+    def pre_save(self, model_instance, add):
+        return _ColumnDefault()
