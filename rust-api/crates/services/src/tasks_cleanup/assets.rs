@@ -529,17 +529,15 @@ pub fn entity_select_sql(entity: CopyEntity) -> String {
 }
 
 /// `FileAsset.objects.filter(workspace, project_id, id__in)` for the copy
-/// scope (`copy_s3_object.py:90`). `$1` workspace, `$2` project (`IS NULL`
-/// when the caller passed none), `$3` the extracted ids.
+/// scope (`copy_s3_object.py:90`). `$1` workspace; with a project the
+/// project is `$2` and the id list `$3`, without one (`IS NULL`, matching
+/// `filter(project_id=None)`) the id list is `$2` so the binds line up.
 pub fn original_assets_sql(project_is_null: bool) -> String {
-    let project = if project_is_null {
-        "\"project_id\" IS NULL".to_string()
+    if project_is_null {
+        "SELECT \"id\", \"asset\", \"attributes\", \"size\", \"entity_type\", \"storage_metadata\" FROM \"file_assets\" WHERE (\"deleted_at\" IS NULL AND \"workspace_id\" = $1 AND \"project_id\" IS NULL AND \"id\" = ANY($2))".to_string()
     } else {
-        "\"project_id\" = $2".to_string()
-    };
-    format!(
-        "SELECT \"id\", \"asset\", \"attributes\", \"size\", \"entity_type\", \"storage_metadata\" FROM \"file_assets\" WHERE (\"deleted_at\" IS NULL AND \"workspace_id\" = $1 AND {project} AND \"id\" = ANY($3))"
-    )
+        "SELECT \"id\", \"asset\", \"attributes\", \"size\", \"entity_type\", \"storage_metadata\" FROM \"file_assets\" WHERE (\"deleted_at\" IS NULL AND \"workspace_id\" = $1 AND \"project_id\" = $2 AND \"id\" = ANY($3))".to_string()
+    }
 }
 
 /// `FileAsset.objects.create(...)` (`copy_s3_object.py:94-108`): every
@@ -922,7 +920,9 @@ mod tests {
         assert!(with_project.contains("\"id\" = ANY($3)"));
         let null_project = original_assets_sql(true);
         assert!(null_project.contains("\"project_id\" IS NULL"));
-        assert!(!null_project.contains("$2"));
+        // No `$3` without a project bind: the id list is `$2`.
+        assert!(null_project.contains("\"id\" = ANY($2)"));
+        assert!(!null_project.contains("$3"));
     }
 
     #[test]

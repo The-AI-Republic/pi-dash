@@ -570,7 +570,7 @@ impl AssetStore for PgAssetStore {
             .bind(None::<DateTime<Utc>>)
             .bind(sqlx::types::Json(asset.attributes))
             .bind(asset.asset_key)
-            .bind(None::<Uuid>)
+            .bind(asset.user_id)
             .bind(asset.workspace_id)
             .bind(asset.draft_issue_id)
             .bind(asset.project_id)
