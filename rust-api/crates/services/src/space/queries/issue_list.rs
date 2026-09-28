@@ -122,9 +122,14 @@ pub fn base_where_sql() -> String {
 
 /// `cycle_id` annotation subquery (`views/issue.py:98-102`):
 /// `Subquery(CycleIssue.objects.filter(issue=OuterRef("id"),
-/// deleted_at__isnull=True).values("cycle_id")[:1])`.
+/// deleted_at__isnull=True).values("cycle_id")[:1])`. The filter does NOT
+/// clear ordering, so `CycleIssue.Meta.ordering = ("-created_at",)`
+/// (`db/models/cycle.py:124`) renders `ORDER BY ... DESC` before the
+/// `LIMIT 1` — the pick among several live cycle links is deterministic.
+/// (The other three subqueries call `.order_by()` in Python, so Django
+/// emits no `ORDER BY` for them.)
 pub fn cycle_id_annotation_sql() -> String {
-    "(SELECT U0.\"cycle_id\" FROM \"cycle_issues\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\")) LIMIT 1) AS \"cycle_id\"".to_string()
+    "(SELECT U0.\"cycle_id\" FROM \"cycle_issues\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\")) ORDER BY U0.\"created_at\" DESC LIMIT 1) AS \"cycle_id\"".to_string()
 }
 
 /// `link_count` annotation subquery (`views/issue.py:103-108`).
@@ -188,10 +193,17 @@ pub fn order_by_sql(order_by_param: &str) -> String {
             )
         }
         "state__group" | "-state__group" => {
-            // `:26`: ascending uses STATE_ORDER as-is only for the (dead)
-            // "state__name" spelling; both live spellings reverse it.
-            let rev: Vec<&&str> = STATE_GROUP_ORDER.iter().rev().collect();
-            let cases: Vec<String> = rev
+            // `:26`: `STATE_ORDER if order_by_param in
+            // ["state__name", "state__group"] else STATE_ORDER[::-1]` —
+            // the live ascending "state__group" spelling IS in that list,
+            // so it uses STATE_ORDER as-is (backlog first); only
+            // "-state__group" reverses (cancelled first).
+            let order: Vec<&&str> = if order_by_param.starts_with('-') {
+                STATE_GROUP_ORDER.iter().rev().collect()
+            } else {
+                STATE_GROUP_ORDER.iter().collect()
+            };
+            let cases: Vec<String> = order
                 .iter()
                 .enumerate()
                 .map(|(i, g)| format!("WHEN \"states\".\"group\" = '{g}' THEN {i}"))
@@ -199,7 +211,7 @@ pub fn order_by_sql(order_by_param: &str) -> String {
             format!(
                 "ORDER BY CASE {} ELSE {} END, \"issues\".\"created_at\" DESC",
                 cases.join(" "),
-                rev.len()
+                order.len()
             )
         }
         "labels__name"
@@ -269,8 +281,13 @@ pub struct FilterCompile {
     pub params: Vec<String>,
 }
 
-/// Keep tokens that are neither `"null"` nor empty
-/// (`issue_filters.py:88,100,110,...`: `split(",")` + `!= "null"` + `"" not in`).
+/// Keep comma-separated tokens minus `"null"`; void the whole param when any
+/// token is empty. Used by the plain-string GET branches (`state_group`,
+/// `estimate_point`, `priority`, `intake_status`, `inbox_status`), where the
+/// raw-string `"" not in <list>` guard is live (`issue_filters.py:100-101`
+/// etc.). UUID branches must NOT use this: post-`filter_valid_uuids` the
+/// list holds `UUID` objects so the `""` guard is dead and empties/invalid
+/// tokens are silently dropped (`issue_filters.py:18-27,90`).
 fn get_tokens(raw: &str) -> Option<Vec<String>> {
     let tokens: Vec<String> = raw
         .split(',')
@@ -281,16 +298,6 @@ fn get_tokens(raw: &str) -> Option<Vec<String>> {
         return None;
     }
     Some(tokens)
-}
-
-/// UUID-valid tokens only; invalid ones are silently dropped
-/// (`filter_valid_uuids`, `issue_filters.py:18-27`).
-fn valid_uuids(tokens: &[String]) -> Vec<String> {
-    tokens
-        .iter()
-        .filter(|t| t.parse::<uuid::Uuid>().is_ok())
-        .cloned()
-        .collect()
 }
 
 /// `IN` conjunct with one `$N` per value, e.g.
@@ -306,12 +313,19 @@ fn in_conjunct(column: &str, values: &[String], next_param: usize) -> (String, u
 }
 
 /// UUID-list filter used by the state/parent/project/mentions/created_by/
-/// logged_by GET branches: drop `"None"`-adjacent handling per branch, keep
-/// valid UUIDs, emit `column IN (...)`. Returns `None` when nothing valid
-/// remains (no conjunct — `issue_filters.py:90-91` etc.).
+/// logged_by GET branches: drop `"null"` tokens, silently drop empty and
+/// invalid tokens (`filter_valid_uuids`, `issue_filters.py:18-27`), emit
+/// `column IN (...)` when anything valid remains. Returns `None` when
+/// nothing valid remains (no conjunct — `issue_filters.py:90-91` etc.).
+/// NOTE: unlike [`get_tokens`], an empty token does NOT void the param —
+/// e.g. `?state=<uuid>,` (trailing comma) still filters in Python.
 fn uuid_in(column: &str, raw: &str, next_param: usize) -> Option<(String, Vec<String>, usize)> {
-    let tokens = get_tokens(raw)?;
-    let ids = valid_uuids(&tokens);
+    let ids: Vec<String> = raw
+        .split(',')
+        .filter(|t| *t != "null")
+        .filter(|t| t.parse::<uuid::Uuid>().is_ok())
+        .map(str::to_string)
+        .collect();
     if ids.is_empty() {
         return None;
     }
@@ -332,6 +346,16 @@ pub fn compile_issue_filters(
     let mut conjuncts = Vec::new();
     let mut params: Vec<String> = Vec::new();
     let mut next = next_param;
+    // `issue_filters()` accumulates into one DICT (`issue_filters.py:432`),
+    // so two entries writing the same key collapse last-write-wins in
+    // `ISSUE_FILTER` order (`:434-460`): `type` (later) overwrites
+    // `state_group`'s `state__group__in` (`:298-308` vs `:98-106`), and
+    // `inbox_status` (later) overwrites `intake_status`'s
+    // `issue_intake__status__in` (`:353-380`). AND-ing both would narrow
+    // (often to empty), so the loser is skipped when both params are
+    // present.
+    let has_type = query_params.iter().any(|(k, _)| k == "type");
+    let has_inbox_status = query_params.iter().any(|(k, _)| k == "inbox_status");
     for (key, raw) in query_params {
         match key.as_str() {
             "state" => {
@@ -341,7 +365,7 @@ pub fn compile_issue_filters(
                     next = n;
                 }
             }
-            "state_group" => {
+            "state_group" if !has_type => {
                 if let Some(tokens) = get_tokens(raw) {
                     let (c, n) = in_conjunct("\"states\".\"group\"", &tokens, next);
                     conjuncts.push(c);
@@ -434,36 +458,49 @@ pub fn compile_issue_filters(
                 params.push(format!("%{raw}%"));
                 next += 1;
             }
+            // `created_at__date` / `completed_at__date` compare on the date
+            // part (`issue_filters.py:217,285`); `start_date`/`target_date`
+            // are bare `DateField` columns (`:255,270`).
             "created_at" => {
-                for (c, p) in date_conjuncts("\"issues\".\"created_at\"", raw) {
+                let (cs, n) = date_conjuncts("\"issues\".\"created_at\"", raw, true, next);
+                for (c, p) in cs {
                     conjuncts.push(c);
                     params.extend(p);
                 }
+                next = n;
             }
             // QUIRK-filtered-out-updated-at: writes the created_at term.
             "updated_at" => {
-                for (c, p) in date_conjuncts("\"issues\".\"created_at\"", raw) {
+                let (cs, n) = date_conjuncts("\"issues\".\"created_at\"", raw, true, next);
+                for (c, p) in cs {
                     conjuncts.push(c);
                     params.extend(p);
                 }
+                next = n;
             }
             "start_date" => {
-                for (c, p) in date_conjuncts("\"issues\".\"start_date\"", raw) {
+                let (cs, n) = date_conjuncts("\"issues\".\"start_date\"", raw, false, next);
+                for (c, p) in cs {
                     conjuncts.push(c);
                     params.extend(p);
                 }
+                next = n;
             }
             "target_date" => {
-                for (c, p) in date_conjuncts("\"issues\".\"target_date\"", raw) {
+                let (cs, n) = date_conjuncts("\"issues\".\"target_date\"", raw, false, next);
+                for (c, p) in cs {
                     conjuncts.push(c);
                     params.extend(p);
                 }
+                next = n;
             }
             "completed_at" => {
-                for (c, p) in date_conjuncts("\"issues\".\"completed_at\"", raw) {
+                let (cs, n) = date_conjuncts("\"issues\".\"completed_at\"", raw, true, next);
+                for (c, p) in cs {
                     conjuncts.push(c);
                     params.extend(p);
                 }
+                next = n;
             }
             "type" => {
                 // `filter_issue_state_type` (`issue_filters.py:298-308`):
@@ -514,7 +551,7 @@ pub fn compile_issue_filters(
                 }
                 conjuncts.push("\"issue_module\".\"deleted_at\" IS NULL".to_string());
             }
-            "intake_status" | "inbox_status" => {
+            "intake_status" if !has_inbox_status => {
                 if let Some(tokens) = get_tokens(raw) {
                     let (c, n) = in_conjunct("\"issue_intake\".\"status\"", &tokens, next);
                     conjuncts.push(c);
@@ -522,18 +559,20 @@ pub fn compile_issue_filters(
                     next = n;
                 }
             }
-            "sub_issue" => {
-                // `filter_sub_issue_toggle` (`issue_filters.py:383-392`):
-                // default "false" excludes childless-parent... precisely:
-                // "false" keeps only top-level issues.
-                let v = if raw.is_empty() {
-                    "false"
-                } else {
-                    raw.as_str()
-                };
-                if v == "false" {
-                    conjuncts.push("\"issues\".\"parent_id\" IS NULL".to_string());
+            "inbox_status" => {
+                if let Some(tokens) = get_tokens(raw) {
+                    let (c, n) = in_conjunct("\"issue_intake\".\"status\"", &tokens, next);
+                    conjuncts.push(c);
+                    params.extend(tokens);
+                    next = n;
                 }
+            }
+            // `filter_sub_issue_toggle` (`issue_filters.py:383-392`):
+            // `params.get("sub_issue", "false")` — only exactly `"false"`
+            // keeps top-level issues; an explicitly empty value is NOT the
+            // default and filters nothing.
+            "sub_issue" if raw == "false" => {
+                conjuncts.push("\"issues\".\"parent_id\" IS NULL".to_string());
             }
             "subscriber" => {
                 if let Some((c, ids, n)) =
@@ -557,15 +596,37 @@ pub fn compile_issue_filters(
 
 /// Date-term conjuncts for one comma-separated GET value
 /// (`date_filter`, `issue_filters.py:57-83`): `after` selects `>=`, anything
-/// else `<=` on two-part queries; a bare single part is `__contains`
-/// (ILIKE here); `N_weeks`/`N_months` relative terms are handler-resolved
-/// against "today" and intentionally contribute no static conjunct.
-fn date_conjuncts(column: &str, raw: &str) -> Vec<(String, Vec<String>)> {
-    let mut out = Vec::new();
-    for query in raw.split(',') {
-        if query.is_empty() {
-            continue;
+/// else `<=` on two-part queries; a bare single part is `__contains` (a
+/// case-sensitive `LIKE` on the date text in Django). `N_weeks`/`N_months`
+/// relative terms are handler-resolved against "today" and intentionally
+/// contribute no static conjunct.
+/// `date_cast` selects the Django `__date` transform used by the
+/// `created_at`/`updated_at`/`completed_at` terms
+/// (`issue_filters.py:217,236,285`): comparisons run on
+/// `{column}::date`, so `date <= D` covers all of day D. `start_date` and
+/// `target_date` are bare `DateField` columns (`:255,270`).
+/// An empty comma-token voids the whole param (`"" not in <list>` on the raw
+/// strings, `issue_filters.py:212-219` etc.). Values are bound as `$N`
+/// params, never interpolated.
+fn date_conjuncts(
+    column: &str,
+    raw: &str,
+    date_cast: bool,
+    next_param: usize,
+) -> (Vec<(String, Vec<String>)>, usize) {
+    if raw.split(',').any(|q| q.is_empty()) {
+        return (Vec::new(), next_param);
+    }
+    let lhs = |column: &str| {
+        if date_cast {
+            format!("{column}::date")
+        } else {
+            column.to_string()
         }
+    };
+    let mut out = Vec::new();
+    let mut next = next_param;
+    for query in raw.split(',') {
         let parts: Vec<&str> = query.split(';').collect();
         if parts.len() >= 2 {
             let head = parts[0];
@@ -582,15 +643,26 @@ fn date_conjuncts(column: &str, raw: &str) -> Vec<(String, Vec<String>)> {
                 continue;
             }
             if parts.contains(&"after") {
-                out.push((format!("{column} >= '{head}'"), vec![]));
+                out.push((
+                    format!("{} >= ${next}", lhs(column)),
+                    vec![head.to_string()],
+                ));
             } else {
-                out.push((format!("{column} <= '{head}'"), vec![]));
+                out.push((
+                    format!("{} <= ${next}", lhs(column)),
+                    vec![head.to_string()],
+                ));
             }
+            next += 1;
         } else {
-            out.push((format!("{column}::text ILIKE '%{}%'", parts[0]), vec![]));
+            out.push((
+                format!("{}::text LIKE ${next}", lhs(column)),
+                vec![format!("%{}%", parts[0])],
+            ));
+            next += 1;
         }
     }
-    out
+    (out, next)
 }
 
 // ---------------------------------------------------------------------------
@@ -786,6 +858,13 @@ pub struct GroupValuesQuery {
     pub project_filter: &'static str,
     /// Extra `WHERE` conjuncts (manager scopes, active flags).
     pub extra_where: &'static str,
+    /// Workspace scoping column: every DB branch filters
+    /// `workspace__slug=slug` (`grouper.py:193,199,206,211,214,220,226`),
+    /// so the handler must add `{workspace_column} = $N` bound to the
+    /// board row's workspace id. (BaseModel carries no auto soft-delete
+    /// manager, so these branches have NO `deleted_at` guard in Python —
+    /// soft-deleted labels/modules/cycles/projects ARE listed.)
+    pub workspace_column: &'static str,
     /// `"None"` sentinel appended after the ids.
     pub none_sentinel: bool,
 }
@@ -799,13 +878,15 @@ pub fn group_values_query(field: &str) -> Option<GroupValuesQuery> {
             column: "\"id\"",
             project_filter: "\"project_id\"",
             extra_where: "\"is_triage\" = false",
+            workspace_column: "\"states\".\"workspace_id\"",
             none_sentinel: false,
         }),
         "labels__id" => Some(GroupValuesQuery {
             table: "\"labels\"",
             column: "\"id\"",
             project_filter: "\"project_id\"",
-            extra_where: "\"deleted_at\" IS NULL",
+            extra_where: "",
+            workspace_column: "\"labels\".\"workspace_id\"",
             none_sentinel: true,
         }),
         "assignees__id" => Some(GroupValuesQuery {
@@ -813,27 +894,31 @@ pub fn group_values_query(field: &str) -> Option<GroupValuesQuery> {
             column: "\"member_id\"",
             project_filter: "\"project_id\"",
             extra_where: "\"is_active\" = true",
+            workspace_column: "\"project_members\".\"workspace_id\"",
             none_sentinel: false,
         }),
         "issue_module__module_id" => Some(GroupValuesQuery {
             table: "\"modules\"",
             column: "\"id\"",
             project_filter: "\"project_id\"",
-            extra_where: "\"deleted_at\" IS NULL",
+            extra_where: "",
+            workspace_column: "\"modules\".\"workspace_id\"",
             none_sentinel: true,
         }),
         "cycle_id" => Some(GroupValuesQuery {
             table: "\"cycles\"",
             column: "\"id\"",
             project_filter: "\"project_id\"",
-            extra_where: "\"deleted_at\" IS NULL",
+            extra_where: "",
+            workspace_column: "\"cycles\".\"workspace_id\"",
             none_sentinel: true,
         }),
         "project_id" => Some(GroupValuesQuery {
             table: "\"projects\"",
             column: "\"id\"",
             project_filter: "",
-            extra_where: "\"deleted_at\" IS NULL",
+            extra_where: "",
+            workspace_column: "\"projects\".\"workspace_id\"",
             none_sentinel: false,
         }),
         // The date/author branches read distinct values off the issue
@@ -846,6 +931,7 @@ pub fn group_values_query(field: &str) -> Option<GroupValuesQuery> {
             column: "\"target_date\"",
             project_filter: "\"project_id\"",
             extra_where: "",
+            workspace_column: "\"issues\".\"workspace_id\"",
             none_sentinel: false,
         }),
         "start_date" => Some(GroupValuesQuery {
@@ -853,6 +939,7 @@ pub fn group_values_query(field: &str) -> Option<GroupValuesQuery> {
             column: "\"start_date\"",
             project_filter: "\"project_id\"",
             extra_where: "",
+            workspace_column: "\"issues\".\"workspace_id\"",
             none_sentinel: false,
         }),
         "created_by" => Some(GroupValuesQuery {
@@ -860,6 +947,7 @@ pub fn group_values_query(field: &str) -> Option<GroupValuesQuery> {
             column: "\"created_by_id\"",
             project_filter: "\"project_id\"",
             extra_where: "",
+            workspace_column: "\"issues\".\"workspace_id\"",
             none_sentinel: false,
         }),
         _ => None,
@@ -1040,10 +1128,12 @@ pub struct IssueListRow {
     pub label_ids: Vec<String>,
     /// `module_ids` (always annotated — BUG-always-annotate).
     pub module_ids: Vec<String>,
-    /// `vote_items` annotation.
-    pub vote_items: Vec<VoteItem>,
-    /// `reaction_items` annotation.
-    pub reaction_items: Vec<ReactionItem>,
+    /// `vote_items` annotation (nullable: Python applies no `Coalesce`, so
+    /// voteless issues yield SQL `NULL` → `None`; the handler must
+    /// `COALESCE … '[]'` or map null→`[]` before presenting).
+    pub vote_items: Option<Vec<VoteItem>>,
+    /// `reaction_items` annotation (nullable, same as `vote_items`).
+    pub reaction_items: Option<Vec<ReactionItem>>,
 }
 
 #[cfg(test)]
@@ -1118,7 +1208,18 @@ mod tests {
 
     #[test]
     fn annotation_subqueries_match_fixture_l2() {
-        assert_in_fixture(FIXTURE_SQL, &cycle_id_annotation_sql(), &[]);
+        // The cycle subquery keeps `CycleIssue.Meta.ordering =
+        // ("-created_at",)` (`db/models/cycle.py:124`) — the fixture's L2
+        // prose abbreviates the annotation, so pin the stable fragments
+        // from the builder side instead of the verbatim statement.
+        for frag in [
+            "SELECT U0.\"cycle_id\" FROM \"cycle_issues\" U0",
+            "U0.\"deleted_at\" IS NULL",
+            "U0.\"issue_id\" = (\"issues\".\"id\")",
+            "ORDER BY U0.\"created_at\" DESC LIMIT 1",
+        ] {
+            assert_builder_contains(&cycle_id_annotation_sql(), &[], frag);
+        }
         assert_in_fixture(FIXTURE_SQL, &link_count_annotation_sql(), &[]);
         assert_in_fixture(FIXTURE_SQL, &attachment_count_annotation_sql(), &[]);
         // The fixture abbreviates the manager exclusions inside the
@@ -1178,6 +1279,11 @@ mod tests {
         assert_eq!(order_key("priority"), "-priority_order");
         let state = order_by_sql("-state__group");
         assert!(state.contains("WHEN \"states\".\"group\" = 'cancelled' THEN 0"));
+        // Ascending keeps STATE_ORDER as-is: backlog first
+        // (`order_queryset.py:26` — the live spelling IS in the as-is list).
+        let state_asc = order_by_sql("state__group");
+        assert!(state_asc.contains("WHEN \"states\".\"group\" = 'backlog' THEN 0"));
+        assert!(state_asc.contains("WHEN \"states\".\"group\" = 'cancelled' THEN 6"));
         assert_eq!(order_key("state__group"), "state_order");
         assert_eq!(order_key("-state__group"), "-state_order");
         let m2m = order_by_sql("-assignees__first_name");
@@ -1196,13 +1302,23 @@ mod tests {
         let c = compile_issue_filters(&qp(&[("state", valid)]), 3);
         assert_eq!(
             c.conjuncts,
-            vec![format!("\"issues\".\"state_id\" IN ($3)")]
+            vec!["\"issues\".\"state_id\" IN ($3)".to_string()]
         );
         assert_eq!(c.params, vec![valid.to_string()]);
         // Invalid UUIDs are silently dropped with no conjunct.
         let bad = compile_issue_filters(&qp(&[("state", "not-a-uuid")]), 3);
         assert!(bad.conjuncts.is_empty());
         assert!(bad.params.is_empty());
+        // Empty/invalid tokens do NOT void the param (`filter_valid_uuids`
+        // drops them; the `""` guard is dead on UUID objects):
+        // `?state=<uuid>,` still filters (`issue_filters.py:18-27,90`).
+        let raw = format!("{valid},not-a-uuid,");
+        let trailing = compile_issue_filters(&qp(&[("state", raw.as_str())]), 3);
+        assert_eq!(
+            trailing.conjuncts,
+            vec!["\"issues\".\"state_id\" IN ($3)".to_string()]
+        );
+        assert_eq!(trailing.params, vec![valid.to_string()]);
         // "null" tokens contribute nothing; empty query contributes nothing.
         let null = compile_issue_filters(&qp(&[("state", "null")]), 3);
         assert!(null.conjuncts.is_empty());
@@ -1245,12 +1361,33 @@ mod tests {
 
     #[test]
     fn filters_updated_at_hits_created_at_and_type_always_emits() {
-        // QUIRK-filtered-out-updated-at: updated_at compiles to created_at.
+        // QUIRK-filtered-out-updated-at: updated_at compiles to created_at,
+        // on the date part (`created_at__date`, `issue_filters.py:236`).
         let c = compile_issue_filters(&qp(&[("updated_at", "2026-01-01;after")]), 3);
         assert_eq!(
             c.conjuncts,
-            vec!["\"issues\".\"created_at\" >= '2026-01-01'".to_string()]
+            vec!["\"issues\".\"created_at\"::date >= $3".to_string()]
         );
+        assert_eq!(c.params, vec!["2026-01-01".to_string()]);
+        // `start_date`/`target_date` are bare columns (no `__date` term).
+        let bare = compile_issue_filters(&qp(&[("target_date", "2026-10-01;before")]), 3);
+        assert_eq!(
+            bare.conjuncts,
+            vec!["\"issues\".\"target_date\" <= $3".to_string()]
+        );
+        assert_eq!(bare.params, vec!["2026-10-01".to_string()]);
+        // A bare single date part is `__contains` (case-sensitive LIKE).
+        let one = compile_issue_filters(&qp(&[("created_at", "2026-01")]), 3);
+        assert_eq!(
+            one.conjuncts,
+            vec!["\"issues\".\"created_at\"::date::text LIKE $3".to_string()]
+        );
+        assert_eq!(one.params, vec!["%2026-01%".to_string()]);
+        // An empty comma-token voids the whole date param
+        // (`"" not in` on raw strings, `issue_filters.py:212-219`).
+        let trailing = compile_issue_filters(&qp(&[("created_at", "2026-01-01,")]), 3);
+        assert!(trailing.conjuncts.is_empty());
+        assert!(trailing.params.is_empty());
         let back = compile_issue_filters(&qp(&[("type", "backlog")]), 3);
         assert_eq!(back.params, vec!["backlog".to_string()]);
         let active = compile_issue_filters(&qp(&[("type", "active")]), 3);
@@ -1260,12 +1397,26 @@ mod tests {
         );
         let all = compile_issue_filters(&qp(&[("type", "all")]), 3);
         assert_eq!(all.params.len(), STATE_GROUP_ORDER.len());
-        // sub_issue defaults to top-level-only; start_target_date needs both.
+        // `type` overwrites `state_group` (dict last-write-wins,
+        // `issue_filters.py:432`): only one `states.group` conjunct.
+        let both = compile_issue_filters(&qp(&[("state_group", "backlog"), ("type", "active")]), 3);
+        assert_eq!(both.conjuncts.len(), 1);
+        assert_eq!(both.params, vec!["unstarted", "started", "review", "test"]);
+        // `inbox_status` overwrites `intake_status` the same way.
+        let inbox =
+            compile_issue_filters(&qp(&[("intake_status", "1"), ("inbox_status", "-1")]), 3);
+        assert_eq!(inbox.conjuncts.len(), 1);
+        assert_eq!(inbox.params, vec!["-1".to_string()]);
+        // sub_issue keeps top-level-only on exactly "false"; an explicitly
+        // empty value is NOT the default and filters nothing
+        // (`issue_filters.py:383-392`).
         let sub = compile_issue_filters(&qp(&[("sub_issue", "false")]), 3);
         assert_eq!(
             sub.conjuncts,
             vec!["\"issues\".\"parent_id\" IS NULL".to_string()]
         );
+        let sub_empty = compile_issue_filters(&qp(&[("sub_issue", "")]), 3);
+        assert!(sub_empty.conjuncts.is_empty());
         let both = compile_issue_filters(&qp(&[("start_target_date", "true")]), 3);
         assert!(both
             .conjuncts
@@ -1373,9 +1524,22 @@ mod tests {
         assert_eq!(static_group_values("state_id"), None);
         let labels = group_values_query("labels__id").unwrap();
         assert!(labels.none_sentinel);
+        // No invented soft-delete guard: these branches read through the
+        // plain manager in Python (`grouper.py:199,214,220,226`).
+        for field in [
+            "labels__id",
+            "issue_module__module_id",
+            "cycle_id",
+            "project_id",
+        ] {
+            let q = group_values_query(field).unwrap();
+            assert!(q.extra_where.is_empty(), "{field}");
+            assert!(!q.workspace_column.is_empty(), "{field}");
+        }
         let states = group_values_query("state_id").unwrap();
         assert!(!states.none_sentinel);
         assert!(states.extra_where.contains("is_triage"));
+        assert_eq!(states.workspace_column, "\"states\".\"workspace_id\"");
         let members = group_values_query("assignees__id").unwrap();
         assert!(members.extra_where.contains("is_active"));
         // BUG-assignees-unwrapped: project-scoped assignees lose list().
@@ -1451,14 +1615,14 @@ mod tests {
             assignee_ids: vec!["11111111-1111-1111-1111-111111111111".to_string()],
             label_ids: vec!["77777777-7777-7777-7777-777777777777".to_string()],
             module_ids: vec![],
-            vote_items: vec![VoteItem {
+            vote_items: Some(vec![VoteItem {
                 vote: 1,
                 actor_details: actor.clone(),
-            }],
-            reaction_items: vec![ReactionItem {
+            }]),
+            reaction_items: Some(vec![ReactionItem {
                 reaction: "+1".to_string(),
                 actor_details: actor,
-            }],
+            }]),
         }
     }
 
@@ -1476,5 +1640,20 @@ mod tests {
             fixture_row()["rows_when_empty"],
             serde_json::Value::Array(vec![])
         );
+    }
+
+    #[test]
+    fn null_vote_and_reaction_items_round_trip() {
+        // Python applies no `Coalesce` to `vote_items`/`reaction_items`, so
+        // voteless/reactionless issues yield SQL `NULL` → `None`
+        // (`grouper.py:111-180`); the row carries that as JSON `null`.
+        let mut row = sample_row();
+        row.vote_items = None;
+        row.reaction_items = None;
+        let v = serde_json::to_value(&row).unwrap();
+        assert_eq!(v["vote_items"], serde_json::Value::Null);
+        assert_eq!(v["reaction_items"], serde_json::Value::Null);
+        let back: IssueListRow = serde_json::from_value(v).unwrap();
+        assert_eq!(back, row);
     }
 }
