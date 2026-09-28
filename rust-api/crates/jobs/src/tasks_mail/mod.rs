@@ -1,4 +1,4 @@
-//! Mail + notification background-task helpers (D-07, jobs layer).
+//! Mail + notification background tasks (D-07, jobs layer).
 //!
 //! Port of the pure helpers in
 //! `apps/api/pi_dash/bgtasks/email_notification_task.py`:
@@ -14,16 +14,20 @@
 //! mention/comment helpers (PIDASHCONV-214/215) and the single-task mail
 //! senders (PIDASHCONV-216/217) extend this module tree the same way.
 //!
-//! Ownership: no local handler is registered here yet — registering one
-//! would steal live traffic from the Python workers while SMTP, the
-//! templates and the remaining D-07 tasks still live there. Every name in
-//! [`TASK_NAMES`] therefore routes to `PythonOwned` (see
+//! T5 (PIDASHCONV-216) adds [`auth_mail`] (the four auth mail tasks) and
+//! [`mail_send`] (the shared send pipeline T6 reuses, never forks).
+//! [`register_auth_mail_tasks`] only builds the handler table — flipping
+//! the live worker to these handlers is the domain gate's call
+//! (PIDASHCONV-218, after the PIDASHCONV-21 proxy pass), so every name in
+//! [`TASK_NAMES`] still routes to `PythonOwned` (see
 //! [`crate::worker::route_for`]); the domain gate flips ownership after
-//! the PIDASHCONV-21 proxy pass, mirroring the `tasks_cleanup` export
-//! tasks. [`is_mail_task`] is the routing predicate and [`TASK_NAMES`]
+//! the proxy pass, mirroring the `tasks_cleanup` export tasks.
+//! [`is_mail_task`] is the routing predicate and [`TASK_NAMES`]
 //! is pinned against the `F-WIRE-MAIL` fixture below.
 
+pub mod auth_mail;
 pub mod email_notification;
+pub mod mail_send;
 
 use crate::worker::Registry;
 
@@ -39,10 +43,10 @@ pub const SEND_EMAIL_NOTIFICATION_TASK: &str =
 /// (`notification_task.py:191`). Handler lands in PIDASHCONV-215.
 pub const NOTIFICATIONS_TASK: &str = "pi_dash.bgtasks.notification_task.notifications";
 /// `pi_dash.bgtasks.magic_link_code_task.magic_link`
-/// (`magic_link_code_task.py:23`). Handler lands in PIDASHCONV-216.
+/// (`magic_link_code_task.py:23`). Handler in [`auth_mail`].
 pub const MAGIC_LINK_TASK: &str = "pi_dash.bgtasks.magic_link_code_task.magic_link";
 /// `pi_dash.bgtasks.forgot_password_task.forgot_password`
-/// (`forgot_password_task.py:23`). Handler lands in PIDASHCONV-216.
+/// (`forgot_password_task.py:23`). Handler in [`auth_mail`].
 pub const FORGOT_PASSWORD_TASK: &str = "pi_dash.bgtasks.forgot_password_task.forgot_password";
 /// `pi_dash.bgtasks.user_activation_email_task.user_activation_email`
 /// (`user_activation_email_task.py:23`). Handler lands in PIDASHCONV-216.
@@ -69,6 +73,14 @@ pub const PROJECT_ADD_USER_EMAIL_TASK: &str =
 pub const WORKSPACE_INVITATION_TASK: &str =
     "pi_dash.bgtasks.workspace_invitation_task.workspace_invitation";
 
+// `MAGIC_LINK_TASK` / `FORGOT_PASSWORD_TASK` live here (routing) and in
+// [`auth_mail`] (handlers) with identical values; the handler module's
+// copies are used qualified so there is exactly one definition each.
+pub use auth_mail::{
+    forgot_password_handler, magic_link_handler, update_confirm_handler, update_magic_handler,
+    AUTH_MAIL_TASKS, UPDATE_CONFIRM_TASK, UPDATE_MAGIC_TASK,
+};
+
 /// Every live D-07 Celery task name (11 tasks; `project_invitation_task.py`
 /// is dead code — no caller in `apps/api/pi_dash` — so it has no name here).
 pub const TASK_NAMES: [&str; 11] = [
@@ -91,11 +103,27 @@ pub fn is_mail_task(task: &str) -> bool {
     TASK_NAMES.contains(&task)
 }
 
-/// Nothing is registered yet: every D-07 name must stay Python-owned until
-/// the task bodies land (PIDASHCONV-213/215/216/217) and the domain gate
-/// flips ownership after the PIDASHCONV-21 proxy pass.
+/// The T5 handler table exists but is not called yet: every D-07 name must
+/// stay Python-owned until the domain gate flips ownership after the
+/// PIDASHCONV-21 proxy pass.
 pub fn assert_python_owned(registry: &Registry, task: &str) -> bool {
     !registry.owns(task) && is_mail_task(task)
+}
+
+/// Register all four T5 task names on `registry` (F-WIRE-MAIL names, plain
+/// `@shared_task`: default ack-on-success, no `autoretry_for` — handlers
+/// always acknowledge, mirroring the swallow-everything bodies).
+pub fn register_auth_mail_tasks(registry: &mut Registry, pool: sqlx::PgPool) {
+    registry.register(auth_mail::MAGIC_LINK_TASK, magic_link_handler(pool.clone()));
+    registry.register(
+        auth_mail::FORGOT_PASSWORD_TASK,
+        forgot_password_handler(pool.clone()),
+    );
+    registry.register(
+        auth_mail::UPDATE_MAGIC_TASK,
+        update_magic_handler(pool.clone()),
+    );
+    registry.register(auth_mail::UPDATE_CONFIRM_TASK, update_confirm_handler(pool));
 }
 
 #[cfg(test)]
@@ -136,5 +164,21 @@ mod tests {
             "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
         ));
         assert!(!is_mail_task(""));
+    }
+
+    #[tokio::test]
+    async fn registry_owns_exactly_the_four_names() {
+        // `connect_lazy` needs a Tokio context even though it never
+        // connects — no database is touched.
+        let pool = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/nope").expect("lazy");
+        let mut registry = Registry::new();
+        register_auth_mail_tasks(&mut registry, pool);
+        for name in AUTH_MAIL_TASKS {
+            assert!(registry.owns(name), "{name}");
+        }
+        // Neighbors stay Python-owned: T6 names and the dead invitation
+        // task are NOT registered here.
+        assert!(!registry.owns("pi_dash.bgtasks.user_activation_email_task.user_activation_email"));
+        assert!(!registry.owns("pi_dash.bgtasks.project_invitation_task.project_invitation"));
     }
 }
