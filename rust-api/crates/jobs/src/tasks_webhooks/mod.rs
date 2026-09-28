@@ -26,6 +26,12 @@
 //!   archive/close beat task (projects windows, candidate SELECT, single
 //!   column bulk writes, per-issue `issue_activity` fan-out) and the
 //!   [`Registry`][crate::worker::Registry] wiring.
+//! * [`webhook_fanout`] — `webhook_activity` and `model_activity`
+//!   from `bgtasks/webhook_task.py` (PIDASHCONV-195): task names,
+//!   payload binders, the workspace/flag filter decision, the
+//!   `.delay()` kwargs constructors, the deleted-verb `{id}` rule,
+//!   the per-webhook send-task fan-out, the created-vs-diff plan with
+//!   Python-`==` comparison, and the fan-out error classifier.
 //! * [`webhook_send`] — `save_webhook_log`,
 //!   `send_webhook_deactivation_email` and `webhook_send_task` from
 //!   `bgtasks/webhook_task.py` (PIDASHCONV-194): task names, `.delay()`
@@ -33,19 +39,23 @@
 //!   map, envelope, HMAC input rendering, log-document builder,
 //!   retry/deactivation choice, email builders).
 //!
-//! Ownership (webhook send path): these tasks stay Python-owned. No local
-//! handler is registered here — registering one would steal live traffic
-//! from the Python workers while the webhook-row fetch, HTTP send, mongo
-//! sink and SMTP send still live there. The domain gate flips ownership
-//! after the oracle replay passes on both backends. Until then
-//! [`webhook_send::is_webhook_task`] is the routing predicate the
-//! worker consults, and every name routes to `PythonOwned`.
+//! Ownership (webhook path, send + fan-out): these tasks stay
+//! Python-owned. No local handler is registered here — registering one
+//! would steal live traffic from the Python workers while the
+//! webhook-row fetch, HTTP send, mongo sink and SMTP send still live
+//! there. The domain gate flips ownership after the oracle replay
+//! passes on both backends. Until then
+//! [`webhook_send::is_webhook_task`] and
+//! [`webhook_fanout::is_webhook_fanout_task`] are the routing
+//! predicates the worker consults, and every name routes to
+//! `PythonOwned`.
 
 pub mod activity_dispatch;
 pub mod automation;
 pub mod link_crawl;
 pub mod sinks;
 pub mod visit_page;
+pub mod webhook_fanout;
 pub mod webhook_send;
 
 pub use activity_dispatch::{
@@ -84,6 +94,15 @@ pub use sinks::{
 pub use visit_page::{
     is_visit_page_task, page_transaction_message, recent_visited_task_message,
     register_visit_page_handlers, PAGE_TRANSACTION_TASK_NAME, RECENT_VISITED_TASK_NAME,
+};
+pub use webhook_fanout::{
+    bind_model_activity, bind_webhook_activity, build_activity, created_call, diff_updates,
+    event_data_for, event_flag_for, fan_out_messages, fanout_prints, is_webhook_fanout_task,
+    parse_current_instance, task_spec_for, updated_calls, webhook_activity_kwargs,
+    webhook_activity_message, webhook_filter_for, FanoutFailure, FieldDiff, ModelActivityCall,
+    TaskSpec, WebhookActivityCall, WebhookFilter, ACTIVITY_KEY_ORDER, FANOUT_TASK_SPEC,
+    MODEL_ACTIVITY_PARAMS_ORDER, MODEL_ACTIVITY_TASK_NAME, WEBHOOKS_TABLE,
+    WEBHOOK_ACTIVITY_PARAMS_ORDER, WEBHOOK_ACTIVITY_TASK_NAME, WEBHOOK_FANOUT_TASK_NAMES,
 };
 pub use webhook_send::{
     is_webhook_task, DEACTIVATION_EMAIL_TASK_NAME, WEBHOOK_SEND_TASK_NAME, WEBHOOK_TASK_NAMES,
