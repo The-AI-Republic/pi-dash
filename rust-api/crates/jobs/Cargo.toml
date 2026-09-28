@@ -14,8 +14,22 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 rrule = { version = "0.14", features = ["exrule", "by-easter"] }
 thiserror = "2"
-tokio = { version = "1.53.1", features = ["time", "sync", "macros", "rt-multi-thread"] }
+tokio = { version = "1.53.1", features = ["time", "sync", "macros", "rt-multi-thread", "net", "io-util"] }
 tracing = "0.1.44"
+# D-07 tasks_mail (PIDASHCONV-216): template render (Django `{{ var }}`
+# interpolation only) + plain-text regexes + the smtplib-faithful SMTP
+# conversation (implicit TLS + STARTTLS). minijinja is the one new download;
+# every other pin below was already in the lockfile via pidash-api/db.
+minijinja = "2"
+regex = "1"
+base64 = "0.22"
+hmac = "0.12.1"
+md-5 = "0.10.6"
+# `ring`, not the default `aws-lc-rs`: ring is already vendored (reqwest),
+# so no C-build chain enters the lockfile for the SMTP TLS paths.
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = "0.26.5"
+webpki-roots = "1.0.9"
 sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "uuid", "chrono", "json"] }
 amqprs = "2.1.5"
 # D-08 sinks: PostHog `/batch/` POST (same TLS stack as pidash-api: rustls
