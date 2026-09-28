@@ -134,12 +134,18 @@ impl Overlay {
 /// D-26): exactly the four list GETs. Registration is the cutover
 /// granularity — sibling paths have no Rust route and keep proxying to
 /// Django through the fallback, so no per-path flag is needed.
+///
+/// The License group serves the D-01 instance console (`license`):
+/// `GET`/`PATCH /api/instances/` and
+/// `POST /api/instances/admins/sign-up-screen-visited/`; every other
+/// method on those paths proxies to Django.
 fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
     match group {
         RouteGroup::Web => Router::new()
             .route("/", any(web::health_check))
             .route("/robots.txt", any(web::robots_txt)),
         RouteGroup::App => crate::app_issues::routes(),
+        RouteGroup::License => crate::license::routes(),
         _ => Router::new(),
     }
 }

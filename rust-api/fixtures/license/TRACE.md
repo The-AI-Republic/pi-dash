@@ -50,6 +50,7 @@ lives outside `license/`. Ported-from: `01a93e17216faea7bfc156b0f864cbbe420d1c52
 - `handlers/signup_signin.golden.json` — signup `admin.py:89-239` (redirect branches `:96-105,:108-117,:128-147,:153-169,:173-189,:192-208`; `zxcvbn<3` `:192`; create `:210-234`; success `general/` `:238`); signin `admin.py:242-358` (branches `:249-258,:265-275,:281-291,:297-307,:310-319,:322-332,:335-345`; success `:356-358`); password hashing `make_password` `:215`; login timestamps `:220-226,:347-353`.
 - `handlers/configuration.golden.json` — GET `configuration.py:32-39`; PATCH `configuration.py:43-60` (strip `:49`, encrypt `:50-53`, `bulk_update` batch 100 `:57`); disable-email `configuration.py:63-86`; SMTP matrix `configuration.py:89-172` (receiver check `:92-96`; `int(EMAIL_PORT)` `:111`; `== "1"` TLS/SSL `:114-115`; 9 except branches `:131-172`).
 - `handlers/workspace.golden.json` — slug-check `workspace.py:19-32` (400 `:25-29`, availability `iexact` OR restricted `:31`); POST `workspace.py:71-110` (400 name/slug `:78-82`, length `:84-88`, serializer errors `:100-103`, 409 `:105-110`, member create role 20 `:93-98`); restricted slugs `utils/constants.py:5-15`; IntegrityError fall-through BUG-3 `:105-110`.
+- `handlers/base.golden.json` — `api/views/base.py` (TimezoneMixin `:34-39`; defaults `:42-51`; filter loop `:53-56`; exception matrix `:63-95`; dispatch quirk `:97-109` unreachable — `handle_exception` never re-raises so the `return exc` path never fires; `fields`/`expand` `:111-119`).
 
 ## Cross-cutting ported bugs (translate as-is)
 
