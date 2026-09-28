@@ -10,6 +10,7 @@
 //! - [`middleware`]: `MIDDLEWARE` equivalents (F-08), wrapping every app
 //!   [`build_app`] builds.
 //! - [`web`]: D-00 web edge handlers (`GET /`, `GET /robots.txt`).
+//! - [`license`]: D-01 license / instance-console handlers (`api/instances/`).
 //!
 //! [`build_app`] is the composition point: the OSS binary and a private
 //! overlay crate's own `main.rs` both call it with an [`AppState`] built
