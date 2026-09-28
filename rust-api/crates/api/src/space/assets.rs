@@ -414,6 +414,18 @@ fn data_str<'a>(data: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     data.get(key).and_then(Value::as_str)
 }
 
+/// `request.data.get("type", "image/jpeg")` (`views/asset.py:77`): the
+/// default applies only when the key is absent. A present non-string
+/// (explicit null included) fails the allowlist below and answers the
+/// 400, exactly like `None not in allowed_types` in Django.
+fn post_mime(data: &Map<String, Value>) -> Option<&str> {
+    match data.get("type") {
+        None => Some("image/jpeg"),
+        Some(Value::String(s)) => Some(s),
+        Some(_) => None,
+    }
+}
+
 /// `int(...)` for the `size` field (`views/asset.py:78`): JSON numbers
 /// truncate, numeric strings parse, anything else (or explicit null)
 /// raises → 500. Missing → `FILE_SIZE_LIMIT`.
@@ -576,7 +588,9 @@ async fn post_asset(
     if !ENTITY_TYPES.contains(&entity_type) {
         return guard_err(guards::invalid_entity_type());
     }
-    let mime = data_str(&data, "type").unwrap_or("image/jpeg");
+    let Some(mime) = post_mime(&data) else {
+        return guard_err(guards::invalid_file_type());
+    };
     if !ALLOWED_TYPES.contains(&mime) {
         return guard_err(guards::invalid_file_type());
     }
@@ -1460,6 +1474,23 @@ mod tests {
         assert_eq!(parse_size(Some(&Value::Bool(true)), 5), Some(1));
         assert_eq!(parse_size(Some(&Value::from("abc")), 5), None);
         assert_eq!(parse_size(Some(&Value::Null), 5), None);
+    }
+
+    #[test]
+    fn post_mime_defaults_only_when_absent() {
+        let empty = Map::new();
+        assert_eq!(post_mime(&empty), Some("image/jpeg"));
+        let mut present = Map::new();
+        present.insert("type".to_owned(), Value::from("image/png"));
+        assert_eq!(post_mime(&present), Some("image/png"));
+        // Explicit null (or any other non-string) fails the allowlist
+        // like Django's `None not in allowed_types` — no default.
+        let mut null = Map::new();
+        null.insert("type".to_owned(), Value::Null);
+        assert_eq!(post_mime(&null), None);
+        let mut number = Map::new();
+        number.insert("type".to_owned(), Value::from(5));
+        assert_eq!(post_mime(&number), None);
     }
 
     #[test]
