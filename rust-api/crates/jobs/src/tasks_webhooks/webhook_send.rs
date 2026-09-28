@@ -219,12 +219,36 @@ fn py_float_repr(float: f64) -> String {
     let text = serde_json::Number::from_f64(float)
         .map(|number| number.to_string())
         .unwrap_or_else(|| "null".to_owned());
-    let Some(exponent_at) = text.find(['e', 'E']) else {
-        return text;
+    if let Some(exponent_at) = text.find(['e', 'E']) {
+        let (mantissa, exponent) = text.split_at(exponent_at);
+        let shift: i32 = exponent[1..].parse().unwrap_or(0);
+        return format!("{mantissa}e{shift:+03}");
+    }
+    // Python switches to exponent form once the decimal exponent drops
+    // below -4 (`1e-05`), while `serde_json` still prints that decade
+    // fixed (`0.00001`). A fixed fraction with four or more leading
+    // zeros is exactly that decade, so rewrite it to the exponent form.
+    let (sign, digits) = match text.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", text.as_str()),
     };
-    let (mantissa, exponent) = text.split_at(exponent_at);
-    let shift: i32 = exponent[1..].parse().unwrap_or(0);
-    format!("{mantissa}e{shift:+03}")
+    if let Some(fraction) = digits.strip_prefix("0.") {
+        let zeros = fraction.bytes().take_while(|byte| *byte == b'0').count();
+        if zeros >= 4 {
+            let sig = fraction[zeros..].trim_end_matches('0');
+            if sig.is_empty() {
+                return text;
+            }
+            let head = &sig[..1];
+            let tail = &sig[1..];
+            let shift = zeros + 1;
+            if tail.is_empty() {
+                return format!("{sign}{head}e-{shift:02}");
+            }
+            return format!("{sign}{head}.{tail}e-{shift:02}");
+        }
+    }
+    text
 }
 
 /// Python `json.dumps` string escaping with `ensure_ascii=True`:
@@ -984,6 +1008,25 @@ mod tests {
         assert_eq!(render_signature_input(&json!(1.5)), "1.5");
         assert_eq!(render_signature_input(&json!(1e16)), "1e+16");
         assert_eq!(render_signature_input(&json!(42)), "42");
+    }
+
+    #[test]
+    fn float_e05_decade_matches_python_repr() {
+        // Python switches to exponent form below 1e-4 (`1e-05`) while
+        // `serde_json` prints that decade fixed (`0.00001`); every
+        // expectation below is `json.dumps` output from CPython.
+        for (value, wire) in [
+            (1e-5, "1e-05"),
+            (1.5e-5, "1.5e-05"),
+            (9.999e-5, "9.999e-05"),
+            (1.00001e-5, "1.00001e-05"),
+            (-1e-5, "-1e-05"),
+            (1e-4, "0.0001"),
+            (1.5e-4, "0.00015"),
+            (1e-6, "1e-06"),
+        ] {
+            assert_eq!(render_signature_input(&json!(value)), wire, "{value}");
+        }
     }
 
     #[test]
