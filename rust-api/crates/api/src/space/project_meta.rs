@@ -1411,6 +1411,10 @@ mod tests {
             "/api/public/anchor/abc/states/",
             "/api/public/anchor/abc/labels/",
             "/api/public/workspaces/slug/project-boards/",
+            // `anchor/<anchor>/issues/` is owned by PIDASHCONV-175
+            // (`space::issues`): without pools its handler answers the
+            // same 500 fallback, proving Rust owns the path now.
+            "/api/public/anchor/abc/issues/",
         ] {
             let (status, body) = get_status(app.clone(), path).await;
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{path}");
@@ -1426,8 +1430,13 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        // Sibling path stays on Django: no Rust route → proxy → 502 closed.
-        let (status, _) = get_status(app, "/api/public/anchor/abc/issues/").await;
+        // Sibling social path stays on Django: no Rust route yet
+        // (PIDASHCONV-176) → proxy → 502 closed.
+        let (status, _) = get_status(
+            app,
+            "/api/public/anchor/abc/issues/62d604a8-db82-44de-9e8c-a3e4a0f28371/comments/",
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
     }
 
