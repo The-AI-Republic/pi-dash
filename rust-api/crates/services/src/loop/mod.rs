@@ -17,6 +17,7 @@
 //! `None` renders `null` exactly as `x.isoformat() if x else None` does.
 
 pub mod builtins;
+pub mod eligibility;
 pub mod shape;
 
 pub use builtins::{BuiltinLoopJob, AUTO_CLOSE_MERGED_PROMPT, BUILTIN_LOOP_JOBS};

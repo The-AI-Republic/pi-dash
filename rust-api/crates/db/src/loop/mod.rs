@@ -9,6 +9,7 @@
 //!   `pidash-services::loop` (PIDASHCONV-152).
 
 pub mod models;
+pub mod queries;
 
 pub use models::{
     loop_job::LoopJob, loop_target::LoopTarget, loop_user_preference::LoopUserPreference, OnDelete,
