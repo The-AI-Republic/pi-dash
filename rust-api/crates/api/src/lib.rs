@@ -21,6 +21,7 @@
 pub mod app_issues;
 pub mod edge;
 pub mod license;
+pub mod r#loop;
 pub mod middleware;
 pub mod overlay;
 pub mod paginator;
