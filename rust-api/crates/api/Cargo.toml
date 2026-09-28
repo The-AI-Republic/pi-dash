@@ -31,7 +31,20 @@ rust_decimal = { version = "1", features = ["serde"] }
 sea-query = { version = "0.32", default-features = false, features = ["backend-postgres"] }
 thiserror = "2"
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono"] }
-uuid = { version = "1" }
+uuid = { version = "1", features = ["v4"] }
+# License console handlers (D-01): session-auth-hash verification
+# (`django.contrib.auth` `salted_hmac`) and the `email-credentials-check`
+# SMTP conversation (implicit TLS + STARTTLS). All five were already in
+# the lockfile via other crates; no new downloads.
+hmac = "0.12.1"
+sha2 = "0.10.9"
+# `AUTH CRAM-MD5` challenge responses (`smtplib.auth_cram_md5`).
+md-5 = "0.10.6"
+# `ring`, not the default `aws-lc-rs`: ring is already vendored (reqwest),
+# so no C-build chain enters the lockfile for the SMTP TLS paths.
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = "0.26.5"
+webpki-roots = "1.0.9"
 tower = { version = "0.5" }
 tracing = "0.1"
 # Reverse proxy to Django. Default features are off on purpose: transparent
