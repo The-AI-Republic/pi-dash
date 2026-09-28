@@ -12,6 +12,7 @@
 //! - [`web`]: D-00 web edge handlers (`GET /`, `GET /robots.txt`).
 //! - [`license`]: D-01 license / instance-console handlers (`api/instances/`).
 //! - [`space`]: D-02 space project/meta/taxonomy handlers (`api/public/`).
+//! - [`r#loop`]: D-03 loop auto-pm user handlers (`api/users/me/auto-pm/`).
 //!
 //! [`build_app`] is the composition point: the OSS binary and a private
 //! overlay crate's own `main.rs` both call it with an [`AppState`] built

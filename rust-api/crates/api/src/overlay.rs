@@ -148,9 +148,11 @@ impl Overlay {
 /// no Rust route and keep proxying to Django through the fallback.
 ///
 /// The Loop group serves the D-03 instance-admin surface (`loop::admin`,
-/// PIDASHCONV-161): the three `/api/instances/loop/jobs/` paths with
-/// their owned methods; every other method on those paths proxies to
-/// Django. The user surface joins this group with PIDASHCONV-159.
+/// PIDASHCONV-161): the `/api/instances/loop/jobs/` paths with their
+/// owned methods — plus the D-03 user auto-pm surface (`loop::user`,
+/// PIDASHCONV-159): `GET`/`PATCH /api/users/me/auto-pm/` and
+/// `PATCH /api/users/me/auto-pm/jobs/{slug}/`; every other method on
+/// those paths proxies to Django.
 fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
     match group {
         RouteGroup::Web => Router::new()
