@@ -9,10 +9,11 @@
 //! - [`email_notification::create_payload`] (`:87-127`, including the
 //!   PORT BUG at `:116`)
 //!
-//! The send/stack task bodies that call these helpers land in
-//! PIDASHCONV-213 on top of this module; the `notification_task.py`
-//! mention/comment helpers (PIDASHCONV-214/215) and the single-task mail
-//! senders (PIDASHCONV-216/217) extend this module tree the same way.
+//! The send/stack task bodies that call these helpers live in
+//! [`email_notification`] (PIDASHCONV-213, part 2); the
+//! `notification_task.py` mention/comment helpers (PIDASHCONV-214/215)
+//! and the single-task mail senders (PIDASHCONV-216/217) extend this
+//! module tree the same way.
 //!
 //! T5 (PIDASHCONV-216) adds [`auth_mail`] (the four auth mail tasks) and
 //! [`mail_send`] (the shared send pipeline T6 reuses, never forks).
@@ -26,12 +27,26 @@
 //! the proxy pass, mirroring the `tasks_cleanup` export tasks.
 //! [`is_mail_task`] is the routing predicate and [`TASK_NAMES`]
 //! is pinned against the `F-WIRE-MAIL` fixture below.
+//!
+//! Ownership: [`email_notification::register_email_notification_tasks`]
+//! builds the handler table for the two mail task names, but the worker
+//! binary does not call it yet — flipping now would steal live traffic
+//! from the Python workers while the concrete SMTP/template/Redis
+//! clients still live there (see the seam traits in
+//! [`email_notification`]). Every name in [`TASK_NAMES`] therefore
+//! routes to `PythonOwned` (see [`crate::worker::route_for`]); the
+//! domain gate flips ownership after the PIDASHCONV-21 proxy pass,
+//! mirroring the `tasks_cleanup` export tasks. [`is_mail_task`] is the
+//! routing predicate and [`TASK_NAMES`] is pinned against the
+//! `F-WIRE-MAIL` fixture below.
 
 pub mod auth_mail;
 pub mod email_notification;
 pub mod mail_send;
 pub mod membership_mail;
 pub mod notifications;
+
+pub use email_notification::register_email_notification_tasks;
 
 use crate::worker::Registry;
 
@@ -573,5 +588,37 @@ mod tests {
             mention_ids_in_html(html),
             Some(vec!["aaaa".to_owned(), "bbbb".to_owned()])
         );
+    }
+
+    #[test]
+    fn registered_mail_tasks_route_local() {
+        // `register_email_notification_tasks` owns exactly the two
+        // `email_notification_task.py` names (PIDASHCONV-213); the other
+        // nine D-07 names stay Python-owned until their own layer issues.
+        fn ack() -> crate::worker::Handler {
+            std::sync::Arc::new(|_: crate::queue::JobRow| {
+                Box::pin(async { Ok(crate::worker::Verdict::Ack) })
+                    as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+            })
+        }
+        let mut registry = Registry::new();
+        register_email_notification_tasks(&mut registry, ack(), ack());
+        assert_eq!(
+            crate::worker::route_for(&registry, STACK_EMAIL_NOTIFICATION_TASK),
+            crate::worker::Route::Local
+        );
+        assert_eq!(
+            crate::worker::route_for(&registry, SEND_EMAIL_NOTIFICATION_TASK),
+            crate::worker::Route::Local
+        );
+        assert!(!assert_python_owned(
+            &registry,
+            STACK_EMAIL_NOTIFICATION_TASK
+        ));
+        assert!(!assert_python_owned(
+            &registry,
+            SEND_EMAIL_NOTIFICATION_TASK
+        ));
+        assert!(assert_python_owned(&registry, NOTIFICATIONS_TASK));
     }
 }
