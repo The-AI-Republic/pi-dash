@@ -21,6 +21,11 @@
 
 pub mod amqp;
 pub mod celery;
+/// Loop auto-PM beat scanner (D-03, PIDASHCONV-156). `loop` is a Rust
+/// keyword, so the module lives at `loop/scan.rs` via an explicit path —
+/// the single file the issue owns, no `mod.rs`.
+#[path = "loop/scan.rs"]
+pub mod loop_scan;
 pub mod queue;
 pub mod schedule;
 pub mod scheduler;
