@@ -41,6 +41,7 @@
 //! (`tasks_cleanup::deletion_queries`); worker registration lives in
 //! `pidash-jobs` (`tasks_cleanup::deletion`).
 
+pub mod assets;
 pub mod cleanup;
 pub mod deletion;
 pub mod exports;
