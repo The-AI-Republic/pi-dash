@@ -1,0 +1,139 @@
+{
+  "_about": "D-09 issue/description/page version behaviour. Ported from 01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "_method": "Values produced by executing the named Python code under pi_dash.settings.test with no DB/S3/mongo (venv /tmp/ct100-django-venv). Cutoff timestamps frozen at 2026-09-28T06:00:00+00:00; production uses timezone.now(). Generators: /tmp/fx_d09b.py, /tmp/fx_d09c.py (throwaway).",
+  "_trace": [
+    "issue_version_sync.py:34-64 issue_task coalesce protocol (600s window)",
+    "issue_version_sync.py:67-82 get_owner_id golden (updated_by/created_by branches)",
+    "issue_version_sync.py:85-128 get_related_data 5-query protocol",
+    "issue_version_sync.py:131-177 create_issue_version field golden",
+    "issue_version_sync.py:181-231 sync_issue_version batch/chain protocol",
+    "issue_version_sync.py:235-236 schedule_issue_version protocol",
+    "issue_description_version_sync.py:21-36 get_owner_id golden",
+    "issue_description_version_sync.py:40-120 sync_issue_description_version protocol",
+    "issue_description_version_sync.py:124-125 schedule protocol",
+    "issue_description_version_task.py:15-22 should_update_existing_version golden",
+    "issue_description_version_task.py:25-40 update_existing_version protocol",
+    "issue_description_version_task.py:44-78 issue_description_version_task protocol",
+    "page_version_task.py:19 PAGE_VERSION_TASK_TIMEOUT=600",
+    "page_version_task.py:22-81 track_page_version protocol"
+  ],
+  "issue_task": {
+    "diff": "updated_issue JSON parsed (falsy -> {}); per key: getattr(issue, key) != value keeps the key (unknown keys raise AttributeError -> broad except -> log_exception, return None).",
+    "coalesce": "Latest IssueVersion by -last_saved_at; same owner (str-compared) AND age <= 600s -> setattr each changed key + last_saved_at=now, save(update_fields=[changed..., 'last_saved_at']); else IssueVersion.log_issue_version(issue, user_id). No changes -> no write. Issue.DoesNotExist -> silent return."
+  },
+  "get_owner_id": {
+    "updated_by_wins": 11,
+    "created_by_fallback": 22,
+    "description_sync_updated_by": 33,
+    "admin_fallback": "ProjectMember.objects.filter(project_id, role=20).first() -> member_id or None (DB path; role 20 = Admin literal)."
+  },
+  "get_related_data": {
+    "cycle_issues": "dict issue_id -> cycle_id (CycleIssue filter issue__in).",
+    "assignees": "values_list ordered by issue_id, groupby -> {id: [str(assignee_id)...]}.",
+    "labels": "same shape from IssueLabel.",
+    "modules": "same shape from ModuleIssue.",
+    "activities": "IssueActivity filter order (issue_id, -created_at), groupby, FIRST per issue -> {id: activity.id}.",
+    "keys": ["cycle_issues", "assignees", "labels", "modules", "activities"]
+  },
+  "create_issue_version": {
+    "fields": {
+      "workspace_id": "aaaaaaaa-1111-1111-1111-111111111111",
+      "project_id": "bbbbbbbb-1111-1111-1111-111111111111",
+      "created_by_id": "5",
+      "updated_by_id": "6",
+      "owned_by_id": "6",
+      "activity_id": "act-1",
+      "issue_id": "11111111-1111-1111-1111-111111111111",
+      "parent": null,
+      "state": "s-1",
+      "estimate_point": null,
+      "name": "Bug",
+      "priority": "high",
+      "sequence_id": "42",
+      "labels": "[]",
+      "assignees": "['u-1', 'u-2']",
+      "modules": "['m-1']",
+      "cycle": null,
+      "type": "t-1",
+      "is_draft": "False",
+      "external_source": null,
+      "external_id": null,
+      "sort_order": "100"
+    },
+    "properties_meta": {
+      "properties": {
+        "p": 1
+      },
+      "meta": {
+        "m": 2
+      }
+    },
+    "missing_workspace_or_project_returns_none": null,
+    "missing_owner_returns_none": "owned_by None -> warning + None.",
+    "exception_returns_none": "broad except -> log_exception -> None.",
+    "field_notes": "owned_by resolved via get_owner_id; activity from related.activities.get(issue.id) (None ok); properties/meta via getattr(issue, ..., {}) (missing attr -> {}); cycle may be None; last_saved_at = now. Returns UNSAVED instance."
+  },
+  "sync_issue_version": {
+    "defaults": {
+      "batch_size": 5000,
+      "offset": 0,
+      "countdown": 300
+    },
+    "flow": "atomic; total = Issue.objects.count(); 0 -> return; end=min(offset+batch, total); batch = order_by(created_at) select_related(workspace, project) [offset:end_offset]; empty -> return; related=get_related_data(ids); per-issue create (skip Nones); bulk_create(batch_size=1000) iff non-empty; end<total -> apply_async(kwargs={batch_size, offset=end, countdown}, countdown=countdown)."
+  },
+  "schedule_issue_version": "sync_issue_version.delay(batch_size=int(batch_size), countdown=countdown).",
+  "sync_issue_description_version": {
+    "defaults": {
+      "batch_size": 5000,
+      "offset": 0,
+      "countdown": 300
+    },
+    "only_fields": [
+      "id",
+      "workspace_id",
+      "project_id",
+      "created_by_id",
+      "updated_by_id",
+      "description_binary",
+      "description_html",
+      "description_stripped",
+      "description_json"
+    ],
+    "flow": "atomic; count; end=min(...); batch order_by(created_at) select_related(workspace, project).only(*fields)[offset:end]; per issue: skip (warning) when workspace/project missing or owner None; else append IssueDescriptionVersion(...last_saved_at=now); bulk_create (NO batch_size) iff non-empty; chain next batch identically."
+  },
+  "should_update_existing_version": {
+    "none_version_returns_none": null,
+    "recent_same_owner_true": true,
+    "int_ids_str_compared": true,
+    "stale_601s_false": false,
+    "boundary_600s_true": true,
+    "other_owner_false": false,
+    "trap": "'if not version: return' yields None, NOT False \u2014 falsy either way, but port the exact None."
+  },
+  "update_existing_version": "Copies description_json/html/binary/stripped from the LIVE issue onto the version + last_saved_at=now; save(update_fields=[4 description fields, last_saved_at]); returns None.",
+  "issue_description_version_task": {
+    "skip": "current.description_html == live.description_html AND NOT is_creating -> return None (is_creating=True forces a version even when unchanged).",
+    "flow": "atomic; latest version by -last_saved_at; should_update_existing_version(latest, user_id) -> update else log_issue_description_version(issue, user_id). Issue.DoesNotExist -> silent; bad JSON -> log 'Invalid JSON for updated_issue: ...'."
+  },
+  "track_page_version": {
+    "timeout": 600,
+    "skip": "existing.description_html == page.description_html -> return None (falsy existing_instance -> {}).",
+    "update_path": "latest by -last_saved_at, same owner (str), age <= 600 -> copy 4 description fields + sub_pages_data={} (ALWAYS {}, never carried over); save(update_fields=[html, binary, json, stripped, sub_pages_data, 'updated_at']) \u2014 note updated_at, NOT last_saved_at.",
+    "create_path": "PageVersion(page, workspace, 4 description fields, owned_by=user_id, last_saved_at=now, sub_pages_data={}).",
+    "prune": "count > 20 -> delete oldest by last_saved_at (ONE row per run). Page.DoesNotExist -> silent return."
+  },
+  "db_before_after": {
+    "issue_task": {
+      "before": "Issue row + 0..n versions; latest version owned by U saved T ago.",
+      "after": "Changed keys only: same-owner-and-fresh -> latest version row updated in place; else one new IssueVersion row."
+    },
+    "sync_issue_version": {
+      "before": "N issues, M versions.",
+      "after": "One IssueVersion per issue with resolvable owner (bulk_create batch 1000); chains next offset while end < total."
+    },
+    "track_page_version": {
+      "before": "Page with changed description_html; K versions.",
+      "after": "K+1 versions iff no fresh same-owner version (else updated in place); at most one prune delete when K+1 > 20."
+    }
+  }
+}
