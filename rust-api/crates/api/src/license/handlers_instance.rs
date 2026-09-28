@@ -413,16 +413,22 @@ fn render_instance(
 // PATCH /api/instances/
 // ---------------------------------------------------------------------------
 
-/// JSON value kinds by DRF's `type(data).__name__` for the non-dict error.
+/// JSON value kinds by DRF's `type(data).__name__` for the non-dict error
+/// (`serializers.py:485`). Python ints are unbounded, so every integer
+/// token — however large — is `"int"`: the token shape (no `.`/`e`/`E`)
+/// discriminates, which `arbitrary_precision` preserves verbatim.
 fn datatype_name(value: &serde_json::Value) -> &'static str {
     match value {
         serde_json::Value::Null => "NoneType",
         serde_json::Value::Bool(_) => "bool",
         serde_json::Value::Number(n) => {
-            if n.is_i64() {
-                "int"
-            } else {
+            if n.to_string()
+                .bytes()
+                .any(|b| b == b'.' || b == b'e' || b == b'E')
+            {
                 "float"
+            } else {
+                "int"
             }
         }
         serde_json::Value::String(_) => "str",
@@ -860,7 +866,8 @@ async fn patch_instance(
 }
 
 /// Decode the PATCH body like DRF: empty → `{}`; otherwise JSON by
-/// content-type (415 for anything else), parse errors → 400 `detail`.
+/// content-type (anything else → 400 with the same body; DRF answers 415
+/// here, a documented divergence), parse errors → 400 `detail`.
 fn patch_body(headers: &HeaderMap, body: &[u8]) -> Result<serde_json::Value, HandlerError> {
     if body.is_empty() {
         return Ok(serde_json::Value::Object(serde_json::Map::new()));
@@ -1501,6 +1508,50 @@ mod tests {
         assert_eq!(
             validate_partial(&body).expect("blank ok"),
             vec![Assignment::Text("domain", String::new())]
+        );
+    }
+
+    #[test]
+    fn non_dict_bodies_report_python_type_names() {
+        // `type(data).__name__` (`serializers.py:485`): Python ints are
+        // unbounded, so every integer token — however large — is "int".
+        // Bodies parsed from raw JSON so the token path (including
+        // `arbitrary_precision` echo) matches the wire.
+        for (raw, want) in [
+            ("42", "int"),
+            ("-5", "int"),
+            ("9223372036854775807", "int"),
+            ("9223372036854775808", "int"),
+            ("18446744073709551616", "int"),
+            ("340282366920938463463374607431768211455", "int"),
+            ("1.5", "float"),
+            ("1.0", "float"),
+            ("1e3", "float"),
+            ("1E5", "float"),
+            ("true", "bool"),
+            ("\"x\"", "str"),
+            ("[1]", "list"),
+            ("{\"a\": 1}", "dict"),
+            ("null", "NoneType"),
+        ] {
+            let value: serde_json::Value = serde_json::from_str(raw).expect("json");
+            assert_eq!(datatype_name(&value), want, "input {raw}");
+        }
+        // The full non-field-errors body for a bare big-int PATCH body.
+        let value: serde_json::Value =
+            serde_json::from_str("340282366920938463463374607431768211455").expect("json");
+        let body = serde_json::json!({
+            "non_field_errors": [
+                format!(
+                    "Invalid data. Expected a dictionary, but got {}.",
+                    datatype_name(&value)
+                )
+            ]
+        })
+        .to_string();
+        assert_eq!(
+            body,
+            r#"{"non_field_errors":["Invalid data. Expected a dictionary, but got int."]}"#
         );
     }
 
