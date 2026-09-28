@@ -2479,6 +2479,7 @@ dependencies = [
  "pidash-jobs",
  "pidash-services",
  "pidash-types",
+ "sqlx",
  "tokio",
  "tower",
  "tracing",
