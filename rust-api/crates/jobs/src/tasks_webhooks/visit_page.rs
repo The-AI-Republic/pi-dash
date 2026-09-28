@@ -34,6 +34,15 @@
 //!   (`filter(transaction__in=...).delete()`) is a queryset delete, i.e.
 //!   a soft `UPDATE deleted_at` over the soft-filtered set, not a hard
 //!   `DELETE`. [`delete_page_logs`] ports it.
+//! * QUIRK-5 (`recent_visited_task.py:53-55`): the create-path backfill
+//!   `save(update_fields=["created_by_id", "updated_by_id"])` routes
+//!   through `BaseModel.save` (`db/models/base.py`), which re-stamps
+//!   audit from `crum.get_current_user()` — `None` in a worker — wiping
+//!   the task's `user_id` assignments before the `UPDATE` renders. The
+//!   live second statement is therefore `SET created_by_id = NULL,
+//!   updated_by_id = NULL`, not `= user_id` (same trap as
+//!   `bgtasks/github_sync_task.py:139-156`). [`create_recent_visit`]
+//!   keeps the two-statement shape and binds NULLs.
 //!
 //! Deliberate transport note (documented, not a bug): the eviction's
 //! `soft_delete_related_objects.delay(...)` cascade has no observable DB
@@ -340,7 +349,9 @@ async fn workspace_id_by_slug(pool: &PgPool, slug: &str) -> DriverResult<Uuid> {
 /// The update-path lookup
 /// (`filter(entity_name, entity_identifier, user_id, project_id,
 /// workspace).first()`): soft-filtered, `None` renders as `IS NULL`
-/// (Django `None` exact lookup), no ordering, one row.
+/// (Django `None` exact lookup). `Meta.ordering = ("-created_at",)`
+/// (`recent_visit.py`) plus `.first()` renders
+/// `ORDER BY created_at DESC LIMIT 1`.
 async fn find_recent_visit(
     pool: &PgPool,
     entity_name: &str,
@@ -353,7 +364,7 @@ async fn find_recent_visit(
         (None, None) => sqlx::query_as(
             "SELECT id FROM user_recent_visits WHERE entity_name = $1 AND entity_identifier IS NULL \
              AND user_id = $2::uuid AND project_id IS NULL AND workspace_id = $3 \
-             AND deleted_at IS NULL LIMIT 1",
+             AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
         )
         .bind(entity_name)
         .bind(user_id)
@@ -364,7 +375,7 @@ async fn find_recent_visit(
         (Some(entity_identifier), None) => sqlx::query_as(
             "SELECT id FROM user_recent_visits WHERE entity_name = $1 AND entity_identifier = $2::uuid \
              AND user_id = $3::uuid AND project_id IS NULL AND workspace_id = $4 \
-             AND deleted_at IS NULL LIMIT 1",
+             AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
         )
         .bind(entity_name)
         .bind(entity_identifier)
@@ -376,7 +387,7 @@ async fn find_recent_visit(
         (None, Some(project_id)) => sqlx::query_as(
             "SELECT id FROM user_recent_visits WHERE entity_name = $1 AND entity_identifier IS NULL \
              AND user_id = $2::uuid AND project_id = $3::uuid AND workspace_id = $4 \
-             AND deleted_at IS NULL LIMIT 1",
+             AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
         )
         .bind(entity_name)
         .bind(user_id)
@@ -388,7 +399,7 @@ async fn find_recent_visit(
         (Some(entity_identifier), Some(project_id)) => sqlx::query_as(
             "SELECT id FROM user_recent_visits WHERE entity_name = $1 AND entity_identifier = $2::uuid \
              AND user_id = $3::uuid AND project_id = $4::uuid AND workspace_id = $5 \
-             AND deleted_at IS NULL LIMIT 1",
+             AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
         )
         .bind(entity_name)
         .bind(entity_identifier)
@@ -467,9 +478,12 @@ async fn evict_oldest(pool: &PgPool, user_id: &str, workspace_id: Uuid) -> Drive
     Ok(())
 }
 
-/// Create path (`:46-56`): full `INSERT` (audit `NULL`, both timestamps
-/// `now()`), then the backfill second write of `created_by_id` /
-/// `updated_by_id` only.
+/// Create path (`:46-56` + QUIRK-5): full `INSERT` (audit `NULL`, both
+/// timestamps `now()`), then the backfill second write. The Python
+/// assigns `user_id` to both audit fields, but the accompanying
+/// `save()` re-stamps them from `crum.get_current_user()` (`None` in a
+/// worker), so the rendered `UPDATE` binds `NULL, NULL` — ported here
+/// exactly, two-statement shape kept.
 async fn create_recent_visit(
     pool: &PgPool,
     entity_name: &str,
@@ -496,9 +510,8 @@ async fn create_recent_visit(
     .await
     .map_err(|error| DriverFailure::Log(format!("recent-visit create: {error}")))?;
     sqlx::query(
-        "UPDATE user_recent_visits SET created_by_id = $1::uuid, updated_by_id = $1::uuid WHERE id = $2",
+        "UPDATE user_recent_visits SET created_by_id = NULL, updated_by_id = NULL WHERE id = $1",
     )
-    .bind(user_id)
     .bind(id)
     .execute(pool)
     .await
