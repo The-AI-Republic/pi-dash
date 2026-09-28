@@ -11,6 +11,7 @@ pub mod extensions;
 pub mod health;
 pub mod integrations;
 pub mod license;
+pub mod r#loop;
 pub mod space;
 pub mod tasks_cleanup;
 pub mod user_settings;
