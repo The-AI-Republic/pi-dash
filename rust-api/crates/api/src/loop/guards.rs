@@ -755,6 +755,41 @@ pub fn slug_taken_on_patch(
 }
 
 // ---------------------------------------------------------------------------
+// ORM write coercions for the handlers layer (PIDASHCONV-161)
+// ---------------------------------------------------------------------------
+
+/// Python `str()` of a JSON value, the shape `CharField.get_prep_value`
+/// takes for storage: strings pass through, booleans render `True`/`False`,
+/// `None` stays `None` (a `NULL` bind — the NOT NULL column then raises
+/// the `IntegrityError` branch), numbers echo their text, and containers
+/// render as JSON (CPython would use `repr`; no recorded vector covers a
+/// container in a text field, so either rendering only decides an
+/// unobserved stored value).
+pub fn python_str(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(s) => Some(s.clone()),
+        Value::Bool(true) => Some("True".to_owned()),
+        Value::Bool(false) => Some("False".to_owned()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Array(_) | Value::Object(_) => Some(value.to_string()),
+    }
+}
+
+/// The stored integer for a validated `min_role` cleaned value:
+/// `PositiveSmallIntegerField.get_prep_value` is `int(value)` (floats
+/// truncate toward zero, numeric strings parse, booleans are 1/0).
+/// `None` means the value fails `int()` — unreachable after
+/// [`validate_writes`] (it answers [`ValidateFail::ServerError`] there),
+/// so handlers map it to the generic 500.
+pub fn coerce_min_role_int(value: &Value) -> Option<i64> {
+    match coerce_min_role(value) {
+        MinRoleCoerce::Value(v) => Some(v),
+        MinRoleCoerce::BigInt | MinRoleCoerce::Invalid => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // InstanceAdminPermission wiring (permissions/instance.py:12-18)
 // ---------------------------------------------------------------------------
 
