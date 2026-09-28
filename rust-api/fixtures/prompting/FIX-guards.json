@@ -1,0 +1,67 @@
+{
+  "bugs": [],
+  "data": {
+    "matrix": {
+      "matrix": [
+        {
+          "admin": true,
+          "member": true,
+          "who": "superuser"
+        },
+        {
+          "admin": true,
+          "member": true,
+          "who": "admin role=20"
+        },
+        {
+          "admin": false,
+          "member": true,
+          "who": "member role=10"
+        },
+        {
+          "admin": false,
+          "member": false,
+          "who": "outsider"
+        }
+      ],
+      "trace": "views.py:74-85 (_is_workspace_admin/member: superuser short-circuit 75-76/83-84 + WorkspaceMember exists with role=20/is_active)",
+      "workspace_or_404_hit": true,
+      "workspace_or_404_miss": true
+    },
+    "sql": {
+      "is_admin_exists": "SELECT \"workspace_members\".\"created_at\", \"workspace_members\".\"updated_at\", \"workspace_members\".\"created_by_id\", \"workspace_members\".\"updated_by_id\", \"workspace_members\".\"deleted_at\", \"workspace_members\".\"id\", \"workspace_members\".\"workspace_id\", \"workspace_members\".\"member_id\", \"workspace_members\".\"role\", \"workspace_members\".\"company_role\", \"workspace_members\".\"view_props\", \"workspace_members\".\"default_props\", \"workspace_members\".\"issue_props\", \"workspace_members\".\"is_active\", \"workspace_members\".\"getting_started_checklist\", \"workspace_members\".\"tips\", \"workspace_members\".\"explored_features\" FROM \"workspace_members\" WHERE (\"workspace_members\".\"deleted_at\" IS NULL AND \"workspace_members\".\"is_active\" AND \"workspace_members\".\"member_id\" = 19a3bb94-30b3-4e62-8116-edea68ffe7eb AND \"workspace_members\".\"role\" = 20 AND \"workspace_members\".\"workspace_id\" = 204fd67f-6485-47a0-98e2-079bd6b34202) ORDER BY \"workspace_members\".\"created_at\" DESC",
+      "is_member_exists": "SELECT \"workspace_members\".\"created_at\", \"workspace_members\".\"updated_at\", \"workspace_members\".\"created_by_id\", \"workspace_members\".\"updated_by_id\", \"workspace_members\".\"deleted_at\", \"workspace_members\".\"id\", \"workspace_members\".\"workspace_id\", \"workspace_members\".\"member_id\", \"workspace_members\".\"role\", \"workspace_members\".\"company_role\", \"workspace_members\".\"view_props\", \"workspace_members\".\"default_props\", \"workspace_members\".\"issue_props\", \"workspace_members\".\"is_active\", \"workspace_members\".\"getting_started_checklist\", \"workspace_members\".\"tips\", \"workspace_members\".\"explored_features\" FROM \"workspace_members\" WHERE (\"workspace_members\".\"deleted_at\" IS NULL AND \"workspace_members\".\"is_active\" AND \"workspace_members\".\"member_id\" = c9c76d26-9b4d-4e2f-a046-c8abb8404293 AND \"workspace_members\".\"workspace_id\" = 204fd67f-6485-47a0-98e2-079bd6b34202) ORDER BY \"workspace_members\".\"created_at\" DESC",
+      "workspace_get_by_slug": "SELECT \"workspaces\".\"created_at\", \"workspaces\".\"updated_at\", \"workspaces\".\"created_by_id\", \"workspaces\".\"updated_by_id\", \"workspaces\".\"deleted_at\", \"workspaces\".\"id\", \"workspaces\".\"name\", \"workspaces\".\"logo\", \"workspaces\".\"logo_asset_id\", \"workspaces\".\"owner_id\", \"workspaces\".\"slug\", \"workspaces\".\"organization_size\", \"workspaces\".\"timezone\", \"workspaces\".\"background_color\" FROM \"workspaces\" WHERE (\"workspaces\".\"deleted_at\" IS NULL AND \"workspaces\".\"slug\" = fx-ws) ORDER BY \"workspaces\".\"created_at\" DESC"
+    },
+    "static": {
+      "admin_role": 20,
+      "resolve_scope": {
+        "bogus_falls_back_user": "user",
+        "default": "user",
+        "explicit_user": "user",
+        "explicit_workspace": "workspace"
+      },
+      "routes": [
+        "GET workspaces/<slug>/prompt-sections",
+        "PUT|DELETE workspaces/<slug>/prompt-sections/<key>",
+        "GET workspaces/<slug>/prompts/<kind>/compiled",
+        "POST workspaces/<slug>/prompts/<kind>/preview"
+      ],
+      "scope_consts": {
+        "user": "user",
+        "workspace": "workspace"
+      },
+      "tier_gate_matrix": "PUT workspace-scope on locked -> 403 'locked and cannot be overridden'; PUT user-scope on workspace-tier -> 403 'cannot be personally overridden'; PUT user-scope on locked -> 403 'locked...'; preview non-admin with scope!=user -> 403 (views.py:379-384)",
+      "trace": "prompting/views.py:57-62 (WORKSPACE_ADMIN_ROLE=20, SCOPE consts), 74-99 (_is_workspace_admin/member, _get_workspace_or_404, _resolve_scope), 186-190 (_check_write_permission), 211-227 (tier gates), 379-384 (preview scope gate)"
+    }
+  },
+  "fixture_id": "FIX-guards",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world).",
+  "notes": [
+    "Superuser short-circuits both checks. No 'workspace'-tier sections exist in the registry today, so the workspace-tier-only branches are unreachable but must be ported verbatim."
+  ],
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "prompting/views.py:57-62 (WORKSPACE_ADMIN_ROLE=20, SCOPE consts), 65-72 (_FakeRun), 74-99 (_is_workspace_admin/_is_workspace_member/_get_workspace_or_404/_resolve_scope), 186-190 (_check_write_permission), 211-227 (PUT tier gates), 379-384 (preview scope gate)"
+  ]
+}

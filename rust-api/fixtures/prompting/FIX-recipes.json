@@ -1,0 +1,148 @@
+{
+  "bugs": [],
+  "data": {
+    "recipes": {
+      "all_kinds": ["coding-task", "review", "test", "scheduler"],
+      "cloud_recipe_for_unknown": {
+        "error": "RecipeNotFound: no Cloud Agent recipe for kind 'nope'",
+        "ok": false
+      },
+      "cloud_recipe_lengths": {
+        "coding-task": 6,
+        "direct": 6,
+        "review": 6,
+        "scheduler": 6,
+        "test": 6
+      },
+      "cloud_recipes": {
+        "coding-task": [
+          "cloud-intro",
+          "cloud-capabilities",
+          "cloud-issue-context",
+          "cloud-execution-loop",
+          "cloud-write-policy",
+          "cloud-ending"
+        ],
+        "direct": [
+          "cloud-intro",
+          "cloud-capabilities",
+          "cloud-direct-task",
+          "cloud-execution-loop",
+          "cloud-write-policy",
+          "cloud-ending"
+        ],
+        "review": [
+          "cloud-review-intro",
+          "cloud-capabilities",
+          "cloud-issue-context",
+          "cloud-review-loop",
+          "cloud-write-policy",
+          "cloud-ending"
+        ],
+        "scheduler": [
+          "cloud-scheduler-intro",
+          "cloud-capabilities",
+          "cloud-scheduler-task",
+          "cloud-scheduler-loop",
+          "cloud-write-policy",
+          "cloud-ending"
+        ],
+        "test": [
+          "cloud-test-intro",
+          "cloud-capabilities",
+          "cloud-issue-context",
+          "cloud-test-loop",
+          "cloud-write-policy",
+          "cloud-ending"
+        ]
+      },
+      "kind_for_identity": "coding-task",
+      "kind_for_with_work_kind": "review",
+      "kinds": {
+        "coding_task": "coding-task",
+        "direct": "direct",
+        "review": "review",
+        "scheduler": "scheduler",
+        "test": "test",
+        "work_kind_coding": "coding"
+      },
+      "local_recipe_lengths": {
+        "coding-task": 16,
+        "review": 10,
+        "scheduler": 6,
+        "test": 10
+      },
+      "local_recipes": {
+        "coding-task": [
+          "intro",
+          "repo-context",
+          "relationships",
+          "session-framing",
+          "pidash-cli",
+          "task-lifecycle",
+          "default-posture",
+          "autonomy",
+          "state-routing",
+          "analyze-and-scope",
+          "workpad-setup",
+          "implementation",
+          "blocking",
+          "guardrails",
+          "workpad-template",
+          "ending-run"
+        ],
+        "review": [
+          "review-intro",
+          "repo-context",
+          "session-framing",
+          "pidash-cli",
+          "task-lifecycle",
+          "workpad-context",
+          "review-cycle",
+          "blocking",
+          "guardrails",
+          "ending-run"
+        ],
+        "scheduler": [
+          "scheduler-intro",
+          "session-framing",
+          "pidash-cli",
+          "scheduler-task",
+          "guardrails",
+          "scheduler-ending"
+        ],
+        "test": [
+          "test-intro",
+          "repo-context",
+          "session-framing",
+          "pidash-cli",
+          "task-lifecycle",
+          "workpad-context",
+          "test-cycle",
+          "blocking",
+          "guardrails",
+          "ending-run"
+        ]
+      },
+      "managed_is_alias_of_local": true,
+      "recipe_for_direct_raises": {
+        "error": "RecipeNotFound: no recipe for kind 'direct'",
+        "ok": false
+      },
+      "recipe_for_unknown": {
+        "error": "RecipeNotFound: no recipe for kind 'nope'",
+        "ok": false
+      },
+      "trace": "prompting/recipes.py:24-28 (kind consts), 30-84 (RECIPES), 88-129 (CLOUD_RECIPES), 142-152 (kind_for), 163-178 (MANAGED_RECIPES alias + recipe_for), 181-185 (cloud_recipe_for), 188-189 (all_kinds)"
+    }
+  },
+  "fixture_id": "FIX-recipes",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world).",
+  "notes": [
+    "MANAGED_RECIPES is dict(RECIPES) (equal copy, not alias); recipe_for('direct') raises RecipeNotFound (cloud kinds unreachable here); recipe errors read 'no recipe for kind %r' / 'no Cloud Agent recipe for kind %r'."
+  ],
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "prompting/recipes.py:24-28 (kind consts), 30-84 (RECIPES), 88-129 (CLOUD_RECIPES), 142-152 (kind_for), 163-178 (MANAGED_RECIPES + recipe_for), 181-189 (cloud_recipe_for, all_kinds)"
+  ]
+}

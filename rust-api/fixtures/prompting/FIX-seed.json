@@ -1,0 +1,73 @@
+{
+  "bugs": [],
+  "data": {
+    "commands": {
+      "reseed_default_force": "default template: skipped",
+      "reseed_default_no_force": "default template: skipped",
+      "reseed_review": "review template: skipped",
+      "reseed_test": "test template: skipped",
+      "revalidate_clear_run": "checked 4 active override(s): 0 newly flagged, 1 cleared.",
+      "revalidate_cleared_after_fix": true,
+      "revalidate_first_run": "checked 4 active override(s): 2 newly flagged, 0 cleared.",
+      "revalidate_flagged_broken": true,
+      "revalidate_flagged_detail": "first run flagged 2 rows: (1) intro/personal (locked section can never validate -> OverrideValidationError) and (2) autonomy/outsider (BROKEN {{ oops_xyz }} undefined var); workspace + member autonomy rows passed. Clear run after fixing (2) to the registry default: 0 newly flagged, 1 cleared; locked intro row stays flagged.",
+      "trace": "management/commands/reseed_{default,review,test}_template.py (handle: seed_*(force) + '<name> template: <result>'); revalidate_section_overrides.py (handle: iterate active, unknown-key or OverrideValidationError -> needs_attention=True; --clear resets clean rows; never deletes/deactivates)"
+    },
+    "db": {
+      "default": {
+        "before_count": 0,
+        "created_version": 1,
+        "first": "created",
+        "refresh": {
+          "body_matches_fragments": true,
+          "result": "refreshed",
+          "version": 2
+        },
+        "second": "skipped",
+        "workspace_row_untouched_by_force": true
+      },
+      "review": {
+        "body_is_const": true,
+        "first": "created",
+        "force_refresh": "refreshed",
+        "second": "skipped",
+        "version_after_refresh": 2
+      },
+      "test": {
+        "body_is_const": true,
+        "first": "created",
+        "second": "skipped"
+      },
+      "trace": "seed.py:215-244 (seed_default_template), 247-274 (review), 277-308 (test): missing -> created v1; present -> skipped; force+different -> refreshed v+1; workspace rows untouched"
+    },
+    "review_template_body": "You are reviewing the work product of a previous implementation pass.\n\"Review\" can mean different things depending on what was produced.\n\nIssue: {{ issue.title }}\nIssue Description: {{ issue.description }}\nRecent activity:\n{{ comments_section }}\nLatest implementation run output (read this carefully \u2014\nit is your authoritative record of what was produced):\n{{ parent_done_payload }}\n\nStep 1 \u2014 Decide what kind of review this is.\nInspect parent_done_payload, the issue description, and the working\ntree. Choose ONE:\n  (a) CODE \u2014 the issue produced a GitHub PR (look for a `pr_url` in\n      done_payload, or a feature branch ahead of main).\n  (b) DESIGN \u2014 the issue produced a design / planning document\n      (look for paths under `.ai_design/`, paths in\n      `done_payload.design_doc_paths`, or markdown artifacts\n      referenced as outputs).\n  (c) DESIGN_THEN_CODE \u2014 both a design doc AND a PR exist. Review\n      the design first, then the code.\n  (d) GENERIC \u2014 none of the above. Review the work product against\n      the issue description and leave a summary on the pidash issue.\n\nIf you cannot decide, ask the human via `paused`.\n\nStep 2 \u2014 Run the cycle for the chosen kind. All cycles share this\nshape:\n  i.   Find issues with the work product.\n  ii.  Validate your findings (no hallucinations) \u2014 re-read the\n       artifact, confirm each issue is real, drop any that aren't.\n  iii. Read existing reviewer comments (in the PR, in the doc, or\n       on the pidash issue depending on kind) and reconcile your\n       findings against them.\n  iv.  Comment on the validated issues at the appropriate surface:\n       - CODE: comments on the GitHub PR (use `gh` CLI).\n       - DESIGN: inline comments on the doc, or a structured\n         comment on the pidash issue if the doc has no comment\n         surface.\n       - DESIGN_THEN_CODE: design comments first, then PR comments.\n       - GENERIC: a structured comment on the pidash issue.\n  v.   If you can fix a confirmed issue and the kind permits it,\n       apply the fix and resolve the corresponding comment:\n       - CODE: edit, commit, push to the PR branch, resolve the\n         PR comment thread.\n       - DESIGN: edit the doc and resolve / strike the inline\n         comment.\n       - GENERIC: usually does NOT auto-apply \u2014 leave the summary\n         and let the human act.\n  vi.  Post a summary back to the pidash issue as a comment:\n       confirmed issues found, what you fixed automatically, what\n       still needs human action.\n\nStep 3 \u2014 Emit a done-signal.\n- `completed` = approved, no further automatic ticking needed\n  (the review pass is satisfied).\n- `blocked` = real issues found that you couldn't auto-fix and\n  need human attention.\n- `paused` = clarifying question for the human.\n- `noop` = nothing has changed since your last review pass.\n",
+    "sql_global_select": "SELECT \"prompt_template\".\"id\", \"prompt_template\".\"workspace_id\", \"prompt_template\".\"name\", \"prompt_template\".\"body\", \"prompt_template\".\"is_active\", \"prompt_template\".\"version\", \"prompt_template\".\"updated_by_id\", \"prompt_template\".\"created_at\", \"prompt_template\".\"updated_at\" FROM \"prompt_template\" WHERE (\"prompt_template\".\"name\" = coding-task AND \"prompt_template\".\"workspace_id\" IS NULL) ORDER BY \"prompt_template\".\"updated_at\" DESC",
+    "statics": {
+      "default_body_equals_assemble": true,
+      "default_body_len": 53594,
+      "default_body_sha256": "c4a63023bb1ca4f249017b7e99f2403b7e51cbf9bf8b9910e00bba2e6f0e3331",
+      "default_name": "coding-task",
+      "migrate_receiver": "seed_default_template_on_migrate: app_config.label != 'prompting' -> return; PI_DASH_SKIP_PROMPT_SEED=1 -> return; else seed_default/review/test force=False; exceptions swallowed with print when verbosity",
+      "review_body_len": 2815,
+      "review_body_sha256": "f0677cf99da065f5853a21eef75fadbc2aa693b3ecff3fc5c6740a57011642b4",
+      "review_body_vars": [true, true, true],
+      "review_name": "review",
+      "test_body_len": 4927,
+      "test_body_sha256": "9b5869a316b488062058b28c07fb17952c830b2220c0b6710710267e91428e2f",
+      "test_name": "test",
+      "trace": "prompting/seed.py:29-96 (REVIEW_TEMPLATE_BODY), 105-197 (TEST_TEMPLATE_BODY), 200-212 (read_*_body), 215-308 (seed_*_template create/refresh/skip), 311-330 (post_migrate receiver)"
+    },
+    "test_template_body": "You are testing the work product of a previous implementation pass \u2014\nas its FIRST USER. The consumer of a change may be a human at a\nscreen, a program calling an API, another service, an operator, or a\nreader; your job is to impersonate that consumer and verify by acting\nand observing, never by inspecting code or trusting a pipeline. CI\nand repo gates corroborate; they are not the verdict. Two questions\ndecide the pass: does the change achieve its stated goal exercised\nfrom the outside, and do the neighboring flows the user relies on\nstill work (a short regression smoke, not just the new happy path)?\n\nIssue: {{ issue.title }}\nIssue Description: {{ issue.description }}\nRecent activity:\n{{ comments_section }}\nLatest implementation run output (read this carefully \u2014 it is your\nauthoritative record of what was produced, including any acceptance\ncriteria, pr_url, or design_doc_paths it reported):\n{{ parent_done_payload }}\n\nStep 1 \u2014 Identify the user, and choose the kind.\nAsk: who consumes this change, and through what surface? Inspect\nparent_done_payload, the issue description, and the working tree.\nChoose ONE:\n  (a) AUTOMATED \u2014 the user is a program: API client, CLI, library\n      caller, or another service (the issue produced code \u2014 a PR /\n      feature branch). Check out the branch, act as that consumer\n      (real calls against a running instance where feasible), and\n      run THIS repo's own gates as corroboration \u2014 discover them\n      from the README/CONTRIBUTING, the CI config, and the package\n      manifest (package.json / Makefile / pyproject.toml /\n      Cargo.toml / go.mod); never assume a toolchain. Run\n      format/lint, types, the targeted unit/integration tests for\n      the changed surface, and build. Add missing tests for the\n      changed surface.\n  (b) UI / EXPLORATORY \u2014 the user is a human at a screen. Launch\n      the app, drive the changed flow as that human would, check\n      the acceptance criteria by observation, and click through the\n      adjacent flows the change could have disturbed. Tests and a\n      clean build do not substitute for looking at it. If you\n      cannot boot the app or drive a browser in this environment,\n      say so and emit `blocked` \u2014 do not report a false pass.\n  (c) OPS / INFRA \u2014 the user is an operator (or the deploy\n      machinery). Run the operator's procedure: dry-run, validate\n      config, apply where safe, health-check, confirm idempotency.\n      Ops changes often produce no CI signal at all \u2014 your run may\n      be the only verification this change gets.\n  (d) DESIGN \u2014 the user is a reader who must act on the doc. Read\n      it cold: internal consistency, open questions resolved,\n      implementable/testable from the text alone.\n  (e) NON_TECHNICAL / GENERIC \u2014 none of the above. Stand in for\n      whoever the deliverable is for; verify the stated acceptance\n      criteria one by one and report pass/fail per criterion for a\n      human to confirm.\nTo act as the user you need somewhere the software runs: boot it\nlocally, stand up an ephemeral environment, or use the project's own\npipeline (preview deploy / CI) to obtain a running instance when\nlocal cannot work end-to-end. The pipeline's exit code is a data\npoint, not the verdict. No route to a running instance = an honest\n`blocked` stating exactly what was missing.\n\nIf the acceptance criteria are ambiguous or absent, derive a plan\nfrom the description, STATE YOUR ASSUMPTIONS in your comment, and\ntest against them \u2014 or emit `paused` to ask if the deliverable is\nhigh-stakes.\n\nStep 2 \u2014 Run the test cycle (uniform across kinds):\n  i.   Derive a test plan from the acceptance criteria, plus a short\n       regression smoke over the neighboring flows the user relies\n       on.\n  ii.  Set up the environment for the chosen kind.\n  iii. Execute from the user's side of the surface \u2014 drive the UI,\n       call the API, run the procedure. \"The diff looks right\" is\n       not a test result.\n  iv.  Collect evidence (test output, coverage, logs, screenshots).\n  v.   Validate your findings \u2014 re-run / confirm; never report a\n       hallucinated failure.\n  vi.  Post a STRUCTURED results comment to the pidash issue:\n        - Kind detected and what was tested (scope).\n        - Method \u2014 commands run / flows exercised.\n        - Result \u2014 pass/fail per acceptance criterion, with evidence.\n        - Defects found \u2014 and whether you auto-fixed (pushed to the\n          PR branch) or it needs a human / a follow-up issue.\n  vii. Optionally push trivial fixes to the PR branch, or file a\n       follow-up issue for real defects.\n\nStep 3 \u2014 Emit a done-signal.\n- `completed` = all tests pass / acceptance criteria met.\n- `blocked`   = real defects found that need a human/dev, OR the\n                test couldn't be run (missing env / creds / tooling).\n- `paused`    = acceptance criteria ambiguous \u2014 ask the human.\n- `noop`      = nothing changed since the last test pass.\n"
+  },
+  "fixture_id": "FIX-seed",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world).",
+  "notes": [
+    "Seed never touches workspace-scoped rows. reseed --force only rewrites when the body differs (else 'skipped'). revalidate never deletes/deactivates; a locked section's override can never validate so --clear leaves it flagged."
+  ],
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "prompting/seed.py:29-96 (REVIEW_TEMPLATE_BODY), 105-197 (TEST_TEMPLATE_BODY), 200-212 (read_*_body), 215-308 (seed_default/review/test_template), 311-330 (post_migrate receiver)",
+    "prompting/management/commands/reseed_default_template.py, reseed_review_template.py, reseed_test_template.py (handle: seed_*(force) + '<name> template: <result>')",
+    "prompting/management/commands/revalidate_section_overrides.py (handle: flag/clear needs_attention)"
+  ]
+}
