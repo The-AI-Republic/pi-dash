@@ -163,15 +163,17 @@ pub fn posthog_configuration_from_env() -> Option<(String, String)> {
 
 /// `determine_server_host` (`posthog/request.py:24-36`): the two legacy
 /// cloud hosts remap to their ingestion endpoints; anything else passes
-/// through unchanged (trailing slash is NOT stripped here — `post()`
-/// strips it when joining `path`).
+/// through unchanged. The SDK compares after `remove_trailing_slash`
+/// (one trailing slash) but returns the original otherwise — `post()`
+/// strips the slash when joining `path` — so the comparison trims here
+/// while the passthrough keeps the input verbatim.
 pub fn determine_server_host(host: &str) -> String {
-    match host {
+    match host.strip_suffix('/').unwrap_or(host) {
         "https://app.posthog.com" | "https://us.posthog.com" => {
             "https://us-api.i.posthog.com".to_owned()
         }
         "https://eu.posthog.com" => "https://eu-api.i.posthog.com".to_owned(),
-        other => other.to_owned(),
+        _ => host.to_owned(),
     }
 }
 
@@ -944,6 +946,20 @@ mod tests {
         assert_eq!(
             determine_server_host("https://eu.posthog.com"),
             "https://eu-api.i.posthog.com"
+        );
+        // The SDK compares after remove_trailing_slash: a legacy host
+        // with a trailing slash still remaps (request.py:24-36).
+        assert_eq!(
+            determine_server_host("https://app.posthog.com/"),
+            "https://us-api.i.posthog.com"
+        );
+        assert_eq!(
+            determine_server_host("https://eu.posthog.com/"),
+            "https://eu-api.i.posthog.com"
+        );
+        assert_eq!(
+            capture_url("https://app.posthog.com/"),
+            "https://us-api.i.posthog.com/batch/"
         );
         assert_eq!(
             determine_server_host("https://ph.example.com"),
