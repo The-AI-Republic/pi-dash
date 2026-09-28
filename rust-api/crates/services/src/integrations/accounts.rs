@@ -1031,7 +1031,7 @@ pub(crate) mod fakes {
                 })
                 .cloned()
                 .collect();
-            scoped.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+            scoped.sort_by_key(|left| left.created_at);
             scoped
         }
     }
@@ -1251,17 +1251,6 @@ pub(crate) mod fakes {
 mod tests {
     use super::fakes::*;
     use super::*;
-    use pidash_types::integrations::GitProviderCapabilities;
-
-    fn capabilities(write_comments: bool) -> GitProviderCapabilities {
-        GitProviderCapabilities {
-            read_repositories: true,
-            read_issues: true,
-            write_comments,
-            manage_webhooks: false,
-            clone: false,
-        }
-    }
 
     #[test]
     fn error_status_codes_replay_golden() {

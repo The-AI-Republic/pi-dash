@@ -712,7 +712,7 @@ mod tests {
                 })
                 .cloned()
                 .collect();
-            scoped.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+            scoped.sort_by_key(|left| left.created_at);
             scoped
         }
 
@@ -1429,7 +1429,7 @@ mod tests {
         .await
         .expect("enables");
         assert!(updated.is_sync_enabled);
-        assert_eq!(store.github_syncs.lock().unwrap()[&project_id], true);
+        assert!(store.github_syncs.lock().unwrap()[&project_id]);
 
         // Unbind removes the binding and the sync rows.
         unbind_repository(&store, FullFake::workspace_slug(), project_id)
@@ -1494,7 +1494,7 @@ mod tests {
         .expect("enables");
         assert!(updated.is_sync_enabled);
         // Non-github provider: the sync table is untouched.
-        assert_eq!(store.github_syncs.lock().unwrap()[&project_id], false);
+        assert!(!store.github_syncs.lock().unwrap()[&project_id]);
     }
 
     #[test]
