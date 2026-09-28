@@ -5,9 +5,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import useSWR from "swr";
 import { AssistantService } from "@pi-dash/services";
-import type { IUserSTTConfig } from "@pi-dash/types";
+import { useSTTConfig } from "@/hooks/use-stt-config";
 
 /**
  * Push-to-talk voice dictation for the chat composer. Wraps the browser
@@ -40,6 +39,9 @@ export interface UseDictationOptions {
 }
 
 export interface UseDictation {
+  /** Instance kill switch. False until the config loads, so dictation stays
+   * hidden while loading and when the config read fails. */
+  isEnabled: boolean;
   status: DictationStatus;
   /** Milliseconds elapsed in the current recording (0 when not recording). */
   elapsedMs: number;
@@ -104,9 +106,8 @@ export function useDictation({ onResult }: UseDictationOptions): UseDictation {
 
   // Pre-check configuration via the shared SWR cache (same key the settings
   // page uses). Undefined while loading or if the endpoint is unavailable.
-  const { data: config } = useSWR<IUserSTTConfig>("assistant-stt-config", () => service.getSTTConfig(), {
-    shouldRetryOnError: false,
-  });
+  const { data: config, mutate: revalidateConfig } = useSTTConfig();
+  const isEnabled = config?.enabled === true;
   const knownUnconfigured = config ? !config.has_api_key : false;
 
   const clearTimers = useCallback(() => {
@@ -143,12 +144,19 @@ export function useDictation({ onResult }: UseDictationOptions): UseDictation {
           setStatus("unconfigured");
           return;
         }
+        if (code === "dictation_disabled") {
+          // Our cached config still says enabled but the server has switched
+          // dictation off: refetch so `isEnabled` drops and the mic hides.
+          setStatus("idle");
+          void revalidateConfig();
+          return;
+        }
         const detail = (err as { detail?: string; error?: string } | null)?.detail;
         setErrorMessage(detail || "Transcription failed. Try again.");
         setStatus("error");
       }
     },
-    [onResult]
+    [onResult, revalidateConfig]
   );
 
   const stop = useCallback(() => {
@@ -181,6 +189,7 @@ export function useDictation({ onResult }: UseDictationOptions): UseDictation {
   }, [clearTimers, releaseStream, status]);
 
   const start = useCallback(async () => {
+    if (!isEnabled) return;
     if (!isSupported) {
       setErrorMessage("Voice input isn't supported in this browser.");
       setStatus("error");
@@ -262,13 +271,21 @@ export function useDictation({ onResult }: UseDictationOptions): UseDictation {
     }, TICK_MS);
     // Auto-stop at the cap so the upload stays under the size limit.
     capRef.current = setTimeout(() => stop(), MAX_RECORDING_MS);
-  }, [isSupported, status, knownUnconfigured, clearTimers, releaseStream, transcribe, stop, cancel]);
+  }, [isSupported, isEnabled, status, knownUnconfigured, clearTimers, releaseStream, transcribe, stop, cancel]);
 
   const reset = useCallback(() => {
     setErrorMessage(null);
     setElapsedMs(0);
     setStatus("idle");
   }, []);
+
+  // The kill switch can flip off mid-recording (config revalidates on focus
+  // after a deploy). The composer then unmounts the mic, and with it the
+  // push-to-talk release, so abandon the recording here or the mic would stay
+  // live with no UI until the cap.
+  useEffect(() => {
+    if (!isEnabled && (status === "recording" || status === "requesting")) cancel();
+  }, [isEnabled, status, cancel]);
 
   // Clean up on unmount / navigation: stop timers and release the mic so no
   // stream leaks past the composer's lifetime.
@@ -289,6 +306,7 @@ export function useDictation({ onResult }: UseDictationOptions): UseDictation {
   }, [clearTimers, releaseStream]);
 
   return {
+    isEnabled,
     status,
     elapsedMs,
     errorMessage,
