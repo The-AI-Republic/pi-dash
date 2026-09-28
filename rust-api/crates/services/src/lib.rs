@@ -13,6 +13,7 @@ pub mod integrations;
 pub mod license;
 pub mod r#loop;
 pub mod prompting;
+pub mod scheduler;
 pub mod space;
 pub mod tasks_cleanup;
 pub mod tasks_webhooks;
