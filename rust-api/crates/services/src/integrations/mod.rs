@@ -14,15 +14,20 @@
 //!   clone URL, bind/get/set-sync/unbind/list; PIDASHCONV-145).
 //! * [`serializers`] — `services.py:232-296` (the four serializers;
 //!   PIDASHCONV-145).
+//! * [`code_reviews`] — `code_reviews.py:1-262` (link-lifecycle closure:
+//!   errors, legacy/path lookups, legacy sync, detach, account fallback,
+//!   attach; PIDASHCONV-146).
 //!
 //! Fixture ids replayed by the unit tests alongside each module:
 //! `rust-api/fixtures/integrations/adapters/github.golden.json`,
 //! `rust-api/fixtures/integrations/adapters/gitlab.golden.json`,
-//! `rust-api/fixtures/integrations/services/*.golden.json`.
+//! `rust-api/fixtures/integrations/services/*.golden.json`,
+//! `rust-api/fixtures/integrations/code_reviews.golden.json`.
 
 pub mod accounts;
 pub mod adapters_github;
 pub mod adapters_gitlab;
+pub mod code_reviews;
 pub mod repositories;
 pub mod serializers;
 
