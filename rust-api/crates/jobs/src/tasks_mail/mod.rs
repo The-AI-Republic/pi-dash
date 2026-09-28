@@ -189,10 +189,13 @@ pub(crate) fn mention_ids_in_html(html: &str) -> Option<Vec<String>> {
                 key == "entity_name" && value.as_deref() == Some("user_mention")
             });
             if is_user_mention {
-                let identifier = attrs
-                    .iter()
-                    .find(|(key, _)| key == "entity_identifier")
-                    .and_then(|(_, value)| value.clone())?;
+                // `tag["entity_identifier"]` raises `KeyError` only when the
+                // attribute is absent; a bare attribute with no `=` parses to
+                // `""` under html.parser, so it yields an empty-string id.
+                let identifier = match attrs.iter().find(|(key, _)| key == "entity_identifier") {
+                    Some((_, value)) => value.clone().unwrap_or_default(),
+                    None => return None,
+                };
                 ids.push(identifier);
             }
         }
@@ -473,6 +476,14 @@ mod tests {
     #[test]
     fn empty_identifier_is_still_a_match() {
         let html = "<mention-component entity_name=\"user_mention\" entity_identifier=\"\"></mention-component>";
+        assert_eq!(mention_ids_in_html(html), Some(vec!["".to_owned()]));
+    }
+
+    #[test]
+    fn bare_identifier_without_value_yields_empty_string() {
+        // html.parser gives a valueless attribute `""` instead of raising,
+        // so only a wholly absent attribute fails the parse.
+        let html = "<mention-component entity_name=\"user_mention\" entity_identifier></mention-component>";
         assert_eq!(mention_ids_in_html(html), Some(vec!["".to_owned()]));
     }
 
