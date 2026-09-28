@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 pidash-types = { path = "../types" }
 pidash-db = { path = "../db" }
+# Version-task flows call the D-09 decision layer (api-crate precedent).
 pidash-services = { path = "../services" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
