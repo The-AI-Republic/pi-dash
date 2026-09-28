@@ -146,6 +146,11 @@ impl Overlay {
 /// The Space group serves the D-02 project/meta/taxonomy family (`space`):
 /// the nine owned GETs (PIDASHCONV-174). Sibling `api/public/` paths have
 /// no Rust route and keep proxying to Django through the fallback.
+///
+/// The Loop group serves the D-03 instance-admin surface (`loop::admin`,
+/// PIDASHCONV-161): the three `/api/instances/loop/jobs/` paths with
+/// their owned methods; every other method on those paths proxies to
+/// Django. The user surface joins this group with PIDASHCONV-159.
 fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
     match group {
         RouteGroup::Web => Router::new()
@@ -154,6 +159,7 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         RouteGroup::App => crate::app_issues::routes(),
         RouteGroup::License => crate::license::routes(),
         RouteGroup::Space => crate::space::routes(),
+        RouteGroup::Loop => crate::r#loop::routes(),
         _ => Router::new(),
     }
 }

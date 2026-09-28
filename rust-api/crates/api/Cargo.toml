@@ -30,7 +30,7 @@ chrono-tz = "0.10"
 rust_decimal = { version = "1", features = ["serde"] }
 sea-query = { version = "0.32", default-features = false, features = ["backend-postgres"] }
 thiserror = "2"
-sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono", "json"] }
 uuid = { version = "1", features = ["v4"] }
 # License console handlers (D-01): session-auth-hash verification
 # (`django.contrib.auth` `salted_hmac`) and the `email-credentials-check`
