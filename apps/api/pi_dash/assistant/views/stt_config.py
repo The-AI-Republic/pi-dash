@@ -13,7 +13,6 @@ The SSRF guard runs both at save time (a friendly rejection) and at test time
 
 from __future__ import annotations
 
-from django.conf import settings
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
@@ -21,19 +20,10 @@ from rest_framework.throttling import UserRateThrottle
 
 from pi_dash.app.views.base import BaseAPIView
 from pi_dash.assistant import crypto, ssrf
-from pi_dash.assistant.errors import AssistantError, DictationDisabled
+from pi_dash.assistant.dictation import dictation_disabled_response, dictation_is_enabled
+from pi_dash.assistant.errors import AssistantError
 from pi_dash.assistant.models import UserSTTConfig
 from pi_dash.assistant.serializers import UserSTTConfigSerializer
-
-
-def dictation_is_enabled() -> bool:
-    """Operator kill switch for voice dictation (``VOICE_DICTATION_ENABLED``)."""
-    return bool(getattr(settings, "VOICE_DICTATION_ENABLED", False))
-
-
-def dictation_disabled_response() -> Response:
-    exc = DictationDisabled("Voice dictation is not available.")
-    return Response({"error": exc.code, "detail": exc.detail}, status=exc.http_status)
 
 
 def _serialize(cfg: UserSTTConfig | None) -> dict:
@@ -96,8 +86,8 @@ class UserSTTConfigEndpoint(BaseAPIView):
         return Response(_serialize(cfg))
 
     def delete(self, request):
-        if not dictation_is_enabled():
-            return dictation_disabled_response()
+        # Deliberately not gated by the kill switch: a user must always be able
+        # to remove a key they saved, even while dictation is switched off.
         UserSTTConfig.objects.filter(user=request.user).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 

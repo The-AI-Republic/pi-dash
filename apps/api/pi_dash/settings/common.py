@@ -273,9 +273,10 @@ ASSISTANT_TURN_HARD_LIMIT = int(get_config("ASSISTANT_TURN_HARD_LIMIT", 330))
 # in the UI is unaffected — only what the model sees is truncated.
 ASSISTANT_HISTORY_MAX_TURNS = int(get_config("ASSISTANT_HISTORY_MAX_TURNS", 40))
 # Voice dictation kill switch. Off by default while the feature is incomplete:
-# the STT config write paths and the transcribe endpoint refuse, and the web app
-# hides the composer mic and the settings section (read from the STT config
-# GET, so flipping it needs no web rebuild). Cloud sets it per env via SSM.
+# STT config save/test and the transcribe endpoint refuse (DELETE stays open so
+# a saved key can always be removed), and the web app hides the composer mic and
+# the settings section (read from the STT config GET, so flipping it needs no web
+# rebuild). Cloud sets it per env via SSM.
 VOICE_DICTATION_ENABLED = get_config("VOICE_DICTATION_ENABLED", "false").lower() in ("1", "true", "yes")
 
 # Loop (Auto Project Management) — periodic assistant jobs.

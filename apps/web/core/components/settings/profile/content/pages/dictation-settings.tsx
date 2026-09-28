@@ -4,13 +4,12 @@
  * See the LICENSE file for details.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { observer } from "mobx-react";
-import useSWR from "swr";
 import { setToast, TOAST_TYPE } from "@pi-dash/propel/toast";
 import { AssistantService } from "@pi-dash/services";
-import type { IUserSTTConfig } from "@pi-dash/types";
 import { Button } from "@pi-dash/ui";
+import { useSTTConfig } from "@/hooks/use-stt-config";
 
 const service = new AssistantService();
 
@@ -22,7 +21,8 @@ const service = new AssistantService();
 export const DICTATION_SETTINGS_ANCHOR = "voice-dictation";
 
 export const DictationSettings = observer(function DictationSettings() {
-  const { data: config, mutate } = useSWR<IUserSTTConfig>("assistant-stt-config", () => service.getSTTConfig());
+  const { data: config, mutate } = useSTTConfig();
+  const sectionRef = useRef<HTMLDivElement>(null);
 
   const [baseUrl, setBaseUrl] = useState("");
   const [modelName, setModelName] = useState("");
@@ -36,6 +36,13 @@ export const DictationSettings = observer(function DictationSettings() {
       setModelName(config.model_name);
     }
   }, [config]);
+
+  // The settings page mounts this section only once the STT config has loaded,
+  // so on a cold deep link the browser's hash scroll has already run and missed
+  // it. Scroll here once it exists.
+  useEffect(() => {
+    if (window.location.hash === `#${DICTATION_SETTINGS_ANCHOR}`) sectionRef.current?.scrollIntoView();
+  }, []);
 
   const save = async () => {
     setSaving(true);
@@ -88,8 +95,26 @@ export const DictationSettings = observer(function DictationSettings() {
     setToast({ type: TOAST_TYPE.INFO, title: "Removed", message: "Voice dictation configuration deleted." });
   };
 
+  // Kill switch off (VOICE_DICTATION_ENABLED): the only thing left to offer is
+  // removing a key saved before dictation was switched off.
+  if (config && !config.enabled) {
+    return (
+      <div id={DICTATION_SETTINGS_ANCHOR} ref={sectionRef} className="flex max-w-xl flex-col gap-3">
+        <h3 className="text-16 font-semibold text-primary">Voice dictation</h3>
+        <p className="text-13 text-secondary">
+          Voice dictation is currently unavailable. You still have a saved transcription API key, which you can remove.
+        </p>
+        <div>
+          <Button onClick={remove} variant="tertiary-danger">
+            Remove
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div id={DICTATION_SETTINGS_ANCHOR} className="flex max-w-xl flex-col gap-5">
+    <div id={DICTATION_SETTINGS_ANCHOR} ref={sectionRef} className="flex max-w-xl flex-col gap-5">
       <div>
         <h3 className="text-16 font-semibold text-primary">Voice dictation</h3>
         <p className="mt-1 text-13 text-secondary">

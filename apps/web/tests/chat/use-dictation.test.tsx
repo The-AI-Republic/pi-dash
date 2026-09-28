@@ -6,7 +6,7 @@
 
 import type { ReactNode } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { SWRConfig } from "swr";
+import { SWRConfig, useSWRConfig } from "swr";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { getSTTConfig, transcribeAudio } = vi.hoisted(() => ({
@@ -181,6 +181,56 @@ describe("useDictation", () => {
     await waitFor(() => expect(result.current.status).toBe("unconfigured"));
     expect(result.current.isUnconfigured).toBe(true);
     expect(onResult).not.toHaveBeenCalled();
+  });
+
+  it("refetches the config and goes idle when the server reports dictation_disabled", async () => {
+    transcribeAudio.mockRejectedValue({ error: "dictation_disabled", detail: "Voice dictation is not available." });
+    const { result } = renderHook(() => useDictation({ onResult: vi.fn() }), { wrapper });
+    await waitFor(() => expect(result.current.isEnabled).toBe(true));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    // The server has since switched dictation off.
+    getSTTConfig.mockResolvedValue({
+      enabled: false,
+      base_url: "https://x",
+      model_name: "whisper-1",
+      has_api_key: true,
+      last_verified_at: null,
+    });
+    nowMs = 1500;
+    await act(async () => {
+      result.current.stop();
+    });
+
+    await waitFor(() => expect(result.current.isEnabled).toBe(false));
+    expect(result.current.status).toBe("idle");
+    expect(result.current.errorMessage).toBeNull();
+  });
+
+  it("abandons an in-flight recording when the kill switch turns off", async () => {
+    const { result } = renderHook(() => ({ dictation: useDictation({ onResult: vi.fn() }), swr: useSWRConfig() }), {
+      wrapper,
+    });
+    await waitFor(() => expect(result.current.dictation.isEnabled).toBe(true));
+    await act(async () => {
+      await result.current.dictation.start();
+    });
+    expect(result.current.dictation.status).toBe("recording");
+
+    // A focus revalidation after a deploy that switched dictation off.
+    await act(async () => {
+      await result.current.swr.mutate(
+        "assistant-stt-config",
+        { enabled: false, base_url: "", model_name: "", has_api_key: true, last_verified_at: null },
+        { revalidate: false }
+      );
+    });
+
+    await waitFor(() => expect(result.current.dictation.status).toBe("idle"));
+    expect(trackStop).toHaveBeenCalled(); // mic released
+    expect(transcribeAudio).not.toHaveBeenCalled();
   });
 
   it("shows the backend detail for a provider failure", async () => {

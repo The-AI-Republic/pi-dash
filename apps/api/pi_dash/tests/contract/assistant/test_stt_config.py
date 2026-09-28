@@ -73,9 +73,18 @@ def test_stt_config_disabled_refuses_writes(world, kms_crypto, settings, mocker)
     assert res.data["error"] == "dictation_disabled"
     post.assert_not_called()
 
+
+
+def test_stt_config_disabled_still_allows_delete(world, kms_crypto, settings):
+    # A user must always be able to remove a saved key, even with dictation off.
+    configure_stt(world.member)
+    settings.VOICE_DICTATION_ENABLED = False
+    c = client_for(world.member)
+
     res = c.delete(CONFIG_URL)
-    assert res.status_code == 404
-    assert res.data["error"] == "dictation_disabled"
+    assert res.status_code == 204
+    res = c.get(CONFIG_URL)
+    assert res.data["has_api_key"] is False
 
 
 # --- config CRUD ---

@@ -117,7 +117,13 @@ describe("DictationSettings", () => {
   });
 
   it("AC4: Save posts {base_url, model_name, api_key}, clears the key, and toasts success", async () => {
-    getSTTConfig.mockResolvedValue({ base_url: "", model_name: "", has_api_key: false, last_verified_at: null });
+    getSTTConfig.mockResolvedValue({
+      enabled: true,
+      base_url: "",
+      model_name: "",
+      has_api_key: false,
+      last_verified_at: null,
+    });
     putSTTConfig.mockResolvedValue({ base_url: "u", model_name: "m", has_api_key: true, last_verified_at: null });
     renderSettings();
 
@@ -140,7 +146,13 @@ describe("DictationSettings", () => {
   });
 
   it("AC5a: Test connection toasts success on {ok:true}", async () => {
-    getSTTConfig.mockResolvedValue({ base_url: "u", model_name: "m", has_api_key: true, last_verified_at: null });
+    getSTTConfig.mockResolvedValue({
+      enabled: true,
+      base_url: "u",
+      model_name: "m",
+      has_api_key: true,
+      last_verified_at: null,
+    });
     testSTTConfig.mockResolvedValue({ ok: true });
     renderSettings();
 
@@ -153,7 +165,13 @@ describe("DictationSettings", () => {
   });
 
   it("AC5b: Test connection toasts the returned error_code on {ok:false}", async () => {
-    getSTTConfig.mockResolvedValue({ base_url: "u", model_name: "m", has_api_key: true, last_verified_at: null });
+    getSTTConfig.mockResolvedValue({
+      enabled: true,
+      base_url: "u",
+      model_name: "m",
+      has_api_key: true,
+      last_verified_at: null,
+    });
     testSTTConfig.mockResolvedValue({ ok: false, error_code: "auth_failed" });
     renderSettings();
 
@@ -169,7 +187,13 @@ describe("DictationSettings", () => {
   });
 
   it("AC6: with a saved key, Test/Remove render and the API-key placeholder shows the saved state; Remove deletes and clears", async () => {
-    getSTTConfig.mockResolvedValue({ base_url: "u", model_name: "m", has_api_key: true, last_verified_at: null });
+    getSTTConfig.mockResolvedValue({
+      enabled: true,
+      base_url: "u",
+      model_name: "m",
+      has_api_key: true,
+      last_verified_at: null,
+    });
     deleteSTTConfig.mockResolvedValue(undefined);
     renderSettings();
 
@@ -182,5 +206,45 @@ describe("DictationSettings", () => {
 
     await waitFor(() => expect(deleteSTTConfig).toHaveBeenCalledTimes(1));
     expect(setToast).toHaveBeenCalledWith(expect.objectContaining({ type: "INFO", title: "Removed" }));
+  });
+
+  it("with dictation switched off, shows only a Remove action for a saved key", async () => {
+    getSTTConfig.mockResolvedValue({
+      enabled: false,
+      base_url: "u",
+      model_name: "m",
+      has_api_key: true,
+      last_verified_at: null,
+    });
+    deleteSTTConfig.mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    renderSettings();
+
+    const remove = await screen.findByRole("button", { name: "Remove" });
+    expect(screen.getByText(/voice dictation is currently unavailable/i)).toBeTruthy();
+    expect(screen.queryByText("Base URL")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+
+    await user.click(remove);
+    await waitFor(() => expect(deleteSTTConfig).toHaveBeenCalledTimes(1));
+  });
+
+  it("scrolls itself into view when deep-linked by its anchor", async () => {
+    getSTTConfig.mockResolvedValue({
+      enabled: true,
+      base_url: "",
+      model_name: "",
+      has_api_key: false,
+      last_verified_at: null,
+    });
+    const scrollIntoView = vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+    window.location.hash = `#${DICTATION_SETTINGS_ANCHOR}`;
+    try {
+      renderSettings();
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+    } finally {
+      window.location.hash = "";
+      scrollIntoView.mockRestore();
+    }
   });
 });

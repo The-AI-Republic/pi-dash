@@ -32,8 +32,8 @@ from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
 
 from pi_dash.app.views.base import BaseAPIView
+from pi_dash.assistant.dictation import dictation_disabled_response, dictation_is_enabled
 from pi_dash.assistant.errors import AssistantError
-from pi_dash.assistant.views.stt_config import dictation_disabled_response, dictation_is_enabled
 from pi_dash.ee.assistant.stt_provider import has_usable_stt_config, resolve_stt_provider
 
 # OpenHub's gateway caps transcription uploads at 25 MB; anything larger is
