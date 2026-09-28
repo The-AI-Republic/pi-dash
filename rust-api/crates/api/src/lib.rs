@@ -52,8 +52,8 @@ pub use state::AppState;
 ///
 /// The stack reads its config from the state's F-03 `Settings`; the
 /// session layer persists through `PgSessionStore` when the state carries
-/// pools and stays transparent otherwise (no pools yet in `serve`, so
-/// Django behind the proxy still owns sessions).
+/// pools and stays transparent otherwise (`serve` connects pools at boot,
+/// so a pool-less state only arises from non-`serve` constructors).
 ///
 /// A private `main.rs` composes it like this (with `from_env`; the doctest
 /// uses deterministic `test_defaults` so it runs hermetically):
