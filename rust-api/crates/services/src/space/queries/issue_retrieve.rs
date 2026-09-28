@@ -135,7 +135,9 @@ fn label_ids_sql() -> String {
 
 /// `assignee_ids` annotation (`issue.py:622-633`): distinct assignee ids
 /// requiring an ACTIVE `project_members` row plus a live
-/// (`issue_assignees`) through row; `Coalesce(..., [])`.
+/// (`issue_assignees`) through row; `Coalesce(..., [])`. Django joins
+/// `project_members` on the member FK alone (no project scoping), same as
+/// the merged `app_issues` precedent; kept.
 fn assignee_ids_sql() -> String {
     "COALESCE(ARRAY_AGG(DISTINCT \"assignees\".\"id\") FILTER (WHERE NOT (\"assignees\".\"id\" IS NULL) AND \"project_members\".\"is_active\" = true AND \"assignee_through\".\"deleted_at\" IS NULL), '{}') AS \"assignee_ids\"".to_string()
 }
@@ -188,7 +190,7 @@ fn reaction_items_sql() -> String {
 /// `$1` = issue id, `$2` = workspace slug, `$3` = project id.
 pub fn issue_retrieve_sql() -> String {
     format!(
-        "SELECT \"issues\".\"id\", \"issues\".\"name\", \"issues\".\"state_id\", \"issues\".\"sort_order\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", {module_ids}, {label_ids}, {assignee_ids}, \"issues\".\"estimate_point_id\" AS \"estimate_point\", \"issues\".\"priority\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"project_id\", \"issues\".\"parent_id\", {cycle_id}, \"issues\".\"created_by_id\" AS \"created_by\", \"states\".\"group\" AS \"state__group\", {vote_items}, {reaction_items} FROM \"issues\" INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") LEFT OUTER JOIN \"issues\" T_parent ON (\"issues\".\"parent_id\" = T_parent.\"id\") LEFT OUTER JOIN \"issue_labels\" \"label_through\" ON (\"issues\".\"id\" = \"label_through\".\"issue_id\") LEFT OUTER JOIN \"labels\" ON (\"label_through\".\"label_id\" = \"labels\".\"id\") LEFT OUTER JOIN \"issue_assignees\" \"assignee_through\" ON (\"issues\".\"id\" = \"assignee_through\".\"issue_id\") LEFT OUTER JOIN \"users\" \"assignees\" ON (\"assignee_through\".\"assignee_id\" = \"assignees\".\"id\") LEFT OUTER JOIN \"project_members\" ON (\"assignees\".\"id\" = \"project_members\".\"member_id\" AND \"project_members\".\"project_id\" = \"issues\".\"project_id\") LEFT OUTER JOIN \"issue_modules\" \"module_through\" ON (\"issues\".\"id\" = \"module_through\".\"issue_id\") LEFT OUTER JOIN \"modules\" ON (\"module_through\".\"module_id\" = \"modules\".\"id\") LEFT OUTER JOIN \"issue_votes\" \"votes\" ON (\"issues\".\"id\" = \"votes\".\"issue_id\") LEFT OUTER JOIN \"users\" \"vote_actor\" ON (\"votes\".\"actor_id\" = \"vote_actor\".\"id\") LEFT OUTER JOIN \"issue_reactions\" ON (\"issues\".\"id\" = \"issue_reactions\".\"issue_id\") LEFT OUTER JOIN \"users\" \"reaction_actor\" ON (\"issue_reactions\".\"actor_id\" = \"reaction_actor\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"states\".\"group\" != 'triage' AND \"issues\".\"archived_at\" IS NULL AND \"projects\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = false AND \"issues\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2 AND \"issues\".\"project_id\" = $3) GROUP BY \"issues\".\"id\", \"states\".\"group\" LIMIT 1",
+        "SELECT \"issues\".\"id\", \"issues\".\"name\", \"issues\".\"state_id\", \"issues\".\"sort_order\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", {module_ids}, {label_ids}, {assignee_ids}, \"issues\".\"estimate_point_id\" AS \"estimate_point\", \"issues\".\"priority\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"project_id\", \"issues\".\"parent_id\", {cycle_id}, \"issues\".\"created_by_id\" AS \"created_by\", \"states\".\"group\" AS \"state__group\", {vote_items}, {reaction_items} FROM \"issues\" INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") LEFT OUTER JOIN \"issues\" T_parent ON (\"issues\".\"parent_id\" = T_parent.\"id\") LEFT OUTER JOIN \"issue_labels\" \"label_through\" ON (\"issues\".\"id\" = \"label_through\".\"issue_id\") LEFT OUTER JOIN \"labels\" ON (\"label_through\".\"label_id\" = \"labels\".\"id\") LEFT OUTER JOIN \"issue_assignees\" \"assignee_through\" ON (\"issues\".\"id\" = \"assignee_through\".\"issue_id\") LEFT OUTER JOIN \"users\" \"assignees\" ON (\"assignee_through\".\"assignee_id\" = \"assignees\".\"id\") LEFT OUTER JOIN \"project_members\" ON (\"assignees\".\"id\" = \"project_members\".\"member_id\") LEFT OUTER JOIN \"module_issues\" \"module_through\" ON (\"issues\".\"id\" = \"module_through\".\"issue_id\") LEFT OUTER JOIN \"modules\" ON (\"module_through\".\"module_id\" = \"modules\".\"id\") LEFT OUTER JOIN \"issue_votes\" \"votes\" ON (\"issues\".\"id\" = \"votes\".\"issue_id\") LEFT OUTER JOIN \"users\" \"vote_actor\" ON (\"votes\".\"actor_id\" = \"vote_actor\".\"id\") LEFT OUTER JOIN \"issue_reactions\" ON (\"issues\".\"id\" = \"issue_reactions\".\"issue_id\") LEFT OUTER JOIN \"users\" \"reaction_actor\" ON (\"issue_reactions\".\"actor_id\" = \"reaction_actor\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"states\".\"group\" != 'triage' AND \"issues\".\"archived_at\" IS NULL AND \"projects\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = false AND \"issues\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2 AND \"issues\".\"project_id\" = $3) GROUP BY \"issues\".\"id\", \"states\".\"group\" LIMIT 1",
         module_ids = module_ids_sql(),
         label_ids = label_ids_sql(),
         assignee_ids = assignee_ids_sql(),
@@ -544,6 +546,32 @@ mod tests {
         assert!(
             squashed(&sql).ends_with("GROUP BY \"issues\".\"id\", \"states\".\"group\" LIMIT 1"),
             "first() close"
+        );
+    }
+
+    #[test]
+    fn through_joins_use_real_table_and_member_join_shape() {
+        // The fixture abbreviates the FROM block as prose, so these
+        // builder-owned joins need their own pins. `ModuleIssue` lives in
+        // `module_issues` (`db/models/module.py`); `issue_modules` exists
+        // nowhere and would fail at execution with 42P01.
+        let flat = squashed(&issue_retrieve_sql());
+        assert!(
+            flat.contains("LEFT OUTER JOIN \"module_issues\" \"module_through\""),
+            "module through table"
+        );
+        assert!(
+            !flat.contains("issue_modules"),
+            "no invented issue_modules relation"
+        );
+        // Django joins project_members on the member FK alone
+        // (`assignees__member_project`, no project scoping), same as the
+        // merged app_issues precedent.
+        assert!(
+            flat.contains(
+                "LEFT OUTER JOIN \"project_members\" ON (\"assignees\".\"id\" = \"project_members\".\"member_id\")"
+            ),
+            "unscoped member join"
         );
     }
 
