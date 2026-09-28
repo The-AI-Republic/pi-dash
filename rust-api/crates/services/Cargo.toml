@@ -7,6 +7,7 @@ edition = "2021"
 pidash-types = { path = "../types" }
 pidash-db = { path = "../db" }
 pidash-auth = { path = "../auth" }
+serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 thiserror = { version = "2" }
 

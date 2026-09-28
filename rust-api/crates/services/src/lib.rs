@@ -10,6 +10,7 @@ pub mod app_issues;
 pub mod extensions;
 pub mod health;
 pub mod license;
+pub mod space;
 pub mod user_settings;
 
 pub use health::{db_summary, health_report};
