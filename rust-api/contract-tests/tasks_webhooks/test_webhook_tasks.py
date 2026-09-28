@@ -10,6 +10,7 @@ timing is pinned by options parity while the suite behaviorally covers the
 first-attempt failure log row, the success path, and redelivery.
 """
 
+import time
 import uuid
 
 import pytest
@@ -112,8 +113,41 @@ def test_fan_out_call_sites():
     )
 
 
+#: Tasks the live Django worker registers (Celery broadcast inspect). NOTE
+#: (PIDASHCONV-242, FX-LOG-01): ``pi_dash.bgtasks.logger_task.process_logs``
+#: is deliberately absent. Stock Django never imports the module at worker
+#: boot — it is in neither ``CELERY_IMPORTS`` (settings/common.py:409) nor
+#: ``bgtasks/apps.py ready()`` — so the ``@shared_task`` never registers and
+#: any published ``process_logs`` job is consumed but never executed (no
+#: ``api_activity_logs`` row). Unchanged since the initial commit: stock
+#: behavior, not drift. Same precedent as the dead
+#: ``project_invitation_task`` (tasks_mail oracle): pin the absence instead
+#: of requiring registration. Wire + task-option parity above still cover
+#: the publisher side (``middleware/logger.py:149`` really emits it), and
+#: the Rust worker matches non-execution (parity decision in the
+#: PIDASHCONV-242 workpad/PR; gate PIDASHCONV-203 must not register
+#: ``PROCESS_LOGS_TASK`` when wiring D-08).
+REGISTERED_WEBHOOK_TASKS = {
+    name for name in WEBHOOK_TASKS if name != f"{M}.logger_task.process_logs"
+}
+
+
 def test_worker_registration(broker_url):
-    broker_probe.wait_for_registration(set(WEBHOOK_TASKS))
+    broker_probe.wait_for_registration(REGISTERED_WEBHOOK_TASKS)
+
+
+def test_process_logs_not_registered(broker_url):
+    """Stock bug pin (FX-LOG-01): the worker answers inspect but never
+    registered ``process_logs`` (see NOTE on REGISTERED_WEBHOOK_TASKS)."""
+    found = broker_probe.wait_for_registration(
+        {f"{M}.event_tracking_task.track_event"},
+        what="D-08 sink witness registration",
+    )
+    assert f"{M}.logger_task.process_logs" not in found, (
+        "process_logs became registered (Django now imports logger_task at "
+        "worker boot?) — re-sync the oracle "
+        f"(registered sample: {sorted(found)[:10]}, total {len(found)})"
+    )
 
 
 def _seed_workspace_with_hook(db_conn, webhook_sink, **flags):
@@ -290,9 +324,17 @@ def test_deactivation_email_delivers(db_conn, broker_url, smtp_sink):
     assert any(receiver["email"] in m["rcpt_tos"] for m in delivered)
 
 
-def test_process_logs_writes_postgres_row(db_conn, broker_url):
-    """Without Mongo configured, process_logs falls back to Postgres."""
+def test_process_logs_published_but_never_executed(db_conn, broker_url):
+    """Stock bug pin (FX-LOG-01): without Mongo configured, process_logs
+    WOULD fall back to Postgres (logger_task.py:97-100) — but the task is
+    never registered at worker boot (see NOTE on REGISTERED_WEBHOOK_TASKS),
+    so the published job is consumed and dropped: no ``api_activity_logs``
+    row ever appears. The queue drain proves the worker took the message;
+    the grace poll proves nothing executed it (a future Django fix that
+    registers the task would write the probe row here and fail loudly).
+    Rust parity: the Rust worker matches non-execution (see NOTE above)."""
     before = snapshot(db_conn, ["api_activity_logs"])
+    baseline = broker_probe.queue_depth()
     celery_wire.publish(
         f"{M}.logger_task.process_logs",
         args=[
@@ -305,11 +347,19 @@ def test_process_logs_writes_postgres_row(db_conn, broker_url):
             {},
         ],
     )
-    after = wait_for(
-        lambda: _added_rows(db_conn, "api_activity_logs", before) or None,
-        what="api_activity_logs row",
+    broker_probe.wait_for_queue_drain(
+        baseline=baseline, what="process_logs consumed (dropped)"
     )
-    assert after[0]["path"] == "/contract/probe"
+    deadline = time.monotonic() + 10.0
+    while True:
+        new_rows = _added_rows(db_conn, "api_activity_logs", before)
+        assert not new_rows, (
+            "process_logs executed unexpectedly (Django now registers "
+            f"logger_task?) — re-sync the oracle: {new_rows!r}"
+        )
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
 
 
 def test_track_event_consumed_without_crash(db_conn, broker_url):
