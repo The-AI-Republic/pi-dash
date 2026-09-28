@@ -15,10 +15,30 @@
 //!   `bgtasks/page_transaction_task.py` (PIDASHCONV-201): recent-visit +
 //!   page-transaction entry points. The pure component extraction lives in
 //!   `pidash-services` (`tasks_webhooks::page_extract`).
+//! * [`activity_dispatch`] — `bgtasks/issue_activities_task.py`
+//!   `issue_activity` dispatcher (PIDASHCONV-198): Celery task name,
+//!   `(args, kwargs)` binding, uuid guard, redis origin, issue touch,
+//!   27-type mapper, `bulk_create`, notifications enqueue, and the
+//!   [`Registry`][crate::worker::Registry] wiring. The pure row builders
+//!   live in `pidash-services` (`tasks_webhooks::activity_misc`).
 
+pub mod activity_dispatch;
 pub mod link_crawl;
 pub mod sinks;
 pub mod visit_page;
+
+pub use activity_dispatch::{
+    activity_json, bind_issue_activity, build_notifications_job, django_dumps, drf_datetime,
+    is_activity_task, is_known_activity_type, is_valid_uuid, issue_flat_json,
+    register_activity_task, run_activity, serialize_notification_rows, DispatchError,
+    IssueActivityCall, IssueFlatRow, RedisOrigin, StoredActivityRow, ACTIVITY_TYPES,
+    FIND_COMMENT_ISSUE_SQL, FIND_COMMENT_REACTION_SQL, FIND_CREATED_ISSUE_SQL, FIND_CYCLE_SQL,
+    FIND_ESTIMATE_SQL, FIND_ISSUE_FLAT_SQL, FIND_ISSUE_REACTION_SQL, FIND_ISSUE_REF_SQL,
+    FIND_ISSUE_SQL, FIND_LABEL_SQL, FIND_LATEST_ACTIVITY_SQL, FIND_MODULE_SQL, FIND_PARENT_SQL,
+    FIND_PROJECT_WORKSPACE_SQL, FIND_STATE_SQL, FIND_USER_SQL, INSERT_SUBSCRIBERS_SQL,
+    ISSUE_ACTIVITY_TASK, NOTIFICATIONS_TASK, ORIGIN_TTL_SECS, TOUCH_ACTIVITY_SQL, TOUCH_ISSUES_SQL,
+    TOUCH_ISSUE_SQL,
+};
 
 pub use link_crawl::{register_link_crawl_handler, TASK_NAMES};
 pub use sinks::{

@@ -6,6 +6,9 @@
 //!
 //! * [`activity_issue`] — entity builders (issue, comment, cycle, module)
 //!   from `bgtasks/issue_activities_task.py` (`:557-:927`) (PIDASHCONV-197).
+//! * [`activity_misc`] — remaining builders (link, attachment, reactions,
+//!   vote, relation, draft, intake) from
+//!   `bgtasks/issue_activities_task.py` (`:928-:1501`) (PIDASHCONV-198).
 //! * [`activity_tracks`] — field trackers from
 //!   `bgtasks/issue_activities_task.py` (`:41-:556`) (PIDASHCONV-196).
 //! * [`link_crawl`] — `bgtasks/work_item_link_task.py` (PIDASHCONV-200).
@@ -17,6 +20,7 @@
 //!   (`tasks_webhooks::visit_page`).
 
 pub mod activity_issue;
+pub mod activity_misc;
 pub mod activity_tracks;
 pub mod link_crawl;
 pub mod log_decode;
