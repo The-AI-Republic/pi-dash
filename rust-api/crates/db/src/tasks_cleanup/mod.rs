@@ -20,3 +20,8 @@ pub use deletion_queries::{
     reverse_relations, run_named_hard_deletes, run_sweep_hard_deletes, soft_stamp_sql, stamp_row,
     sweep_tables, LookupError, ReverseRelation, RowState, SchemaInfo, HARD_DELETE_NAMED_TABLES,
 };
+
+// D-09 version-task query units (stage 5, PIDASHCONV-188): the SQL behind
+// `issue_version_sync.py`, `issue_description_version_sync.py`,
+// `issue_description_version_task.py` and `page_version_task.py`.
+pub mod version_queries;

@@ -16,6 +16,10 @@ serde_json = { version = "1" }
 thiserror = { version = "2" }
 crc32fast = { version = "1" }
 flate2 = { version = "1" }
+# Version-task row builders carry typed UUIDs and timestamps (serde kept
+# from the D-09 versions port; same locked chrono 0.4.45 as pidash-db).
+chrono = { version = "0.4.45", default-features = false, features = ["std", "serde"] }
+uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
