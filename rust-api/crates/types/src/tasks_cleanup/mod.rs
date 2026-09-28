@@ -6,5 +6,11 @@
 //! statuses, the S3 key layout, the 8-day expiry rule and the mail payload
 //! shape. No I/O: every constructor here is pure over caller-supplied
 //! scalars so fixture goldens replay without a database, S3 or SMTP.
+//!
+//! D-09 cleanup retention + mongo flush DTOs.
+//!
+//! Port of the transform layer of
+//! `apps/api/pi_dash/bgtasks/cleanup_task.py` (`:167-:265`).
 
+pub mod cleanup_dto;
 pub mod exports_dto;

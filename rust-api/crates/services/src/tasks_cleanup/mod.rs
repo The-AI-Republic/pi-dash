@@ -24,5 +24,11 @@
 //! (`:200`) is `list(set(...))` in Python — nondeterministic across runs
 //! (hash seed). The port keeps first-seen order over the same multiset,
 //! which replays every recorded golden and is stable under test.
+//!
+//! D-09 cleanup retention + mongo flush task logic.
+//!
+//! Port of the task wiring of `apps/api/pi_dash/bgtasks/cleanup_task.py`
+//! (`:92-:163`, `:422-:479`).
 
+pub mod cleanup;
 pub mod exports;

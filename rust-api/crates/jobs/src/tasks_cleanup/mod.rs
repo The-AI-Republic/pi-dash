@@ -28,6 +28,12 @@ use pidash_types::tasks_cleanup::exports_dto::{
 
 pub use pidash_types::tasks_cleanup::exports_dto::EXPORT_TASK_NAMES;
 
+// D-09 cleanup retention + mongo flush handlers (PIDASHCONV-185):
+// port of the `@shared_task` entry points of cleanup_task.py (`:422-:479`).
+pub mod cleanup;
+
+pub use cleanup::register_cleanup_handlers;
+
 /// True for the four D-09 export task names. The worker forwards them to
 /// the Python plane until the domain gate flips ownership.
 pub fn is_export_task(task: &str) -> bool {
