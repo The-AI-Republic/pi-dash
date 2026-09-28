@@ -523,6 +523,14 @@ export const coreRoutes: RouteConfigEntry[] = [
   // Legacy global settings redirect: /settings, /settings/profile and
   // /settings/profile/:tab all land on /:workspaceSlug/settings/account/:tab in
   // the user's current workspace.
+  //
+  // `settings/profile/*` is listed separately and is not redundant: react-router
+  // ranks by specificity, and a bare `settings/*` splat scores below
+  // `:workspaceSlug/profile/:userId`, so `/settings/profile/security` would
+  // otherwise render the profile page of a user "security" in a workspace
+  // "settings". Two static segments out-rank two dynamic ones. It needs its own
+  // route file because `mergeRoutes` keys routes by `file`.
+  route("settings/profile/*", "routes/redirects/core/legacy-profile-settings.tsx"),
   route("settings/*", "routes/redirects/core/settings.tsx"),
 
   // Bare or unknown account paths: /:workspaceSlug/settings/account(/…)

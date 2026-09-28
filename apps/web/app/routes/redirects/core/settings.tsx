@@ -23,7 +23,10 @@ import { AuthenticationWrapper } from "@/lib/wrappers/authentication-wrapper";
  * rather than a `clientLoader`.
  *
  * Handles `/settings`, `/settings/profile`, `/settings/profile/:tab` and any
- * other `/settings/*` leftover.
+ * other `/settings/*` leftover. `legacy-profile-settings.tsx` re-exports this
+ * same component for the `settings/profile/*` route — `mergeRoutes` in
+ * `app/routes/helper.ts` keys routes by their file, so two route entries cannot
+ * share one module file without one of them being silently dropped.
  */
 export const tabFromSplat = (splat: string): string => {
   const segments = splat.split("/").filter(Boolean);
