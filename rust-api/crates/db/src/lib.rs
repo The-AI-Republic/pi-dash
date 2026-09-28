@@ -28,6 +28,7 @@ pub mod license;
 pub mod migrations;
 pub mod pool;
 pub mod soft_delete;
+pub mod tasks_ticker;
 pub mod tx;
 
 pub use config::DbConfig;
