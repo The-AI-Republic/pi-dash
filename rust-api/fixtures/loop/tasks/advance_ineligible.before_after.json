@@ -1,0 +1,20 @@
+{
+ "advanced": 1,
+ "check_reason": "llm_config_missing",
+ "cursor_advanced_past_now": true,
+ "eligible_ids_untouched": [
+  "49ba8fd1-f22f-4ca0-ae96-24d722c35934"
+ ],
+ "method": "Ran _advance_ineligible_due() on pidash_loop_fx with a due member target lacking LLM creds.",
+ "source": "apps/api/pi_dash/bgtasks/loop.py:111-145 (per-job next-fire cache :129-131, eligibility.check :132, bulk_update :140-144)",
+ "target_after": {
+  "last_skip_reason": "llm_config_missing",
+  "last_skipped_at": "2026-09-28T04:28:09.880362+00:00",
+  "next_run_at": "2026-09-29T03:45:09+00:00"
+ },
+ "target_before": {
+  "last_skip_reason": "",
+  "last_skipped_at": null,
+  "next_run_at": "2026-09-28T04:27:09.873429+00:00"
+ }
+}

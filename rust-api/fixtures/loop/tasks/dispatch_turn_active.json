@@ -1,0 +1,7 @@
+{
+ "last_skip_reason": "turn_active",
+ "method": "Seeded a LOOP thread with a RUNNING active turn on pidash_loop_fx; ran fire_loop_target().",
+ "returned": false,
+ "source": "apps/api/pi_dash/loop/dispatch.py:89-100 (active_turn recheck under SFU) via bgtasks/loop.py:226",
+ "turn_count": 1
+}

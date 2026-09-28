@@ -1,0 +1,61 @@
+{
+ "method": "Ran interval_label() over each rrule under pi_dash.settings.test (no DB).",
+ "notes": [
+  "prefix match is case-sensitive: 'freq=daily' falls through to 'periodically' (:30); the FREQ value itself is uppercased (:31)."
+ ],
+ "source": "apps/api/pi_dash/loop/serializers.py:16-32",
+ "vectors": [
+  {
+   "label": "every few minutes",
+   "rrule": "FREQ=MINUTELY"
+  },
+  {
+   "label": "hourly",
+   "rrule": "FREQ=HOURLY"
+  },
+  {
+   "label": "daily",
+   "rrule": "FREQ=DAILY"
+  },
+  {
+   "label": "weekly",
+   "rrule": "FREQ=WEEKLY"
+  },
+  {
+   "label": "monthly",
+   "rrule": "FREQ=MONTHLY"
+  },
+  {
+   "label": "yearly",
+   "rrule": "FREQ=YEARLY"
+  },
+  {
+   "label": "daily",
+   "rrule": "FREQ=DAILY;BYHOUR=3;BYMINUTE=0"
+  },
+  {
+   "label": "periodically",
+   "rrule": "freq=daily"
+  },
+  {
+   "label": "periodically",
+   "rrule": "FREQ=SECONDLY"
+  },
+  {
+   "label": "periodically",
+   "rrule": "FREQ=FORTNIGHTLY"
+  },
+  {
+   "label": "periodically",
+   "rrule": "BYHOUR=3"
+  },
+  {
+   "label": "periodically",
+   "rrule": ""
+  },
+  {
+   "label": "daily",
+   "rrule": "INTERVAL=2;FREQ=DAILY"
+  }
+ ]
+}
