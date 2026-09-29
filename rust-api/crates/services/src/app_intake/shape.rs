@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Intake serializers A: `IntakeSerializer` + `IntakeIssueSerializer`.
 //!
 //! Ports `apps/api/pi_dash/app/serializers/intake.py:17-90`.
@@ -20,11 +22,55 @@
 //! Fixtures:
 //! `rust-api/fixtures/app_intake/serializers/intake.golden.json`,
 //! `rust-api/fixtures/app_intake/serializers/intake_issue.golden.json`.
+//!
+//! Intake serializers B: detail + lite + state (D-32, PIDASHCONV-282).
+//!
+//! Ports `apps/api/pi_dash/app/serializers/intake.py:93-139`:
+//! - `IntakeIssueDetailSerializer` (`:93-117`): explicit 7-key `Meta.fields`
+//!   with `issue` (`IssueDetailSerializer`, read-only) and
+//!   `duplicate_issue_detail` (`IssueIntakeSerializer`, read-only,
+//!   `source="duplicate_to"`); `to_representation` copies the annotated
+//!   `assignee_ids` / `label_ids` onto the nested issue object first, each
+//!   guarded by `hasattr` so absent annotations are skipped, not defaulted.
+//! - `IntakeIssueLiteSerializer` (`:120-124`): 5 read-only fields, rendered
+//!   in `Meta.fields` order. Consumed as a nested `many=True` read shape by
+//!   `IssueStateIntakeSerializer.issue_intake` (`:133`).
+//! - `IssueStateIntakeSerializer` (`:127-139`): `Meta.exclude = ["workpad"]`
+//!   over the `Issue` model (`:136-139` — the agent workpad is served only
+//!   by the dedicated workpad endpoint, never as part of an intake
+//!   payload), with `state_detail` / `project_detail` / `label_details` /
+//!   `assignee_details` nested details, the annotated `sub_issues_count`,
+//!   and the reverse-FK `issue_intake` (`IntakeIssueLiteSerializer`,
+//!   `many=True`).
+//!
+//! The nested detail shapes (`IssueDetailSerializer`,
+//! `IssueIntakeSerializer`, `StateLiteSerializer`, `ProjectLiteSerializer`,
+//! `LabelLiteSerializer`, `UserLiteSerializer`) belong to other domains:
+//! they are referenced here by name only, never redefined.
+//!
+//! Fixtures (PIDASHCONV-278):
+//! `rust-api/fixtures/app_intake/serializers/intake_issue_detail.golden.json`,
+//! `serializers/intake_issue_lite.golden.json`,
+//! `serializers/issue_state_intake.golden.json`.
+//! Serializers A (`IntakeSerializer`, `IntakeIssueSerializer`,
+//! `intake.py:17-90`, PIDASHCONV-281) live above in this same file;
+//! the B section below must not move or rename anything above.
+//! already-rendered strings supplied by the query layer, and statuses as
+//! `i64` (`IntakeIssueStatus`: PENDING=-2, REJECTED=-1, SNOOZED=0,
+//! ACCEPTED=1, DUPLICATE=2; `db/models/intake.py:42-47`). None of these
+//! three serializers validates input — every field is read-only output —
+//! so there are no error bodies to carry.
+//!
+//! JSON note (Porting guide DRF rows): explicit `Meta.fields` renders in
+//! list order, which the builders below reproduce by inserting into the
+//! `serde_json::Map` in field order (workspace `preserve_order`
+//! unification keeps that order in the serialized bytes). The replay tests
+//! assert both canonical (key-sorted) equality with the goldens and exact
+//! key order against each fixture's `key_order`.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
-/// `IntakeSerializer` output keys in DRF `__all__` render order
 /// (`intake.py:17-24`; order verified in the fixture via the installed DRF).
 pub const INTAKE_KEY_ORDER: &[&str] = &[
     "id",
@@ -196,6 +242,204 @@ pub fn apply_label_ids_annotation(issue: &mut Value, label_ids: Option<&Value>) 
             obj.insert("label_ids".to_owned(), ids.clone());
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// IntakeIssueDetailSerializer (intake.py:93-117)
+// ---------------------------------------------------------------------------
+
+/// `Meta.fields` (`intake.py:99-107`), the render order.
+pub const DETAIL_FIELDS: &[&str] = &[
+    "id",
+    "status",
+    "duplicate_to",
+    "snoozed_till",
+    "duplicate_issue_detail",
+    "source",
+    "issue",
+];
+
+/// `Meta.read_only_fields` (`intake.py:108`). Neither name is in `fields`,
+/// so both entries are inert (DRF only applies `read_only_fields` to known
+/// fields); carried here so the declaration stays complete.
+pub const DETAIL_READ_ONLY_FIELDS: &[&str] = &["project", "workspace"];
+
+/// Nested `issue` shape (`intake.py:94`): `IssueDetailSerializer`,
+/// read-only. Owned by the issues domain; referenced only.
+pub const DETAIL_NESTED_ISSUE_TYPE: &str = "IssueDetailSerializer";
+
+/// Nested `duplicate_issue_detail` shape (`intake.py:95`):
+/// `IssueIntakeSerializer`, read-only, `source="duplicate_to"` — null
+/// whenever `duplicate_to` is null. Owned by the issues domain; referenced
+/// only.
+pub const DETAIL_NESTED_DUPLICATE_TYPE: &str = "IssueIntakeSerializer";
+
+/// Source attribute of `duplicate_issue_detail` (`intake.py:95`).
+pub const DETAIL_DUPLICATE_SOURCE: &str = "duplicate_to";
+
+/// One `IntakeIssue` row plus its already-rendered nested shapes, as the
+/// query layer supplies them. `snoozed_till` is the DRF-rendered datetime
+/// string (null when unset); `duplicate_issue_detail` is the rendered
+/// nested issue for `duplicate_to`. Because the field reads through
+/// `source="duplicate_to"` (`intake.py:95`), a null `duplicate_to` always
+/// renders a null detail — any supplied detail is ignored in that case.
+pub struct DetailRow<'a> {
+    pub id: &'a str,
+    pub status: i64,
+    pub duplicate_to: Option<&'a str>,
+    pub snoozed_till: Option<&'a str>,
+    pub duplicate_issue_detail: Option<Value>,
+    pub source: Option<&'a str>,
+    pub issue: Value,
+}
+
+/// The query annotations `to_representation` (`intake.py:110-117`) looks
+/// for. Each side is `Some` exactly when the instance carries that
+/// annotation (`hasattr` true); `None` means absent, never an empty list.
+pub struct DetailAnnotations<'a> {
+    pub assignee_ids: Option<&'a Value>,
+    pub label_ids: Option<&'a Value>,
+}
+
+/// Ports `IntakeIssueDetailSerializer.to_representation`
+/// (`intake.py:110-117`): copy each present annotation onto the nested
+/// issue object. Absent annotations leave the object untouched — Python
+/// checks `hasattr` per key, so one annotation present never implies the
+/// other.
+pub fn apply_detail_annotations(
+    issue: &mut Map<String, Value>,
+    annotations: DetailAnnotations<'_>,
+) {
+    if let Some(ids) = annotations.assignee_ids {
+        issue.insert("assignee_ids".to_owned(), ids.clone());
+    }
+    if let Some(ids) = annotations.label_ids {
+        issue.insert("label_ids".to_owned(), ids.clone());
+    }
+}
+
+/// Renders a detail body in `DETAIL_FIELDS` order. The nested `issue` value
+/// is carried through untouched: callers apply [`apply_detail_annotations`]
+/// to it first, exactly as Python mutates `instance.issue` before
+/// `super().to_representation(instance)`.
+pub fn render_detail(row: &DetailRow<'_>) -> Value {
+    let mut body = Map::with_capacity(DETAIL_FIELDS.len());
+    body.insert("id".to_owned(), Value::String(row.id.to_owned()));
+    body.insert("status".to_owned(), Value::from(row.status));
+    body.insert(
+        "duplicate_to".to_owned(),
+        row.duplicate_to
+            .map_or(Value::Null, |id| Value::String(id.to_owned())),
+    );
+    body.insert(
+        "snoozed_till".to_owned(),
+        row.snoozed_till
+            .map_or(Value::Null, |ts| Value::String(ts.to_owned())),
+    );
+    // `source="duplicate_to"` (`intake.py:95`): the detail renders the
+    // `duplicate_to` relation itself, so it is null exactly when the FK is
+    // null — never a caller-supplied object for a null FK.
+    let duplicate_issue_detail = match row.duplicate_to {
+        None => Value::Null,
+        Some(_) => row.duplicate_issue_detail.clone().unwrap_or(Value::Null),
+    };
+    body.insert("duplicate_issue_detail".to_owned(), duplicate_issue_detail);
+    body.insert(
+        "source".to_owned(),
+        row.source
+            .map_or(Value::Null, |s| Value::String(s.to_owned())),
+    );
+    body.insert("issue".to_owned(), row.issue.clone());
+    Value::Object(body)
+}
+
+// ---------------------------------------------------------------------------
+// IntakeIssueLiteSerializer (intake.py:120-124)
+// ---------------------------------------------------------------------------
+
+/// `Meta.fields` (`intake.py:123`), the render order.
+pub const LITE_FIELDS: &[&str] = &["id", "status", "duplicate_to", "snoozed_till", "source"];
+
+/// `Meta.read_only_fields = fields` (`intake.py:124`): every field is
+/// read-only, so this serializer never validates input.
+pub const LITE_READ_ONLY_FIELDS: &[&str] = LITE_FIELDS;
+
+/// One `IntakeIssue` row for the lite shape. Same pass-through conventions
+/// as [`DetailRow`].
+pub struct LiteRow<'a> {
+    pub id: &'a str,
+    pub status: i64,
+    pub duplicate_to: Option<&'a str>,
+    pub snoozed_till: Option<&'a str>,
+    pub source: Option<&'a str>,
+}
+
+/// Renders a lite body in `LITE_FIELDS` order.
+pub fn render_lite(row: &LiteRow<'_>) -> Value {
+    let mut body = Map::with_capacity(LITE_FIELDS.len());
+    body.insert("id".to_owned(), Value::String(row.id.to_owned()));
+    body.insert("status".to_owned(), Value::from(row.status));
+    body.insert(
+        "duplicate_to".to_owned(),
+        row.duplicate_to
+            .map_or(Value::Null, |id| Value::String(id.to_owned())),
+    );
+    body.insert(
+        "snoozed_till".to_owned(),
+        row.snoozed_till
+            .map_or(Value::Null, |ts| Value::String(ts.to_owned())),
+    );
+    body.insert(
+        "source".to_owned(),
+        row.source
+            .map_or(Value::Null, |s| Value::String(s.to_owned())),
+    );
+    Value::Object(body)
+}
+
+// ---------------------------------------------------------------------------
+// IssueStateIntakeSerializer (intake.py:127-139)
+// ---------------------------------------------------------------------------
+
+/// Declared nested fields in source order (`intake.py:128-133`):
+/// (field name, source attribute, serializer type). The `many=True` shapes
+/// render arrays; the single-source shapes render one object each. All
+/// serializers below are owned by other domains; referenced only.
+pub const STATE_DECLARED: &[(&str, &str, &str)] = &[
+    ("state_detail", "state", "StateLiteSerializer"),
+    ("project_detail", "project", "ProjectLiteSerializer"),
+    ("label_details", "labels", "LabelLiteSerializer"),
+    ("assignee_details", "assignees", "UserLiteSerializer"),
+];
+
+/// Annotated integer field (`intake.py:132`): the query layer supplies the
+/// counted value; the serializer only renders it.
+pub const STATE_ANNOTATED_COUNT: &str = "sub_issues_count";
+
+/// Reverse-FK nested field (`intake.py:133`): `issue_intake` renders the
+/// related `IntakeIssue` rows through `IntakeIssueLiteSerializer`
+/// (`many=True`).
+pub const STATE_REVERSE_NESTED: &str = "issue_intake";
+/// Element shape of [`STATE_REVERSE_NESTED`].
+pub const STATE_REVERSE_NESTED_TYPE: &str = "IntakeIssueLiteSerializer";
+
+/// `Meta.exclude` (`intake.py:136-139`): the agent workpad is never part of
+/// an intake payload — it is served only by the dedicated workpad endpoint.
+pub const STATE_EXCLUDED: &[&str] = &["workpad"];
+
+/// Rejects a response body that carries the excluded key. The Rust render
+/// path is typed, so `workpad` can only leak in through an untyped merge;
+/// every such merge must pass through this guard before the body leaves
+/// the intake domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("workpad is never part of an intake payload")]
+pub struct WorkpadLeak;
+
+pub fn reject_workpad_key(body: &Map<String, Value>) -> Result<(), WorkpadLeak> {
+    if body.contains_key("workpad") {
+        return Err(WorkpadLeak);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -523,5 +767,339 @@ mod tests {
         let mut untouched = serde_json::json!({"id": "x"});
         apply_label_ids_annotation(&mut untouched, None);
         assert_eq!(str_keys(&untouched), vec!["id".to_owned()]);
+    }
+
+    fn fixture(name: &str) -> Value {
+        let path = format!(
+            "{}/../../fixtures/app_intake/serializers/{name}.golden.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("golden exists"))
+            .expect("golden parses")
+    }
+
+    /// Canonical form: objects with recursively sorted keys. `Value` key
+    /// order follows workspace feature unification (`preserve_order`), so
+    /// raw `to_string` is only comparable at fixed insertion order; sorting
+    /// first makes the equality order-insensitive.
+    fn canonical(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                let mut sorted = Map::new();
+                for key in keys {
+                    sorted.insert(key.clone(), canonical(&map[key]));
+                }
+                Value::Object(sorted)
+            }
+            Value::Array(items) => Value::Array(items.iter().map(canonical).collect()),
+            _ => value.clone(),
+        }
+    }
+
+    /// Byte-identical replay: same content in canonical form plus the exact
+    /// DRF key order from the fixture's `key_order`.
+    fn assert_replay(produced: &Value, expected: &Value, key_order: &[&str]) {
+        assert_eq!(
+            serde_json::to_string(&canonical(produced)).expect("serializes"),
+            serde_json::to_string(&canonical(expected)).expect("serializes"),
+            "byte-identical replay mismatch"
+        );
+        let order: Vec<&str> = produced
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(order, key_order, "DRF key-order mismatch");
+    }
+
+    fn str_list(value: &Value) -> Vec<&str> {
+        value
+            .as_array()
+            .expect("string array")
+            .iter()
+            .map(|item| item.as_str().expect("string item"))
+            .collect()
+    }
+
+    #[test]
+    fn detail_meta_matches_golden() {
+        // Fixture serializers/intake_issue_detail.golden.json: Meta.fields,
+        // read_only_fields, and both nested descriptors.
+        let golden = fixture("intake_issue_detail");
+        let meta = golden.get("meta").expect("meta");
+        assert_eq!(
+            DETAIL_FIELDS,
+            str_list(meta.get("fields").expect("fields")).as_slice()
+        );
+        assert_eq!(
+            DETAIL_READ_ONLY_FIELDS,
+            str_list(meta.get("read_only_fields").expect("read_only_fields")).as_slice()
+        );
+        let nested = golden
+            .get("nested")
+            .expect("nested")
+            .as_array()
+            .expect("array");
+        assert_eq!(nested.len(), 2);
+        assert_eq!(nested[0].get("name").expect("name"), "issue");
+        assert_eq!(
+            nested[0].get("type").expect("type"),
+            DETAIL_NESTED_ISSUE_TYPE
+        );
+        assert_eq!(
+            nested[1].get("name").expect("name"),
+            "duplicate_issue_detail"
+        );
+        assert_eq!(
+            nested[1].get("type").expect("type"),
+            DETAIL_NESTED_DUPLICATE_TYPE
+        );
+        assert_eq!(
+            nested[1].get("source").expect("source"),
+            DETAIL_DUPLICATE_SOURCE
+        );
+    }
+
+    #[test]
+    fn detail_replays_golden() {
+        // Fixture example_output: annotated ids already copied onto the
+        // nested issue; duplicate_to null so the duplicate detail is null.
+        let golden = fixture("intake_issue_detail");
+        let expected = golden.get("example_output").expect("example_output");
+        let row = DetailRow {
+            id: "55555555-5555-4555-8555-555555555555",
+            status: -2,
+            duplicate_to: None,
+            snoozed_till: None,
+            duplicate_issue_detail: None,
+            source: Some("IN_APP"),
+            issue: expected.get("issue").expect("issue").clone(),
+        };
+        let produced = render_detail(&row);
+        let key_order = str_list(golden.get("key_order").expect("key_order"));
+        assert_replay(&produced, expected, &key_order);
+    }
+
+    #[test]
+    fn detail_duplicate_detail_null_exactly_when_fk_null() {
+        // intake.py:95 `source="duplicate_to"`: the detail renders the
+        // relation itself, so a null FK always renders null — even if a
+        // caller supplies a detail object for it.
+        let issue = Value::Object(Map::new());
+        let stray = Value::String("stray".to_owned());
+        let row = DetailRow {
+            id: "55555555-5555-4555-8555-555555555555",
+            status: -2,
+            duplicate_to: None,
+            snoozed_till: None,
+            duplicate_issue_detail: Some(stray),
+            source: Some("IN_APP"),
+            issue: issue.clone(),
+        };
+        let produced = render_detail(&row);
+        assert_eq!(produced.get("duplicate_issue_detail"), Some(&Value::Null));
+
+        // A set FK renders the supplied detail object untouched.
+        let detail = serde_json::json!({"id": "1"});
+        let row = DetailRow {
+            id: "55555555-5555-4555-8555-555555555555",
+            status: 2,
+            duplicate_to: Some("11111111-1111-4111-8111-111111111111"),
+            snoozed_till: None,
+            duplicate_issue_detail: Some(detail.clone()),
+            source: Some("IN_APP"),
+            issue,
+        };
+        let produced = render_detail(&row);
+        assert_eq!(produced.get("duplicate_issue_detail"), Some(&detail));
+    }
+
+    #[test]
+    fn detail_annotations_copied_only_when_present() {
+        // intake.py:110-117: each hasattr guard is independent — a present
+        // annotation is copied, an absent one leaves the object untouched
+        // (never defaulted to an empty list).
+        let assignee_ids = Value::Array(vec![]);
+        let label_ids = Value::Array(vec![Value::String(
+            "77777777-7777-4777-8777-777777777777".to_owned(),
+        )]);
+
+        let mut bare = Map::new();
+        bare.insert("id".to_owned(), Value::String("x".to_owned()));
+        let mut untouched = bare.clone();
+        apply_detail_annotations(
+            &mut untouched,
+            DetailAnnotations {
+                assignee_ids: None,
+                label_ids: None,
+            },
+        );
+        assert_eq!(Value::Object(untouched), Value::Object(bare.clone()));
+
+        // One side present never implies the other.
+        let mut half = bare.clone();
+        apply_detail_annotations(
+            &mut half,
+            DetailAnnotations {
+                assignee_ids: None,
+                label_ids: Some(&label_ids),
+            },
+        );
+        assert!(!half.contains_key("assignee_ids"));
+        assert_eq!(half.get("label_ids"), Some(&label_ids));
+
+        let mut full = bare;
+        apply_detail_annotations(
+            &mut full,
+            DetailAnnotations {
+                assignee_ids: Some(&assignee_ids),
+                label_ids: Some(&label_ids),
+            },
+        );
+        assert_eq!(full.get("assignee_ids"), Some(&assignee_ids));
+        assert_eq!(full.get("label_ids"), Some(&label_ids));
+    }
+
+    #[test]
+    fn lite_meta_matches_golden() {
+        // Fixture serializers/intake_issue_lite.golden.json: five fields,
+        // all read-only.
+        let golden = fixture("intake_issue_lite");
+        let meta = golden.get("meta").expect("meta");
+        assert_eq!(
+            LITE_FIELDS,
+            str_list(meta.get("fields").expect("fields")).as_slice()
+        );
+        assert_eq!(
+            LITE_READ_ONLY_FIELDS,
+            str_list(meta.get("read_only_fields").expect("read_only_fields")).as_slice()
+        );
+        assert_eq!(LITE_READ_ONLY_FIELDS, LITE_FIELDS);
+        assert_eq!(
+            golden
+                .get("used_by")
+                .expect("used_by")
+                .as_str()
+                .expect("str"),
+            "IssueStateIntakeSerializer.issue_intake (many=True), app/serializers/intake.py:133",
+        );
+    }
+
+    #[test]
+    fn lite_replays_golden() {
+        // Fixture example_output (SNOOZED=0 row, nulls for the unset FK and
+        // datetime).
+        let golden = fixture("intake_issue_lite");
+        let expected = golden.get("example_output").expect("example_output");
+        let row = LiteRow {
+            id: "55555555-5555-4555-8555-555555555555",
+            status: 0,
+            duplicate_to: None,
+            snoozed_till: None,
+            source: Some("IN_APP"),
+        };
+        let produced = render_lite(&row);
+        let key_order = str_list(golden.get("key_order").expect("key_order"));
+        assert_replay(&produced, expected, &key_order);
+    }
+
+    #[test]
+    fn state_meta_matches_golden() {
+        // Fixture serializers/issue_state_intake.golden.json: declared
+        // fields in source order, excluded workpad with its trace.
+        let golden = fixture("issue_state_intake");
+        let declared = golden
+            .get("declared")
+            .expect("declared")
+            .as_array()
+            .expect("array");
+        // Six declared entries in source order: the four nested details,
+        // then the annotated count, then the reverse-FK nested list.
+        let expected_names = [
+            "state_detail",
+            "project_detail",
+            "label_details",
+            "assignee_details",
+            STATE_ANNOTATED_COUNT,
+            STATE_REVERSE_NESTED,
+        ];
+        assert_eq!(declared.len(), expected_names.len());
+        for (entry, name) in declared.iter().zip(expected_names.iter()) {
+            assert_eq!(
+                entry.get("name").expect("name").as_str().expect("str"),
+                *name
+            );
+        }
+        for (entry, (name, source, kind)) in declared.iter().zip(STATE_DECLARED.iter()) {
+            assert_eq!(
+                entry.get("name").expect("name").as_str().expect("str"),
+                *name
+            );
+            assert_eq!(
+                entry.get("source").expect("source").as_str().expect("str"),
+                *source
+            );
+            let rendered = entry.get("type").expect("type").as_str().expect("str");
+            assert!(
+                rendered == *kind || rendered == format!("{kind} (many)"),
+                "type mismatch for {name}: {rendered}"
+            );
+        }
+        assert_eq!(
+            declared[4]
+                .get("type")
+                .expect("type")
+                .as_str()
+                .expect("str"),
+            "IntegerField (annotated)"
+        );
+        assert_eq!(
+            declared[5]
+                .get("type")
+                .expect("type")
+                .as_str()
+                .expect("str"),
+            "IntakeIssueLiteSerializer (many)"
+        );
+        assert_eq!(STATE_REVERSE_NESTED_TYPE, "IntakeIssueLiteSerializer");
+        let meta = golden.get("meta").expect("meta");
+        assert_eq!(
+            STATE_EXCLUDED,
+            str_list(meta.get("excluded").expect("excluded")).as_slice()
+        );
+        assert_eq!(
+            golden
+                .get("workpad_exclusion")
+                .expect("workpad_exclusion")
+                .get("trace")
+                .expect("trace")
+                .as_str()
+                .expect("str"),
+            "app/serializers/intake.py:136-139",
+        );
+    }
+
+    #[test]
+    fn state_workpad_key_fails() {
+        // Done-when: a response containing a workpad key fails — the agent
+        // workpad is never part of an intake payload (intake.py:136-139).
+        let mut clean = Map::new();
+        clean.insert("id".to_owned(), Value::String("x".to_owned()));
+        clean.insert(STATE_ANNOTATED_COUNT.to_owned(), Value::from(0));
+        assert_eq!(reject_workpad_key(&clean), Ok(()));
+
+        let mut leaked = clean;
+        leaked.insert(
+            "workpad".to_owned(),
+            Value::String("agent notes".to_owned()),
+        );
+        assert_eq!(reject_workpad_key(&leaked), Err(WorkpadLeak));
+        assert_eq!(
+            WorkpadLeak.to_string(),
+            "workpad is never part of an intake payload"
+        );
     }
 }
