@@ -1,0 +1,27 @@
+{
+  "name": "@pidash/kit",
+  "version": "0.0.0",
+  "description": "Pi Dash design system for the new frontend. Empty v0 scaffold from NEWFRONT-12; components land in NEWFRONT-16.",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "main": "./dist/index.mjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "scripts": {
+    "build": "tsdown src/index.ts --dts --format esm",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --deny-warnings",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "tsdown": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "^3.2.0"
+  },
+  "peerDependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  }
+}

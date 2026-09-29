@@ -1,0 +1,39 @@
+{
+  "$schema": "https://oxlint.sheriff.dev/schema.json",
+  "plugins": ["import"],
+  "rules": {
+    "no-restricted-imports": "error"
+  },
+  "overrides": [
+    {
+      "files": ["src/**/*.{ts,tsx}"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@pi-dash/ui",
+                "message": "Old frontend is a reference, never a source (NEWFRONT). Use @pidash/kit."
+              }
+            ],
+            "patterns": [
+              {
+                "group": ["@pi-dash/*"],
+                "message": "Old frontend packages are banned in the new trees (NEWFRONT)."
+              },
+              {
+                "group": ["**/apps/web/**", "**/apps/admin/**", "**/apps/space/**"],
+                "message": "Old frontend paths are banned in the new trees (NEWFRONT)."
+              },
+              {
+                "group": ["**/desktop-overlay/**", "**/ee-overlay/**", "**/ce/**"],
+                "message": "Old overlay paths are banned (NEWFRONT)."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

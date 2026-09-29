@@ -1,0 +1,173 @@
+# Copyright (c) Pi Dash contributors. All rights reserved.
+# License for this tree is pending the H-license decision (NEWFRONT-2,
+# owner: human). This placeholder grants no license and must be replaced
+# with the final header text by F-11 (NEWFRONT-22).
+# CI for the new frontend (NEWFRONT-12). Runs on PRs into web-new-dev and
+# on pushes to it.
+name: web-new
+
+on:
+  pull_request:
+    branches: [web-new-dev]
+    paths:
+      - "apps/web_new/**"
+      - "packages/kit/**"
+      - "packages/api-client/**"
+      - ".ai_design/new_frontend_implementation/parity/**"
+      - ".github/workflows/web-new*.yml"
+      - "pnpm-lock.yaml"
+  push:
+    branches: [web-new-dev]
+    paths:
+      - "apps/web_new/**"
+      - "packages/kit/**"
+      - "packages/api-client/**"
+      - ".ai_design/new_frontend_implementation/parity/**"
+      - ".github/workflows/web-new*.yml"
+      - "pnpm-lock.yaml"
+
+concurrency:
+  group: web-new-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+jobs:
+  paths-gate:
+    name: paths allowlist gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fail when the PR touches paths outside NEWFRONT-1
+        run: |
+          export BASE_REF="${{ github.base_ref }}"
+          if [ -z "$BASE_REF" ]; then
+            export BASE_REF="web-new-dev"
+          fi
+          export ALLOW='^(apps/web_new/|packages/kit/|packages/api-client/|\.ai_design/new_frontend_implementation/parity/|\.github/workflows/web-new[^/]*\.yml|pnpm-lock\.yaml$)'
+          export TOUCHED=$(git diff --name-only "origin/$BASE_REF...HEAD")
+          echo "$TOUCHED"
+          export OUTSIDE=$(echo "$TOUCHED" | grep -v -E "$ALLOW" || true)
+          if [ -n "$OUTSIDE" ]; then
+            echo "Files outside the NEWFRONT-1 path allowlist:"
+            echo "$OUTSIDE"
+            exit 1
+          fi
+
+  install:
+    name: install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter web_new typecheck
+      - run: pnpm --filter @pidash/kit typecheck
+      - run: pnpm --filter @pidash/api-client typecheck
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter web_new lint
+      - run: pnpm --filter @pidash/kit lint
+      - run: pnpm --filter @pidash/api-client lint
+      - run: pnpm --filter web_new check:boundaries
+      - run: pnpm --filter web_new check:headers
+      - run: pnpm --filter web_new check:deps
+
+  unit:
+    name: unit tests
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter web_new test
+      - run: pnpm --filter @pidash/kit test
+      - run: pnpm --filter @pidash/api-client test
+
+  build:
+    name: build (web + desktop)
+    runs-on: ubuntu-latest
+    needs: [typecheck, lint, unit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @pidash/kit build
+      - run: pnpm --filter @pidash/api-client build
+      - run: pnpm --filter web_new build
+      - name: Show bundles
+        run: |
+          export WEB_DIR="apps/web_new/dist/web"
+          export DESKTOP_DIR="apps/web_new/dist/desktop"
+          ls -la "$WEB_DIR" "$DESKTOP_DIR"
+          test -f "$WEB_DIR/index.html"
+          test -f "$DESKTOP_DIR/index.html"
+
+  size-limit:
+    name: size-limit
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @pidash/kit build
+      - run: pnpm --filter @pidash/api-client build
+      - run: pnpm --filter web_new build
+      - run: pnpm --filter web_new size
