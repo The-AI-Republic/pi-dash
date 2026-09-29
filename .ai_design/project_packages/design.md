@@ -121,6 +121,7 @@ Grounded in the models as they exist at this commit.
 | Seed issues and epics    | `Issue`, plus `IssueRelation` (`db/models/issue.py:396`) restricted to `blocked_by` / `blocking` and parent links                                                                                                                              | Name, description, priority, state (by name), labels (by name), type (by name), local key for relations                                                                        |
 | Prompt section overrides | `PromptSectionOverride` (`prompting/models.py:65`)                                                                                                                                                                                             | **Blocked today** — the model is workspace/user-scoped with no project column; see §3.4                                                                                        |
 | Work type                | Not implemented; `prompting/recipes.py:136` has `WORK_KIND_CODING` and `kind_for(template_name, work_kind)` as the seam PDASHOSS01-234 will fill                                                                                               | Carried as an optional forward-compatible string, see §3.4                                                                                                                     |
+| Project visibility       | `Project.network` (`db/models/project.py:78`, `NETWORK_CHOICES = ((0, "Secret"), (2, "Public"))`)                                                   | **Not carried.** The model default is `2` (Public); install forces Secret regardless of the source project (§5.6)     |
 | Required capabilities    | §3.3                                                                                                                                                                                                                                           | New concept                                                                                                                                                                    |
 
 **Include as a parameter — asked at install time**
@@ -158,13 +159,16 @@ and what makes the git diff of a package readable.
 
 A package declares what the project expects of whatever agent runs it:
 
+```json
+"requires": {
+  "capabilities": ["repo.write", "repo.admin_merge", "shell", "network"],
+  "executor_kinds": ["local_runner", "managed_runner"],
+  "env": ["DATABASE_URL", "GH_TOKEN"],
+  "pidash_version": ">=0.24"
+}
 ```
-requires:
-  capabilities: [repo.write, repo.admin_merge, shell, network]
-  executor_kinds: [local_runner, managed_runner]
-  env: [DATABASE_URL, GH_TOKEN]        # names only, never values
-  pidash_version: ">=0.24"
-```
+
+`env` carries names only, never values (§3.2).
 
 There is already a capability channel to hang this on: `Runner.capabilities`
 (`runner/models.py`, a JSON list reported at enrollment) and
@@ -646,9 +650,10 @@ that work are consent, legibility and blast-radius, not filtering.
 | Package silently acquires powerful capabilities                                   | `requires` declared, displayed, never implicit; unknown capability = hard error (§4.4 rule 2)                    | v1                             |
 | Package overrides Pi Dash's own safety instructions                               | Package-supplied prompt content is confined to an allowlist of section keys; core sections are code-owned (§7.4) | v1                             |
 | Malicious content added after you looked at it                                    | Content digest pinned at install; git sources resolve to a SHA; upgrade shows a diff (§5.7)                      | v1 (pin), v3 (diff-on-upgrade) |
+| Package-supplied prompt section body executes as a Jinja template                                  | Bodies are template text, not content (§7.4); sandbox was sized for admins, not strangers — decided in §11-D16     | v1 (decision), with D4 |
 | Impersonating a trusted publisher                                                 | Signing + verified publishers (§7.5)                                                                             | v2                             |
 | Registry serves a tampered tarball                                                | Digest in the manifest index; signature verification                                                             | v2                             |
-| Harmful package stays up                                                          | Report, yank, takedown (§7.6)                                                                                    | v2 (cloud)                     |
+| Harmful package stays up                                                          | Report, yank, takedown (§7.7)                                                                                    | v2 (cloud)                     |
 
 ### 7.2 Mandatory review
 
@@ -700,6 +705,33 @@ content may only land in:
   `Slot(...)` positions in a recipe;
 - prompt section overrides whose `section_key` is in an explicit
   package-allowed allowlist.
+
+**But an allowlisted `section_key` is not by itself a sufficient control,
+because a section body is template text.** The rulebook is safe on this
+axis: `Project.description` reaches the prompt as a context variable
+(`{{ project.description }}` in `prompting/sections/intro.md:20`,
+`prompting/sections/review-intro.md:13`,
+`prompting/sections/test-intro.md:16`), so it is content and §4.5's
+rule already holds for it. Prompt *section overrides* are different:
+`composer._assemble` (`prompting/composer.py:204`) concatenates every
+resolved section body — overrides included — into one `template_body`
+that is then rendered as Jinja (`prompting/composer.py:318`, via
+`renderer.render`). A package-supplied section body would therefore be
+executed as a template, which is exactly what §4.5 rules out for
+package content.
+
+The existing defence is `SandboxedEnvironment`
+(`prompting/renderer.py:34`), and it is real — but read why it was
+adopted: *"Templates are workspace-admin-editable; rendering them in the
+default Jinja environment would let any admin pivot to an RCE via
+attribute traversal."* The author it was sized against is a **workspace
+admin**, a trusted insider. A package author is a stranger on the
+internet. That is a strictly stronger threat model than the one the
+sandbox was chosen for, and the difference must be decided rather than
+inherited — see §11-D16. Note that D4 defers package-supplied overrides
+for *scope* reasons only, so without D16 this gap opens silently the
+moment the project-scope rung from
+`.ai_design/prompt_section_system/design.md` §9.4 lands.
 
 It may **never** override the code-owned core sections that carry
 Pi Dash's own operating rules — `guardrails`, `blocking`, `ending-run`,
@@ -1088,3 +1120,23 @@ error._ Explicitly not Jinja and explicitly not deferred to run time
 `--include-issues` selects them._ A package is a starting point, not a
 backup; exporting 251 issues by default would make every package a data
 dump and every install a mess.
+
+**D16 — Package-supplied prompt section bodies are template text.**
+Section overrides are concatenated into the composed template and
+rendered as Jinja (`prompting/composer.py:204`/`:318`), unlike the
+rulebook, which travels as a context variable. The sandbox that guards
+this today (`prompting/renderer.py:34`) was adopted against a
+*workspace-admin* author, not an untrusted publisher. _Default: a
+package's `prompts/` bodies are **not** treated as templates. At install
+they are rejected if they contain any Jinja construct (`{{`, `{%`,
+`{#`), so a package body is literal prose in the same way a rulebook is;
+package content that genuinely needs a value uses `${param}` substitution
+(§4.5, D14), which happens once at install and produces literal text._
+This keeps one rule — package content is never a template — instead of
+two, and it costs a package nothing that `${param}` does not already
+give it. It also means D4 can be lifted on its own merits when the
+project-scope rung lands, without quietly widening what a package may
+execute. Alternative, if a package is ever to author real templates:
+keep Jinja and rely on the sandbox, but re-review the sandbox explicitly
+against an untrusted author first, and treat that as a v2 decision
+gated on P-10.
