@@ -9,7 +9,14 @@
 //!   column/constraint mapping only). Serializers and errors live in
 //!   `pidash-types::assistant` (PIDASHCONV-246); crypto, SSRF, queries,
 //!   and runtime belong to later D-06 layer issues.
+//!
+//! * [`event_queries`] — `runtime/events.py:1-145` + `runtime/history.py:1-60`
+//!   (PIDASHCONV-248, SQL builders + wire shapes over [`models`]).
+//! * [`fernet_keys`] — multi-key Fernet primitive backing the services
+//!   crypto backend (PIDASHCONV-248; the `fernet` dependency lives here).
 
+pub mod event_queries;
+pub mod fernet_keys;
 pub mod models;
 
 pub use models::{
