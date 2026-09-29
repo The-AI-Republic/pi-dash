@@ -1,0 +1,27 @@
+{
+  "fixture": "FX-A-MOD-02",
+  "source": "db/models/exporter.py:21-67",
+  "model": "ExporterHistory(BaseModel)",
+  "table": "exporters",
+  "ordering": ["-created_at"],
+  "columns": [
+    {"name": "id", "ddl": "UUID PK default=uuid4 unique db_index", "from": "BaseModel"},
+    {"name": "name", "ddl": "CharField max_length=255 null=True blank=True"},
+    {"name": "type", "ddl": "CharField max_length=50 default=issue_exports choices=[issue_exports, issue_worklogs]"},
+    {"name": "workspace_id", "ddl": "FK \"db.WorkSpace\" (capital S, :34) related=workspace_exporters on_delete=CASCADE"},
+    {"name": "project", "ddl": "ArrayField(UUIDField default=uuid.uuid4) blank=True null=True (:35)"},
+    {"name": "provider", "ddl": "CharField max_length=50 choices=[json, csv, xlsx] (no default — required)"},
+    {"name": "status", "ddl": "CharField max_length=50 default=queued choices=[queued, processing, completed, failed]"},
+    {"name": "reason", "ddl": "TextField blank=True"},
+    {"name": "key", "ddl": "TextField blank=True"},
+    {"name": "url", "ddl": "URLField max_length=800 blank=True null=True"},
+    {"name": "token", "ddl": "CharField max_length=255 default=generate_token unique=True (:20-21 uuid4().hex, 32 hex chars)"},
+    {"name": "initiated_by_id", "ddl": "FK users related=workspace_exporters on_delete=CASCADE"},
+    {"name": "filters", "ddl": "JSONField blank=True null=True"},
+    {"name": "rich_filters", "ddl": "JSONField default=dict blank=True null=True"},
+    {"name": "created_at/updated_at/created_by/updated_by", "ddl": "audit columns from AuditModel via BaseModel"}
+  ],
+  "str": "f\"{provider} <{workspace.name}>\" (:65-67)",
+  "meta": {"verbose_name": "Exporter", "verbose_name_plural": "Exporters"},
+  "ported_notes": ["FK string is \"db.WorkSpace\" with capital S while AnalyticView uses \"db.Workspace\" — port as-is (same table at runtime)."]
+}

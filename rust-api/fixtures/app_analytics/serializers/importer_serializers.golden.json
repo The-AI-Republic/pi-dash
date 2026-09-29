@@ -1,0 +1,36 @@
+{
+  "fixture": "FX-A-SER-03",
+  "source": "app/serializers/importer.py:13-20",
+  "serializer": "ImporterSerializer",
+  "meta": {
+    "model": "Importer",
+    "fields": "__all__",
+    "read_only_fields": "none declared",
+    "nested": [
+      "initiated_by_detail = UserLiteSerializer(source=initiated_by, read_only=True)",
+      "project_detail = ProjectLiteSerializer(source=project, read_only=True)",
+      "workspace_detail = WorkspaceLiteSerializer(source=workspace, read_only=True)"
+    ]
+  },
+  "golden_output": {
+    "id": "<uuid>",
+    "service": "github",
+    "status": "queued",
+    "initiated_by": "<user uuid>",
+    "initiated_by_detail": {"id": "<user uuid>", "display_name": "<name>"},
+    "project": "<project uuid>",
+    "project_detail": {"id": "<project uuid>"},
+    "workspace": "<workspace uuid>",
+    "workspace_detail": {"id": "<workspace uuid>"},
+    "metadata": {},
+    "config": {},
+    "data": {},
+    "token": "<api-token uuid>",
+    "imported_data": null
+  },
+  "notes": [
+    "No handler serves this serializer (model only) — no route renders it.",
+    "Defaults: status=queued, metadata/config/data={} (default=dict), imported_data=null.",
+    "service choices: github|jira; status choices: queued|processing|completed|failed."
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "fixture": "FX-A-MOD-01",
+  "source": "db/models/analytic.py:14-31",
+  "model": "AnalyticView(BaseModel)",
+  "table": "analytic_views",
+  "ordering": ["-created_at"],
+  "columns": [
+    {"name": "id", "ddl": "UUID PK default=uuid4 unique db_index", "from": "BaseModel"},
+    {"name": "workspace_id", "ddl": "FK db.Workspace related=analytics on_delete=CASCADE"},
+    {"name": "name", "ddl": "CharField max_length=255"},
+    {"name": "description", "ddl": "TextField blank=True"},
+    {"name": "query", "ddl": "JSONField (no default — required)"},
+    {"name": "query_dict", "ddl": "JSONField default=dict"},
+    {"name": "created_at/updated_at/created_by/updated_by", "ddl": "audit columns from AuditModel via BaseModel"}
+  ],
+  "str": "f\"{name} <{workspace.name}>\" (:24-26)",
+  "meta": {"verbose_name": "Analytic", "verbose_name_plural": "Analytics"}
+}
