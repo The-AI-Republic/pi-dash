@@ -531,6 +531,47 @@ mod tests {
     }
 
     #[test]
+    fn max_seq_sql_matches_fixture() {
+        // F-A6-06: both MAX+1 statements byte-match the fixture vectors
+        // (`events.py:73-80`).
+        let events = &fixture()["events"];
+        let thread = "33ade466-0600-43ed-b19a-9616ba72e19b";
+        assert_eq!(
+            next_event_seq_sql(thread),
+            events["next_event_seq"]["sql"].as_str().expect("sql")
+        );
+        assert_eq!(
+            next_message_seq_sql(thread),
+            events["next_message_seq"]["sql"].as_str().expect("sql")
+        );
+    }
+
+    #[test]
+    fn lock_and_insert_shapes() {
+        // `append_event`/`create_message` shapes (`events.py:92-101,116-125`):
+        // full thread row locked under the seq allocation, every
+        // non-pk column bound positionally on insert.
+        let lock = lock_thread_sql("tid-1");
+        assert!(lock.starts_with("SELECT \"assistant_thread\"."));
+        assert!(lock.contains("WHERE \"assistant_thread\".\"id\" = tid-1"));
+        assert!(lock.ends_with("FOR UPDATE SKIP LOCKED"));
+        let insert = insert_event_sql();
+        assert!(insert.starts_with("INSERT INTO \"assistant_event\" ("));
+        assert!(!insert.contains("\"id\""));
+        assert_eq!(
+            insert.matches('$').count(),
+            assistant_event::COLUMNS.len() - 1
+        );
+        let insert = insert_message_sql();
+        assert!(insert.starts_with("INSERT INTO \"assistant_message\" ("));
+        assert!(!insert.contains("\"id\""));
+        assert_eq!(
+            insert.matches('$').count(),
+            assistant_message::COLUMNS.len() - 1
+        );
+    }
+
+    #[test]
     fn history_caps_and_sql_match_fixture() {
         let history = &fixture()["history"];
         assert_eq!(CHAT_HISTORY_MAX_TURNS, 40);
