@@ -163,7 +163,11 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         RouteGroup::Web => Router::new()
             .route("/", any(web::health_check))
             .route("/robots.txt", any(web::robots_txt)),
-        RouteGroup::App => crate::app_issues::routes(),
+        // App handlers merge their routers here (D-26 issue lists in
+        // `app_issues`; D-32 intake-issue detail + versions in
+        // `app_intake`, PIDASHCONV-395; sibling handler issues extend
+        // the merge; merges keep both sides).
+        RouteGroup::App => crate::app_issues::routes().merge(crate::app_intake::routes()),
         RouteGroup::License => crate::license::routes(),
         // Space handlers merge their routers here (intake: PIDASHCONV-177;
         // sibling handler issues extend the merge; merges keep both sides).
