@@ -17,6 +17,8 @@
 //! * [`tools_comments`] — `tools/comments.py:1-77` (PIDASHCONV-252).
 //! * [`tools_projects`] — `tools/projects.py:1-65` (PIDASHCONV-252).
 //! * [`tools_runs`] — `tools/runs.py:1-96` (PIDASHCONV-252).
+//! * [`tools_issues`] — `tools/issues.py:1-490` (PIDASHCONV-253).
+//! * [`tools_github`] — `tools/github.py:1-165` (PIDASHCONV-253).
 
 pub mod agent;
 pub mod crypto;
@@ -27,6 +29,8 @@ pub mod seams;
 pub mod ssrf;
 pub mod title;
 pub mod tools_comments;
+pub mod tools_github;
+pub mod tools_issues;
 pub mod tools_projects;
 pub mod tools_results;
 pub mod tools_runs;
