@@ -45,7 +45,7 @@
 //!   (fixture `queries/v1.golden.json` records the `.get` lookups this
 //!   way).
 //! - `SELECT *` is the full column list in
-//!   [`columns::COLUMNS`][pidash_db::app_assets::columns::COLUMNS] order
+//!   [`columns::COLUMNS`] order
 //!   (Django selects every concrete field when no `.values()` is used).
 //!
 //! Ported bugs (translate, don't redesign — recorded here, fixed nowhere):
@@ -59,7 +59,7 @@
 //! - `BUG (base.py:67)`: `UserAssetsEndpoint.get` serializes the queryset
 //!   WITHOUT `many=True`, so any existing user row raises and the
 //!   `handle_exception` fallback returns 500
-//!   [`unhandled_body`]. [`USER_GET_FOUND_IS_500`] pins this: handlers
+//!   [`unhandled_body`]. [`USER_GET_FOUND_STATUS`] pins this: handlers
 //!   must return 500 (never the row) when the user filter matches.
 //!
 //! Fixture: `rust-api/fixtures/app_assets/queries/v1.golden.json`
