@@ -166,7 +166,11 @@ async fn worker(concurrency: u32) -> MainResult {
     if mongo.is_none() {
         tracing::info!("MongoDB not configured; cleanup tasks will delete from Postgres only");
     }
-    pidash_jobs::tasks_cleanup::register_cleanup_handlers(&mut registry, pools.clone(), mongo);
+    pidash_jobs::tasks_cleanup::register_cleanup_handlers(
+        &mut registry,
+        pools.clone(),
+        mongo.clone(),
+    );
     pidash_jobs::tasks_cleanup::register_versions(&mut registry, pools.primary().clone());
     // D-09 remaining groups (PIDASHCONV-224; kept in sync with
     // `tests::worker_registry_owns_all_d09_local_tasks`). The four export
@@ -197,6 +201,19 @@ async fn worker(concurrency: u32) -> MainResult {
         &mut registry,
         pools.primary().clone(),
         pidash_jobs::integrations::github_sync::LiveTransports::from_env(),
+    );
+    // D-08 process_logs (PIDASHCONV-260, FX-LOG-01; kept in sync with
+    // `tests::worker_registry_owns_process_logs_task`). EXECUTE parity
+    // per PIDASHCONV-242: canonical Django (settings.local, the CI
+    // worker-plane env) executes `process_logs` at worker boot, so the
+    // Rust worker owns it too — the existing `process_logs_handler`
+    // (mongo-configured → mongo sink, else the Postgres fallback row;
+    // `logger_task.py:97-100`). `track_event` stays Python-owned: with no
+    // PostHog configured it early-returns, so local registration would
+    // only swallow the forward — never register it here.
+    registry.register(
+        pidash_jobs::tasks_webhooks::PROCESS_LOGS_TASK,
+        pidash_jobs::tasks_webhooks::process_logs_handler(pools.clone(), mongo),
     );
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,
@@ -463,5 +480,37 @@ mod tests {
             assert!(registry.owns(name), "{name} must be worker-owned");
             assert_eq!(route_for(&registry, name), Route::Local);
         }
+    }
+
+    /// PIDASHCONV-260 (FX-LOG-01): the worker owns `PROCESS_LOGS_TASK`
+    /// (EXECUTE parity per PIDASHCONV-242) while `TRACK_EVENT_TASK`
+    /// stays Python-owned. Mirrors the `worker()` registration block:
+    /// `process_logs_handler` needs a `Pools`, which cannot be built
+    /// without a database (same precedent as the `Pools`-taking groups
+    /// in `worker_registry_owns_all_d09_local_tasks`), so the stub below
+    /// is registered over the exact name constant the real call uses —
+    /// the live execution itself is pinned by the contract replay
+    /// (`test_rust_process_logs_executes_locally`).
+    #[test]
+    fn worker_registry_owns_process_logs_task() {
+        use pidash_jobs::tasks_webhooks::{PROCESS_LOGS_TASK, TRACK_EVENT_TASK};
+        use pidash_jobs::worker::{route_for, Handler, Registry, Route, Verdict};
+
+        let mut registry = Registry::new();
+        // Same name + same handler constructor `worker()` uses (the real
+        // `process_logs_handler` needs live pools, so a stub stands in
+        // for the handler body — never for the name).
+        let handler: Handler = std::sync::Arc::new(|_| Box::pin(async { Ok(Verdict::Ack) }));
+        registry.register(PROCESS_LOGS_TASK, handler);
+
+        assert_eq!(
+            PROCESS_LOGS_TASK,
+            "pi_dash.bgtasks.logger_task.process_logs"
+        );
+        assert!(registry.owns(PROCESS_LOGS_TASK));
+        assert_eq!(route_for(&registry, PROCESS_LOGS_TASK), Route::Local);
+        // Deliberately unregistered: the forward stays the contract.
+        assert!(!registry.owns(TRACK_EVENT_TASK));
+        assert_eq!(route_for(&registry, TRACK_EVENT_TASK), Route::PythonOwned);
     }
 }

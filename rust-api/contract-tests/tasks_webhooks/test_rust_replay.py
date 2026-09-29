@@ -40,25 +40,26 @@ backend-independent — they assert on Django source text and the
 in-process wire builder, so they already pass with no worker at all.
 Only the live worker tests have a replay form.
 
-Ownership split (mirrors the worker registry on rust-dev): all 11 D-08
-task names are Python-owned — the ``pidash-api`` binary registers no
-``tasks_webhooks`` handler (``bin/pidash-api/src/main.rs`` wires only
-cleanup + integrations), and ``crates/jobs/src/tasks_webhooks/mod.rs``
+Ownership split (mirrors the worker registry on rust-dev): 10 of the
+11 D-08 task names are Python-owned — the ``pidash-api`` binary
+registers exactly one ``tasks_webhooks`` handler, ``process_logs``
+(``bin/pidash-api/src/main.rs`` wires cleanup + integrations +
+``PROCESS_LOGS_TASK``), and ``crates/jobs/src/tasks_webhooks/mod.rs``
 keeps the webhook send/fan-out path Python-owned deliberately
 (registering a local send handler would steal live traffic while the
 webhook-row fetch, HTTP send and SMTP send still live on Python).
-Every test below therefore asserts observable AMQP forwarding — the
+Every test below except ``test_rust_process_logs_executes_locally``
+therefore asserts observable AMQP forwarding — the
 ``rust_job_queue`` row is acked AND the broker ``celery`` queue grows
 while the Django worker is stopped — instead of local DB effects, plus
 a no-local-row pin proving the Rust worker never executes these jobs
 itself. No skipped or weakened assertions.
 
-process_logs note (coordinate with PIDASHCONV-242): Django never
-executes ``process_logs`` either (unregistered at worker boot), so
-forwarding is the faithful replay of stock behavior on both backends.
-If 242 decides the Rust worker must execute it locally, its port
-registers the handler and this module's process_logs test is revisited
-to assert the row diff.
+process_logs note (PIDASHCONV-242, decided EXECUTE; PIDASHCONV-260
+registers it): canonical Django (settings.local, the CI worker-plane
+env) executes ``process_logs`` at worker boot, so the Rust worker owns
+``PROCESS_LOGS_TASK`` too and ``test_rust_process_logs_executes_locally``
+asserts the local ``api_activity_logs`` row diff instead of forwarding.
 
 Beat note: D-08 owns no beat entries (``test_no_beat_entries_owned`` —
 cleanup owns the webhook-log delete; the daily
@@ -73,7 +74,7 @@ import uuid
 from _harness import broker_probe, rust_queue
 from _harness import seed as seed_helpers
 from _harness.db import diff as _diff
-from _harness.db import snapshot
+from _harness.db import snapshot, wait_for_condition as wait_for
 
 M = "pi_dash.bgtasks"
 
@@ -286,17 +287,29 @@ def test_rust_deactivation_email_forwards_to_python(db_conn, broker_url):
     )
 
 
-def test_rust_process_logs_forwards_to_python(db_conn, broker_url):
-    """process_logs, Rust side: forward, never execute locally.
+def _added_rows(conn, table, before):
+    after = snapshot(conn, [table])[table]
+    new_keys = set(after) - set(before[table])
+    return [after[k] for k in new_keys]
 
-    Mirrors ``test_process_logs_writes_postgres_row`` (same payload):
-    the ``api_activity_logs`` row is a Python-plane effect, so the
-    replay pins forwarding plus a no-local-row pin. See the module
-    docstring re PIDASHCONV-242: if the parity decision registers a
-    local handler, this test is revisited to assert the row diff.
+
+def test_rust_process_logs_executes_locally(db_conn, broker_url):
+    """process_logs, Rust side: EXECUTE locally (PIDASHCONV-260, FX-LOG-01).
+
+    Revisits ``test_rust_process_logs_forwards_to_python``: EXECUTE
+    parity per PIDASHCONV-242 means the Rust worker owns
+    ``PROCESS_LOGS_TASK``, so this mirrors
+    ``test_process_logs_writes_postgres_row`` (same probe payload,
+    ``path == "/contract/probe"``) and asserts the local
+    ``api_activity_logs`` row diff instead of forwarding. Settlement of
+    the ``rust_job_queue`` row plus the new row is the proof: with the
+    Django worker stopped, a forward could never produce a local row.
+    No broker-depth assertion: the scheduler loop forwards other
+    domains' entries over the same broker, so only the row diff is
+    attributable to this job.
     """
     before = snapshot(db_conn, ["api_activity_logs"])
-    _publish_and_observe_forward(
+    celery_id = rust_queue.publish(
         PROCESS_LOGS,
         args=[
             {
@@ -308,7 +321,13 @@ def test_rust_process_logs_forwards_to_python(db_conn, broker_url):
             {},
         ],
     )
-    assert _diff(before, snapshot(db_conn, ["api_activity_logs"])) == {}
+    rust_queue.wait_for_settled(celery_id, what=f"{PROCESS_LOGS} executed")
+    after = wait_for(
+        lambda: _added_rows(db_conn, "api_activity_logs", before) or None,
+        what="api_activity_logs row",
+    )
+    assert len(after) == 1
+    assert after[0]["path"] == "/contract/probe"
 
 
 def test_rust_track_event_forwarded_without_crash(db_conn, broker_url):
