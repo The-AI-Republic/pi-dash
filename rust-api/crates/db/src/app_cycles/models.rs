@@ -474,7 +474,12 @@ mod tests {
             .as_array()
             .expect("cycle has columns array")
             .iter()
-            .map(|c| c["name"].as_str().expect("column entry has name").to_string())
+            .map(|c| {
+                c["name"]
+                    .as_str()
+                    .expect("column entry has name")
+                    .to_string()
+            })
             .collect()
     }
 
@@ -497,7 +502,11 @@ mod tests {
             .collect()
     }
 
-    fn constraint<'a>(value: &'a serde_json::Value, model: &str, name: &str) -> &'a serde_json::Value {
+    fn constraint<'a>(
+        value: &'a serde_json::Value,
+        model: &str,
+        name: &str,
+    ) -> &'a serde_json::Value {
         value[model]["meta"]["constraints"]
             .as_array()
             .expect("meta has constraints")
@@ -515,7 +524,10 @@ mod tests {
         assert_eq!(table, v["cycle"]["meta"]["db_table"].as_str().unwrap());
         assert_eq!(table, "cycles");
         let ordering: &str = cycle::ORDERING;
-        assert_eq!(ordering, v["cycle"]["meta"]["ordering"][0].as_str().unwrap());
+        assert_eq!(
+            ordering,
+            v["cycle"]["meta"]["ordering"][0].as_str().unwrap()
+        );
         assert_eq!(ordering, "-created_at");
         let verbose: &str = cycle::VERBOSE_NAME;
         let verbose_plural: &str = cycle::VERBOSE_NAME_PLURAL;
@@ -523,7 +535,10 @@ mod tests {
             format!("{verbose} / {verbose_plural}"),
             v["cycle"]["meta"]["verbose_name"].as_str().unwrap()
         );
-        assert_eq!(v["cycle"]["source"].as_str().unwrap(), "db/models/cycle.py:60-101");
+        assert_eq!(
+            v["cycle"]["source"].as_str().unwrap(),
+            "db/models/cycle.py:60-101"
+        );
     }
 
     #[test]
@@ -577,7 +592,10 @@ mod tests {
     fn cycle_save_sort_order_matches_fixture() {
         let v = fixture();
         let rule = v["cycle"]["save_sort_order"]["rule"].as_str().unwrap();
-        assert!(rule.contains("MIN(sort_order over same project) - 10000"), "{rule}");
+        assert!(
+            rule.contains("MIN(sort_order over same project) - 10000"),
+            "{rule}"
+        );
         assert!(v["cycle"]["save_sort_order"]["first_cycle_keeps_default"]
             .as_bool()
             .unwrap());
@@ -608,13 +626,22 @@ mod tests {
         // semantics as Cycle"); the probe expands them.
         let inherited: &[&str] = &cycle_issue::COLUMNS[..8];
         assert_eq!(owned(inherited), owned(&cycle::COLUMNS[..8]));
-        assert_eq!(owned(&cycle_issue::COLUMNS[8..]), vec!["issue_id", "cycle_id"]);
+        assert_eq!(
+            owned(&cycle_issue::COLUMNS[8..]),
+            vec!["issue_id", "cycle_id"]
+        );
         assert_eq!(cycle_issue::COLUMNS.len(), 10);
         let table: &str = cycle_issue::TABLE;
-        assert_eq!(table, v["cycle_issue"]["meta"]["db_table"].as_str().unwrap());
+        assert_eq!(
+            table,
+            v["cycle_issue"]["meta"]["db_table"].as_str().unwrap()
+        );
         assert_eq!(table, "cycle_issues");
         let ordering: &str = cycle_issue::ORDERING;
-        assert_eq!(ordering, v["cycle_issue"]["meta"]["ordering"][0].as_str().unwrap());
+        assert_eq!(
+            ordering,
+            v["cycle_issue"]["meta"]["ordering"][0].as_str().unwrap()
+        );
         assert_eq!(ordering, "-created_at");
         let together: Vec<String> = owned(cycle_issue::UNIQUE_TOGETHER);
         assert_eq!(together, unique_together(&v, "cycle_issue"));
@@ -664,20 +691,27 @@ mod tests {
         let table: &str = cycle_user_properties::TABLE;
         assert_eq!(
             table,
-            v["cycle_user_properties"]["meta"]["db_table"].as_str().unwrap()
+            v["cycle_user_properties"]["meta"]["db_table"]
+                .as_str()
+                .unwrap()
         );
         assert_eq!(table, "cycle_user_properties");
         let ordering: &str = cycle_user_properties::ORDERING;
         assert_eq!(
             ordering,
-            v["cycle_user_properties"]["meta"]["ordering"][0].as_str().unwrap()
+            v["cycle_user_properties"]["meta"]["ordering"][0]
+                .as_str()
+                .unwrap()
         );
         assert_eq!(ordering, "-created_at");
         let together: Vec<String> = owned(cycle_user_properties::UNIQUE_TOGETHER);
         assert_eq!(together, unique_together(&v, "cycle_user_properties"));
         assert_eq!(together, vec!["cycle", "user", "deleted_at"]);
         let name: &str = cycle_user_properties::UNIQUE_CYCLE_USER_NAME;
-        assert_eq!(name, "cycle_user_properties_unique_cycle_user_when_deleted_at_null");
+        assert_eq!(
+            name,
+            "cycle_user_properties_unique_cycle_user_when_deleted_at_null"
+        );
         let c = constraint(&v, "cycle_user_properties", name);
         let cfields: Vec<String> = c["fields"]
             .as_array()
@@ -689,12 +723,18 @@ mod tests {
                 other => panic!("unexpected constraint field {other}"),
             })
             .collect();
-        assert_eq!(owned(cycle_user_properties::UNIQUE_CYCLE_USER_COLUMNS), cfields);
+        assert_eq!(
+            owned(cycle_user_properties::UNIQUE_CYCLE_USER_COLUMNS),
+            cfields
+        );
         assert_eq!(
             c["condition"].as_str().unwrap(),
             cycle_user_properties::UNIQUE_CYCLE_USER_WHERE
         );
-        assert_eq!(cycle_user_properties::UNIQUE_CYCLE_USER_WHERE, "deleted_at IS NULL");
+        assert_eq!(
+            cycle_user_properties::UNIQUE_CYCLE_USER_WHERE,
+            "deleted_at IS NULL"
+        );
         assert_eq!(cycle_user_properties::CYCLE_ON_DELETE, OnDelete::Cascade);
         assert_eq!(cycle_user_properties::USER_ON_DELETE, OnDelete::Cascade);
     }
@@ -735,7 +775,10 @@ mod tests {
         assert_eq!(default_filters()["priority"], serde_json::Value::Null);
         let mut disp = default_display_filters();
         disp["layout"] = serde_json::json!("board");
-        assert_eq!(default_display_filters()["layout"], serde_json::json!("list"));
+        assert_eq!(
+            default_display_filters()["layout"],
+            serde_json::json!("list")
+        );
     }
 
     #[test]
