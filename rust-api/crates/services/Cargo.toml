@@ -41,3 +41,7 @@ tokio = { version = "1", features = ["macros", "rt"] }
 # bodies in this crate's own tests; same locked sha2 0.11.x as pidash-db
 # (no lock churn).
 sha2 = { version = "0.11" }
+# D-33 tasks: HMAC-SHA256 replay of the FX-TSK-01 executed wire vector
+# (test-only); same locked hmac 0.13.x + digest 0.11.x pair already in
+# rust-api/Cargo.lock (no lock churn).
+hmac = { version = "0.13" }
