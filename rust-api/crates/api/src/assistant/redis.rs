@@ -11,22 +11,23 @@
 //! * `events.py:77-79` — the SSE live tail: `SUBSCRIBE
 //!   assistant:thread:<thread_id>` after the replay prefix.
 //!
-//! No `redis` crate exists anywhere in the workspace yet, and both
-//! `api/Cargo.toml` and `api/src/state.rs` (where a shared handle would
-//! live) are read-only foundation files — so the transport half is a
-//! dedicated foundation issue (filed by PIDASHCONV-255, which waits on it).
-//! This module pins everything the transport will execute — key formats,
-//! expiries, and the throttle cache algorithm over the ported
-//! [`crate::assistant::throttles`] pure functions — so the foundation run
-//! only supplies the client, and every call site below already reads like
-//! the finished wiring.
+//! Transport for the three behaviors above is the merged foundation
+//! (`pidash_db::redis::RedisHandle`, PIDASHCONV-265): one shared client on
+//! [`AppState`](crate::state::AppState) (`state.redis()`, `None` when the
+//! cache is disabled), exposing `SET .. EX` / `GET` / `SUBSCRIBE`. This
+//! module pins everything the transport executes — key formats, expiries,
+//! and the throttle cache algorithm over the ported
+//! [`crate::assistant::throttles`] pure functions — and owns the call sites'
+//! failure policy, which mirrors Python per site (see each function).
 //!
-//! Interim behavior (until the foundation issue lands): cancel still answers
-//! 204 (exactly like Python's swallow-everything `except`), the throttle
-//! allows (fresh-user contract traffic never trips it), and the SSE stream
-//! serves the replay prefix plus `1s` keepalives (the live tail the
-//! subscription would feed is the only gap). Each site is marked PENDING
-//! with the foundation issue id; nothing here merges until they are wired.
+//! The SSE live tail's *receive* half still waits on a follow-up foundation
+//! issue (awaiting the next publish needs a `Stream` poll that neither this
+//! crate's dependency closure nor any new `assistant/` file can name;
+//! `api/Cargo.toml` is read-only): `events.rs` serves the exact replay
+//! prefix plus headers as a finite body until that lands, and nothing here
+//! merges until the tail is wired.
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
 
@@ -46,14 +47,17 @@ pub fn cancel_set_command(turn_id: &Uuid) -> (String, String, u64) {
 }
 
 /// Signal an in-flight turn to stop (`messages.py:124-128`,
-/// `threads.py:105-110`). PENDING(redis-foundation): sends
-/// [`cancel_set_command`] through the shared client and swallows every
-/// failure; until the transport lands this is a documented no-op that
-/// preserves the 204 response shape.
-pub async fn signal_cancel(_state: &AppState, turn_id: &Uuid) {
-    let (key, _value, _expiry_secs) = cancel_set_command(turn_id);
-    // PENDING(redis-foundation): `SET key "1" EX 600`, swallow all errors.
-    tracing::debug!(key = key.as_str(), "assistant.cancel: redis unavailable; signal deferred");
+/// `threads.py:105-110`): [`cancel_set_command`] through the shared client.
+/// Every failure is swallowed (`except Exception: pass`), including a
+/// missing client (cache disabled): the 204 response shape never changes.
+pub async fn signal_cancel(state: &AppState, turn_id: &Uuid) {
+    let (key, value, expiry_secs) = cancel_set_command(turn_id);
+    let Some(redis) = state.redis() else {
+        return;
+    };
+    if let Err(error) = redis.set_ex(&key, &value, expiry_secs).await {
+        tracing::debug!(%error, key = key.as_str(), "assistant.cancel: signal write failed; swallowed");
+    }
 }
 
 /// Throttle-cache key for a message POST
@@ -74,11 +78,9 @@ pub enum ThrottleVerdict {
 /// entries `<= now - duration`, allow iff fewer than `num_requests` remain
 /// ([`crate::assistant::throttles::allow_request`]); on allow the caller
 /// records `now` at the front and re-caches with timeout `duration`
-/// (here [`MESSAGE_THROTTLE`]'s 3600s window). PENDING(redis-foundation):
-/// the history fetch/store goes through the shared client; until the
-/// transport lands callers allow (fresh-user contract traffic never trips
-/// the 30/hour brake) and this function documents the exact decision the
-/// transport will execute.
+/// (here [`MESSAGE_THROTTLE`]'s 3600s window). The pure decision behind
+/// [`check_message_throttle`], kept so the algorithm stays unit-testable
+/// without a Redis server.
 pub fn evaluate_message_throttle(history: &[f64], now: f64) -> ThrottleVerdict {
     if crate::assistant::throttles::allow_request(
         history,
@@ -92,13 +94,59 @@ pub fn evaluate_message_throttle(history: &[f64], now: f64) -> ThrottleVerdict {
     }
 }
 
-/// Check the message-POST brake for `user_id`. PENDING(redis-foundation):
-/// always allows until the throttle cache is wired (see
-/// [`evaluate_message_throttle`] for the decision the transport executes).
-pub async fn check_message_throttle(_state: &AppState, _user_id: &Uuid) -> ThrottleVerdict {
-    // PENDING(redis-foundation): fetch history at `message_throttle_key`,
-    // evaluate, record `now`, re-cache with 3600s timeout; deny with the
-    // `Throttled` 429 body on quota exhaustion.
+/// Decode a cached throttle history: the JSON array of `time.time()` floats
+/// this handler writes. Anything else (a cache miss is `None` before this;
+/// notably a Django-pickled history from pre-cutover traffic, which is not
+/// JSON) decodes to the empty history, i.e. fail-open to allow — the
+/// foundation transport's documented policy for unreadable values.
+pub fn decode_throttle_history(raw: &str) -> Vec<f64> {
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+/// Encode a throttle history for the cache: the compact JSON array of
+/// floats [`decode_throttle_history`] reads back.
+pub fn encode_throttle_history(history: &[f64]) -> String {
+    serde_json::to_string(history).expect("float vec serializes")
+}
+
+/// Check the message-POST brake for `user_id` (`messages.py:39-42`): the
+/// DRF sliding window over the cached timestamp history at
+/// [`message_throttle_key`]. `now` is `time.time()` seconds; entries `<=
+/// now - duration` have passed out of the window. On allow the caller
+/// records `now` at the front and re-caches with timeout `duration`
+/// (`throttle_success`); on quota exhaustion the caller answers the
+/// `Throttled` 429. A missing client, a cache miss, an unreadable value,
+/// and a failed re-cache all fail open to allow (cutover traffic owns these
+/// keys, so a miss is a fresh user, exactly DRF's `get(key, [])`).
+pub async fn check_message_throttle(state: &AppState, user_id: &Uuid) -> ThrottleVerdict {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs_f64())
+        .unwrap_or(0.0);
+    let key = message_throttle_key(user_id);
+    let Some(redis) = state.redis() else {
+        return ThrottleVerdict::Allow;
+    };
+    let history: Vec<f64> = match redis.get_string(&key).await {
+        Ok(Some(raw)) => decode_throttle_history(&raw),
+        _ => Vec::new(),
+    };
+    let window = MESSAGE_THROTTLE.window_secs as f64;
+    let mut live: Vec<f64> = history
+        .into_iter()
+        .filter(|&stamp| stamp > now - window)
+        .collect();
+    if live.len() >= MESSAGE_THROTTLE.requests as usize {
+        return ThrottleVerdict::Deny;
+    }
+    live.insert(0, now);
+    let recached = encode_throttle_history(&live);
+    if let Err(error) = redis
+        .set_ex(&key, &recached, MESSAGE_THROTTLE.window_secs)
+        .await
+    {
+        tracing::debug!(%error, key = key.as_str(), "assistant.throttle: re-cache failed; allowance stands");
+    }
     ThrottleVerdict::Allow
 }
 
@@ -148,6 +196,20 @@ mod tests {
             evaluate_message_throttle(&history[1..], now),
             ThrottleVerdict::Allow
         );
+    }
+
+    #[test]
+    fn throttle_history_codec_roundtrips_and_rejects_pickles() {
+        let history = vec![1_700_000_000.123_456_7, 1_699_999_999.0, 42.0];
+        let encoded = encode_throttle_history(&history);
+        assert_eq!(decode_throttle_history(&encoded), history);
+        // Integers decode as floats (DRF timer values are floats, but a
+        // hand-written cache must not trip the brake either).
+        assert_eq!(decode_throttle_history("[1,2]"), vec![1.0, 2.0]);
+        // A Django-pickled history (pre-cutover traffic) is not JSON:
+        // fail-open to the empty history, i.e. allow.
+        assert!(decode_throttle_history("\u{80}\u{4}X\u{1e}\0\0\0").is_empty());
+        assert!(decode_throttle_history("not json at all").is_empty());
     }
 
     #[test]

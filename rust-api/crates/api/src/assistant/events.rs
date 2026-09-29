@@ -298,23 +298,21 @@ async fn assistant_event_stream(
         })));
     }
 
-    // PENDING(redis-foundation): the finished stream feeds `frames`, then
-    // the live tail, then 1s keepalives through a channel body
-    // (`http_body_util::channel`, which needs its `channel` feature enabled
-    // in `api/Cargo.toml` — a foundation-file change owned by the Redis
-    // foundation issue, together with the shared client). The live tail
-    // subscribes to `assistant:thread:<id>` (`events.py:77-79`, channel
-    // builder [`live_tail_channel`]) and relays each publish verbatim
+    // PENDING(pubsub-receive): the finished stream feeds `frames`, then the
+    // live tail, then 1s keepalives through `sse_body::sse_channel` (the
+    // channel transport itself is merged). The live tail subscribes to
+    // `assistant:thread:<id>` (`events.py:77-79`, channel builder
+    // [`live_tail_channel`]) and relays each publish verbatim
     // (`event: chat.event\ndata: <data>\n\n`, `events.py:86-89`); an idle
     // second yields `: keepalive` (`events.py:81-84`, constant
     // `redis::SSE_KEEPALIVE_FRAME`), and a dropped receiver (client gone)
-    // ends the feeder task.
-    //
-    // Interim: the replay prefix as a finite body. Headers, auth, cursor,
+    // ends the feeder task. Awaiting the next publish needs a `Stream`
+    // poll that this crate's dependency closure cannot name (see
+    // `redis.rs`); until the follow-up foundation method lands, the exact
+    // replay prefix below serves as a finite body. Headers, auth, cursor,
     // and frame bytes are already exact, so the contract suite's
-    // replay-prefix reads pass; the infinite tail (keepalives + live
-    // events) arrives with the foundation issue, and this route does not
-    // merge until then.
+    // replay-prefix reads pass; this route does not merge until the tail
+    // is wired.
     let _ = live_tail_channel(&thread_id);
     let response = Response::builder()
         .status(StatusCode::OK)

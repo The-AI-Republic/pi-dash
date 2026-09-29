@@ -1616,7 +1616,7 @@ pub fn parse_json_body(raw: &[u8]) -> HandlerResult<serde_json::Value> {
 }
 
 #[cfg(test)]
-mod tests {
+mod thread_surface_tests {
     use super::*;
 
     #[test]

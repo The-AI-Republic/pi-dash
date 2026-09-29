@@ -189,8 +189,8 @@ async fn post_message(
     };
     // POST-only throttle (`get_throttles`, `messages.py:39-42`): DRF runs
     // `check_throttles` before the handler body, so a throttled caller
-    // answers 429 even when a later gate would also deny it. The cache
-    // half is PENDING on the Redis foundation issue (see `redis.rs`).
+    // answers 429 even when a later gate would also deny it (see
+    // `redis::check_message_throttle`).
     if check_message_throttle(&state, &actor.id).await == ThrottleVerdict::Deny {
         return Err(crate::assistant::throttles::Throttled.into_response());
     }
@@ -366,8 +366,8 @@ const NO_ACTIVE_TURN_BODY: &str = r#"{"error":"no_active_turn"}"#;
 
 /// `AssistantCancelEndpoint.post` (`messages.py:114-128`): the member gate,
 /// the owned-thread scope (404), 409 when no turn is in flight, else the
-/// cancel signal (Redis `SET`, every failure swallowed) and 204. The signal
-/// half is PENDING on the Redis foundation issue (see `redis.rs`).
+/// cancel signal (Redis `SET`, every failure swallowed; see
+/// `redis::signal_cancel`) and 204.
 async fn cancel_turn(
     State(state): State<AppState>,
     Path((slug, thread_id)): Path<(String, String)>,
