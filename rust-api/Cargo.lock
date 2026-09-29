@@ -2625,6 +2625,7 @@ dependencies = [
  "chrono",
  "crc32fast",
  "flate2",
+ "hmac 0.13.0",
  "idna",
  "minijinja",
  "pidash-auth",

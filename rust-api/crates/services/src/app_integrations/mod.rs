@@ -37,3 +37,4 @@
 //!   the PATCH caller passes `None`.
 
 pub mod serializers;
+pub mod tasks;
