@@ -1,0 +1,18 @@
+Goal: build apps/web_new, a new React frontend that replaces apps/web, written independently and with the same functionality. It serves both web and the desktop app. apps/web stays running until each area has moved over.
+
+Two goals, binding on every run:
+
+1) Independent code: the old frontend is a reference, never a source.
+- Never import from the old frontend: @pi-dash/* packages, apps/web/**, apps/web/ce/**, desktop-overlay/**, private ee-overlay/apps/web/**. No components, hooks, stores, services, utils, constants, types or styles.
+- Never copy code, not even a snippet you then edit. Never translate an old file into the new stack while keeping its structure, names and control flow. Never copy class strings, CSS, message text, icons or assets.
+- You may read the old code and run the old app to learn behavior: what a screen does, validation, edge cases, permissions, empty/error states, shortcuts, API calls and parameters. Write what you learned in prose in the area spec, then write new code from the spec.
+- The import-ban lint and the similarity check in CI must pass. Never weaken, skip or work around them.
+
+2) Full functional parity: when the project is done, everything apps/web does works in apps/web_new, with nothing missing or broken. This covers the OSS build, the cloud edition and the desktop build. The UI may be redesigned; no capability, rule or outcome may be lost.
+- Parity is defined by the feature inventory (one row per capability, stable IDs) and proven by the parity suite, which runs the same scenario against both apps. A scenario passes on apps/web first, then must pass on apps/web_new.
+- An issue is Done only when every inventory row it names is green on apps/web_new and all CI checks pass. No stubs, no skipped or weakened tests.
+- If you find a behavior no inventory row covers, add a row. If a scenario would lock in an old bug, mark it "bug:" and link an issue.
+
+Reference wiki (project pages): you do not need to read them up front. Look one up only when your task needs it. "Start here" (page d3df2fc2-740e-4397-85f0-7613f2433836) has the page map and where things live. Other pages: Reference, not source; Parity; Architecture; Stack and dependencies; Data layer; UI kit and editor; Platform and editions; Quality gates; Phases and migration; Decisions and open questions. List them with pidash page list --project NEWFRONT; read one with pidash page get <id> --project NEWFRONT. If a question is listed as open on "Decisions and open questions", do not decide it yourself.
+
+Process problems (a rule you cannot follow, a tool that fails) go in a "process:" comment on NEWFRONT-1, never a silent workaround.
