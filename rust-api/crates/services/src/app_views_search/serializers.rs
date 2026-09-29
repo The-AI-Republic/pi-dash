@@ -508,12 +508,20 @@ pub fn resolve_create_query(
 /// and overwrites the POST line, so the effective query is always the PATCH
 /// mapping — even when `filters` is empty or missing. The POST computation
 /// never survives; it is not invoked here at all.
+///
+/// `query_params` reproduces `validated_data.get("filters", {})`: a missing
+/// `filters` key arrives as `None` and maps to the empty query input (`{}`),
+/// exactly what Python hands `issue_filters`. Only an explicitly present
+/// value — including JSON `null`, which makes Python's `key in query_params`
+/// raise — is forwarded to the PATCH computation as-is.
 pub fn resolve_update_query(
     query_params: Option<&Value>,
     compute_patch: impl FnOnce(&Value) -> Value,
 ) -> Value {
-    let params = query_params.unwrap_or(&Value::Null);
-    compute_patch(params)
+    match query_params {
+        Some(params) => compute_patch(params),
+        None => compute_patch(&Value::Object(serde_json::Map::new())),
+    }
 }
 
 /// The empty-query literal both write kernels fall back to (`{}`).
@@ -895,11 +903,20 @@ mod tests {
             json!({"patch-empty": true})
         });
         assert_eq!(out, json!({"patch-empty": true}));
+        // Missing `filters` reproduces `validated_data.get("filters", {})`: the
+        // PATCH computation receives `{}`, not null.
         let out = resolve_update_query(None, |value| {
-            assert_eq!(value, &Value::Null);
+            assert_eq!(value, &json!({}));
             json!({"patch-missing": true})
         });
         assert_eq!(out, json!({"patch-missing": true}));
+        // An explicitly present null is forwarded as-is (Python hands `None`
+        // to `issue_filters`, whose `key in query_params` then raises).
+        let out = resolve_update_query(Some(&Value::Null), |value| {
+            assert_eq!(value, &Value::Null);
+            json!({"patch-null": true})
+        });
+        assert_eq!(out, json!({"patch-null": true}));
     }
 
     #[test]
