@@ -1,0 +1,298 @@
+{
+  "trace": "apps/api/pi_dash/assistant/tools/_scoping.py:28-103; apps/api/pi_dash/assistant/tools/_results.py:20-69; apps/api/pi_dash/assistant/tools/issues.py:25-490; apps/api/pi_dash/assistant/tools/comments.py:21-; apps/api/pi_dash/assistant/tools/github.py:35-; apps/api/pi_dash/assistant/tools/projects.py:17-; apps/api/pi_dash/assistant/tools/runs.py:18-; apps/api/pi_dash/assistant/tasks.py:54-526",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "scoping": {
+    "source": "apps/api/pi_dash/assistant/tools/_scoping.py:39-103",
+    "member_projects": "workspace slug + active membership, distinct (_scoping.py:43-49)",
+    "get_project": "member-scope miss -> ToolNotFound('Project <id> not found or not accessible.')",
+    "get_issue": "scoped (member-project issues) + select_related; malformed UUID (ValidationError/ValueError) -> ToolNotFound('Issue <id> not found or not accessible.')",
+    "require_project_write": "ADMIN/MEMBER only; guests blocked -> ToolPermissionError(\"You don't have permission to make changes in this project.\")",
+    "error_types": "ToolPermissionError/ToolNotFound subclass ModelRetry so the model retries instead of failing the turn (_scoping.py:28-36)",
+    "matrix": "guest/member/owner x project visibility: non-member projects invisible to get_project/get_issue; member read ok; write requires project role ADMIN/MEMBER"
+  },
+  "results_helpers": {
+    "wrap_untrusted": {
+      "source": "apps/api/pi_dash/assistant/tools/_results.py:20-29",
+      "vectors": [
+        "<untrusted>hello</untrusted>",
+        "<untrusted>x<\u200b/untrusted>y<\u200buntrusted>z</untrusted>"
+      ]
+    },
+    "truncate": {
+      "source": "apps/api/pi_dash/assistant/tools/_results.py:32-36",
+      "vectors": [
+        [
+          "abc",
+          true
+        ],
+        [
+          "ab",
+          false
+        ]
+      ],
+      "rule": "returns (text, truncated_bool); cut is hard slice, no ellipsis"
+    },
+    "issue_link": {
+      "source": "apps/api/pi_dash/assistant/tools/_results.py:39-46",
+      "shape": "{type:issue, workspace_slug, project_id, issue_id, url_path:/<ws>/projects/<p>/issues/<i>}"
+    },
+    "record_write": {
+      "source": "apps/api/pi_dash/assistant/tools/_results.py:49-69",
+      "shape": "INSERT tool_result message (summary + {links}) + tool_result event with message envelope"
+    }
+  },
+  "tools": {
+    "issues_py_count_note": "9 @assistant.tool functions observed in tools/issues.py:56-490 (issue text says 8; all 9 recorded)",
+    "issues": [
+      {
+        "name": "search_issues",
+        "source": "apps/api/pi_dash/assistant/tools/issues.py:56-81",
+        "params": [
+          "query",
+          "project_id?=None",
+          "limit=20",
+          "offset=0"
+        ],
+        "shape": "limit clamped 1..20; window limit+1; {results:[brief], has_more, next_offset}"
+      },
+      {
+        "name": "list_issues",
+        "source": "apps/api/pi_dash/assistant/tools/issues.py:83-131",
+        "params": [
+          "project_id",
+          "state?",
+          "state_group?",
+          "parent_issue_id?",
+          "labels?",
+          "priority?",
+          "limit=20",
+          "offset=0"
+        ]
+      },
+      {
+        "name": "list_my_issues",
+        "source": "apps/api/pi_dash/assistant/tools/issues.py:133-153",
+        "params": [
+          "scope='all'",
+          "limit=20",
+          "offset=0"
+        ]
+      },
+      {
+        "name": "get_issue",
+        "source": "apps/api/pi_dash/assistant/tools/issues.py:155-183",
+        "params": [
+          "issue_id"
+        ],
+        "shape": "brief + description wrap_untrusted(desc) + description_truncated flag"
+      },
+      {
+        "name": "create_issue",
+        "source": "apps/api/pi_dash/assistant/tools/issues.py:228-285",
+        "params": [
+          "project_id",
+          "name",
+          "description_md?",
+          "state_id?",
+          "priority?",
+          "parent_issue_id?"
+        ],
+        "shape": "name stripped+truncated 255; description via to_safe_html; record_write + link"
+      },
+      {
+        "name": "update_issue",
+        "source": "apps/api/pi_dash/assistant/tools/issues.py:287-400",
+        "params": [
+          "issue_id",
+          "name?",
+          "description_md?",
+          "state_id?",
+          "priority?",
+          "parent_issue_id='__unset__'"
+        ]
+      },
+      {
+        "name": "relate_issues",
+        "source": "apps/api/pi_dash/assistant/tools/issues.py:448-467",
+        "params": [
+          "issue",
+          "relation_type",
+          "related_issues[]"
+        ]
+      },
+      {
+        "name": "unrelate_issues",
+        "source": "apps/api/pi_dash/assistant/tools/issues.py:468-482",
+        "params": [
+          "issue",
+          "relation_type",
+          "related_issues[]"
+        ]
+      },
+      {
+        "name": "list_issue_relations",
+        "source": "apps/api/pi_dash/assistant/tools/issues.py:483-490",
+        "params": [
+          "issue"
+        ]
+      }
+    ],
+    "caps": {
+      "source": "apps/api/pi_dash/assistant/tools/issues.py:25-33",
+      "SEARCH_LIMIT": 20,
+      "NAME_CAP": 200,
+      "DESC_CAP": 2000,
+      "COMMENT_CAP": 500,
+      "PARENT_UNSET": "__unset__"
+    },
+    "comments": [
+      {
+        "name": "create_comment",
+        "source": "apps/api/pi_dash/assistant/tools/comments.py:21-",
+        "params": [
+          "issue_id",
+          "body_md",
+          "fold=False"
+        ]
+      }
+    ],
+    "github": [
+      {
+        "name": "get_pull_request_status",
+        "source": "apps/api/pi_dash/assistant/tools/github.py:85-",
+        "params": [
+          "url"
+        ],
+        "budget": "LOOP_PR_LOOKUPS_PER_RUN default 15 -> 'budget_exhausted'",
+        "unknown": [
+          "unsupported_url",
+          "rate limit/network -> unknown"
+        ],
+        "shape": "{state: merged|open|closed|unknown, ...}"
+      }
+    ],
+    "projects": [
+      {
+        "name": "list_projects",
+        "source": "apps/api/pi_dash/assistant/tools/projects.py:17-26",
+        "params": []
+      },
+      {
+        "name": "list_states",
+        "source": "apps/api/pi_dash/assistant/tools/projects.py:27-36",
+        "params": [
+          "project_id"
+        ]
+      },
+      {
+        "name": "list_labels",
+        "source": "apps/api/pi_dash/assistant/tools/projects.py:37-46",
+        "params": [
+          "project_id"
+        ]
+      },
+      {
+        "name": "list_project_members",
+        "source": "apps/api/pi_dash/assistant/tools/projects.py:47-",
+        "params": [
+          "project_id"
+        ]
+      }
+    ],
+    "runs": [
+      {
+        "name": "get_run_status",
+        "source": "apps/api/pi_dash/assistant/tools/runs.py:18-36",
+        "params": [
+          "issue_id"
+        ]
+      },
+      {
+        "name": "dispatch_coding_run",
+        "source": "apps/api/pi_dash/assistant/tools/runs.py:37-",
+        "params": [
+          "issue_id",
+          "target_state_id?"
+        ],
+        "shape": "moves issue to delegated (ticking) state; bad state -> ModelRetry; requires write access"
+      }
+    ]
+  },
+  "tasks": {
+    "celery": {
+      "source": "apps/api/pi_dash/assistant/tasks.py:476-491",
+      "run_assistant_turn": "name=assistant.run_turn, acks_late=False, max_retries=0, soft=300, hard=330 (tasks.py:45-46,476-482)",
+      "timeout_path": "SoftTimeLimitExceeded -> _fail_turn(turn_timeout, 'The assistant took too long to respond.')",
+      "sweep_stale_turns": "name=assistant.sweep_stale_turns; RUNNING + started_at < now-(hard+60)=390s -> _fail_turn(turn_timeout, 'The assistant turn did not finish (worker lost).') returns count (tasks.py:511-526)"
+    },
+    "run_flow": {
+      "source": "apps/api/pi_dash/assistant/tasks.py:299-367",
+      "steps": [
+        "_load_context (QUEUED/RUNNING only, else None)",
+        "_mark_running or return",
+        "resolve model (AssistantError -> _fail_turn)",
+        "resolve toolsets (never fails turn)",
+        "load_history",
+        "assistant.run(..., UsageLimits(request_limit=25, tool_calls_limit=20))",
+        "Cancelled -> _cancel_turn; UsageLimitExceeded -> iteration_limit; other -> _classify_error",
+        "success -> dump_new_messages + usage + model_label -> _complete_turn"
+      ]
+    },
+    "classify_error": {
+      "source": "apps/api/pi_dash/assistant/tasks.py:442-469",
+      "vectors": {
+        "payment_required": [
+          "provider_out_of_credit",
+          "The provider rejected the request for lack of credit."
+        ],
+        "status_402": [
+          "provider_out_of_credit",
+          "The provider rejected the request for lack of credit."
+        ],
+        "auth_401": [
+          "provider_auth_failed",
+          "Your API key was rejected by the provider."
+        ],
+        "connection": [
+          "provider_unreachable",
+          "Could not reach the configured provider endpoint."
+        ],
+        "model_not_found": [
+          "model_invalid",
+          "The configured model name was not accepted by the provider."
+        ],
+        "other": [
+          "internal",
+          "The assistant hit an unexpected error."
+        ]
+      },
+      "rule": "402 read from status_code attr (never substring); credit phrases -> provider_out_of_credit"
+    },
+    "cancel_key": {
+      "source": "apps/api/pi_dash/assistant/tasks.py:54-55",
+      "vector": "assistant:cancel:abc",
+      "checked": "redis GET; errors -> False (tasks.py:110-115)"
+    },
+    "turn_limits": {
+      "soft": 300,
+      "hard": 330,
+      "delta_flush_ms": 100
+    },
+    "streamer": {
+      "source": "apps/api/pi_dash/assistant/tasks.py:220-292",
+      "flush": "every 100ms or pending>=200 chars; bare sync_to_async (not db_sync_to_async) by design (tasks.py:266-279)",
+      "events": "PartStart TextPart -> new assistant row; deltas -> assistant_delta events; end -> finalize COMPLETED"
+    },
+    "ctx_shape": {
+      "source": "apps/api/pi_dash/assistant/tasks.py:58-96",
+      "fields": [
+        "thread",
+        "turn",
+        "user",
+        "user_text",
+        "deps"
+      ],
+      "deps": "user_display=display_name or email; mode=thread.kind; workspace from thread"
+    }
+  }
+}

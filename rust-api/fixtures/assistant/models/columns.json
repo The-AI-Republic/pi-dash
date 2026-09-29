@@ -1,0 +1,980 @@
+{
+  "trace": "apps/api/pi_dash/assistant/models.py:23-293",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "enums": {
+    "ThreadKind": {
+      "source": "apps/api/pi_dash/assistant/models.py:23-25",
+      "values": [
+        [
+          "chat",
+          "Chat"
+        ],
+        [
+          "loop",
+          "Loop"
+        ]
+      ]
+    },
+    "TurnStatus": {
+      "source": "apps/api/pi_dash/assistant/models.py:64-69",
+      "values": [
+        [
+          "queued",
+          "Queued"
+        ],
+        [
+          "running",
+          "Running"
+        ],
+        [
+          "completed",
+          "Completed"
+        ],
+        [
+          "failed",
+          "Failed"
+        ],
+        [
+          "cancelled",
+          "Cancelled"
+        ]
+      ]
+    },
+    "MessageKind": {
+      "source": "apps/api/pi_dash/assistant/models.py:108-113",
+      "values": [
+        [
+          "user",
+          "User"
+        ],
+        [
+          "assistant",
+          "Assistant"
+        ],
+        [
+          "tool_call",
+          "Tool call"
+        ],
+        [
+          "tool_result",
+          "Tool result"
+        ],
+        [
+          "error",
+          "Error"
+        ]
+      ]
+    },
+    "MessageStatus": {
+      "source": "apps/api/pi_dash/assistant/models.py:116-120",
+      "values": [
+        [
+          "streaming",
+          "Streaming"
+        ],
+        [
+          "completed",
+          "Completed"
+        ],
+        [
+          "failed",
+          "Failed"
+        ],
+        [
+          "cancelled",
+          "Cancelled"
+        ]
+      ]
+    },
+    "ProviderKind": {
+      "source": "apps/api/pi_dash/assistant/models.py:179-181",
+      "values": [
+        [
+          "openai_compatible",
+          "OpenAI-compatible"
+        ],
+        [
+          "anthropic",
+          "Anthropic"
+        ]
+      ]
+    }
+  },
+  "tables": {
+    "AssistantThread": {
+      "db_table": "assistant_thread",
+      "ordering": [
+        "-updated_at"
+      ],
+      "columns": [
+        [
+          "id",
+          "UUIDField",
+          {
+            "max_length": 32,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": "UUID('b3a5bc01-0446-4025-93d7-cad58abd3026')"
+          }
+        ],
+        [
+          "workspace",
+          "ForeignKey",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": null,
+            "fk_to": "Workspace",
+            "on_delete": "function",
+            "related_name": "assistant_threads"
+          }
+        ],
+        [
+          "user",
+          "ForeignKey",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": null,
+            "fk_to": "User",
+            "on_delete": "function",
+            "related_name": "assistant_threads"
+          }
+        ],
+        [
+          "title",
+          "CharField",
+          {
+            "max_length": 255,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": "''"
+          }
+        ],
+        [
+          "kind",
+          "CharField",
+          {
+            "max_length": 16,
+            "null": false,
+            "blank": false,
+            "choices": [
+              [
+                "chat",
+                "Chat"
+              ],
+              [
+                "loop",
+                "Loop"
+              ]
+            ],
+            "default": "ThreadKind.CHAT"
+          }
+        ],
+        [
+          "is_archived",
+          "BooleanField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": "False"
+          }
+        ],
+        [
+          "active_turn",
+          "ForeignKey",
+          {
+            "max_length": null,
+            "null": true,
+            "blank": true,
+            "choices": null,
+            "default": null,
+            "fk_to": "AssistantTurn",
+            "on_delete": "function",
+            "related_name": "+"
+          }
+        ],
+        [
+          "created_at",
+          "DateTimeField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ],
+        [
+          "updated_at",
+          "DateTimeField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ]
+      ]
+    },
+    "AssistantTurn": {
+      "db_table": "assistant_turn",
+      "ordering": [
+        "created_at"
+      ],
+      "columns": [
+        [
+          "id",
+          "UUIDField",
+          {
+            "max_length": 32,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": "UUID('3fcba107-e622-454c-bb74-9d105f27b07c')"
+          }
+        ],
+        [
+          "thread",
+          "ForeignKey",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": null,
+            "fk_to": "AssistantThread",
+            "on_delete": "function",
+            "related_name": "turns"
+          }
+        ],
+        [
+          "user_message",
+          "ForeignKey",
+          {
+            "max_length": null,
+            "null": true,
+            "blank": true,
+            "choices": null,
+            "default": null,
+            "fk_to": "AssistantMessage",
+            "on_delete": "function",
+            "related_name": "+"
+          }
+        ],
+        [
+          "status",
+          "CharField",
+          {
+            "max_length": 16,
+            "null": false,
+            "blank": false,
+            "choices": [
+              [
+                "queued",
+                "Queued"
+              ],
+              [
+                "running",
+                "Running"
+              ],
+              [
+                "completed",
+                "Completed"
+              ],
+              [
+                "failed",
+                "Failed"
+              ],
+              [
+                "cancelled",
+                "Cancelled"
+              ]
+            ],
+            "default": "TurnStatus.QUEUED"
+          }
+        ],
+        [
+          "model_messages",
+          "JSONField",
+          {
+            "max_length": null,
+            "null": true,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ],
+        [
+          "usage",
+          "JSONField",
+          {
+            "max_length": null,
+            "null": true,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ],
+        [
+          "model_used",
+          "CharField",
+          {
+            "max_length": 255,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": "''"
+          }
+        ],
+        [
+          "error_code",
+          "CharField",
+          {
+            "max_length": 64,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": "''"
+          }
+        ],
+        [
+          "error_detail",
+          "TextField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": "''"
+          }
+        ],
+        [
+          "created_at",
+          "DateTimeField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ],
+        [
+          "started_at",
+          "DateTimeField",
+          {
+            "max_length": null,
+            "null": true,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ],
+        [
+          "completed_at",
+          "DateTimeField",
+          {
+            "max_length": null,
+            "null": true,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ]
+      ]
+    },
+    "AssistantMessage": {
+      "db_table": "assistant_message",
+      "ordering": [
+        "seq"
+      ],
+      "columns": [
+        [
+          "id",
+          "UUIDField",
+          {
+            "max_length": 32,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": "UUID('01f83d5b-3fed-459f-951f-294ed1ce487f')"
+          }
+        ],
+        [
+          "thread",
+          "ForeignKey",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": null,
+            "fk_to": "AssistantThread",
+            "on_delete": "function",
+            "related_name": "messages"
+          }
+        ],
+        [
+          "turn",
+          "ForeignKey",
+          {
+            "max_length": null,
+            "null": true,
+            "blank": true,
+            "choices": null,
+            "default": null,
+            "fk_to": "AssistantTurn",
+            "on_delete": "function",
+            "related_name": "messages"
+          }
+        ],
+        [
+          "seq",
+          "BigIntegerField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": "0"
+          }
+        ],
+        [
+          "kind",
+          "CharField",
+          {
+            "max_length": 16,
+            "null": false,
+            "blank": false,
+            "choices": [
+              [
+                "user",
+                "User"
+              ],
+              [
+                "assistant",
+                "Assistant"
+              ],
+              [
+                "tool_call",
+                "Tool call"
+              ],
+              [
+                "tool_result",
+                "Tool result"
+              ],
+              [
+                "error",
+                "Error"
+              ]
+            ],
+            "default": "''"
+          }
+        ],
+        [
+          "display_content",
+          "TextField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": "''"
+          }
+        ],
+        [
+          "payload",
+          "JSONField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": "{}"
+          }
+        ],
+        [
+          "status",
+          "CharField",
+          {
+            "max_length": 16,
+            "null": false,
+            "blank": false,
+            "choices": [
+              [
+                "streaming",
+                "Streaming"
+              ],
+              [
+                "completed",
+                "Completed"
+              ],
+              [
+                "failed",
+                "Failed"
+              ],
+              [
+                "cancelled",
+                "Cancelled"
+              ]
+            ],
+            "default": "MessageStatus.COMPLETED"
+          }
+        ],
+        [
+          "created_at",
+          "DateTimeField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ],
+        [
+          "completed_at",
+          "DateTimeField",
+          {
+            "max_length": null,
+            "null": true,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ]
+      ]
+    },
+    "AssistantEvent": {
+      "db_table": "assistant_event",
+      "ordering": [
+        "seq"
+      ],
+      "columns": [
+        [
+          "id",
+          "BigAutoField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ],
+        [
+          "thread",
+          "ForeignKey",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": null,
+            "fk_to": "AssistantThread",
+            "on_delete": "function",
+            "related_name": "events"
+          }
+        ],
+        [
+          "turn",
+          "ForeignKey",
+          {
+            "max_length": null,
+            "null": true,
+            "blank": true,
+            "choices": null,
+            "default": null,
+            "fk_to": "AssistantTurn",
+            "on_delete": "function",
+            "related_name": "events"
+          }
+        ],
+        [
+          "seq",
+          "BigIntegerField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": "0"
+          }
+        ],
+        [
+          "kind",
+          "CharField",
+          {
+            "max_length": 64,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": "''"
+          }
+        ],
+        [
+          "message_id",
+          "UUIDField",
+          {
+            "max_length": 32,
+            "null": true,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ],
+        [
+          "payload",
+          "JSONField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": "{}"
+          }
+        ],
+        [
+          "created_at",
+          "DateTimeField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ]
+      ]
+    },
+    "AssistantMCPServer": {
+      "db_table": "assistant_mcp_server",
+      "ordering": [
+        "created_at"
+      ],
+      "columns": [
+        [
+          "id",
+          "UUIDField",
+          {
+            "max_length": 32,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": "UUID('be6b3cbb-31b1-45d4-8bb4-26e52d42543b')"
+          }
+        ],
+        [
+          "user",
+          "ForeignKey",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": null,
+            "fk_to": "User",
+            "on_delete": "function",
+            "related_name": "assistant_mcp_servers"
+          }
+        ],
+        [
+          "name",
+          "CharField",
+          {
+            "max_length": 80,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": "''"
+          }
+        ],
+        [
+          "url",
+          "CharField",
+          {
+            "max_length": 500,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": "''"
+          }
+        ],
+        [
+          "auth_header_encrypted",
+          "BinaryField",
+          {
+            "max_length": null,
+            "null": true,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ],
+        [
+          "is_enabled",
+          "BooleanField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": "True"
+          }
+        ],
+        [
+          "created_at",
+          "DateTimeField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ],
+        [
+          "updated_at",
+          "DateTimeField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ]
+      ]
+    },
+    "UserLLMConfig": {
+      "db_table": "assistant_user_llm_config",
+      "ordering": [],
+      "columns": [
+        [
+          "id",
+          "BigAutoField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ],
+        [
+          "user",
+          "OneToOneField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": null,
+            "fk_to": "User",
+            "on_delete": "function",
+            "related_name": "assistant_llm_config"
+          }
+        ],
+        [
+          "provider_kind",
+          "CharField",
+          {
+            "max_length": 32,
+            "null": false,
+            "blank": false,
+            "choices": [
+              [
+                "openai_compatible",
+                "OpenAI-compatible"
+              ],
+              [
+                "anthropic",
+                "Anthropic"
+              ]
+            ],
+            "default": "ProviderKind.OPENAI_COMPATIBLE"
+          }
+        ],
+        [
+          "base_url",
+          "CharField",
+          {
+            "max_length": 500,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": "''"
+          }
+        ],
+        [
+          "model_name",
+          "CharField",
+          {
+            "max_length": 255,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": "''"
+          }
+        ],
+        [
+          "api_key_encrypted",
+          "BinaryField",
+          {
+            "max_length": null,
+            "null": true,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ],
+        [
+          "last_verified_at",
+          "DateTimeField",
+          {
+            "max_length": null,
+            "null": true,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ],
+        [
+          "created_at",
+          "DateTimeField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ],
+        [
+          "updated_at",
+          "DateTimeField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ]
+      ]
+    },
+    "UserSTTConfig": {
+      "db_table": "assistant_user_stt_config",
+      "ordering": [],
+      "columns": [
+        [
+          "id",
+          "BigAutoField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ],
+        [
+          "user",
+          "OneToOneField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": false,
+            "choices": null,
+            "default": null,
+            "fk_to": "User",
+            "on_delete": "function",
+            "related_name": "assistant_stt_config"
+          }
+        ],
+        [
+          "base_url",
+          "CharField",
+          {
+            "max_length": 500,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": "''"
+          }
+        ],
+        [
+          "model_name",
+          "CharField",
+          {
+            "max_length": 255,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": "''"
+          }
+        ],
+        [
+          "api_key_encrypted",
+          "BinaryField",
+          {
+            "max_length": null,
+            "null": true,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ],
+        [
+          "last_verified_at",
+          "DateTimeField",
+          {
+            "max_length": null,
+            "null": true,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ],
+        [
+          "created_at",
+          "DateTimeField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ],
+        [
+          "updated_at",
+          "DateTimeField",
+          {
+            "max_length": null,
+            "null": false,
+            "blank": true,
+            "choices": null,
+            "default": null
+          }
+        ]
+      ]
+    }
+  },
+  "notes": [
+    "AssistantTurn.model_messages is the ONLY LLM history-replay source (models.py:85-87, runtime/history.py:27-53)",
+    "AssistantMessage rows are UI projection only; AssistantEvent rows are the SSE replay log with an independent seq counter (models.py:123-176)",
+    "AssistantThread.active_turn is a nullable FK one-active-turn flag (models.py:41-49)",
+    "AssistantMCPServer has user+name unique constraint assistant_mcp_server_user_name_uniq (models.py:214-216)"
+  ]
+}

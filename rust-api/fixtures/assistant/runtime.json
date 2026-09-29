@@ -1,0 +1,170 @@
+{
+  "trace": "apps/api/pi_dash/assistant/runtime/llm.py:35-115; apps/api/pi_dash/assistant/runtime/title.py:31-147; apps/api/pi_dash/assistant/runtime/instructions.py:19-86; apps/api/pi_dash/assistant/runtime/deps.py:19-51; apps/api/pi_dash/assistant/runtime/agent.py:21-29; apps/api/pi_dash/assistant/runtime/markdown.py",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "llm": {
+    "key_cache": {
+      "source": "apps/api/pi_dash/assistant/runtime/llm.py:25-64",
+      "defaults": {
+        "maxsize": 1000,
+        "ttl": 300
+      },
+      "disabled_when": "ASSISTANT_KEY_CACHE_TTL <= 0 or no stored key -> direct decrypt (llm.py:51-52)",
+      "key": "sha256(ciphertext hex); decrypt outside the lock (llm.py:53-64)"
+    },
+    "get_config": {
+      "source": "apps/api/pi_dash/assistant/runtime/llm.py:67-68",
+      "shape": "first UserLLMConfig for user or None"
+    },
+    "resolve_byok_model_gates": {
+      "source": "apps/api/pi_dash/assistant/runtime/llm.py:71-90",
+      "gates": [
+        "no cfg or no key -> LLMConfigMissing('No LLM provider is configured for this user.')",
+        "empty model_name -> LLMConfigMissing('No model name is configured.')",
+        "base_url SSRF-blocked -> LLMConfigMissing('The configured provider endpoint is not allowed.')"
+      ]
+    },
+    "build_branches": {
+      "source": "apps/api/pi_dash/assistant/runtime/llm.py:93-111",
+      "anthropic": "AnthropicModel + AnthropicProvider(api_key)",
+      "openai_compatible": {
+        "vector": {
+          "type": "OpenAIChatModel",
+          "model": "m"
+        },
+        "shape": "OpenAIChatModel + OpenAIProvider(base_url, api_key)"
+      },
+      "anthropic_env_note": {
+        "env_blocked": "TypeError: Invalid `http_client` argument; `httpx.AsyncClient` is from the `httpx` package, but this SDK uses `httpx2`. Use `httpx2.AsyncClient` instead.",
+        "branch": "AnthropicModel+AnthropicProvider (llm.py:99-103)"
+      }
+    },
+    "model_label": {
+      "source": "apps/api/pi_dash/assistant/runtime/llm.py:114-115",
+      "shape": "'<provider_kind>:<model_name>'",
+      "vector": "openai_compatible:gpt-4o"
+    }
+  },
+  "title": {
+    "consts": {
+      "max_len": 255,
+      "max_tokens": 256,
+      "system": "You write concise, specific titles for project work items. Given a work item's description, reply with a single short title (at most 80 characters) that captures what it is about. Return only the title text: no surrounding quotes, no trailing punctuation, no reasoning or analysis, and no preamble such as 'Title:'."
+    },
+    "clean_title_vectors": {
+      "source": "apps/api/pi_dash/assistant/runtime/title.py:124-139",
+      "vectors": [
+        "Fix the thing",
+        "Real title",
+        "line one",
+        "",
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "Trailing punctuation"
+      ]
+    },
+    "strip_reasoning_vector": {
+      "source": "apps/api/pi_dash/assistant/runtime/title.py:142-147",
+      "vector": "mid  end"
+    },
+    "content_to_text_vectors": {
+      "source": "apps/api/pi_dash/assistant/runtime/title.py:94-115",
+      "vectors": [
+        "",
+        "plain",
+        "hi",
+        "nested"
+      ]
+    },
+    "deepseek_branch": {
+      "source": "apps/api/pi_dash/assistant/runtime/title.py:65-77",
+      "rule": "model contains deepseek-v4 OR host is [*.]deepseek.com -> extra_body thinking.disabled",
+      "vectors": [
+        [
+          true
+        ],
+        [
+          true
+        ],
+        [
+          true
+        ],
+        [
+          false
+        ]
+      ],
+      "extra_options": [
+        {
+          "extra_body": {
+            "thinking": {
+              "type": "disabled"
+            }
+          }
+        },
+        {}
+      ]
+    },
+    "provider_branch": {
+      "source": "apps/api/pi_dash/assistant/runtime/title.py:31-45",
+      "rule": "anthropic kind -> Anthropic path (timeout 20.0, max_tokens 256, temp 0.2); else OpenAI-compatible chat.completions"
+    },
+    "gates": "same three LLMConfigMissing gates as resolve_byok_model (title.py:32-38)"
+  },
+  "instructions": {
+    "base": {
+      "source": "apps/api/pi_dash/assistant/runtime/instructions.py:19-50",
+      "head": "You are Pi Dash AI, built into the pi-dash project tracker. You operate pi-dash on behalf of the user via tools, with ex",
+      "contract": "fixed: investigate-first, act-then-report, bulk-ask, untrusted delimiters, error/stop, scope (instructions.py:5-10)"
+    },
+    "loop_appendix": {
+      "source": "apps/api/pi_dash/assistant/runtime/instructions.py:57-67",
+      "rule": "appended (not substituted) on loop threads; overrides rule 3 only"
+    },
+    "dynamic": {
+      "source": "apps/api/pi_dash/assistant/runtime/instructions.py:70-86",
+      "chat_vector": "Workspace: Acme (acme) \u00b7 User: Ada (Member) \u00b7 Date: 2026-09-29",
+      "guest_vector": "Workspace: Acme (acme) \u00b7 User: Ada (Guest) \u00b7 Date: 2026-09-29\nThis user's role cannot create or modify issues; offer read-only help.",
+      "loop_vector": "Workspace: Acme (acme) \u00b7 User: Ada (Admin) \u00b7 Date: 2026-09-29\n## Unattended mode\nYou are running as a scheduled maintenance task. No human reads your reply live, and nobody can answer questions \u2014 never ask; when a judgement is ambiguous, skip that item instead of guessing. Perform only the actions your task instructions explicitly call for. Never delete anything. The bulk-change confirmation rule does not apply, but act on at most 10 items per run; if more qualify, handle the oldest and note the remainder in your summary. End with a short plain-text summary of every action you took, or \"No action needed.\"\n",
+      "role_labels": {
+        "20": "Admin",
+        "15": "Member",
+        "5": "Guest",
+        "other": "Member"
+      },
+      "loop_max_writes": "LOOP_MAX_WRITES default 10"
+    }
+  },
+  "deps": {
+    "run_budget": {
+      "source": "apps/api/pi_dash/assistant/runtime/deps.py:20-28",
+      "defaults": {
+        "pr_lookups": 0
+      }
+    },
+    "assistant_deps": {
+      "source": "apps/api/pi_dash/assistant/runtime/deps.py:30-51",
+      "defaults": {
+        "mode": "chat",
+        "created_via": "assistant",
+        "budget": {
+          "pr_lookups": 0
+        }
+      },
+      "created_via": "assistant when mode=chat else loop (deps.py:48-51)",
+      "mode_from": "thread.kind in _load_context (tasks.py:94)"
+    }
+  },
+  "agent": {
+    "source": "apps/api/pi_dash/assistant/runtime/agent.py:21-29",
+    "shape": "single stateless module-level Agent(deps_type=AssistantDeps, instructions=BASE, retries=2) + dynamic_instructions registered",
+    "note": "retries = pydantic-ai validation retries, not Celery retries"
+  },
+  "markdown": {
+    "source": "apps/api/pi_dash/assistant/runtime/markdown.py",
+    "vectors": [
+      "<p></p>",
+      "<p></p>",
+      "<p>para one</p><p>para two</p>",
+      "<p>a<br/>b</p>"
+    ],
+    "rule": "blank-line paragraphs, escape + <br/> for newlines; empty -> <p></p>; to_safe_html sanitizes via validate_html_content else <p></p>"
+  }
+}

@@ -1,0 +1,136 @@
+{
+  "trace": "apps/api/pi_dash/assistant/serializers.py:123-162 (AssistantMCPServerSerializer)",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "serializer": "AssistantMCPServerSerializer",
+  "source": "apps/api/pi_dash/assistant/serializers.py:123",
+  "meta": {
+    "fields": [
+      "id",
+      "name",
+      "url",
+      "auth_header",
+      "has_auth_header",
+      "tool_prefix",
+      "is_enabled",
+      "created_at",
+      "updated_at"
+    ],
+    "read_only": [
+      "id",
+      "has_auth_header",
+      "tool_prefix",
+      "created_at",
+      "updated_at"
+    ],
+    "write_only": [
+      "auth_header"
+    ],
+    "note": "auth_header max_length 2048 (:124-126); tool_prefix read-only slug (:128)"
+  },
+  "fields": {
+    "id": {
+      "write_only": false,
+      "read_only": true,
+      "required": false,
+      "allow_blank": null,
+      "max_length": null
+    },
+    "name": {
+      "write_only": false,
+      "read_only": false,
+      "required": true,
+      "allow_blank": false,
+      "max_length": 80
+    },
+    "url": {
+      "write_only": false,
+      "read_only": false,
+      "required": true,
+      "allow_blank": false,
+      "max_length": 500
+    },
+    "auth_header": {
+      "write_only": true,
+      "read_only": false,
+      "required": false,
+      "allow_blank": true,
+      "max_length": 2048
+    },
+    "has_auth_header": {
+      "write_only": false,
+      "read_only": true,
+      "required": false,
+      "allow_blank": null,
+      "max_length": null
+    },
+    "tool_prefix": {
+      "write_only": false,
+      "read_only": true,
+      "required": false,
+      "allow_blank": false,
+      "max_length": null
+    },
+    "is_enabled": {
+      "write_only": false,
+      "read_only": false,
+      "required": false,
+      "allow_blank": null,
+      "max_length": null
+    },
+    "created_at": {
+      "write_only": false,
+      "read_only": true,
+      "required": false,
+      "allow_blank": null,
+      "max_length": null
+    },
+    "updated_at": {
+      "write_only": false,
+      "read_only": true,
+      "required": false,
+      "allow_blank": null,
+      "max_length": null
+    }
+  },
+  "cases": [
+    {
+      "name": "empty url rejected",
+      "source": "apps/api/pi_dash/assistant/serializers.py:151-162",
+      "error": [
+        "A server URL is required."
+      ]
+    },
+    {
+      "name": "url trailing slash stripped",
+      "source": "apps/api/pi_dash/assistant/serializers.py:151-162",
+      "input": {
+        "url": "https://mcp.example.com/sse/"
+      },
+      "output": {
+        "url": "https://mcp.example.com/sse"
+      }
+    },
+    {
+      "name": "url must be http(s), no credentials",
+      "source": "apps/api/pi_dash/assistant/serializers.py:151-162",
+      "note": "same messages as base_url validators: 'url must be an http(s) URL.' / 'url must not contain credentials.'"
+    },
+    {
+      "name": "blank name rejected",
+      "source": "apps/api/pi_dash/assistant/serializers.py:145-149",
+      "error": [
+        "A name is required."
+      ]
+    },
+    {
+      "name": "name stripped",
+      "source": "apps/api/pi_dash/assistant/serializers.py:145-149",
+      "input": {
+        "name": "  Tools  "
+      },
+      "output": {
+        "name": "Tools"
+      }
+    }
+  ]
+}

@@ -1,0 +1,126 @@
+{
+  "trace": "apps/api/pi_dash/assistant/runtime/mcp.py:37-309; apps/api/pi_dash/ee/assistant/model_provider.py:45-134; apps/api/pi_dash/ee/assistant/stt_provider.py:43-72",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "consts": {
+    "source": "apps/api/pi_dash/assistant/runtime/mcp.py:37-48",
+    "values": {
+      "timeout": 10.0,
+      "read_timeout": 300.0,
+      "max_servers": 10
+    }
+  },
+  "settings": {
+    "source": "apps/api/pi_dash/assistant/runtime/mcp.py:299-309",
+    "keys": [
+      "ASSISTANT_MCP_TIMEOUT_S",
+      "ASSISTANT_MCP_READ_TIMEOUT_S",
+      "ASSISTANT_MCP_MAX_SERVERS"
+    ],
+    "override_vectors": [
+      5.0,
+      60.0,
+      3
+    ]
+  },
+  "unique_prefixes": {
+    "source": "apps/api/pi_dash/assistant/runtime/mcp.py:212-233",
+    "rule": "slug base from row.tool_prefix; collisions get _2,_3... ordered by created_at; keyed by server pk",
+    "vectors": {
+      "00000000-0000-0000-0000-000000000001": "mcp_my_tools",
+      "00000000-0000-0000-0000-000000000002": "mcp_my_tools_2",
+      "00000000-0000-0000-0000-000000000003": "mcp_other"
+    },
+    "slug_vectors": [
+      "mcp_my_tools",
+      "mcp_my_tools",
+      "mcp_12345678"
+    ]
+  },
+  "auth_header_for": {
+    "source": "apps/api/pi_dash/assistant/runtime/mcp.py:236-239",
+    "rule": "None when row has no header, else crypto.decrypt(auth_header_encrypted)"
+  },
+  "build_toolsets": {
+    "source": "apps/api/pi_dash/assistant/runtime/mcp.py:242-296",
+    "skipped_cases": [
+      "over cap -> 'too_many_servers' (stable created_at order, :261-264)",
+      "SSRF-blocked url -> 'url_blocked' (:267-269)",
+      "AssistantError decrypt -> exc.code (:271-275)",
+      "other decrypt failure -> 'auth_header_unreadable' (:276-279)",
+      "construction failure -> 'toolset_unavailable' (:292-294)",
+      "resolver blows up -> ([], []) + 'all tool servers'/'toolsets_unavailable' event (tasks.py:370-386)"
+    ],
+    "never_raises_per_server": true
+  },
+  "build_toolset": {
+    "source": "apps/api/pi_dash/assistant/runtime/mcp.py:175-209",
+    "shape": "streamable-HTTP MCPToolset(url, Authorization header?, init_timeout, read_timeout) -> prefixed wrapper -> outermost ResilientToolset"
+  },
+  "resilient": {
+    "source": "apps/api/pi_dash/assistant/runtime/mcp.py:73-172",
+    "policy": "fail open: connect/list/call/close failures recorded as failure=<ExcClass>, turn continues",
+    "call_tool_absorbs": "mid-run failure -> string result 'Tool server <name> was unavailable for this call (<Exc>).' (mcp.py:166-172)",
+    "control_flow_passthrough": [
+      "ModelRetry",
+      "ToolRetryError",
+      "SkipToolExecution",
+      "CallDeferred",
+      "ApprovalRequired"
+    ],
+    "enter_never_entered_close": "no-op (mcp.py:128-133)"
+  },
+  "ee_model_provider": {
+    "has_usable_llm_config": {
+      "source": "apps/api/pi_dash/ee/assistant/model_provider.py:45-53",
+      "rule": "cfg exists and has_api_key; no decrypt, no model build"
+    },
+    "resolve_model_for_user": {
+      "source": "apps/api/pi_dash/ee/assistant/model_provider.py:56-63",
+      "rule": "CE: resolve_byok_model directly"
+    },
+    "agent_model_profile_for_user": {
+      "source": "apps/api/pi_dash/ee/assistant/model_provider.py:71-89",
+      "ce_matrix": [
+        "has key -> {available:false, lane:'byok', reason:'byok_unsupported'}",
+        "no key -> {available:false, lane:'', reason:'llm_config_missing'}"
+      ],
+      "shape": "AgentModelProfile(available, lane, base_url, model, reason_code) (model_provider.py:24-42)"
+    },
+    "agent_model_credential_for_user": {
+      "source": "apps/api/pi_dash/ee/assistant/model_provider.py:92-108",
+      "rule": "CE always raises ManagedRunnerUnavailable(BYOK_UNSUPPORTED); raising (not empty) keeps silent-401 callers loud"
+    },
+    "model_label_for_user": {
+      "source": "apps/api/pi_dash/ee/assistant/model_provider.py:111-119",
+      "rule": "cfg -> '<kind>:<model>' else '' (recorded as turn.model_used)"
+    },
+    "resolve_toolsets_for_user": {
+      "source": "apps/api/pi_dash/ee/assistant/model_provider.py:122-134",
+      "rule": "CE: build_toolsets(user)"
+    }
+  },
+  "ee_stt_provider": {
+    "shape": {
+      "source": "apps/api/pi_dash/ee/assistant/stt_provider.py:28-40",
+      "fields": [
+        "base_url",
+        "api_key",
+        "model"
+      ],
+      "note": "api_key is the decrypted Bearer [REDACTED]"
+    },
+    "has_usable_stt_config": {
+      "source": "apps/api/pi_dash/ee/assistant/stt_provider.py:43-51",
+      "rule": "cfg exists and has_api_key; no decrypt"
+    },
+    "resolve_stt_provider": {
+      "source": "apps/api/pi_dash/ee/assistant/stt_provider.py:54-72",
+      "gates": [
+        "no cfg/key -> STTConfigMissing('Configure dictation in Settings.')",
+        "SSRF-blocked base_url -> BaseUrlBlocked('That endpoint host is not allowed.')",
+        "decrypt failure -> AssistantError propagates"
+      ],
+      "ssrf_note": "re-checked at execution time (DNS rebinding), not just save time"
+    }
+  }
+}

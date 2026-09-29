@@ -1,0 +1,89 @@
+{
+  "trace": "apps/api/pi_dash/assistant/errors.py:15-107",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "source": "apps/api/pi_dash/assistant/errors.py:15-28 (AssistantError base: code=internal, http_status=500; __init__ detail/code/http_status overrides)",
+  "base": {
+    "class": "AssistantError",
+    "code": "internal",
+    "http_status": 500
+  },
+  "init_vector": {
+    "str": "detail-x",
+    "detail": "detail-x",
+    "code": "turn_active",
+    "http_status": 409
+  },
+  "errors": [
+    {
+      "class": "LLMConfigMissing",
+      "code": "llm_config_missing",
+      "http_status": 422
+    },
+    {
+      "class": "STTConfigMissing",
+      "code": "stt_config_missing",
+      "http_status": 422
+    },
+    {
+      "class": "AssistantNotConfigured",
+      "code": "assistant_not_configured",
+      "http_status": 503
+    },
+    {
+      "class": "RoleNotAllowed",
+      "code": "role_not_allowed",
+      "http_status": 403
+    },
+    {
+      "class": "TurnActive",
+      "code": "turn_active",
+      "http_status": 409
+    },
+    {
+      "class": "ThreadFull",
+      "code": "thread_full",
+      "http_status": 409
+    },
+    {
+      "class": "QuotaExceeded",
+      "code": "quota_exceeded",
+      "http_status": 402
+    },
+    {
+      "class": "BaseUrlBlocked",
+      "code": "base_url_blocked",
+      "http_status": 400
+    },
+    {
+      "class": "ProviderAuthFailed",
+      "code": "provider_auth_failed",
+      "http_status": 502
+    },
+    {
+      "class": "ProviderUnreachable",
+      "code": "provider_unreachable",
+      "http_status": 502
+    },
+    {
+      "class": "ModelInvalid",
+      "code": "model_invalid",
+      "http_status": 400
+    },
+    {
+      "class": "TurnTimeout",
+      "code": "turn_timeout",
+      "http_status": 504
+    },
+    {
+      "class": "IterationLimit",
+      "code": "iteration_limit",
+      "http_status": 400
+    }
+  ],
+  "limits": {
+    "MAX_THREAD_MESSAGES": 200,
+    "MAX_MESSAGE_CHARS": 32000
+  },
+  "limits_source": "apps/api/pi_dash/assistant/errors.py:105-107",
+  "surface_note": "codes surface as sync HTTP errors or as turn_failed event + error message row (errors.py:5-10)"
+}
