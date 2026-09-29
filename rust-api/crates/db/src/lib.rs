@@ -9,6 +9,7 @@
 //!   `encryption`, `legacy`, `settings`).
 //! - [`pool`]: primary + replica sqlx pools with Django-equivalent routing.
 //! - [`context`]: explicit per-request audit/tenant context.
+//! - [`app_assets`]: file-asset columns + helpers (D-31).
 //! - [`filter`]: dynamic JSON filters compiled to sea-query conditions.
 //! - [`filterset`]: the `IssueFilterSet` declaration and leaf compiler (F-07).
 //! - [`issue_filters`]: the legacy `issue_filters` query-param compiler (F-07).
@@ -20,6 +21,7 @@
 //! Write paths take a [`context::RequestContext`]; there is no unscoped
 //! handle for writes.
 
+pub mod app_assets;
 pub mod app_cycles;
 pub mod app_intake;
 pub mod app_views_search;
