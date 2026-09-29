@@ -1,0 +1,386 @@
+{
+ "_fixture": "FX-AUTH-01",
+ "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+ "_sources": [
+  "apps/api/pi_dash/authentication/adapter/error.py:5-74 (AUTHENTICATION_ERROR_CODES table)",
+  "apps/api/pi_dash/authentication/adapter/error.py:77-92 (AuthenticationException + get_error_dict)",
+  "apps/api/pi_dash/authentication/adapter/exception.py:17-34 (auth_exception_handler: NotAuthenticated->401, Throttled->429 error_dict)",
+  "apps/api/pi_dash/authentication/rate_limit.py:21-28,40-47 (throttle_failure_view 429 bodies)",
+  "apps/api/pi_dash/settings/common.py:119 (EXCEPTION_HANDLER wiring)"
+ ],
+ "_method": "executed /tmp/fx279venv/bin/python /tmp/probe01.py (python 3.12; error.py has zero imports, loaded direct by file path to bypass the pi_dash/__init__ celery chain; class body byte-identical). Every no_payload vector below is the real get_error_dict() return; with_payload vectors are real returns for payload shapes the views actually pass. 429/production bodies executed in probe_fx0506 (real DRF throttle classes + real auth_exception_handler with real Throttled/NotAuthenticated).",
+ "codes": {
+  "INSTANCE_NOT_CONFIGURED": 5000,
+  "INVALID_EMAIL": 5005,
+  "EMAIL_REQUIRED": 5010,
+  "SIGNUP_DISABLED": 5015,
+  "MAGIC_LINK_LOGIN_DISABLED": 5016,
+  "PASSWORD_LOGIN_DISABLED": 5018,
+  "USER_ACCOUNT_DEACTIVATED": 5019,
+  "INVALID_PASSWORD": 5020,
+  "PASSWORD_TOO_WEAK": 5021,
+  "SMTP_NOT_CONFIGURED": 5025,
+  "USER_ALREADY_EXIST": 5030,
+  "AUTHENTICATION_FAILED_SIGN_UP": 5035,
+  "REQUIRED_EMAIL_PASSWORD_SIGN_UP": 5040,
+  "INVALID_EMAIL_SIGN_UP": 5045,
+  "INVALID_EMAIL_MAGIC_SIGN_UP": 5050,
+  "MAGIC_SIGN_UP_EMAIL_CODE_REQUIRED": 5055,
+  "EMAIL_PASSWORD_AUTHENTICATION_DISABLED": 5056,
+  "USER_DOES_NOT_EXIST": 5060,
+  "AUTHENTICATION_FAILED_SIGN_IN": 5065,
+  "REQUIRED_EMAIL_PASSWORD_SIGN_IN": 5070,
+  "INVALID_EMAIL_SIGN_IN": 5075,
+  "INVALID_EMAIL_MAGIC_SIGN_IN": 5080,
+  "MAGIC_SIGN_IN_EMAIL_CODE_REQUIRED": 5085,
+  "INVALID_MAGIC_CODE_SIGN_IN": 5090,
+  "INVALID_MAGIC_CODE_SIGN_UP": 5092,
+  "EXPIRED_MAGIC_CODE_SIGN_IN": 5095,
+  "EXPIRED_MAGIC_CODE_SIGN_UP": 5097,
+  "EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_IN": 5100,
+  "EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_UP": 5102,
+  "OAUTH_NOT_CONFIGURED": 5104,
+  "GOOGLE_NOT_CONFIGURED": 5105,
+  "GITHUB_NOT_CONFIGURED": 5110,
+  "GITHUB_USER_NOT_IN_ORG": 5122,
+  "GITLAB_NOT_CONFIGURED": 5111,
+  "GITEA_NOT_CONFIGURED": 5112,
+  "GOOGLE_OAUTH_PROVIDER_ERROR": 5115,
+  "GITHUB_OAUTH_PROVIDER_ERROR": 5120,
+  "GITLAB_OAUTH_PROVIDER_ERROR": 5121,
+  "GITEA_OAUTH_PROVIDER_ERROR": 5123,
+  "INVALID_PASSWORD_TOKEN": 5125,
+  "EXPIRED_PASSWORD_TOKEN": 5130,
+  "INCORRECT_OLD_PASSWORD": 5135,
+  "MISSING_PASSWORD": 5138,
+  "INVALID_NEW_PASSWORD": 5140,
+  "PASSWORD_ALREADY_SET": 5145,
+  "ADMIN_ALREADY_EXIST": 5150,
+  "REQUIRED_ADMIN_EMAIL_PASSWORD_FIRST_NAME": 5155,
+  "INVALID_ADMIN_EMAIL": 5160,
+  "INVALID_ADMIN_PASSWORD": 5165,
+  "REQUIRED_ADMIN_EMAIL_PASSWORD": 5170,
+  "ADMIN_AUTHENTICATION_FAILED": 5175,
+  "ADMIN_USER_ALREADY_EXIST": 5180,
+  "ADMIN_USER_DOES_NOT_EXIST": 5185,
+  "ADMIN_USER_DEACTIVATED": 5190,
+  "RATE_LIMIT_EXCEEDED": 5900,
+  "AUTHENTICATION_FAILED": 5999
+ },
+ "n_codes": 56,
+ "no_payload_vectors": {
+  "INSTANCE_NOT_CONFIGURED": {
+   "error_code": 5000,
+   "error_message": "INSTANCE_NOT_CONFIGURED"
+  },
+  "INVALID_EMAIL": {
+   "error_code": 5005,
+   "error_message": "INVALID_EMAIL"
+  },
+  "EMAIL_REQUIRED": {
+   "error_code": 5010,
+   "error_message": "EMAIL_REQUIRED"
+  },
+  "SIGNUP_DISABLED": {
+   "error_code": 5015,
+   "error_message": "SIGNUP_DISABLED"
+  },
+  "MAGIC_LINK_LOGIN_DISABLED": {
+   "error_code": 5016,
+   "error_message": "MAGIC_LINK_LOGIN_DISABLED"
+  },
+  "PASSWORD_LOGIN_DISABLED": {
+   "error_code": 5018,
+   "error_message": "PASSWORD_LOGIN_DISABLED"
+  },
+  "USER_ACCOUNT_DEACTIVATED": {
+   "error_code": 5019,
+   "error_message": "USER_ACCOUNT_DEACTIVATED"
+  },
+  "INVALID_PASSWORD": {
+   "error_code": 5020,
+   "error_message": "INVALID_PASSWORD"
+  },
+  "PASSWORD_TOO_WEAK": {
+   "error_code": 5021,
+   "error_message": "PASSWORD_TOO_WEAK"
+  },
+  "SMTP_NOT_CONFIGURED": {
+   "error_code": 5025,
+   "error_message": "SMTP_NOT_CONFIGURED"
+  },
+  "USER_ALREADY_EXIST": {
+   "error_code": 5030,
+   "error_message": "USER_ALREADY_EXIST"
+  },
+  "AUTHENTICATION_FAILED_SIGN_UP": {
+   "error_code": 5035,
+   "error_message": "AUTHENTICATION_FAILED_SIGN_UP"
+  },
+  "REQUIRED_EMAIL_PASSWORD_SIGN_UP": {
+   "error_code": 5040,
+   "error_message": "REQUIRED_EMAIL_PASSWORD_SIGN_UP"
+  },
+  "INVALID_EMAIL_SIGN_UP": {
+   "error_code": 5045,
+   "error_message": "INVALID_EMAIL_SIGN_UP"
+  },
+  "INVALID_EMAIL_MAGIC_SIGN_UP": {
+   "error_code": 5050,
+   "error_message": "INVALID_EMAIL_MAGIC_SIGN_UP"
+  },
+  "MAGIC_SIGN_UP_EMAIL_CODE_REQUIRED": {
+   "error_code": 5055,
+   "error_message": "MAGIC_SIGN_UP_EMAIL_CODE_REQUIRED"
+  },
+  "EMAIL_PASSWORD_AUTHENTICATION_DISABLED": {
+   "error_code": 5056,
+   "error_message": "EMAIL_PASSWORD_AUTHENTICATION_DISABLED"
+  },
+  "USER_DOES_NOT_EXIST": {
+   "error_code": 5060,
+   "error_message": "USER_DOES_NOT_EXIST"
+  },
+  "AUTHENTICATION_FAILED_SIGN_IN": {
+   "error_code": 5065,
+   "error_message": "AUTHENTICATION_FAILED_SIGN_IN"
+  },
+  "REQUIRED_EMAIL_PASSWORD_SIGN_IN": {
+   "error_code": 5070,
+   "error_message": "REQUIRED_EMAIL_PASSWORD_SIGN_IN"
+  },
+  "INVALID_EMAIL_SIGN_IN": {
+   "error_code": 5075,
+   "error_message": "INVALID_EMAIL_SIGN_IN"
+  },
+  "INVALID_EMAIL_MAGIC_SIGN_IN": {
+   "error_code": 5080,
+   "error_message": "INVALID_EMAIL_MAGIC_SIGN_IN"
+  },
+  "MAGIC_SIGN_IN_EMAIL_CODE_REQUIRED": {
+   "error_code": 5085,
+   "error_message": "MAGIC_SIGN_IN_EMAIL_CODE_REQUIRED"
+  },
+  "INVALID_MAGIC_CODE_SIGN_IN": {
+   "error_code": 5090,
+   "error_message": "INVALID_MAGIC_CODE_SIGN_IN"
+  },
+  "INVALID_MAGIC_CODE_SIGN_UP": {
+   "error_code": 5092,
+   "error_message": "INVALID_MAGIC_CODE_SIGN_UP"
+  },
+  "EXPIRED_MAGIC_CODE_SIGN_IN": {
+   "error_code": 5095,
+   "error_message": "EXPIRED_MAGIC_CODE_SIGN_IN"
+  },
+  "EXPIRED_MAGIC_CODE_SIGN_UP": {
+   "error_code": 5097,
+   "error_message": "EXPIRED_MAGIC_CODE_SIGN_UP"
+  },
+  "EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_IN": {
+   "error_code": 5100,
+   "error_message": "EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_IN"
+  },
+  "EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_UP": {
+   "error_code": 5102,
+   "error_message": "EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_UP"
+  },
+  "OAUTH_NOT_CONFIGURED": {
+   "error_code": 5104,
+   "error_message": "OAUTH_NOT_CONFIGURED"
+  },
+  "GOOGLE_NOT_CONFIGURED": {
+   "error_code": 5105,
+   "error_message": "GOOGLE_NOT_CONFIGURED"
+  },
+  "GITHUB_NOT_CONFIGURED": {
+   "error_code": 5110,
+   "error_message": "GITHUB_NOT_CONFIGURED"
+  },
+  "GITHUB_USER_NOT_IN_ORG": {
+   "error_code": 5122,
+   "error_message": "GITHUB_USER_NOT_IN_ORG"
+  },
+  "GITLAB_NOT_CONFIGURED": {
+   "error_code": 5111,
+   "error_message": "GITLAB_NOT_CONFIGURED"
+  },
+  "GITEA_NOT_CONFIGURED": {
+   "error_code": 5112,
+   "error_message": "GITEA_NOT_CONFIGURED"
+  },
+  "GOOGLE_OAUTH_PROVIDER_ERROR": {
+   "error_code": 5115,
+   "error_message": "GOOGLE_OAUTH_PROVIDER_ERROR"
+  },
+  "GITHUB_OAUTH_PROVIDER_ERROR": {
+   "error_code": 5120,
+   "error_message": "GITHUB_OAUTH_PROVIDER_ERROR"
+  },
+  "GITLAB_OAUTH_PROVIDER_ERROR": {
+   "error_code": 5121,
+   "error_message": "GITLAB_OAUTH_PROVIDER_ERROR"
+  },
+  "GITEA_OAUTH_PROVIDER_ERROR": {
+   "error_code": 5123,
+   "error_message": "GITEA_OAUTH_PROVIDER_ERROR"
+  },
+  "INVALID_PASSWORD_TOKEN": {
+   "error_code": 5125,
+   "error_message": "INVALID_PASSWORD_TOKEN"
+  },
+  "EXPIRED_PASSWORD_TOKEN": {
+   "error_code": 5130,
+   "error_message": "EXPIRED_PASSWORD_TOKEN"
+  },
+  "INCORRECT_OLD_PASSWORD": {
+   "error_code": 5135,
+   "error_message": "INCORRECT_OLD_PASSWORD"
+  },
+  "MISSING_PASSWORD": {
+   "error_code": 5138,
+   "error_message": "MISSING_PASSWORD"
+  },
+  "INVALID_NEW_PASSWORD": {
+   "error_code": 5140,
+   "error_message": "INVALID_NEW_PASSWORD"
+  },
+  "PASSWORD_ALREADY_SET": {
+   "error_code": 5145,
+   "error_message": "PASSWORD_ALREADY_SET"
+  },
+  "ADMIN_ALREADY_EXIST": {
+   "error_code": 5150,
+   "error_message": "ADMIN_ALREADY_EXIST"
+  },
+  "REQUIRED_ADMIN_EMAIL_PASSWORD_FIRST_NAME": {
+   "error_code": 5155,
+   "error_message": "REQUIRED_ADMIN_EMAIL_PASSWORD_FIRST_NAME"
+  },
+  "INVALID_ADMIN_EMAIL": {
+   "error_code": 5160,
+   "error_message": "INVALID_ADMIN_EMAIL"
+  },
+  "INVALID_ADMIN_PASSWORD": {
+   "error_code": 5165,
+   "error_message": "INVALID_ADMIN_PASSWORD"
+  },
+  "REQUIRED_ADMIN_EMAIL_PASSWORD": {
+   "error_code": 5170,
+   "error_message": "REQUIRED_ADMIN_EMAIL_PASSWORD"
+  },
+  "ADMIN_AUTHENTICATION_FAILED": {
+   "error_code": 5175,
+   "error_message": "ADMIN_AUTHENTICATION_FAILED"
+  },
+  "ADMIN_USER_ALREADY_EXIST": {
+   "error_code": 5180,
+   "error_message": "ADMIN_USER_ALREADY_EXIST"
+  },
+  "ADMIN_USER_DOES_NOT_EXIST": {
+   "error_code": 5185,
+   "error_message": "ADMIN_USER_DOES_NOT_EXIST"
+  },
+  "ADMIN_USER_DEACTIVATED": {
+   "error_code": 5190,
+   "error_message": "ADMIN_USER_DEACTIVATED"
+  },
+  "RATE_LIMIT_EXCEEDED": {
+   "error_code": 5900,
+   "error_message": "RATE_LIMIT_EXCEEDED"
+  },
+  "AUTHENTICATION_FAILED": {
+   "error_code": 5999,
+   "error_message": "AUTHENTICATION_FAILED"
+  }
+ },
+ "with_payload_vectors": {
+  "AUTHENTICATION_FAILED_SIGN_IN": {
+   "email": "u@x.com",
+   "error_code": 5065,
+   "error_message": "AUTHENTICATION_FAILED_SIGN_IN"
+  },
+  "INSTANCE_NOT_CONFIGURED": {
+   "no_payload": {
+    "error_code": 5000,
+    "error_message": "INSTANCE_NOT_CONFIGURED"
+   }
+  },
+  "INVALID_EMAIL_signin_payload": {
+   "email": "bad",
+   "error_code": 5075,
+   "error_message": "INVALID_EMAIL_SIGN_IN"
+  },
+  "MISSING_PASSWORD_change": {
+   "error": "Old password is missing",
+   "error_code": 5138,
+   "error_message": "MISSING_PASSWORD"
+  },
+  "RATE_LIMIT_EXCEEDED": {
+   "no_payload": {
+    "error_code": 5900,
+    "error_message": "RATE_LIMIT_EXCEEDED"
+   }
+  },
+  "USER_ALREADY_EXIST": {
+   "no_payload": {
+    "error_code": 5030,
+    "error_message": "USER_ALREADY_EXIST"
+   }
+  },
+  "USER_DOES_NOT_EXIST": {
+   "no_payload": {
+    "error_code": 5060,
+    "error_message": "USER_DOES_NOT_EXIST"
+   }
+  }
+ },
+ "mutable_default_payload_shared": true,
+ "mutable_default_note": "BUG(recorded): __init__(..., payload={}) binds ONE dict shared by every instance constructed without payload; verified True by probe (e1.payload['k']='v' leaks into e2). Rust port must reproduce the shared-state semantics.",
+ "http_mapping": {
+  "json_400": [
+   "EmailCheckEndpoint app+space (all error branches)",
+   "MagicGenerateEndpoint app+space (caught AuthenticationException only)",
+   "ForgotPasswordEndpoint app+space (all error branches)",
+   "ChangePasswordEndpoint/SetUserPasswordEndpoint (all error branches)",
+   "CSRFTokenEndpoint n/a (200 only)"
+  ],
+  "json_429": [
+   "throttle_failure_view bodies (dead code, no callers \u2014 see quirks)",
+   "production DRF-throttle path via auth_exception_handler"
+  ],
+  "redirect_302": [
+   "SignIn/SignUp app+space (every branch incl. provider exceptions)",
+   "MagicSignIn/SignUp app+space (every branch)",
+   "SignOut app+space (both try and except branches)",
+   "ResetPassword app+space (every branch)"
+  ],
+  "uncaught_500": [
+   "magic-generate invalid/empty email (django ValidationError, not AuthenticationException)",
+   "reset-password app malformed uidb64 (UUID ValidationError, not ValueError)",
+   "reset-password space unknown-id (User.DoesNotExist, only DjangoUnicodeDecodeError caught)"
+  ]
+ },
+ "status_bodies": {
+  "throttle_failure_view": {
+   "status": 429,
+   "body": {
+    "error_code": 5900,
+    "error_message": "RATE_LIMIT_EXCEEDED"
+   }
+  },
+  "production_drf_throttled_via_handler": {
+   "status": 429,
+   "body": {
+    "error_code": 5900,
+    "error_message": "RATE_LIMIT_EXCEEDED"
+   }
+  },
+  "production_not_authenticated_via_handler": {
+   "status": 401,
+   "body": {
+    "detail": "Authentication credentials were not provided."
+   }
+  }
+ }
+}

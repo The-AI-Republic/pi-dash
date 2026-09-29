@@ -1,0 +1,125 @@
+{
+ "_fixture": "FX-AUTH-04",
+ "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+ "_sources": [
+  "apps/api/pi_dash/db/models/user.py:56-61 (email unique CharField(255); password from AbstractBaseUser varchar(128))",
+  "apps/api/pi_dash/db/models/session.py:30-56 (SessionStore exists/save/delete inherited from DBSessionStore; create_model_instance override)",
+  "apps/api/pi_dash/license/models/instance.py:22-50 (Instance table 'instances'; is_setup_done :38; BaseModel soft-delete)",
+  "apps/api/pi_dash/license/models/instance.py:53-70 (InstanceAdmin), :72-83 (InstanceConfiguration key/value/category)",
+  "apps/api/pi_dash/authentication/adapter/base.py:297 (User.objects.filter(email=email).first())",
+  "apps/api/pi_dash/authentication/adapter/base.py:303-328 (user create + save paths)",
+  "apps/api/pi_dash/authentication/adapter/base.py:220-234 (save_user_data field writes + activation-mail branch)",
+  "apps/api/pi_dash/authentication/utils/user_auth_workflow.py:8-9 (post_user_auth_workflow wrapper)",
+  "apps/api/pi_dash/authentication/utils/workspace_project_join.py:20-91 (full write sequence)",
+  "apps/api/pi_dash/db/models/workspace.py:198-232 (WorkspaceMember), :234-259 (WorkspaceMemberInvite)",
+  "apps/api/pi_dash/db/models/project.py:302-313 (ProjectBaseModel.save workspace backfill), :314-330 (ProjectMemberInvite), :332-384 (ProjectMember)",
+  "apps/api/pi_dash/utils/cache.py:54-70 (invalidate_cache_directly path/key/multiple semantics)",
+  "apps/api/pi_dash/utils/analytics_events.py:5 (USER_JOINED_WORKSPACE='user_joined_workspace')"
+ ],
+ "_method": "executed /tmp/fx279venv/bin/python /tmp/probe_fx0304.py (sqlite :memory:, real ORM): query SQL via str(queryset.query) + result rows via real execution. Postgres compiler strings captured via /tmp/probe_pg2.py against scratch DB fx279scratch (created + dropped on local /tmp:5432 socket; str(query) needs no tables). ProjectMember NULL-project IntegrityError reproduced on real Postgres  (probe_pg.py, tables via migrate --run-syncdb + minimal projects stub for FK DDL). Workflow write sequence executed real (probe_fx06w) with invalidate_cache_directly + track_event.delay captured via mock (call sequences only, as the issue prescribes). Membership writes reuse owning-domain kernels \u2014 recorded here as observed writes, not re-specified.",
+ "queries": {
+  "user_by_email": {
+   "orm": "User.objects.filter(email=<email>).first()",
+   "sql_sqlite": "SELECT \"users\".\"password\", \"users\".\"last_login\", \"users\".\"id\", \"users\".\"username\", \"users\".\"mobile_number\", \"users\".\"email\", \"users\".\"display_name\", \"users\".\"first_name\", \"users\".\"last_name\", \"users\".\"avatar\", \"users\".\"avatar_asset_id\", \"users\".\"cover_image\", \"users\".\"cover_image_asset_id\", \"users\".\"date_joined\", \"users\".\"created_at\", \"users\".\"updated_at\", \"users\".\"last_location\", \"users\".\"created_location\", \"users\".\"is_superuser\", \"users\".\"is_managed\", \"users\".\"is_password_expired\", \"users\".\"is_active\", \"users\".\"is_staff\", \"users\".\"is_email_verified\", \"users\".\"is_password_autoset\", \"users\".\"is_password_reset_required\", \"users\".\"token\", \"users\".\"last_active\", \"users\".\"last_login_time\", \"users\".\"last_logout_time\", \"users\".\"last_login_ip\", \"users\".\"last_logout_ip\", \"users\".\"last_login_medium\", \"users\".\"last_login_uagent\", \"users\".\"token_updated_at\", \"users\".\"is_bot\", \"users\".\"bot_type\", \"users\".\"user_timezone\", \"users\".\"is_email_valid\", \"users\".\"masked_at\" FROM \"users\" WHERE \"users\".\"email\" = probe@x.com ORDER BY \"users\".\"created_at\" DESC",
+   "sql_postgres": "SELECT \"users\".\"password\", \"users\".\"last_login\", \"users\".\"id\", \"users\".\"username\", \"users\".\"mobile_number\", \"users\".\"email\", \"users\".\"display_name\", \"users\".\"first_name\", \"users\".\"last_name\", \"users\".\"avatar\", \"users\".\"avatar_asset_id\", \"users\".\"cover_image\", \"users\".\"cover_image_asset_id\", \"users\".\"date_joined\", \"users\".\"created_at\", \"users\".\"updated_at\", \"users\".\"last_location\", \"users\".\"created_location\", \"users\".\"is_superuser\", \"users\".\"is_managed\", \"users\".\"is_password_expired\", \"users\".\"is_active\", \"users\".\"is_staff\", \"users\".\"is_email_verified\", \"users\".\"is_password_autoset\", \"users\".\"is_password_reset_required\", \"users\".\"token\", \"users\".\"last_active\", \"users\".\"last_login_time\", \"users\".\"last_logout_time\", \"users\".\"last_login_ip\", \"users\".\"last_logout_ip\", \"users\".\"last_login_medium\", \"users\".\"last_login_uagent\", \"users\".\"token_updated_at\", \"users\".\"is_bot\", \"users\".\"bot_type\", \"users\".\"user_timezone\", \"users\".\"is_email_valid\", \"users\".\"masked_at\" FROM \"users\" WHERE \"users\".\"email\" = a@x.com ORDER BY \"users\".\"created_at\" DESC",
+   "sql_note": "str(queryset.query) inlines params unquoted (Django rendering, not executed SQL). Meta ordering -created_at: .first() returns latest-created row.",
+   "row": {
+    "id": "04739771-4974-4a16-92e6-f55898fd158f",
+    "email": "probe@x.com"
+   }
+  },
+  "user_by_pk": {
+   "orm": "User.objects.get(pk=<id>) / .filter(pk=)",
+   "sql_sqlite": "SELECT \"users\".\"password\", \"users\".\"last_login\", \"users\".\"id\", \"users\".\"username\", \"users\".\"mobile_number\", \"users\".\"email\", \"users\".\"display_name\", \"users\".\"first_name\", \"users\".\"last_name\", \"users\".\"avatar\", \"users\".\"avatar_asset_id\", \"users\".\"cover_image\", \"users\".\"cover_image_asset_id\", \"users\".\"date_joined\", \"users\".\"created_at\", \"users\".\"updated_at\", \"users\".\"last_location\", \"users\".\"created_location\", \"users\".\"is_superuser\", \"users\".\"is_managed\", \"users\".\"is_password_expired\", \"users\".\"is_active\", \"users\".\"is_staff\", \"users\".\"is_email_verified\", \"users\".\"is_password_autoset\", \"users\".\"is_password_reset_required\", \"users\".\"token\", \"users\".\"last_active\", \"users\".\"last_login_time\", \"users\".\"last_logout_time\", \"users\".\"last_login_ip\", \"users\".\"last_logout_ip\", \"users\".\"last_login_medium\", \"users\".\"last_login_uagent\", \"users\".\"token_updated_at\", \"users\".\"is_bot\", \"users\".\"bot_type\", \"users\".\"user_timezone\", \"users\".\"is_email_valid\", \"users\".\"masked_at\" FROM \"users\" WHERE \"users\".\"id\" = 0473977149744a1692e6f55898fd158f ORDER BY \"users\".\"created_at\" DESC",
+   "row_note": "same 41-col select with WHERE id = <uuid>."
+  },
+  "session_read": {
+   "orm": "SessionStore.exists/load via Session.objects.filter(session_key=)",
+   "sql_sqlite": "SELECT \"sessions\".\"session_data\", \"sessions\".\"expire_date\", \"sessions\".\"device_info\", \"sessions\".\"session_key\", \"sessions\".\"user_id\" FROM \"sessions\" WHERE \"sessions\".\"session_key\" = kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+   "sql_postgres": "SELECT \"sessions\".\"session_data\", \"sessions\".\"expire_date\", \"sessions\".\"device_info\", \"sessions\".\"session_key\", \"sessions\".\"user_id\" FROM \"sessions\" WHERE \"sessions\".\"session_key\" = k",
+   "row": {
+    "session_key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+    "user_id": "04739771-4974-4a16-92e6-f55898fd158f",
+    "device_info": {
+     "user_agent": "UA",
+     "ip_address": "9.9.9.9",
+     "domain": "http://localhost:3000"
+    }
+   }
+  },
+  "session_write_delete": {
+   "orm": "SessionStore.save() -> save(update_fields) or create; delete() -> Session.objects.filter(session_key=).delete(); create_model_instance override per FX-AUTH-03",
+   "note": "inherited from django.contrib.sessions.backends.db; only create_model_instance + key length are custom."
+  },
+  "instance_first": {
+   "orm": "Instance.objects.first()",
+   "sql_sqlite": "SELECT \"instances\".\"created_at\", \"instances\".\"updated_at\", \"instances\".\"created_by_id\", \"instances\".\"updated_by_id\", \"instances\".\"deleted_at\", \"instances\".\"id\", \"instances\".\"instance_name\", \"instances\".\"whitelist_emails\", \"instances\".\"instance_id\", \"instances\".\"current_version\", \"instances\".\"latest_version\", \"instances\".\"edition\", \"instances\".\"domain\", \"instances\".\"last_checked_at\", \"instances\".\"namespace\", \"instances\".\"is_telemetry_enabled\", \"instances\".\"is_support_required\", \"instances\".\"is_setup_done\", \"instances\".\"is_signup_screen_visited\", \"instances\".\"is_verified\", \"instances\".\"is_test\", \"instances\".\"is_current_version_deprecated\" FROM \"instances\" WHERE \"instances\".\"deleted_at\" IS NULL ORDER BY \"instances\".\"created_at\" DESC",
+   "sql_postgres": "SELECT \"instances\".\"created_at\", \"instances\".\"updated_at\", \"instances\".\"created_by_id\", \"instances\".\"updated_by_id\", \"instances\".\"deleted_at\", \"instances\".\"id\", \"instances\".\"instance_name\", \"instances\".\"whitelist_emails\", \"instances\".\"instance_id\", \"instances\".\"current_version\", \"instances\".\"latest_version\", \"instances\".\"edition\", \"instances\".\"domain\", \"instances\".\"last_checked_at\", \"instances\".\"namespace\", \"instances\".\"is_telemetry_enabled\", \"instances\".\"is_support_required\", \"instances\".\"is_setup_done\", \"instances\".\"is_signup_screen_visited\", \"instances\".\"is_verified\", \"instances\".\"is_test\", \"instances\".\"is_current_version_deprecated\" FROM \"instances\" WHERE \"instances\".\"deleted_at\" IS NULL ORDER BY \"instances\".\"created_at\" DESC",
+   "row": {
+    "is_setup_done": true
+   },
+   "note": "SoftDeleteManager adds deleted_at IS NULL; gate used: instance is None or not instance.is_setup_done."
+  }
+ },
+ "password": {
+  "set_check": {
+   "algo": "pbkdf2_sha256",
+   "iterations": "1500000",
+   "check_true": true,
+   "check_false": false
+  },
+  "note": "PBKDF2 via AbstractBaseUser (F-05 semantics); Django values recorded (algo/iterations/verify)."
+ },
+ "workflow_write_sequence": {
+  "before": {
+   "wm": 0,
+   "pm": 0,
+   "wmi": 1,
+   "pmi": 1
+  },
+  "after": {
+   "wm": 1,
+   "pm": 0,
+   "wmi": 0,
+   "pmi": 0
+  },
+  "member_roles_created": {
+   "workspace_member": [
+    15
+   ],
+   "project_member": []
+  },
+  "role_mapping": "role if role in [5, 15] else 15 (probe invite role=20 -> 15)",
+  "invalidate_calls": [
+   [
+    {
+     "path": "/api/workspaces/ws1/members/",
+     "url_params": false,
+     "user": false,
+     "multiple": true
+    }
+   ]
+  ],
+  "track_event_calls": [
+   [
+    {
+     "user_id": "a11704be-ccbc-4d99-8cca-95c15c35879f",
+     "event_name": "user_joined_workspace",
+     "slug": "ws1",
+     "event_properties": {
+      "user_id": "a11704be-ccbc-4d99-8cca-95c15c35879f",
+      "workspace_id": "14954f78-b755-4201-a36c-bc14d6f26254",
+      "workspace_slug": "ws1",
+      "role": 15,
+      "joined_at": "2026-09-29T18:13:49.312486+00:00"
+     }
+    }
+   ]
+  ],
+  "invite_deletes": "workspace_member_invites.delete() + project_member_invites.delete() (both 1->0 observed)"
+ },
+ "ported_bugs": [
+  "BUG-CRITICAL (verified on real Postgres): ProjectMember bulk_create omits project_id (workspace_project_join.py:76-87) -> IntegrityError 'null value in column project_id violates not-null constraint' despite ignore_conflicts=True. On sqlite the row is silently skipped (pm 0->0 observed). Any signup carrying an accepted project invite crashes on Postgres.",
+  "BUG (verified by code + sqlite): complete_login_or_signup sets is_signup=bool(existing_user) \u2014 inverted: new-user signup reports is_signup=False, existing-user login reports True (adapter/base.py:299; probe signup_autoset/login_existing_callback)."
+ ]
+}
