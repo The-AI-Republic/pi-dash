@@ -34,12 +34,12 @@ Each `fx-*.json` carries its own `trace` array; this file is the index.
 
 ## Models
 
-- `fx-model-fileasset.json` — `db/models/asset.py:28-110` (FileAsset columns
+- `fx-model-fileasset.json` — `db/models/asset.py:28-100` (FileAsset columns
   `:45-62`, Meta+indexes `:64-74`, `asset_url` property `:79-100`,
   `get_upload_path` `:17-20`, dead `file_size` validator `:23-25`) plus
   `FileAssetSerializer` read shape `api/serializers/asset.py:93-123`
   (fields `__all__` + 16 read-only).
-- `fx-model-sticky.json` — `db/models/sticky.py:16-60` (columns `:17-30`,
+- `fx-model-sticky.json` — `db/models/sticky.py:16-57` (columns `:17-30`,
   Meta `:32-36`, save(): description_stripped via strip_tags incl.
   empty/None -> None `:38-44`, sort_order = max+10000 per workspace on
   create `:45-52`); `strip_tags` `utils/html_processor.py:28-31`.
