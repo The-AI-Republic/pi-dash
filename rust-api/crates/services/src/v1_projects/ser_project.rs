@@ -477,6 +477,29 @@ pub struct SharedChecks<'a> {
     pub default_assignee_is_member: Option<bool>,
 }
 
+/// Name/identifier forbidden-character checks, in source order
+/// (`serializers/project.py:144-148,218-222,288-292`).
+fn check_name_identifier(input: &SharedChecks<'_>) -> Result<(), ProjectSerError> {
+    if input.name.is_some_and(contains_forbidden_chars) {
+        return Err(ProjectSerError::NameForbidden);
+    }
+    if input.identifier.is_some_and(contains_forbidden_chars) {
+        return Err(ProjectSerError::IdentifierForbidden);
+    }
+    Ok(())
+}
+
+/// Workspace-membership checks, in source order (`:150-164,299-317`).
+fn check_membership(input: &SharedChecks<'_>) -> Result<(), ProjectSerError> {
+    if input.project_lead_is_member == Some(false) {
+        return Err(ProjectSerError::ProjectLeadNotMember);
+    }
+    if input.default_assignee_is_member == Some(false) {
+        return Err(ProjectSerError::DefaultAssigneeNotMember);
+    }
+    Ok(())
+}
+
 /// Ports `ProjectCreateSerializer.validate` (`:139-166`): first failure
 /// wins, in source order.
 pub fn validate_shared(input: &SharedChecks<'_>) -> Result<(), ProjectSerError> {
@@ -485,18 +508,8 @@ pub fn validate_shared(input: &SharedChecks<'_>) -> Result<(), ProjectSerError> 
         input.cloud_configured,
         input.managed_enabled,
     ))?;
-    if input.name.is_some_and(contains_forbidden_chars) {
-        return Err(ProjectSerError::NameForbidden);
-    }
-    if input.identifier.is_some_and(contains_forbidden_chars) {
-        return Err(ProjectSerError::IdentifierForbidden);
-    }
-    if input.project_lead_is_member == Some(false) {
-        return Err(ProjectSerError::ProjectLeadNotMember);
-    }
-    if input.default_assignee_is_member == Some(false) {
-        return Err(ProjectSerError::DefaultAssigneeNotMember);
-    }
+    check_name_identifier(input)?;
+    check_membership(input)?;
     Ok(())
 }
 
@@ -541,10 +554,12 @@ pub fn validate_update(
     )
 }
 
-/// `ProjectSerializer.validate()` tail (`:294-327`) after the shared
-/// checks: the instance-default guard, then the `description_html` branch.
-/// `instance_is_default` is `None` on the (unreachable from D-19 views)
-/// create path, where `self.instance` is `None`.
+/// `ProjectSerializer.validate()` tail (`:294-327`): the instance-default
+/// guard, then the `description_html` branch. `instance_is_default` is `None`
+/// on the (unreachable from D-19 views) create path, where `self.instance`
+/// is `None`. This runs after the membership checks only when called
+/// directly; full-path callers must use [`validate_read`], which keeps
+/// Python's first-wins order (guard before the membership checks).
 pub fn validate_read_tail(
     instance_is_default: Option<bool>,
     is_default: Option<bool>,
@@ -553,6 +568,30 @@ pub fn validate_read_tail(
     if instance_is_default == Some(true) && is_default == Some(false) {
         return Err(ProjectSerError::UnsetDefault);
     }
+    check_description_html(description_html)
+}
+
+/// Full `ProjectSerializer.validate()` decision (`:283-329`): executor,
+/// name, identifier, unset-guard, lead, assignee, then `description_html`.
+/// Python checks the guard (`:294`) before the membership facts (`:299-317`),
+/// so this interleaving — not `validate_shared` followed by
+/// `validate_read_tail` — is the order the handler layer must honor.
+pub fn validate_read(
+    shared: &SharedChecks<'_>,
+    instance_is_default: Option<bool>,
+    is_default: Option<bool>,
+    description_html: DescriptionHtml<'_>,
+) -> Result<Option<String>, ProjectSerError> {
+    Result::<(), ProjectSerError>::from(check_default_agent_executor(
+        shared.executor,
+        shared.cloud_configured,
+        shared.managed_enabled,
+    ))?;
+    check_name_identifier(shared)?;
+    if instance_is_default == Some(true) && is_default == Some(false) {
+        return Err(ProjectSerError::UnsetDefault);
+    }
+    check_membership(shared)?;
     check_description_html(description_html)
 }
 
@@ -919,6 +958,72 @@ mod tests {
                 }
             ),
             Err(ProjectSerError::UnsetDefault)
+        );
+    }
+
+    #[test]
+    fn read_validate_keeps_python_first_wins_order() {
+        // `ProjectSerializer.validate` checks the unset-default guard (:294)
+        // before the membership facts (:299-317): when both fail, Django
+        // answers the unset body, not the lead body.
+        let mut shared = quiet_shared();
+        shared.project_lead_is_member = Some(false);
+        assert_eq!(
+            validate_read(
+                &shared,
+                Some(true),
+                Some(false),
+                DescriptionHtml::MissingOrFalsy
+            ),
+            Err(ProjectSerError::UnsetDefault)
+        );
+        // Without the guard, the lead check fires.
+        assert_eq!(
+            validate_read(
+                &shared,
+                Some(false),
+                Some(false),
+                DescriptionHtml::MissingOrFalsy
+            ),
+            Err(ProjectSerError::ProjectLeadNotMember)
+        );
+        // Executor and name checks still run before the guard.
+        let mut shared = quiet_shared();
+        shared.executor = Some("cloud_agent");
+        shared.project_lead_is_member = Some(false);
+        assert_eq!(
+            validate_read(
+                &shared,
+                Some(true),
+                Some(false),
+                DescriptionHtml::MissingOrFalsy
+            ),
+            Err(ProjectSerError::CloudAgentUnavailable)
+        );
+        let mut shared = quiet_shared();
+        shared.name = Some("Bad & Name");
+        assert_eq!(
+            validate_read(
+                &shared,
+                Some(true),
+                Some(false),
+                DescriptionHtml::MissingOrFalsy
+            ),
+            Err(ProjectSerError::NameForbidden)
+        );
+        // Clean input passes through with the sanitiser replacement.
+        let shared = quiet_shared();
+        assert_eq!(
+            validate_read(
+                &shared,
+                None,
+                None,
+                DescriptionHtml::Dict {
+                    is_valid: true,
+                    sanitized: Some("<p>clean</p>"),
+                }
+            ),
+            Ok(Some("<p>clean</p>".to_string()))
         );
     }
 
