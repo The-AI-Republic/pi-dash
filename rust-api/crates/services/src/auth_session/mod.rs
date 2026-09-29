@@ -27,6 +27,12 @@
 //!   `SimpleRateThrottle` counter math (`rate_limit.py`, the view
 //!   declarations, and the DRF settings defaults).
 //!
+//! Plus the publish-side task kernel named by PIDASHCONV-405:
+//!
+//! * [`tasks`] — `magic_link` + `user_activation_email` + `forgot_password`
+//!   Celery v2 emit builders (task names, positional arg orders, triggering
+//!   conditions) and the magic redis pre-state builders.
+//!
 //! Sibling D-16 issues (handlers, guards, queries, tasks) consume these pieces
 //! read-only.
 
@@ -34,6 +40,7 @@ pub mod guards;
 pub mod models;
 pub mod queries;
 pub mod shapes;
+pub mod tasks;
 
 pub use guards::{
     allow_request, anon_cache_key, drf_throttled_body, endpoint_guards, parse_rate,
