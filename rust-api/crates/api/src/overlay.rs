@@ -172,6 +172,10 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // Prompting handlers merge their router here (PIDASHCONV-158);
         // sibling handler issues extend the merge; merges keep both sides.
         RouteGroup::Prompting => crate::prompting::routes(),
+        // Assistant handlers merge their router here (PIDASHCONV-256:
+        // LLM/STT config + title; sibling handler issues extend the
+        // merge; merges keep both sides).
+        RouteGroup::Assistant => crate::assistant::routes(),
         _ => Router::new(),
     }
 }

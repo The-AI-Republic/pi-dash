@@ -15,6 +15,27 @@
 //! fetching (`WorkspaceMember` lookup) and thread fetching stay with the
 //! handler layer, which owns the only scoped database handle (tenancy rule);
 //! this module decides and renders, exactly like the Python view helpers.
+//!
+//! [`llm_config`] owns the BYOK LLM-config + title-generation HTTP shell
+//! (PIDASHCONV-256) and [`stt_config`] the BYO speech-to-text config shell
+//! (PIDASHCONV-256); [`common`] holds their shared request edge and
+//! [`kms`] the production KMS wire. Sibling handler issues merge their
+//! own routers into [`routes`]; merges keep both sides.
 
+pub mod common;
+pub mod kms;
+pub mod llm_config;
 pub mod perm;
+pub mod stt_config;
 pub mod throttles;
+
+use axum::Router;
+
+use crate::state::AppState;
+
+/// Owned D-06 assistant routes (cutover granularity: registered paths
+/// serve from Rust, everything else keeps proxying). Sibling handler
+/// issues extend this merge; merges keep both sides.
+pub fn routes() -> Router<AppState> {
+    llm_config::routes().merge(stt_config::routes())
+}
