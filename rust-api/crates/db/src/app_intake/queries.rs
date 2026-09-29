@@ -68,11 +68,11 @@
 //!   mapping that error to the 500 body is handlers-owned.
 //! * `assignee_ids` guard asymmetry, ported per call site: the
 //!   `get_queryset` form (`:149-160`) checks `is_active` **and**
-//!   through-table `deleted_at`; the create re-fetch (`:307-315`) and
-//!   `retrieve` (`:518-527`) forms drop the `deleted_at` check; the
-//!   partial-update re-fetch (`:486-495`) and the partial-update issue
-//!   annotate (`:379-396`) drop the `is_active` check. Each form has
-//!   its own fragment function below.
+//!   through-table `deleted_at`; the create re-fetch (`:307-315`) form
+//!   drops the `deleted_at` check; the `retrieve` (`:518-527`),
+//!   partial-update re-fetch (`:486-495`) and partial-update issue
+//!   annotate (`:379-396`) forms drop the `is_active` check instead.
+//!   Each form has its own fragment function below.
 //!
 //! Fixture source of truth:
 //! `rust-api/fixtures/app_intake/queries/*.sql.json` (recorded by
@@ -262,9 +262,12 @@ pub fn queryset_assignee_ids_fragment() -> String {
     r#"COALESCE(ARRAY_AGG(DISTINCT "users"."id") FILTER (WHERE ("users"."id" IS NOT NULL AND "member_project"."is_active" AND "issue_assignees"."deleted_at" IS NULL)), '{}')"#.to_owned()
 }
 
-/// `assignee_ids` annotation, retrieve / create re-fetch form
-/// (`base.py:307-315`, `:518-527`): the `issue_assignees.deleted_at`
-/// guard is missing — ported as-is (see the ported-bugs note).
+/// `assignee_ids` annotation, create re-fetch form
+/// (`base.py:307-315`): the `issue_assignees.deleted_at` guard is
+/// missing — ported as-is (see the ported-bugs note). `retrieve`
+/// (`:518-527`) does NOT use this form: it keeps the `deleted_at`
+/// guard and drops `is_active` instead, i.e. the
+/// [`refetch_assignee_ids_fragment`] shape.
 pub fn detail_assignee_ids_fragment() -> String {
     r#"COALESCE(ARRAY_AGG(DISTINCT "users"."id") FILTER (WHERE ("users"."id" IS NOT NULL AND "member_project"."is_active")), '{}')"#.to_owned()
 }
@@ -367,9 +370,16 @@ impl std::fmt::Display for StatusParseError {
 impl std::error::Error for StatusParseError {}
 
 /// Parse the `status` query param (`base.py:200-202`):
-/// `request.GET.get("status", "-2").split(",")` minus every `"null"`
-/// token, then `filter(status__in=...)` only when the remainder is
-/// non-empty.
+/// `request.GET.get("status", "-2").split(",")` minus every exact
+/// `"null"` token, then `filter(status__in=...)` only when the
+/// remainder is non-empty.
+///
+/// Only exact `"null"` tokens are dropped — Python does no trimming
+/// and no empty-skip. An empty token (`?status=`, a trailing comma)
+/// or a padded `" null"` stays in the list and fails `IntegerField`
+/// coercion at execution (500 via `handle_exception`); here it
+/// surfaces as [`StatusParseError`]. Surrounding ASCII whitespace
+/// around a numeric token parses, matching CPython `int()`.
 ///
 /// Returns `None` when no status filter applies — the falsy-skip bug
 /// (`?status=null` lists every status). Returns
@@ -381,11 +391,7 @@ pub fn parse_intake_status(raw: Option<&str>) -> Result<Option<Vec<i32>>, Status
         if token == "null" {
             continue;
         }
-        let trimmed = token.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        match trimmed.parse::<i32>() {
+        match token.trim().parse::<i32>() {
             Ok(v) => out.push(v),
             Err(_) => return Err(StatusParseError(token.to_owned())),
         }
@@ -512,10 +518,12 @@ pub fn issue_annotate_assignee_ids_fragment() -> String {
 /// The shared detail projection: the `IntakeIssue` row, its joined
 /// `Issue` row (`select_related("issue")`), and the `label_ids` /
 /// caller-chosen `assignee_ids` annotations. `retrieve` (`:506-530`)
-/// and the partial-update re-fetch (`:474-498`) share this shape and
-/// differ only in the assignee guard (see [`refetch_assignee_ids_fragment`]
-/// vs [`detail_assignee_ids_fragment`]); the create re-fetch
-/// (`:293-322`) shares it too, with the retrieve-form guard.
+/// and the partial-update re-fetch (`:474-498`) share this shape
+/// **and** the assignee guard ([`refetch_assignee_ids_fragment`]:
+/// through-table `deleted_at`, no `is_active`); the create re-fetch
+/// (`:293-322`) shares the shape with the
+/// [`detail_assignee_ids_fragment`] guard (`is_active`, no
+/// `deleted_at`).
 /// `$1` intake_id, `$2` issue_id, `$3` project_id.
 pub fn intake_issue_detail_sql(assignee_ids: &str) -> String {
     format!(
@@ -566,11 +574,17 @@ pub fn destroy_issue_lookup_sql() -> String {
     )
 }
 
-/// Guest-role narrowing applied after the detail fetch in `retrieve`
-/// (`:531-545`) and in the versions `get` (unit 5): a `GUEST` member
+/// Guest-role narrowing on `IntakeIssue` rows: the list queryset
+/// (`:204-214`, via [`IntakeIssueListQuery::guest_created_by`]) and
+/// the post-fetch check in `retrieve` (`:531-545`,
+/// `intake_issue.created_by == request.user`). A `GUEST` member
 /// without `guest_view_all_features` may only see rows they created.
 /// The membership/flag check is handlers-owned; this is the predicate
 /// it appends: `created_by_id = $N`.
+///
+/// NOT for the versions `get` (unit 5, `:583-597`): that check
+/// compares the parent **Issue** row (`issue.created_by`), so it
+/// needs the `issues`-table column, not this one.
 pub fn guest_creator_predicate(bind: usize) -> String {
     format!(
         r#""{t}"."created_by_id" = ${bind}"#,
@@ -799,8 +813,11 @@ mod tests {
         ] {
             assert!(sql.contains(predicate), "missing {predicate}: {sql}");
         }
-        // The fixture's own trace calls out the asymmetry: this form
-        // HAS the through-table guard the re-fetch forms lack.
+        // The asymmetry, per call site: this form has BOTH guards.
+        // The create re-fetch (detail) form keeps is_active and lacks
+        // the through-table guard; the retrieve / partial-update
+        // (refetch) forms keep the through-table guard and lack
+        // is_active.
         assert!(detail_assignee_ids_fragment().contains("is_active"));
         assert!(!detail_assignee_ids_fragment().contains("issue_assignees"));
         assert!(refetch_assignee_ids_fragment().contains("issue_assignees"));
@@ -915,12 +932,22 @@ mod tests {
     fn parse_intake_status_defaults_and_falsy_skip() {
         // Absent param → the `-2` default.
         assert_eq!(parse_intake_status(None), Ok(Some(vec![-2])));
-        // Explicit values, `null` tokens dropped.
+        // Explicit values, exact `null` tokens dropped.
         assert_eq!(parse_intake_status(Some("-2,-1")), Ok(Some(vec![-2, -1])));
         assert_eq!(parse_intake_status(Some("null,-1")), Ok(Some(vec![-1])));
         // Only `null` tokens → falsy `[]` → NO filter (the ported bug).
         assert_eq!(parse_intake_status(Some("null")), Ok(None));
-        assert_eq!(parse_intake_status(Some("")), Ok(None));
+        assert_eq!(parse_intake_status(Some("null,null")).unwrap(), None);
+        // Python does no empty-skip: `?status=` is `[""]`, truthy, so
+        // Django filters on `[""]` and 500s on IntegerField coercion.
+        // The port surfaces that as an error, never as "no filter".
+        assert!(parse_intake_status(Some("")).is_err());
+        assert!(parse_intake_status(Some("-2,")).is_err());
+        // No trimming before the `null` compare either: `" null"` is
+        // kept and fails coercion, while padded numerics parse like
+        // CPython `int()`.
+        assert!(parse_intake_status(Some(" null")).is_err());
+        assert_eq!(parse_intake_status(Some(" -2 ")), Ok(Some(vec![-2])));
         // Non-numeric tokens are a handler-mapped 500, surfaced here.
         assert!(parse_intake_status(Some("bogus")).is_err());
     }
@@ -981,9 +1008,14 @@ mod tests {
 
     #[test]
     fn detail_variants_carry_their_guards() {
-        let retrieve = intake_issue_detail_sql(&detail_assignee_ids_fragment());
+        // retrieve (base.py:518-527) keeps the through-table deleted_at
+        // guard and drops is_active: the refetch shape.
+        let retrieve = intake_issue_detail_sql(&refetch_assignee_ids_fragment());
         let referetch = intake_issue_detail_sql(&refetch_assignee_ids_fragment());
-        for sql in [&retrieve, &referetch] {
+        // create re-fetch (base.py:307-315) keeps is_active and drops
+        // the through-table guard: the detail shape.
+        let create_refetch = intake_issue_detail_sql(&detail_assignee_ids_fragment());
+        for sql in [&retrieve, &referetch, &create_refetch] {
             assert!(sql.contains(label_ids_fragment().as_str()), "{sql}");
             assert!(
                 sql.contains("\"intake_issues\".\"intake_id\" = $1"),
@@ -995,12 +1027,18 @@ mod tests {
                 "{sql}"
             );
         }
-        // retrieve / create re-fetch: is_active, no through-table guard.
-        assert!(retrieve.contains("is_active"), "{retrieve}");
-        assert!(!retrieve.contains("issue_assignees"), "{retrieve}");
+        // retrieve: through-table guard, no is_active.
+        assert!(retrieve.contains("issue_assignees"), "{retrieve}");
+        assert!(!retrieve.contains("is_active"), "{retrieve}");
         // partial-update re-fetch: through-table guard, no is_active.
         assert!(referetch.contains("issue_assignees"), "{referetch}");
         assert!(!referetch.contains("is_active"), "{referetch}");
+        // create re-fetch: is_active, no through-table guard.
+        assert!(create_refetch.contains("is_active"), "{create_refetch}");
+        assert!(
+            !create_refetch.contains("issue_assignees"),
+            "{create_refetch}"
+        );
         // The partial-update issue annotate shares the re-fetch shape
         // under its own name so review sees the call-site asymmetry.
         assert_eq!(
