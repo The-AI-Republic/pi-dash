@@ -19,6 +19,8 @@
 | D11 | No human merge gate: the In Test run that passes merges its own PR (Test rule in the project description). Human involvement is limited to decisions and sign-offs (issues labeled `human`). |
 | D12 | Visual direction: dense and neutral, Inter, indigo accent, follow the OS theme, compact on desktop. Token spec on *UI kit and editor* (NEWFRONT-5). |
 | D13 | `apps/admin` and `apps/space` are in scope (NEWFRONT-4). They become route subtrees `/god-mode/*` and `/spaces/*` inside `apps/web_new`, web build only, and are removed with `apps/web` at the end. |
+| D14 | No third-party product analytics (NEWFRONT-6). `core/telemetry` reports errors and startup timings only, to a sink an edition can configure (none by default). The old app's Microsoft Clarity script is intentionally not carried over: inventories record it as "dropped by NEWFRONT-6", not as a parity row. |
+| D15 | Charts: Recharts 3 (NEWFRONT-7), only through `import()`, wrapped in our own chart components in `shared/` that read colors from kit tokens. Needed types: bar, area, line, pie, radar, scatter, treemap, composed. |
 
 ## Open
 
@@ -28,8 +30,6 @@
 | Q2 | Legal review of the reference-not-source process; whether some areas need split spec/implementation runs | human · NEWFRONT-3 |
 | Q4 | Real-time issue updates: is there a server push channel today beyond runner/assistant SSE? Parity requires whatever live behavior `apps/web` has. | investigated by NEWFRONT-27 |
 | Q5 | Annotate internal Django views for OpenAPI (`@extend_schema`) so contracts can be generated later? | human |
-| Q6 | Charts library for analytics | human · NEWFRONT-7 |
-| Q7 | Telemetry on the new app (the old app loads Microsoft Clarity) | human · NEWFRONT-6 |
 | Q9 | Similarity-check threshold (starting value ≥ 50 duplicated tokens) | set by NEWFRONT-13 |
 
 ## Risks to keep in mind

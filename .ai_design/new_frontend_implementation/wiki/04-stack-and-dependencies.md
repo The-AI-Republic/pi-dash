@@ -22,7 +22,7 @@
 | Icons | lucide-react, per-icon imports | no icon fonts |
 | Rich text | Tiptap | lazy; see *UI kit and editor* |
 | Collaboration | Yjs + `apps/live` (Hocuspocus) | lazy; pages only |
-| Charts | not chosen yet | see *Decisions and open questions*; always lazy |
+| Charts | Recharts 3 | lazy only; wrap in our own components in `shared/charts`, colors from kit tokens |
 | Tests | Vitest, Testing Library, Playwright | |
 
 ## Rules
