@@ -17,7 +17,9 @@ whatever toolsets did build. Callers surface the skipped servers to the user
 
 **Trust policy: results are data.** A tool server is third-party code, so what
 it returns is delimited as untrusted content before the model sees it, exactly
-as issue and comment text is. See :func:`wrap_untrusted_result`.
+as issue and comment text is. That covers both channels a result can arrive
+on: the value of a successful call (:func:`wrap_untrusted_result`) and the
+message of a failed one (:func:`wrap_untrusted_retry`).
 """
 
 from __future__ import annotations
@@ -100,6 +102,35 @@ def wrap_untrusted_result(result):
     if isinstance(result, (list, tuple)):
         return [wrap_untrusted_result(part) for part in result]
     return result
+
+
+def wrap_untrusted_retry(exc: BaseException) -> None:
+    """Frame the server-controlled text a retry exception carries, in place.
+
+    The error channel is a results channel. When a tool reports failure, the
+    message the model is asked to react to is the server's own text: fastmcp
+    raises ``ToolError(result.content[0].text)`` and pydantic-ai turns that
+    into ``ModelRetry(message=str(e))``, which the tool manager hands to the
+    model verbatim as a ``RetryPromptPart`` — followed by its own trusted
+    "Fix the errors and try again." So a hostile server only has to fail every
+    call to get un-delimited text in front of the model, and rule 4's promise
+    that tool-server output arrives framed is what makes that text read as
+    ours rather than theirs.
+
+    Mutated rather than re-raised as a new exception: the retry machinery keys
+    off the exception's identity and its other attributes (``tool_retry``
+    carries the part the tool manager reuses), so replacing the object risks
+    changing control flow. Only the text changes.
+    """
+    message = getattr(exc, "message", None)
+    if isinstance(message, str):
+        exc.message = wrap_untrusted(message)  # type: ignore[attr-defined]
+    # ``ToolRetryError`` carries the prompt part itself; its ``content`` is the
+    # server's text for a tool retry, or pydantic-ai's own validation-error
+    # list — a list is ours, so leave it alone.
+    part = getattr(exc, "tool_retry", None)
+    if part is not None and isinstance(getattr(part, "content", None), str):
+        part.content = wrap_untrusted(part.content)
 
 
 @dataclass(frozen=True)
@@ -200,8 +231,11 @@ class ResilientToolset(WrapperToolset):
         ``ModelRetry`` would burn the run's retries on a server that is not
         coming back.
 
-        pydantic-ai's own control-flow exceptions pass through untouched: they
-        are decisions, not outages, and the tool manager is what acts on them.
+        pydantic-ai's own control-flow exceptions pass through: they are
+        decisions, not outages, and the tool manager is what acts on them. The
+        server-authored text they carry is framed on the way past, because a
+        retry prompt reaches the model just as a result does — see
+        :func:`wrap_untrusted_retry`.
 
         A result that *did* come from the server is delimited as untrusted on
         the way out — see :func:`wrap_untrusted_result`. The failure message
@@ -211,7 +245,10 @@ class ResilientToolset(WrapperToolset):
         """
         try:
             result = await super().call_tool(name, tool_args, ctx, tool)
-        except _CONTROL_FLOW_EXCEPTIONS:
+        except _CONTROL_FLOW_EXCEPTIONS as exc:
+            # Still a decision, not an outage — but the text it carries came
+            # from the server, so it gets framed like any other result.
+            wrap_untrusted_retry(exc)
             raise
         except Exception as exc:  # noqa: BLE001 — a dying server is not a turn failure
             self._record(exc, f"failed calling {name}")
