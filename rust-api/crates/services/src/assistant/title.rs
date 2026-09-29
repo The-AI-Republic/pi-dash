@@ -162,8 +162,10 @@ fn scalar_to_text(value: &Value) -> String {
 ///
 /// `None` → `""`, strings pass through, lists concatenate their text parts
 /// while skipping `reasoning`/`thinking` blocks (case-insensitive), and
-/// anything else renders via `str()`. Dict attribute access (`block.get`)
+/// bare scalars render via `str()`. Dict attribute access (`block.get`)
 /// and object attribute access (`getattr`) both read as object lookups here.
+/// Bare JSON objects never occur (SDK `message.content` is `None`, a string,
+/// or a block list) and render as JSON rather than Python `str()`.
 pub fn content_to_text(content: &Value) -> String {
     match content {
         Value::Null => String::new(),

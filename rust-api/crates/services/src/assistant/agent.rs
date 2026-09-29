@@ -111,7 +111,7 @@ pub struct RunBudget {
 /// makes one shared agent safe across tenants. `Clone` reuses the same
 /// budget counters' values for the new handle (each construction site still
 /// starts from `Default`, i.e. a fresh budget).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct AssistantDeps {
     pub user_id: Uuid,
     pub user_display: String,
@@ -147,6 +147,25 @@ impl Default for AssistantDeps {
         }
     }
 }
+
+/// `compare=False` on `budget` (`deps.py:43-46`): identical identity compares
+/// equal regardless of how much budget each run has spent (and the frozen
+/// deps stays hashable in Python; no `Hash` impl is needed here yet).
+impl PartialEq for AssistantDeps {
+    fn eq(&self, other: &Self) -> bool {
+        self.user_id == other.user_id
+            && self.user_display == other.user_display
+            && self.workspace_id == other.workspace_id
+            && self.workspace_slug == other.workspace_slug
+            && self.workspace_name == other.workspace_name
+            && self.workspace_role == other.workspace_role
+            && self.thread_id == other.thread_id
+            && self.turn_id == other.turn_id
+            && self.mode == other.mode
+    }
+}
+
+impl Eq for AssistantDeps {}
 
 impl AssistantDeps {
     /// The `Issue.created_via` marker for writes made in this run
@@ -241,6 +260,22 @@ mod tests {
         assert_eq!(deps.budget.pr_lookups, 0);
         assert_eq!(deps.mode, MODE_CHAT);
         assert_eq!(deps.created_via(), "assistant");
+    }
+
+    #[test]
+    fn deps_equality_ignores_budget_spend() {
+        // `compare=False` (deps.py:43-46): identical identity compares equal
+        // regardless of how much budget each run has spent.
+        let spent = AssistantDeps {
+            budget: RunBudget { pr_lookups: 3 },
+            ..AssistantDeps::default()
+        };
+        assert_eq!(spent, AssistantDeps::default());
+        let other_mode = AssistantDeps {
+            mode: MODE_LOOP.to_owned(),
+            ..AssistantDeps::default()
+        };
+        assert_ne!(other_mode, AssistantDeps::default());
     }
 
     #[test]
