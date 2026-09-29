@@ -351,7 +351,10 @@ pub fn validate_invite_unique(
     slug: Option<&str>,
     already_invited: bool,
 ) -> Result<(), InviteUniqueError> {
-    if slug.is_none_or(|slug| slug.is_empty()) {
+    // `invite.py:54` reads `self.context["slug"]`: only an absent key raises
+    // `KeyError`. An empty-string slug is a dict hit, so validation proceeds
+    // (the workspace filter then matches nothing).
+    if slug.is_none() {
         return Err(InviteUniqueError::MissingSlug(MissingSlug));
     }
     match email {
@@ -931,6 +934,18 @@ mod tests {
             validate_invite_unique(Some("a@b.co"), None, false).expect_err("missing slug fails");
         assert_eq!(error, InviteUniqueError::MissingSlug(MissingSlug));
         assert!(validate_invite_unique(None, Some("ws"), true).is_ok());
+    }
+
+    #[test]
+    fn invite_empty_slug_proceeds_like_dict_hit() {
+        // invite.py:54 reads self.context["slug"]: only an absent key raises
+        // KeyError. An empty-string slug is a dict hit, so validation
+        // proceeds instead of taking the missing-slug arm.
+        assert!(validate_invite_unique(Some("a@b.co"), Some(""), false).is_ok());
+        assert!(validate_invite_unique(None, Some(""), false).is_ok());
+        let error =
+            validate_invite_unique(Some("a@b.co"), None, false).expect_err("absent slug fails");
+        assert_eq!(error, InviteUniqueError::MissingSlug(MissingSlug));
     }
 
     #[test]
