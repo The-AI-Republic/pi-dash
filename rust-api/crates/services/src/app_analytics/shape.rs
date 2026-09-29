@@ -353,26 +353,47 @@ pub const IMPORTER_FIELDS: [&str; 19] = [
     "token",
 ];
 
-/// `project_detail` mirrors `ProjectLiteSerializer` (7 keys, same order as
-/// the space port).
+/// `project_detail` mirrors the app `ProjectLiteSerializer`
+/// (`app/serializers/project.py:120-133`, 8 keys in `Meta.fields` order).
+/// This is NOT the space-app lite shape (`space/serializer/project.py`,
+/// `icon_prop`/`emoji`); the importer nests the app serializer
+/// (`importer.py:8,15`).
+pub const IMPORTER_PROJECT_DETAIL_FIELDS: [&str; 8] = [
+    "id",
+    "identifier",
+    "name",
+    "cover_image",
+    "cover_image_url",
+    "logo_props",
+    "description",
+    "is_default",
+];
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ImporterProjectDetailView<'a> {
     pub id: &'a str,
     pub identifier: &'a str,
     pub name: &'a str,
     pub cover_image: Option<&'a str>,
-    pub icon_prop: &'a Value,
-    pub emoji: Option<&'a str>,
+    pub cover_image_url: Option<&'a str>,
+    pub logo_props: &'a Value,
     pub description: &'a str,
+    pub is_default: bool,
 }
 
-/// `workspace_detail` mirrors `WorkspaceLiteSerializer` (3 keys, same order
-/// as the space port).
+/// `workspace_detail` mirrors the app `WorkspaceLiteSerializer`
+/// (`app/serializers/workspace.py:79-83`, 4 keys in `Meta.fields` order),
+/// nested by the importer (`importer.py:9,16`). `logo_url` is a model
+/// `@property` (`db/models/workspace.py:146`: logo-asset URL, else `logo`,
+/// else `None`) resolved by the caller; the view passes it through verbatim.
+pub const IMPORTER_WORKSPACE_DETAIL_FIELDS: [&str; 4] = ["name", "slug", "id", "logo_url"];
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ImporterWorkspaceDetailView<'a> {
     pub name: &'a str,
     pub slug: &'a str,
     pub id: &'a str,
+    pub logo_url: Option<&'a str>,
 }
 
 /// A database row for the importer shape. Defaults: `status = "queued"`,
@@ -1002,7 +1023,7 @@ mod tests {
     #[test]
     fn importer_replays_golden_defaults() {
         let empty = json!({});
-        let icon = json!({});
+        let logo_props = json!({});
         let detail = InitiatedByDetailRow {
             id: "user-1",
             first_name: "an_admin",
@@ -1020,14 +1041,16 @@ mod tests {
                 identifier: "AN",
                 name: "Analytics Project",
                 cover_image: None,
-                icon_prop: &icon,
-                emoji: None,
+                cover_image_url: None,
+                logo_props: &logo_props,
                 description: "",
+                is_default: false,
             },
             workspace_detail: ImporterWorkspaceDetailView {
                 name: "ws",
                 slug: "ws",
                 id: "ws-1",
+                logo_url: None,
             },
             created_at: "2026-09-01T10:00:00Z",
             updated_at: "2026-09-01T10:00:00Z",
@@ -1060,6 +1083,28 @@ mod tests {
                 .map(|name| (*name).to_owned())
                 .collect::<Vec<_>>()
         );
+        // Nested details render the app lite shapes byte-for-byte: the app
+        // `ProjectLiteSerializer` 8 keys (`project.py:120-133`), not the
+        // space-app `icon_prop`/`emoji` set; the app `WorkspaceLiteSerializer`
+        // 4 keys (`workspace.py:79-83`) including `logo_url`.
+        assert_eq!(
+            keys(&produced["project_detail"]),
+            IMPORTER_PROJECT_DETAIL_FIELDS
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            keys(&produced["workspace_detail"]),
+            IMPORTER_WORKSPACE_DETAIL_FIELDS
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(produced["project_detail"]["cover_image_url"], Value::Null);
+        assert_eq!(produced["project_detail"]["logo_props"], json!({}));
+        assert_eq!(produced["project_detail"]["is_default"], json!(false));
+        assert_eq!(produced["workspace_detail"]["logo_url"], Value::Null);
     }
 
     // -- FX-A-SER-04 ------------------------------------------------------
