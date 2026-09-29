@@ -64,11 +64,11 @@ Pages read: Porting Guide `4496e321-dd24-40f7-bfdf-f771e45fac0c`
   (created_at/updated_at/created_by/updated_by), `db/models/base.py:17-22`
   (id PK), `db/mixins.py:60-70` (deleted_at/soft managers),
   `db/models/workspace.py:185-195` (workspace/project FKs).
-- `FX-GUARD.json` — `app/permissions/base.py:13-109` (ROLE values,
+- `FX-GUARD.json` — `app/permissions/base.py:13-88` (ROLE values,
   creator bypass, WORKSPACE vs PROJECT + admin fallback, 403 body) applied
   to the 10 gates in `app/views/view/base.py:71,80,114,216,289,308,343,365,413,423`
   plus undecorated actions (`:102` retrieve, `:404-411` fav list) and in-body
   rechecks (`:75-76,89,118-134,293-303,317-331,368-392`).
 - `FX-TASK.json` — call sites `app/views/view/base.py:105-111` (project_id
-  None) and `:334-340`; task body `bgtasks/recent_visited_task.py:17-62`;
+  None) and `:334-340`; task body `bgtasks/recent_visited_task.py:17-61`;
   table `db/models/recent_visit.py:22-36`.
