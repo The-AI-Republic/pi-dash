@@ -27,7 +27,10 @@ const allowPermissionsFor = (rolesBySlug: Record<string, EUserWorkspaceRoles>) =
 
 describe("getAccessibleWorkspaceSettingGroups", () => {
   it("gives an admin every item, grouped by category", () => {
-    const groups = getAccessibleWorkspaceSettingGroups("acme", allowPermissionsFor({ acme: EUserWorkspaceRoles.ADMIN }));
+    const groups = getAccessibleWorkspaceSettingGroups(
+      "acme",
+      allowPermissionsFor({ acme: EUserWorkspaceRoles.ADMIN })
+    );
 
     expect(groups.map((group) => group.category)).toEqual(["administration", "developer"]);
     expect(groups[0].items.map((item) => item.key)).toEqual(["general", "members", "billing-and-plans", "export"]);
@@ -46,9 +49,9 @@ describe("getAccessibleWorkspaceSettingGroups", () => {
   });
 
   it("returns nothing for a workspace where the user may open nothing, so the row renders plain", () => {
-    expect(getAccessibleWorkspaceSettingGroups("acme", allowPermissionsFor({ acme: EUserWorkspaceRoles.GUEST }))).toEqual(
-      []
-    );
+    expect(
+      getAccessibleWorkspaceSettingGroups("acme", allowPermissionsFor({ acme: EUserWorkspaceRoles.GUEST }))
+    ).toEqual([]);
   });
 
   it("filters against the workspace it was asked about, not the current one", () => {
