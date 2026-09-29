@@ -9,10 +9,15 @@
 //! * [`title`] — `runtime/title.py:1-147` (PIDASHCONV-250).
 //! * [`agent`] — `runtime/deps.py`, `runtime/agent.py`,
 //!   `runtime/instructions.py` (PIDASHCONV-250).
+//! * [`mcp`] — `runtime/mcp.py:1-309` (PIDASHCONV-251).
+//! * [`seams`] — `ee/assistant/model_provider.py` + `stt_provider.py`
+//!   (PIDASHCONV-251).
 
 pub mod agent;
 pub mod crypto;
 pub mod llm;
 pub mod markdown;
+pub mod mcp;
+pub mod seams;
 pub mod ssrf;
 pub mod title;
