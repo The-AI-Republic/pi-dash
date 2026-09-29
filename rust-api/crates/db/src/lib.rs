@@ -20,6 +20,7 @@
 //! Write paths take a [`context::RequestContext`]; there is no unscoped
 //! handle for writes.
 
+pub mod app_cycles;
 pub mod app_intake;
 pub mod assistant;
 pub mod config;
