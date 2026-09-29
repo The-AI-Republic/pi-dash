@@ -618,6 +618,35 @@ that the package will not work without a skill store, which lets a
 platform that has none say so up front instead of installing a broken
 project (D20).
 
+**`capabilities` is a closed vocabulary, and it has to be, because §4.4
+rule 2 makes an unrecognised capability name a hard error.** A
+fail-closed rule over an open-ended set of strings is not implementable:
+every name is unrecognised to somebody. So the spec owns the list, and
+v1's is deliberately short — each entry is a thing an installer would
+make a different decision about:
+
+| Capability | The agent will |
+| --- | --- |
+| `repo.read` | clone and read the repository |
+| `repo.write` | push branches and open pull requests |
+| `repo.admin_merge` | merge pull requests without a human approval |
+| `shell` | run arbitrary commands on the host the runner is on |
+| `network` | reach hosts other than the tracker and the repository |
+| `db.write` | write to a database reachable from that host |
+
+Two consequences follow, and they are the reason this is stated here
+rather than left to the schema:
+
+- **A platform-specific requirement is not a core capability.** It goes
+  in that vendor's own `requires` block — which is exactly what
+  `extensions.pidash.requires.executor_kinds` below is. This keeps the
+  core list small enough to stay stable.
+- **The core list can only grow on a `spec_version` bump.** Adding
+  `foo.bar` in-place would make every existing reader hard-error on a
+  package that uses it, which is rule 2 working as designed rather than a
+  bug in it. Publishers who need something the list does not cover use a
+  vendor block until the next spec major. §14-D24.
+
 The `pidash` extension adds `executor_kinds` and a `pidash_version`
 floor, because both name Pi Dash concepts:
 
@@ -733,6 +762,7 @@ rule applies (§3.3, D1, D22).
     "name": "django-to-rust-port",
     "owner": "airepublic",
     "version": "1.2.0",
+    "description": "Port a Django backend to Rust, agent-driven end to end.",
     "license": "AGPL-3.0-only",
     "authors": ["AI Republic <oss@airepublic.com>"],
     "homepage": "https://github.com/The-AI-Republic/agent-projects",
@@ -790,13 +820,21 @@ rule applies (§3.3, D1, D22).
 }
 ```
 
-Note what is **not** in the manifest any more: `name`, `description`,
-`version` and `license` also appear in `PROJECT.md`'s frontmatter, which
-is the human-facing copy. The manifest is authoritative on conflict and a
-mismatch is a validation error — one source of truth, checked rather than
-assumed. And the rulebook is not a manifest value pointing at
-`rulebook.md`; it is the `PROJECT.md` body, which is what makes the entry
-file readable on its own.
+Note what is **duplicated** and what deliberately is not. `name`,
+`description`, `version` and `license` appear in both `PROJECT.md`'s
+frontmatter and the manifest's `package` block. That is on purpose: the
+frontmatter is what a human reads first when browsing the package repo
+(which is why D13 requires `license` there), and the manifest is what a
+schema validates and a reader parses. **The manifest is authoritative on
+conflict and a mismatch is a validation error** — one source of truth,
+checked rather than assumed, rather than two that drift.
+
+What is *not* duplicated is the rulebook. It is not a manifest value
+pointing at `rulebook.md`; it is the `PROJECT.md` body, which is what
+makes the entry file readable on its own. Nor is the manifest a second
+copy of the `pages/`, `issues/` and `skills/` *contents* — it indexes
+those files and carries only the structured fields they cannot express in
+prose.
 
 The manifest is JSON with a published JSON Schema in the spec repo, so
 editors autocomplete it and a catalog's CI can validate every package it
@@ -1051,7 +1089,7 @@ These are not configurable by the package. That is the point.
 
 | Setting | Installed value | Why |
 | --- | --- | --- |
-| `agent_ticking_enabled` | **`False`**, always | The rulebook is unreviewed instructions. Nothing may start running before a human reads it. The package's proposed value is recorded and shown, so turning it on is one click |
+| `agent_ticking_enabled` | **`False`**, always | The package's proposed value is recorded and shown, so turning it on is one click once reviewed. Note this flag stops the *clock* only — it does not stop a Run AI click or a human state move, so the review gate proper lives at run creation (§10.2, D23) |
 | Bundled skills | **unapproved**, and not delivered to any machine | 260's gate: a `skills.author` approves, and the runner operator has separately opted in (§10.5) |
 | Seed issue state | the package's declared state, and the plan must show it; the default and the recommendation is `Backlog` | `Backlog` is inert (`.ai_design/issue_ticking_system/design.md`); an issue installed straight into `In Progress` would dispatch a run on install |
 | `network` | `SECRET` | Do not publish someone's new project to the workspace at large |
@@ -1223,7 +1261,7 @@ not just names.
 
 | Risk | Mitigation | Ships in |
 | --- | --- | --- |
-| Rulebook instructs exfiltration, destructive commands, or merging unreviewed code | Mandatory human review before anything runs (§10.2); ticking installed off; rulebook shown in full at install | v1 |
+| Rulebook instructs exfiltration, destructive commands, or merging unreviewed code | Run creation refused until the rulebook is reviewed, on **every** trigger and not just the timer (§10.2, D23); ticking installed off; rulebook shown in full at install | v1 |
 | A bundled skill carries an executable script | v1 store is text-only; scripts refused at install; later, second-approver review (§10.5) | v1 |
 | A bundled skill's description injects on every turn | Skills install unapproved; plan lists every name and description; per-runner opt-in off by default (§10.5) | v1 |
 | A package skill silently replaces a workspace skill other projects use | Package-name namespacing; residual collision is a plan-time error (§8.5, D21) | v1 |
@@ -1237,24 +1275,63 @@ not just names.
 
 ### 10.2 Mandatory review
 
-Install never produces a project that can run an agent:
+No agent may run on an installed package until a human has read the
+rulebook. **Turning ticking off does not achieve that, and an earlier
+draft of this section assumed it did.**
 
-1. `agent_ticking_enabled` is `False`, unconditionally (§8.6).
+`agent_ticking_enabled` gates the *clock*, not dispatch. Its only
+consumer is `_clock_allowed` (`orchestration/scheduling.py:213`, via
+`_project_ticking_enabled` at `:208`), and the two handlers that dispatch
+on a **human** action never reach it:
+
+- `_on_human_run_requested` (`orchestration/scheduling.py:520`) — the
+  Run AI button (`runner/views/runs.py:410`) and Comment & Run — sets
+  `dispatch_now` straight from `event.want_run` with no switch check at
+  all.
+- `_on_enter_or_move` (`orchestration/scheduling.py:396`) reads
+  `clock_allowed` at `:409` but tests it only inside the `agent_move`
+  branch (`:420`). A human move takes the `else` branch, whose comment is
+  _"Human move: one free run, always — even into a spent pool"_ (`:431`).
+
+So on a freshly installed, unreviewed project a workspace member who
+clicks Run AI, or drags a seed issue into `In Progress`, gets a full agent
+run — and the prompt that run receives carries the unreviewed rulebook
+verbatim (`{{ project.description }}`,
+`prompting/sections/intro.md:20`). §8.6 already half-knows this: its
+seed-issue row warns that an issue landing in `In Progress` "would
+dispatch a run on install", which is only true because the flag does not
+gate dispatch. The general claim has to be corrected to match the
+specific one.
+
+The gate therefore sits at **run creation**, not on the switch:
+
+1. `agent_ticking_enabled` is `False` at install, unconditionally
+   (§8.6). Necessary, not sufficient.
 2. The install record carries `reviewed_by` / `reviewed_at` /
    `reviewed_digest`, all null at install.
-3. Turning ticking on — in the UI or via API — is **refused** while
-   `reviewed_at` is null. The UI's toggle opens the rulebook first; the
-   API returns a 409 naming the review endpoint. CLI install prints the
+3. **Creating an agent run on a project whose `reviewed_at` is null is
+   refused, for every trigger** — the timer, a state transition, Run AI,
+   Comment & Run, Re-tick, and the token API. One choke point covers all
+   of them: every path above funnels through `_create_and_dispatch_run`
+   (`orchestration/service.py:735`) or `_create_continuation_run`
+   (`:443`), so the check goes there rather than into five callers that
+   can drift apart. The refusal carries a reason the UI renders as "read
+   the rulebook first", linked to the review screen. §14-D23.
+4. Turning ticking on — in the UI or via API — is **also** refused while
+   `reviewed_at` is null, so the switch cannot be armed behind the
+   reviewer's back. The UI's toggle opens the rulebook first; the API
+   returns a 409 naming the review endpoint. CLI install prints the
    rulebook path and the command to read it.
-4. Non-interactive install (CI, scripting) requires
+5. Non-interactive install (CI, scripting) requires
    `--accept-rulebook <sha256>`. Passing the digest — rather than a bare
    `--yes` — means an automated install cannot silently start accepting a
    _changed_ rulebook.
-5. `reviewed_digest` records _what_ was accepted, so a later upgrade can
+6. `reviewed_digest` records _what_ was accepted, so a later upgrade can
    tell whether re-review is needed.
 
-This is one gate, it is cheap, and it is the whole reason the feature is
-safe to ship.
+This is still one gate and it is still cheap. It just has to be on the
+door the runs come through, rather than on the timer that is one of
+several things that knocks.
 
 ### 10.3 Declared capabilities: disclosure, not enforcement — say so
 
@@ -1527,10 +1604,13 @@ approval gate.
 in whatever serves the catalog — a git repo, in the primary path (§5.1) —
 and the marketplace project owns any server-side model of them (§5.4).
 
-`ProjectPackageInstall.reviewed_at` is the field the ticking-enable path
-must consult; that is the one place this feature touches existing code
-(`Project.agent_ticking_enabled` write paths in the app API serializer
-and the project settings view from PDASHOSS01-220).
+`ProjectPackageInstall.reviewed_at` is the field the existing code must
+consult, in two places rather than one (§10.2): the run-creation path
+(`_create_and_dispatch_run` / `_create_continuation_run`,
+`orchestration/service.py:735`/`:443`), which is what actually holds the
+gate, and the `Project.agent_ticking_enabled` write paths in the app API
+serializer and the project settings view from PDASHOSS01-220. Both are
+one-line guards; the first is the one that must not be skipped.
 
 ### 11.2 API
 
@@ -1651,6 +1731,7 @@ issues, the declared `requires`, and the parameter declarations:
   "spec_version": 1,
   "package": { "name": "django-to-rust-port", "owner": "airepublic",
                "version": "1.0.0", "license": "AGPL-3.0-only",
+               "description": "Port a Django backend to Rust, agent-driven end to end.",
                "tags": ["porting", "rust", "django", "autonomous"] },
   "requires": {
     "capabilities": ["repo.write", "repo.admin_merge", "shell", "network", "db.write"],
@@ -1778,9 +1859,11 @@ blocked-by edges, **both bundled skills with every file listed and
 budget, the capability list with `repo.admin_merge` flagged, the resolved
 parameters, the catalog it came from, and `unsigned` against the digest.
 
-Re-run without `--dry-run` and the project exists — **with ticking off and
-both skills unapproved**. Two separate human acts follow, and the fact
-that they are separate is deliberate:
+Re-run without `--dry-run` and the project exists — **with ticking off,
+both skills unapproved, and no agent run creatable on any of its issues**
+(§10.2, D23: clicking Run AI on the rulebook issue at this point is
+refused, not silently queued). Two separate human acts follow, and the
+fact that they are separate is deliberate:
 
 1. Read the rulebook (`pidash project show MYPORT --rulebook`). The
    rulebook says agents should merge their own PRs; that is a decision the
@@ -1826,13 +1909,13 @@ Filed after approval, not in this PR.
 
 | # | Repo | Scope | Acceptance criteria |
 | --- | --- | --- | --- |
-| P-1 | **spec repo** (new) | **`agent-project` spec v1: the normative document, `project.json` JSON Schema, `PROJECT.md` frontmatter rules, the core/extension split and the conformance levels.** No implementation code | The spec document defines every core field in §6.2 and §7.2; the schema validates all fixtures and rejects an invalid one with a located error; the four conformance levels of §4.5 are defined with what each must produce; the `extensions` rule of §4.3 is normative; nothing in the spec, schema or file names mentions Pi Dash |
+| P-1 | **spec repo** (new) | **`agent-project` spec v1: the normative document, `project.json` JSON Schema, `PROJECT.md` frontmatter rules, the closed capability vocabulary, the core/extension split and the conformance levels.** No implementation code | The spec document defines every core field in §6.2 and §7.2, and which of them are duplicated between `PROJECT.md` frontmatter and the manifest with the manifest authoritative (§7.2); the capability vocabulary of §6.3 is enumerated normatively and the schema rejects a name outside it with a located error (so §4.4 rule 2 is implementable); the schema validates all fixtures and rejects an invalid one with a located error; the four conformance levels of §4.5 are defined with what each must produce; the `extensions` rule of §4.3 is normative; nothing in the spec, schema or file names mentions Pi Dash |
 | P-2 | **spec repo** | **Catalog format: `marketplace.json` schema, the two source types, and the resolution + pinning rules.** Plus golden conformance fixtures for plan generation | Schema validates a catalog with both `git` and `archive` entries and rejects an `archive` entry with no `sha256`; the fixture suite carries at least one package per conformance level with its expected plan as canonical JSON; resolution order for a multi-catalog client is specified |
 | P-3 | pi-dash | **Exporter + scrub (API + `pidash project export`).** `ProjectPackageExport`, the allowlist exporter, the two scrub passes, the CLI command | Exporting a project with a known-dirty rulebook fails and names every flag; `--allow-flagged` records acknowledgements in the manifest; export of a fixture-equivalent project matches its P-2 fixture; a test asserts no excluded model is reachable from the export path; a NULL-workspace skill is never exported |
 | P-4 | pi-dash | **Importer: plan + apply (API).** `ProjectPackageInstall`, plan generation, `apply` in one transaction, state reconciliation, issue-type reuse, `blocked_by` wiring, extension parsing | Plan writes nothing and is deterministic for a given (package, params, workspace), and matches the P-2 fixtures byte for byte; apply is atomic (an induced failure mid-apply leaves no project); installed project has the package's states with exactly one default; ticking is off; install record carries source, digest, catalog and artifact hashes; an unknown `extensions` key is ignored and an unknown `requires` key is a hard error |
 | P-5 | pi-dash | **`pidash project install` / `export` / `show` CLI, including catalog resolution.** Sources (file, dir, tgz, git, digest-pinned https, `owner/name@version`), parameter prompting, `--dry-run` rendering, conflict flags, `--accept-rulebook` | Round-trip test: export a PIDASHCONV-like fixture → install into a second workspace → export again → byte-identical; `--dry-run` output matches the plan API; tarball extraction rejects path traversal and oversized members; an archive whose digest does not match is refused before extraction; `owner/name@version` resolves against a static catalog served from a plain file server |
 | P-6 | pi-dash | **Bundled-skill install into the workspace skill store.** Depends on PDASHOSS01-260's `Skill` / `SkillFile`, the `skills.author` permission and the approval gate. Package-name namespacing; provenance fields; the plan's per-file listing | A package with `skills/` installs them as unapproved rows carrying package provenance; a skill with any file under `scripts/` or any executable bit is refused at plan time naming the files; a name collision with an existing workspace skill is refused; installing a package with skills without `skills.author` is refused; the plan lists every skill, description, file path, size and the executable count; no file reaches any machine before approval **and** runner opt-in |
-| P-7 | pi-dash | **Rulebook review gate.** `reviewed_*` fields, the review endpoint, the 409 on enabling ticking before review, UI rulebook-review screen | Enabling `agent_ticking_enabled` on an unreviewed installed project is refused by API and UI; reviewing records who/when/which digest; a project not created from a package is unaffected |
+| P-7 | pi-dash | **Rulebook review gate (§10.2, D23).** `reviewed_*` fields, the review endpoint, the **run-creation guard**, the 409 on enabling ticking before review, UI rulebook-review screen | Creating an agent run on an unreviewed installed project is refused for **every** trigger — a test per trigger: timer tick, human state move into a ticking state, Run AI, Comment & Run, Re-tick, token API — and the refusal names the review step; enabling `agent_ticking_enabled` on an unreviewed installed project is refused by API and UI; reviewing records who/when/which digest; a project not created from a package is unaffected (no `ProjectPackageInstall` row ⇒ no guard) |
 | P-8 | pi-dash | **Web UI: catalog browse, install, and package panel.** Source entry, catalog listing, parameter form, plan preview, skill + capability disclosure, post-install review panel | A user can install from a catalog entry and from a git URL end to end without the CLI; the skill file list, the capability list and the unsigned/provenance line are all visible before the confirm button |
 | P-9 | pi-dash | **MCP preview tool.** `pidash_preview_project_package` in `READ_TOOLS` | Tool returns the plan; no install tool exists; a write-policy test asserts install is not reachable from the agent toolset |
 | P-10 | pi-dash | **`pidash project diff`.** Read-only comparison of an installed project against a package version, using `installed_artifacts` | Correctly classifies each artifact — including each skill file — as unchanged / locally-edited / changed-upstream; exits non-zero when drift exists (so CI can gate) |
@@ -1853,8 +1936,9 @@ whether §5.2 is real.
 ## 14. Open decisions
 
 Each has a proposed default. Confirm or overturn in review; the outcome
-becomes the pinned contract. D1, D11 and D17 were re-decided for this
-revision and are marked accordingly.
+becomes the pinned contract. D1, D11 and D17 were re-decided for the
+scope revision and are marked accordingly; D23 and D24 came out of the
+review pass on that revision and are the two newest.
 
 **D1 — Frontmatter and manifest format.** *(re-decided)* The first draft
 pinned JSON on a pure dependency argument. Adopting the skills structure
@@ -2106,3 +2190,39 @@ so the courier must be liberal in what it accepts. Alternative: validate
 bundled skills strictly against the scalars-only rule and reject anything
 richer — which would reject skills that work perfectly well in every
 engine, for no gain.
+
+**D23 — The review gate belongs at run creation, not on the ticking
+switch.** `agent_ticking_enabled` gates only the clock:
+`_on_human_run_requested` (`orchestration/scheduling.py:520`) never checks
+it, and `_on_enter_or_move` (`:396`) checks it only for agent-initiated
+moves (`:420`), so Run AI, Comment & Run and a human state move into
+`In Progress` all dispatch a run on an unreviewed rulebook (§10.2).
+*Default: refuse **run creation** while `ProjectPackageInstall.reviewed_at`
+is null, at the single choke point every trigger funnels through
+(`_create_and_dispatch_run` / `_create_continuation_run`,
+`orchestration/service.py:735`/`:443`), and keep the refusal on the
+ticking switch as well.* One guard in the path all six triggers share is
+both stronger and less code than a check per caller, and putting it there
+means a future seventh trigger is covered by construction. Alternative:
+guard each trigger separately, which is what a reader of the first draft
+would have built from the switch-only description and which leaves the
+next dispatch path to be found by an incident. A second alternative worth
+naming and rejecting: treat a deliberate human Run AI click as consent.
+It is not — the person clicking has not necessarily read the rulebook, and
+the whole point of the gate is that reading it is a distinct act (§12.3).
+
+**D24 — The core capability vocabulary is closed and spec-owned.**
+§4.4 rule 2 makes an unrecognised capability name a hard error, which is
+only implementable against an enumerated set. *Default: the spec
+enumerates the v1 core capabilities — `repo.read`, `repo.write`,
+`repo.admin_merge`, `shell`, `network`, `db.write` (§6.3) — a name outside
+the set is a validation error, platform-specific requirements go in that
+vendor's own `requires` block rather than the core list, and the core list
+grows only on a `spec_version` major.* The last clause is the cost of rule
+2 and is worth paying: the alternative, letting the list grow within a
+major, means a package can declare a capability an older reader silently
+ignores, which is exactly the "installed with more power than it
+displayed" failure rule 2 exists to prevent. Alternative: make
+`capabilities` free-form strings and downgrade rule 2 to a warning for
+capabilities while keeping it strict for permissions — simpler for
+publishers, and it reintroduces the silent-underdisclosure hole.
