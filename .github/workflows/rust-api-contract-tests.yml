@@ -157,7 +157,13 @@ jobs:
       BASE_URL: http://localhost:8000
       DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
       CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
+      CONTRACT_REDIS_URL: redis://localhost:6379/0
       CONTRACT_TASK_TIMEOUT: "60"
+      # D-06 assistant task oracle (PIDASHCONV-254): BYOK config encryption
+      # needs a backend. Fernet with a committed test-only key (ephemeral CI
+      # database; never a real secret) — the other oracles never touch BYOK.
+      ASSISTANT_CRYPTO_BACKEND: fernet
+      ASSISTANT_ENCRYPTION_KEY: -k26Q_XWFtfq5jzJTSUY483-H3-wrdJ67w2kQgLDmlU=
     steps:
       - uses: actions/checkout@v6
 
@@ -254,7 +260,7 @@ jobs:
         # without this the django plugin tries to import pi_dash from this dir
         # and collection fails before any test runs. The oracle never touches
         # Django (wire format + DB diff + sinks only).
-        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django tasks_mail tasks_webhooks tasks_cleanup tasks_ticker
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py
 
       - name: Upload service logs on failure
         if: failure()
