@@ -23,6 +23,7 @@
 
 pub mod app_issues;
 pub mod assistant;
+pub mod auth_session;
 pub mod edge;
 pub mod license;
 pub mod r#loop;
