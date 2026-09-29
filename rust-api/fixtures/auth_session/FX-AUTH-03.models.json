@@ -1,0 +1,561 @@
+{
+ "_fixture": "FX-AUTH-03",
+ "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+ "_sources": [
+  "apps/api/pi_dash/db/models/session.py:14 (VALID_KEY_CHARS)",
+  "apps/api/pi_dash/db/models/session.py:17-27 (Session: device_info/session_key/user_id, db_table='sessions', AbstractBaseSession base)",
+  "apps/api/pi_dash/db/models/session.py:30-56 (SessionStore: get_model_class, 128-char key loop, create_model_instance)",
+  "apps/api/pi_dash/db/models/user.py:56-137 (User auth-relevant columns; USERNAME_FIELD=email)",
+  "apps/api/pi_dash/db/models/user.py:142-151 (avatar_url), :164-167 (full_name), :169-187 (save: lowercases email, token rotation, display_name backfill, superuser->staff)",
+  "apps/api/pi_dash/db/models/user.py:189-197 (get_display_name)",
+  "apps/api/pi_dash/db/models/user.py:200-277 (Profile: is_onboarded, last_workspace_id \u2014 read-only reference for redirection)",
+  "apps/api/pi_dash/db/mixins.py:16-27 (TimeAuditModel created_at/updated_at), :85+ (AuditModel adds UserAuditModel+SoftDeleteModel)",
+  "apps/api/pi_dash/settings/common.py:599 (SESSION_ENGINE='pi_dash.db.models.session')"
+ ],
+ "_method": "executed /tmp/fx279venv/bin/python /tmp/probe_fx0304.py (python 3.12, Django 5.2, sqlite :memory:): real Session/User model classes (bodies byte-identical; loaded under shim app labels 'db'/'lic' for registry purposes only; User post_save notification signal disconnected probe-only; FK enforcement off probe-only). Column lists from real _meta. Keygen via real _get_new_session_key (exists() against sqlite). create_model_instance executed unsaved. set_password/check_password are Django AbstractBaseUser PBKDF2 (F-05 owns the hash format; recorded algo/iterations + verify booleans only). Postgres column types noted where the sqlite rendering differs (UUID char(32) vs uuid).",
+ "session": {
+  "db_table": "sessions",
+  "django_base": "django.contrib.sessions.base_session.AbstractBaseSession",
+  "store_class": "pi_dash.db.models.session.SessionStore",
+  "columns": [
+   {
+    "name": "session_data",
+    "column": "session_data",
+    "django_type": "TextField",
+    "max_length": null,
+    "null": false,
+    "primary_key": false,
+    "db_index": false,
+    "unique": false
+   },
+   {
+    "name": "expire_date",
+    "column": "expire_date",
+    "django_type": "DateTimeField",
+    "max_length": null,
+    "null": false,
+    "primary_key": false,
+    "db_index": true,
+    "unique": false
+   },
+   {
+    "name": "device_info",
+    "column": "device_info",
+    "django_type": "JSONField",
+    "max_length": null,
+    "null": true,
+    "primary_key": false,
+    "db_index": false,
+    "unique": false
+   },
+   {
+    "name": "session_key",
+    "column": "session_key",
+    "django_type": "CharField",
+    "max_length": 128,
+    "null": false,
+    "primary_key": true,
+    "db_index": false,
+    "unique": true
+   },
+   {
+    "name": "user_id",
+    "column": "user_id",
+    "django_type": "CharField",
+    "max_length": 50,
+    "null": true,
+    "primary_key": false,
+    "db_index": true,
+    "unique": false
+   }
+  ],
+  "column_names": [
+   "session_data",
+   "expire_date",
+   "device_info",
+   "session_key",
+   "user_id"
+  ]
+ },
+ "user": {
+  "db_table": "users",
+  "auth_columns": {
+   "db_table": "users",
+   "columns": [
+    {
+     "name": "password",
+     "column": "password",
+     "django_type": "CharField",
+     "max_length": 128,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "last_login",
+     "column": "last_login",
+     "django_type": "DateTimeField",
+     "max_length": null,
+     "null": true,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "id",
+     "column": "id",
+     "django_type": "UUIDField",
+     "max_length": 32,
+     "null": false,
+     "primary_key": true,
+     "db_index": true,
+     "unique": true
+    },
+    {
+     "name": "username",
+     "column": "username",
+     "django_type": "CharField",
+     "max_length": 128,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": true
+    },
+    {
+     "name": "mobile_number",
+     "column": "mobile_number",
+     "django_type": "CharField",
+     "max_length": 255,
+     "null": true,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "email",
+     "column": "email",
+     "django_type": "CharField",
+     "max_length": 255,
+     "null": true,
+     "primary_key": false,
+     "db_index": false,
+     "unique": true
+    },
+    {
+     "name": "display_name",
+     "column": "display_name",
+     "django_type": "CharField",
+     "max_length": 255,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false,
+     "default": "''"
+    },
+    {
+     "name": "first_name",
+     "column": "first_name",
+     "django_type": "CharField",
+     "max_length": 255,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "last_name",
+     "column": "last_name",
+     "django_type": "CharField",
+     "max_length": 255,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "avatar",
+     "column": "avatar",
+     "django_type": "TextField",
+     "max_length": null,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "avatar_asset",
+     "column": "avatar_asset_id",
+     "django_type": "ForeignKey",
+     "max_length": null,
+     "null": true,
+     "primary_key": false,
+     "db_index": true,
+     "unique": false
+    },
+    {
+     "name": "cover_image",
+     "column": "cover_image",
+     "django_type": "URLField",
+     "max_length": 800,
+     "null": true,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "cover_image_asset",
+     "column": "cover_image_asset_id",
+     "django_type": "ForeignKey",
+     "max_length": null,
+     "null": true,
+     "primary_key": false,
+     "db_index": true,
+     "unique": false
+    },
+    {
+     "name": "date_joined",
+     "column": "date_joined",
+     "django_type": "DateTimeField",
+     "max_length": null,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "created_at",
+     "column": "created_at",
+     "django_type": "DateTimeField",
+     "max_length": null,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "updated_at",
+     "column": "updated_at",
+     "django_type": "DateTimeField",
+     "max_length": null,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "last_location",
+     "column": "last_location",
+     "django_type": "CharField",
+     "max_length": 255,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "created_location",
+     "column": "created_location",
+     "django_type": "CharField",
+     "max_length": 255,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "is_superuser",
+     "column": "is_superuser",
+     "django_type": "BooleanField",
+     "max_length": null,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false,
+     "default": false
+    },
+    {
+     "name": "is_managed",
+     "column": "is_managed",
+     "django_type": "BooleanField",
+     "max_length": null,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false,
+     "default": false
+    },
+    {
+     "name": "is_password_expired",
+     "column": "is_password_expired",
+     "django_type": "BooleanField",
+     "max_length": null,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false,
+     "default": false
+    },
+    {
+     "name": "is_active",
+     "column": "is_active",
+     "django_type": "BooleanField",
+     "max_length": null,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false,
+     "default": true
+    },
+    {
+     "name": "is_staff",
+     "column": "is_staff",
+     "django_type": "BooleanField",
+     "max_length": null,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false,
+     "default": false
+    },
+    {
+     "name": "is_email_verified",
+     "column": "is_email_verified",
+     "django_type": "BooleanField",
+     "max_length": null,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false,
+     "default": false
+    },
+    {
+     "name": "is_password_autoset",
+     "column": "is_password_autoset",
+     "django_type": "BooleanField",
+     "max_length": null,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false,
+     "default": false
+    },
+    {
+     "name": "is_password_reset_required",
+     "column": "is_password_reset_required",
+     "django_type": "BooleanField",
+     "max_length": null,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false,
+     "default": false
+    },
+    {
+     "name": "token",
+     "column": "token",
+     "django_type": "CharField",
+     "max_length": 64,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "last_active",
+     "column": "last_active",
+     "django_type": "DateTimeField",
+     "max_length": null,
+     "null": true,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "last_login_time",
+     "column": "last_login_time",
+     "django_type": "DateTimeField",
+     "max_length": null,
+     "null": true,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "last_logout_time",
+     "column": "last_logout_time",
+     "django_type": "DateTimeField",
+     "max_length": null,
+     "null": true,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "last_login_ip",
+     "column": "last_login_ip",
+     "django_type": "CharField",
+     "max_length": 255,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "last_logout_ip",
+     "column": "last_logout_ip",
+     "django_type": "CharField",
+     "max_length": 255,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "last_login_medium",
+     "column": "last_login_medium",
+     "django_type": "CharField",
+     "max_length": 20,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false,
+     "default": "'email'"
+    },
+    {
+     "name": "last_login_uagent",
+     "column": "last_login_uagent",
+     "django_type": "TextField",
+     "max_length": null,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "token_updated_at",
+     "column": "token_updated_at",
+     "django_type": "DateTimeField",
+     "max_length": null,
+     "null": true,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "is_bot",
+     "column": "is_bot",
+     "django_type": "BooleanField",
+     "max_length": null,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false,
+     "default": false
+    },
+    {
+     "name": "bot_type",
+     "column": "bot_type",
+     "django_type": "CharField",
+     "max_length": 30,
+     "null": true,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "user_timezone",
+     "column": "user_timezone",
+     "django_type": "CharField",
+     "max_length": 255,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false,
+     "default": "'UTC'"
+    },
+    {
+     "name": "is_email_valid",
+     "column": "is_email_valid",
+     "django_type": "BooleanField",
+     "max_length": null,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false,
+     "default": false
+    },
+    {
+     "name": "masked_at",
+     "column": "masked_at",
+     "django_type": "DateTimeField",
+     "max_length": null,
+     "null": true,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "groups",
+     "column": null,
+     "django_type": "ManyToManyField",
+     "max_length": null,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    },
+    {
+     "name": "user_permissions",
+     "column": null,
+     "django_type": "ManyToManyField",
+     "max_length": null,
+     "null": false,
+     "primary_key": false,
+     "db_index": false,
+     "unique": false
+    }
+   ]
+  },
+  "postgres_note": "UUIDField renders char(32) on sqlite, uuid on Postgres; varchar/bool/datetime identical."
+ },
+ "valid_key_chars": "abcdefghijklmnopqrstuvwxyz0123456789",
+ "keygen": {
+  "length": 128,
+  "charset_ok": true,
+  "sample": "g6cgjxv2bts7yu4r..."
+ },
+ "create_model_instance": {
+  "full": {
+   "user_id": "abc",
+   "device_info": {
+    "user_agent": "UA",
+    "ip_address": "1.1.1.1",
+    "domain": "http://x"
+   }
+  },
+  "empty": {
+   "user_id": null,
+   "device_info": null
+  },
+  "nondict_device_info": {
+   "user_id": 5,
+   "device_info": null
+  }
+ },
+ "create_model_instance_note": "user_id=data.get('_auth_user_id') with ValueError/TypeError->None (an int passes through unconverted); device_info kept only if dict else None; non-dict data raises AttributeError (uncaught) \u2014 code-evident.",
+ "password": {
+  "algo": "pbkdf2_sha256",
+  "iterations": "1500000",
+  "check_true": true,
+  "check_false": false
+ },
+ "save_normalization": {
+  "saved_email": "mixed@x.com",
+  "note": "User.save() lowercases+strips email; token rotation + display_name backfill per user.py:169-187."
+ },
+ "display_name": {
+  "with_email": "john",
+  "fallback": "6 random ascii_letters when email missing or != 2 parts (nondeterministic; probe observed 'WKamaj')"
+ }
+}

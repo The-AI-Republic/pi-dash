@@ -1,0 +1,234 @@
+{
+ "_fixture": "FX-AUTH-05",
+ "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+ "_sources": [
+  "apps/api/pi_dash/authentication/rate_limit.py:17-28 (AuthenticationThrottle 30/min + throttle_failure_view)",
+  "apps/api/pi_dash/authentication/rate_limit.py:31-47 (EmailVerificationThrottle 3/hour + throttle_failure_view)",
+  "apps/api/pi_dash/authentication/middleware/session.py:22-27 (process_request cookie selection)",
+  "apps/api/pi_dash/authentication/middleware/session.py:29-92 (process_response save/delete-cookie + Vary)",
+  "apps/api/pi_dash/authentication/session.py:8-11 (BaseSessionAuthentication: CSRF disabled; used only by CLI device views D-22)",
+  "apps/api/pi_dash/authentication/adapter/exception.py:17-34 (production throttle/401 mapping)",
+  "apps/api/pi_dash/settings/common.py:73-88 (MIDDLEWARE order: custom SessionMiddleware FIRST at :77)",
+  "apps/api/pi_dash/settings/common.py:90-106 (REST_FRAMEWORK: SessionAuthentication, AnonRateThrottle, anon 30/min; NO default permission class -> AllowAny)",
+  "apps/api/pi_dash/settings/common.py:597-607 (cookie names/ages: session-id/604800, admin-session-id/3600)",
+  "apps/api/pi_dash/settings/common.py:CSRF_FAILURE_VIEW='pi_dash.authentication.views.common.csrf_failure'",
+  "apps/api/pi_dash/authentication/views/common.py:28-29 (CSRFTokenEndpoint AllowAny), :47 (ChangePasswordEndpoint: no permission_classes), :99-100 (SetUserPasswordEndpoint + invalidate_cache)",
+  "apps/api/pi_dash/authentication/views/app/check.py:29-32 + space/check.py:29-32 (AllowAny + AuthenticationThrottle)",
+  "apps/api/pi_dash/authentication/views/app/magic.py:33-36 + space/magic.py:31-33 (MagicGenerate AllowAny + AuthenticationThrottle)",
+  "apps/api/pi_dash/authentication/views/app/password_management.py:45-48 + space/password_management.py:45-48 (Forgot AllowAny + AuthenticationThrottle)",
+  "apps/api/pi_dash/authentication/views/app/email.py:26,135 + space/email.py:25,110 + app|space/magic.py:61,132,56,115 + signout + reset (plain Django View: no DRF permission layer, session-dependent)"
+ ],
+ "_method": "executed /tmp/fx279venv/bin/python /tmp/probe_fx0506.py: real DRF throttle classes driven 31x with real DRF test requests (anon throttled on 31st, authed never); real throttle_failure_view bodies; real production auth_exception_handler with real Throttled/NotAuthenticated; real SessionMiddleware.process_request cookie selection with stub store; real process_response against real HttpResponse (cookie capture). Permission table from real class attrs (probe_fx78).",
+ "permissions": {
+  "AllowAny_explicit": [
+   "EmailCheckEndpoint app+space",
+   "MagicGenerateEndpoint app+space",
+   "ForgotPasswordEndpoint app+space",
+   "CSRFTokenEndpoint"
+  ],
+  "AllowAny_by_default": [
+   "ChangePasswordEndpoint",
+   "SetUserPasswordEndpoint (APIView, no permission_classes; DRF default AllowAny since settings set no DEFAULT_PERMISSION_CLASSES)"
+  ],
+  "session_dependent_plain_views": [
+   "SignIn/SignUp/MagicSignIn/MagicSignUp/ResetPassword/SignOut app+space (django.views.View: no permission layer; behavior depends on session/user)"
+  ],
+  "declared": {
+   "EmailCheck": [
+    "AllowAny"
+   ],
+   "MagicGenerate": [
+    "AllowAny"
+   ],
+   "ForgotPassword": [
+    "AllowAny"
+   ],
+   "CSRFToken": [
+    "AllowAny"
+   ],
+   "ChangePassword": [
+    "<class 'rest_framework.permissions.AllowAny'>"
+   ],
+   "SetPassword": [
+    "<class 'rest_framework.permissions.AllowAny'>"
+   ]
+  },
+  "production_401": {
+   "status": 401,
+   "body": {
+    "detail": "Authentication credentials were not provided."
+   }
+  }
+ },
+ "throttles": {
+  "AuthenticationThrottle": {
+   "rate": "30/minute",
+   "scope": "authentication",
+   "base": [
+    "AnonRateThrottle",
+    "SimpleRateThrottle"
+   ]
+  },
+  "EmailVerificationThrottle": {
+   "rate": "3/hour",
+   "scope": "email_verification",
+   "base": [
+    "UserRateThrottle",
+    "SimpleRateThrottle"
+   ]
+  }
+ },
+ "throttle_429_bodies": {
+  "AuthenticationThrottle": {
+   "status": 429,
+   "body": {
+    "error_code": 5900,
+    "error_message": "RATE_LIMIT_EXCEEDED"
+   }
+  },
+  "EmailVerificationThrottle": {
+   "status": 429,
+   "body": {
+    "error_code": 5900,
+    "error_message": "RATE_LIMIT_EXCEEDED"
+   }
+  },
+  "production_drf_path": {
+   "status": 429,
+   "body": {
+    "detail": "Request was throttled."
+   }
+  }
+ },
+ "throttle_drive": {
+  "anon_first30_all_true": true,
+  "anon_req31": false,
+  "authed_5_all_true": true
+ },
+ "throttle_notes": [
+  "throttle_failure_view is DEAD CODE: zero non-test callers (repo-wide grep); DRF invokes throttle_failure(), not throttle_failure_view. Real 429 path: DRF default {'detail': 'Request was throttled.'} -> production auth_exception_handler rewrites to 5900 error_dict.",
+  "AnonRateThrottle.get_cache_key returns None for authenticated users -> authenticated callers are NEVER throttled by AuthenticationThrottle (probe authed_5_all_true).",
+  "EmailVerificationThrottle is UserRateThrottle (per-user 3/hour) but NO D-16 view wires it (all D-16 throttle_classes use AuthenticationThrottle); recorded for completeness."
+ ],
+ "middleware": {
+  "cookie_selection": [
+   {
+    "path": "/api/auth/sign-in/",
+    "cookies": {
+     "session-id": "AAA"
+    },
+    "store_key": "AAA",
+    "session_obj": "FakeStore"
+   },
+   {
+    "path": "/api/instances/foo/",
+    "cookies": {
+     "admin-session-id": "BBB",
+     "session-id": "AAA"
+    },
+    "store_key": "BBB",
+    "session_obj": "FakeStore"
+   },
+   {
+    "path": "/api/instances/foo/",
+    "cookies": {},
+    "store_key": null,
+    "session_obj": "FakeStore"
+   },
+   {
+    "path": "/api/auth/x/",
+    "cookies": {},
+    "store_key": null,
+    "session_obj": "FakeStore"
+   }
+  ],
+  "response_vectors": {
+   "delete_empty": {
+    "saved": false,
+    "cookies": {
+     "session-id": {
+      "expires": "Thu, 01 Jan 1970 00:00:00 GMT",
+      "path": "/",
+      "comment": "",
+      "domain": "",
+      "max-age": 0,
+      "secure": "",
+      "httponly": "",
+      "version": "",
+      "samesite": "Lax"
+     }
+    },
+    "deleted": [
+     "session-id"
+    ],
+    "vary": "Cookie"
+   },
+   "save_dirty": {
+    "saved": true,
+    "cookies": {
+     "session-id": {
+      "expires": "Tue, 06 Oct 2026 18:12:42 GMT",
+      "path": "/",
+      "comment": "",
+      "domain": "",
+      "max-age": 604800,
+      "secure": "",
+      "httponly": true,
+      "version": "",
+      "samesite": "Lax"
+     }
+    },
+    "deleted": [],
+    "vary": "Cookie"
+   },
+   "admin_save": {
+    "saved": true,
+    "cookies": {
+     "admin-session-id": {
+      "expires": "Tue, 29 Sep 2026 19:12:42 GMT",
+      "path": "/",
+      "comment": "",
+      "domain": "",
+      "max-age": 3600,
+      "secure": "",
+      "httponly": true,
+      "version": "",
+      "samesite": "Lax"
+     }
+    },
+    "deleted": [],
+    "vary": "Cookie"
+   },
+   "untouched": {
+    "saved": false,
+    "cookies": {},
+    "deleted": [],
+    "vary": null
+   },
+   "browser_close": {
+    "saved": true,
+    "cookies": {
+     "session-id": {
+      "expires": "",
+      "path": "/",
+      "comment": "",
+      "domain": "",
+      "max-age": "",
+      "secure": "",
+      "httponly": true,
+      "version": "",
+      "samesite": "Lax"
+     }
+    },
+    "deleted": [],
+    "vary": "Cookie"
+   }
+  },
+  "notes": [
+   "'instances' substring match on path selects ADMIN cookie (not prefix/segment match).",
+   "delete_cookie passes path/domain/samesite; secure/httponly falsy->omitted on delete.",
+   "save skipped when response.status_code >= 500 (code-evident).",
+   "browser_close sessions persist with empty max_age/expires (session cookie)."
+  ]
+ }
+}

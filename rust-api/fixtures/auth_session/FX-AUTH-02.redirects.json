@@ -1,0 +1,77 @@
+{
+ "_fixture": "FX-AUTH-02",
+ "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+ "_sources": [
+  "apps/api/pi_dash/utils/path_validator.py:13-47 (_contains_suspicious_patterns list)",
+  "apps/api/pi_dash/utils/path_validator.py:50-66 (get_allowed_hosts)",
+  "apps/api/pi_dash/utils/path_validator.py:69-98 (validate_next_path)",
+  "apps/api/pi_dash/utils/path_validator.py:101-145 (get_safe_redirect_url)",
+  "apps/api/pi_dash/authentication/utils/host.py:16-63 (base_host incl. ADMIN_BASE_PATH/SPACE_BASE_PATH normalization)",
+  "apps/api/pi_dash/authentication/utils/host.py:66-67 (user_ip)",
+  "apps/api/pi_dash/authentication/utils/redirection_path.py:8-46 (get_redirection_path branches)",
+  "apps/api/pi_dash/authentication/views/app/password_management.py:112-116,124-129,138-142,151-155,162-166 (urljoin reset targets)",
+  "apps/api/pi_dash/authentication/views/space/password_management.py:125,135,145,153 (space reset targets)",
+  "apps/api/pi_dash/authentication/views/space/email.py:96-101,180-185 + views/space/magic.py:98-103,156-161 (validate_next_path + allowed-host success branches)",
+  "apps/api/pi_dash/settings/common.py:619-641 (ADMIN/SPACE/APP base URL + path settings)"
+ ],
+ "_method": "executed /tmp/fx279venv/bin/python /tmp/probe02.py and fixup probes (python 3.12, Django 5.2 utils only): real validate_next_path/get_safe_redirect_url/get_allowed_hosts/base_host with settings WEB_URL=http://localhost:8000 APP_BASE_URL=http://localhost:3000 ADMIN/SPACE_BASE_URL=None. Redirection-path matrix executed against sqlite in probe_fx78c (real Profile/Workspace/WorkspaceMember/WorkspaceMemberInvite rows). Reset targets executed end-to-end in probe_fx78/fx78c (real views).",
+ "probe_settings": {
+  "WEB_URL": "http://localhost:8000",
+  "APP_BASE_URL": "http://localhost:3000",
+  "ADMIN_BASE_URL": null,
+  "SPACE_BASE_URL": null
+ },
+ "base_host": {
+  "app": "http://localhost:3000",
+  "space": "http://localhost:8000/spaces/",
+  "plain": "http://localhost:8000",
+  "admin": "http://localhost:8000/god-mode/"
+ },
+ "validate_next_path": {
+  "/onboarding": "/onboarding",
+  "onboarding": "",
+  "": "",
+  "null": "",
+  "/a/../b": "",
+  "https://evil.com/x": "/x",
+  "/x?yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy": "",
+  "/spaces/abc": "/spaces/abc",
+  "/create-workspace": "/create-workspace",
+  "javascript:alert(1)": "",
+  "/foo\\bar": "/foobar",
+  "//evil.com/x": "/x",
+  "/invitations": "/invitations"
+ },
+ "safe_url_cases": {
+  "signin_fail_app_next": "http://localhost:3000?error_code=5065&error_message=AUTHENTICATION_FAILED_SIGN_IN&email=u%40x.com",
+  "signin_fail_app_no_next": "http://localhost:3000?error_code=5000&error_message=INSTANCE_NOT_CONFIGURED",
+  "signup_fail_space_next": "http://localhost:8000/spaces/?next_path=/invitations&error_code=5030&error_message=USER_ALREADY_EXIST&email=u%40x.com",
+  "magic_fail_space_evil_next": "http://localhost:8000/spaces/?next_path=/x&error_code=5090&error_message=INVALID_MAGIC_CODE_SIGN_IN&email=u%40x.com",
+  "success_no_params_next": "http://localhost:3000",
+  "success_no_next": "http://localhost:3000",
+  "allowed_hosts": [
+   "localhost:8000"
+  ]
+ },
+ "reset_targets": {
+  "app_invalid_token": "http://localhost:3000/accounts/reset-password?error_code=5125&error_message=INVALID_PASSWORD_TOKEN",
+  "app_success": "http://localhost:3000/sign-in?success=True",
+  "space_invalid_token": "http://localhost:8000/spaces//accounts/reset-password/?error_code=5125&error_message=INVALID_PASSWORD_TOKEN",
+  "space_signout_ok": "http://localhost:8000/spaces/?next_path=/onboarding"
+ },
+ "observed_quirks": [
+  "Q1: app-base redirects drop next_path when APP_BASE_URL host != WEB_URL host: signin_fail_app_next keeps error params but loses next_path (allowed-host check fails, fallback appends only encoded params).",
+  "Q2: get_redirection_path returns slash-less paths ('onboarding', '<slug>', 'invitations', 'create-workspace'); validate_next_path rejects all of them, so app success redirects land on the bare base URL (observed signin_ok/signup_ok/magicsignin_ok -> bare base).",
+  "Q3: urlencode({'success': True}) renders 'success=True' (capital T) byte-exact.",
+  "Q4: space reset target has a double slash ('spaces//accounts') \u2014 base ends with '/' and the path is absolute.",
+  "Q5: '//evil.com/x' degrades to path '/x' (netloc stripped, kept); backslashes are deleted ('/foo\\bar' -> '/foobar'); 'javascript:...' with no leading slash -> ''."
+ ],
+ "redirection_path_matrix": {
+  "new_user_no_profile": "onboarding",
+  "onboarded_last_workspace": "ws1",
+  "onboarded_fallback_member": "ws1",
+  "has_invite_only": "invitations",
+  "nothing": "create-workspace"
+ },
+ "redirection_soft_delete_quirk": "reverse join Workspace->workspace_members carries NO deleted_at filter (observed SQL in probe; soft-deleted memberships still redirect)."
+}
