@@ -39,7 +39,7 @@ export const ProfileSidebar = observer(function ProfileSidebar(props: TProfileSi
   // refs
   const ref = useRef<HTMLDivElement>(null);
   // router
-  const { userId } = useParams();
+  const { workspaceSlug, userId } = useParams();
   const router = useAppRouter();
   // store hooks
   const { data: currentUser } = useUser();
@@ -100,7 +100,7 @@ export const ProfileSidebar = observer(function ProfileSidebar(props: TProfileSi
                 <IconButton
                   variant="secondary"
                   icon={EditIcon}
-                  onClick={() => router.push("/settings/profile/general")}
+                  onClick={() => router.push(`/${workspaceSlug}/settings/account/general`)}
                 />
               </div>
             )}
