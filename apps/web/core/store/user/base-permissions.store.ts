@@ -109,7 +109,18 @@ export abstract class BaseUserPermissionStore implements IBaseUserPermissionStor
   getWorkspaceRoleByWorkspaceSlug = computedFn(
     (workspaceSlug: string): TUserPermissions | EUserWorkspaceRoles | undefined => {
       if (!workspaceSlug) return undefined;
-      return this.workspaceUserInfo[workspaceSlug]?.role as TUserPermissions | EUserWorkspaceRoles | undefined;
+      const memberRole = this.workspaceUserInfo[workspaceSlug]?.role;
+      if (memberRole !== undefined) return memberRole as TUserPermissions | EUserWorkspaceRoles;
+      // `workspaceUserInfo` is only populated by `fetchUserWorkspaceInfo`, which the
+      // workspace wrapper calls for the *current* workspace. The user's role in every
+      // workspace they belong to is already on the client though - the workspace list
+      // endpoint annotates it per workspace - so fall back to that. Without this, any
+      // permission check against a non-current workspace (e.g. the settings navigator
+      // listing every workspace) denies everything until that workspace is opened.
+      const workspaceRole = Object.values(this.store.workspaceRoot.workspaces ?? {}).find(
+        (workspace) => workspace.slug === workspaceSlug
+      )?.role;
+      return workspaceRole as TUserPermissions | EUserWorkspaceRoles | undefined;
     }
   );
 
