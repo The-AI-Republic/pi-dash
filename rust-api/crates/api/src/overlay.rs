@@ -169,9 +169,10 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // App handlers merge their routers here (D-26 issue lists in
         // `app_issues`; D-32 intake-issues/inbox-issues list+create,
         // PIDASHCONV-385, plus intake-issue detail + versions,
-        // PIDASHCONV-395, in `app_intake`; D-33 project-github,
-        // PIDASHCONV-450, in `app_integrations`; sibling handler issues
-        // extend the merge; merges keep both sides).
+        // PIDASHCONV-395, in `app_intake`; D-33 project-github
+        // (PIDASHCONV-450) + workspace GitHub handlers (PIDASHCONV-446),
+        // both in `app_integrations`; sibling handler issues extend the
+        // merge; merges keep both sides).
         RouteGroup::App => crate::app_issues::routes()
             .merge(crate::app_intake::routes())
             .merge(crate::app_integrations::routes()),
