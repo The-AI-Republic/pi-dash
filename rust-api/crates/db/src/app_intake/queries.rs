@@ -488,9 +488,16 @@ pub fn intake_issue_list_sql(q: &IntakeIssueListQuery<'_>) -> String {
         ));
     }
     sql.push(')');
+    // Django groups aggregate-over-join reads by every selected PK:
+    // `IntakeIssue` and its `select_related("issue")` row
+    // (`base.py:184-188`). Grouping by the intake-issue id alone
+    // rejects any ORDER BY on a joined column — including the view
+    // default `-issue__created_at` (`:198`) — with `column
+    // "issues.created_at" must appear in the GROUP BY clause`.
     sql.push_str(&format!(
-        " GROUP BY \"{t}\".\"id\"",
-        t = intake_issue::TABLE
+        " GROUP BY \"{t}\".\"id\", \"{i}\".\"id\"",
+        t = intake_issue::TABLE,
+        i = ISSUE_TABLE,
     ));
     sql.push_str(&format!(" ORDER BY {}", order_to_sql(q.order_by)));
     sql.push_str(&format!(" LIMIT {}", q.limit));
@@ -525,9 +532,14 @@ pub fn issue_annotate_assignee_ids_fragment() -> String {
 /// [`detail_assignee_ids_fragment`] guard (`is_active`, no
 /// `deleted_at`).
 /// `$1` intake_id, `$2` issue_id, `$3` project_id.
+///
+/// The `GROUP BY` covers both selected PKs — Django's rendering for
+/// an aggregate-over-`select_related("issue")` read
+/// (`base.py:507-530`). Without it Postgres rejects the statement:
+/// a bare column (`"t".*`) may not sit beside an aggregate.
 pub fn intake_issue_detail_sql(assignee_ids: &str) -> String {
     format!(
-        r#"SELECT "{t}".*, "{i}".*, {labels} AS "label_ids", {assignees} AS "assignee_ids" FROM "{t}" INNER JOIN "{i}" ON ("{t}"."issue_id" = "{i}"."id") WHERE ("{t}"."intake_id" = $1 AND "{t}"."issue_id" = $2 AND "{t}"."project_id" = $3 AND "{t}"."deleted_at" IS NULL)"#,
+        r#"SELECT "{t}".*, "{i}".*, {labels} AS "label_ids", {assignees} AS "assignee_ids" FROM "{t}" INNER JOIN "{i}" ON ("{t}"."issue_id" = "{i}"."id") WHERE ("{t}"."intake_id" = $1 AND "{t}"."issue_id" = $2 AND "{t}"."project_id" = $3 AND "{t}"."deleted_at" IS NULL) GROUP BY "{t}"."id", "{i}"."id""#,
         t = intake_issue::TABLE,
         i = ISSUE_TABLE,
         labels = label_ids_fragment(),
@@ -923,7 +935,13 @@ mod tests {
             sql.contains("ORDER BY \"issues\".\"created_at\" DESC"),
             "{sql}"
         );
-        assert!(sql.contains("GROUP BY \"intake_issues\".\"id\""), "{sql}");
+        // Django groups by both selected PKs (intake-issue + joined
+        // issue): grouping by the intake-issue id alone rejects the
+        // default ORDER BY on "issues"."created_at".
+        assert!(
+            sql.contains("GROUP BY \"intake_issues\".\"id\", \"issues\".\"id\""),
+            "{sql}"
+        );
         assert!(sql.contains("LIMIT 50"), "{sql}");
         assert!(!sql.contains("OFFSET"), "{sql}");
     }
@@ -1017,6 +1035,12 @@ mod tests {
         let create_refetch = intake_issue_detail_sql(&detail_assignee_ids_fragment());
         for sql in [&retrieve, &referetch, &create_refetch] {
             assert!(sql.contains(label_ids_fragment().as_str()), "{sql}");
+            // Aggregate-over-join: Django groups by both selected PKs.
+            // No GROUP BY at all always errors in Postgres.
+            assert!(
+                sql.contains("GROUP BY \"intake_issues\".\"id\", \"issues\".\"id\""),
+                "{sql}"
+            );
             assert!(
                 sql.contains("\"intake_issues\".\"intake_id\" = $1"),
                 "{sql}"
