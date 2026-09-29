@@ -116,8 +116,18 @@ async fn serve(bind: &str) -> MainResult {
         flags = ?edge.flags(),
         "serving HTTP"
     );
-    let state = AppState::with_settings_and_edge(env!("CARGO_PKG_VERSION"), settings, edge)
+    // Shared Redis client (PIDASHCONV-265): cancel signals, the throttle
+    // cache, and the SSE live tail multiplex over it. Absent without a
+    // `REDIS_URL` (handlers degrade per-site: swallow / allow / replay-only).
+    let redis = pidash_db::redis::RedisHandle::from_settings(&settings);
+    if redis.is_some() {
+        tracing::info!("redis handle ready (client connects lazily per operation)");
+    }
+    let mut state = AppState::with_settings_and_edge(env!("CARGO_PKG_VERSION"), settings, edge)
         .with_pools(pools);
+    if let Some(handle) = redis {
+        state = state.with_redis(handle);
+    }
     let app = pidash_api::build_app(state, None);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(

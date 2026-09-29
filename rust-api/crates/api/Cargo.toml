@@ -24,7 +24,11 @@ axum = "0.8"
 bytes = "1"
 flate2 = "1"
 http = "1"
-http-body-util = "0.1"
+# The SSE live tail (PIDASHCONV-265) streams through `channel::Channel`;
+# without the `channel` feature the module is compiled out and no other
+# workspace crate enables it (no feature-unification rescue), so it is
+# declared here explicitly.
+http-body-util = { version = "0.1", features = ["channel"] }
 serde = { version = "1", features = ["derive"] }
 # preserve_order: response envelopes and trimmed objects keep serializer field
 # order, which byte-identical JSON parity with DRF requires. serde_json::Map

@@ -32,6 +32,7 @@ pub mod r#loop;
 pub mod migrations;
 pub mod pool;
 pub mod prompting;
+pub mod redis;
 pub mod soft_delete;
 pub mod space;
 pub mod tasks_cleanup;

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use pidash_db::config::Settings;
+use pidash_db::redis::RedisHandle;
 use pidash_db::Pools;
 
 use crate::edge::{EdgeHandle, DEFAULT_UPSTREAM};
@@ -20,6 +21,7 @@ pub struct AppState {
     settings: Arc<Settings>,
     edge: EdgeHandle,
     pools: Option<Arc<Pools>>,
+    redis: Option<RedisHandle>,
 }
 
 impl AppState {
@@ -57,6 +59,7 @@ impl AppState {
             settings: Arc::new(settings),
             edge,
             pools: None,
+            redis: None,
         }
     }
 
@@ -64,6 +67,16 @@ impl AppState {
     /// tests that never touch the database keep working unchanged.
     pub fn with_pools(mut self, pools: Pools) -> Self {
         self.pools = Some(Arc::new(pools));
+        self
+    }
+
+    /// Attach the shared Redis handle (PIDASHCONV-265). `None` until the
+    /// binary builds one from `Settings`, so unit tests that never touch
+    /// the cache keep working unchanged; handlers treat `None` as
+    /// cache-disabled (cancel still 204s, throttle allows, SSE serves the
+    /// replay prefix).
+    pub fn with_redis(mut self, handle: RedisHandle) -> Self {
+        self.redis = Some(handle);
         self
     }
 
@@ -77,6 +90,10 @@ impl AppState {
 
     pub fn pools(&self) -> Option<&Pools> {
         self.pools.as_deref()
+    }
+
+    pub fn redis(&self) -> Option<&RedisHandle> {
+        self.redis.as_ref()
     }
 
     pub fn edge(&self) -> &EdgeHandle {
