@@ -62,6 +62,9 @@ pub const MSG_NULL: &str = "This field may not be null.";
 pub const MSG_BLANK: &str = "This field may not be blank.";
 /// Over-`max_length` value (DRF `CharField`, `max_length=1024` from the model).
 pub const MSG_MAX_LENGTH: &str = "Ensure this field has no more than 1024 characters.";
+/// NUL content (DRF `ProhibitNullCharactersValidator`, pinned chain position
+/// 4th: after `MaxLengthValidator`, before `URLValidator`).
+pub const MSG_NULL_CHARS: &str = "Null characters are not allowed.";
 /// Django `URLValidator.message`.
 pub const MSG_INVALID_URL: &str = "Enter a valid URL.";
 /// `validate_schema` (`db/models/webhook.py:24`).
@@ -381,9 +384,14 @@ fn split_url_parts(value: &str) -> Option<(String, &str, &str)> {
 /// Order mirrors DRF `CharField.run_validation` + `run_validators`: missing
 /// → required; [`python_strip`] (`trim_whitespace=True`); blank; then each
 /// validator in list order — declared `[validate_schema, validate_domain]`,
-/// `MaxLengthValidator` (chars, not bytes), `URLValidator` — collecting
-/// every failure (so `"not-a-url"` yields both the schema and the URL
-/// message).
+/// `MaxLengthValidator` (chars, not bytes), `ProhibitNullCharactersValidator`,
+/// `URLValidator` — collecting every failure (so `"not-a-url"` yields both
+/// the schema and the URL message).
+///
+/// `ProhibitSurrogateCharactersValidator` sits between the null check and
+/// `URLValidator` in DRF's list but needs no runtime check here: lone
+/// surrogates cannot occur in a Rust `&str` (probed: DRF's message is
+/// parameterized per codepoint, so there is no fixed string to port).
 /// Returns the trimmed value that the guards then inspect.
 ///
 /// Three input states mirror DRF: absent (`None`) → required; explicit JSON
@@ -403,9 +411,11 @@ pub fn validate_url_field(raw: Option<Option<&str>>) -> Result<String, Vec<Strin
     }
     // Validator order mirrors the `self.validators` list DRF builds:
     // declared `[validate_schema, validate_domain]`, then the
-    // `MaxLengthValidator` mapped from the model, then `URLValidator`
-    // (probed: an over-long `ftp:` URL yields the schema message *and*
-    // the max-length message, in that order).
+    // `MaxLengthValidator` mapped from the model, then
+    // `ProhibitNullCharactersValidator`, then `URLValidator`
+    // (probed on live DRF: an over-long `ftp:` URL yields schema then
+    // max-length; a NUL `https:` URL yields exactly the null message —
+    // `URLValidator` itself passes NUL, so it contributes nothing there).
     let mut errors = Vec::new();
     if let Err(message) = validate_schema(&value) {
         errors.push(message.to_owned());
@@ -415,6 +425,11 @@ pub fn validate_url_field(raw: Option<Option<&str>>) -> Result<String, Vec<Strin
     }
     if value.chars().count() > MAX_URL_CHARS {
         errors.push(MSG_MAX_LENGTH.to_owned());
+    }
+    // Lone surrogates (`ProhibitSurrogateCharactersValidator`, next in DRF's
+    // list) cannot occur in a `&str`: no runtime check, comment only.
+    if value.contains('\0') {
+        errors.push(MSG_NULL_CHARS.to_owned());
     }
     if !url_validator_ok(&value) {
         errors.push(MSG_INVALID_URL.to_owned());
@@ -919,6 +934,51 @@ mod tests {
             field_body(&[
                 "Invalid schema. Only HTTP and HTTPS are allowed.",
                 "Ensure this field has no more than 1024 characters."
+            ])
+        );
+        // NUL content yields exactly the null message: `URLValidator`
+        // itself passes NUL (probed on live DRF 3.16.1 / Django 4.2.30).
+        assert_eq!(
+            validate_create_url(
+                Some(Some("https://example.com/\0hook")),
+                None,
+                &public_dns()
+            )
+            .unwrap_err()
+            .body(),
+            field_body(&["Null characters are not allowed."])
+        );
+        // Combined order: schema, then null — no URL message (probed).
+        assert_eq!(
+            validate_create_url(Some(Some("ftp://example.com/\0hook")), None, &public_dns())
+                .unwrap_err()
+                .body(),
+            field_body(&[
+                "Invalid schema. Only HTTP and HTTPS are allowed.",
+                "Null characters are not allowed."
+            ])
+        );
+        // NUL without a scheme collects all three, in chain order (probed).
+        assert_eq!(
+            validate_create_url(Some(Some("not-a-url\0")), None, &public_dns())
+                .unwrap_err()
+                .body(),
+            field_body(&[
+                "Invalid schema. Only HTTP and HTTPS are allowed.",
+                "Null characters are not allowed.",
+                "Enter a valid URL."
+            ])
+        );
+        // Over-long NUL URL: schema, max-length, null, in that order (probed).
+        let long_nul = format!("ftp://example.com/{}\0", "a".repeat(2000));
+        assert_eq!(
+            validate_create_url(Some(Some(&long_nul)), None, &public_dns())
+                .unwrap_err()
+                .body(),
+            field_body(&[
+                "Invalid schema. Only HTTP and HTTPS are allowed.",
+                "Ensure this field has no more than 1024 characters.",
+                "Null characters are not allowed."
             ])
         );
         // Every field failure answers 400 like Django.
