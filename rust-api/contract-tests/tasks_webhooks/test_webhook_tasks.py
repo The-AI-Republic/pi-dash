@@ -112,6 +112,25 @@ def test_fan_out_call_sites():
     )
 
 
+#: Tasks the live Django worker registers (Celery broadcast inspect). NOTE
+#: (PIDASHCONV-242, FX-LOG-01): ``pi_dash.bgtasks.logger_task.process_logs``
+#: IS registered in the canonical worker-plane env
+#: (``DJANGO_SETTINGS_MODULE=pi_dash.settings.local``). The module is in
+#: neither ``CELERY_IMPORTS`` (settings/common.py:409) nor
+#: ``bgtasks/apps.py ready()``; its only static importer is request-time
+#: ``middleware/logger.py:19``. Under local settings, though,
+#: ``debug_toolbar``'s ``check_middleware`` system check import-strings every
+#: ``MIDDLEWARE`` entry during ``celery worker`` boot
+#: (``DjangoWorkerFixup.validate_models`` → ``run_checks()``), which imports
+#: the middleware module and registers the ``@shared_task`` as a side
+#: effect — so the worker answers inspect with ``process_logs`` present and
+#: executes published jobs (``api_activity_logs`` row written). Stacks
+#: booted without ``debug_toolbar`` (e.g. test settings) see the task
+#: absent; that env is non-canonical for this suite. The Rust worker matches
+#: execution (parity decision in the PIDASHCONV-242 workpad/PR; gate
+#: PIDASHCONV-203 must register ``PROCESS_LOGS_TASK`` when wiring D-08).
+
+
 def test_worker_registration(broker_url):
     broker_probe.wait_for_registration(set(WEBHOOK_TASKS))
 
