@@ -1,10 +1,13 @@
 //! App intake-issue handlers (D-32, stage 5).
 //!
-//! Ports the four handler units of `app/views/intake/base.py:329-637`
-//! (`IntakeIssueViewSet.partial_update` / `retrieve` / `destroy` and
+//! Ports the six handler units of `app/views/intake/base.py:176-637`
+//! (`IntakeIssueViewSet.list` / `.create` / `.partial_update` /
+//! `.retrieve` / `.destroy` and
 //! `IntakeWorkItemDescriptionVersionEndpoint.get`) with routes from
 //! `app/urls/intake.py`:
 //!
+//! * `GET` + `POST intake-issues/` + `inbox-issues/` (`issues`,
+//!   PIDASHCONV-385)
 //! * `PATCH intake-issues/<pk>/` + `inbox-issues/<pk>/` (`issues`)
 //! * `GET intake-issues/<pk>/` + `inbox-issues/<pk>/` (`issues`)
 //! * `DELETE intake-issues/<pk>/` + `inbox-issues/<pk>/` (`issues`)
@@ -12,8 +15,8 @@
 //!
 //! Sibling handler issues own their files and share this module's
 //! plumbing (mirrors the D-02 `space` layout): PIDASHCONV-360 (Intake
-//! CRUD) and PIDASHCONV-385 (intake-issue list + create) extend
-//! [`routes`] with their own routers; merges keep both sides.
+//! CRUD) extends [`routes`] with its own router when it lands; merges
+//! keep both sides.
 //!
 //! Only the methods above are owned: `PUT` on the detail paths proxies
 //! to Django (BUG-intake-issue-put — `update` carries no decorator, so
@@ -69,6 +72,14 @@ pub enum OneOrMany {
 pub type QueryMap = HashMap<String, OneOrMany>;
 
 /// Django `QueryDict.get`: the last value, or `None`.
+/// All values for `key`, in order; `None` when absent.
+pub fn query_values(query: &QueryMap, key: &str) -> Option<Vec<String>> {
+    query.get(key).map(|value| match value {
+        OneOrMany::One(one) => vec![one.clone()],
+        OneOrMany::Many(many) => many.clone(),
+    })
+}
+
 pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
     query.get(key).map(|value| match value {
         OneOrMany::One(one) => one.clone(),
@@ -81,12 +92,18 @@ pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
 pub enum Denial {
     /// 401, DRF `NotAuthenticated` (anonymous on a guarded route).
     Unauthorized,
+    /// 403, `allow_permission` fallthrough.
+    Forbidden,
     /// 404, `ObjectDoesNotExist` branch.
     NotFound,
     /// 404, DRF default `Http404` (unresolvable project identifier).
     NotFoundDetail,
+    /// 404, view-inline `{"error": ...}` (missing intake row).
+    NotFoundError(String),
     /// 400, `{"error": ...}` (view-inline).
     BadError(String),
+    /// 400, DRF `ParseError` `{"detail": ...}` (per_page/cursor/JSON).
+    BadDetail(String),
     /// 400, pre-rendered serializer-errors body (`{"field": [...]}`).
     BadJson(serde_json::Value),
     /// 400, Django `ValidationError` branch.
@@ -99,11 +116,23 @@ impl Denial {
     fn status_and_body(&self) -> (StatusCode, String) {
         match self {
             Denial::Unauthorized => (StatusCode::UNAUTHORIZED, UNAUTHENTICATED_BODY.to_owned()),
+            Denial::Forbidden => (
+                StatusCode::FORBIDDEN,
+                r#"{"error":"You don't have the required permissions."}"#.to_owned(),
+            ),
             Denial::NotFound => (StatusCode::NOT_FOUND, NOT_FOUND_BODY.to_owned()),
             Denial::NotFoundDetail => (StatusCode::NOT_FOUND, NOT_FOUND_DETAIL_BODY.to_owned()),
+            Denial::NotFoundError(message) => (
+                StatusCode::NOT_FOUND,
+                format!("{{\"error\":{}}}", json_string(message)),
+            ),
             Denial::BadError(message) => (
                 StatusCode::BAD_REQUEST,
                 format!("{{\"error\":{}}}", json_string(message)),
+            ),
+            Denial::BadDetail(message) => (
+                StatusCode::BAD_REQUEST,
+                format!("{{\"detail\":{}}}", json_string(message)),
             ),
             Denial::BadJson(body) => (
                 StatusCode::BAD_REQUEST,
@@ -207,8 +236,25 @@ fn python_dump_str(out: &mut String, text: &str) {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
+            ch if (ch as u32) < 0x20 || (ch as u32) == 0x7F => {
+                out.push_str(&format!("\\u{:04x}", ch as u32));
+            }
+            ch if (ch as u32) > 0x7E => {
+                let code = ch as u32;
+                if code > 0xFFFF {
+                    let v = code - 0x10000;
+                    out.push_str(&format!(
+                        "\\u{:04x}\\u{:04x}",
+                        0xD800 + (v >> 10),
+                        0xDC00 + (v & 0x3FF)
+                    ));
+                } else {
+                    out.push_str(&format!("\\u{code:04x}"));
+                }
+            }
+            ch => out.push(ch),
         }
     }
     out.push('"');
@@ -241,6 +287,20 @@ pub fn owned(
 /// issues merge their own routers here; merges keep both sides.
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/intake-issues/",
+            owned(
+                axum::routing::get(issues::collection_list).post(issues::collection_create),
+                &["PUT", "PATCH", "DELETE", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/inbox-issues/",
+            owned(
+                axum::routing::get(issues::collection_list).post(issues::collection_create),
+                &["PUT", "PATCH", "DELETE", "OPTIONS"],
+            ),
+        )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/intake-issues/{pk}/",
             owned(
