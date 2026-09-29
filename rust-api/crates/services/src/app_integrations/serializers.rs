@@ -567,36 +567,55 @@ pub fn ip_is_private(ip: &IpAddr) -> bool {
 }
 
 /// `ip.is_loopback` (`ipaddress.py`, CPython 3.12): 127.0.0.0/8 for IPv4;
-/// exactly `::1` for IPv6. Only `is_private` delegates mapped addresses to
-/// the embedded IPv4; loopback does not (`::ffff:127.0.0.1` is not
-/// loopback on 3.12 — probed live).
+/// `::1` for IPv6, with IPv4-mapped IPv6 addresses delegating to the
+/// embedded IPv4 (`IPv6Address.is_loopback` returns
+/// `ipv4_mapped.is_loopback` — `::ffff:127.0.0.1` is loopback on 3.12,
+/// probed live on 3.12.14).
 pub fn ip_is_loopback(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => in_v4_net(v4, V4_LOOPBACK.0, V4_LOOPBACK.1),
-        IpAddr::V6(v6) => *v6 == Ipv6Addr::LOCALHOST,
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return ip_is_loopback(&IpAddr::V4(mapped));
+            }
+            *v6 == Ipv6Addr::LOCALHOST
+        }
     }
 }
 
 /// `ip.is_link_local` (`ipaddress.py`, CPython 3.12): 169.254.0.0/16 for
-/// IPv4; fe80::/10 for IPv6. No mapped delegation (`::ffff:169.254.1.1`
-/// is not link-local on 3.12 — probed live).
+/// IPv4; fe80::/10 for IPv6, with IPv4-mapped IPv6 addresses delegating
+/// to the embedded IPv4 (`IPv6Address.is_link_local` returns
+/// `ipv4_mapped.is_link_local` — `::ffff:169.254.1.1` is link-local on
+/// 3.12, probed live on 3.12.14).
 pub fn ip_is_link_local(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => in_v4_net(v4, V4_LINK_LOCAL.0, V4_LINK_LOCAL.1),
-        IpAddr::V6(v6) => in_v6_net(v6, &V6_LINK_LOCAL.0, V6_LINK_LOCAL.1),
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return ip_is_link_local(&IpAddr::V4(mapped));
+            }
+            in_v6_net(v6, &V6_LINK_LOCAL.0, V6_LINK_LOCAL.1)
+        }
     }
 }
 
 /// `ip.is_reserved` (`ipaddress.py`, CPython 3.12): 240.0.0.0/4 for IPv4;
-/// the IETF-reserved ranges for IPv6, with no mapped delegation — every
-/// `::ffff:0:0/96` address is reserved via `::/8`
-/// (`::ffff:8.8.8.8` is reserved, hence blocked, on 3.12 — probed live).
+/// the IETF-reserved ranges for IPv6, with IPv4-mapped IPv6 addresses
+/// delegating to the embedded IPv4 (`IPv6Address.is_reserved` returns
+/// `ipv4_mapped.is_reserved` — `::ffff:8.8.8.8` is not reserved on 3.12,
+/// probed live on 3.12.14).
 pub fn ip_is_reserved(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => in_v4_net(v4, V4_RESERVED.0, V4_RESERVED.1),
-        IpAddr::V6(v6) => V6_RESERVED
-            .iter()
-            .any(|(base, prefix)| in_v6_net(v6, base, *prefix)),
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return ip_is_reserved(&IpAddr::V4(mapped));
+            }
+            V6_RESERVED
+                .iter()
+                .any(|(base, prefix)| in_v6_net(v6, base, *prefix))
+        }
     }
 }
 
@@ -1204,18 +1223,18 @@ mod tests {
             ("192.0.0.10", false, false, false, false, false),
             ("192.31.196.0", false, false, false, false, false),
             ("::", true, false, true, false, true),
-            // Mapped addresses delegate to the embedded IPv4 for
-            // `is_private` only (3.12 docstring guarantee); loopback,
-            // reserved and link-local use the v6 tables — every mapped
-            // address is reserved via `::/8`, none is loopback or
-            // link-local (all probed live on CPython 3.12).
-            ("::ffff:127.0.0.1", true, false, true, false, true),
-            ("::ffff:0:0", true, false, true, false, true),
-            ("::ffff:8.8.8.8", false, false, true, false, true),
-            ("::ffff:100.64.0.1", false, false, true, false, true),
-            ("::ffff:192.0.0.9", false, false, true, false, true),
-            ("::ffff:224.0.0.1", false, false, true, false, true),
-            ("::ffff:169.254.1.1", true, false, true, false, true),
+            // Mapped addresses delegate to the embedded IPv4 for all four
+            // flags (`IPv6Address.is_private/is_loopback/is_reserved/
+            // is_link_local` each return `ipv4_mapped.<flag>` — every
+            // row below equals its embedded-IPv4 row, probed live on
+            // CPython 3.12.14).
+            ("::ffff:127.0.0.1", true, true, false, false, true),
+            ("::ffff:0:0", true, false, false, false, true),
+            ("::ffff:8.8.8.8", false, false, false, false, false),
+            ("::ffff:100.64.0.1", false, false, false, false, false),
+            ("::ffff:192.0.0.9", false, false, false, false, false),
+            ("::ffff:224.0.0.1", false, false, false, false, false),
+            ("::ffff:169.254.1.1", true, false, false, true, true),
             ("fe80::1", true, false, false, true, true),
             ("fc00::1", true, false, false, false, true),
             ("2001:db8::1", true, false, false, false, true),
