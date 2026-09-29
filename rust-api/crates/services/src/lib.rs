@@ -8,6 +8,7 @@
 
 pub mod app_intake;
 pub mod app_issues;
+pub mod app_views_search;
 pub mod assistant;
 pub mod extensions;
 pub mod health;
