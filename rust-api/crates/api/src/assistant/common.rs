@@ -1317,7 +1317,10 @@ pub async fn request_actor(
 /// ordering (`-created_at`) with `LIMIT 1` is what `.first()` compiles to.
 /// `None` is "no active row" (also what anonymous callers resolve to).
 pub async fn role_for(pool: &PgPool, user_id: &Uuid, slug: &str) -> Result<Option<i32>, Response> {
-    let row: Option<(i32,)> = sqlx::query_as(
+    // `role` is a `PositiveSmallIntegerField` (SMALLINT): decode as `i16
+    // (the `app_issues` precedent) and widen — decoding `int2` straight
+    // into `i32` fails whenever a row exists.
+    let row: Option<(i16,)> = sqlx::query_as(
         "SELECT \"workspace_members\".\"role\" FROM \"workspace_members\" \
          INNER JOIN \"workspaces\" ON (\"workspace_members\".\"workspace_id\" = \"workspaces\".\"id\") \
          WHERE (\"workspaces\".\"slug\" = $1 AND \"workspace_members\".\"member_id\" = $2 \
@@ -1329,7 +1332,7 @@ pub async fn role_for(pool: &PgPool, user_id: &Uuid, slug: &str) -> Result<Optio
     .fetch_optional(pool)
     .await
     .map_err(|_| server_error())?;
-    Ok(row.map(|(role,)| role))
+    Ok(row.map(|(role,)| i32::from(role)))
 }
 
 /// Mirror of `AssistantBaseView.require_member` (`views/_base.py:25-29`)

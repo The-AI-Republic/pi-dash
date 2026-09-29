@@ -253,11 +253,15 @@ async fn post_message(
         return Err(json_response(StatusCode::CONFLICT, THREAD_FULL_BODY.to_owned()));
     }
     // `AssistantTurn.objects.create(thread=locked, status=QUEUED)`
-    // (`messages.py:92`).
+    // (`messages.py:92`): the ORM fills the remaining fields from their
+    // model defaults (`model_used=""`, `error_code=""`, `error_detail=""`,
+    // `models.py:88-94`) — the columns are `NOT NULL` with no database
+    // default, so the insert must carry the defaults explicitly.
     let (turn_id, turn_status): (Uuid, String) = sqlx::query_as(
         "INSERT INTO \"assistant_turn\" \
-         (\"id\", \"thread_id\", \"status\", \"created_at\") \
-         VALUES (gen_random_uuid(), $1, 'queued', now()) \
+         (\"id\", \"thread_id\", \"status\", \"model_used\", \"error_code\", \
+         \"error_detail\", \"created_at\") \
+         VALUES (gen_random_uuid(), $1, 'queued', '', '', '', now()) \
          RETURNING \"id\", \"status\"",
     )
     .bind(thread_id)
