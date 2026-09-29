@@ -13,6 +13,7 @@ pub mod app_issues;
 pub mod app_views_search;
 pub mod assistant;
 pub mod auth_oauth;
+pub mod auth_session;
 pub mod extensions;
 pub mod health;
 pub mod integrations;
