@@ -307,9 +307,11 @@ pub fn validate_base_url(value: &str) -> Result<String, &'static str> {
 
 /// `UserLLMConfigSerializer.validate_api_key`
 /// (`serializers.py:63-66`, shared verbatim by STT `:111-114`): only a
-/// non-empty value shorter than 8 characters is rejected.
+/// non-empty value shorter than 8 characters is rejected. The length is in
+/// code points (`chars().count()`), matching Python `len(value)` — byte
+/// length would diverge on non-ASCII input (semantic trap).
 pub fn validate_api_key(value: &str) -> Result<String, &'static str> {
-    if !value.is_empty() && value.len() < 8 {
+    if !value.is_empty() && value.chars().count() < 8 {
         return Err(API_KEY_TOO_SHORT);
     }
     Ok(value.to_string())
@@ -539,6 +541,9 @@ mod tests {
             validate_api_key("sk-ant-1234567890"),
             Ok("sk-ant-1234567890".into())
         );
+        // Length is code points, not bytes (probed: len("é"*7) == 7).
+        assert_eq!(validate_api_key(&"é".repeat(7)), Err(API_KEY_TOO_SHORT));
+        assert_eq!(validate_api_key(&"é".repeat(8)), Ok("é".repeat(8)));
     }
 
     #[test]
