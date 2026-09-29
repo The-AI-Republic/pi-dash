@@ -16,10 +16,16 @@
 //!   `base_host`, redirection-path selector, `zxcvbn` threshold,
 //!   `csrf_failure` context, `UserSerializer` field list.
 //!
-//! Sibling D-16 issues (handlers, guards, queries) consume these pieces
+//! Plus the read/write query kernel named by PIDASHCONV-382:
+//!
+//! * [`queries`] — user/session/instance SQL builders, adapter create/update
+//!   descriptors, the invite-join write sequence, F-05 password delegation.
+//!
+//! Sibling D-16 issues (handlers, guards, tasks) consume these pieces
 //! read-only.
 
 pub mod models;
+pub mod queries;
 pub mod shapes;
 
 pub use shapes::{
