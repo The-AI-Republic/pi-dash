@@ -16,10 +16,14 @@
 //!   the workspace-slug lookup, the `is_deleted` flip, and the
 //!   status/body contract per outcome (PIDASHCONV-346). Later layer issues
 //!   append their units here.
+//! * [`queries_v2_project`] — v2 project-side query closure
+//!   (`app/views/asset/v2.py:432-835`): entity-field maps, scoped SQL,
+//!   bulk dispatch, duplicate/download shapes (PIDASHCONV-361).
 //!
 //! Wiring note: the crate root declares `pub mod app_assets;` (seam for
 //! this issue's new files); every file under this module is new.
 pub mod queries_v1;
+pub mod queries_v2_project;
 pub mod shape;
 pub mod tasks;
 
