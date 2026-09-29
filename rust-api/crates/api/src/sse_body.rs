@@ -8,10 +8,10 @@
 //! sender (or the request's receiver going away) ends the stream, matching
 //! the `finally: unsubscribe` path in Python.
 //!
-//! The body carries the exact SSE headers the events handler sets
+//! The handler sets the exact SSE headers the events view sets
 //! (`text/event-stream`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`,
-//! `Content-Encoding: identity`); this module owns the infinite transport
-//! only, not the headers.
+//! `Content-Encoding: identity`) on the response; this module owns the
+//! infinite transport only, not the headers.
 
 use std::convert::Infallible;
 
@@ -53,7 +53,11 @@ mod tests {
                 .await
                 .expect("receiver lives");
         });
-        let collected = body.collect().await.expect("infinite body collects").to_bytes();
+        let collected = body
+            .collect()
+            .await
+            .expect("infinite body collects")
+            .to_bytes();
         feeder.await.expect("feeder sends both frames");
         assert_eq!(
             collected,

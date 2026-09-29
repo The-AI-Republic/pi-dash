@@ -123,9 +123,8 @@ async fn serve(bind: &str) -> MainResult {
     if redis.is_some() {
         tracing::info!("redis handle ready (client connects lazily per operation)");
     }
-    let mut state =
-        AppState::with_settings_and_edge(env!("CARGO_PKG_VERSION"), settings, edge)
-            .with_pools(pools);
+    let mut state = AppState::with_settings_and_edge(env!("CARGO_PKG_VERSION"), settings, edge)
+        .with_pools(pools);
     if let Some(handle) = redis {
         state = state.with_redis(handle);
     }

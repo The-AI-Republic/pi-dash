@@ -56,7 +56,11 @@ impl RedisHandle {
     /// but unparsable URL also degrades to `None` with a warn log, so a typo
     /// fails handlers soft (per-site policy above) instead of failing boot.
     pub fn from_settings(settings: &crate::config::Settings) -> Option<Self> {
-        let url = settings.redis.url.as_deref().filter(|url| !url.is_empty())?;
+        let url = settings
+            .redis
+            .url
+            .as_deref()
+            .filter(|url| !url.is_empty())?;
         match Self::from_url(url) {
             Ok(handle) => Some(handle),
             Err(error) => {
@@ -119,7 +123,9 @@ mod tests {
         // pins (`SET assistant:cancel:<turn_id> "1" EX 600`, key built by
         // `pidash_jobs::assistant::cancel_key`, which this crate cannot name
         // without an import cycle): the transport sends exactly these three.
-        let turn: uuid::Uuid = "db68f428-df63-4de8-b060-2d4038a5b1f4".parse().expect("uuid");
+        let turn: uuid::Uuid = "db68f428-df63-4de8-b060-2d4038a5b1f4"
+            .parse()
+            .expect("uuid");
         let key = format!("assistant:cancel:{turn}");
         let (value, expiry_secs) = ("1", 600u64);
         assert_eq!(
@@ -147,7 +153,10 @@ mod tests {
         // `Err` (callers swallow it per-site) rather than panic or hang.
         let handle = RedisHandle::from_url("redis://127.0.0.1:6399/").expect("url parses");
         assert!(handle.set_ex("assistant:cancel:x", "1", 600).await.is_err());
-        assert!(handle.get_string("throttle_assistant_message_x").await.is_err());
+        assert!(handle
+            .get_string("throttle_assistant_message_x")
+            .await
+            .is_err());
         assert!(handle.subscribe("assistant:thread:x").await.is_err());
     }
 }
