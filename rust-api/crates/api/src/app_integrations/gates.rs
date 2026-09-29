@@ -1,7 +1,8 @@
 //! D-33 permission gates (stage 5, PIDASHCONV-436).
 //!
 //! Ports the `allow_permission` gates on all 24 D-33 routes (27 fixture
-//! rows, one [`RouteGate`] per method), the two `AllowAny` endpoints, and
+//! entries, one [`RouteGate`] per method+path: 33 rows), the two `AllowAny`
+//! endpoints, and
 //! the manual admin checks in:
 //!
 //! - `apps/api/pi_dash/app/views/integration/git.py:51-158`
@@ -292,7 +293,13 @@ pub static GATES: &[RouteGate] = &[
         method: "GET",
         path: "workspaces/<slug>/webhooks/",
         gate: Gate::Workspace { roles: ADMIN },
-        source: "webhook/base.py:39",
+        source: "webhook/base.py:39 (pk=None list branch)",
+    },
+    RouteGate {
+        method: "GET",
+        path: "workspaces/<slug>/webhooks/<uuid>/",
+        gate: Gate::Workspace { roles: ADMIN },
+        source: "webhook/base.py:39 (same get with pk; fixture GET list + detail)",
     },
     RouteGate {
         method: "PATCH",
@@ -466,7 +473,7 @@ mod tests {
 
     #[test]
     fn table_covers_every_fixture_row() {
-        assert_eq!(GATES.len(), 32, "24 routes, one row per method");
+        assert_eq!(GATES.len(), 33, "24 routes, one row per method+path");
         assert!(gate_for("GET", "nope/").is_none());
     }
 
@@ -618,6 +625,13 @@ mod tests {
         ),
         ("POST", "workspaces/<slug>/webhooks/", true, false, false),
         ("GET", "workspaces/<slug>/webhooks/", true, false, false),
+        (
+            "GET",
+            "workspaces/<slug>/webhooks/<uuid>/",
+            true,
+            false,
+            false,
+        ),
         (
             "PATCH",
             "workspaces/<slug>/webhooks/<uuid>/",
