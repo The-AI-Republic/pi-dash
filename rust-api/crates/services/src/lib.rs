@@ -6,6 +6,7 @@
 //! depending only on `types`, `db` and `auth`. The HTTP layer in
 //! `pidash-api` calls into these functions; it holds no logic of its own.
 
+pub mod app_assets;
 pub mod app_intake;
 pub mod app_issues;
 pub mod app_views_search;
