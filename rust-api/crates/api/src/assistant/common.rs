@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![allow(clippy::result_large_err)]
 
 //! Shared HTTP shell for the assistant config handlers (D-06, stage 5).
 //!
@@ -1187,5 +1188,547 @@ mod tests {
             .expect("parses")
             .with_timezone(&chrono::Utc);
         assert_eq!(isoformat(&whole), "2026-09-29T13:50:51+00:00");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Thread-surface plumbing (PIDASHCONV-255).
+// ---------------------------------------------------------------------------
+// The rest of this module is the 255 half of the merge: session actor, role
+// lookup, owned-thread scope, thread wire shape, error bodies, cursor
+// parsing, plus the JSON helpers its handlers share. Two names from this
+// half were renamed at the 255/256 merge because `common` already owns
+// them with different contracts: `pool_of` (borrowed `&PgPool`) is
+// `pool_ref` here, and the JSON-only `parse_body` is `parse_json_body`
+// here. Nothing else was renamed; both halves are byte-identical to their
+// pre-merge files apart from those two renames.
+// Shared handler plumbing for the assistant thread surface (D-06, stage 5).
+//
+// Ports the pieces every `apps/api/pi_dash/assistant/views/*.py` handler
+// reuses: session actor resolution (DRF `SessionAuthentication` without
+// CSRF, `authentication/session.py:1-9`, mirroring the `app_issues` /
+// `license` precedent), the workspace role lookup behind
+// `workspace_role_by_slug` (`core/permissions.py:48-56`), the owned-thread
+// scope (`views/_base.py:31-34`), the thread wire shape
+// (`serializers.py:20-29` via [`thread_json`]), and the exact error
+// bodies. Sibling handler files ([`super::threads`], [`super::messages`],
+// [`super::events`]) consume this module read-only.
+//
+// Datetime rules (the two renderers this surface needs):
+//
+// * Thread rows render through the DRF serializer, so their stamps use
+//   [`crate::serializer::render_datetime_in`] in the request user's zone
+//   (`TimezoneMixin`, `app/views/base.py:36-46`).
+// * Message envelopes and event frames call `.isoformat()` directly
+//   (`runtime/events.py:49,139-140`), which renders the stored instant in
+//   its own zone (UTC from Postgres) — see [`py_iso`].
+
+// Every handler returns a fully-rendered `Response` by design (like the
+// intake `parse_json_body` precedent, which carries per-function allows for the
+// same lint).
+
+use axum::extract::Extension;
+use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::middleware::SessionHandle;
+
+/// Exact bytes of the DRF `NotAuthenticated` denial: anonymous on a guarded
+/// endpoint (`APIView.permission_denied` with `message=None`; same bytes as
+/// `license::handlers_base::UNAUTHENTICATED_BODY`, restated here so the
+/// assistant surface reads standalone).
+pub const UNAUTHENTICATED_BODY: &str =
+    r#"{"detail":"Authentication credentials were not provided."}"#;
+
+/// Generic branch of the app `handle_exception` matrix
+/// (`app/views/base.py:91-95`; same bytes as the license port): unexpected
+/// failures — including the `TypeError`/`AttributeError` a non-string JSON
+/// scalar raises inside the `(value or "")` coercions below — answer 500.
+pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
+
+/// `ObjectDoesNotExist` branch (`app/views/base.py:79-83`): the
+/// `select_for_update().get(pk)` inside the message-POST transaction raises
+/// this when the thread vanishes between the scope check and the lock.
+pub const OBJECT_NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
+
+/// Thread-scope miss on every thread-scoped endpoint
+/// (`messages.py:50,69,121`, `threads.py:89,103`): 404 `{"error":"not_found"}`
+/// (same bytes as [`crate::assistant::perm::THREAD_NOT_FOUND_BODY`]).
+pub const THREAD_NOT_FOUND_BODY: &str = r#"{"error":"not_found"}"#;
+
+/// Every handler returns either a value or a fully-rendered `Response`;
+/// `?` on a fallible body therefore needs nothing more than a mapping into
+/// one of the constructors below.
+pub type HandlerResult<T> = Result<T, Response>;
+
+/// The request's user: `Some` is an active session user (DRF
+/// `SessionAuthentication.authenticate`: a missing session, an unknown user
+/// id, or an inactive user all authenticate as nobody).
+pub struct Actor {
+    pub id: Uuid,
+    pub timezone: Tz,
+}
+
+/// Resolve the actor from the Django session (`_auth_user_id`), mirroring
+/// the `app_issues` / `license` precedent. An unparseable id, an unknown
+/// row, or an inactive user all resolve to `None` (anonymous); an
+/// unparseable `user_timezone` is a 500 (`zoneinfo.ZoneInfo` raises inside
+/// `TimezoneMixin.initial`, which `handle_exception` maps to the generic
+/// branch).
+pub async fn request_actor(
+    pool: &PgPool,
+    extension: Option<Extension<SessionHandle>>,
+) -> Result<Option<Actor>, Response> {
+    let raw = extension
+        .and_then(|Extension(handle)| {
+            handle
+                .snapshot()
+                .get("_auth_user_id")
+                .and_then(|v| v.as_str().map(str::to_owned))
+        })
+        .and_then(|raw| raw.parse::<Uuid>().ok());
+    let id = match raw {
+        Some(id) => id,
+        None => return Ok(None),
+    };
+    let row: Option<(bool, Option<String>)> =
+        sqlx::query_as("SELECT is_active, user_timezone FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| server_error())?;
+    match row {
+        Some((true, timezone)) => {
+            let tz: Tz = match timezone.as_deref().unwrap_or("UTC").parse() {
+                Ok(tz) => tz,
+                Err(_) => return Err(server_error()),
+            };
+            Ok(Some(Actor { id, timezone: tz }))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Active `WorkspaceMember` role for (`user`, `slug`)
+/// (`core/permissions.py:48-56`): join over `workspace__slug`, `member`,
+/// `is_active=True`, `.values_list("role").first()` — the model's default
+/// ordering (`-created_at`) with `LIMIT 1` is what `.first()` compiles to.
+/// `None` is "no active row" (also what anonymous callers resolve to).
+pub async fn role_for(pool: &PgPool, user_id: &Uuid, slug: &str) -> Result<Option<i32>, Response> {
+    let row: Option<(i32,)> = sqlx::query_as(
+        "SELECT \"workspace_members\".\"role\" FROM \"workspace_members\" \
+         INNER JOIN \"workspaces\" ON (\"workspace_members\".\"workspace_id\" = \"workspaces\".\"id\") \
+         WHERE (\"workspaces\".\"slug\" = $1 AND \"workspace_members\".\"member_id\" = $2 \
+         AND \"workspace_members\".\"is_active\") \
+         ORDER BY \"workspace_members\".\"created_at\" DESC LIMIT 1",
+    )
+    .bind(slug)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| server_error())?;
+    Ok(row.map(|(role,)| role))
+}
+
+/// Mirror of `AssistantBaseView.require_member` (`views/_base.py:25-29`)
+/// through [`crate::assistant::perm::require_member`]: role `None` or below
+/// member denies with the exact `role_not_allowed` body.
+pub fn require_member(role: Option<i32>) -> HandlerResult<()> {
+    crate::assistant::perm::require_member(role).map_err(|denial| denial.into_response())
+}
+
+/// One `assistant_thread` row as the handlers read it.
+pub struct ThreadRow {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub user_id: Uuid,
+    pub title: String,
+    pub kind: String,
+    pub is_archived: bool,
+    pub active_turn_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Mirror of `AssistantBaseView.owned_thread` (`views/_base.py:31-34`):
+/// `.filter(id=thread_id, user=request.user, workspace__slug=slug).first()` —
+/// the three scope predicates over the workspace join with the model's
+/// default `ORDER BY updated_at DESC ... LIMIT 1` (`models.py:55`).
+/// A miss is `None` (callers answer
+/// [`THREAD_NOT_FOUND_BODY`]); the fetch itself failing is a 500.
+pub async fn owned_thread(
+    pool: &PgPool,
+    thread_id: &Uuid,
+    user_id: &Uuid,
+    slug: &str,
+) -> Result<Option<ThreadRow>, Response> {
+    sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, String, bool, Option<Uuid>, DateTime<Utc>, DateTime<Utc>)>(
+        "SELECT \"assistant_thread\".\"id\", \"assistant_thread\".\"workspace_id\", \
+         \"assistant_thread\".\"user_id\", \"assistant_thread\".\"title\", \
+         \"assistant_thread\".\"kind\", \"assistant_thread\".\"is_archived\", \
+         \"assistant_thread\".\"active_turn_id\", \"assistant_thread\".\"created_at\", \
+         \"assistant_thread\".\"updated_at\" \
+         FROM \"assistant_thread\" \
+         INNER JOIN \"workspaces\" ON (\"assistant_thread\".\"workspace_id\" = \"workspaces\".\"id\") \
+         WHERE (\"assistant_thread\".\"id\" = $1 \
+         AND \"assistant_thread\".\"user_id\" = $2 \
+         AND \"workspaces\".\"slug\" = $3) \
+         ORDER BY \"assistant_thread\".\"updated_at\" DESC LIMIT 1",
+    )
+    .bind(thread_id)
+    .bind(user_id)
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| server_error())
+    .map(|row| {
+        row.map(
+            |(id, workspace_id, user_id, title, kind, is_archived, active_turn_id, created_at, updated_at)| {
+                ThreadRow {
+                    id,
+                    workspace_id,
+                    user_id,
+                    title,
+                    kind,
+                    is_archived,
+                    active_turn_id,
+                    created_at,
+                    updated_at,
+                }
+            },
+        )
+    })
+}
+
+/// Workspace id for `slug` (`Workspace.objects.filter(slug=slug).first()`,
+/// `threads.py:71`): `None` answers 404 `not_found` (`threads.py:72-73`).
+/// Unreachable once the member gate passes (a role implies the workspace),
+/// ported as written.
+pub async fn workspace_id_for_slug(pool: &PgPool, slug: &str) -> Result<Option<Uuid>, Response> {
+    let row: Option<(Uuid,)> = sqlx::query_as("SELECT \"id\" FROM \"workspaces\" WHERE \"slug\" = $1")
+        .bind(slug)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| server_error())?;
+    Ok(row.map(|(id,)| id))
+}
+
+/// Thread wire shape (`serializers.py:20-29`): `Meta.fields` order
+/// (`id, title, is_archived, has_active_turn, created_at, updated_at`),
+/// DRF-compact rendering with the `U+2028/29` post-pass
+/// (`JSONRenderer`, same rule as `db::assistant::event_queries` documents
+/// for envelopes). Stamps render in the request user's zone
+/// (`TimezoneMixin`); `has_active_turn` is `active_turn_id is not None`
+/// (`get_has_active_turn`).
+pub fn thread_json(row: &ThreadRow, timezone: &Tz) -> String {
+    let created = crate::serializer::render_datetime_in(&row.created_at, timezone);
+    let updated = crate::serializer::render_datetime_in(&row.updated_at, timezone);
+    let id = serde_json::to_string(&row.id.to_string()).expect("string serializes");
+    let title = serde_json::to_string(&row.title).expect("string serializes");
+    drf_escape(&format!(
+        "{{\"id\":{},\"title\":{},\"is_archived\":{},\"has_active_turn\":{},\"created_at\":{},\"updated_at\":{}}}",
+        id,
+        title,
+        row.is_archived,
+        row.active_turn_id.is_some(),
+        serde_json::to_string(&created).expect("string serializes"),
+        serde_json::to_string(&updated).expect("string serializes"),
+    ))
+}
+
+/// DRF `JSONRenderer` post-pass over this project's settings
+/// (`UNICODE_JSON=True`, so raw UTF-8 survives, except U+2028/U+2029 which
+/// the renderer escapes; same rule as the `drf_escape` helper in
+/// `db::assistant::event_queries`, restated here because that helper is
+/// private to the db crate).
+fn drf_escape(rendered: &str) -> String {
+    rendered
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
+/// Python `datetime.isoformat()` for a UTC instant: `+00:00` suffix (never
+/// `Z`), microseconds as six digits when nonzero, no fraction when zero —
+/// the same rule `serializer.rs` pins for DRF, minus the `Z` rewrite. This
+/// is what message envelopes and event frames use
+/// (`runtime/events.py:49,139-140`); the thread serializer's DRF renderer
+/// is the separate `Z` path above.
+pub fn py_iso(dt: &DateTime<Utc>) -> String {
+    let base = dt.format("%Y-%m-%dT%H:%M:%S").to_string();
+    let micros = dt.timestamp_subsec_micros();
+    if micros == 0 {
+        format!("{base}+00:00")
+    } else {
+        format!("{base}.{micros:06}+00:00")
+    }
+}
+
+/// `(request.data.get(key) or "")` for the thread/message text fields
+/// (`threads.py:77,91`, `messages.py:71`): JSON falsy (`null`, `false`,
+/// `0`/`0.0`, `""`, `[]`, `{}`) coerces to `""`; strings pass through; any
+/// other truthy scalar raises in Python (`TypeError`/`AttributeError` on
+/// `[:255]`/`.strip()`), which `handle_exception` maps to the generic 500.
+pub fn or_empty_str(value: Option<&serde_json::Value>) -> HandlerResult<String> {
+    match value {
+        None => Ok(String::new()),
+        Some(serde_json::Value::String(text)) => Ok(text.clone()),
+        Some(serde_json::Value::Null) => Ok(String::new()),
+        Some(serde_json::Value::Bool(false)) => Ok(String::new()),
+        Some(serde_json::Value::Number(number)) => {
+            if number.as_i64() == Some(0) || number.as_f64() == Some(0.0) {
+                Ok(String::new())
+            } else {
+                Err(server_error())
+            }
+        }
+        Some(serde_json::Value::Array(items)) if items.is_empty() => Ok(String::new()),
+        Some(serde_json::Value::Object(map)) if map.is_empty() => Ok(String::new()),
+        _ => Err(server_error()),
+    }
+}
+
+/// Python `str[:n]` on the title fields (`threads.py:77,91`): code points,
+/// never mid-UTF-8 (the `[:255]` semantic trap).
+pub fn truncate_chars(text: &str, bound: usize) -> String {
+    if text.chars().count() <= bound {
+        return text.to_owned();
+    }
+    let end = text
+        .char_indices()
+        .nth(bound)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len());
+    text[..end].to_owned()
+}
+
+/// Python `bool(value)` for the PATCH `is_archived` flag (`threads.py:93`):
+/// `null`/`false`/`0`/`""`/`[]`/`{}` are false, everything else — including
+/// the string `"false"` and any object — is true. Ported as written.
+pub fn py_bool(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(flag) => *flag,
+        serde_json::Value::Number(number) => {
+            number.as_i64().is_some_and(|n| n != 0)
+                || number.as_u64().is_some_and(|n| n != 0)
+                || number.as_f64().is_some_and(|n| n != 0.0)
+        }
+        serde_json::Value::String(text) => !text.is_empty(),
+        serde_json::Value::Array(items) => !items.is_empty(),
+        serde_json::Value::Object(map) => !map.is_empty(),
+    }
+}
+
+/// `after` cursor (`messages.py:51-54`, `events.py:67-70`):
+/// `int(raw or 0)`, `0` on missing/empty/unparseable. `limit` uses
+/// [`parse_limit`].
+pub fn parse_after(raw: Option<&str>) -> i64 {
+    match raw {
+        None | Some("") => 0,
+        Some(text) => text.parse::<i64>().unwrap_or(0),
+    }
+}
+
+/// `limit` cursor (`messages.py:55-59`): `int(raw or 100)`, `100` on
+/// missing/empty/unparseable, then clamped to `[1, 200]`. Note the
+/// `or`-before-`int` order: `"0"` parses to `0` (truthy string) and clamps
+/// to `1`, while `""` falls back to `100`.
+pub fn parse_limit(raw: Option<&str>) -> i64 {
+    let value = match raw {
+        None | Some("") => 100,
+        Some(text) => text.parse::<i64>().unwrap_or(100),
+    };
+    value.clamp(1, 200)
+}
+
+/// Last query value wins (Django `QueryDict.get`), over axum's
+/// `Query<HashMap<..>>` which keeps the last duplicate the same way.
+pub fn query_last(params: &std::collections::HashMap<String, String>, key: &str) -> Option<String> {
+    params.get(key).cloned()
+}
+
+/// First line of the stripped message, capped at 60 chars
+/// (`messages.py:33-35`).
+pub fn title_from(content: &str) -> String {
+    let first = content.trim().split('\n').next().unwrap_or("");
+    // `split('\n')` never yields a trailing `\r`-free line the way Python's
+    // `splitlines()` does for `\r\n`; strip the carriage return Python's
+    // line splitting removes.
+    truncate_chars(first.strip_suffix('\r').unwrap_or(first), 60)
+}
+
+/// Borrow the Postgres pool from the state (500 when the binary runs without
+/// one — the license `pool_ref` precedent).
+pub fn pool_ref(state: &AppState) -> HandlerResult<&PgPool> {
+    state.pools().map(|pools| pools.primary()).ok_or_else(server_error)
+}
+
+/// Compact-JSON response with the DRF content type.
+pub fn json_response(status: StatusCode, body: String) -> Response {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(body))
+        .expect("handler response builds")
+}
+
+/// The generic-500 envelope (`app/views/base.py:91-95`).
+pub fn server_error() -> Response {
+    json_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        SERVER_ERROR_BODY.to_owned(),
+    )
+}
+
+/// 401 for anonymous callers on the DRF routes.
+pub fn unauthenticated() -> Response {
+    json_response(StatusCode::UNAUTHORIZED, UNAUTHENTICATED_BODY.to_owned())
+}
+
+/// 404 `{"error":"not_found"}` for a thread scope that matches nothing.
+pub fn thread_not_found() -> Response {
+    json_response(StatusCode::NOT_FOUND, THREAD_NOT_FOUND_BODY.to_owned())
+}
+
+/// Parse a request body the way DRF does for JSON posts (the intake
+/// `parse_json_body` precedent): empty → `{}`; malformed → the DRF `ParseError`
+/// 400; non-object JSON → the attribute errors the view code hits (500).
+/// The contract suite only sends objects; the shape is pinned for parity.
+pub fn parse_json_body(raw: &[u8]) -> HandlerResult<serde_json::Value> {
+    if raw.is_empty() {
+        return Ok(serde_json::Value::Object(Default::default()));
+    }
+    match serde_json::from_slice::<serde_json::Value>(raw) {
+        Ok(value) if value.is_object() => Ok(value),
+        Ok(_) => Err(server_error()),
+        // The intake `parse_json_body` precedent: DRF interpolates the parser
+        // message (`ParseError('JSON parse error - %s')`).
+        Err(error) => Err(json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"detail": format!("JSON parse error - {error}")}).to_string(),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn py_iso_renders_python_isoformat_bytes() {
+        let whole =
+            DateTime::parse_from_rfc3339("2026-09-29T13:50:51+00:00").expect("parse");
+        assert_eq!(py_iso(&whole.with_timezone(&Utc)), "2026-09-29T13:50:51+00:00");
+        let micros =
+            DateTime::parse_from_rfc3339("2026-09-29T13:50:51.378615+00:00").expect("parse");
+        assert_eq!(
+            py_iso(&micros.with_timezone(&Utc)),
+            "2026-09-29T13:50:51.378615+00:00"
+        );
+        // Trailing-zero micros keep six digits (where chrono AutoSi would
+        // trim to ".378"): Python `isoformat()` always prints six.
+        let trailing =
+            DateTime::parse_from_rfc3339("2026-09-29T13:50:51.378000+00:00").expect("parse");
+        assert_eq!(
+            py_iso(&trailing.with_timezone(&Utc)),
+            "2026-09-29T13:50:51.378000+00:00"
+        );
+    }
+
+    #[test]
+    fn after_limit_parse_mirrors_python_coercion() {
+        assert_eq!(parse_after(None), 0);
+        assert_eq!(parse_after(Some("")), 0);
+        assert_eq!(parse_after(Some("abc")), 0);
+        assert_eq!(parse_after(Some("0")), 0);
+        assert_eq!(parse_after(Some("5")), 5);
+        assert_eq!(parse_limit(None), 100);
+        assert_eq!(parse_limit(Some("")), 100);
+        assert_eq!(parse_limit(Some("abc")), 100);
+        // "0" is a truthy string: int("0") = 0, then clamps to 1.
+        assert_eq!(parse_limit(Some("0")), 1);
+        assert_eq!(parse_limit(Some("500")), 200);
+        assert_eq!(parse_limit(Some("-3")), 1);
+        assert_eq!(parse_limit(Some("50")), 50);
+    }
+
+    #[test]
+    fn or_empty_str_mirrors_python_or_coercion() {
+        assert_eq!(or_empty_str(None).expect("missing"), "");
+        assert_eq!(
+            or_empty_str(Some(&serde_json::Value::Null)).expect("null"),
+            ""
+        );
+        assert_eq!(
+            or_empty_str(Some(&serde_json::json!("hi"))).expect("str"),
+            "hi"
+        );
+        assert_eq!(
+            or_empty_str(Some(&serde_json::json!(0))).expect("zero"),
+            ""
+        );
+        assert_eq!(
+            or_empty_str(Some(&serde_json::json!([]))).expect("empty list"),
+            ""
+        );
+        assert_eq!(
+            or_empty_str(Some(&serde_json::json!({}))).expect("empty dict"),
+            ""
+        );
+        assert!(or_empty_str(Some(&serde_json::json!(5))).is_err());
+        assert!(or_empty_str(Some(&serde_json::json!(true))).is_err());
+    }
+
+    #[test]
+    fn py_bool_matches_python_truthiness() {
+        assert!(!py_bool(&serde_json::Value::Null));
+        assert!(py_bool(&serde_json::json!(true)));
+        assert!(!py_bool(&serde_json::json!(0)));
+        assert!(py_bool(&serde_json::json!(1)));
+        // The string "false" is truthy in Python.
+        assert!(py_bool(&serde_json::json!("false")));
+        assert!(!py_bool(&serde_json::json!("")));
+        assert!(!py_bool(&serde_json::json!([])));
+    }
+
+    #[test]
+    fn title_from_takes_first_line_capped_at_sixty_chars() {
+        assert_eq!(title_from("do a thing"), "do a thing");
+        assert_eq!(title_from("  line one\nline two  "), "line one");
+        assert_eq!(title_from(""), "");
+        assert_eq!(title_from("   "), "");
+        assert_eq!(title_from(&"x".repeat(100)).len(), 60);
+        assert_eq!(title_from("a\r\nb"), "a");
+    }
+
+    #[test]
+    fn thread_json_uses_serializer_field_order_and_z_stamps() {
+        let row = ThreadRow {
+            id: "db68f428-df63-4de8-b060-2d4038a5b1f4".parse().expect("uuid"),
+            workspace_id: Uuid::nil(),
+            user_id: Uuid::nil(),
+            title: "Hi".to_owned(),
+            kind: "chat".to_owned(),
+            is_archived: false,
+            active_turn_id: None,
+            created_at: DateTime::parse_from_rfc3339("2026-09-29T13:50:51.378615+00:00")
+                .expect("parse")
+                .with_timezone(&Utc),
+            updated_at: DateTime::parse_from_rfc3339("2026-09-29T13:50:51+00:00")
+                .expect("parse")
+                .with_timezone(&Utc),
+        };
+        assert_eq!(
+            thread_json(&row, &chrono_tz::UTC),
+            r#"{"id":"db68f428-df63-4de8-b060-2d4038a5b1f4","title":"Hi","is_archived":false,"has_active_turn":false,"created_at":"2026-09-29T13:50:51.378615Z","updated_at":"2026-09-29T13:50:51Z"}"#
+        );
+    }
+
+    #[test]
+    fn truncate_chars_cuts_at_char_boundaries() {
+        assert_eq!(truncate_chars("héllo", 4), "héll");
+        assert_eq!(truncate_chars("abc", 5), "abc");
     }
 }
