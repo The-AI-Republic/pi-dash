@@ -21,4 +21,5 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod models;
+pub mod queries_projmem;
 pub mod queries_stateest;
