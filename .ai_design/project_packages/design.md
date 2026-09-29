@@ -1310,13 +1310,25 @@ The gate therefore sits at **run creation**, not on the switch:
 2. The install record carries `reviewed_by` / `reviewed_at` /
    `reviewed_digest`, all null at install.
 3. **Creating an agent run on a project whose `reviewed_at` is null is
-   refused, for every trigger** — the timer, a state transition, Run AI,
-   Comment & Run, Re-tick, and the token API. One choke point covers all
-   of them: every path above funnels through `_create_and_dispatch_run`
-   (`orchestration/service.py:735`) or `_create_continuation_run`
-   (`:443`), so the check goes there rather than into five callers that
-   can drift apart. The refusal carries a reason the UI renders as "read
-   the rulebook first", linked to the review screen. §14-D23.
+   refused, at every site that mints an `AgentRun`.** There is no single
+   choke point to put this on — the codebase has **five** creation sites,
+   and the guard has to be a shared helper every one of them calls, not a
+   check dropped into the busiest two:
+
+   | Creation site | Reaches the rulebook? |
+   |---|---|
+   | `_create_continuation_run` (`orchestration/service.py:443`, creates at `:478`) | yes — `build_first_turn` → `prompting/sections/intro.md:20` |
+   | `_create_and_dispatch_run` (`:735`, creates at `:785`) | yes — same path |
+   | `_create_project_move_handoff_run` (`:569`, creates at `:604`) | **yes** — calls `build_first_turn` for the **target** project; reached from `utils/issue_move.py:358` when an issue is moved into the project |
+   | `dispatch_scheduler_run` (`:846`, creates at `:953`) | **yes** — `build_scheduler_turn` → `prompting/sections/scheduler-intro.md:16` renders `project.description`; reached from `bgtasks/scheduler.py:226` |
+   | direct runs, `runner/views/runs.py:256` (creates at `:316`) | not today, and only by accident — the `KIND_DIRECT` recipe (`prompting/recipes.py:122`) happens to omit every rulebook-bearing section, though `build_direct_turn` already puts `project.description` in the context (`prompting/composer.py:484`). Guard it too rather than depend on a recipe staying that way. |
+
+   The last three are the ones a "gate the obvious triggers" reading
+   misses, and two of them carry the stranger's rulebook into a
+   local-runner prompt with no ticking, no Run AI click and no scheduler
+   of the package's own: moving an issue into the installed project is
+   enough. The refusal carries a reason the UI renders as "read the
+   rulebook first", linked to the review screen. §14-D23.
 4. Turning ticking on — in the UI or via API — is **also** refused while
    `reviewed_at` is null, so the switch cannot be armed behind the
    reviewer's back. The UI's toggle opens the rulebook first; the API
@@ -1605,12 +1617,14 @@ in whatever serves the catalog — a git repo, in the primary path (§5.1) —
 and the marketplace project owns any server-side model of them (§5.4).
 
 `ProjectPackageInstall.reviewed_at` is the field the existing code must
-consult, in two places rather than one (§10.2): the run-creation path
-(`_create_and_dispatch_run` / `_create_continuation_run`,
-`orchestration/service.py:735`/`:443`), which is what actually holds the
-gate, and the `Project.agent_ticking_enabled` write paths in the app API
-serializer and the project settings view from PDASHOSS01-220. Both are
-one-line guards; the first is the one that must not be skipped.
+consult, in two kinds of place (§10.2): **every** `AgentRun` creation site
+— all five of them, via one shared helper — which is what actually holds
+the gate, and the `Project.agent_ticking_enabled` write paths in the app
+API serializer and the project settings view from PDASHOSS01-220. The
+second is a one-line guard; the first is a one-line call in five places
+and is the one that must not be skipped, because two of those five
+(`_create_project_move_handoff_run`, `dispatch_scheduler_run`) are not on
+the issue-run path a reader naturally looks at.
 
 ### 11.2 API
 
@@ -1915,7 +1929,7 @@ Filed after approval, not in this PR.
 | P-4 | pi-dash | **Importer: plan + apply (API).** `ProjectPackageInstall`, plan generation, `apply` in one transaction, state reconciliation, issue-type reuse, `blocked_by` wiring, extension parsing | Plan writes nothing and is deterministic for a given (package, params, workspace), and matches the P-2 fixtures byte for byte; apply is atomic (an induced failure mid-apply leaves no project); installed project has the package's states with exactly one default; ticking is off; install record carries source, digest, catalog and artifact hashes; an unknown `extensions` key is ignored and an unknown `requires` key is a hard error |
 | P-5 | pi-dash | **`pidash project install` / `export` / `show` CLI, including catalog resolution.** Sources (file, dir, tgz, git, digest-pinned https, `owner/name@version`), parameter prompting, `--dry-run` rendering, conflict flags, `--accept-rulebook` | Round-trip test: export a PIDASHCONV-like fixture → install into a second workspace → export again → byte-identical; `--dry-run` output matches the plan API; tarball extraction rejects path traversal and oversized members; an archive whose digest does not match is refused before extraction; `owner/name@version` resolves against a static catalog served from a plain file server |
 | P-6 | pi-dash | **Bundled-skill install into the workspace skill store.** Depends on PDASHOSS01-260's `Skill` / `SkillFile`, the `skills.author` permission and the approval gate. Package-name namespacing; provenance fields; the plan's per-file listing | A package with `skills/` installs them as unapproved rows carrying package provenance; a skill with any file under `scripts/` or any executable bit is refused at plan time naming the files; a name collision with an existing workspace skill is refused; installing a package with skills without `skills.author` is refused; the plan lists every skill, description, file path, size and the executable count; no file reaches any machine before approval **and** runner opt-in |
-| P-7 | pi-dash | **Rulebook review gate (§10.2, D23).** `reviewed_*` fields, the review endpoint, the **run-creation guard**, the 409 on enabling ticking before review, UI rulebook-review screen | Creating an agent run on an unreviewed installed project is refused for **every** trigger — a test per trigger: timer tick, human state move into a ticking state, Run AI, Comment & Run, Re-tick, token API — and the refusal names the review step; enabling `agent_ticking_enabled` on an unreviewed installed project is refused by API and UI; reviewing records who/when/which digest; a project not created from a package is unaffected (no `ProjectPackageInstall` row ⇒ no guard) |
+| P-7 | pi-dash | **Rulebook review gate (§10.2, D23).** `reviewed_*` fields, the review endpoint, the **run-creation guard**, the 409 on enabling ticking before review, UI rulebook-review screen | Creating an agent run on an unreviewed installed project is refused at **every one of the five `AgentRun` creation sites** in §10.2's table — a test per trigger: timer tick, human state move into a ticking state, Run AI, Comment & Run, Re-tick, token API, **an issue moved into the project (`_create_project_move_handoff_run`) and a scheduler-binding tick (`dispatch_scheduler_run`)**, the last two being the paths that bypass the issue-run helpers — and the refusal names the review step; a regression test asserts the guard is a shared helper, so a sixth creation site added later cannot silently skip it; enabling `agent_ticking_enabled` on an unreviewed installed project is refused by API and UI; reviewing records who/when/which digest; a project not created from a package is unaffected (no `ProjectPackageInstall` row ⇒ no guard) |
 | P-8 | pi-dash | **Web UI: catalog browse, install, and package panel.** Source entry, catalog listing, parameter form, plan preview, skill + capability disclosure, post-install review panel | A user can install from a catalog entry and from a git URL end to end without the CLI; the skill file list, the capability list and the unsigned/provenance line are all visible before the confirm button |
 | P-9 | pi-dash | **MCP preview tool.** `pidash_preview_project_package` in `READ_TOOLS` | Tool returns the plan; no install tool exists; a write-policy test asserts install is not reachable from the agent toolset |
 | P-10 | pi-dash | **`pidash project diff`.** Read-only comparison of an installed project against a package version, using `installed_artifacts` | Correctly classifies each artifact — including each skill file — as unchanged / locally-edited / changed-upstream; exits non-zero when drift exists (so CI can gate) |
@@ -2198,15 +2212,17 @@ it, and `_on_enter_or_move` (`:396`) checks it only for agent-initiated
 moves (`:420`), so Run AI, Comment & Run and a human state move into
 `In Progress` all dispatch a run on an unreviewed rulebook (§10.2).
 *Default: refuse **run creation** while `ProjectPackageInstall.reviewed_at`
-is null, at the single choke point every trigger funnels through
-(`_create_and_dispatch_run` / `_create_continuation_run`,
-`orchestration/service.py:735`/`:443`), and keep the refusal on the
-ticking switch as well.* One guard in the path all six triggers share is
-both stronger and less code than a check per caller, and putting it there
-means a future seventh trigger is covered by construction. Alternative:
-guard each trigger separately, which is what a reader of the first draft
-would have built from the switch-only description and which leaves the
-next dispatch path to be found by an incident. A second alternative worth
+is null, through one shared helper called from **all five** `AgentRun`
+creation sites (§10.2's table), and keep the refusal on the ticking switch
+as well.* Note there is no single choke point to hang this on — the two
+issue-run helpers (`_create_and_dispatch_run` / `_create_continuation_run`,
+`orchestration/service.py:735`/`:443`) cover the six familiar triggers but
+not the project-move handoff or the scheduler, and both of those compose
+the rulebook. A shared helper rather than five inlined checks is what
+keeps a sixth creation site from silently skipping the gate.
+Alternative: guard each trigger separately, which is what a reader of the
+first draft would have built from the switch-only description and which
+leaves the next dispatch path to be found by an incident. A second alternative worth
 naming and rejecting: treat a deliberate human Run AI click as consent.
 It is not — the person clicking has not necessarily read the rulebook, and
 the whole point of the gate is that reading it is a distinct act (§12.3).
