@@ -28,6 +28,12 @@ scraper = { version = "0.24" }
 # undefined (Porting guide); same locked minijinja 2.x as pidash-jobs
 # (no lock churn).
 minijinja = { version = "2" }
+# D-19 collab serializers: Django EmailValidator port needs its user/domain/
+# literal patterns (same locked regex 1.x as pidash-jobs, no lock churn);
+# the IDN fallback needs UTS-46 ascii mapping (locked idna 1.x via url,
+# no lock churn).
+regex = "1"
+idna = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
