@@ -324,7 +324,11 @@ pub struct StateRef<'a> {
 /// project (else `ModelRetry`); otherwise the default state, else the
 /// lowest-`sequence` state (which may be `None` when the project has no
 /// states — the caller then creates the issue with a null state, exactly
-/// as Django's `state=None` assignment does).
+/// as Django's `state=None` assignment does). Input rows come from
+/// `project_states` (`_scoping.py:87-89`): `State.objects` scoped to the
+/// project + workspace slug, whose default manager already excludes
+/// soft-deleted and triage states (`state.py:79-84`) — the caller queries
+/// them, it does not re-filter here.
 pub fn resolve_state<'a>(
     state_id: Option<&str>,
     states: &'a [StateRef<'a>],
@@ -534,17 +538,22 @@ pub fn create_description_html(description_md: Option<&str>) -> String {
 /// the user holds an active membership row. Drives `get_project`,
 /// the token lookup, and every scoped queryset below. Table names are the
 /// models' `db_table`s (`projects`, `project_members`, `workspaces`).
+/// `$1` is the user id, `$2` the workspace slug. The queried model is
+/// `Project`, whose default manager (`SoftDeleteModel.objects`,
+/// `db/mixins.py:56-58`) excludes soft-deleted rows — hence the
+/// `projects.deleted_at` predicate. Join predicates never carry manager
+/// filters in Django, so the joined tables need none.
 pub const MEMBER_PROJECTS_SQL: &str = "SELECT DISTINCT projects.id FROM projects \
      INNER JOIN project_members ON (project_members.project_id = projects.id \
      AND project_members.member_id = $1 AND project_members.is_active) \
      INNER JOIN workspaces ON workspaces.id = projects.workspace_id \
-     WHERE workspaces.slug = $2";
+     WHERE workspaces.slug = $2 AND projects.deleted_at IS NULL";
 
 /// Exact miss message is [`ToolError::project_not_found`].
 /// Malformed-UUID handling ([`ToolError::issue_not_found`]) needs no
 /// translation layer in Rust: `Uuid::parse_str` failing *is* the miss.
 pub fn parse_scoped_issue_id(raw: &str) -> Result<Uuid, ToolError> {
-    Uuid::parse_str(raw).map_err(|_| ToolError::issue_not_found(raw))
+    Uuid::parse_str(strip_uuid_braces(raw)).map_err(|_| ToolError::issue_not_found(raw))
 }
 
 /// `scoped_issues` = `member_project_issues` (`core/querysets.py:19-30`)
@@ -556,7 +565,10 @@ pub fn parse_scoped_issue_id(raw: &str) -> Result<Uuid, ToolError> {
 /// `NOT (states.group = 'triage')`, and `NOT NULL` is `NULL` — so issues
 /// with *no* state are excluded too. The fragment below keeps the exact
 /// `NOT (...)` form instead of the "equivalent" `IS NULL OR !=` rewrite,
-/// which would wrongly admit stateless issues.
+/// which would wrongly admit stateless issues. The queried model is
+/// `Issue.issue_objects` (soft-delete base, like [`MEMBER_PROJECTS_SQL`]),
+/// hence `issues.deleted_at IS NULL`; joined tables carry no such
+/// predicate.
 pub const SCOPED_ISSUES_SQL: &str = "SELECT DISTINCT issues.* FROM issues \
      INNER JOIN projects ON projects.id = issues.project_id \
      INNER JOIN workspaces ON workspaces.id = issues.workspace_id \
@@ -564,6 +576,7 @@ pub const SCOPED_ISSUES_SQL: &str = "SELECT DISTINCT issues.* FROM issues \
      AND project_members.member_id = $1 AND project_members.is_active) \
      LEFT OUTER JOIN states ON states.id = issues.state_id \
      WHERE workspaces.slug = $2 \
+     AND issues.deleted_at IS NULL \
      AND NOT (states.group = 'triage') \
      AND NOT (issues.archived_at IS NOT NULL) \
      AND NOT (projects.archived_at IS NOT NULL) \
@@ -602,24 +615,37 @@ pub fn my_issues_scope_sql(scope: &str) -> &'static str {
 
 /// `require_project_write` (`_scoping.py:92-103` → `check_project_role`,
 /// `core/permissions.py:73-110`): an active `ProjectMember` row with role
-/// 20/15, OR any-role membership plus workspace-admin (role 20).
+/// 20/15, OR any-role membership plus workspace-admin (role 20, exact —
+/// `role=ROLE_ADMIN`, not `>=`).
 /// Guests are blocked with [`ToolError::write_denied`].
+/// `$1` is the user id, `$2` the workspace slug, `$3` the project id.
+/// Python filters `workspace__slug`, i.e. a join to `workspaces` — the
+/// fragment joins it explicitly so the caller binds the slug it already
+/// has (binding a slug against the `workspace_id` UUID column would fail
+/// at runtime). Both membership models use the soft-delete default
+/// manager, hence the `deleted_at` predicates.
 pub const PROJECT_WRITE_GATE_SQL: &str = "SELECT EXISTS(SELECT 1 FROM project_members \
+     INNER JOIN workspaces ON workspaces.id = project_members.workspace_id \
      WHERE project_members.member_id = $1 \
-     AND project_members.workspace_id = $2 \
+     AND workspaces.slug = $2 \
      AND project_members.project_id = $3 \
      AND project_members.role IN (20, 15) \
-     AND project_members.is_active) \
+     AND project_members.is_active \
+     AND project_members.deleted_at IS NULL) \
      OR (EXISTS(SELECT 1 FROM project_members \
+     INNER JOIN workspaces ON workspaces.id = project_members.workspace_id \
      WHERE project_members.member_id = $1 \
-     AND project_members.workspace_id = $2 \
+     AND workspaces.slug = $2 \
      AND project_members.project_id = $3 \
-     AND project_members.is_active) \
+     AND project_members.is_active \
+     AND project_members.deleted_at IS NULL) \
      AND EXISTS(SELECT 1 FROM workspace_members \
+     INNER JOIN workspaces ON workspaces.id = workspace_members.workspace_id \
      WHERE workspace_members.member_id = $1 \
-     AND workspace_members.workspace_id = $2 \
+     AND workspaces.slug = $2 \
      AND workspace_members.role = 20 \
-     AND workspace_members.is_active))";
+     AND workspace_members.is_active \
+     AND workspace_members.deleted_at IS NULL))";
 
 // ---------------------------------------------------------------------------
 // list_issues filters (work_item_list_filters + issue_filters GET mapping)
@@ -643,11 +669,24 @@ pub fn split_tokens(raw: Option<&str>) -> Vec<String> {
     }
 }
 
+/// `uuid.UUID(str)` also accepts the braced form (`{...}`); neither
+/// `Uuid::parse_str` nor the regex-free classifiers below do. Strip one
+/// matched pair of braces first so braced UUIDs validate exactly as in
+/// Python. (Non-ASCII digits are the reverse gap: Python `\d`/`isdigit`
+/// accept them, the classifiers here are ASCII-only — same documented
+/// limitation as [`search_sequence_tokens`].)
+pub fn strip_uuid_braces(value: &str) -> &str {
+    value
+        .strip_prefix('{')
+        .and_then(|inner| inner.strip_suffix('}'))
+        .unwrap_or(value)
+}
+
 /// `_is_uuid` (`issue_filters.py:495-500`): `uuid.UUID(str(value))`
 /// accepting anything the constructor takes (hex with or without braces
-/// and dashes). `Uuid::parse_str` covers the same forms.
+/// and dashes).
 pub fn is_uuid_token(value: &str) -> bool {
-    Uuid::parse_str(value).is_ok()
+    Uuid::parse_str(strip_uuid_braces(value)).is_ok()
 }
 
 /// Validated `list_issues` filter parameters
@@ -864,14 +903,35 @@ impl ListFilterPredicates {
 /// branch. Comment-text matches never surface on this path (known
 /// limitation, `search/issue.py:77-82` — the contract is preserved, not
 /// fixed).
+///
+/// Bindings: `$1` is the raw query (FTS branch), `$2` the int array from
+/// [`search_sequence_tokens`], `$3` the [`escape_icontains`] output.
+/// `$1` and `$3` must stay separate: Django escapes LIKE metacharacters
+/// only in the `icontains` branches, never in the FTS query.
 pub const ISSUE_FTS_SQL: &str = "(to_tsvector('english'::regconfig, \
      COALESCE(issues.name, '') || ' ' || COALESCE(issues.description_stripped, '')) \
      @@ websearch_to_tsquery('english'::regconfig, $1) \
-     OR issues.name ILIKE '%' || $1 || '%' \
+     OR issues.name ILIKE '%' || $3 || '%' ESCAPE '\\' \
      OR issues.sequence_id IN (SELECT * FROM UNNEST($2::int[])) \
      OR EXISTS (SELECT 1 FROM projects \
      WHERE projects.id = issues.project_id \
-     AND projects.identifier ILIKE '%' || $1 || '%'))";
+     AND projects.identifier ILIKE '%' || $3 || '%' ESCAPE '\\'))";
+
+/// Django `icontains` escapes LIKE metacharacters (`\`, `%`, `_`) with a
+/// backslash, so a query for `100%` matches literally instead of acting
+/// as a wildcard (`db/models/lookups.py`, `PatternLookup`). The `ILIKE`
+/// branches of [`ISSUE_FTS_SQL`] pin the same escape character
+/// explicitly; the handler binds their parameter through this helper.
+pub fn escape_icontains(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    for ch in pattern.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
 
 /// Numeric branch of `_build_search_filter` (`search/issue.py:114-123`):
 /// only when the whole query is at most 20 chars; per `\b\d+\b` token at
@@ -1041,8 +1101,12 @@ pub fn classify_issue_ref(raw: &str) -> IssueRef {
     if reference.is_empty() {
         return IssueRef::Unresolved;
     }
-    if Uuid::parse_str(reference).is_ok() {
-        return IssueRef::Id(reference.to_owned());
+    // Brace-stripping applies to the UUID attempt only: Python tries
+    // `uuid.UUID(ref)` first and falls back to the identifier split on the
+    // *original* string, so `{PROJ-12}` stays unresolved (the tail `12}`
+    // is not a digit run).
+    if Uuid::parse_str(strip_uuid_braces(reference)).is_ok() {
+        return IssueRef::Id(strip_uuid_braces(reference).to_owned());
     }
     match reference.rsplit_once('-') {
         Some((code, tail))
@@ -1062,12 +1126,24 @@ pub fn classify_issue_ref(raw: &str) -> IssueRef {
     }
 }
 
+/// `_resolve_issue_refs` miss message (`issues.py:402-408`): every
+/// reference the scoped lookup could not resolve, in request order.
+pub fn unresolved_refs_message(unresolved: &[&str]) -> String {
+    format!(
+        "Issues not found or not accessible: {}",
+        unresolved.join(", ")
+    )
+}
+
 /// SQL for the identifier half of `resolve_refs`: project code compares
 /// case-insensitively (`project__identifier__iexact` → `UPPER()`, mirroring
 /// the model's always-upper normalization in `project.py:201-210`).
+/// The lookup runs on `Issue.issue_objects`, so soft-deleted rows are
+/// invisible (`db/mixins.py:56-58`).
 pub const RESOLVE_IDENTIFIER_SQL: &str =
     "SELECT issues.id FROM issues INNER JOIN projects ON projects.id = issues.project_id \
-     WHERE UPPER(projects.identifier) = UPPER($1) AND issues.sequence_id = $2 LIMIT 1";
+     WHERE UPPER(projects.identifier) = UPPER($1) AND issues.sequence_id = $2 \
+     AND issues.deleted_at IS NULL LIMIT 1";
 
 /// `_pair_rows` (`relations.py:126-130`) over live rows (the default
 /// soft-deletion manager excludes `deleted_at` rows, `mixins.py:56-58`).
@@ -1188,6 +1264,38 @@ pub fn relation_sort_key(project_identifier: &str, sequence_id: i64) -> (String,
     (project_identifier.to_owned(), sequence_id)
 }
 
+/// One grouped item: `_item` (`relations.py:269-277`) with the name
+/// truncation + untrusted wrapper applied by `_relations_view`
+/// (`issues.py:411-419`). Unknown stored types never reach this builder:
+/// `grouped_relations` drops rows whose viewpoint type is outside
+/// [`RELATION_TYPES`] (`relations.py:295-296`).
+pub fn relation_item(
+    id: &str,
+    identifier: &str,
+    name: &str,
+    state_name: Option<&str>,
+    state_group: Option<&str>,
+) -> Value {
+    let (name, _) = truncate(name, NAME_CAP);
+    json!({
+        "id": id,
+        "identifier": identifier,
+        "name": wrap_untrusted(&name),
+        "state": state_name,
+        "state_group": state_group,
+    })
+}
+
+/// Post-commit activity tasks fired by the relation writes
+/// (`relations.py:219-225,251-260`): `relate` logs per created target,
+/// `unrelate` logs per removed target. Celery dispatches, not audit rows —
+/// the handler fires them after the write transaction commits (same
+/// post-commit wrapper as [`RECORD_MESSAGE_INSERT_SQL`]), or the activity
+/// feed silently loses these entries.
+pub const RELATION_CREATED_ACTIVITY: &str = "issue_relation.activity.created";
+/// See [`RELATION_CREATED_ACTIVITY`].
+pub const RELATION_DELETED_ACTIVITY: &str = "issue_relation.activity.deleted";
+
 /// `_relation_write` wrapper (`issues.py:422-445`): exactly one source must
 /// resolve; write access to its project is required; an empty target list
 /// retries (`related_issues must list at least one issue.`); relation
@@ -1267,19 +1375,32 @@ pub const ISSUE_COMMENTS_SQL: &str =
 /// `record_write` (`_results.py:49-69`): persists the human-facing
 /// transcript row (tool-result message with links) plus the `tool_result`
 /// event carrying the message envelope, so write actions are always
-/// visible in the chat. Message `seq` is `MAX(seq) + 1` over the thread
-/// (0 when empty); events reuse the same allocation (`events.py:73-80`).
+/// visible in the chat. Message `seq` is `(MAX(seq) or 0) + 1` over the
+/// thread (**1** when empty — `_next_message_seq`, `events.py:73-80`;
+/// `None or 0` then `+ 1`); events allocate identically.
 /// Per the Porting guide transactions row, the handler runs this behind
 /// the post-commit wrapper — the write transaction commits first, then
 /// the message/event inserts and (for `update_issue` dispatches) the
 /// orchestration call fire.
+///
+/// Write summaries below are the exact `record_write` strings, including
+/// the em dash (U+2014) in the create summary.
+pub fn created_summary(identifier: &str, name: &str) -> String {
+    format!("Created issue {identifier} \u{2014} {name}")
+}
+
+/// `issues.py:383-387` — `changed` in [`plan_update`] order.
+pub fn updated_summary(identifier: &str, changed: &[&str]) -> String {
+    format!("Updated issue {identifier} ({})", changed.join(", "))
+}
+
 pub const RECORD_MESSAGE_SQL: &str =
     "SELECT assistant_thread.id FROM assistant_thread WHERE assistant_thread.id = $1 FOR UPDATE";
 
 pub const RECORD_MESSAGE_INSERT_SQL: &str =
     "INSERT INTO assistant_message (id, thread_id, turn_id, seq, kind, display_content, payload, status) \
      VALUES ($1, $2, $3, \
-     (SELECT COALESCE(MAX(seq), -1) + 1 FROM assistant_message WHERE thread_id = $2), \
+     (SELECT COALESCE(MAX(seq), 0) + 1 FROM assistant_message WHERE thread_id = $2), \
      'tool_result', $4, $5, 'completed') RETURNING id, seq, created_at";
 
 /// `AssistantEvent.id` is a `BigAutoField` (`models.py:154`) — the insert
@@ -1287,7 +1408,7 @@ pub const RECORD_MESSAGE_INSERT_SQL: &str =
 pub const RECORD_EVENT_INSERT_SQL: &str =
     "INSERT INTO assistant_event (thread_id, turn_id, seq, kind, message_id, payload) \
      VALUES ($1, $2, \
-     (SELECT COALESCE(MAX(seq), -1) + 1 FROM assistant_event WHERE thread_id = $1), \
+     (SELECT COALESCE(MAX(seq), 0) + 1 FROM assistant_event WHERE thread_id = $1), \
      'tool_result', $3, $4) RETURNING id, seq, created_at";
 
 /// `message_envelope` (`events.py:128-140`): `kind → role`,
@@ -1327,8 +1448,11 @@ pub fn message_envelope(
 /// (`assistant` for chat, `loop` otherwise).
 pub const CREATE_ISSUE_SQL: &str = "SELECT id FROM projects WHERE id = $1 FOR UPDATE";
 
+/// `Issue.objects` is the soft-delete default manager, so the maximum is
+/// taken over live rows only — a sequence held by a soft-deleted row can
+/// be reallocated, exactly as in Python (ported behavior, not fixed).
 pub const CREATE_ISSUE_MAX_SEQ_SQL: &str =
-    "SELECT COALESCE(MAX(sequence_id), 0) FROM issues WHERE project_id = $1";
+    "SELECT COALESCE(MAX(sequence_id), 0) FROM issues WHERE project_id = $1 AND deleted_at IS NULL";
 
 pub const CREATE_ISSUE_INSERT_SQL: &str =
     "INSERT INTO issues (id, name, description_html, description_json, priority, \
@@ -2094,5 +2218,103 @@ mod tests {
         assert_eq!(value["content"], "did it");
         assert_eq!(value["turn_id"], Value::Null);
         assert_eq!(value["completed_at"], Value::Null);
+    }
+
+    #[test]
+    fn seq_starts_at_one_on_empty_threads() {
+        // `(MAX(seq) or 0) + 1` (`events.py:73-80`): the first message /
+        // event in a thread takes seq 1, not 0.
+        assert!(RECORD_MESSAGE_INSERT_SQL.contains("COALESCE(MAX(seq), 0) + 1"));
+        assert!(RECORD_EVENT_INSERT_SQL.contains("COALESCE(MAX(seq), 0) + 1"));
+        assert!(!RECORD_MESSAGE_INSERT_SQL.contains("MAX(seq), -1"));
+        assert!(!RECORD_EVENT_INSERT_SQL.contains("MAX(seq), -1"));
+    }
+
+    #[test]
+    fn soft_delete_predicates_match_default_managers() {
+        // Every `.objects` query in the ported Python runs under
+        // `SoftDeleteModel.objects` (`db/mixins.py:56-58`); joins never
+        // carry manager filters, so exactly the queried tables predicate.
+        assert!(SCOPED_ISSUES_SQL.contains("issues.deleted_at IS NULL"));
+        assert!(MEMBER_PROJECTS_SQL.contains("projects.deleted_at IS NULL"));
+        assert!(RESOLVE_IDENTIFIER_SQL.contains("issues.deleted_at IS NULL"));
+        assert!(CREATE_ISSUE_MAX_SEQ_SQL.contains("deleted_at IS NULL"));
+        assert!(PROJECT_WRITE_GATE_SQL.contains("project_members.deleted_at IS NULL"));
+        assert!(PROJECT_WRITE_GATE_SQL.contains("workspace_members.deleted_at IS NULL"));
+        // M2M traversals join the through tables with no manager filter
+        // (only the explicit through-model joins filter) — filtering here
+        // would hide issues Python still returns.
+        assert!(!my_issues_scope_sql("assigned").contains("deleted_at"));
+    }
+
+    #[test]
+    fn write_gate_binds_workspace_slug() {
+        // `check_project_role` filters `workspace__slug`, i.e. a join —
+        // never a bare `workspace_id = <slug>` comparison, which would
+        // fail at runtime (UUID column vs text).
+        assert!(PROJECT_WRITE_GATE_SQL.contains("workspaces.slug = $2"));
+        assert!(!PROJECT_WRITE_GATE_SQL.contains("workspace_id = $2"));
+        assert!(PROJECT_WRITE_GATE_SQL.contains("role IN (20, 15)"));
+        assert!(PROJECT_WRITE_GATE_SQL.contains("role = 20"));
+    }
+
+    #[test]
+    fn fts_escapes_like_metacharacters() {
+        assert_eq!(escape_icontains("100%"), "100\\%");
+        assert_eq!(escape_icontains("a_b\\c"), "a\\_b\\\\c");
+        assert_eq!(escape_icontains("plain"), "plain");
+        assert!(ISSUE_FTS_SQL.contains("$3"));
+        assert!(ISSUE_FTS_SQL.contains("ESCAPE '\\'"));
+    }
+
+    #[test]
+    fn braced_uuids_match_python_constructor() {
+        let id = "11111111-1111-1111-1111-111111111111";
+        assert_eq!(strip_uuid_braces(&format!("{{{id}}}")), id);
+        assert_eq!(strip_uuid_braces("{abc"), "{abc");
+        assert_eq!(strip_uuid_braces("abc}"), "abc}");
+        assert!(is_uuid_token(&format!("{{{id}}}")));
+        assert!(matches!(
+            classify_issue_ref(&format!("{{{id}}}")),
+            IssueRef::Id(_)
+        ));
+        // Braces are stripped for the UUID attempt only: the identifier
+        // fallback still sees the original string, as in `resolve_refs`.
+        assert_eq!(classify_issue_ref("{PROJ-12}"), IssueRef::Unresolved);
+        assert!(parse_scoped_issue_id(&format!("{{{id}}}")).is_ok());
+    }
+
+    #[test]
+    fn write_summaries_are_byte_exact() {
+        assert_eq!(
+            created_summary("PROJ-7", "Fix it"),
+            "Created issue PROJ-7 \u{2014} Fix it"
+        );
+        assert_eq!(
+            updated_summary("PROJ-7", &["name", "state"]),
+            "Updated issue PROJ-7 (name, state)"
+        );
+        assert_eq!(
+            unresolved_refs_message(&["PROJ-9", "nope"]),
+            "Issues not found or not accessible: PROJ-9, nope"
+        );
+    }
+
+    #[test]
+    fn grouped_item_shape() {
+        let value = relation_item("i", "PROJ-2", "Some work", Some("Backlog"), Some("backlog"));
+        assert_eq!(value["id"], "i");
+        assert_eq!(value["identifier"], "PROJ-2");
+        assert_eq!(value["name"], "<untrusted>Some work</untrusted>");
+        assert_eq!(value["state"], "Backlog");
+        assert_eq!(value["state_group"], "backlog");
+        let long = "n".repeat(300);
+        let trunc = relation_item("i", "P-1", &long, None, None);
+        assert_eq!(
+            trunc["name"],
+            format!("<untrusted>{}</untrusted>", "n".repeat(200))
+        );
+        assert_eq!(RELATION_CREATED_ACTIVITY, "issue_relation.activity.created");
+        assert_eq!(RELATION_DELETED_ACTIVITY, "issue_relation.activity.deleted");
     }
 }

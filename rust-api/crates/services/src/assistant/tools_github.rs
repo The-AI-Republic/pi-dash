@@ -137,6 +137,13 @@ pub fn normalize_gitlab_host(host: &str) -> String {
 /// `:78-88`). The canonical URL is rebuilt (`:281`).
 pub fn parse_gitlab_review_url(url: &str, gitlab_hosts: &[String]) -> Option<ParsedReview> {
     let candidate = super::tools_issues::py_strip(url);
+    // Python matches against `urlparse` output, which splits `?query` and
+    // `#fragment` off before the scheme/host/path checks — a pasted MR URL
+    // with tracking params or a note anchor still parses there. Mirror the
+    // split so such URLs parse here too (the GitHub regex needs no such
+    // treatment: its optional tail already requires a `/` prefix, so a
+    // `?`/`#` suffix fails matching on both sides).
+    let candidate = candidate.split(['?', '#']).next().unwrap_or("");
     let (scheme, rest) = candidate.split_once("://")?;
     if scheme != "http" && scheme != "https" {
         return None;
@@ -330,6 +337,10 @@ pub fn review_success(
 /// whose repository matches provider + namespace/name case-insensitively;
 /// the token is `provider_account.credential_config["token"]`.
 /// (`*_iexact` → `UPPER()` comparisons, as in [`super::tools_issues`].)
+/// The member-projects subquery is [`super::tools_issues::MEMBER_PROJECTS_SQL`]
+/// inline, including its `projects.deleted_at` predicate; the outer
+/// `deleted_at` predicate is the binding's own default manager. Joined
+/// repository/account tables carry no manager filter, as in Django.
 pub const BINDING_TOKEN_SQL: &str = "SELECT git_provider_accounts.credential_config \
      FROM git_repository_bindings \
      INNER JOIN git_repositories ON git_repositories.id = git_repository_bindings.repository_id \
@@ -339,7 +350,7 @@ pub const BINDING_TOKEN_SQL: &str = "SELECT git_provider_accounts.credential_con
      INNER JOIN project_members ON (project_members.project_id = projects.id \
      AND project_members.member_id = $1 AND project_members.is_active) \
      INNER JOIN workspaces ON workspaces.id = projects.workspace_id \
-     WHERE workspaces.slug = $2) \
+     WHERE workspaces.slug = $2 AND projects.deleted_at IS NULL) \
      AND git_repositories.provider = $3 \
      AND UPPER(git_repositories.namespace) = UPPER($4) \
      AND UPPER(git_repositories.name) = UPPER($5) \
@@ -358,7 +369,7 @@ pub const SYNC_TOKEN_SQL: &str =
      INNER JOIN project_members ON (project_members.project_id = projects.id \
      AND project_members.member_id = $1 AND project_members.is_active) \
      INNER JOIN workspaces ON workspaces.id = projects.workspace_id \
-     WHERE workspaces.slug = $2) \
+     WHERE workspaces.slug = $2 AND projects.deleted_at IS NULL) \
      AND UPPER(github_repositories.owner) = UPPER($3) \
      AND UPPER(github_repositories.name) = UPPER($4) \
      AND github_repository_syncs.deleted_at IS NULL \
@@ -625,5 +636,35 @@ mod tests {
         let schema = tool_schema();
         assert_eq!(schema["name"], "get_pull_request_status");
         assert_eq!(schema["parameters"]["required"], json!(["url"]));
+    }
+
+    #[test]
+    fn gitlab_query_and_fragment_still_parse() {
+        // Python matches against `urlparse` output, where `?query` and
+        // `#fragment` never reach the path checks.
+        for url in [
+            "https://gitlab.com/g/r/-/merge_requests/42?foo=bar",
+            "https://gitlab.com/g/r/-/merge_requests/42#note_1",
+            "https://gitlab.com/g/r/-/merge_requests/42/?foo=bar",
+        ] {
+            let parsed = parse_gitlab_review_url(url, &[]).expect("parses");
+            assert_eq!(parsed.external_iid, "42", "{url}");
+            assert_eq!(
+                parsed.url, "https://gitlab.com/g/r/-/merge_requests/42",
+                "{url}"
+            );
+        }
+        // The GitHub regex needs no such treatment: its optional tail
+        // requires a `/` prefix, so suffixes fail on both sides alike.
+        assert!(parse_github_review_url("https://github.com/o/n/pull/12?x=1").is_none());
+        assert!(parse_github_review_url("https://github.com/o/n/pull/12/files").is_some());
+    }
+
+    #[test]
+    fn token_subqueries_exclude_deleted_projects() {
+        assert!(BINDING_TOKEN_SQL.contains("projects.deleted_at IS NULL"));
+        assert!(SYNC_TOKEN_SQL.contains("projects.deleted_at IS NULL"));
+        assert!(BINDING_TOKEN_SQL.contains("git_repository_bindings.deleted_at IS NULL"));
+        assert!(SYNC_TOKEN_SQL.contains("github_repository_syncs.deleted_at IS NULL"));
     }
 }
