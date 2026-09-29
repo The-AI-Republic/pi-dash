@@ -21,7 +21,9 @@
 //! * `workspace__slug` filters are a join to `workspaces`
 //!   (`workspaces.id = file_assets.workspace_id AND workspaces.slug = $N`).
 //! * `QuerySet.update(...)` writes the named columns only (no `updated_at`
-//!   bump); `save(update_fields=[...])` bumps `updated_at` via `auto_now`.
+//!   bump); `save(update_fields=[...])` writes exactly the named columns
+//!   too (Django builds the UPDATE from that list only — no `auto_now`
+//!   bump for the rest).
 //! * `save_project_cover` (`v2.py:631-634`) re-gets the project per row and
 //!   the LAST row wins.
 //!
@@ -203,9 +205,9 @@ pub const PROJECT_SCOPED_GET_SQL: &str = "SELECT \"file_assets\".\"id\" FROM \"f
 pub const PROJECT_GET_SQL: &str = PROJECT_SCOPED_GET_SQL;
 
 /// `save(update_fields=["is_uploaded", "attributes"])` (`v2.py:592`):
-/// flips `is_uploaded` and replaces-or-keeps `attributes`. `updated_at`
-/// bumps via `auto_now` (Django `save`, not `QuerySet.update`).
-pub const PROJECT_PATCH_SAVE_SQL: &str = "UPDATE \"file_assets\" SET \"is_uploaded\" = TRUE, \"attributes\" = $2, \"updated_at\" = CURRENT_TIMESTAMP WHERE \"file_assets\".\"id\" = $1";
+/// flips `is_uploaded` and replaces-or-keeps `attributes` — exactly these
+/// two columns, no `updated_at` bump (`update_fields` filters the UPDATE).
+pub const PROJECT_PATCH_SAVE_SQL: &str = "UPDATE \"file_assets\" SET \"is_uploaded\" = TRUE, \"attributes\" = $2 WHERE \"file_assets\".\"id\" = $1";
 
 /// `is_deleted=True; deleted_at=now; save(...)` (`v2.py:600-603`) — BOTH
 /// columns, unlike the v1 delete.
@@ -287,9 +289,10 @@ pub fn bulk_swallows_integrity_error(branch: BulkBranch) -> bool {
 }
 
 /// `save_project_cover` (`v2.py:631-634`): per row, re-get the project and
-/// stamp `cover_image_asset_id`; the LAST row wins.
+/// stamp `cover_image_asset_id`; the LAST row wins. The re-get uses the
+/// default manager, so it carries `deleted_at IS NULL`.
 pub const SAVE_PROJECT_COVER_GET_SQL: &str =
-    "SELECT \"projects\".\"id\" FROM \"projects\" WHERE \"projects\".\"id\" = $1";
+    "SELECT \"projects\".\"id\" FROM \"projects\" WHERE \"projects\".\"id\" = $1 AND \"projects\".\"deleted_at\" IS NULL";
 pub const SAVE_PROJECT_COVER_SQL: &str =
     "UPDATE \"projects\" SET \"cover_image_asset_id\" = $2 WHERE \"projects\".\"id\" = $1";
 
@@ -312,8 +315,9 @@ pub const CHECK_EXISTS_SQL: &str = "SELECT EXISTS(SELECT 1 FROM \"file_assets\" 
 pub const DUPLICATE_ORIGINAL_SQL: &str = "SELECT \"file_assets\".\"id\" FROM \"file_assets\" WHERE (\"file_assets\".\"deleted_at\" IS NULL AND \"file_assets\".\"id\" = $1 AND \"file_assets\".\"is_uploaded\")";
 
 /// `filter(id=project_id, workspace=workspace).exists()` (`v2.py:750`) —
-/// only when `project_id` is given.
-pub const DUPLICATE_PROJECT_CHECK_SQL: &str = "SELECT EXISTS(SELECT 1 FROM \"projects\" WHERE \"projects\".\"id\" = $1 AND \"projects\".\"workspace_id\" = $2)";
+/// only when `project_id` is given. Default-manager scope: a soft-deleted
+/// project reads as missing → 404.
+pub const DUPLICATE_PROJECT_CHECK_SQL: &str = "SELECT EXISTS(SELECT 1 FROM \"projects\" WHERE \"projects\".\"id\" = $1 AND \"projects\".\"workspace_id\" = $2 AND \"projects\".\"deleted_at\" IS NULL)";
 
 /// `FileAsset.objects.filter(id=new).update(is_uploaded=True)` (`v2.py:778`)
 /// — runs unconditionally after `copy_object` returns, whatever the copy did
@@ -339,13 +343,14 @@ pub const DUPLICATE_CREATE_COLUMNS: &[&str] = &[
 // Download endpoints (`v2.py:783-835`)
 // ---------------------------------------------------------------------------
 
-/// Workspace download lookup (`v2.py:788-795`): `is_uploaded` is part of the
-/// LOOKUP (a present-but-unuploaded row answers the same 404).
-pub const WORKSPACE_DOWNLOAD_SQL: &str = "SELECT \"file_assets\".\"id\" FROM \"file_assets\" INNER JOIN \"workspaces\" ON \"workspaces\".\"id\" = \"file_assets\".\"workspace_id\" WHERE (\"file_assets\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2 AND \"file_assets\".\"is_uploaded\")";
+/// Workspace download lookup (`v2.py:788-795`): default-manager scope
+/// (`deleted_at IS NULL`) plus `is_uploaded` in the LOOKUP (a
+/// present-but-unuploaded row answers the same 404).
+pub const WORKSPACE_DOWNLOAD_SQL: &str = "SELECT \"file_assets\".\"id\" FROM \"file_assets\" INNER JOIN \"workspaces\" ON \"workspaces\".\"id\" = \"file_assets\".\"workspace_id\" WHERE (\"file_assets\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2 AND \"file_assets\".\"is_uploaded\" AND \"file_assets\".\"deleted_at\" IS NULL)";
 
 /// Project download lookup (`v2.py:815-823`): as above plus `project_id`
 /// scoping — a row without this project 404s.
-pub const PROJECT_DOWNLOAD_SQL: &str = "SELECT \"file_assets\".\"id\" FROM \"file_assets\" INNER JOIN \"workspaces\" ON \"workspaces\".\"id\" = \"file_assets\".\"workspace_id\" WHERE (\"file_assets\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2 AND \"file_assets\".\"project_id\" = $3 AND \"file_assets\".\"is_uploaded\")";
+pub const PROJECT_DOWNLOAD_SQL: &str = "SELECT \"file_assets\".\"id\" FROM \"file_assets\" INNER JOIN \"workspaces\" ON \"workspaces\".\"id\" = \"file_assets\".\"workspace_id\" WHERE (\"file_assets\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2 AND \"file_assets\".\"project_id\" = $3 AND \"file_assets\".\"is_uploaded\" AND \"file_assets\".\"deleted_at\" IS NULL)";
 
 /// Presigned-call shape for the fetch/download redirects: `disposition`
 /// and how `filename` resolves. Static uses bare defaults (inline);
@@ -492,6 +497,8 @@ mod tests {
         // Patch saves exactly is_uploaded + attributes; delete stamps both columns.
         assert!(PROJECT_PATCH_SAVE_SQL.contains("\"is_uploaded\" = TRUE"));
         assert!(PROJECT_PATCH_SAVE_SQL.contains("\"attributes\" = $2"));
+        // save(update_fields=[...]) writes the named columns only: no auto_now bump.
+        assert!(!PROJECT_PATCH_SAVE_SQL.contains("updated_at"));
         assert!(PROJECT_DELETE_SQL.contains("\"is_deleted\" = TRUE"));
         assert!(PROJECT_DELETE_SQL.contains("\"deleted_at\" = CURRENT_TIMESTAMP"));
         // Patch metadata publisher passes the URL kwarg pk.
@@ -540,6 +547,8 @@ mod tests {
         assert!(!bulk_swallows_integrity_error(BulkBranch::ProjectCover));
         // Cover loop re-gets the project per row; last row wins (documented).
         assert!(SAVE_PROJECT_COVER_SQL.contains("\"cover_image_asset_id\" = $2"));
+        // The per-row project re-get uses the default manager.
+        assert!(SAVE_PROJECT_COVER_GET_SQL.contains("\"deleted_at\" IS NULL"));
         // Lookup scopes ids + slug + active rows.
         assert!(BULK_LOOKUP_SQL.contains("= ANY($1)"));
         assert!(BULK_LOOKUP_SQL.contains("\"workspaces\".\"slug\" = $2"));
@@ -580,6 +589,8 @@ mod tests {
         assert!(DUPLICATE_CREATE_COLUMNS.contains(&"storage_metadata"));
         // The is_uploaded flip runs unconditionally after the copy.
         assert!(DUPLICATE_MARK_UPLOADED_SQL.contains("\"is_uploaded\" = TRUE"));
+        // The project-exists check reads through the default manager.
+        assert!(DUPLICATE_PROJECT_CHECK_SQL.contains("\"deleted_at\" IS NULL"));
     }
 
     #[test]
@@ -588,6 +599,9 @@ mod tests {
         assert!(WORKSPACE_DOWNLOAD_SQL.contains("\"is_uploaded\""));
         assert!(PROJECT_DOWNLOAD_SQL.contains("\"is_uploaded\""));
         assert!(PROJECT_DOWNLOAD_SQL.contains("\"project_id\" = $3"));
+        // Default-manager reads: soft-deleted rows 404 like missing rows.
+        assert!(WORKSPACE_DOWNLOAD_SQL.contains("\"deleted_at\" IS NULL"));
+        assert!(PROJECT_DOWNLOAD_SQL.contains("\"deleted_at\" IS NULL"));
         // Static lookup has NO workspace scoping (AllowAny, id only).
         assert!(!STATIC_GET_SQL.contains("workspaces"));
         assert!(STATIC_GET_SQL.contains("\"deleted_at\" IS NULL"));
