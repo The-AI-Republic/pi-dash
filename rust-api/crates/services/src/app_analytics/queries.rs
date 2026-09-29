@@ -247,11 +247,13 @@ pub fn dimension_sql(x_axis: &str) -> Option<(String, String)> {
                  ON (\"{ISSUE_TABLE}\".\"id\" = \"{ISSUE_ASSIGNEE_TABLE}\".\"issue_id\")"
             ),
         )),
+        // Forward nullable FK (`Issue.estimate_point`, `db/models/issue.py:130-136`):
+        // Django joins `issues.estimate_point_id = estimate_points.id` (LEFT OUTER, nullable).
         "estimate_point__value" => Some((
             format!("\"{ESTIMATE_POINT_TABLE}\".\"value\""),
             format!(
                 " LEFT OUTER JOIN \"{ESTIMATE_POINT_TABLE}\" \
-                 ON (\"{ISSUE_TABLE}\".\"id\" = \"{ESTIMATE_POINT_TABLE}\".\"issue_id\")"
+                 ON (\"{ISSUE_TABLE}\".\"estimate_point_id\" = \"{ESTIMATE_POINT_TABLE}\".\"id\")"
             ),
         )),
         "issue_cycle__cycle_id" => Some((
@@ -699,6 +701,13 @@ mod tests {
         let sql = base_plot_estimate_sql("priority", None, "TRUE").expect("known axis");
         assert!(sql.contains("SUM(CAST(\"estimate_points\".\"value\" AS DOUBLE PRECISION))"));
         assert!(sql.contains("GROUP BY \"dimension\""));
+        // Forward FK (`db/models/issue.py:130-136`): the estimate table joins on
+        // `issues.estimate_point_id`, and exactly once.
+        assert!(sql.contains(
+            "LEFT OUTER JOIN \"estimate_points\" \
+             ON (\"issues\".\"estimate_point_id\" = \"estimate_points\".\"id\")"
+        ));
+        assert_eq!(sql.matches("\"estimate_points\"").count(), 3);
         assert!(base_plot_estimate_sql("nope", None, "TRUE").is_none());
     }
 
