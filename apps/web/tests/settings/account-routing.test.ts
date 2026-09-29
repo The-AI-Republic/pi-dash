@@ -6,6 +6,8 @@
 
 import { describe, expect, it } from "vitest";
 
+import { PROFILE_SETTINGS_TABS } from "@pi-dash/constants";
+
 import { getAccountActivePath } from "@/components/settings/helper";
 import { tabFromSplat } from "@/app/routes/redirects/core/settings";
 
@@ -31,6 +33,23 @@ describe("tabFromSplat", () => {
 
   it("ignores anything past the tab segment", () => {
     expect(tabFromSplat("profile/activity/extra")).toBe("activity");
+  });
+
+  // `:profileTabId` matches any segment, but the page renders a spinner for a
+  // tab it does not know — so an unknown segment has to fall back here rather
+  // than being forwarded as if it were a tab.
+  it("falls back to general for a segment that is not a real tab", () => {
+    expect(tabFromSplat("account")).toBe("general");
+    expect(tabFromSplat("nope")).toBe("general");
+    expect(tabFromSplat("profile/notification")).toBe("general");
+    expect(tabFromSplat("prefs/deeper")).toBe("general");
+  });
+
+  it("accepts every real tab", () => {
+    for (const tab of PROFILE_SETTINGS_TABS) {
+      expect(tabFromSplat(tab)).toBe(tab);
+      expect(tabFromSplat(`profile/${tab}`)).toBe(tab);
+    }
   });
 });
 
