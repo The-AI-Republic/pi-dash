@@ -2439,6 +2439,7 @@ version = "0.1.0"
 dependencies = [
  "ammonia",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "chrono-tz",
@@ -2446,6 +2447,7 @@ dependencies = [
  "hmac 0.12.1",
  "http",
  "http-body-util",
+ "idna",
  "md-5 0.10.6",
  "pidash-auth",
  "pidash-db",
