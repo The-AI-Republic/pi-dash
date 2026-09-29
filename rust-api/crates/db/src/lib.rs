@@ -24,6 +24,7 @@
 pub mod app_assets;
 pub mod app_cycles;
 pub mod app_intake;
+pub mod app_integrations;
 pub mod app_views_search;
 pub mod assistant;
 pub mod config;
