@@ -12,7 +12,11 @@
 //!   headline, snippet.
 //! * [`queries_search`] — the search query builders (`app/views/search/`,
 //!   PIDASHCONV-272): global sections, entity branches, issue pipeline.
+//! * [`permissions`] — the five guard units owned by PIDASHCONV-273:
+//!   workspace / project view gates, the view-issues list gate, the
+//!   favorite gates and the search gates, over the F-06 kernel semantics.
 pub mod fts;
+pub mod permissions;
 pub mod queries_search;
 pub mod queries_views;
 pub mod serializers;
