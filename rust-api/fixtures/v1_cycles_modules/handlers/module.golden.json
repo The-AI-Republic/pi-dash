@@ -1,0 +1,181 @@
+{
+ "_method": "ast walk of api/urls/cycle.py, api/urls/module.py (route table) and api/views/cycle.py + module.py handler bodies: Response literals + status codes extracted, cross-checked against contract tests PIDASHCONV-78; run: python3 /tmp/gen_cycmod_fixtures.py",
+ "extracted_responses": [
+  {
+   "body": null,
+   "line": 241,
+   "status": "status.HTTP_400_BAD_REQUEST"
+  },
+  {
+   "body": null,
+   "line": 450,
+   "status": "status.HTTP_400_BAD_REQUEST"
+  },
+  {
+   "body": null,
+   "line": 475,
+   "status": "status.HTTP_200_OK"
+  },
+  {
+   "body": null,
+   "line": 533,
+   "status": "status.HTTP_204_NO_CONTENT"
+  },
+  {
+   "body": null,
+   "line": 730,
+   "status": "status.HTTP_200_OK"
+  },
+  {
+   "body": null,
+   "line": 888,
+   "status": "status.HTTP_204_NO_CONTENT"
+  },
+  {
+   "body": null,
+   "line": 1054,
+   "status": "status.HTTP_204_NO_CONTENT"
+  },
+  {
+   "body": null,
+   "line": 1077,
+   "status": "status.HTTP_204_NO_CONTENT"
+  },
+  {
+   "body": null,
+   "line": 240,
+   "status": "status.HTTP_201_CREATED"
+  },
+  {
+   "body": {
+    "error": "Archived module cannot be edited"
+   },
+   "line": 413,
+   "status": "status.HTTP_400_BAD_REQUEST"
+  },
+  {
+   "body": null,
+   "line": 449,
+   "status": "status.HTTP_200_OK"
+  },
+  {
+   "body": {
+    "error": "Only admin or creator can delete the module"
+   },
+   "line": 506,
+   "status": "status.HTTP_403_FORBIDDEN"
+  },
+  {
+   "body": {
+    "error": "Issues are required"
+   },
+   "line": 670,
+   "status": "status.HTTP_400_BAD_REQUEST"
+  },
+  {
+   "body": {
+    "error": "Only completed or cancelled modules can be archived"
+   },
+   "line": 1042,
+   "status": "status.HTTP_400_BAD_REQUEST"
+  },
+  {
+   "body": "Dict(keys=[Constant(value='error'), Constant(value='id')], values=[Constant(value='Module with the same external id and external source already exists'), Call(func=Name(id='str', ctx=Load()), args=[Attribute(value=Name(id='module', ctx=Load()), attr='id', ctx=Load())], keywords=[])])",
+   "line": 220,
+   "status": "status.HTTP_409_CONFLICT"
+  },
+  {
+   "body": "Dict(keys=[Constant(value='error'), Constant(value='id')], values=[Constant(value='Module with the same external id and external source already exists'), Call(func=Name(id='str', ctx=Load()), args=[Attribute(value=Name(id='module', ctx=Load()), attr='id', ctx=Load())], keywords=[])])",
+   "line": 429,
+   "status": "status.HTTP_409_CONFLICT"
+  }
+ ],
+ "fixture": "FX-CYCMOD-08",
+ "handler_shapes": {
+  "archive": "POST archive -> status must be completed/cancelled else 400; sets archived_at, prunes favorites, 204 (views/module.py:1034-1054)",
+  "archived_list": "GET archived-modules/ -> paginated, no estimate sums (views/module.py:1006-1018)",
+  "create": "POST modules/ -> 201 bare ModuleSerializer (members=[] default via to_representation); 400 serializer.errors incl date order; 400 {id, code MODULE_NAME_ALREADY_EXISTS...} dup name; 409 {error, id} external dup (views/module.py:192-241)",
+  "detail_delete": "DELETE pk -> non-creator non-admin 403; else issue_activity + soft delete + ModuleIssue hard delete + favorites pruned, 204 (views/module.py:490-533)",
+  "detail_get": "GET pk -> 200 MODULE_KEYS incl metrics + members (views/module.py:468-475); 404 base",
+  "detail_patch": "PATCH pk -> archived 400; external dup 409; else 200 serializer.data (NOTE: returns update-serializer data, not re-serialised ModuleSerializer \u2014 views/module.py:402-450)",
+  "issue_add": "POST module-issues/ -> empty 400 {error: Issues are required} (no code, unlike cycle); 200 ModuleIssueSerializer full list incl pre-existing rows (views/module.py:662-733)",
+  "issue_detail_delete": "DELETE issue -> 204 + issue_activity deleted (views/module.py:864-888)",
+  "issue_detail_get": "GET defined on view (views/module.py:800-849) but NOT routed (urls/module.py:31-35 DELETE only) -> 405; PORT must not invent it",
+  "issue_list": "GET module-issues/ -> paginated Issue shape (views/module.py:594-639)",
+  "list": "GET modules/ -> paginated envelope, archived excluded (views/module.py:264-276)",
+  "unarchive": "DELETE unarchive -> archived_at=None, 204 (views/module.py:1068-1077)"
+ },
+ "routes": [
+  {
+   "line": 16,
+   "methods": [
+    "get",
+    "post"
+   ],
+   "path": "workspaces/<str:slug>/projects/<str:project_id>/modules/",
+   "url_name": "modules",
+   "view": "ModuleListCreateAPIEndpoint.as_view"
+  },
+  {
+   "line": 21,
+   "methods": [
+    "get",
+    "patch",
+    "delete"
+   ],
+   "path": "workspaces/<str:slug>/projects/<str:project_id>/modules/<uuid:pk>/",
+   "url_name": "modules-detail",
+   "view": "ModuleDetailAPIEndpoint.as_view"
+  },
+  {
+   "line": 26,
+   "methods": [
+    "get",
+    "post"
+   ],
+   "path": "workspaces/<str:slug>/projects/<str:project_id>/modules/<uuid:module_id>/module-issues/",
+   "url_name": "module-issues",
+   "view": "ModuleIssueListCreateAPIEndpoint.as_view"
+  },
+  {
+   "line": 31,
+   "methods": [
+    "delete"
+   ],
+   "path": "workspaces/<str:slug>/projects/<str:project_id>/modules/<uuid:module_id>/module-issues/<uuid:issue_id>/",
+   "url_name": "module-issues-detail",
+   "view": "ModuleIssueDetailAPIEndpoint.as_view"
+  },
+  {
+   "line": 36,
+   "methods": [
+    "post"
+   ],
+   "path": "workspaces/<str:slug>/projects/<str:project_id>/modules/<uuid:pk>/archive/",
+   "url_name": "module-archive",
+   "view": "ModuleArchiveUnarchiveAPIEndpoint.as_view"
+  },
+  {
+   "line": 41,
+   "methods": [
+    "get"
+   ],
+   "path": "workspaces/<str:slug>/projects/<str:project_id>/archived-modules/",
+   "url_name": "module-archive-list",
+   "view": "ModuleArchiveUnarchiveAPIEndpoint.as_view"
+  },
+  {
+   "line": 46,
+   "methods": [
+    "delete"
+   ],
+   "path": "workspaces/<str:slug>/projects/<str:project_id>/archived-modules/<uuid:pk>/unarchive/",
+   "url_name": "module-unarchive",
+   "view": "ModuleArchiveUnarchiveAPIEndpoint.as_view"
+  }
+ ],
+ "trace": [
+  "routes api/urls/module.py:15-51 (7 routes)",
+  "handlers api/views/module.py:76-1077"
+ ]
+}
