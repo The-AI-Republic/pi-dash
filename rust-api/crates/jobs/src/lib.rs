@@ -20,6 +20,8 @@
 //! this crate owns the mechanism, never task bodies.
 
 pub mod amqp;
+/// Assistant turn pipeline + stale-turn sweep (D-06, PIDASHCONV-254).
+pub mod assistant;
 pub mod celery;
 pub mod integrations;
 /// Loop turn dispatch: thread rotation + turn creation + run enqueue
