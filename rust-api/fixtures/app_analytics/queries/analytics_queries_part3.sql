@@ -1,0 +1,68 @@
+-- FX-A-Q-04 workspace advance (app/views/analytic/advance.py:32-351).
+-- Filter source: get_analytics_filters(slug, type, user, date_filter, project_ids)
+-- (utils/date_utils.py:125+) yields base_filters {workspace__slug, project member
+-- is_active, project not deleted/archived}, project_filters (same for Project),
+-- analytics_date_range {current:{gte,lte}, previous} for type=analytics,
+-- chart_period_range (start,end) for type=chart.
+--
+-- (Q-04a) get_filtered_counts (advance.py:45-65): count in the CURRENT date
+--   window when analytics_date_range set, else plain count. The previous-window
+--   helper exists but its line is COMMENTED OUT — response is {"count": n} only.
+SELECT COUNT(*) FROM <table> WHERE <scope filters>
+  [AND "created_at" >= %s AND "created_at" <= %s];
+--
+-- (Q-04b) get_agent_run_usage_stats (advance.py:67-96):
+--   AgentRun.objects.filter(workspace__slug, pod__project member active,
+--   project not deleted/archived[, pod__project_id__in][, current window])
+--   .aggregate(input=Sum(input_tokens,default=0), output=..., total=...)
+SELECT COALESCE(SUM("input_tokens"),0), COALESCE(SUM("output_tokens"),0),
+  COALESCE(SUM("total_tokens"),0) FROM "agent_runs" <pod/project joins>
+ WHERE (...);  -- Seed row: all three {"count": 0}.
+--
+-- (Q-04c) get_overview_data (advance.py:98-124): members from WorkspaceMember
+--   active non-bot; when project_ids given the source SWITCHES to ProjectMember
+--   (project_id__in, active, non-bot). Keys: total_users/admins(20)/members(15)/
+--   guests(5) via get_filtered_counts; total_projects (project_filters);
+--   total_work_items (Issue.issue_objects + base_filters); total_cycles;
+--   total_intake = Issue.objects.filter(base_filters).filter(
+--     issue_intake__status__in=["-2","-1","0","1","2"]) — NOTE the TODO comment
+--   and that this DIFFERS from project_chart intake (Q-04f); plus Q-04b tokens.
+-- Seed rows: users 3 / admins 1 / members 1 / guests 1 / projects 1 /
+-- work_items 3 / cycles 0 / intake 0.
+--
+-- (Q-04d) get_work_items_stats (advance.py:126-135): base + one state__group
+--   filter per key (started/backlog/unstarted/completed; cancelled NOT present).
+-- Seed rows: total 3 / started 0 / backlog 2 / un_started 0 / completed 1.
+-- Invalid tab → 400 {"message": "Invalid tab"} (advance.py:152).
+--
+-- (Q-04e) get_project_issues_stats (advance.py:156-175) + stats get_work_items_stats
+--   (advance.py:177-189): values(project_id, project__name).annotate(
+--   cancelled/completed/backlog/un_started/started = Count(id, filter=Q(state__group=...)))
+--   .order_by(project_id). Stats variant applies chart_period_range on
+--   created_at__date first. Seed row: one project {cancelled 0, completed 1,
+--   backlog 2, un_started 0, started 0}.
+--
+-- (Q-04f) project_chart (advance.py:206-248): seven independent counts under the
+--   SAME date_filter (created_at__date range when chart_period_range set):
+--   work_items (issue_objects+base), cycles, modules, intake =
+--   Issue.objects.filter(issue_intake__isnull=False, base, dates) — NOTE: differs
+--   from Q-04c intake (isnull vs status list); members = WorkspaceMember active
+--   (workspace slug + dates, NO bot exclusion); pages (ProjectPage); views
+--   (IssueView). Rendered [{"key":k,"name":Title(k),"count":v||0}] in fixed order
+--   work_items,cycles,modules,intake,members,pages,views. Seed: 3,0,0,0,3,0,0.
+--
+-- (Q-04g) work_item_completion_chart (advance.py:250-316): monthly TruncMonth
+--   buckets of created (all) vs completed (state__group=completed); zero-fill
+--   from workspace.created_at month-start to current month-start; row
+--   {key,name,count=created,completed_issues,created_issues};
+--   schema {"completed_issues":"completed_issues","created_issues":"created_issues"}.
+-- Seed row: single bucket <YYYY-MM-01> {count 3, completed 1, created 3}.
+--
+-- (Q-04h) custom-work-items (advance.py:328-343): same base queryset +
+--   chart_period_range, rendered by build_analytics_chart(queryset, x_axis,
+--   group_by) (utils/build_chart.py): x_axis in {STATES,STATE_GROUPS,LABELS,
+--   ASSIGNEES,ESTIMATE_POINTS,CYCLES,MODULES,PRIORITY,START_DATE,TARGET_DATE,
+--   CREATED_AT,COMPLETED_AT,CREATED_BY} with per-axis id/name lookups and
+--   deleted guards (labels/assignees/cycles/modules). Seed row for PRIORITY:
+--   data [{high,1},{medium,1},{urgent,1}], schema {}.
+-- Invalid chart type → 400 {"message": "Invalid type"} (advance.py:351).
