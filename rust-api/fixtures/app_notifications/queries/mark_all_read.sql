@@ -26,8 +26,9 @@
 --   created (:272-281): WorkspaceMember role<15 exists -> .none() (observed, as list);
 --     else entity_identifier IN (SELECT id FROM issues WHERE workspace + created_by = user)
 
--- Write (:283-287): Python loop sets read_at = timezone.now() (ONE timestamp shared
--- by every row), then Notification.objects.bulk_update(rows, ["read_at"],
+-- Write (:283-287): Python loop sets read_at = timezone.now() per row (:285 —
+-- distinct microseconds-apart timestamps, NOT one shared value), then
+-- Notification.objects.bulk_update(rows, ["read_at"],
 -- batch_size=100) — batched UPDATEs of 100, signals/save() NOT run, updated_at
 -- auto_now NOT refreshed by bulk_update. Empty set -> bulk_update([]) no-op, still 200.
 -- Equivalent per-batch SQL (values Навального-style):
