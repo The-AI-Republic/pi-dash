@@ -874,11 +874,12 @@ pub fn project_stats_fields(csv: &str) -> Vec<&str> {
 /// `.annotate(count=Func(F("id"), function="Count")).values("count")`,
 /// `base.py:414-451`). The empty `.order_by()` clears default ordering so the
 /// subquery returns a scalar; `Func(Count)` renders `COUNT(U0."id")` with no
-/// `COALESCE`, hence `NULL` (not 0) on empty. `outer_col` is `"pk"` for the
-/// issue annotations and `"id"` for cycles/modules/members — identical columns
-/// in Django, kept distinct for trace fidelity (`base.py:416,424,432,440,448`).
-/// `extra_where` carries the per-annotation predicate (`state__group IN …`,
-/// member bot/active guards, or empty).
+/// `COALESCE`, hence `NULL` (not 0) on empty. `outer_col` is `"id"` everywhere:
+/// Django's `OuterRef("pk")` (`base.py:416,424`) renders the concrete `id`
+/// column, same as the explicit `OuterRef("id")` (`base.py:432,440,448`) —
+/// `"projects"."pk"` is not a real column. `extra_where` carries the
+/// per-annotation predicate (`state__group IN …`, member bot/active guards,
+/// or empty).
 pub fn project_stats_subquery(
     table: &str,
     alias: &str,
@@ -899,9 +900,12 @@ pub fn project_stats_subquery(
 }
 
 /// `total_members` predicate (`base.py:448`):
-/// `member__is_bot=False, is_active=True` over the users join.
-pub fn project_stats_member_where() -> String {
-    "NOT \"users\".\"is_bot\" AND \"project_members\".\"is_active\"".to_owned()
+/// `member__is_bot=False, is_active=True` over the users join. `table_alias`
+/// must match the subquery alias passed to [`project_stats_subquery`] (`U0`
+/// at the only call site): the table is aliased, so the bare table name is
+/// not visible inside the subquery.
+pub fn project_stats_member_where(table_alias: &str) -> String {
+    format!("NOT \"users\".\"is_bot\" AND \"{table_alias}\".\"is_active\"")
 }
 
 /// Full project-stats select (`base.py:409-455`):
@@ -913,11 +917,11 @@ pub fn project_stats_sql(workspace_slug_ph: &str, project_ids: &[&str], fields: 
     let mut selects = vec!["\"projects\".\"id\"".to_owned()];
     for field in fields {
         let sub = match *field {
-            "total_issues" => project_stats_subquery("issues", "U0", "pk", "", "", "total_issues"),
+            "total_issues" => project_stats_subquery("issues", "U0", "id", "", "", "total_issues"),
             "completed_issues" => project_stats_subquery(
                 "issues",
                 "U0",
-                "pk",
+                "id",
                 "INNER JOIN \"states\" ON (U0.\"state_id\" = \"states\".\"id\")",
                 &format!(
                     "\"states\".\"group\" IN ({})",
@@ -934,7 +938,7 @@ pub fn project_stats_sql(workspace_slug_ph: &str, project_ids: &[&str], fields: 
                 "U0",
                 "id",
                 "INNER JOIN \"users\" ON (U0.\"member_id\" = \"users\".\"id\")",
-                &project_stats_member_where(),
+                &project_stats_member_where("U0"),
                 "total_members",
             ),
             _ => continue,
@@ -948,7 +952,10 @@ pub fn project_stats_sql(workspace_slug_ph: &str, project_ids: &[&str], fields: 
     if !project_ids.is_empty() {
         let ids = project_ids
             .iter()
-            .map(|id| format!("'{id}'"))
+            // Django binds these as parameters; the literal shape here doubles
+            // embedded quotes so a hostile id cannot break out of the string.
+            // Malformed UUIDs still fail in the DB, per ported bug B7.
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
             .collect::<Vec<_>>()
             .join(",");
         sql.push_str(&format!(" AND \"projects\".\"id\" IN ({ids})"));
@@ -987,7 +994,7 @@ pub fn advance_filtered_count_sql(
 pub fn advance_agent_run_usage_sql(scope_where_sql: &str) -> String {
     format!(
         "SELECT COALESCE(SUM(\"input_tokens\"),0), COALESCE(SUM(\"output_tokens\"),0), \
-         COALESCE(SUM(\"total_tokens\"),0) FROM \"agent_runs\" WHERE ({scope_where_sql})"
+         COALESCE(SUM(\"total_tokens\"),0) FROM \"agent_run\" WHERE ({scope_where_sql})"
     )
 }
 
@@ -1051,9 +1058,9 @@ pub fn advance_work_item_stat_sql(
 /// `get_project_issues_stats` (`advance.py:156-175`) and the stats-view
 /// `get_work_items_stats` (`advance.py:177-189`): identical
 /// `values("project_id", "project__name")` + five `Count(id, filter=Q(…))`
-/// (no `distinct`) `.order_by("project_id")`. The stats variant first applies
+/// (no `distinct`) `.order_by("project_id")`. Only the former first applies
 /// `chart_period_range` on `created_at__date`; pass it via `date_range` as
-/// `(gte_ph, lte_ph)` placeholders, or `None`.
+/// `(gte_ph, lte_ph)` placeholders, or `None` for the plain shape.
 pub fn advance_project_issues_stats_sql(
     base_where_sql: &str,
     date_range: Option<(&str, &str)>,
@@ -1387,12 +1394,16 @@ pub fn provider_not_found_body(provider: &str) -> String {
 }
 
 /// Empty-project fallback (`exporter/base.py:32-39`):
-/// `Project.objects.filter(workspace__slug, member active, archived null)`
-/// `.values_list("id", flat=True)`, stringified per row.
-pub fn exporter_project_fallback_sql(workspace_slug_ph: &str) -> String {
+/// `Project.objects.filter(workspace__slug, project_projectmember__member=user,
+/// project_projectmember__is_active, archived null)` `.values_list("id",
+/// flat=True)`, stringified per row. `member_ph` binds `request.user` — without
+/// it the fallback would return every workspace project instead of the
+/// requester's.
+pub fn exporter_project_fallback_sql(workspace_slug_ph: &str, member_ph: &str) -> String {
     format!(
         "SELECT \"projects\".\"id\" FROM \"projects\" WHERE \
          (\"workspaces\".\"slug\" = {workspace_slug_ph} \
+         AND \"project_members\".\"member_id\" = {member_ph} \
          AND \"project_members\".\"is_active\" AND \"projects\".\"archived_at\" IS NULL)"
     )
 }
@@ -1458,7 +1469,7 @@ pub fn exporter_list_sql(workspace_slug_ph: &str, type_ph: &str) -> String {
          LEFT OUTER JOIN \"workspaces\" ON (\"exporters\".\"workspace_id\" = \"workspaces\".\"id\") \
          LEFT OUTER JOIN \"users\" ON (\"exporters\".\"initiated_by_id\" = \"users\".\"id\") \
          WHERE (\"exporters\".\"workspace_id\" IN \
-         (SELECT \"workspaces\".\"id\" WHERE \"workspaces\".\"slug\" = {workspace_slug_ph}) \
+         (SELECT \"workspaces\".\"id\" FROM \"workspaces\" WHERE \"workspaces\".\"slug\" = {workspace_slug_ph}) \
          AND \"exporters\".\"type\" = {type_ph}) \
          ORDER BY \"exporters\".\"created_at\" DESC"
     )
@@ -1638,9 +1649,13 @@ mod tests {
         }
         assert!(sql.contains("\"states\".\"group\" IN ('completed','cancelled')"));
         assert!(sql.contains("NOT \"users\".\"is_bot\""));
+        assert!(sql.contains("\"U0\".\"is_active\""));
+        // The aliased table name is not visible inside its own subquery.
+        assert!(!sql.contains("\"project_members\".\"is_active\""));
         assert!(sql.contains("\"projects\".\"id\" IN ('a','b')"));
-        // Trace fidelity: pk for issues, id for the rest.
-        assert!(sql.contains("U0.\"project_id\" = \"projects\".\"pk\""));
+        // OuterRef("pk") renders the concrete "id" column; "projects"."pk"
+        // is not a real column.
+        assert!(!sql.contains("\"projects\".\"pk\""));
         assert!(sql.contains("U0.\"project_id\" = \"projects\".\"id\""));
         let unfiltered = project_stats_sql("$1", &[], &["total_issues"]);
         assert!(!unfiltered.contains("IN ("));
@@ -1662,7 +1677,8 @@ mod tests {
         assert!(sql.contains("COALESCE(SUM(\"input_tokens\"),0)"));
         assert!(sql.contains("COALESCE(SUM(\"output_tokens\"),0)"));
         assert!(sql.contains("COALESCE(SUM(\"total_tokens\"),0)"));
-        assert!(sql.contains("FROM \"agent_runs\""));
+        // Runner AgentRun Meta db_table is the singular "agent_run".
+        assert!(sql.contains("FROM \"agent_run\""));
     }
 
     #[test]
@@ -1774,6 +1790,21 @@ mod tests {
     }
 
     // -- FX-A-Q-06 ----------------------------------------------------------
+
+    #[test]
+    fn exporter_fallback_scopes_to_requesting_member() {
+        let sql = exporter_project_fallback_sql("$1", "$2");
+        assert!(sql.contains("\"workspaces\".\"slug\" = $1"));
+        assert!(sql.contains("\"project_members\".\"member_id\" = $2"));
+        assert!(sql.contains("\"project_members\".\"is_active\""));
+        assert!(sql.contains("\"projects\".\"archived_at\" IS NULL"));
+    }
+
+    #[test]
+    fn project_ids_literals_escape_quotes() {
+        let sql = project_stats_sql("$1", &["a'b"], &["total_issues"]);
+        assert!(sql.contains("'a''b'"));
+    }
 
     #[test]
     fn exporter_provider_gate_and_bodies() {
@@ -1936,6 +1967,7 @@ mod tests {
         let sql = exporter_list_sql("$1", "$2");
         assert!(sql.contains("\"exporters\".\"type\" = $2"));
         assert!(sql.contains("\"workspaces\".\"slug\" = $1"));
+        assert!(sql.contains("FROM \"workspaces\""));
         assert!(sql.contains("ORDER BY \"exporters\".\"created_at\" DESC"));
         assert_eq!(EXPORTER_DEFAULT_TYPE, "issue_exports");
         assert_eq!(EXPORTER_DEFAULT_ORDER, "-created_at");
