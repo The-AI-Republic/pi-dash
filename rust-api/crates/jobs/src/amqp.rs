@@ -67,8 +67,12 @@ impl AmqpConfig {
         let (username, password) = credentials
             .split_once(':')
             .ok_or_else(|| AmqpError::BadUrl(url.to_owned()))?;
+        // The URL path names the vhost verbatim (kombu resolves path
+        // `/gate218` to vhost `gate218`); only an empty path means the
+        // default `/` vhost.
         let (host_port, vhost) = match host_part.split_once('/') {
-            Some((hp, v)) => (hp, format!("/{v}")),
+            Some((hp, "")) => (hp, "/".to_owned()),
+            Some((hp, v)) => (hp, v.to_owned()),
             None => (host_part, "/".to_owned()),
         };
         let (host, port) = match host_port.split_once(':') {
@@ -295,10 +299,24 @@ mod tests {
         assert_eq!(cfg.port, 5673);
         assert_eq!(cfg.username, "user");
         assert_eq!(cfg.password, "pass");
-        assert_eq!(cfg.virtual_host, "/vhost");
+        assert_eq!(cfg.virtual_host, "vhost");
 
         let default_port = AmqpConfig::parse_url("amqp://u:p@h/v").expect("parse");
         assert_eq!(default_port.port, 5672);
+        assert_eq!(default_port.virtual_host, "v");
+
+        // Empty path (with or without trailing slash) means the default `/` vhost.
+        let root_slash = AmqpConfig::parse_url("amqp://u:p@h/").expect("parse");
+        assert_eq!(root_slash.virtual_host, "/");
+        let no_path = AmqpConfig::parse_url("amqp://u:p@h").expect("parse");
+        assert_eq!(no_path.virtual_host, "/");
+
+        // The gate's named-vhost setup: path `/gate218` is vhost `gate218`.
+        let named =
+            AmqpConfig::parse_url("amqp://guest:guest@127.0.0.1:5674/gate218").expect("parse");
+        assert_eq!(named.host, "127.0.0.1");
+        assert_eq!(named.port, 5674);
+        assert_eq!(named.virtual_host, "gate218");
 
         assert!(matches!(
             AmqpConfig::parse_url("amqps://u:p@h/v"),
