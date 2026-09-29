@@ -143,7 +143,8 @@ Grounded in the models as they exist at this commit.
 credential, token and env _value_; `AgentRun` and its `done_payload`,
 `prompt_manifest`, `agent_metadata`, transcripts and logs; `IssueComment`
 and the agent workpad; `IssueAgentTicker` runtime state; `UserFavorite`,
-`RecentVisit`, `Sticky`, `View`, `Cycle`, `Module`, `Estimate`,
+`UserRecentVisit`, `Sticky`, `IssueView`, `AnalyticView`, `Cycle`,
+`Module`, `Estimate`,
 `DeployBoard`, `Intake`, analytics, `WorkspaceIntegration` and any GitHub
 sync state; `Importer` / `ExporterHistory` rows; all `external_id` /
 `external_source` values (they point at the publisher's Jira/GitHub);
@@ -474,11 +475,25 @@ reports them before `apply` runs:
   package states that match a seeded name are updated in place (so
   `default_state` and any FK stay valid), seeded states the package does
   not mention are deleted, package states with no match are created.
-  Validation before apply: the package must supply at least one state in
-  each of the `started`, `review` and `test` groups, because the ticking
-  system's three stages are keyed on those groups
-  (`.ai_design/issue_ticking_system/design.md` §3), and exactly one
-  `default: true`.
+  Validation before apply: exactly one `default: true`, and the package
+  must supply the three ticking states — but "in the right group" is
+  **not** the test. A phase ticks only when the state's group _and its
+  literal name_ match the phase registry: `is_ticking_state`
+  (`orchestration/agent_phases.py:149`) returns
+  `state.name == cfg.state_name`, and `PHASES` (`:117`) pins those names
+  to `"In Progress"`, `"In Review"` and `"In Test"`. `PhaseConfig`'s own
+  docstring says so outright — _"Workspaces with bespoke state names
+  within the group still don't tick in v1."_ A package whose workflow is
+  `Building` / `Code Review` / `QA` sits in exactly the right three
+  groups, installs cleanly, and then never ticks: the installer would
+  have delivered an agent-driven project that runs no agents, silently.
+  So the rule is the literal names, and §11-D17 decides what install does
+  with a package that renames them. (The authority here is
+  `orchestration/agent_phases.py`, not
+  `.ai_design/issue_ticking_system/design.md` §3 — that section
+  distinguishes issue state from `AgentRun` status and does not cover the
+  keying; the phase registry is specified in
+  `.ai_design/create_review_state/design.md` §3.)
 - **Labels** — `unique_project_name_when_not_deleted` on `(project,
 name)`. New project, so no conflict; duplicates _within_ the package
   are a validation error.
@@ -1140,3 +1155,21 @@ execute. Alternative, if a package is ever to author real templates:
 keep Jinja and rely on the sandbox, but re-review the sandbox explicitly
 against an untrusted author first, and treat that as a v2 decision
 gated on P-10.
+
+**D17 — Workflow state names are load-bearing, not cosmetic.** Ticking
+keys on the state's group **and** its literal name
+(`is_ticking_state`, `orchestration/agent_phases.py:149`; names pinned in
+`PHASES`, `:117`), so a package that renames its workflow installs
+cleanly and then never ticks (§5.5). _Default: the package must name its
+`started` / `review` / `test` states exactly `In Progress`, `In Review`
+and `In Test`; anything else is a **validation error at plan time**,
+named in the plan, not a warning._ A warning is the wrong choice here
+precisely because the failure it warns about is silent and delayed — the
+project looks installed and correct, and the absence of ticking only
+shows up as nothing happening. Rejecting at plan time costs a publisher
+one rename and tells them why. Alternative: install anyway and surface
+"this project will not tick" in the plan and on the project page — worth
+revisiting if the phase registry is ever generalised to any state in the
+group, which `PhaseConfig` names as a separate future generalisation. It
+also follows that §4.3's "workflow states renamed" example of a **major**
+version bump is only legitimate for the states outside those three.
