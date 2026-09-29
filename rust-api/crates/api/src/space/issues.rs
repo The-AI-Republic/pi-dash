@@ -2167,8 +2167,7 @@ mod tests {
             workspace_id: ws,
             project_id: Some(uuid::Uuid::nil()),
         };
-        let GroupValuesPlan::Sql { sql, .. } = group_values_plan("state_id", &scoped)
-        else {
+        let GroupValuesPlan::Sql { sql, .. } = group_values_plan("state_id", &scoped) else {
             panic!("state_id branch is a DB plan");
         };
         assert!(sql.contains("(\"states\".\"workspace_id\" = $1"));
@@ -2271,13 +2270,7 @@ mod tests {
         );
         // Non-null values pass through untouched.
         let items = serde_json::json!([{"vote": 1}]);
-        assert_eq!(
-            shape_retrieve_value("vote_items", items.clone()),
-            items
-        );
-        assert_eq!(
-            shape_retrieve_value("label_ids", Value::Null),
-            Value::Null
-        );
+        assert_eq!(shape_retrieve_value("vote_items", items.clone()), items);
+        assert_eq!(shape_retrieve_value("label_ids", Value::Null), Value::Null);
     }
 }

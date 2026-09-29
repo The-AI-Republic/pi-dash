@@ -79,7 +79,8 @@ SELECT "issues"."id", "issues"."name", "issues"."state_id", "issues"."sort_order
       'avatar', "reaction_actor"."avatar",
       -- BUG-PORT views/issue.py:713,716,722: avatar branches read the VOTE
       -- actor traversal (votes__actor__*) instead of issue_reactions__actor__*,
-      -- rendered through the vote_actor join reused from vote_items.
+      -- rendered through the vote_actor join reused from vote_items (same
+      -- votes__actor path), i.e. the vote_actor users alias.
       'avatar_url', (CASE WHEN ("vote_actor"."avatar_asset_id" IS NOT NULL)
         THEN CONCAT('/api/assets/v2/static/', "vote_actor"."avatar_asset_id", '/')
         WHEN ("vote_actor"."avatar_asset_id" IS NULL) THEN "vote_actor"."avatar"
