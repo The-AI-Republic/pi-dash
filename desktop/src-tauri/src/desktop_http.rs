@@ -735,6 +735,46 @@ mod tests {
         }
     }
 
+    // The duplicate ranking has to work on the shape the native store actually
+    // hands back, which is never the one the server sent: Wry rebuilds every
+    // cookie from ``expiresDate``, so ``window.cookies()`` yields an absolute
+    // ``Expires`` and never a ``Max-Age``. Measured on macOS 26: a cookie that
+    // expires while sitting in the store is still reported, and reported *after*
+    // the live one -- so the dead sign-in copy is exactly the last insert that
+    // would evict the rotated cookie.
+    #[test]
+    fn duplicates_are_ranked_by_the_absolute_expiry_the_native_store_returns() {
+        let url = Url::parse("https://pidash.airepublic.com/api/users/me/").unwrap();
+        let rotated = cookie(
+            "pidash_access=rotated; Domain=airepublic.com; Path=/; Secure; HttpOnly; Expires=Wed, 01 Jan 2031 00:00:00 GMT",
+        );
+        assert_eq!(
+            rotated.max_age(),
+            None,
+            "the native store reports no Max-Age"
+        );
+        let sign_in_live = cookie(
+            "pidash_access=from_sign_in; Domain=.airepublic.com; Path=/; Secure; HttpOnly; Expires=Tue, 01 Jan 2030 00:00:00 GMT",
+        );
+        let sign_in_dead = cookie(
+            "pidash_access=from_sign_in; Domain=.airepublic.com; Path=/; Secure; HttpOnly; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+        );
+        for order in [
+            vec![rotated.clone(), sign_in_live.clone()],
+            vec![sign_in_live, rotated.clone()],
+            // The order the native store was measured to report: dead copy last.
+            vec![rotated.clone(), sign_in_dead.clone()],
+            vec![sign_in_dead, rotated],
+        ] {
+            assert_eq!(
+                cookie_header(order, &url)
+                    .map(|v| v.to_str().unwrap().to_owned())
+                    .unwrap_or_default(),
+                "pidash_access=rotated"
+            );
+        }
+    }
+
     #[test]
     fn max_age_takes_precedence_over_expires_when_ranking_duplicates() {
         let now = 1_700_000_000;
