@@ -5,7 +5,7 @@
 //!
 //! * [`ser_workflow`] — state / estimate serializers (PIDASHCONV-351).
 //! * `ser_project` — project serializers (PIDASHCONV-348, sibling).
-//! * `ser_collab` — member / invite / user serializers (PIDASHCONV-350,
+//! * [`ser_collab`] — member / invite / user serializers (PIDASHCONV-350,
 //!   sibling).
 //!
 //! Wiring note: the crate root declares `pub mod v1_projects;` (seam for
@@ -13,4 +13,5 @@
 //! issues add their own `ser_*` siblings to this `mod.rs`; on rebase keep
 //! both sides.
 
+pub mod ser_collab;
 pub mod ser_workflow;
