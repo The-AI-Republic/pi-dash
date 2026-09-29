@@ -13,6 +13,7 @@ pub mod app_intake;
 pub mod app_integrations;
 pub mod app_issues;
 pub mod app_modules;
+pub mod app_notifications;
 pub mod app_views_search;
 pub mod assistant;
 pub mod auth_oauth;
