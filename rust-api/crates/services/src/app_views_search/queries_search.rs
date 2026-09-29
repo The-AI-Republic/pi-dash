@@ -234,6 +234,9 @@ pub fn split_query_types(raw: Option<&str>) -> Vec<String> {
 /// Global-search entities (`base.py:261-277`): comma list filtered to known
 /// mapper keys (unknown names silently dropped; all-unknown yields
 /// `{'results': {}}`); default is all 8 mapper keys in mapper order.
+/// Request order wins (`:273-275` iterate the request list, so
+/// `?entities=intake,issue` emits `intake` first); repeats collapse —
+/// Python overwrites the same `results` key, which is output-identical.
 pub fn requested_entities(raw: Option<&str>) -> Vec<&'static str> {
     const MAPPER: &[&str] = &[
         "workspace",
@@ -248,12 +251,18 @@ pub fn requested_entities(raw: Option<&str>) -> Vec<&'static str> {
     match opt(raw) {
         None => MAPPER.to_vec(),
         Some(list) => {
-            let wanted: Vec<&str> = list.split(',').map(str::trim).collect();
-            MAPPER
-                .iter()
-                .copied()
-                .filter(|key| wanted.contains(key))
-                .collect()
+            let mut out: Vec<&'static str> = Vec::new();
+            for part in list.split(',').map(str::trim) {
+                if part.is_empty() {
+                    continue;
+                }
+                if let Some(key) = MAPPER.iter().copied().find(|key| *key == part) {
+                    if !out.contains(&key) {
+                        out.push(key);
+                    }
+                }
+            }
+            out
         }
     }
 }
@@ -1269,10 +1278,15 @@ mod tests {
                 "intake"
             ]
         );
-        // Mapper order wins over request order.
+        // Request order wins (base.py:273-275 iterate the request list);
+        // repeats collapse (Python overwrites the same results key).
         assert_eq!(
             requested_entities(Some("issue,project")),
-            vec!["project", "issue"]
+            vec!["issue", "project"]
+        );
+        assert_eq!(
+            requested_entities(Some("intake, issue, bogus, issue")),
+            vec!["intake", "issue"]
         );
         assert!(requested_entities(Some("bogus")).is_empty());
         assert_eq!(requested_entities(Some("")).len(), 8);
