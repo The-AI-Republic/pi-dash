@@ -668,6 +668,13 @@ mod tests {
             .expect("row");
         let previous = stamp_secret_regenerate(&mut after);
         assert_eq!(previous, before.secret_key);
+        // TIMESTAMPTZ stores microseconds; truncate the stamp to what the
+        // database keeps so the round-trip assertion below is exact.
+        after.updated_at = chrono::DateTime::from_timestamp(
+            after.updated_at.timestamp(),
+            after.updated_at.timestamp_subsec_micros() * 1000,
+        )
+        .expect("microsecond truncation stays in range");
         update_webhook_full(&mut *tx, &after).await.expect("save");
         assert_ne!(after.secret_key, before.secret_key);
         assert!(after.secret_key.starts_with("pi_dash_wh_"));
