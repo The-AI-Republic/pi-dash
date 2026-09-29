@@ -59,6 +59,9 @@
 //!   sync/binding status reads, the install-session callback read, and
 //!   the app-auth pure shapes (JWT claims, headers, exchange payload,
 //!   installations URL + `Link` paging). Fixtures FX-GHA-01..03.
+//! * [`queries_webhook`] — webhook list/detail, create, full-row save,
+//!   secret regenerate, soft delete, and log list (`views/webhook/base.py`).
+//!   Fixtures FX-WEB-01..03.
 //!
 //! Same-SQL-semantics notes (translate, don't redesign):
 //!
@@ -189,6 +192,7 @@ pub(crate) mod test_support {
 
 pub mod queries_git;
 pub mod queries_github;
+pub mod queries_webhook;
 
 /// `db.Workspace` table (`db/models/workspace.py:181`).
 pub const WORKSPACE_TABLE: &str = "workspaces";
