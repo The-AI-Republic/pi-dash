@@ -30,7 +30,8 @@ pub struct Part {
     /// `Content-Disposition` `name` parameter (last part wins, like
     /// Django's `QueryDict.get`).
     pub name: String,
-    /// `filename` parameter, when present (empty string counts).
+    /// `filename` parameter, when present (an empty string does not
+    /// count: Django files a `filename=""` part under POST, not FILES).
     pub filename: Option<String>,
     /// Per-part `Content-Type` header, when present.
     pub content_type: Option<String>,
@@ -38,9 +39,15 @@ pub struct Part {
     pub body: Vec<u8>,
 }
 
-/// Whether the part is a file upload (`filename` was present).
+/// Whether the part is a file upload: `filename` was present and
+/// non-empty. A `filename=""` part (the browser empty-file-input shape)
+/// lands in Django's POST, never in FILES, so it must not count here —
+/// otherwise an empty upload would forward silence to the provider
+/// instead of answering `no_audio`.
 pub fn is_file(part: &Part) -> bool {
-    part.filename.is_some()
+    part.filename
+        .as_deref()
+        .is_some_and(|name| !name.is_empty())
 }
 
 /// Split a `multipart/form-data` body into its parts.
@@ -403,6 +410,23 @@ mod tests {
         assert_eq!(parts[2].filename.as_deref(), Some("clip.webm"));
         assert_eq!(parts[2].content_type.as_deref(), Some("audio/webm"));
         assert_eq!(parts[2].body, audio);
+    }
+
+    #[test]
+    fn empty_filename_is_not_a_file() {
+        // The browser empty-file-input shape: Django files it under
+        // POST, so `FILES.get("file")` misses and the view answers
+        // `no_audio`.
+        let boundary = "e1";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\"\r\nContent-Type: application/octet-stream\r\n\r\n\r\n--{boundary}--\r\n"
+        );
+        let parts = parse(
+            &format!("multipart/form-data; boundary={boundary}"),
+            body.as_bytes(),
+        );
+        assert_eq!(parts.len(), 1);
+        assert!(!is_file(&parts[0]));
     }
 
     #[test]

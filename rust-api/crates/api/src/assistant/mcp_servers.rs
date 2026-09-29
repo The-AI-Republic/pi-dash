@@ -104,44 +104,57 @@ struct McpAttrs {
 
 /// Validate a create (full) or patch (partial) body. Errors render as
 /// DRF does: `{field: [messages]}` in serializer field order, 400.
+///
+/// Every field validates independently: a bad `name` never suppresses
+/// the `url` errors (DRF collects per-field), and within one field
+/// every validator runs — `max_length`, nul bytes, then the Django
+/// URL check stack in that order (verified live against DRF 3.15).
 fn validate_mcp(data: &Map<String, Value>, partial: bool) -> Result<McpAttrs, Map<String, Value>> {
     let mut errors = Map::new();
     let mut attrs = McpAttrs::default();
     // Writable fields in serializer declaration order; read-only and
     // unknown keys are ignored, never errors (verified live).
-    if let Some(value) = validate_char_field(data, "name", 80, false, partial, &mut errors) {
-        match validate_mcp_name(&value) {
-            Ok(name) => attrs.name = Some(name),
-            Err(message) => push_error(&mut errors, "name", message),
+    let (name_value, name_clean) =
+        validate_char_field(data, "name", 80, false, partial, &mut errors);
+    if name_clean {
+        if let Some(value) = name_value {
+            match validate_mcp_name(&value) {
+                Ok(name) => attrs.name = Some(name),
+                Err(message) => push_error(&mut errors, "name", message),
+            }
         }
     }
-    if let Some(value) = validate_char_field(data, "url", 500, false, partial, &mut errors) {
-        attrs.url = Some(value);
+    let (url_value, url_clean) = validate_char_field(data, "url", 500, false, partial, &mut errors);
+    if let Some(value) = url_value {
+        // The MCP serializer defines no cross-field `validate()`; the
+        // URL half below is the `URLField` validator plus
+        // `validate_url`, in order, landing in the same 400 envelope.
+        // `run_validators` runs every validator even when an earlier
+        // one failed, so the Django check still collects `Enter a
+        // valid URL.` on a too-long or nul-bearing value — while
+        // `validate_url` (normalize + scheme) only runs when the field
+        // phase raised nothing for this field.
+        if !django_url_valid(&value) {
+            push_error(&mut errors, "url", INVALID_URL_MSG);
+        } else if url_clean {
+            match normalize_mcp_url(&value) {
+                None => push_error(&mut errors, "url", URL_REQUIRED_MSG),
+                Some(normalized) => match url_scheme_error(&normalized) {
+                    Some(message) => push_error(&mut errors, "url", message),
+                    None => attrs.url = Some(normalized),
+                },
+            }
+        }
     }
-    if let Some(value) = validate_char_field(data, "auth_header", 2048, true, partial, &mut errors)
-    {
-        attrs.auth_header = Some(value);
+    let (auth_value, auth_clean) =
+        validate_char_field(data, "auth_header", 2048, true, partial, &mut errors);
+    if auth_clean {
+        if let Some(value) = auth_value {
+            attrs.auth_header = Some(value);
+        }
     }
     if let Some(enabled) = validate_bool_field(data, "is_enabled", partial, &mut errors) {
         attrs.is_enabled = Some(enabled);
-    }
-    if errors.is_empty() {
-        // The MCP serializer defines no cross-field `validate()`; the
-        // URL half below is `URLField` validators + `validate_url`, in
-        // order, landing in the same 400 envelope.
-        if let Some(url) = attrs.url.clone() {
-            if !django_url_valid(&url) {
-                push_error(&mut errors, "url", INVALID_URL_MSG);
-            } else {
-                match normalize_mcp_url(&url) {
-                    None => push_error(&mut errors, "url", URL_REQUIRED_MSG),
-                    Some(normalized) => match url_scheme_error(&normalized) {
-                        Some(message) => push_error(&mut errors, "url", message),
-                        None => attrs.url = Some(normalized),
-                    },
-                }
-            }
-        }
     }
     if errors.is_empty() {
         Ok(attrs)
@@ -151,8 +164,15 @@ fn validate_mcp(data: &Map<String, Value>, partial: bool) -> Result<McpAttrs, Ma
 }
 
 /// One `CharField` (`name`, `url`, `auth_header`): required Unless
-/// partial, null/type/blank/max-length/nul checks in DRF order, then
-/// the stripped value. Returns `None` when omitted or errored.
+/// partial, null/type/blank checks, coercion, then the stripped value.
+///
+/// Returns `(value, field_clean)`: `value` is `Some(stripped)` whenever
+/// the input coerced to a string — even when a length/nul validator
+/// failed, because DRF `run_validators` runs every validator and
+/// collects (the caller still runs later checks on it); `None` when
+/// omitted or when required/null/blank/type failed. `field_clean` is
+/// false when this call pushed any error for the field (the caller's
+/// `validate_*` only runs on a clean field).
 fn validate_char_field(
     data: &Map<String, Value>,
     field: &str,
@@ -160,16 +180,17 @@ fn validate_char_field(
     allow_blank: bool,
     partial: bool,
     errors: &mut Map<String, Value>,
-) -> Option<String> {
+) -> (Option<String>, bool) {
     let Some(raw) = data.get(field) else {
         if !partial && !is_create_optional(field) {
             push_error(errors, field, REQUIRED_MSG);
+            return (None, false);
         }
-        return None;
+        return (None, true);
     };
     if raw.is_null() {
         push_error(errors, field, NULL_MSG);
-        return None;
+        return (None, false);
     }
     // `run_validation`: `data == ''` or (trim and `str(data).strip()`
     // blank) → blank/''. Only JSON strings can be blank this way —
@@ -178,9 +199,9 @@ fn validate_char_field(
         if text.is_empty() || text.trim().is_empty() {
             if !allow_blank {
                 push_error(errors, field, BLANK_MSG);
-                return None;
+                return (None, false);
             }
-            return Some(String::new());
+            return (Some(String::new()), true);
         }
     }
     // `to_internal_value`: bools and composites fail; numerics coerce.
@@ -189,25 +210,26 @@ fn validate_char_field(
         Value::Number(num) => num.to_string(),
         _ => {
             push_error(errors, field, INVALID_STR_MSG);
-            return None;
+            return (None, false);
         }
     };
     let stripped: String = coerced.trim().to_string();
-    // Validators in order: max length (code points, like Python
-    // `len`), nul bytes, then the field's `validate_*`.
+    // Validators in order, all collected: max length (code points, like
+    // Python `len`), then nul bytes (`ProhibitNullCharactersValidator`).
+    let mut clean = true;
     if stripped.chars().count() > max_length {
         push_error(
             errors,
             field,
             &format!("Ensure this field has no more than {max_length} characters."),
         );
-        return None;
+        clean = false;
     }
     if stripped.contains('\0') {
         push_error(errors, field, NULL_CHARS_MSG);
-        return None;
+        clean = false;
     }
-    Some(stripped)
+    (Some(stripped), clean)
 }
 
 /// `name`/`url` are required on create; `auth_header`/`is_enabled`
@@ -735,7 +757,9 @@ fn parse_object_body(raw: &[u8]) -> Result<Map<String, Value>, Response> {
     };
     match value {
         Value::Object(fields) => Ok(fields),
-        Value::Null => Err(validation_error_response(&dtype_error("NoneType"))),
+        // A JSON `null` body parses to `None`, and the serializer
+        // answers its `null` message — not the dict-shape one.
+        Value::Null => Err(validation_error_response(&no_data_error())),
         Value::Bool(_) => Err(validation_error_response(&dtype_error("bool"))),
         Value::Number(num) => {
             let kind = if num.is_i64() || num.is_u64() {
@@ -748,6 +772,18 @@ fn parse_object_body(raw: &[u8]) -> Result<Map<String, Value>, Response> {
         Value::String(_) => Err(validation_error_response(&dtype_error("str"))),
         Value::Array(_) => Err(validation_error_response(&dtype_error("list"))),
     }
+}
+
+/// `{"non_field_errors": ["No data provided"]}` 400 (DRF
+/// `BaseSerializer.run_validation` on a JSON `null` body, verified
+/// live).
+fn no_data_error() -> Map<String, Value> {
+    let mut errors = Map::new();
+    errors.insert(
+        "non_field_errors".to_string(),
+        Value::Array(vec![Value::String("No data provided".to_string())]),
+    );
+    errors
 }
 
 /// `{"non_field_errors": ["Invalid data. Expected a dictionary, but got
@@ -1409,17 +1445,85 @@ mod tests {
             ("5", "int"),
             ("1.5", "float"),
             ("true", "bool"),
-            ("null", "NoneType"),
         ] {
             let response = parse_object_body(raw.as_bytes()).expect_err("invalid");
             let _ = (response, kind);
         }
+        // A JSON `null` body parses to `None`: the serializer answers
+        // `No data provided`, not the dict-shape message (verified live
+        // against DRF 3.15).
+        let _ = parse_object_body(b"null").expect_err("invalid");
+        assert_eq!(
+            no_data_error().get("non_field_errors").expect("errors"),
+            &serde_json::json!(["No data provided"])
+        );
         assert!(parse_object_body(b"").expect("empty").is_empty());
         // The messages themselves:
         let errors = validate_non_dict(&serde_json::json!([1, 2]));
         assert_eq!(
             errors.get("non_field_errors").expect("errors"),
             &serde_json::json!(["Invalid data. Expected a dictionary, but got list."])
+        );
+    }
+
+    #[test]
+    fn field_errors_all_collect() {
+        // Every field validates independently: a bad `name` never
+        // suppresses the `url` errors, and within one field every
+        // validator runs (verified live against DRF 3.15).
+        let errors = validate_mcp(
+            &fields(serde_json::json!({"name": "x".repeat(81), "url": "not-a-url"})),
+            false,
+        )
+        .expect_err("errors");
+        assert_eq!(
+            errors.get("name").expect("name error"),
+            &serde_json::json!(["Ensure this field has no more than 80 characters."])
+        );
+        assert_eq!(
+            errors.get("url").expect("url error"),
+            &serde_json::json!(["Enter a valid URL."])
+        );
+        // Length and nul stack on one field, in order.
+        let errors = validate_mcp(
+            &fields(
+                serde_json::json!({"name": format!("a\0{}", "b".repeat(80)), "url": "https://8.8.8.8/mcp"}),
+            ),
+            false,
+        )
+        .expect_err("errors");
+        assert_eq!(
+            errors.get("name").expect("name error"),
+            &serde_json::json!([
+                "Ensure this field has no more than 80 characters.",
+                "Null characters are not allowed.",
+            ])
+        );
+        // A too-long URL still collects the URLValidator message.
+        let errors = validate_mcp(
+            &fields(
+                serde_json::json!({"name": "n", "url": format!("http://{}.com", "a".repeat(600))}),
+            ),
+            false,
+        )
+        .expect_err("errors");
+        assert_eq!(
+            errors.get("url").expect("url error"),
+            &serde_json::json!([
+                "Ensure this field has no more than 500 characters.",
+                "Enter a valid URL.",
+            ])
+        );
+        // A nul-bearing host collects both messages; the scheme half
+        // (`validate_url`) stays skipped once the field phase failed.
+        let errors = validate_mcp(
+            &fields(serde_json::json!({"name": "n", "url": "https://8.8.8.\0/mcp"})),
+            false,
+        )
+        .expect_err("errors");
+        assert_eq!(
+            errors.get("url").expect("url error"),
+            &serde_json::json!(["Null characters are not allowed.", "Enter a valid URL.",])
         );
     }
 

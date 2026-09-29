@@ -430,6 +430,7 @@ async fn fetch_stt_row(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<SttR
 /// check. `AssistantError` renders as its code/detail/status; an
 /// operational crypto failure (never an `AssistantError` in Python)
 /// answers the generic 500.
+#[allow(clippy::result_large_err)]
 async fn resolve_provider(
     state: &AppState,
     stt: &SttRow,
