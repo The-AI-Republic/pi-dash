@@ -34,6 +34,7 @@ pub mod prompting;
 pub mod routes;
 pub mod serializer;
 pub mod space;
+pub mod sse_body;
 pub mod state;
 pub mod web;
 
