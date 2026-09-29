@@ -19,5 +19,6 @@ pub mod space;
 pub mod tasks_cleanup;
 pub mod tasks_webhooks;
 pub mod user_settings;
+pub mod v1_projects;
 
 pub use health::{db_summary, health_report};
