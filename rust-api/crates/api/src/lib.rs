@@ -22,6 +22,7 @@
 //! `extra` stays the additive-only path.
 
 pub mod app_issues;
+pub mod assistant;
 pub mod edge;
 pub mod license;
 pub mod r#loop;
