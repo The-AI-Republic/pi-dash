@@ -158,11 +158,31 @@ fn allowed_api_url(url: &Url, api: &Url) -> bool {
         && (url.path().starts_with("/api/") || url.path().starts_with("/auth/"))
 }
 
-fn cookie_header(cookies: Vec<Cookie<'static>>, url: &Url) -> Option<header::HeaderValue> {
+fn cookie_header(mut cookies: Vec<Cookie<'static>>, url: &Url) -> Option<header::HeaderValue> {
     let jar = Jar::default();
     // cookies_for_url in Wry on macOS only compares exact domains and loses
     // .example.com cookies for api.example.com. Use the full native jar and
     // let the HTTP cookie store enforce domain, path, Secure and expiry.
+    //
+    // The native store can hold two cookies of one name that differ only in
+    // host-only-ness, and for a deployment that sets a cookie domain it always
+    // does: the sign-in navigation lets the webview store the server's
+    // ``Domain=.example.com`` pair itself, while every rotation afterwards is
+    // written back through a domain accessor that strips the leading dot, so it
+    // lands on a *separate* host-only cookie and the navigation's copy keeps its
+    // original value forever. Both serialize to the same jar key here, so the
+    // one added last decides what we send -- and an expired duplicate does not
+    // merely lose, it *evicts* the live cookie and we send no cookie at all.
+    // Either way the API 401s, the page's refresh succeeds, its replay reads
+    // this same jar and 401s again, and the user is bounced to sign-in one
+    // access-token lifetime after every sign-in.
+    //
+    // So drop the dead ones first, then add the rest oldest-expiry-first: when
+    // duplicates collapse, the longest-lived -- the most recently rotated --
+    // value wins. Session cookies sort first and never displace a dated one.
+    let now = unix_now();
+    cookies.retain(|cookie| !cookie_expired(cookie));
+    cookies.sort_by_key(|cookie| cookie_expiry(cookie, now));
     for cookie in cookies {
         jar.add_cookie_str(&cookie.to_string(), url);
     }
@@ -194,17 +214,25 @@ fn response_cookie(raw: &str, url: &Url) -> Option<Cookie<'static>> {
     Some(cookie)
 }
 
-fn cookie_expired(cookie: &Cookie<'_>) -> bool {
-    if let Some(age) = cookie.max_age() {
-        return age.whole_seconds() <= 0;
-    }
-    let now = std::time::SystemTime::now()
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs() as i64;
-    cookie
-        .expires_datetime()
-        .is_some_and(|expiry| expiry.unix_timestamp() <= now)
+        .as_secs() as i64
+}
+
+/// When the cookie stops being valid, or `None` for a session cookie. `Max-Age`
+/// takes precedence over `Expires`, per RFC 6265 section 5.2.2.
+fn cookie_expiry(cookie: &Cookie<'_>, now: i64) -> Option<i64> {
+    if let Some(age) = cookie.max_age() {
+        return Some(now.saturating_add(age.whole_seconds()));
+    }
+    cookie.expires_datetime().map(|at| at.unix_timestamp())
+}
+
+fn cookie_expired(cookie: &Cookie<'_>) -> bool {
+    let now = unix_now();
+    cookie_expiry(cookie, now).is_some_and(|expiry| expiry <= now)
 }
 
 fn safe_request_header(name: &header::HeaderName) -> bool {
@@ -648,5 +676,113 @@ mod tests {
             &Url::parse("tauri://evil.test/").unwrap()
         ));
         assert!(!same_origin(&bundle, &api()));
+    }
+
+    // A deployment with AIREPUBLIC_COOKIE_DOMAIN set (production does: see
+    // deployments/ec2/SETUP-PROD.md) leaves the native store holding *two*
+    // cookies per name. The sign-in navigation stores the server's
+    // ``Domain=.airepublic.com`` copy through the webview; every rotation after
+    // that is written from Rust, where the cookie crate's ``domain()`` strips
+    // the leading dot, so it lands on a separate host-only cookie and the
+    // navigation's copy is never updated again. Both collapse to one jar key,
+    // so the request must carry the freshest value regardless of the order the
+    // native store reports them in -- and must never carry none at all.
+    #[test]
+    fn rotated_cookie_wins_over_a_stale_duplicate_in_any_order() {
+        let url = Url::parse("https://pidash.airepublic.com/api/users/me/").unwrap();
+        let fresh = cookie(
+            "pidash_access=rotated; Domain=airepublic.com; Path=/; Secure; HttpOnly; Max-Age=600",
+        );
+        let stale = cookie(
+            "pidash_access=from_sign_in; Domain=.airepublic.com; Path=/; Secure; HttpOnly; Max-Age=60",
+        );
+        for order in [
+            vec![fresh.clone(), stale.clone()],
+            vec![stale, fresh.clone()],
+        ] {
+            let sent = cookie_header(order, &url)
+                .map(|v| v.to_str().unwrap().to_owned())
+                .unwrap_or_default();
+            assert_eq!(sent, "pidash_access=rotated");
+        }
+
+        // Once the sign-in copy passes the access TTL it must be ignored, not
+        // allowed to evict the rotated cookie and sign the user out.
+        let expired = cookie(
+            "pidash_access=from_sign_in; Domain=.airepublic.com; Path=/; Secure; HttpOnly; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+        );
+        for order in [vec![fresh.clone(), expired.clone()], vec![expired, fresh]] {
+            let sent = cookie_header(order, &url)
+                .map(|v| v.to_str().unwrap().to_owned())
+                .unwrap_or_default();
+            assert_eq!(sent, "pidash_access=rotated");
+        }
+    }
+
+    #[test]
+    fn a_session_cookie_never_displaces_a_dated_duplicate() {
+        let url = Url::parse("https://pidash.airepublic.com/api/users/me/").unwrap();
+        let dated = cookie(
+            "pidash_access=rotated; Domain=airepublic.com; Path=/; Secure; HttpOnly; Max-Age=600",
+        );
+        let session =
+            cookie("pidash_access=from_sign_in; Domain=.airepublic.com; Path=/; Secure; HttpOnly");
+        for order in [vec![dated.clone(), session.clone()], vec![session, dated]] {
+            let sent = cookie_header(order, &url)
+                .map(|v| v.to_str().unwrap().to_owned())
+                .unwrap_or_default();
+            assert_eq!(sent, "pidash_access=rotated");
+        }
+    }
+
+    // The duplicate ranking has to work on the shape the native store actually
+    // hands back, which is never the one the server sent: Wry rebuilds every
+    // cookie from ``expiresDate``, so ``window.cookies()`` yields an absolute
+    // ``Expires`` and never a ``Max-Age``. Measured on macOS 26: a cookie that
+    // expires while sitting in the store is still reported, and reported *after*
+    // the live one -- so the dead sign-in copy is exactly the last insert that
+    // would evict the rotated cookie.
+    #[test]
+    fn duplicates_are_ranked_by_the_absolute_expiry_the_native_store_returns() {
+        let url = Url::parse("https://pidash.airepublic.com/api/users/me/").unwrap();
+        let rotated = cookie(
+            "pidash_access=rotated; Domain=airepublic.com; Path=/; Secure; HttpOnly; Expires=Wed, 01 Jan 2031 00:00:00 GMT",
+        );
+        assert_eq!(
+            rotated.max_age(),
+            None,
+            "the native store reports no Max-Age"
+        );
+        let sign_in_live = cookie(
+            "pidash_access=from_sign_in; Domain=.airepublic.com; Path=/; Secure; HttpOnly; Expires=Tue, 01 Jan 2030 00:00:00 GMT",
+        );
+        let sign_in_dead = cookie(
+            "pidash_access=from_sign_in; Domain=.airepublic.com; Path=/; Secure; HttpOnly; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+        );
+        for order in [
+            vec![rotated.clone(), sign_in_live.clone()],
+            vec![sign_in_live, rotated.clone()],
+            // The order the native store was measured to report: dead copy last.
+            vec![rotated.clone(), sign_in_dead.clone()],
+            vec![sign_in_dead, rotated],
+        ] {
+            assert_eq!(
+                cookie_header(order, &url)
+                    .map(|v| v.to_str().unwrap().to_owned())
+                    .unwrap_or_default(),
+                "pidash_access=rotated"
+            );
+        }
+    }
+
+    #[test]
+    fn max_age_takes_precedence_over_expires_when_ranking_duplicates() {
+        let now = 1_700_000_000;
+        // Max-Age wins even when Expires disagrees (RFC 6265 section 5.2.2).
+        let c = cookie("a=b; Max-Age=600; Expires=Thu, 01 Jan 1970 00:00:00 GMT");
+        assert_eq!(cookie_expiry(&c, now), Some(now + 600));
+        assert!(!cookie_expired(&c));
+        // A session cookie has no expiry and so sorts before any dated cookie.
+        assert_eq!(cookie_expiry(&cookie("a=b"), now), None);
     }
 }
