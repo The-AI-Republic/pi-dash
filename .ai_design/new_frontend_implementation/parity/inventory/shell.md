@@ -119,7 +119,7 @@
 | SHELL-100 | Cloud edition marker shows the edition name, reveals the app version on hover, and opens the paid-plans dialog | all signed-in users | cloud | shell chrome near workspace controls | packaged app version; paid-plans dialog; mobile detection | hover or long-press reveals the version; activating the badge opens the plans dialog | | not started |
 | SHELL-101 | Upgrade pill marks paywalled destinations without affecting navigation | all users (informational) | cloud | beside eligible sidebar and menu rows | none | marked rows display the pill in both size variants and still navigate normally | | not started |
 | SHELL-102 | Desktop-only update control lives in the sidebar chrome | desktop users | desktop | sidebar wrapper region | desktop runtime (detail owned by the Desktop area) | desktop builds show the control in the sidebar; its update behavior is rowed with the desktop runtime | | not started |
-| SHELL-103 | Repository-star action adapts its icon to the color theme and opens externally | all signed-in users | all | mounted shell chrome (exact mount unconfirmed in surveyed files — verify in oracle) | external repository address only | icon swaps between light and dark themes; activation opens the repository in a new tab with safe link attributes | | not started |
+| SHELL-103 | Repository-star action adapts its icon to the color theme and opens externally | all signed-in users | cloud | cloud top navigation bar (rendered by the cloud top-bar root) | external repository address only | icon swaps between light and dark themes; activation opens the repository in a new tab with safe link attributes | | not started |
 | SHELL-104 | Shared empty-state kit offers four presentation tiers with theme-aware art | all roles (presentational) | all | reused by list, archive, search-miss and update surfaces | none | centered illustration, wide marketing, text-first detailed and compact section variants each render with and without actions | | not started |
 | SHELL-105 | Cover-image primitive handles loading, remote and fallback sources | all roles (presentational) | all | project card cover slot and detail headers | file-URL resolution helper | pending URLs shimmer then resolve uploaded, static or external art; empty covers fall back to default art | | not started |
 | SHELL-106 | Workspace-level browse route renders the project-scoped detail view, preserving archive state, with no cross-project browser | not applicable (project-scoped detail only) | cloud wrapper over core detail | browse route | none at shell level | opening the browse route shows the same project-scoped detail as in-project navigation, not a workspace-wide browser | | not started |
@@ -137,7 +137,7 @@ each mapped to the row IDs that cover it. Anything unmapped is explained, not dr
 | `apps/web/app/(all)/[workspaceSlug]/(projects)/layout.tsx` | SHELL-002 | persistent sidebar plus slide-over plus portal |
 | `apps/web/app/(all)/[workspaceSlug]/(projects)/header.tsx` | SHELL-022 | home breadcrumb plus widget-settings shortcut |
 | `apps/web/app/(all)/[workspaceSlug]/(projects)/page.tsx` | SHELL-003 | thin wrapper mounting the home view; widget behavior rowed under home |
-| `apps/web/app/(all)/[workspaceSlug]/(projects)/star-us-link.tsx` | SHELL-103 | definition found; no consumer in surveyed files, so the oracle must confirm where it mounts |
+| `apps/web/app/(all)/[workspaceSlug]/(projects)/star-us-link.tsx` | SHELL-103 | definition in the shared route tree; sole consumer is the cloud top-bar root, so the behavior is cloud-only; oracle still confirms the visual rendering |
 | `apps/web/app/(all)/[workspaceSlug]/(projects)/projects/(list)/layout.tsx` | SHELL-043, SHELL-044 | desktop plus mobile header slots |
 | `apps/web/app/(all)/[workspaceSlug]/(projects)/projects/(list)/page.tsx` | SHELL-024 | thin wrapper delegating to the list view |
 | `apps/web/app/(home)/layout.tsx`, `apps/web/app/(home)/page.tsx` | (landing shows sign-in) | covered-elsewhere: auth area NEWFRONT-23 owns the signed-out landing; no shell row |
@@ -222,10 +222,9 @@ each mapped to the row IDs that cover it. Anything unmapped is explained, not dr
 
 ### Open confirmations for the oracle run (NEWFRONT-26)
 
-1. Mount point of the repository-star action (no consumer in surveyed files).
-2. Whether the legacy local tab-preference helpers and the no-op personal-list filter still execute anywhere.
-3. Cloud-only deltas that need the cloud build: top-bar composition, edition badge, upgrade pill,
+1. Whether the legacy local tab-preference helpers and the no-op personal-list filter still execute anywhere.
+2. Cloud-only deltas that need the cloud build: top-bar composition, edition badge, upgrade pill,
    mobile list header, peek overlay, plan dialog, subscription pill, cloud theme-switcher reload.
-4. Exact supported-language set per edition (open-source English-only claim).
-5. Debounce interval, result-group ordering, and the full two-key sequence map for palette commands.
-6. Desktop shell beyond the update control (owned by the Desktop area; nothing else found in scope).
+3. Exact supported-language set per edition (open-source English-only claim).
+4. Result-group ordering and the full two-key sequence map for palette commands (search debounce confirmed at half a second in the modal search view).
+5. Desktop shell beyond the update control (owned by the Desktop area; nothing else found in scope).
