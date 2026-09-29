@@ -1,0 +1,171 @@
+{
+  "trace": "apps/api/pi_dash/assistant/runtime/events.py:37-143; apps/api/pi_dash/assistant/runtime/history.py:27-60",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "capture_note": "compiler-form SQL rendered offline with the project venv (no DB connection); same compiler other domains pair with CaptureQueriesContext executed SQL. Row shapes follow serialize_event/message_envelope key sets.",
+  "events": {
+    "event_channel": {
+      "source": "apps/api/pi_dash/assistant/runtime/events.py:37-38",
+      "vector": "assistant:thread:tid-1",
+      "prefix": "assistant:thread:"
+    },
+    "serialize_event": {
+      "source": "apps/api/pi_dash/assistant/runtime/events.py:41-50",
+      "keys": [
+        "id",
+        "thread",
+        "message",
+        "seq",
+        "kind",
+        "payload",
+        "created_at"
+      ],
+      "vector": {
+        "id": 7,
+        "thread": "0c46aebe-0915-458b-ad1c-3a1d7b8de050",
+        "message": null,
+        "seq": 1,
+        "kind": "turn_started",
+        "payload": {
+          "t": 1
+        },
+        "created_at": "2026-09-29T03:39:16.065834+00:00"
+      }
+    },
+    "next_event_seq": {
+      "source": "apps/api/pi_dash/assistant/runtime/events.py:73-75",
+      "shape": "MAX(seq) over thread events + 1 (0 when empty)",
+      "sql": "SELECT \"assistant_event\".\"thread_id\", MAX(\"assistant_event\".\"seq\") AS \"m\" FROM \"assistant_event\" WHERE \"assistant_event\".\"thread_id\" = 33ade466-0600-43ed-b19a-9616ba72e19b GROUP BY \"assistant_event\".\"thread_id\""
+    },
+    "next_message_seq": {
+      "source": "apps/api/pi_dash/assistant/runtime/events.py:78-80",
+      "shape": "MAX(seq) over thread messages + 1 (0 when empty)",
+      "sql": "SELECT \"assistant_message\".\"thread_id\", MAX(\"assistant_message\".\"seq\") AS \"m\" FROM \"assistant_message\" WHERE \"assistant_message\".\"thread_id\" = 33ade466-0600-43ed-b19a-9616ba72e19b GROUP BY \"assistant_message\".\"thread_id\""
+    },
+    "append_event": {
+      "source": "apps/api/pi_dash/assistant/runtime/events.py:83-103",
+      "shape": "atomic: SELECT thread FOR UPDATE, INSERT event (kind truncated to 64 chars), publish on commit",
+      "concurrency": "seq allocated MAX+1 under a row lock on the thread so streaming handler + threadpool tools do not collide (events.py:9-11)"
+    },
+    "create_message": {
+      "source": "apps/api/pi_dash/assistant/runtime/events.py:106-125",
+      "shape": "atomic: SELECT thread FOR UPDATE, INSERT message with MAX+1 seq"
+    },
+    "message_envelope": {
+      "source": "apps/api/pi_dash/assistant/runtime/events.py:128-140",
+      "keys": [
+        "id",
+        "role",
+        "content",
+        "status",
+        "seq",
+        "turn_id",
+        "payload",
+        "created_at",
+        "completed_at"
+      ],
+      "mapping": "kind->role, display_content->content",
+      "vector": {
+        "id": "869b748c-b9e0-40e7-84c3-5e2d9b9c47a2",
+        "role": "user",
+        "content": "hi",
+        "status": "completed",
+        "seq": 3,
+        "turn_id": null,
+        "payload": {
+          "a": 1
+        },
+        "created_at": "2026-09-29T03:39:16.065775+00:00",
+        "completed_at": null
+      }
+    },
+    "prune_turn_deltas": {
+      "source": "apps/api/pi_dash/assistant/runtime/events.py:143-145",
+      "shape": "DELETE assistant_event WHERE turn_id AND kind='assistant_delta'"
+    },
+    "publish": {
+      "source": "apps/api/pi_dash/assistant/runtime/events.py:53-70",
+      "shape": "PUBLISH <channel> <serialize_event JSON>; redis-unavailable -> log + return (never raises)"
+    }
+  },
+  "history": {
+    "load_history": {
+      "source": "apps/api/pi_dash/assistant/runtime/history.py:27-53",
+      "shape": "newest N COMPLETED turns with non-null model_messages (order -created_at,-id, slice, reverse to chronological); per-blob ModelMessagesTypeAdapter.validate_python, skip-on-error",
+      "caps": "chat ASSISTANT_HISTORY_MAX_TURNS=40; loop ASSISTANT_LOOP_HISTORY_MAX_TURNS=5 (history.py:34-37)",
+      "sql": "SELECT \"assistant_turn\".\"model_messages\" FROM \"assistant_turn\" WHERE (\"assistant_turn\".\"thread_id\" = 33ade466-0600-43ed-b19a-9616ba72e19b AND \"assistant_turn\".\"model_messages\" IS NOT NULL AND \"assistant_turn\".\"status\" = completed) ORDER BY \"assistant_turn\".\"created_at\" DESC, \"assistant_turn\".\"id\" DESC LIMIT 40"
+    },
+    "dump_new_messages": {
+      "source": "apps/api/pi_dash/assistant/runtime/history.py:56-60",
+      "shape": "ModelMessagesTypeAdapter.dump_python(result.new_messages(), mode='json')"
+    }
+  },
+  "orm_sql": {
+    "load_context_turn": {
+      "source": "apps/api/pi_dash/assistant/tasks.py:73-78",
+      "sql": "SELECT \"assistant_turn\".\"id\", \"assistant_turn\".\"thread_id\", \"assistant_turn\".\"user_message_id\", \"assistant_turn\".\"status\", \"assistant_turn\".\"model_messages\", \"assistant_turn\".\"usage\", \"assistant_turn\".\"model_used\", \"assistant_turn\".\"error_code\", \"assistant_turn\".\"error_detail\", \"assistant_turn\".\"created_at\", \"assistant_turn\".\"started_at\", \"assistant_turn\".\"completed_at\", \"assistant_thread\".\"id\", \"assistant_thread\".\"workspace_id\", \"assistant_thread\".\"user_id\", \"assistant_thread\".\"title\", \"assistant_thread\".\"kind\", \"assistant_thread\".\"is_archived\", \"assistant_thread\".\"active_turn_id\", \"assistant_thread\".\"created_at\", \"assistant_thread\".\"updated_at\", \"workspaces\".\"created_at\", \"workspaces\".\"updated_at\", \"workspaces\".\"created_by_id\", \"workspaces\".\"updated_by_id\", \"workspaces\".\"deleted_at\", \"workspaces\".\"id\", \"workspaces\".\"name\", \"workspaces\".\"logo\", \"workspaces\".\"logo_asset_id\", \"workspaces\".\"owner_id\", \"workspaces\".\"slug\", \"workspaces\".\"organization_size\", \"workspaces\".\"timezone\", \"workspaces\".\"background_color\", \"assistant_message\".\"id\", \"assistant_message\".\"thread_id\", \"assistant_message\".\"turn_id\", \"assistant_message\".\"seq\", \"assistant_message\".\"kind\", \"assistant_message\".\"display_content\", \"assistant_message\".\"payload\", \"assistant_message\".\"status\", \"assistant_message\".\"created_at\", \"assistant_message\".\"completed_at\" FROM \"assistant_turn\" INNER JOIN \"assistant_thread\" ON (\"assistant_turn\".\"thread_id\" = \"assistant_thread\".\"id\") INNER JOIN \"workspaces\" ON (\"assistant_thread\".\"workspace_id\" = \"workspaces\".\"id\") LEFT OUTER JOIN \"assistant_message\" ON (\"assistant_turn\".\"user_message_id\" = \"assistant_message\".\"id\") WHERE \"assistant_turn\".\"id\" = 0b01261f-8567-4e72-aad4-d4436a6a0ac7 ORDER BY \"assistant_turn\".\"created_at\" ASC"
+    },
+    "sweep_running_ids": {
+      "source": "apps/api/pi_dash/assistant/tasks.py:514-518",
+      "sql": "SELECT \"assistant_turn\".\"id\" FROM \"assistant_turn\" WHERE \"assistant_turn\".\"status\" = running ORDER BY \"assistant_turn\".\"created_at\" ASC"
+    },
+    "owned_thread": {
+      "source": "apps/api/pi_dash/assistant/views/_base.py:31-34",
+      "sql": "SELECT \"assistant_thread\".\"id\", \"assistant_thread\".\"workspace_id\", \"assistant_thread\".\"user_id\", \"assistant_thread\".\"title\", \"assistant_thread\".\"kind\", \"assistant_thread\".\"is_archived\", \"assistant_thread\".\"active_turn_id\", \"assistant_thread\".\"created_at\", \"assistant_thread\".\"updated_at\" FROM \"assistant_thread\" INNER JOIN \"workspaces\" ON (\"assistant_thread\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"assistant_thread\".\"id\" = db68f428-df63-4de8-b060-2d4038a5b1f4 AND \"assistant_thread\".\"user_id\" = a7107351-38ac-4f3d-91d5-ee34c2459bd6 AND \"workspaces\".\"slug\" = acme) ORDER BY \"assistant_thread\".\"updated_at\" DESC"
+    },
+    "thread_message_count": {
+      "source": "apps/api/pi_dash/assistant/views/messages.py:87",
+      "sql": "SELECT \"assistant_message\".\"id\", \"assistant_message\".\"thread_id\", \"assistant_message\".\"turn_id\", \"assistant_message\".\"seq\", \"assistant_message\".\"kind\", \"assistant_message\".\"display_content\", \"assistant_message\".\"payload\", \"assistant_message\".\"status\", \"assistant_message\".\"created_at\", \"assistant_message\".\"completed_at\" FROM \"assistant_message\" WHERE \"assistant_message\".\"thread_id\" = 33ade466-0600-43ed-b19a-9616ba72e19b ORDER BY \"assistant_message\".\"seq\" ASC"
+    },
+    "message_list_window": {
+      "source": "apps/api/pi_dash/assistant/views/messages.py:95",
+      "sql": "SELECT \"assistant_message\".\"id\", \"assistant_message\".\"thread_id\", \"assistant_message\".\"turn_id\", \"assistant_message\".\"seq\", \"assistant_message\".\"kind\", \"assistant_message\".\"display_content\", \"assistant_message\".\"payload\", \"assistant_message\".\"status\", \"assistant_message\".\"created_at\", \"assistant_message\".\"completed_at\" FROM \"assistant_message\" WHERE \"assistant_message\".\"thread_id\" = 33ade466-0600-43ed-b19a-9616ba72e19b ORDER BY \"assistant_message\".\"seq\" ASC"
+    },
+    "events_replay_window": {
+      "source": "apps/api/pi_dash/assistant/views/events.py:44-46",
+      "sql": "SELECT \"assistant_event\".\"id\", \"assistant_event\".\"thread_id\", \"assistant_event\".\"turn_id\", \"assistant_event\".\"seq\", \"assistant_event\".\"kind\", \"assistant_event\".\"message_id\", \"assistant_event\".\"payload\", \"assistant_event\".\"created_at\" FROM \"assistant_event\" WHERE (\"assistant_event\".\"seq\" > 5 AND \"assistant_event\".\"thread_id\" = 33ade466-0600-43ed-b19a-9616ba72e19b) ORDER BY \"assistant_event\".\"seq\" ASC"
+    },
+    "threads_list": {
+      "source": "apps/api/pi_dash/assistant/views/threads.py:60-63",
+      "sql": "SELECT \"assistant_thread\".\"id\", \"assistant_thread\".\"workspace_id\", \"assistant_thread\".\"user_id\", \"assistant_thread\".\"title\", \"assistant_thread\".\"kind\", \"assistant_thread\".\"is_archived\", \"assistant_thread\".\"active_turn_id\", \"assistant_thread\".\"created_at\", \"assistant_thread\".\"updated_at\" FROM \"assistant_thread\" INNER JOIN \"workspaces\" ON (\"assistant_thread\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"assistant_thread\".\"kind\" = chat AND \"assistant_thread\".\"user_id\" = 88d57e9a-1254-45c2-a79c-58ccb38aa150 AND \"workspaces\".\"slug\" = acme) ORDER BY \"assistant_thread\".\"updated_at\" DESC"
+    },
+    "llm_config_lookup": {
+      "source": "apps/api/pi_dash/assistant/runtime/llm.py:67-68",
+      "sql": "SELECT \"assistant_user_llm_config\".\"id\", \"assistant_user_llm_config\".\"user_id\", \"assistant_user_llm_config\".\"provider_kind\", \"assistant_user_llm_config\".\"base_url\", \"assistant_user_llm_config\".\"model_name\", \"assistant_user_llm_config\".\"api_key_encrypted\", \"assistant_user_llm_config\".\"last_verified_at\", \"assistant_user_llm_config\".\"created_at\", \"assistant_user_llm_config\".\"updated_at\" FROM \"assistant_user_llm_config\" WHERE \"assistant_user_llm_config\".\"user_id\" = 6e409d0f-bea4-466b-bd79-96f31866d257"
+    },
+    "stt_config_lookup": {
+      "source": "apps/api/pi_dash/ee/assistant/stt_provider.py:66",
+      "sql": "SELECT \"assistant_user_stt_config\".\"id\", \"assistant_user_stt_config\".\"user_id\", \"assistant_user_stt_config\".\"base_url\", \"assistant_user_stt_config\".\"model_name\", \"assistant_user_stt_config\".\"api_key_encrypted\", \"assistant_user_stt_config\".\"last_verified_at\", \"assistant_user_stt_config\".\"created_at\", \"assistant_user_stt_config\".\"updated_at\" FROM \"assistant_user_stt_config\" WHERE \"assistant_user_stt_config\".\"user_id\" = 4e1244eb-9035-4c6e-94ec-d9a463003c61"
+    },
+    "mcp_enabled_list": {
+      "source": "apps/api/pi_dash/assistant/runtime/mcp.py:250",
+      "sql": "SELECT \"assistant_mcp_server\".\"id\", \"assistant_mcp_server\".\"user_id\", \"assistant_mcp_server\".\"name\", \"assistant_mcp_server\".\"url\", \"assistant_mcp_server\".\"auth_header_encrypted\", \"assistant_mcp_server\".\"is_enabled\", \"assistant_mcp_server\".\"created_at\", \"assistant_mcp_server\".\"updated_at\" FROM \"assistant_mcp_server\" WHERE (\"assistant_mcp_server\".\"is_enabled\" AND \"assistant_mcp_server\".\"user_id\" = a8bdb207-e389-45bd-b335-5c9651a1ac02) ORDER BY \"assistant_mcp_server\".\"created_at\" ASC"
+    }
+  },
+  "updates": [
+    {
+      "name": "mark_running QUEUED->RUNNING",
+      "source": "apps/api/pi_dash/assistant/tasks.py:99-107",
+      "shape": "UPDATE assistant_turn SET status=running, started_at=now WHERE id AND status=queued; 0 rows -> False"
+    },
+    {
+      "name": "complete_turn",
+      "source": "apps/api/pi_dash/assistant/tasks.py:157-170",
+      "shape": "SELECT turn FOR UPDATE; set completed/model_messages/usage/model_used/completed_at; clear thread.active_turn when it matches"
+    },
+    {
+      "name": "fail_turn",
+      "source": "apps/api/pi_dash/assistant/tasks.py:181-201",
+      "shape": "SELECT turn FOR UPDATE; set failed + error_code[:64] + error_detail[:2000]; close streaming rows as failed; clear active_turn; INSERT error message row + turn_failed event"
+    },
+    {
+      "name": "cancel_turn",
+      "source": "apps/api/pi_dash/assistant/tasks.py:204-213",
+      "shape": "SELECT turn FOR UPDATE; set cancelled; close streaming rows as cancelled; clear active_turn; INSERT turn_cancelled event"
+    },
+    {
+      "name": "finalize_open_rows",
+      "source": "apps/api/pi_dash/assistant/tasks.py:173-178",
+      "shape": "UPDATE assistant_message SET status, completed_at=now WHERE turn AND status=streaming"
+    }
+  ]
+}
