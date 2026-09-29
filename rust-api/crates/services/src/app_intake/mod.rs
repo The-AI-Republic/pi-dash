@@ -9,6 +9,12 @@
 //!   (27-90) from `apps/api/pi_dash/app/serializers/intake.py:17-90`
 //!   (PIDASHCONV-281). Sibling issue PIDASHCONV-282 appends the remaining
 //!   three units (`intake.py:93-139`) to [`shape`].
+//! * [`tasks`] — the five `issue_activity` / `issue_description_version_task`
+//!   `.delay()` emits from `app/views/intake/base.py` (PIDASHCONV-345):
+//!   Celery-format kwargs in call-site order plus the migration-update
+//!   silent-path predicate. Handlers (PIDASHCONV-385/395) wrap them into
+//!   queue rows; no worker `Registry` handler is needed (Python-owned
+//!   names forward to the broker).
 //!
 //! Wiring note: the crate root declares `pub mod app_intake;` (seam for
 //! this issue's new files); every file under this module is new.
@@ -21,6 +27,7 @@
 //! set) reaches `validate`/`update`.
 pub mod permissions;
 pub mod shape;
+pub mod tasks;
 
 pub use shape::{
     accepted_issue_transition, apply_label_ids_annotation, no_default_state_error_body,
