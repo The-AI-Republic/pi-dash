@@ -554,12 +554,14 @@ pub fn gitea_preferred_email(emails: &[Value]) -> Result<Value, GiteaEmailError>
     if emails.is_empty() {
         return Err(GiteaEmailError::NoEmails);
     }
+    // `next((e.get("email") for e in ... if pred), None)`: the first matching
+    // entry decides, even when its `email` is missing (`None` is returned, the
+    // search does NOT continue down the chain).
     let pick = |pred: &dyn Fn(&Value) -> bool| {
         emails
             .iter()
             .find(|e| pred(e))
-            .and_then(|e| e.get("email"))
-            .cloned()
+            .map(|e| e.get("email").cloned().unwrap_or(Value::Null))
     };
     if let Some(email) = pick(&|e| {
         json_truthy(e.get("primary").unwrap_or(&Value::Null))
@@ -1117,6 +1119,14 @@ mod tests {
             gitea_preferred_email(&unflagged).unwrap(),
             json!("first@example.com")
         );
+        // First match decides even when its `email` is missing: Python's
+        // `next()` returns that entry's `.get("email")` (None) without
+        // continuing down the chain.
+        let keyless_winner = vec![
+            json!({"primary": true, "verified": true}),
+            json!({"email": "v@example.com", "verified": true}),
+        ];
+        assert_eq!(gitea_preferred_email(&keyless_winner).unwrap(), Value::Null);
         assert_eq!(
             gitea_preferred_email(&[]).unwrap_err(),
             GiteaEmailError::NoEmails
