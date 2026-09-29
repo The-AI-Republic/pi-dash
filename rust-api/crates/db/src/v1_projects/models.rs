@@ -690,10 +690,11 @@ pub mod state {
     }
 
     /// Ports the ASCII behavior of Django's `slugify(name)`
-    /// (`state.py:132`, `django.template.defaultfilters.slugify` with
+    /// (`state.py:132`, `django.utils.text.slugify` with
     /// `allow_unicode=False`): lowercase, drop every character that is not
-    /// alphanumeric, whitespace, or a hyphen, and collapse each run of
-    /// spaces/hyphens to one hyphen. Non-ASCII input differs: Django strips
+    /// a word character (`[^\w\s-]` — underscore is kept), collapse each
+    /// run of spaces/hyphens to one hyphen, and strip leading/trailing
+    /// hyphens and underscores. Non-ASCII input differs: Django strips
     /// diacritics via NFKD (`"Café"` -> `"cafe"`) while this keeps the
     /// characters as-is; no D-19 fixture covers that case.
     pub fn slugify_name(name: &str) -> String {
@@ -701,7 +702,7 @@ pub mod state {
         let mut out = String::with_capacity(lowered.len());
         let mut prev_dash = true;
         for ch in lowered.chars() {
-            if ch.is_alphanumeric() {
+            if ch.is_alphanumeric() || ch == '_' {
                 out.push(ch);
                 prev_dash = false;
             } else if (ch.is_whitespace() || ch == '-') && !prev_dash {
@@ -709,10 +710,7 @@ pub mod state {
                 prev_dash = true;
             }
         }
-        while out.ends_with('-') {
-            out.pop();
-        }
-        out
+        out.trim_matches(|c| c == '-' || c == '_').to_owned()
     }
 
     /// Ports the `State.save` sequence rule (`state.py:133-138`): on add,
@@ -1537,6 +1535,12 @@ mod tests {
         assert_eq!(slugify_name("In Progress"), "in-progress");
         assert_eq!(slugify_name("Backlog"), "backlog");
         assert_eq!(slugify_name("  Todo  "), "todo");
+        // Underscores survive like Django `[^\w\s-]` (`\w` keeps `_`).
+        assert_eq!(slugify_name("my_project"), "my_project");
+        assert_eq!(slugify_name("a__b"), "a__b");
+        assert_eq!(slugify_name("_lead"), "lead");
+        assert_eq!(slugify_name("trail_"), "trail");
+        assert_eq!(slugify_name("a - _ b"), "a-_-b");
     }
 
     fn timestamp(secs: i64) -> chrono::DateTime<chrono::Utc> {
