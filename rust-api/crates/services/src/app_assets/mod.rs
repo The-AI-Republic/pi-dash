@@ -19,11 +19,18 @@
 //! * [`queries_v2_project`] — v2 project-side query closure
 //!   (`app/views/asset/v2.py:432-835`): entity-field maps, scoped SQL,
 //!   bulk dispatch, duplicate/download shapes (PIDASHCONV-361).
+//! * [`queries_v2_user_workspace`] — v2 user + workspace asset queries
+//!   (`UserAssetsV2Endpoint`, `v2.py:29-198`; `WorkspaceFileAssetEndpoint`,
+//!   `v2.py:201-429`): entity-field mapping, lookups, create sets,
+//!   confirm/delete updates, entity-link actions, post-commit
+//!   invalidations, metadata predicate (PIDASHCONV-356). Later layer
+//!   issues append their units here.
 //!
 //! Wiring note: the crate root declares `pub mod app_assets;` (seam for
 //! this issue's new files); every file under this module is new.
 pub mod queries_v1;
 pub mod queries_v2_project;
+pub mod queries_v2_user_workspace;
 pub mod shape;
 pub mod tasks;
 
