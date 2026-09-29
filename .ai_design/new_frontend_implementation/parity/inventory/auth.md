@@ -1,0 +1,104 @@
+# Feature inventory: Auth, sign-up, invitations, onboarding, create workspace
+
+Area: Auth, sign-up, invitations, onboarding, create workspace (Phase 1). ID prefix `AUTH-`.
+Editions: oss, cloud (extra sign-in providers via edition), desktop (sign-in via system browser + deep link).
+Source behavior learned by reading the old frontend (routes, components, services listed in the coverage
+checklist below). The old app was not run in this session; the oracle run (NEWFRONT-24) verifies each row
+against the live app later. Written from the area spec; no old code, strings, or assets copied.
+
+Row format per the Parity page: ID, capability, who, edition, old entry point, API, acceptance,
+parity test (empty for now), status (`not started`).
+
+| ID | Capability | Who | Edition | Old entry point | API | Acceptance | Parity test | Status |
+|----|------------|-----|---------|-----------------|-----|------------|-------------|--------|
+| AUTH-001 | Sign in with email plus password | Signed-out visitor | all | Sign-in card, email step then password step | email-check call; native credential POST | Existing account holder reaches the password step after the email check and lands authenticated; wrong credentials return to the form with an explanatory banner |  | not started |
+| AUTH-002 | Sign in with a one-time code sent by email | Signed-out visitor | all | Sign-in card, code step | email-check, code-generate, native code POST | Code step appears when the account uses code login; entering the emailed code authenticates; resend is throttled by a short cooldown |  | not started |
+| AUTH-003 | Sign in through a third-party provider | Signed-out visitor | all | Provider buttons on the sign-in card | full-page navigation to provider auth URL | Each provider enabled in instance config starts a full-page provider flow and returns authenticated; disabled providers are not offered |  | not started |
+| AUTH-004 | Email-first routing between sign-in and sign-up paths | Signed-out visitor | all | Sign-in / sign-up cards, email step | email-check call | Typing an address that already exists vs one that does not selects the correct next step (password or code, sign-in or sign-up mode); clearing the address resets the card |  | not started |
+| AUTH-005 | Invitation-aware sign-in header | Signed-out invitee | all | Sign-in card with invitation query params | single-invitation fetch | When the link identifies an invitation matching the typed address, the card header names that workspace; otherwise the generic header shows |  | not started |
+| AUTH-006 | Server error banner with step recovery | Signed-out visitor | all | Sign-in / sign-up cards, incl. `error_code` deep link | none (client mapping) | Each failure kind (unknown account, already registered, disabled sign-up, bad/expired/exhausted code, provider failure, rate limit) shows a dismissible banner, and link-carried codes land the form on the step that can fix them |  | not started |
+| AUTH-007 | No-authentication-methods notice | Signed-out visitor | all | Sign-in / sign-up cards | none | When the instance enables neither provider nor email login, the card explains login is unavailable and points at the administrator instead of showing a form |  | not started |
+| AUTH-008 | Behavior when outgoing mail is unconfigured | Signed-out visitor | all | Sign-in card, password step | instance config | Password-reset entry becomes an explanation instead of a link, code login is not offered, and the primary button label reflects the mail-less mode |  | not started |
+| AUTH-009 | Account creation (password and code paths) | Signed-out visitor | all | Sign-up card | email-check, code-generate, native account-creation POSTs | A new address can create an account via password or via emailed code; success leaves the newcomer on the post-sign-up path (onboarding), never silently membered anywhere |  | not started |
+| AUTH-010 | New-password strength and confirmation enforcement | Signed-out visitor (sign-up); signed-in without password (set-password) | all | Sign-up card; set-password form | none client-side beyond meter | Weak secrets are refused before anything is posted and mismatched confirmations block submit with an inline message |  | not started |
+| AUTH-011 | Sign-up entry behavior (legacy redirect, prefill, return path) | Signed-out visitor | all | `/sign-up`, legacy accounts sign-up URL | none | The legacy URL forwards to the canonical one; an email query value prefills the field; a return-path value survives to the post-login redirect |  | not started |
+| AUTH-012 | Forgotten-password request with resend throttling | Signed-out visitor | all | Forgot-password page; `email` prefill | forgot-password call | Submitting an address shows an inbox-check confirmation and starts a resend countdown that disables the form; failures surface a toast without leaking account existence details |  | not started |
+| AUTH-013 | Password reset from the emailed link | Signed-out holder of a reset link | all | Reset-password page (`uid` + `token` in URL) | native reset POST embedding uid/token | The address is shown locked, the new secret needs the strength check plus matching confirmation, and invalid/expired links render an explanatory banner instead of the form |  | not started |
+| AUTH-014 | First password for passwordless accounts | Signed-in user without a password | all | Set-password page | set-password call | Users who never set a secret (provider-created accounts) can set one; users who already have one are sent away instead of seeing the form |  | not started |
+| AUTH-015 | Route guards (signed-out-only, signed-in-only, public, onboarding gate) | Everyone | all | Every route in this area | session/profile reads | Signed-out visitors reach only public and signed-out-only screens (bounced to sign-in with a return path otherwise); signed-in users are kept out of signed-out-only screens; anyone signed in but not onboarded is funneled to onboarding |  | not started |
+| AUTH-016 | Post-authentication landing | Newly authenticated user | all | Auth completion | profile/last-workspace reads | Landing honors a safe return path first, else the last or fallback workspace still available to the user, else the workspace-creation route |  | not started |
+| AUTH-017 | Sign-out from every entry point | Signed-in user | all | Sidebar, command palette, guards, account switching, email change, deactivation | sign-out POST clearing the session | Signing out ends the server session and returns to the signed-out entry; on desktop the local webview store is additionally wiped so no session survives locally |  | not started |
+| AUTH-018 | Account switching | Signed-in user | all | Switch-account control | session reads; sign-out path on confirm | The user sees which account is active, can pick another identity, and confirming routes through sign-out into the fresh login |  | not started |
+| AUTH-019 | Account deactivation | Signed-in user | all | Deactivate-account dialog | deactivation call, then sign-out path | Confirming deactivation disables the account, signs out, and returns to the signed-out entry with success/failure feedback |  | not started |
+| AUTH-020 | Session expiry and request forgery handling | Signed-in user | all | Any authenticated API use; login forms | CSRF fetch; 401 redirect rule | An expired session sends the user to sign-in preserving the return path; login and password forms carry a fresh forgery token with each submission |  | not started |
+| AUTH-021 | CLI device approval in the browser | Signed-in onboarded user | all | Device-approval page, incl. CLI deep link with code | device-approve call | The short code is auto-formatted as typed; a CLI-carried code prefills and tries once automatically; approval shows a confirmation naming account and workspace, failures allow editing and retry |  | not started |
+| AUTH-022 | Desktop sign-in through the system browser plus deep-link return | Signed-out desktop user | desktop | Desktop sign-in card; `pidash` callback link | desktop-exchange navigation | The app opens the system browser for login and completes the session when the callback link returns (code/state); provider-side or aborted flows land back on sign-in with an explanatory error |  | not started |
+| AUTH-023 | Desktop unavailable-sign-in card | Signed-out desktop user | desktop | Desktop root, login/sign-in overrides | none | Where direct desktop login is unsupported, the card says so and offers opening the browser instead of a dead form |  | not started |
+| AUTH-024 | Authorization-failure screens | Signed-in user hitting something out of reach | all | Forbidden project, non-member workspace, generic denial | membership reads; project join call | Missing project membership offers joining where allowed and explains otherwise; workspace outsiders are pointed at invitations or workspace creation; unknown targets report not-found |  | not started |
+| AUTH-025 | Keyboard and focus behavior (no custom shortcuts) | Everyone using keyboard | all | All screens in this area | none | Each step focuses its input, Enter submits native forms, toggles/clears/dismissals are reachable buttons; no screen requires custom key bindings |  | not started |
+| AUTH-026 | Invitation inbox with batch accept | Signed-in invitee | all | Invitations page | list-invitations, batch-accept, last-workspace stamp | Each pending invite is a selectable card showing workspace and role; accepting joins all selected at once; an empty inbox shows an illustrated no-invites state with a way home |  | not started |
+| AUTH-027 | Single-invitation emailed link (accept or decline) | Signed-out or signed-in recipient | all | Workspace-invitation page (`invitation`, `slug`, `token` in URL) | single-invitation fetch; accept/decline call | Pending links offer accept and ignore; already-answered or broken links render already-member / no-longer-active / not-found states instead of the actions |  | not started |
+| AUTH-028 | Landing after answering an invitation | Invitee | all | Invitation flows | last-workspace stamp; workspace list refresh | Accepting lands in the joined workspace (first of a batch); a signed-in address that does not match the invitee lands on the home route; ignoring always lands home |  | not started |
+| AUTH-029 | Onboarding gate and resume | Signed-in user who has not finished setup | all | `/onboarding` single-URL flow | profile/progress-flag reads | Unfinished users are funneled here from any page; finished users are bounced away; a refresh resumes at the workspace step or invite step when earlier flags are already stored, and a pending access request resumes on its holding view |  | not started |
+| AUTH-030 | CLI-install onboarding step | Onboarding user | all | Onboarding step 1 | none | Shows install guidance per OS with the current platform preselected; both continue actions advance identically and nothing is stored |  | not started |
+| AUTH-031 | Profile-setup onboarding step | Onboarding user | all | Onboarding step 2 | user update; profile update; optional set-password | Collects display name (required, length-checked) plus optional avatar; offers a password only to accounts that never set one; records marketing consent where editions ask for it |  | not started |
+| AUTH-032 | Role-selection onboarding step | Onboarding user | all | Onboarding step 3 | profile update | One role from a fixed list is required to continue, or skip; self-managed instances skip this step entirely |  | not started |
+| AUTH-033 | Use-case onboarding step | Onboarding user | all | Onboarding step 4 | profile update | At least one use case from the shared list is required to continue, or skip; saved as a combined profile value; skipped on self-managed instances |  | not started |
+| AUTH-034 | Workspace create-or-join onboarding step | Onboarding user | all | Onboarding step 5, four sub-views | workspace create; batch-accept; join-request; slug check; invitation list | Defaults to invites when invites exist (pending requests force the holding view); creating needs a valid available name/slug plus team size; joining by email sends a request; already-member shortcuts finish directly |  | not started |
+| AUTH-035 | Workspace URL availability and reserved-name enforcement | Onboarding user; standalone creator | all | Workspace name/slug fields | slug-availability check | The slug derives from the name but stays editable; taken, reserved, or malformed values block submit inline before anything is created |  | not started |
+| AUTH-036 | Workspace access request plus pending view | Onboarding user without an invite | all | Join-by-email view; pending view | join-request create/list | An admin address takes a request and parks the user on a holding view naming that address; the holding view offers creating a workspace instead; the request outcome itself reveals nothing about the address |  | not started |
+| AUTH-037 | Invite-members onboarding step | Onboarding user who created a workspace | all | Onboarding step 6 | bulk-invite send | Starts with blank address-plus-role rows, grows on demand, drops empties, requires at least one valid address to send; deferring finishes onboarding without sending |  | not started |
+| AUTH-038 | Solo-workspace shortcut | Onboarding user working alone | all | Workspace creation with solo team size | workspace create; finish calls | Choosing the solo size finishes onboarding immediately after creation with no invite step and hides that step from progress |  | not started |
+| AUTH-039 | Onboarding completion and landing | Finishing onboarding user | all | Finish routine | progress-flag writes; onboard call; settings/profile refresh | Finishing stamps all progress flags and the onboarded marker, refreshes cached profile and settings, then lands per AUTH-016 |  | not started |
+| AUTH-040 | Standalone workspace creation | Signed-in onboarded user | all | `/create-workspace` | slug-availability check; workspace create | Same fields and checks as the onboarding create view with full-page chrome; success enters the new workspace directly with no invite step |  | not started |
+| AUTH-041 | Workspace-creation-disabled states | Signed-in user | all | Standalone route; in-onboarding create view | instance config | Standalone shows an admin-only illustration with go-back and ask-admin actions; the in-onboarding view shows an inline notice steering to joining instead |  | not started |
+| AUTH-042 | First-run product tour | New workspace user | cloud | Tour overlay on workspace home | tour-completed flag read/write | A dismissible guided tour (welcome plus stops across core areas ending in project creation) shows until completed or explicitly skipped, once per user |  | not started |
+| AUTH-043 | In-flow back navigation | Onboarding user | all | Onboarding header chevron | none | Back moves step to step per the visible sequence except on the first and last steps; browser chrome is not step-aware (single URL) |  | not started |
+
+## Coverage checklist
+
+Every route file, top-level component folder, and API endpoint in the assigned sources, mapped to rows.
+Endpoint paths below are backend contracts as observed from the old frontend's call sites.
+
+### Route files (`apps/web/app/(all)/…`)
+
+| Source | Covering rows |
+|--------|---------------|
+| `accounts/forgot-password/page.tsx` + `layout.tsx` | AUTH-012, AUTH-015 |
+| `accounts/reset-password/page.tsx` + `layout.tsx` | AUTH-013, AUTH-015 |
+| `accounts/set-password/page.tsx` + `layout.tsx` | AUTH-014, AUTH-015 |
+| `auth/device/page.tsx` + `layout.tsx` | AUTH-021, AUTH-015 |
+| `sign-up/page.tsx` + `layout.tsx` | AUTH-004, AUTH-005, AUTH-006, AUTH-007, AUTH-008, AUTH-009, AUTH-010, AUTH-011, AUTH-015 |
+| `invitations/page.tsx` + `layout.tsx` | AUTH-026, AUTH-028, AUTH-015 |
+| `workspace-invitations/page.tsx` + `layout.tsx` | AUTH-027, AUTH-028, AUTH-015 |
+| `onboarding/page.tsx` + `layout.tsx` | AUTH-015, AUTH-016, AUTH-029 through AUTH-039, AUTH-043 |
+| `create-workspace/page.tsx` + `layout.tsx` | AUTH-015, AUTH-035, AUTH-040, AUTH-041 |
+
+### Top-level component folders
+
+| Source | Covering rows |
+|--------|---------------|
+| `core/components/account/` (auth forms: email, password, unique code, form root, auth root, banners, headers, forgot/reset/set password, terms, deactivation dialog) | AUTH-001, AUTH-002, AUTH-004, AUTH-005, AUTH-006, AUTH-007, AUTH-008, AUTH-009, AUTH-010, AUTH-012, AUTH-013, AUTH-014, AUTH-019, AUTH-025. Note: the standalone set-password form component is present but the set-password page renders the shared reset form; both behaviors are captured in AUTH-014 |
+| `core/components/auth-screens/` (base shell, hero, header, not-authorized view, project restriction, workspace non-member) | AUTH-004, AUTH-005, AUTH-009, AUTH-011, AUTH-024 |
+| `core/components/onboarding/` (root, header, step indicator, steps: cli-install, profile, role, use-case, workspace incl. create/join-invites/join-by-email/pending-approval, team, invite-members, invitations, switch-account) | AUTH-016, AUTH-018, AUTH-026, AUTH-029 through AUTH-039, AUTH-043. Note: older full-page variants beside the steps flow encode the same capabilities (invited users previously finished right after profile setup); no separate rows — the oracle run confirms nothing extra survives |
+| `ce/components/onboarding/` (product tour) | AUTH-042 |
+| Desktop sign-in seams (`ce` sign-in card, `desktop-overlay` home/redirects, native deep-link + exchange handling) | AUTH-022, AUTH-023 |
+
+### API endpoints observed from these sources
+
+| Endpoint | Covering rows |
+|----------|---------------|
+| CSRF fetch; email-check; code-generate | AUTH-001, AUTH-002, AUTH-004, AUTH-009, AUTH-020 |
+| Native credential/code account POSTs (sign-in, sign-up, code variants) | AUTH-001, AUTH-002, AUTH-009, AUTH-011 |
+| Native reset POST with uid/token; forgot-password; set-password | AUTH-012, AUTH-013, AUTH-014, AUTH-031 |
+| Provider auth navigations (Google, GitHub, GitLab, Gitea) | AUTH-003 |
+| Device-approve; desktop-exchange navigation; sign-out POST | AUTH-021, AUTH-022, AUTH-017 |
+| List invitations; batch-accept invitations | AUTH-005, AUTH-026, AUTH-029, AUTH-034 |
+| Single-invitation fetch; single-invitation accept/decline | AUTH-005, AUTH-027 |
+| Join-request list/create | AUTH-034, AUTH-036 |
+| Slug-availability check; workspace create; bulk workspace invites | AUTH-034, AUTH-035, AUTH-037, AUTH-040 |
+| User update; profile read/update; onboard marker; settings read; tour-completed flag; last-workspace stamp | AUTH-016, AUTH-028, AUTH-031, AUTH-032, AUTH-033, AUTH-039, AUTH-042 |
+
+No source mapped to zero rows. No `bug:` rows: nothing observed contradicted its evident intent; the oracle run
+marks any such scenario if the live app disagrees. Easy-to-miss behaviors called out as their own rows:
+AUTH-007, AUTH-008, AUTH-015, AUTH-020, AUTH-023, AUTH-024, AUTH-025, AUTH-035, AUTH-036, AUTH-038, AUTH-041.
