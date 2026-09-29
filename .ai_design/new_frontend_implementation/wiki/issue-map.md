@@ -13,8 +13,8 @@ Generated when the project was set up (2026-09-29). Pi Dash is the source of tru
 | H-charts | NEWFRONT-7 | Decision: charts library for analytics |  |
 | H-signoff-1 | NEWFRONT-8 | Sign-off: feature inventories for Phase 1 areas | NEWFRONT-23, NEWFRONT-25, NEWFRONT-27, NEWFRONT-29, NEWFRONT-31 |
 | H-signoff-2 | NEWFRONT-9 | Sign-off: feature inventories for Phase 2 areas | NEWFRONT-33, NEWFRONT-35, NEWFRONT-37, NEWFRONT-39 |
-| H-signoff-3 | NEWFRONT-10 | Sign-off: feature inventories for Phase 3 areas | NEWFRONT-41, NEWFRONT-43, NEWFRONT-45, NEWFRONT-47, NEWFRONT-49, NEWFRONT-51, NEWFRONT-53, NEWFRONT-55, NEWFRONT-57, NEWFRONT-59, NEWFRONT-61, NEWFRONT-63, NEWFRONT-65, NEWFRONT-67 |
-| H-accept | NEWFRONT-11 | Acceptance pass: sign off full parity before apps/web is removed | NEWFRONT-69, NEWFRONT-70, NEWFRONT-71, NEWFRONT-72, NEWFRONT-73, NEWFRONT-74, NEWFRONT-75, NEWFRONT-76, NEWFRONT-77, NEWFRONT-78, NEWFRONT-79, NEWFRONT-80, NEWFRONT-81, NEWFRONT-82, NEWFRONT-83, NEWFRONT-84, NEWFRONT-85, NEWFRONT-86, NEWFRONT-87, NEWFRONT-88, NEWFRONT-89, NEWFRONT-90, NEWFRONT-91, NEWFRONT-92 |
+| H-signoff-3 | NEWFRONT-10 | Sign-off: feature inventories for Phase 3 areas | NEWFRONT-41, NEWFRONT-43, NEWFRONT-45, NEWFRONT-47, NEWFRONT-49, NEWFRONT-51, NEWFRONT-53, NEWFRONT-55, NEWFRONT-57, NEWFRONT-59, NEWFRONT-61, NEWFRONT-63, NEWFRONT-65, NEWFRONT-67, NEWFRONT-94, NEWFRONT-96 |
+| H-accept | NEWFRONT-11 | Acceptance pass: sign off full parity before apps/web is removed | NEWFRONT-69, NEWFRONT-70, NEWFRONT-71, NEWFRONT-72, NEWFRONT-73, NEWFRONT-74, NEWFRONT-75, NEWFRONT-76, NEWFRONT-77, NEWFRONT-78, NEWFRONT-79, NEWFRONT-80, NEWFRONT-81, NEWFRONT-82, NEWFRONT-83, NEWFRONT-84, NEWFRONT-85, NEWFRONT-86, NEWFRONT-87, NEWFRONT-88, NEWFRONT-89, NEWFRONT-90, NEWFRONT-91, NEWFRONT-98, NEWFRONT-99, NEWFRONT-92 |
 | F-01 | NEWFRONT-12 | F-01: scaffold apps/web_new, packages/kit, packages/api-client + CI |  |
 | F-02 | NEWFRONT-13 | F-02: CI similarity check against the old frontend | NEWFRONT-12 |
 | F-03 | NEWFRONT-14 | F-03: @pidash/api-client core, first contracts, contract-test harness | NEWFRONT-12 |
@@ -72,6 +72,10 @@ Generated when the project was set up (2026-09-29). Pi Dash is the source of tru
 | O-profile | NEWFRONT-66 | Oracle scenarios: Profile, account, appearance, notification preferences | NEWFRONT-65, NEWFRONT-19 |
 | I-cloud | NEWFRONT-67 | Inventory: Cloud edition: home, docs, downloads, pricing, login, apps, profile tabs |  |
 | O-cloud | NEWFRONT-68 | Oracle scenarios: Cloud edition: home, docs, downloads, pricing, login, apps, profile tabs | NEWFRONT-67, NEWFRONT-19 |
+| I-admin | NEWFRONT-94 | Inventory: Instance admin (god-mode): general, email, auth providers, AI, images, loop, workspaces |  |
+| O-admin | NEWFRONT-95 | Oracle scenarios: Instance admin (god-mode): general, email, auth providers, AI, images, loop, workspaces | NEWFRONT-94, NEWFRONT-19 |
+| I-space | NEWFRONT-96 | Inventory: Public boards (space): published project boards and public issue view |  |
+| O-space | NEWFRONT-97 | Oracle scenarios: Public boards (space): published project boards and public issue view | NEWFRONT-96, NEWFRONT-19 |
 | E-auth | NEWFRONT-69 | Epic: Auth, sign-up, invitations, onboarding, create workspace | NEWFRONT-24, NEWFRONT-8, NEWFRONT-17, NEWFRONT-20 |
 | E-shell | NEWFRONT-70 | Epic: Workspace shell, home, projects list, command palette / Power K, search | NEWFRONT-26, NEWFRONT-8, NEWFRONT-17, NEWFRONT-20 |
 | E-issues | NEWFRONT-71 | Epic: Issues: layouts, detail, peek, filters, bulk edit, relations, attachments | NEWFRONT-28, NEWFRONT-8, NEWFRONT-17, NEWFRONT-20, NEWFRONT-70 |
@@ -95,5 +99,7 @@ Generated when the project was set up (2026-09-29). Pi Dash is the source of tru
 | E-workspace-settings | NEWFRONT-89 | Epic: Workspace settings (members, integrations, webhooks, API tokens, billing, exports entry) | NEWFRONT-64, NEWFRONT-10, NEWFRONT-17, NEWFRONT-20, NEWFRONT-70 |
 | E-profile | NEWFRONT-90 | Epic: Profile, account, appearance, notification preferences | NEWFRONT-66, NEWFRONT-10, NEWFRONT-17, NEWFRONT-20, NEWFRONT-70 |
 | E-cloud | NEWFRONT-91 | Epic: Cloud edition: home, docs, downloads, pricing, login, apps, profile tabs | NEWFRONT-68, NEWFRONT-10, NEWFRONT-17, NEWFRONT-20, NEWFRONT-70, NEWFRONT-69 |
+| E-admin | NEWFRONT-98 | Epic: Instance admin (god-mode): general, email, auth providers, AI, images, loop, workspaces | NEWFRONT-95, NEWFRONT-10, NEWFRONT-17, NEWFRONT-20 |
+| E-space | NEWFRONT-99 | Epic: Public boards (space): published project boards and public issue view | NEWFRONT-97, NEWFRONT-10, NEWFRONT-17, NEWFRONT-20, NEWFRONT-71 |
 | M-01 | NEWFRONT-92 | M-01: switch the desktop app to apps/web_new; remove desktop-overlay | NEWFRONT-69, NEWFRONT-70, NEWFRONT-71, NEWFRONT-72, NEWFRONT-73, NEWFRONT-74, NEWFRONT-75, NEWFRONT-76, NEWFRONT-77, NEWFRONT-18, NEWFRONT-21 |
-| M-02 | NEWFRONT-93 | M-02: remove apps/web and the unused old frontend packages | NEWFRONT-69, NEWFRONT-70, NEWFRONT-71, NEWFRONT-72, NEWFRONT-73, NEWFRONT-74, NEWFRONT-75, NEWFRONT-76, NEWFRONT-77, NEWFRONT-78, NEWFRONT-79, NEWFRONT-80, NEWFRONT-81, NEWFRONT-82, NEWFRONT-83, NEWFRONT-84, NEWFRONT-85, NEWFRONT-86, NEWFRONT-87, NEWFRONT-88, NEWFRONT-89, NEWFRONT-90, NEWFRONT-91, NEWFRONT-92, NEWFRONT-11, NEWFRONT-3 |
+| M-02 | NEWFRONT-93 | M-02: remove apps/web, apps/admin, apps/space and the old frontend packages | NEWFRONT-69, NEWFRONT-70, NEWFRONT-71, NEWFRONT-72, NEWFRONT-73, NEWFRONT-74, NEWFRONT-75, NEWFRONT-76, NEWFRONT-77, NEWFRONT-78, NEWFRONT-79, NEWFRONT-80, NEWFRONT-81, NEWFRONT-82, NEWFRONT-83, NEWFRONT-84, NEWFRONT-85, NEWFRONT-86, NEWFRONT-87, NEWFRONT-88, NEWFRONT-89, NEWFRONT-90, NEWFRONT-91, NEWFRONT-98, NEWFRONT-99, NEWFRONT-92, NEWFRONT-11, NEWFRONT-3 |

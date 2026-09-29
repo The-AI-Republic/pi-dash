@@ -17,6 +17,8 @@
 | D9 | Static SPA only; no server-side rendering. |
 | D10 | All work goes into the `web-new-dev` branch through PRs; a human merges it into `main` at phase exits. |
 | D11 | No human merge gate: the In Test run that passes merges its own PR (Test rule in the project description). Human involvement is limited to decisions and sign-offs (issues labeled `human`). |
+| D12 | Visual direction: dense and neutral, Inter, indigo accent, follow the OS theme, compact on desktop. Token spec on *UI kit and editor* (NEWFRONT-5). |
+| D13 | `apps/admin` and `apps/space` are in scope (NEWFRONT-4). They become route subtrees `/god-mode/*` and `/spaces/*` inside `apps/web_new`, web build only, and are removed with `apps/web` at the end. |
 
 ## Open
 
@@ -24,12 +26,10 @@
 |---|---|---|
 | Q1 | License for the new tree and exact header text | human · NEWFRONT-2 |
 | Q2 | Legal review of the reference-not-source process; whether some areas need split spec/implementation runs | human · NEWFRONT-3 |
-| Q3 | Are `apps/admin` and `apps/space` in scope? (Default: no.) | human · NEWFRONT-4 |
 | Q4 | Real-time issue updates: is there a server push channel today beyond runner/assistant SSE? Parity requires whatever live behavior `apps/web` has. | investigated by NEWFRONT-27 |
 | Q5 | Annotate internal Django views for OpenAPI (`@extend_schema`) so contracts can be generated later? | human |
 | Q6 | Charts library for analytics | human · NEWFRONT-7 |
 | Q7 | Telemetry on the new app (the old app loads Microsoft Clarity) | human · NEWFRONT-6 |
-| Q8 | Visual design direction (tokens, type, density, mockups) | human · NEWFRONT-5 |
 | Q9 | Similarity-check threshold (starting value ≥ 50 duplicated tokens) | set by NEWFRONT-13 |
 
 ## Risks to keep in mind

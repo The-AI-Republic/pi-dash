@@ -4,7 +4,7 @@
 
 The old frontend is a **reference**: read it and run it to learn what the product does. It is never a **source**: nothing is imported from it, nothing is copied out of it.
 
-"Old frontend" means: `@pi-dash/*` packages (`ui`, `propel`, `editor`, `utils`, `constants`, `types`, `services`, `shared-state`, `hooks`, `i18n`, …), `apps/web/**`, `apps/web/ce/**`, `desktop-overlay/**`, and the cloud `private-pi-dash/ee-overlay/apps/web/**`.
+"Old frontend" means: `@pi-dash/*` packages (`ui`, `propel`, `editor`, `utils`, `constants`, `types`, `services`, `shared-state`, `hooks`, `i18n`, …), `apps/web/**`, `apps/web/ce/**`, `apps/admin/**`, `apps/space/**`, `desktop-overlay/**`, and the cloud `private-pi-dash/ee-overlay/apps/{web,admin}/**`.
 
 ## Not allowed
 

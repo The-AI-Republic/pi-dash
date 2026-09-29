@@ -98,9 +98,9 @@ service → axios. In practice:
   (Schema annotations in §9.1 are additive.)
 - Server-side rendering. The app is a static SPA (Tauri loads local files;
   the web is behind auth).
-- Rewriting `apps/admin` (god-mode), `apps/space` (public boards) or
-  `apps/live` in this project. They can reuse `@pidash/kit` and the API
-  layer later.
+- Rewriting `apps/live` (the collaboration server) in this project.
+  `apps/admin` and `apps/space` **are** in scope (D13): they become route
+  subtrees `/god-mode/*` and `/spaces/*` inside `apps/web_new`.
 - Visual parity. The visual design and layout are new; **functional
   parity is required** (§15). A feature may look and flow differently, but
   every capability must exist and work.
@@ -685,8 +685,9 @@ test suite.
 | Profile, account settings, appearance, notifications preferences | `profile/[userId]`, `settings/account`, `settings/profile/*` | 3 |
 | Cloud edition: marketing/home, docs, downloads, pricing, login, apps, profile tabs | `ee-overlay/apps/web/app/**` | 3 (via `core/edition`) |
 
-Out of scope, unless decided otherwise (§18): `apps/admin` (god-mode) and
-`apps/space` (public boards).
+In scope as well (NEWFRONT-4): `apps/admin` (instance admin, route subtree
+`/god-mode/*`) and `apps/space` (public boards, route subtree `/spaces/*`),
+both web build only, removed together with `apps/web` in Phase 4.
 
 ### 15.2 Feature inventory
 

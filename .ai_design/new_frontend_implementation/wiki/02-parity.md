@@ -2,7 +2,7 @@
 
 **Read this when:** you write inventory rows or parity scenarios, implement an area, or need to decide whether something is done.
 
-**Everything `apps/web` does today, `apps/web_new` must do when the project is done.** No area is dropped. This covers the OSS build, the cloud edition (`private-pi-dash/ee-overlay/apps/web`) and the desktop build (`desktop-overlay/`). The UI may be redesigned; capabilities, rules and outcomes may not be lost.
+**Everything `apps/web`, `apps/admin` and `apps/space` do today, `apps/web_new` must do when the project is done.** No area is dropped. This covers the OSS build, the cloud edition (`private-pi-dash/ee-overlay/apps/web`) and the desktop build (`desktop-overlay/`). The UI may be redesigned; capabilities, rules and outcomes may not be lost.
 
 Parity is not judged by eye. It is defined by an **inventory** and proven by a **parity suite**.
 
@@ -33,8 +33,10 @@ Parity is not judged by eye. It is defined by an **inventory** and proven by a *
 | Workspace settings (incl. billing, API tokens, webhooks, integrations) | `settings/(workspace)/*` | 3 |
 | Profile, account, appearance, notification preferences | `profile/[userId]`, `settings/account`, `settings/profile/*` | 3 |
 | Cloud edition: home, docs, downloads, pricing, login, apps, profile tabs | `ee-overlay/apps/web/app/**` | 3 |
+| Instance admin (god-mode), as route subtree `/god-mode/*` | `apps/admin/**`, `ee-overlay/apps/admin/**` | 3 |
+| Public boards (space), as route subtree `/spaces/*` | `apps/space/**` | 3 |
 
-`apps/admin` and `apps/space` are out of scope unless decided otherwise.
+`apps/admin` and `apps/space` are in scope (NEWFRONT-4). They become route subtrees of `apps/web_new` (`/god-mode/*`, `/spaces/*`) with their own layouts, lazy-loaded, web build only.
 
 ## Feature inventory
 
@@ -83,6 +85,6 @@ If you find a behavior no row covers, add a row with the next ID and note where 
 | An area's implementation may start | its inventory is human-reviewed and its oracle scenarios are green on `apps/web` |
 | An area's routes move to `apps/web_new` (Caddy / desktop) | 100% of the area's rows green on `apps/web_new` |
 | Desktop switches to `apps/web_new` | all Phase 1–2 areas and all desktop rows green |
-| `apps/web` is removed | 100% of all rows green for both editions and desktop, plus a human acceptance pass |
+| `apps/web`, `apps/admin`, `apps/space` are removed | 100% of all rows green for both editions and desktop, plus a human acceptance pass |
 
 An issue is Done only when every inventory row it names is green on `apps/web_new`.

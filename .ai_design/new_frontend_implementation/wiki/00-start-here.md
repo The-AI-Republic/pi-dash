@@ -4,12 +4,12 @@
 
 ## What we are building
 
-`apps/web_new` is a new React frontend that replaces `apps/web` (the Plane-derived app). It serves both the web and the Tauri desktop app from one codebase. Both apps run side by side until each area has moved over and passed parity.
+`apps/web_new` is a new React frontend that replaces the Plane-derived frontends: `apps/web`, `apps/admin` (instance admin, becomes `/god-mode/*`) and `apps/space` (public boards, becomes `/spaces/*`). It serves both the web and the Tauri desktop app from one codebase. Old and new run side by side until each area has moved over and passed parity.
 
 Two goals override everything else:
 
 1. **Independent code.** The old frontend is a reference, never a source. Read it to learn behavior; never import it or copy it. See *Reference, not source*.
-2. **Full functional parity.** When the project is done, everything `apps/web` does (OSS, cloud edition, desktop) works in `apps/web_new`. See *Parity*.
+2. **Full functional parity.** When the project is done, everything the old apps do (OSS, cloud edition, desktop) works in `apps/web_new`. See *Parity*.
 
 Why: the old app loads slowly (about 7.6 MB of JS to open an issue list), it is AGPL and the product is moving off AGPL, and it works poorly inside the desktop app.
 

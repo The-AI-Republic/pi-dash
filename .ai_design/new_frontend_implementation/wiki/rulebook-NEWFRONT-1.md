@@ -44,7 +44,7 @@ Every issue carries a `stage:N` label. Stages are for reporting; **release is dr
 | 0 | Decisions, foundation (F-01…F-11), inventories, oracle scenarios, inventory sign-offs |
 | 1 | Epics: auth, shell, issues, comments, drafts |
 | 2 | Epics: runners, agents (schedulers, prompts, assistant), notifications, desktop; M-01 desktop switch |
-| 3 | Epics: views, archives, intake, cycles, modules, pages, estimates, analytics, stickies, exports, project settings, workspace settings, profile, cloud edition |
+| 3 | Epics: views, archives, intake, cycles, modules, pages, estimates, analytics, stickies, exports, project settings, workspace settings, profile, cloud edition, instance admin (`/god-mode`), public boards (`/spaces`) |
 | 4 | Human acceptance pass; M-02 removal |
 
 ## Release and the coordinator

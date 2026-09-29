@@ -34,13 +34,13 @@ Runners, runs, approvals, runner chat (SSE via `platform.stream`), AI dev machin
 
 ### Phase 3 — Everything else + web cutover
 
-Views, archives, intake, cycles, modules, pages (with collaboration), estimates, analytics, stickies, exports, all settings, profile, and the cloud edition module in `private-pi-dash`. Each area moves on the web as soon as it passes its gate.
+Views, archives, intake, cycles, modules, pages (with collaboration), estimates, analytics, stickies, exports, all settings, profile, the cloud edition module in `private-pi-dash`, instance admin (`/god-mode`) and public boards (`/spaces`). Each area moves on the web as soon as it passes its gate.
 
 **Exit:** every area served by `apps/web_new`; every inventory row green.
 
 ### Phase 4 — Removal
 
-After the final gate and a human acceptance pass: remove `apps/web`, legacy route handling no longer needed, and old packages no longer used by `apps/admin` or `apps/space`. The parity suite keeps running on `apps/web_new` as its regression suite.
+After the final gate and a human acceptance pass: remove `apps/web`, `apps/admin`, `apps/space`, their containers and proxy routes, legacy route handling no longer needed, and the old `packages/*`. The parity suite keeps running on `apps/web_new` as its regression suite.
 
 ## Coexistence
 

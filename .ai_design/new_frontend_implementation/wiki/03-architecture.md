@@ -53,6 +53,8 @@ apps/web_new/src/
         issues/$issueId.tsx
         …
       runs/ runners/ schedulers/ prompts/ assistant/ notifications.tsx settings/
+    god-mode/             instance admin (own layout and admin session; web build only)
+    spaces/               public boards (no workspace session; web build only)
   features/
     issues/
       api/                keys.ts  queries.ts  mutations.ts
