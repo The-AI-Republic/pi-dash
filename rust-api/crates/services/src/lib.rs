@@ -11,6 +11,7 @@ pub mod app_intake;
 pub mod app_issues;
 pub mod app_views_search;
 pub mod assistant;
+pub mod auth_oauth;
 pub mod extensions;
 pub mod health;
 pub mod integrations;
