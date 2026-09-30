@@ -194,7 +194,8 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // (PIDASHCONV-452) + external LLM/Unsplash (PIDASHCONV-454)
         // + git provider-accounts (PIDASHCONV-451) + webhooks
         // (PIDASHCONV-453), all in `app_integrations`; D-31 v2
-        // user/workspace/static/restore assets (PIDASHCONV-400) in
+        // user/workspace/static/restore assets (PIDASHCONV-400) + v2
+        // project/bulk/check/duplicate/downloads (PIDASHCONV-412) in
         // `app_assets`; D-34 notification viewset core
         // (PIDASHCONV-301) in `app_notifications`; D-27 archived
         // cycles + archive/unarchive (PIDASHCONV-377) in
