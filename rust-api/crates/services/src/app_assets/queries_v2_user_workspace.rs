@@ -941,7 +941,9 @@ mod tests {
         assert_eq!(FILE_SIZE_LIMIT_DEFAULT, limit);
         // Post input defaults (v2.py:112-114,:316-317).
         assert_eq!(DEFAULT_FILE_TYPE, "image/jpeg");
-        assert!(!USER_POST_ENTITY_DEFAULT_FALSE);
+        const {
+            assert!(!USER_POST_ENTITY_DEFAULT_FALSE);
+        }
         assert_eq!(
             validate_user_entity_type(None),
             Err(PostValidationError::EntityType),
