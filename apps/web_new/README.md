@@ -33,13 +33,23 @@ pnpm --filter @pidash/kit test
 pnpm --filter @pidash/api-client test
 ```
 
-Unit tests: Vitest. Contract tests (against local Django) land in NEWFRONT-14;
-parity scenarios (Playwright, `e2e/parity`) land in NEWFRONT-19. Until then:
+Unit tests: Vitest. Contract tests (against local Django) land in NEWFRONT-14:
 
 ```sh
 # once they exist:
 pnpm --filter web_new test:contracts
-pnpm --filter web_new test:parity
+```
+
+Parity scenarios (Playwright, `e2e/parity`, NEWFRONT-19) run against the
+seeded stack from `e2e/parity/stack/README.md`:
+
+```sh
+export PARITY_SEED_FILE="$PWD/apps/web_new/e2e/parity/.seed.json"
+export PARITY_API_URL=http://localhost:18019
+pnpm --filter web_new test:parity:oracle   # apps/web only
+pnpm --filter web_new test:parity:new      # apps/web_new only
+pnpm --filter web_new test:parity          # both
+pnpm --filter web_new parity:report        # inventory x oracle/new report
 ```
 
 ## Build

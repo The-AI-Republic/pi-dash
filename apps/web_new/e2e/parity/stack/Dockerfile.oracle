@@ -1,0 +1,33 @@
+# Oracle frontend image (NEWFRONT-19).
+#
+# Serves apps/web for oracle runs: installs the workspace, builds the
+# workspace packages the dev server resolves, then runs the dev server.
+# Self-contained from a clean checkout; layer caching keeps rebuilds fast.
+FROM node:22-alpine
+
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PNPM_HOME/bin:$PATH"
+
+RUN apk add --no-cache libc6-compat && corepack enable
+
+WORKDIR /app
+
+COPY . .
+
+RUN pnpm install
+# Build the runtime JS of every workspace package the web dev server resolves.
+# NOTE: this deliberately bypasses each package's own `build` script and skips
+# `.d.ts` generation (`--no-dts`): the `web^...` dependency closure currently
+# fails its DTS rollup at the base (pre-existing `TS2742` in
+# `packages/propel/src/portal/portal-wrapper.tsx` vs `@types/react@19.3.0`;
+# fixing old-frontend code is outside this harness' paths), while the JS bundle
+# step succeeds. The oracle runs `react-router dev`, which only ever reads the
+# emitted `.js`/`.css` in `dist/` — never the declarations — so nothing the
+# parity runs consume is lost. The `test -f` guard skips the two matched
+# packages with no tsdown build (`tailwind-config`, `typescript-config`);
+# `apps/web` itself stays excluded (its build is `react-router build`).
+RUN pnpm --filter "web^..." --filter "!web" exec sh -c 'if [ -f tsdown.config.ts ]; then tsdown --no-dts; else echo "skip: no tsdown build in $PWD"; fi'
+
+EXPOSE 3000
+
+CMD ["pnpm", "dev", "--filter=web"]

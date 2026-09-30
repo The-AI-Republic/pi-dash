@@ -1,0 +1,50 @@
+# Copyright (c) Pi Dash contributors. All rights reserved.
+# License for this tree is pending the H-license decision (NEWFRONT-2,
+# owner: human). This placeholder grants no license and must be replaced
+# with the final header text by F-11 (NEWFRONT-22).
+# Parity report CI (NEWFRONT-19). Publishes the per-area inventory report
+# (rows x oracle/new green) on every PR into web-new-dev. Node only: no
+# stack, no browsers. Scenario runs stay local per the stack runbook.
+name: web-new-parity
+
+on:
+  pull_request:
+    branches: [web-new-dev]
+    paths:
+      - "apps/web_new/**"
+      - "packages/kit/**"
+      - "packages/api-client/**"
+      - ".ai_design/new_frontend_implementation/parity/**"
+      - ".github/workflows/web-new*.yml"
+      - "pnpm-lock.yaml"
+  push:
+    branches: [web-new-dev]
+    paths:
+      - "apps/web_new/**"
+      - "packages/kit/**"
+      - "packages/api-client/**"
+      - ".ai_design/new_frontend_implementation/parity/**"
+      - ".github/workflows/web-new*.yml"
+      - "pnpm-lock.yaml"
+
+concurrency:
+  group: web-new-parity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  parity-report:
+    name: parity report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Generate the parity report
+        run: node apps/web_new/e2e/parity/report/generate.mjs --out parity-report.md
+      - name: Show the parity report
+        run: cat parity-report.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parity-report
+          path: parity-report.md
