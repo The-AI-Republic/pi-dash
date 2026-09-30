@@ -47,6 +47,22 @@ store). `src/core/` holds `api` (the singleton HTTP client), `query`,
 - `errorComponent` (retry) and `notFoundComponent` (access notice) per area.
 - Unknown paths render the root `notFoundComponent`: not-yet-migrated areas.
 
+## Coexistence (F-09)
+
+- `apps/web_new/migrated-routes.json` is the one list of path prefixes the
+  proxy serves from web_new; everything else goes to the old app on the
+  same origin (session cookie shared, no origin/cookie change). Empty until
+  area gates append their prefixes.
+- After editing the list, run `pnpm --filter web_new coexistence:generate`
+  to rewrite the marked blocks in `apps/proxy/Caddyfile.ce` and
+  `Caddyfile.aio.ce`; never edit those blocks by hand. CI enforces
+  freshness with `pnpm --filter web_new check:coexistence`.
+- Links to not-yet-migrated screens use
+  `src/shared/coexistence/CrossAppLink.tsx`: unmigrated paths render as
+  plain `<a href>` (full-page load into the old app), migrated paths as
+  router links. Both read the same list, so a link flips the moment its
+  prefix lands — no call site changes.
+
 ## Queries and session
 
 - Key shape: `["ws", workspaceSlug, "<feature>", …]`.

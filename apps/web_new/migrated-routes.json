@@ -1,0 +1,4 @@
+{
+  "$comment": "Migrated-route list (F-09/NEWFRONT-20). Path prefixes served by apps/web_new; the proxy routes these to web_new and everything else to the old app. Area gates append their prefixes as areas land. Starts empty: with no entries the proxy sends every path to the old app. Each entry is a leading-slash path prefix (e.g. \"/sign-in\"); \"/\" means everything. Regenerate the proxy config after editing: pnpm --filter web_new coexistence:generate.",
+  "prefixes": []
+}

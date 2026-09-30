@@ -80,6 +80,7 @@ jobs:
       - run: pnpm --filter web_new check:boundaries
       - run: pnpm --filter web_new check:headers
       - run: pnpm --filter web_new check:deps
+      - run: pnpm --filter web_new check:coexistence
 
   similarity:
     name: similarity check (new vs old frontend)
@@ -104,6 +105,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter web_new test
+      - run: pnpm --filter web_new test:coexistence
       - run: pnpm --filter @pidash/kit test
       - run: pnpm --filter @pidash/api-client test
 
