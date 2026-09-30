@@ -149,7 +149,7 @@ impl Denial {
             ),
             Denial::ProjectNotFound => (
                 StatusCode::NOT_FOUND,
-                r#"{"detail":"Project not found."}"#.to_owned(),
+                r#"{"detail":"Project not found"}"#.to_owned(),
             ),
             Denial::PageNotFound => (
                 StatusCode::NOT_FOUND,
@@ -704,4 +704,23 @@ pub async fn enqueue_soft_delete(pool: &PgPool, app_label: &str, model_name: &st
         Default::default(),
     );
     enqueue_message(pool, message).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Project.resolve` raises `Http404("Project not found")`
+    /// (`db/models/project.py:214-218`, no trailing period); DRF's
+    /// `exception_handler` maps the args verbatim to `{"detail": ...}`
+    /// (`rest_framework/views.py:81-82`), so the port must not add one.
+    /// Pinned by review (PIDASHCONV-360): the intake tenant lookup
+    /// ([`crate::app_intake::intakes::intake_tenant`]) serves this body
+    /// for identifier-form project ids that resolve to no row.
+    #[test]
+    fn project_resolve_miss_matches_django_byte_for_byte() {
+        let (status, body) = Denial::ProjectNotFound.status_and_body();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, r#"{"detail":"Project not found"}"#);
+    }
 }
