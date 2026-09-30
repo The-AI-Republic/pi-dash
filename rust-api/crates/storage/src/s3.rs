@@ -181,6 +181,46 @@ pub fn sign_put(
     }
 }
 
+/// Sign a server-side HEAD of `object_key`.
+///
+/// Mirrors `S3Storage.get_object_metadata` (`storage.py:156-174`): one signed
+/// `HEAD` per key, answered headers projected through
+/// [`crate::avatar::head_to_storage_metadata`]. The caller executes it and
+/// treats any failure as [`StorageError`] (Python logs and records `None`,
+/// so the row is still created with NULL metadata).
+pub fn sign_head(
+    storage: &StorageSettings,
+    scheme: &str,
+    host: &str,
+    object_key: &str,
+    amz_datetime: &str,
+    date_stamp: &str,
+) -> SignedRequest {
+    let payload_hash = sha256_hex(&[]);
+    let endpoint = resolve_server_endpoint(storage, scheme, host);
+    let path = canonical_path(&endpoint, &storage.bucket_name, object_key);
+    let signed_headers = "host;x-amz-content-sha256;x-amz-date";
+    let canonical = format!(
+        "HEAD\n{path}\n\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_datetime}\n\n{signed_headers}\n{payload_hash}",
+        endpoint.signed_host,
+    );
+    let authorization = authorization(
+        storage,
+        &canonical,
+        amz_datetime,
+        date_stamp,
+        signed_headers,
+    );
+    SignedRequest {
+        method: "HEAD",
+        url: format!("{}{path}", endpoint.url_base),
+        authorization,
+        amz_date: amz_datetime.to_owned(),
+        content_sha256: payload_hash,
+        content_type: None,
+    }
+}
+
 /// Sign a server-side DELETE of `object_key`.
 ///
 /// Mirrors `S3Storage.delete_files` (`storage.py:209-220`) for the single-key
@@ -410,6 +450,37 @@ mod tests {
         );
         assert_eq!(req.content_type, None);
         let canonical = "DELETE\n/examplebucket/ab12cd34-user-avatar.png\n\nhost:s3.us-east-1.amazonaws.com\nx-amz-content-sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\nx-amz-date:20260928T120000Z\n\nhost;x-amz-content-sha256;x-amz-date\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let expected = format!(
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260928/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature={}",
+            oracle_signature(canonical, "20260928T120000Z", "20260928")
+        );
+        assert_eq!(req.authorization, expected);
+    }
+
+    #[test]
+    fn head_signing_vector() {
+        // Same empty-payload hash as DELETE (`sha256("")`), same URL, only
+        // the method line differs — `get_object_metadata` heads the key
+        // the PUT just stored (`storage.py:156-174`).
+        let req = sign_head(
+            &test_storage(),
+            "https",
+            "unused.example",
+            "ab12cd34-user-avatar.png",
+            "20260928T120000Z",
+            "20260928",
+        );
+        assert_eq!(req.method, "HEAD");
+        assert_eq!(
+            req.url,
+            "https://s3.us-east-1.amazonaws.com/examplebucket/ab12cd34-user-avatar.png"
+        );
+        assert_eq!(
+            req.content_sha256,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(req.content_type, None);
+        let canonical = "HEAD\n/examplebucket/ab12cd34-user-avatar.png\n\nhost:s3.us-east-1.amazonaws.com\nx-amz-content-sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\nx-amz-date:20260928T120000Z\n\nhost;x-amz-content-sha256;x-amz-date\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         let expected = format!(
             "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260928/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature={}",
             oracle_signature(canonical, "20260928T120000Z", "20260928")

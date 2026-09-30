@@ -16,6 +16,12 @@ pidash-services = { path = "../services" }
 # builder plus the AMQP coexistence publisher. pidash-jobs depends only
 # on types/db/services, so no cycle is introduced.
 pidash-jobs = { path = "../jobs" }
+# D-17 OAuth avatar persistence (PIDASHCONV-475): the shared server-side
+# S3 PUT/DELETE/HEAD signers plus the avatar mapping live in the
+# assets/storage-owned crate (PIDASHCONV-480) — this domain builds the
+# SignedRequests here and executes them with reqwest, never a parallel
+# signer. A path dependency, so the lockfile gains no new downloads.
+pidash-storage = { path = "../storage" }
 # Space intake `description_html` sanitization: `nh3` (the Python side) is
 # bindings for this exact crate, so the same tags/attributes/schemes give
 # the same bytes. Pinned to the 4.x line nh3 0.2.18 builds on.
