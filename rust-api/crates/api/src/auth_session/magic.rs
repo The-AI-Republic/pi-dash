@@ -1,4 +1,7 @@
 #![forbid(unsafe_code)]
+// Fallible helpers bottom out in the uncaught-exception 500, so they carry
+// `Response` as the error (same precedent as the assistant handlers).
+#![allow(clippy::result_large_err)]
 
 //! Magic-link handlers (stage 5, PIDASHCONV-431).
 //!
