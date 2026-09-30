@@ -564,6 +564,7 @@ async fn asset_delete(pool: &sqlx::PgPool, asset_id: &Uuid) -> Result<(), sqlx::
 }
 
 /// `UserAssetsV2Endpoint.entity_asset_save` (`v2.py:41-78`).
+#[allow(clippy::result_large_err)]
 async fn user_entity_save(
     pool: &sqlx::PgPool,
     asset_id: &Uuid,
@@ -631,6 +632,7 @@ async fn user_entity_save(
 
 /// `UserAssetsV2Endpoint.entity_asset_delete` (`v2.py:80-107`): clears the
 /// link FK only (the `avatar`/`cover_image` strings are untouched here).
+#[allow(clippy::result_large_err)]
 async fn user_entity_delete(
     pool: &sqlx::PgPool,
     entity_type: &str,
@@ -672,6 +674,7 @@ async fn user_entity_delete(
 }
 
 /// `WorkspaceFileAssetEndpoint.entity_asset_save` (`v2.py:247-284`).
+#[allow(clippy::result_large_err)]
 async fn workspace_entity_save(
     pool: &sqlx::PgPool,
     asset_id: &Uuid,
@@ -742,6 +745,7 @@ async fn workspace_entity_save(
 }
 
 /// `WorkspaceFileAssetEndpoint.entity_asset_delete` (`v2.py:286-312`).
+#[allow(clippy::result_large_err)]
 async fn workspace_entity_delete(
     pool: &sqlx::PgPool,
     entity_type: &str,
@@ -753,14 +757,17 @@ async fn workspace_entity_delete(
             let Some(workspace_id) = asset.workspace_id else {
                 return Err(does_not_exist());
             };
-            // `.get(id)` — miss raises (the `if workspace is None`
-            // check after it is dead code; BUG ported).
-            let row: Option<(Uuid,)> =
-                sqlx::query_as(r#"SELECT "id" FROM "workspaces" WHERE "id" = $1"#)
-                    .bind(workspace_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| server_error())?;
+            // `.get(id)` through the scoped manager — miss raises (the
+            // `if workspace is None` check after it is dead code; BUG
+            // ported). The scope covers soft-deleted rows too, so a
+            // deleted workspace answers 404 with the asset untouched.
+            let row: Option<(Uuid,)> = sqlx::query_as(
+                r#"SELECT "id" FROM "workspaces" WHERE "id" = $1 AND "deleted_at" IS NULL"#,
+            )
+            .bind(workspace_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| server_error())?;
             row.ok_or_else(does_not_exist)?;
             sqlx::query(r#"UPDATE "workspaces" SET "logo_asset_id" = NULL WHERE "id" = $1"#)
                 .bind(workspace_id)
@@ -1033,6 +1040,7 @@ async fn user_delete(
 
 /// Resolve `slug` the way `Workspace.objects.get(slug=slug)` does
 /// (`v2.py:349`): miss raises → the 404 envelope.
+#[allow(clippy::result_large_err)]
 async fn workspace_id_for(pool: &sqlx::PgPool, slug: &str) -> Result<Uuid, Response> {
     let row: Option<(Uuid,)> = sqlx::query_as(
         r#"SELECT "id" FROM "workspaces" WHERE "slug" = $1 AND "deleted_at" IS NULL"#,
