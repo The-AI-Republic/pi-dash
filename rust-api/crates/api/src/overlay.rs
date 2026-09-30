@@ -198,17 +198,18 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // project/bulk/check/duplicate/downloads (PIDASHCONV-412) in
         // `app_assets`; D-34 notification viewset core
         // (PIDASHCONV-301) in `app_notifications`; D-27 archived
-        // cycles + archive/unarchive (PIDASHCONV-377) + date-check +
-        // transfer + user-properties (PIDASHCONV-357) in
-        // `app_cycles`; D-28 module CRUD (PIDASHCONV-391) in
-        // `app_modules` (siblings 397/407 extend that merge, keeping
-        // both sides); D-35 analytics + analytic-view viewset
-        // (PIDASHCONV-389) + workspace advance analytics
-        // (PIDASHCONV-414) + analytic handlers-B — saved-analytic-view,
-        // export-analytics, default-analytics, project-stats
-        // (PIDASHCONV-399; gates: PIDASHCONV-358) in `app_analytics`;
-        // D-30 page favorites + description (PIDASHCONV-332) + state
-        // ops (PIDASHCONV-328) in `app_pages`; sibling handler issues
+        // cycles + archive/unarchive (PIDASHCONV-377) + CycleViewSet
+        // CRUD (PIDASHCONV-321) + date-check + transfer +
+        // user-properties (PIDASHCONV-357) in `app_cycles`; D-28
+        // module CRUD (PIDASHCONV-391) in `app_modules` (siblings
+        // 397/407 extend that merge, keeping both sides); D-35
+        // analytics + analytic-view viewset (PIDASHCONV-389) +
+        // workspace advance analytics (PIDASHCONV-414) + analytic
+        // handlers-B — saved-analytic-view, export-analytics,
+        // default-analytics, project-stats (PIDASHCONV-399; gates:
+        // PIDASHCONV-358) in `app_analytics`; D-30 page favorites +
+        // description (PIDASHCONV-332) + state ops (PIDASHCONV-328)
+        // in `app_pages`; sibling handler issues
         // extend the merge; merges keep both sides).
         RouteGroup::App => crate::app_issues::routes()
             .merge(crate::app_views_search::routes())
