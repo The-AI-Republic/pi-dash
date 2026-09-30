@@ -2065,6 +2065,117 @@ fn link_joins_for(fragment: &str, existing: &str) -> String {
             out.push_str(&format!(
                 " LEFT JOIN {table} ON ({table}.\"issue_id\" = \"issues\".\"id\")"
             ));
+//! DRF parity rendering for the D-35 handlers-A family (PIDASHCONV-389).
+//!
+//! - `build_graph_plot` regroup (`utils/analytics_plot.py:117-120`): rows
+//!   arrive ordered by dimension; Python `groupby` groups consecutive rows
+//!   by `str(dimension)`, then `sort_data` orders the keys (priority axes
+//!   sort low/medium/high/urgent/none with missing keys dropped, every
+//!   other axis sorts with `'none'` last).
+//! - Estimate sums render as JSON numbers; a NULL sum renders `null`
+//!   (Python `None` in the row dict). Non-finite floats cannot come back
+//!   from Postgres here, but map to `null` rather than erroring.
+//! - Envelope key order is DRF `.values()`/dict order, preserved through
+//!   `serde_json` (`preserve_order`): `total, distribution, extras` with
+//!   `state_details, assignee_details, label_details, cycle_details,
+//!   module_details`; buckets carry `dimension, [segment,] count|estimate`.
+
+
+
+use pidash_services::app_analytics::queries::sort_data_keys;
+
+/// Regrouped buckets: keys in first-seen (row) order plus each key's
+/// bucket list. `serde_json::Map` has no `entry` API, so grouping runs
+/// over a plain map and only the ordered assembly below touches `Map`.
+struct Grouped {
+    order: Vec<String>,
+    buckets: HashMap<String, Vec<Value>>,
+}
+
+impl Grouped {
+    fn new() -> Self {
+        Self {
+            order: Vec::new(),
+            buckets: HashMap::new(),
+        }
+    }
+
+    /// Push one row: the bucket renders `dimension, [segment,] value` in
+    /// `.values()` order (`dimension` first — it is inserted before the
+    /// caller-supplied tail).
+    fn push(&mut self, dimension: Option<String>, segment: Option<String>, value: (String, Value)) {
+        let key = dimension.clone().unwrap_or_else(|| "None".to_owned());
+        let mut bucket = Map::new();
+        bucket.insert(
+            "dimension".to_owned(),
+            Value::String(dimension.unwrap_or_else(|| "None".to_owned())),
+        );
+        if let Some(segment) = segment {
+            bucket.insert("segment".to_owned(), Value::String(segment));
+        }
+        bucket.insert(value.0, value.1);
+        if !self.buckets.contains_key(&key) {
+            self.order.push(key.clone());
+            self.buckets.insert(key.clone(), Vec::new());
+        }
+        if let Some(items) = self.buckets.get_mut(&key) {
+            items.push(Value::Object(bucket));
+        }
+    }
+
+    fn into_map(self) -> Map<String, Value> {
+        let mut out = Map::new();
+        for key in &self.order {
+            if let Some(items) = self.buckets.get(key) {
+                out.insert(key.clone(), Value::Array(items.clone()));
+            }
+        }
+        out
+    }
+}
+
+/// One `issue_count` plot row: `(dimension, segment, count)`. Dimensions
+/// group under `str(dimension)` — `None` under `"None"` (Python
+/// `str(None)`).
+pub fn distribution_from_count_rows(
+    rows: Vec<(Option<String>, Option<String>, i64)>,
+    x_axis: &str,
+) -> Map<String, Value> {
+    let mut grouped = Grouped::new();
+    for (dimension, segment, count) in rows {
+        grouped.push(dimension, segment, ("count".to_owned(), Value::from(count)));
+    }
+    order_distribution(grouped.into_map(), x_axis)
+}
+
+/// One `estimate` plot row: `(dimension, segment, estimate)`.
+pub fn distribution_from_estimate_rows(
+    rows: Vec<(Option<String>, Option<String>, Option<f64>)>,
+    x_axis: &str,
+) -> Map<String, Value> {
+    let mut grouped = Grouped::new();
+    for (dimension, segment, estimate) in rows {
+        grouped.push(
+            dimension,
+            segment,
+            ("estimate".to_owned(), render_estimate(estimate)),
+        );
+    }
+    order_distribution(grouped.into_map(), x_axis)
+}
+
+/// Apply `sort_data` key order to a grouped distribution, exactly like
+/// Python (`analytics_plot.py:64-70`): the priority path keeps only
+/// `low/medium/high/urgent/none` keys present in the data (anything else —
+/// e.g. the `'None'` NULL bucket — is dropped); every other axis sorts all
+/// keys with `'none'` last.
+fn order_distribution(grouped: Map<String, Value>, x_axis: &str) -> Map<String, Value> {
+    let keys: Vec<String> = grouped.keys().cloned().collect();
+    let ordered = sort_data_keys(&keys, x_axis);
+    let mut out = Map::new();
+    for key in &ordered {
+        if let Some(items) = grouped.get(key) {
+            out.insert(key.clone(), items.clone());
         }
     }
     out
@@ -3323,6 +3434,127 @@ mod tests {
         assert_eq!(
             remap_legacy("issue.created_at::date >= $2::date"),
             "\"issues\".created_at::date >= $2::date"
+/// Render one estimate sum: JSON number, or `null` for NULL.
+pub fn render_estimate(estimate: Option<f64>) -> Value {
+    match estimate {
+        Some(value) => serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        None => Value::Null,
+    }
+}
+
+/// The `extras` envelope: `state_details, assignee_details, label_details,
+/// cycle_details, module_details` in `base.py:165-171` order. Each arm is
+/// `{}` (empty object, not `[]`) when its axis does not apply.
+pub fn extras_envelope(
+    state_details: Option<Vec<Map<String, Value>>>,
+    assignee_details: Option<Vec<Map<String, Value>>>,
+    label_details: Option<Vec<Map<String, Value>>>,
+    cycle_details: Option<Vec<Map<String, Value>>>,
+    module_details: Option<Vec<Map<String, Value>>>,
+) -> Map<String, Value> {
+    fn arm(rows: Option<Vec<Map<String, Value>>>) -> Value {
+        match rows {
+            Some(rows) => Value::Array(rows.into_iter().map(Value::Object).collect()),
+            None => Value::Object(Map::new()),
+        }
+    }
+    let mut extras = Map::new();
+    extras.insert("state_details".to_owned(), arm(state_details));
+    extras.insert("assignee_details".to_owned(), arm(assignee_details));
+    extras.insert("label_details".to_owned(), arm(label_details));
+    extras.insert("cycle_details".to_owned(), arm(cycle_details));
+    extras.insert("module_details".to_owned(), arm(module_details));
+    extras
+}
+
+/// The full analytics envelope in `base.py:161-174` key order.
+pub fn analytics_envelope(
+    total: i64,
+    distribution: Map<String, Value>,
+    extras: Map<String, Value>,
+) -> String {
+    let mut body = Map::new();
+    body.insert("total".to_owned(), Value::from(total));
+    body.insert("distribution".to_owned(), Value::Object(distribution));
+    body.insert("extras".to_owned(), Value::Object(extras));
+    serde_json::to_string(&Value::Object(body)).expect("analytics envelope")
+}
+
+    #[test]
+    fn count_distribution_groups_and_sorts_priority() {
+        let rows = vec![
+            (Some("urgent".to_owned()), None, 1),
+            (Some("high".to_owned()), None, 1),
+            (Some("medium".to_owned()), None, 1),
+        ];
+        let dist = distribution_from_count_rows(rows, "priority");
+        let keys: Vec<&str> = dist.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["medium", "high", "urgent"]);
+        assert_eq!(dist["medium"], json!([{"dimension": "medium", "count": 1}]));
+    }
+
+    #[test]
+    fn count_distribution_seed_shape() {
+        // FX-A-H-01 first pair: three priority buckets, extras empty.
+        let rows = vec![
+            (Some("high".to_owned()), None, 1),
+            (Some("medium".to_owned()), None, 1),
+            (Some("urgent".to_owned()), None, 1),
+        ];
+        let dist = distribution_from_count_rows(rows, "priority");
+        let body = analytics_envelope(3, dist, extras_envelope(None, None, None, None, None));
+        let parsed: Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(parsed["total"], json!(3));
+        assert_eq!(
+            parsed["distribution"],
+            json!({
+                "medium": [{"dimension": "medium", "count": 1}],
+                "high": [{"dimension": "high", "count": 1}],
+                "urgent": [{"dimension": "urgent", "count": 1}],
+            })
+        );
+        assert_eq!(
+            parsed["extras"],
+            json!({
+                "state_details": {},
+                "assignee_details": {},
+                "label_details": {},
+                "cycle_details": {},
+                "module_details": {},
+            })
+        );
+        // Byte order: total, distribution, extras.
+        assert!(body.starts_with(r#"{"total":3,"distribution":{"#));
+    }
+
+    #[test]
+    fn null_dimension_groups_under_none() {
+        // `str(None)` groups under 'None', which the priority `sort_data`
+        // drops (not in low/medium/high/urgent/none); other axes keep it
+        // (sorted with 'none' last only for the exact 'none' spelling).
+        let rows = vec![(None, None, 2)];
+        let dist = distribution_from_count_rows(rows, "priority");
+        assert!(dist.is_empty());
+        let rows = vec![(None, None, 2)];
+        let dist = distribution_from_count_rows(rows, "state__group");
+        assert_eq!(dist["None"], json!([{"dimension": "None", "count": 2}]));
+    }
+
+    #[test]
+    fn estimate_null_renders_null() {
+        let rows = vec![(Some("high".to_owned()), None, None)];
+        let dist = distribution_from_estimate_rows(rows, "priority");
+        assert_eq!(
+            dist["high"],
+            json!([{"dimension": "high", "estimate": null}])
+        );
+        let rows = vec![(Some("high".to_owned()), None, Some(8.0))];
+        let dist = distribution_from_estimate_rows(rows, "priority");
+        assert_eq!(
+            dist["high"],
+            json!([{"dimension": "high", "estimate": 8.0}])
         );
     }
 
@@ -3449,5 +3681,12 @@ mod tests {
         let scope = issue_where("$1", legacy.as_deref());
         assert!(scope.contains("\"workspaces\".\"slug\" = $1"));
         assert!(scope.contains(q::ISSUE_OBJECTS_SCOPE));
+    fn segment_rides_the_bucket() {
+        let rows = vec![(Some("high".to_owned()), Some("backlog".to_owned()), 1)];
+        let dist = distribution_from_count_rows(rows, "priority");
+        assert_eq!(
+            dist["high"],
+            json!([{"dimension": "high", "segment": "backlog", "count": 1}])
+        );
     }
 }
