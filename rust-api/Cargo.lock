@@ -2649,6 +2649,8 @@ dependencies = [
 name = "pidash-types"
 version = "0.1.0"
 dependencies = [
+ "ammonia",
+ "base64 0.22.1",
  "chrono",
  "serde",
  "serde_json",

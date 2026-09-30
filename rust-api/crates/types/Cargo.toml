@@ -9,6 +9,11 @@ serde_json = { version = "1", features = ["preserve_order"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 uuid = { version = "1", features = ["serde"] }
 thiserror = "2"
+# D-21 asset/sticky serializers (PIDASHCONV-392): nh3 is Python bindings for
+# ammonia, so the same configuration renders the same bytes; base64 mirrors
+# validate_binary_data's b64decode path (`utils/content_validator.py`).
+ammonia = "4"
+base64 = "0.22"
 
 [dev-dependencies]
 serde_json = "1"
