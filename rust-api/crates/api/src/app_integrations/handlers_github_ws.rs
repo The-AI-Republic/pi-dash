@@ -561,10 +561,12 @@ async fn apply_disconnect(
         .execute(pool)
         .await
         .map_err(|_| Denial::ServerError)?;
+    // `QuerySet.update()` runs through the default manager, so soft-deleted
+    // rows are untouched (`deleted_at IS NULL`).
     sqlx::query(
         r#"UPDATE github_repository_syncs
            SET is_sync_enabled = false, last_sync_error = $1
-           WHERE workspace_integration_id = $2"#,
+           WHERE workspace_integration_id = $2 AND deleted_at IS NULL"#,
     )
     .bind(DISCONNECT_ERROR)
     .bind(wi.id)
@@ -595,10 +597,11 @@ async fn disconnect_pat_accounts(
     .await
     .map_err(|_| Denial::ServerError)?;
     if !ids.is_empty() {
+        // Default-manager update: soft-deleted bindings stay untouched.
         sqlx::query(
             r#"UPDATE git_repository_bindings
                SET is_sync_enabled = false, last_sync_error = $1
-               WHERE provider_account_id = ANY($2)"#,
+               WHERE provider_account_id = ANY($2) AND deleted_at IS NULL"#,
         )
         .bind(DISCONNECT_ERROR)
         .bind(&ids)
@@ -912,8 +915,14 @@ fn has_next_page(headers: &reqwest::header::HeaderMap) -> bool {
 fn link_next_url(link: &str) -> Option<&str> {
     for part in link.split(',') {
         let part = part.trim_start();
-        let after_open = part.strip_prefix('<')?;
-        let end = after_open.find('>')?;
+        // A malformed part never matches (`re.match` returns `None` for
+        // it); the scan continues with the next part.
+        let Some(after_open) = part.strip_prefix('<') else {
+            continue;
+        };
+        let Some(end) = after_open.find('>') else {
+            continue;
+        };
         let (url, rest) = after_open.split_at(end);
         let rest = rest[1..].trim_start();
         if rest
@@ -1006,12 +1015,9 @@ async fn connect(
         Some(map) => map,
         None => return Denial::ServerError.into_response(),
     };
-    let token = match map.get("token") {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::String(s)) => s.trim().to_owned(),
-        Some(Value::Bool(false)) => String::new(),
-        Some(Value::Number(n)) if json_number_is_zero(n) => String::new(),
-        Some(_) => return Denial::ServerError.into_response(),
+    let token = match coerce_token(map.get("token")) {
+        Ok(token) => token,
+        Err(()) => return Denial::ServerError.into_response(),
     };
     if token.is_empty() {
         return Denial::BadError("GitHub PAT required".to_owned()).into_response();
@@ -1036,7 +1042,7 @@ async fn connect(
         Ok(id) => id,
         Err(denial) => return denial.into_response(),
     };
-    let integration = match ensure_github_integration(&pool).await {
+    let integration = match ensure_github_integration(&pool, &actor.id).await {
         Ok(id) => id,
         Err(denial) => return denial.into_response(),
     };
@@ -1069,6 +1075,22 @@ async fn connect(
     }))
 }
 
+/// `(request.data.get("token") or "").strip()` (`github.py:434`): every
+/// falsy JSON shape (`null`, `false`, `0`/`0.0`, `""`, `[]`, `{}`) reads
+/// `""` (and answers 400 downstream); strings are stripped; any other
+/// truthy shape fails `.strip()` (`AttributeError` → base 500).
+fn coerce_token(value: Option<&Value>) -> Result<String, ()> {
+    match value {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(s)) => Ok(s.trim().to_owned()),
+        Some(Value::Bool(false)) => Ok(String::new()),
+        Some(Value::Number(n)) if json_number_is_zero(n) => Ok(String::new()),
+        Some(Value::Array(a)) if a.is_empty() => Ok(String::new()),
+        Some(Value::Object(o)) if o.is_empty() => Ok(String::new()),
+        Some(_) => Err(()),
+    }
+}
+
 /// `(x or "")` falsiness for JSON numbers: `0`/`0.0` are falsy in Python
 /// (`github.py:434`); every other number is truthy (and then fails
 /// `.strip()` → 500).
@@ -1084,9 +1106,14 @@ fn json_number_is_zero(n: &serde_json::Number) -> bool {
 
 /// `_get_or_create_github_integration` (`github.py:90-99`): the
 /// `provider="github"` row, created with the title/verified/description
-/// defaults when missing. A concurrent create surfaces as a unique
-/// violation — Django's `get_or_create` re-reads, and so do we.
-async fn ensure_github_integration(pool: &sqlx::PgPool) -> Result<uuid::Uuid, Denial> {
+/// defaults when missing. `BaseModel.save()` stamps `created_by` from the
+/// request user (crum), so the insert carries the actor. A concurrent
+/// create surfaces as a unique violation — Django's `get_or_create`
+/// re-reads, and so do we.
+async fn ensure_github_integration(
+    pool: &sqlx::PgPool,
+    actor_id: &uuid::Uuid,
+) -> Result<uuid::Uuid, Denial> {
     let existing: Option<(uuid::Uuid,)> = sqlx::query_as(
         r#"SELECT id FROM integrations
            WHERE provider = 'github' AND deleted_at IS NULL
@@ -1106,11 +1133,12 @@ async fn ensure_github_integration(pool: &sqlx::PgPool) -> Result<uuid::Uuid, De
            (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
             title, provider, network, description, author,
             webhook_url, webhook_secret, redirect_url, metadata, verified, avatar_url)
-           VALUES ($1,$2,$2,NULL,NULL,NULL,'GitHub','github',1,$3,'','','','{}',true,NULL)"#,
+           VALUES ($1,$2,$2,$4,NULL,NULL,'GitHub','github',1,$3,'','','','{}',true,NULL)"#,
     )
     .bind(id)
     .bind(now)
     .bind(&description)
+    .bind(actor_id)
     .execute(pool)
     .await;
     match created {
@@ -1568,32 +1596,42 @@ mod tests {
             link_next_url(r#"  <https://x?page=2>; rel="next""#),
             Some("https://x?page=2")
         );
+        // A malformed part is skipped, not fatal (the `for` loop keeps
+        // scanning, like `_next_url`).
+        assert_eq!(
+            link_next_url(r#"garbage, <https://x?page=2>; rel="next""#),
+            Some("https://x?page=2")
+        );
     }
 
     #[test]
     fn connect_token_coercion() {
-        // Mirror the match arms in `connect` for `(x or "").strip()`.
-        fn coerce(value: Option<&Value>) -> Result<String, ()> {
-            match value {
-                None | Some(Value::Null) => Ok(String::new()),
-                Some(Value::String(s)) => Ok(s.trim().to_owned()),
-                Some(Value::Bool(false)) => Ok(String::new()),
-                Some(Value::Number(n)) if json_number_is_zero(n) => Ok(String::new()),
-                Some(_) => Err(()),
-            }
-        }
-        assert_eq!(coerce(None).expect("none"), "");
+        // `(x or "").strip()`: every falsy shape reads `""` (400
+        // downstream); truthy non-strings fail `.strip()` → 500.
+        assert_eq!(coerce_token(None).expect("none"), "");
         assert_eq!(
-            coerce(Some(&serde_json::json!("  tok "))).expect("str"),
+            coerce_token(Some(&serde_json::json!("  tok "))).expect("str"),
             "tok"
         );
-        assert_eq!(coerce(Some(&serde_json::json!(0))).expect("zero"), "");
-        assert_eq!(coerce(Some(&serde_json::json!(false))).expect("false"), "");
+        assert_eq!(coerce_token(Some(&serde_json::json!(0))).expect("zero"), "");
+        assert_eq!(
+            coerce_token(Some(&serde_json::json!(false))).expect("false"),
+            ""
+        );
+        // Falsy containers read `""` too, like `[] or ""` / `{} or ""`.
+        assert_eq!(
+            coerce_token(Some(&serde_json::json!([]))).expect("empty array"),
+            ""
+        );
+        assert_eq!(
+            coerce_token(Some(&serde_json::json!({}))).expect("empty object"),
+            ""
+        );
         // Truthy non-strings fail `.strip()` → 500.
-        assert!(coerce(Some(&serde_json::json!(5))).is_err());
-        assert!(coerce(Some(&serde_json::json!(true))).is_err());
-        assert!(coerce(Some(&serde_json::json!([]))).is_err());
-        assert!(coerce(Some(&serde_json::json!({}))).is_err());
+        assert!(coerce_token(Some(&serde_json::json!(5))).is_err());
+        assert!(coerce_token(Some(&serde_json::json!(true))).is_err());
+        assert!(coerce_token(Some(&serde_json::json!([1]))).is_err());
+        assert!(coerce_token(Some(&serde_json::json!({"t": "x"}))).is_err());
     }
 
     #[test]
