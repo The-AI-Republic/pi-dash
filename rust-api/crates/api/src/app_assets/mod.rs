@@ -6,11 +6,14 @@
 //! `apps/api/pi_dash/throttles/asset.py`). [`handlers_v1`] serves the
 //! legacy v1 routes (PIDASHCONV-394);
 //! [`handlers_v2_user_workspace`] (PIDASHCONV-400) serves the v2
-//! user/workspace/static/restore family; sibling handler issues 412
+//! user/workspace/static/restore family;
+//! [`handlers_v2_project`] serves the v2 project-side routes
+//! (`app/urls/asset.py:79-113`, PIDASHCONV-412); sibling handler issues
 //! extend [`routes`] with their own routers, keeping both sides.
 
 pub mod guards;
 pub mod handlers_v1;
+pub mod handlers_v2_project;
 pub mod handlers_v2_user_workspace;
 
 use axum::Router;
@@ -18,8 +21,11 @@ use axum::Router;
 use crate::state::AppState;
 
 /// Merge the app-asset route groups (v1 first, then v2
-/// user/workspace/static/restore; sibling handler issues extend the
-/// merge; merges keep both sides).
+/// user/workspace/static/restore, then v2 project/bulk/check/duplicate/
+/// downloads; sibling handler issues extend the merge; merges keep both
+/// sides).
 pub fn routes() -> Router<AppState> {
-    handlers_v1::routes().merge(handlers_v2_user_workspace::routes())
+    handlers_v1::routes()
+        .merge(handlers_v2_user_workspace::routes())
+        .merge(handlers_v2_project::routes())
 }
