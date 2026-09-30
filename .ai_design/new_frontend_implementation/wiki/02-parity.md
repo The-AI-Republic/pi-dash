@@ -78,6 +78,17 @@ If you find a behavior no row covers, add a row with the next ID and note where 
 
 **Old bugs:** if the oracle behavior is a bug, do not encode it silently. Mark the scenario `bug:` with a linked issue, and record the intended behavior in the row. `apps/web_new` may implement the fix.
 
+## New features (beyond parity)
+
+Parity is the floor, not the ceiling. When a decision adds a capability the old app does not have, it goes into the area's inventory like any row, with two differences:
+
+- Status `new (D<n>)` naming the decision, and a short "New features" note in the inventory file.
+- No oracle scenario (there is nothing to observe in the old app). Its scenarios run on `apps/web_new` only.
+
+Otherwise it is a normal row: it needs a slice, green scenarios, and it counts toward the area gate. Never add a `new` row without a decision on *Decisions and open questions*.
+
+Current new features: nested pages (D17, rows PAGE-084…090).
+
 ## Gates
 
 | Gate | Condition |
