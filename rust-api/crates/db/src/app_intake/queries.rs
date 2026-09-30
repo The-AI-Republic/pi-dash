@@ -53,11 +53,14 @@
 //!
 //! # Ported bugs (translate, don't redesign)
 //!
-//! * Raw `order_by` passthrough (`base.py:198`): an unknown field raises
-//!   `FieldError`, which `handle_exception` maps to
-//!   `500 {"error": "Something went wrong please try again later"}`.
-//!   [`order_to_sql`] passes unknown values through untouched; mapping
-//!   the failure to the 500 body is handlers-owned.
+//! * `order_by` field resolution (`base.py:198`): Django resolves the
+//!   param against the queryset's fields, so [`order_to_sql`] maps a
+//!   single-level `issue__<field>` to the `issues` columns and a bare
+//!   `<field>` to the `intake_issues` columns (direction from one
+//!   leading `-`). Anything else passes through untouched and raises
+//!   at execution (`FieldError` in Django), which `handle_exception`
+//!   maps to `500 {"error": "Something went wrong please try again
+//!   later"}`; mapping the failure to the 500 body is handlers-owned.
 //! * Falsy status-CSV skip (`base.py:200-202`): `?status=` with only
 //!   `null` tokens parses to `[]`, which is falsy, so **no** status
 //!   filter applies. [`parse_intake_status`] returns `None` for that
@@ -403,18 +406,136 @@ pub fn parse_intake_status(raw: Option<&str>) -> Result<Option<Vec<i32>>, Status
     }
 }
 
+/// Django field name → `intake_issues` column for `ORDER BY`
+/// (`db/models/intake.py:51-74` plus the audit/project base from
+/// `db/mixins.py:15-83` and `db/models/project.py:302-311`). FK fields
+/// carry both the field spelling (`project`) and the attname spelling
+/// (`project_id`): Django resolves both spellings in `order_by`.
+const BRIDGE_ORDER_COLUMNS: &[(&str, &str)] = &[
+    ("id", "id"),
+    ("created_at", "created_at"),
+    ("updated_at", "updated_at"),
+    ("created_by", "created_by_id"),
+    ("created_by_id", "created_by_id"),
+    ("updated_by", "updated_by_id"),
+    ("updated_by_id", "updated_by_id"),
+    ("deleted_at", "deleted_at"),
+    ("project", "project_id"),
+    ("project_id", "project_id"),
+    ("workspace", "workspace_id"),
+    ("workspace_id", "workspace_id"),
+    ("intake", "intake_id"),
+    ("intake_id", "intake_id"),
+    ("issue", "issue_id"),
+    ("issue_id", "issue_id"),
+    ("status", "status"),
+    ("snoozed_till", "snoozed_till"),
+    ("duplicate_to", "duplicate_to_id"),
+    ("duplicate_to_id", "duplicate_to_id"),
+    ("source", "source"),
+    ("source_email", "source_email"),
+    ("external_source", "external_source"),
+    ("external_id", "external_id"),
+    ("extra", "extra"),
+];
+
+/// Django field name → `issues` column for `ORDER BY` through the
+/// `issue__` prefix (`db/models/issue.py:107-~250` plus the same
+/// audit/project base). The M2M fields (`assignees`, `labels`) have no
+/// column and stay passthrough — Django joins them, which this mapping
+/// does not reproduce (residual divergence, documented below).
+const ISSUE_ORDER_COLUMNS: &[(&str, &str)] = &[
+    ("id", "id"),
+    ("created_at", "created_at"),
+    ("updated_at", "updated_at"),
+    ("created_by", "created_by_id"),
+    ("created_by_id", "created_by_id"),
+    ("updated_by", "updated_by_id"),
+    ("updated_by_id", "updated_by_id"),
+    ("deleted_at", "deleted_at"),
+    ("project", "project_id"),
+    ("project_id", "project_id"),
+    ("workspace", "workspace_id"),
+    ("workspace_id", "workspace_id"),
+    ("parent", "parent_id"),
+    ("parent_id", "parent_id"),
+    ("state", "state_id"),
+    ("state_id", "state_id"),
+    ("point", "point"),
+    ("estimate_point", "estimate_point_id"),
+    ("estimate_point_id", "estimate_point_id"),
+    ("name", "name"),
+    ("description_json", "description_json"),
+    ("description_html", "description_html"),
+    ("description_stripped", "description_stripped"),
+    ("description_binary", "description_binary"),
+    ("priority", "priority"),
+    ("complexity_score", "complexity_score"),
+    ("start_date", "start_date"),
+    ("target_date", "target_date"),
+    ("sequence_id", "sequence_id"),
+    ("sort_order", "sort_order"),
+    ("completed_at", "completed_at"),
+    ("archived_at", "archived_at"),
+    ("is_draft", "is_draft"),
+    ("external_source", "external_source"),
+    ("external_id", "external_id"),
+    ("type", "type_id"),
+    ("type_id", "type_id"),
+    ("git_work_branch", "git_work_branch"),
+    ("workpad", "workpad"),
+    ("created_via", "created_via"),
+    ("assigned_pod", "assigned_pod_id"),
+    ("assigned_pod_id", "assigned_pod_id"),
+    ("agent_executor", "agent_executor"),
+];
+
+/// Look a Django field (or attname) spelling up in an order map.
+fn lookup_order_column<'a>(map: &[(&'a str, &'a str)], field: &str) -> Option<&'a str> {
+    map.iter()
+        .find(|(name, _)| *name == field)
+        .map(|(_, column)| *column)
+}
+
 /// Map the raw `order_by` param to an `ORDER BY` expression
-/// (`base.py:198`). The two known spellings map to the joined issue's
-/// `created_at`; **any other value passes through untouched** — Django
-/// interpolates it into `ORDER BY`, raises `FieldError`, and
-/// `handle_exception` answers
-/// `500 {"error": "Something went wrong please try again later"}`.
+/// (`base.py:198`, which resolves the param against the queryset's
+/// fields). A single leading `-` selects descending; `issue__<field>`
+/// (one level) resolves against the joined issue's columns and a bare
+/// `<field>` against the `intake_issues` bridge columns. **Anything
+/// else passes through untouched** — unknown fields, M2M names,
+/// deeper `__` join paths and empty spellings: Django raises
+/// `FieldError` there and `handle_exception` answers
+/// `500 {"error": "Something went wrong please try again later"}`;
+/// the raw fragment fails in Postgres and maps to the same 500.
 /// That failure mapping is handlers-owned.
+///
+/// Residual divergence (kept, per the "anything else passes through"
+/// scope): multi-level join paths (`issue__project__name`) and M2M
+/// names (`issue__labels`, bare `assignees` has no bridge column
+/// either) are valid Django orderings via join, but pass through here
+/// and 500. The default (`-issue__created_at`) rendering is unchanged.
 pub fn order_to_sql(raw: &str) -> String {
-    match raw {
-        "-issue__created_at" => r#""issues"."created_at" DESC"#.to_owned(),
-        "issue__created_at" => r#""issues"."created_at" ASC"#.to_owned(),
-        other => other.to_owned(),
+    let (descending, field) = match raw.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, raw),
+    };
+    let direction = if descending { "DESC" } else { "ASC" };
+    let resolved = if let Some(issue_field) = field.strip_prefix("issue__") {
+        if issue_field.is_empty() || issue_field.contains("__") {
+            None
+        } else {
+            lookup_order_column(ISSUE_ORDER_COLUMNS, issue_field)
+                .map(|column| format!(r#""{ISSUE_TABLE}"."{column}""#))
+        }
+    } else if field.is_empty() || field.contains("__") {
+        None
+    } else {
+        lookup_order_column(BRIDGE_ORDER_COLUMNS, field)
+            .map(|column| format!(r#""{t}"."{column}""#, t = intake_issue::TABLE))
+    };
+    match resolved {
+        Some(expr) => format!("{expr} {direction}"),
+        None => raw.to_owned(),
     }
 }
 
@@ -973,6 +1094,7 @@ mod tests {
     #[test]
     fn order_mapping_and_passthrough_bug() {
         assert_eq!(DEFAULT_LIST_ORDER, "-issue__created_at");
+        // The default rendering is unchanged.
         assert_eq!(
             order_to_sql("-issue__created_at"),
             "\"issues\".\"created_at\" DESC"
@@ -981,8 +1103,80 @@ mod tests {
             order_to_sql("issue__created_at"),
             "\"issues\".\"created_at\" ASC"
         );
-        // Unknown fields pass through raw (FieldError-as-500 in Django).
+        // Bare bridge fields resolve against intake_issues; one leading
+        // `-` selects descending (base.py:198 resolves `-created_at` /
+        // `-id` to the bridge columns).
+        assert_eq!(order_to_sql("status"), "\"intake_issues\".\"status\" ASC");
+        assert_eq!(order_to_sql("-status"), "\"intake_issues\".\"status\" DESC");
+        assert_eq!(
+            order_to_sql("created_at"),
+            "\"intake_issues\".\"created_at\" ASC"
+        );
+        assert_eq!(
+            order_to_sql("-created_at"),
+            "\"intake_issues\".\"created_at\" DESC"
+        );
+        assert_eq!(order_to_sql("id"), "\"intake_issues\".\"id\" ASC");
+        assert_eq!(order_to_sql("-id"), "\"intake_issues\".\"id\" DESC");
+        // Single-level issue__ fields resolve against issues.
+        assert_eq!(order_to_sql("issue__name"), "\"issues\".\"name\" ASC");
+        assert_eq!(order_to_sql("-issue__name"), "\"issues\".\"name\" DESC");
+        // FK names resolve to their attname columns, both spellings.
+        assert_eq!(
+            order_to_sql("created_by"),
+            "\"intake_issues\".\"created_by_id\" ASC"
+        );
+        assert_eq!(
+            order_to_sql("project_id"),
+            "\"intake_issues\".\"project_id\" ASC"
+        );
+        assert_eq!(order_to_sql("issue__state"), "\"issues\".\"state_id\" ASC");
+        assert_eq!(
+            order_to_sql("-issue__priority"),
+            "\"issues\".\"priority\" DESC"
+        );
+        // Passthrough keeps the 500 quirk: unknown fields, M2M names,
+        // deeper join paths and empty spellings fail at execution on
+        // both backends. The bridge has no `name` column, so bare
+        // `name` stays raw.
         assert_eq!(order_to_sql("name"), "name");
+        assert_eq!(order_to_sql("bogus_field"), "bogus_field");
+        assert_eq!(order_to_sql("-bogus_field"), "-bogus_field");
+        assert_eq!(order_to_sql("issue__bogus"), "issue__bogus");
+        assert_eq!(order_to_sql("-issue__bogus"), "-issue__bogus");
+        assert_eq!(order_to_sql("issue__labels"), "issue__labels");
+        assert_eq!(order_to_sql("issue__project__name"), "issue__project__name");
+        assert_eq!(order_to_sql("project__name"), "project__name");
+        assert_eq!(order_to_sql("issue__"), "issue__");
+        assert_eq!(order_to_sql(""), "");
+        assert_eq!(order_to_sql("-"), "-");
+        // A second `-` is part of the field name, not direction.
+        assert_eq!(order_to_sql("--created_at"), "--created_at");
+    }
+
+    #[test]
+    fn list_renders_mapped_order_by() {
+        let q = IntakeIssueListQuery {
+            order_by: "-created_at",
+            ..default_list_query()
+        };
+        let sql = intake_issue_list_sql(&q);
+        assert!(
+            sql.contains("ORDER BY \"intake_issues\".\"created_at\" DESC"),
+            "{sql}"
+        );
+        let q = IntakeIssueListQuery {
+            order_by: "issue__name",
+            ..default_list_query()
+        };
+        let sql = intake_issue_list_sql(&q);
+        assert!(sql.contains("ORDER BY \"issues\".\"name\" ASC"), "{sql}");
+        // The default still renders the joined issue's creation time.
+        let sql = intake_issue_list_sql(&default_list_query());
+        assert!(
+            sql.contains("ORDER BY \"issues\".\"created_at\" DESC"),
+            "{sql}"
+        );
     }
 
     #[test]
