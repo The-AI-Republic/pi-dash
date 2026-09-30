@@ -15,15 +15,16 @@
 //!   columns field-for-field against `rust-api/fixtures/auth_oauth/`
 //!   `F1_social_login_connection.columns.json` (PIDASHCONV-324,
 //!   AUTHOAUTH-F1) and `F2_cli_device_code.columns.json` (AUTHOAUTH-F2).
+//! * [`queries`] — account upsert, `deactivate_api_token`, device-machine
+//!   touch / get-or-create / rotate (PIDASHCONV-327, AUTHOAUTH-F6/F7/F8).
 //!
 //! # Wiring note
 //!
 //! The crate root declares `pub mod auth_oauth;` (one-line wiring in the
-//! port PR, following the PIDASHCONV-284 precedent). Later D-17 layer
-//! issues add siblings here (`queries` for the account upsert /
-//! `cli_tokens` / device helpers, owned by PIDASHCONV-327).
+//! port PR, following the PIDASHCONV-284 precedent).
 
 pub mod models;
+pub mod queries;
 
 #[cfg(test)]
 pub(crate) mod test_support {
