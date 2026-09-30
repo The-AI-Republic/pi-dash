@@ -7,19 +7,16 @@
 //! `PageVersion.save()` (`:175-182`) both funnel through
 //! [`sync_description_stripped`].
 //!
-//! This is a line-for-line transliteration of CPython's `goahead(end=0)`
-//! (`html/parser.py:133-250`), `parse_starttag` (`:300-347`),
-//! `check_for_whole_start_tag` (`:351-381`), `parse_endtag` (`:385-422`),
-//! `parse_html_declaration` (`:255-272`), `parse_bogus_comment`
-//! (`:276-285`), `parse_pi` (`:289-297`), `parse_comment`
-//! (`_markupbase.py:168-177`), `parse_marked_section` (`:146-164`),
-//! `_scan_name` (`:376-392`) and `html.unescape` (`html/__init__.py:91-135`)
+//! This is a transliteration of CPython 3.12's `goahead(end=0)`
+//! (`html/parser.py`), `parse_starttag`, `check_for_whole_start_tag`,
+//! `parse_endtag`, `parse_html_declaration`, `parse_bogus_comment`,
+//! `parse_pi`, `parse_comment` and `html.unescape` (`html/__init__.py`)
 //! with every handler a no-op except `handle_data`, which appends. The
 //! named-entity table lives in [`super::entities`] (generated from
 //! `html.entities.html5`, same source `unescape` reads).
 //!
 //! Three behaviors a simpler "drop `<...>` spans" port gets wrong, all
-//! verified against the live `strip_tags` before committing:
+//! verified against the live `strip_tags` (Python 3.12) before committing:
 //!
 //! * Text chunks are passed through `unescape`: `&amp;` decodes to `&`,
 //!   `&nbsp;` to U+00A0, `&#128;` to the euro sign. (This is a different
@@ -27,54 +24,35 @@
 //!   `api::space::sanitize::strip_tags`, which keeps references verbatim.
 //!   The `db` crate cannot reuse that helper anyway: the crate graph runs
 //!   `types` → `db` → `services` → `api`.)
-//! * A trailing `&...` tail with no `;`/space ahead is dropped whole
-//!   (`R&D` → `""`, `fish &amp` → `""`; `parser.py:143-151`). `feed` is
-//!   never followed by `close`, so every other incomplete trailing
+//! * A trailing `&...` tail with no `;`/ASCII-space ahead is dropped whole
+//!   (`R&D` → `""`, `fish &amp` → `""`; `goahead`'s near-end guard). `feed`
+//!   is never followed by `close`, so every other incomplete trailing
 //!   construct (open tag, comment, declaration) is dropped the same way.
-//! * `<script>`/`<style>` switch the parser to CDATA mode: content up to
-//!   the matching end tag passes through verbatim (no tag parsing, no
-//!   entity decoding), and anything else is dropped.
+//! * `<script>`/`<style>`/`<xmp>`/`<iframe>`/`<noembed>`/`<noframes>` switch
+//!   the parser to RAWTEXT mode and `<textarea>`/`<title>` to RCDATA mode:
+//!   content up to the matching end tag passes through (verbatim, or
+//!   entity-decoded for RCDATA), and anything else is dropped.
 //!
-//! Python raises `NotImplementedError` out of `save()` for `<![` sections
-//! with an unknown (or missing) status keyword (`_markupbase.py:146-164`,
-//! `:376-392` via `ParserBase.error`); that surfaces here as
-//! [`StripError`], which the write path maps to a 500 exactly as Django's
-//! 500 on the same input.
+//! `<![...]>` declarations never raise: 3.12 consumes them to the first
+//! `>` (`unknown_decl`/`handle_comment`, both no-ops in `MLStripper`), so
+//! stripping is infallible and `save()` always writes normally.
 
 use super::entities::{HTML5_ENTITIES, INVALID_CHARREFS, INVALID_CODEPOINTS};
 
-/// Feed of `<![...>` Python cannot classify.
-///
-/// Mirrors `ParserBase.error`, which raises `NotImplementedError` out of
-/// `MLStripper.feed` (and therefore out of `Page.save()` /
-/// `PageVersion.save()`). The write path maps this to a 500, matching
-/// Django's behavior byte for byte on the wire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StripError {
-    char_offset: usize,
-}
-
-impl StripError {
-    /// Char offset of the `<![` that failed classification.
-    pub fn offset(self) -> usize {
-        self.char_offset
-    }
-}
-
-impl std::fmt::Display for StripError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "unknown marked section at offset {}", self.char_offset)
-    }
-}
-
-impl std::error::Error for StripError {}
-
-/// Script/style CDATA element (`HTMLParser.CDATA_CONTENT_ELEMENTS`,
-/// `parser.py:84`).
+/// CDATA/RCDATA element (`HTMLParser.CDATA_CONTENT_ELEMENTS` /
+/// `RCDATA_CONTENT_ELEMENTS`, `parser.py`). `set_cdata_mode` lowercases the
+/// tag before comparing, so matching here is on the lowercased name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CdataElem {
     Script,
     Style,
+    Xmp,
+    Iframe,
+    Noembed,
+    Noframes,
+    Textarea,
+    Title,
+    Plaintext,
 }
 
 impl CdataElem {
@@ -82,14 +60,51 @@ impl CdataElem {
         match self {
             CdataElem::Script => "script",
             CdataElem::Style => "style",
+            CdataElem::Xmp => "xmp",
+            CdataElem::Iframe => "iframe",
+            CdataElem::Noembed => "noembed",
+            CdataElem::Noframes => "noframes",
+            CdataElem::Textarea => "textarea",
+            CdataElem::Title => "title",
+            CdataElem::Plaintext => "plaintext",
+        }
+    }
+
+    /// RCDATA (`textarea`, `title`) content is entity-decoded (`_escapable`
+    /// with `convert_charrefs`); RAWTEXT passes through verbatim.
+    fn escapable(self) -> bool {
+        matches!(self, CdataElem::Textarea | CdataElem::Title)
+    }
+
+    /// `set_cdata_mode` (`parser.py`): RAWTEXT elements, RCDATA elements,
+    /// and `plaintext`. (`noscript` needs `scripting=True`, which
+    /// `MLStripper` never sets, so it parses normally.)
+    fn from_tag(tag: &str) -> Option<CdataElem> {
+        match tag {
+            "script" => Some(CdataElem::Script),
+            "style" => Some(CdataElem::Style),
+            "xmp" => Some(CdataElem::Xmp),
+            "iframe" => Some(CdataElem::Iframe),
+            "noembed" => Some(CdataElem::Noembed),
+            "noframes" => Some(CdataElem::Noframes),
+            "textarea" => Some(CdataElem::Textarea),
+            "title" => Some(CdataElem::Title),
+            "plaintext" => Some(CdataElem::Plaintext),
+            _ => None,
         }
     }
 }
 
-/// Python `re` `\s` on `str`: ASCII whitespace plus the explicit extras
-/// (`\x0b`, `\x1c`-`\x1f`, `\x85`) plus Unicode `White_Space`
-/// (`char::is_whitespace`). Probed against `re.compile(r'\s')` for every
-/// code point below U+3000 plus the U+2000 block, U+3000 and U+FEFF.
+/// HTML whitespace for tag/declaration structure (`[\t\n\r\f ]` in
+/// `tagfind_tolerant`/`attrfind_tolerant`/`locatetagend` and the `&`
+/// near-end guard, `parser.py`). ASCII-only: `\x0b`, `\x85` and non-ASCII
+/// spaces are ordinary name/value chars here.
+fn is_html_space(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\r' | '\x0c' | ' ')
+}
+
+/// Python `str.strip()` (used only for the start-tag end check in
+/// `parse_starttag`): full Unicode whitespace.
 fn is_py_space(c: char) -> bool {
     matches!(
         c,
@@ -97,38 +112,32 @@ fn is_py_space(c: char) -> bool {
     ) || c.is_whitespace()
 }
 
-/// Tag-name continuation (`tagfind_tolerant`, `parser.py:36`):
-/// everything except whitespace, `/`, `>` and NUL.
+/// Tag-name continuation (`tagfind_tolerant`): everything except HTML
+/// whitespace, `/` and `>`.
 fn is_tag_name_char(c: char) -> bool {
-    !matches!(c, '\t' | '\n' | '\r' | '\x0c' | ' ' | '/' | '>' | '\0')
+    !(is_html_space(c) || c == '/' || c == '>')
 }
 
-/// Entity-name char (`_charref`, `html/__init__.py:130-132`): everything
-/// except `\t \n \x0c space < > & # ;`.
+/// Entity-name char (`_charref`, `html/__init__.py`): everything except
+/// `\t \n \f space < > & # ;`.
 fn is_entity_name_char(c: char) -> bool {
     !matches!(c, '\t' | '\n' | '\x0c' | ' ' | '<' | '>' | '&' | '#' | ';')
 }
 
-/// End-tag name char (`endtagfind`, `parser.py:58`).
-fn is_end_tag_name_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | ':')
-}
-
-/// Attribute-name first char (`attrfind_tolerant`, `parser.py:37-39`):
-/// `[^\s/>]`.
+/// Attribute-name first char (`attrfind_tolerant`): `[^\t\n\r\f />]`.
 fn is_attr_first_char(c: char) -> bool {
-    !(is_py_space(c) || c == '/' || c == '>')
+    !(is_html_space(c) || c == '/' || c == '>')
 }
 
-/// Attribute-name continuation: `[^\s/=>]*`.
+/// Attribute-name continuation: `[^\t\n\r\f /=>]*`.
 fn is_attr_char(c: char) -> bool {
-    !(is_py_space(c) || c == '/' || c == '=' || c == '>')
+    !(is_html_space(c) || c == '/' || c == '=' || c == '>')
 }
 
 /// `MLStripper.feed(html)` without `close()`: collect `handle_data`,
 /// drop every tag/comment/declaration/PI and every incomplete trailing
-/// construct (`goahead(0)`, `parser.py:133-250`).
-pub fn ml_strip_tags(html: &str) -> Result<String, StripError> {
+/// construct (`goahead(0)`).
+pub fn ml_strip_tags(html: &str) -> String {
     let raw: Vec<char> = html.chars().collect();
     let n = raw.len();
     let mut out = String::new();
@@ -136,42 +145,52 @@ pub fn ml_strip_tags(html: &str) -> Result<String, StripError> {
     let mut cdata: Option<CdataElem> = None;
     while i < n {
         if let Some(elem) = cdata {
-            match find_cdata_end(&raw, i, elem) {
+            // `plaintext` never terminates (`interesting = re.compile(r'\Z')`):
+            // the rest is data, verbatim.
+            if elem == CdataElem::Plaintext {
+                out.extend(raw[i..].iter());
+                break;
+            }
+            match find_cdata_end(&raw, i, elem.name()) {
                 // `interesting` miss with `cdata_elem` set: `break`
-                // (`parser.py:157-158`); the tail stays buffered, and with
-                // no `close()` it is never emitted.
+                // (`goahead`); the tail stays buffered, and with no
+                // `close()` it is never emitted.
                 None => break,
-                Some((start, gt)) => {
-                    out.extend(raw[i..start].iter());
-                    // `parse_endtag` at the match (`parser.py:385-422`):
-                    // only an ASCII `</elem>` (via `endtagfind`) clears
-                    // CDATA mode; anything else the case-insensitive scan
-                    // found (e.g. `</ſcript>`) is collected as data
-                    // (`parser.py:415-418`) and the mode stays on.
-                    match match_endtagfind(&raw, start) {
-                        Some(name) if name == elem.name() => {
-                            i = gt + 1;
+                Some(start) => {
+                    // RCDATA decodes entities (`_escapable` with
+                    // `convert_charrefs`); RAWTEXT passes through verbatim.
+                    if elem.escapable() {
+                        out.push_str(&unescape(&raw[i..start]));
+                    } else {
+                        out.extend(raw[i..start].iter());
+                    }
+                    // `parse_endtag` at the match: the quote-aware
+                    // `locatetagend` scan finds the `>` (skipping quoted
+                    // `>`s). With none the parse is incomplete (`-1` →
+                    // `break`) and the tail is dropped — the content above
+                    // is already emitted, exactly as `goahead` emits
+                    // before `parse_endtag` runs.
+                    match locatetagend_end(&raw, start + 2) {
+                        Some(end) => {
+                            i = end;
                             cdata = None;
                         }
-                        _ => {
-                            out.extend(raw[start..gt + 1].iter());
-                            i = gt + 1;
-                        }
+                        None => break,
                     }
                     continue;
                 }
             }
         }
-        // `j = rawdata.find('<', i)` (`parser.py:139`).
+        // `j = rawdata.find('<', i)`.
         let mut j = i;
         while j < n && raw[j] != '<' {
             j += 1;
         }
         if j == n {
-            // No `<` ahead: the `&` near-end guard (`parser.py:143-151`).
-            // A `&` in the last 34 chars with no whitespace/`;` after it
-            // may be a cut-in-half charref, so the parser waits for more
-            // text — which never comes, so the tail is dropped.
+            // No `<` ahead: the `&` near-end guard. A `&` in the last 34
+            // chars with no `[\t\n\r\f ;]` after it may be a cut-in-half
+            // charref, so the parser waits for more text — which never
+            // comes, so the tail is dropped.
             let from = i.max(n.saturating_sub(34));
             let mut amp: Option<usize> = None;
             for k in (from..n).rev() {
@@ -183,7 +202,7 @@ pub fn ml_strip_tags(html: &str) -> Result<String, StripError> {
             if let Some(a) = amp {
                 let mut terminated = false;
                 for c in raw.iter().skip(a) {
-                    if *c == ';' || is_py_space(*c) {
+                    if *c == ';' || is_html_space(*c) {
                         terminated = true;
                         break;
                     }
@@ -200,7 +219,7 @@ pub fn ml_strip_tags(html: &str) -> Result<String, StripError> {
         if i == n {
             break;
         }
-        // `rawdata[i] == '<'` dispatch (`parser.py:168-183`).
+        // `rawdata[i] == '<'` dispatch (`goahead`).
         if i + 1 < n && raw[i + 1].is_ascii_alphabetic() {
             // `starttagopen` (`<[a-zA-Z]`).
             match parse_starttag(&raw, i, &mut out) {
@@ -231,32 +250,17 @@ pub fn ml_strip_tags(html: &str) -> Result<String, StripError> {
         } else if starts_with(&raw, i, "<!") {
             match parse_html_declaration(&raw, i) {
                 Ok(end) => i = end,
-                Err(ParseFail::Incomplete) => break,
-                Err(ParseFail::Error(e)) => return Err(e),
+                Err(()) => break,
             }
         } else if i + 1 < n {
-            // A `<` that opens nothing is literal data (`parser.py:179-181`).
+            // A `<` that opens nothing is literal data.
             out.push('<');
             i += 1;
         } else {
             break;
         }
     }
-    Ok(out)
-}
-
-/// `parse_*` failure: incomplete (break, tail dropped) or a classification
-/// error (Python raises; see [`StripError`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ParseFail {
-    Incomplete,
-    Error(StripError),
-}
-
-impl From<StripError> for ParseFail {
-    fn from(e: StripError) -> Self {
-        ParseFail::Error(e)
-    }
+    out
 }
 
 fn starts_with(raw: &[char], at: usize, pat: &str) -> bool {
@@ -269,71 +273,86 @@ fn find_gt(raw: &[char], from: usize) -> Option<usize> {
     (from..raw.len()).find(|&k| raw[k] == '>')
 }
 
-/// Single-char case-insensitive equality for the CDATA-end scan.
-///
-/// The scan regex is compiled with `re.I` (`parser.py:122-124`), whose one
-/// pragmatic quirk is folding four non-ASCII chars onto ASCII letters —
-/// U+0130/U+0131 onto `i`, U+017F onto `s`, U+212A onto `k` — probed
-/// against `re` itself across the whole BMP (astral spot-checks fold
-/// nothing to ASCII). Everything else compares ASCII case-insensitively.
-fn fold_eq(c: char, ascii: char) -> bool {
-    if c == ascii {
-        return true;
-    }
-    if c.is_ascii() {
-        return c.to_ascii_lowercase() == ascii;
-    }
-    matches!(
-        (c, ascii),
-        ('\u{130}', 'i') | ('\u{131}', 'i') | ('\u{17f}', 's') | ('\u{212a}', 'k')
-    )
-}
-
-/// CDATA end (`interesting` with `cdata_elem`, `parser.py:122-124`):
-/// `</`, optional whitespace, the element name (case-insensitive per
-/// [`fold_eq`]), optional whitespace, `>`. Returns the match start and the
-/// `>` index.
-fn find_cdata_end(raw: &[char], from: usize, elem: CdataElem) -> Option<(usize, usize)> {
-    let name: Vec<char> = elem.name().chars().collect();
+/// CDATA end (`set_cdata_mode`: `</elem(?=[\t\n\r\f />])` with
+/// `re.IGNORECASE|re.ASCII`): ASCII-only case-insensitive, no whitespace
+/// allowed after `</`, single-char lookahead. Returns the match start.
+/// (`re.ASCII` means non-ASCII letters never fold: `</scrıpt>` does not
+/// end a `script` section.)
+fn find_cdata_end(raw: &[char], from: usize, name: &str) -> Option<usize> {
+    let name: Vec<char> = name.chars().collect();
     let mut s = from;
     while s < raw.len() {
-        while s < raw.len() && raw[s] != '<' {
+        if raw[s] != '<' {
             s += 1;
+            continue;
         }
         if s + 1 >= raw.len() || raw[s + 1] != '/' {
             s += 1;
             continue;
         }
-        let mut p = s + 2;
-        while p < raw.len() && is_py_space(raw[p]) {
-            p += 1;
+        // Fewer chars left than `</` + name: no later `s` can match.
+        if s + 2 + name.len() > raw.len() {
+            break;
         }
         let mut ok = true;
-        for nc in &name {
-            if p >= raw.len() || !fold_eq(raw[p], *nc) {
+        for (k, nc) in name.iter().enumerate() {
+            if !raw[s + 2 + k].eq_ignore_ascii_case(nc) {
                 ok = false;
                 break;
             }
-            p += 1;
         }
         if !ok {
             s += 1;
             continue;
         }
-        while p < raw.len() && is_py_space(raw[p]) {
-            p += 1;
-        }
-        if p < raw.len() && raw[p] == '>' {
-            return Some((s, p));
+        // Lookahead: exactly one char in `[\t\n\r\f />]` (at end of input
+        // there is no match).
+        let after = s + 2 + name.len();
+        if after < raw.len()
+            && (is_html_space(raw[after]) || raw[after] == '/' || raw[after] == '>')
+        {
+            return Some(s);
         }
         s += 1;
     }
     None
 }
 
-/// `tagfind_tolerant` at `pos` (`parser.py:36`): the caller guarantees an
-/// ASCII letter at `pos`. Returns the lowercased name and the match end
-/// (name plus the trailing `(?:\s|/(?!>))*` run).
+/// `locatetagend` extent (`parser.py`): tag name, `[\t\n\r\f /]*`, zero or
+/// more `attrfind_tolerant` blocks, optional `>`. The caller guarantees an
+/// ASCII letter at `pos` (`<` + letter for start tags, `</` + letter for
+/// end tags, `</` + element name for CDATA ends). Returns the index past
+/// the `>`, or `None` when no `>` terminates the tag (Python's `-1`).
+/// Quoted attribute values are skipped whole, so a `>` inside quotes does
+/// not end the tag.
+fn locatetagend_end(raw: &[char], pos: usize) -> Option<usize> {
+    let mut p = pos;
+    while p < raw.len() && is_tag_name_char(raw[p]) {
+        p += 1;
+    }
+    loop {
+        while p < raw.len() && (is_html_space(raw[p]) || raw[p] == '/') {
+            p += 1;
+        }
+        match match_attr(raw, p) {
+            Some(end) => p = end,
+            None => break,
+        }
+    }
+    while p < raw.len() && is_html_space(raw[p]) {
+        p += 1;
+    }
+    // `>?`: the match always succeeds; only a `>` terminates.
+    if p < raw.len() && raw[p] == '>' {
+        Some(p + 1)
+    } else {
+        None
+    }
+}
+
+/// `tagfind_tolerant` at `pos`: the caller guarantees an ASCII letter at
+/// `pos`. Returns the lowercased name and the match end (name plus the
+/// trailing `(?:[\t\n\r\f ]|/(?!>))*` run).
 fn match_tagfind(raw: &[char], pos: usize) -> (String, usize) {
     let mut e = pos + 1;
     while e < raw.len() && is_tag_name_char(raw[e]) {
@@ -342,23 +361,23 @@ fn match_tagfind(raw: &[char], pos: usize) -> (String, usize) {
     let name: String = raw[pos..e].iter().collect();
     let mut m = e;
     while m < raw.len()
-        && (is_py_space(raw[m]) || (raw[m] == '/' && !(m + 1 < raw.len() && raw[m + 1] == '>')))
+        && (is_html_space(raw[m]) || (raw[m] == '/' && !(m + 1 < raw.len() && raw[m + 1] == '>')))
     {
         m += 1;
     }
     (name.to_lowercase(), m)
 }
 
-/// `attrfind_tolerant` at `k` (`parser.py:37-39`): attribute name with the
-/// `(?<=[\'"\s/])` lookbehind, the backtracking optional value group, and
-/// the trailing run. Returns the match end. Values are parsed only for
-/// their extent — every handler that would read them is a no-op.
+/// `attrfind_tolerant` at `k`: attribute name with the
+/// `(?<=['"\t\n\r\f /])` lookbehind, the backtracking optional value
+/// group, and the trailing run. Returns the match end. Values are parsed
+/// only for their extent — every handler that would read them is a no-op.
 fn match_attr(raw: &[char], k: usize) -> Option<usize> {
     if k == 0 {
         return None;
     }
     let prev = raw[k - 1];
-    if !(prev == '\'' || prev == '"' || prev == '/' || is_py_space(prev)) {
+    if !(prev == '\'' || prev == '"' || prev == '/' || is_html_space(prev)) {
         return None;
     }
     if k >= raw.len() || !is_attr_first_char(raw[k]) {
@@ -368,98 +387,60 @@ fn match_attr(raw: &[char], k: usize) -> Option<usize> {
     while p < raw.len() && is_attr_char(raw[p]) {
         p += 1;
     }
-    // Optional value group, with backtracking to empty when the value
-    // alternatives fail (`(\s*=+\s*(...))?`).
+    // Optional value group, with backtracking (`([\t\n\r\f ]*=[\t\n\r\f
+    // ]*(...))?`). The bare alternative matches empty, so on a failing
+    // quoted value the post-`=` whitespace retracts and the group still
+    // consumes the `=` — unless the quote directly follows the `=`, when
+    // the whole group matches empty.
     let save = p;
     let mut q = p;
-    while q < raw.len() && is_py_space(raw[q]) {
+    while q < raw.len() && is_html_space(raw[q]) {
         q += 1;
     }
     if q < raw.len() && raw[q] == '=' {
-        q += 1;
-        while q < raw.len() && raw[q] == '=' {
-            q += 1;
+        let after_eq = q + 1;
+        let mut w = after_eq;
+        while w < raw.len() && is_html_space(raw[w]) {
+            w += 1;
         }
-        while q < raw.len() && is_py_space(raw[q]) {
-            q += 1;
-        }
-        if q < raw.len() && raw[q] == '\'' {
-            match (q + 1..raw.len()).find(|&t| raw[t] == '\'') {
+        if w < raw.len() && (raw[w] == '\'' || raw[w] == '"') {
+            let quote = raw[w];
+            match (w + 1..raw.len()).find(|&t| raw[t] == quote) {
                 Some(t) => q = t + 1,
-                // `'[^']*'` fails; `"(...)"` and the bare alternative
-                // (blocked by the `(?![\'"])` lookahead) fail too, so the
-                // whole value group matches empty.
-                None => q = save,
-            }
-        } else if q < raw.len() && raw[q] == '"' {
-            match (q + 1..raw.len()).find(|&t| raw[t] == '"') {
-                Some(t) => q = t + 1,
-                None => q = save,
+                // Unterminated quote: retract the whitespace (the bare
+                // alternative matches empty there) unless there is none
+                // to retract, when the whole value group matches empty.
+                None => {
+                    q = if w > after_eq { after_eq } else { save };
+                }
             }
         } else {
-            while q < raw.len() && raw[q] != '>' && !is_py_space(raw[q]) {
+            // Bare value (`(?!['"])[^>\t\n\r\f ]*`, possibly empty).
+            q = w;
+            while q < raw.len() && raw[q] != '>' && !is_html_space(raw[q]) {
                 q += 1;
             }
         }
         p = q;
     }
     while p < raw.len()
-        && (is_py_space(raw[p]) || (raw[p] == '/' && !(p + 1 < raw.len() && raw[p + 1] == '>')))
+        && (is_html_space(raw[p]) || (raw[p] == '/' && !(p + 1 < raw.len() && raw[p + 1] == '>')))
     {
         p += 1;
     }
     Some(p)
 }
 
-/// `check_for_whole_start_tag` (`parser.py:351-381`): `Ok(endpos)` or
-/// `Err(())` for the `-1` (incomplete, buffer-boundary) cases.
+/// `check_for_whole_start_tag`: `locatetagend` from `i + 1` (the caller
+/// guarantees `<[a-zA-Z]`); `Ok(endpos)` or `Err(())` for the `-1`
+/// (incomplete, buffer-boundary) cases.
 fn check_for_whole_start_tag(raw: &[char], i: usize) -> Result<usize, ()> {
-    // `locatestarttagend_tolerant` (`parser.py:40-54`): `<`, tag name, then
-    // `[\s/]*` + attributes, then trailing whitespace. The match cannot
-    // fail — the caller guarantees `<[a-zA-Z]`.
-    let mut pos = i + 1;
-    while pos < raw.len() && is_tag_name_char(raw[pos]) {
-        pos += 1;
-    }
-    loop {
-        while pos < raw.len() && (is_py_space(raw[pos]) || raw[pos] == '/') {
-            pos += 1;
-        }
-        match match_attr(raw, pos) {
-            Some(end) => pos = end,
-            None => break,
-        }
-    }
-    while pos < raw.len() && is_py_space(raw[pos]) {
-        pos += 1;
-    }
-    let j = pos;
-    if j >= raw.len() {
-        // End of input.
-        return Err(());
-    }
-    let next = raw[j];
-    if next == '>' {
-        return Ok(j + 1);
-    }
-    if next == '/' {
-        if j + 1 < raw.len() && raw[j + 1] == '>' {
-            return Ok(j + 2);
-        }
-        // Buffer boundary (`startswith("/", j)` always holds here).
-        return Err(());
-    }
-    if next.is_ascii_alphabetic() || next == '=' || next == '/' {
-        // End of input in or before an attribute value.
-        return Err(());
-    }
-    // Bogus input: `j > i` always holds (at least `<x` matched).
-    Ok(j)
+    locatetagend_end(raw, i + 1).ok_or(())
 }
 
-/// `parse_starttag` (`parser.py:300-347`). `Ok((end, cdata))` consumes a
-/// tag (setting CDATA mode for script/style); `Ok` via the `Raw` path
-/// emits `raw[i..end]` verbatim — note: no `unescape` (`parser.py:338`).
+/// `parse_starttag`. `Ok((end, cdata))` consumes a tag (setting CDATA
+/// mode for the RAWTEXT/RCDATA/`plaintext` elements); `Ok` via the `Raw`
+/// path emits `raw[i..end]` verbatim — note: no `unescape`.
 enum StartTag {
     Tag { end: usize, elem: Option<CdataElem> },
     Raw { end: usize },
@@ -486,202 +467,112 @@ fn parse_starttag(raw: &[char], i: usize, out: &mut String) -> Result<StartTag, 
             elem: None,
         });
     }
-    let elem = match tag.as_str() {
-        "script" => Some(CdataElem::Script),
-        "style" => Some(CdataElem::Style),
-        _ => None,
-    };
-    Ok(StartTag::Tag { end: endpos, elem })
+    Ok(StartTag::Tag {
+        end: endpos,
+        elem: CdataElem::from_tag(&tag),
+    })
 }
 
-/// `parse_endtag` (`parser.py:385-422`) with no CDATA element set (the main
-/// loop only dispatches here outside CDATA mode). Every end tag is
-/// consumed; `handle_endtag` is a no-op.
+/// `parse_endtag`. Every end tag is consumed; `handle_endtag` is a no-op.
+/// On the real-tag path Python also clears CDATA mode unconditionally —
+/// in this port the CDATA branch consumes end tags itself, so the mode is
+/// already `None` here and the clear is a no-op, exactly as in Python.
 fn parse_endtag(raw: &[char], i: usize) -> Result<usize, ()> {
-    let gt = find_gt(raw, i + 1).ok_or(())?;
-    if match_endtagfind(raw, i).is_some() {
-        return Ok(gt + 1);
-    }
-    match match_tagfind_opt(raw, i + 2) {
-        None => {
-            if starts_with(raw, i, "</>") {
-                Ok(i + 3)
-            } else {
-                // `parse_bogus_comment`: `find('>', i+2)` — `gt` exists.
-                Ok(gt + 1)
-            }
+    // Fast check: no `>` anywhere ahead means incomplete.
+    find_gt(raw, i + 2).ok_or(())?;
+    // `endtagopen` (`</` + ASCII letter).
+    if !(i + 2 < raw.len() && raw[i + 2].is_ascii_alphabetic()) {
+        // `</>` is ignored; anything else is a bogus comment (the fast
+        // check guarantees `find('>', i+2)` hits).
+        if starts_with(raw, i, "</>") {
+            return Ok(i + 3);
         }
-        Some((_, m)) => {
-            let gt2 = find_gt(raw, m).ok_or(())?;
-            Ok(gt2 + 1)
-        }
+        return parse_bogus_comment(raw, i);
     }
+    // Quote-aware `locatetagend` scan (handles `>` inside quoted attr
+    // values); incomplete when no `>` terminates the tag.
+    locatetagend_end(raw, i + 2).ok_or(())
 }
 
-/// `endtagfind` at `i` (`parser.py:58`): `</`, whitespace, ASCII-letter
-/// name, whitespace, `>`. Returns the lowercased name.
-fn match_endtagfind(raw: &[char], i: usize) -> Option<String> {
-    let mut p = i + 2;
-    while p < raw.len() && is_py_space(raw[p]) {
-        p += 1;
-    }
-    if p >= raw.len() || !raw[p].is_ascii_alphabetic() {
-        return None;
-    }
-    let mut e = p + 1;
-    while e < raw.len() && is_end_tag_name_char(raw[e]) {
-        e += 1;
-    }
-    let mut m = e;
-    while m < raw.len() && is_py_space(raw[m]) {
-        m += 1;
-    }
-    if m < raw.len() && raw[m] == '>' {
-        Some(raw[p..e].iter().collect::<String>().to_lowercase())
-    } else {
-        None
-    }
-}
-
-/// `tagfind_tolerant` that may fail (end-tag fallback path,
-/// `parser.py:398`).
-fn match_tagfind_opt(raw: &[char], pos: usize) -> Option<(String, usize)> {
-    if pos >= raw.len() || !raw[pos].is_ascii_alphabetic() {
-        return None;
-    }
-    let (name, m) = match_tagfind(raw, pos);
-    Some((name, m))
-}
-
-/// `parse_comment` (`_markupbase.py:168-177`): `<!--` plus the first
-/// `--\s*>`. Unterminated comments are incomplete. `handle_comment` is a
-/// no-op, so only the end position matters.
+/// `parse_comment`: `commentclose` (`--!?>`) searched from `i + 4`, else
+/// `commentabruptclose` (`-?>`) matched at exactly `i + 4`, else
+/// incomplete. `handle_comment` is a no-op, so only the end matters.
 fn parse_comment(raw: &[char], i: usize) -> Result<usize, ()> {
+    let n = raw.len();
+    // `commentclose.search(rawdata, i+4)`.
     let mut s = i + 4;
-    while s + 1 < raw.len() {
-        if raw[s] == '-' && raw[s + 1] == '-' {
-            let mut p = s + 2;
-            while p < raw.len() && is_py_space(raw[p]) {
-                p += 1;
+    while s + 1 < n {
+        if raw[s] == '-' && s + 1 < n && raw[s + 1] == '-' {
+            if s + 2 < n && raw[s + 2] == '>' {
+                return Ok(s + 3);
             }
-            if p < raw.len() && raw[p] == '>' {
-                return Ok(p + 1);
+            if s + 3 < n && raw[s + 2] == '!' && raw[s + 3] == '>' {
+                return Ok(s + 4);
             }
         }
         s += 1;
+    }
+    // `commentabruptclose.match(rawdata, i+4)`.
+    if i + 4 < n && raw[i + 4] == '>' {
+        return Ok(i + 5);
+    }
+    if i + 5 < n && raw[i + 4] == '-' && raw[i + 5] == '>' {
+        return Ok(i + 6);
     }
     Err(())
 }
 
-/// `parse_bogus_comment` (`parser.py:276-285`): first `>` from `i+2`.
-/// `handle_comment` is a no-op.
+/// `parse_bogus_comment`: first `>` from `i + 2`. `handle_comment` is a
+/// no-op.
 fn parse_bogus_comment(raw: &[char], i: usize) -> Result<usize, ()> {
     find_gt(raw, i + 2).map(|gt| gt + 1).ok_or(())
 }
 
-/// `parse_pi` (`parser.py:289-297`): first `>` from `i+2` (`piclose`,
-/// `parser.py:28`). `handle_pi` is a no-op.
+/// `parse_pi` (`piclose` is `>`): first `>` from `i + 2`. `handle_pi` is a
+/// no-op.
 fn parse_pi(raw: &[char], i: usize) -> Result<usize, ()> {
     find_gt(raw, i + 2).map(|gt| gt + 1).ok_or(())
 }
 
-/// `parse_html_declaration` (`parser.py:255-272`). The `<!--` arm is kept
-/// for fidelity although the main loop never routes a comment here.
-fn parse_html_declaration(raw: &[char], i: usize) -> Result<usize, ParseFail> {
+/// `parse_html_declaration`. The `<!--` arm is kept for fidelity although
+/// the main loop never routes a comment here. Nothing here can fail the
+/// way the old `parse_marked_section` did: `<![CDATA[` needs its `]]>`,
+/// `<!doctype` (any case) and `<![` need their `>`, and anything else is a
+/// bogus comment — every handler on these paths is a no-op in
+/// `MLStripper`, so `Err` only means incomplete (drop the tail).
+fn parse_html_declaration(raw: &[char], i: usize) -> Result<usize, ()> {
     if starts_with(raw, i, "<!--") {
-        return parse_comment(raw, i).map_err(|()| ParseFail::Incomplete);
+        return parse_comment(raw, i);
     }
-    if starts_with(raw, i, "<![") {
-        return parse_marked_section(raw, i);
+    // Exact case, and only with `_support_cdata` — which `MLStripper`
+    // never disables.
+    if starts_with(raw, i, "<![CDATA[") {
+        return find_cdata_literal(raw, i + 9).ok_or(());
     }
     if raw.len() >= i + 9 && raw[i..i + 9].iter().collect::<String>().to_lowercase() == "<!doctype"
     {
         // `find('>', i+9)`; `handle_decl` is a no-op.
-        return find_gt(raw, i + 9)
-            .map(|gt| gt + 1)
-            .ok_or(ParseFail::Incomplete);
+        return find_gt(raw, i + 9).map(|gt| gt + 1).ok_or(());
     }
-    parse_bogus_comment(raw, i).map_err(|()| ParseFail::Incomplete)
+    if starts_with(raw, i, "<![") {
+        // `unknown_decl` when the char before `>` is `]`, else
+        // `handle_comment` — both no-ops.
+        return find_gt(raw, i + 3).map(|gt| gt + 1).ok_or(());
+    }
+    parse_bogus_comment(raw, i)
 }
 
-/// `_scan_name` (`_markupbase.py:376-392`): `declstart` is the `<![`
-/// position for the error offset. `Ok(None)` means end-of-buffer
-/// (incomplete); `Err` mirrors `ParserBase.error` (Python raises).
-fn scan_name(
-    raw: &[char],
-    p: usize,
-    declstart: usize,
-) -> Result<(Option<String>, usize), StripError> {
-    let n = raw.len();
-    if p == n {
-        return Ok((None, 0));
-    }
-    if !raw[p].is_ascii_alphabetic() {
-        return Err(StripError {
-            char_offset: declstart,
-        });
-    }
-    let mut e = p + 1;
-    while e < n && (raw[e].is_ascii_alphanumeric() || matches!(raw[e], '-' | '_' | '.')) {
-        e += 1;
-    }
-    while e < n && is_py_space(raw[e]) {
-        e += 1;
-    }
-    if e == n {
-        return Ok((None, 0));
-    }
-    let name: String = raw[p..e]
-        .iter()
-        .collect::<String>()
-        .trim_end_matches(|c: char| is_py_space(c))
-        .to_string();
-    Ok((Some(name.to_lowercase()), e))
-}
-
-/// `parse_marked_section` (`_markupbase.py:146-164`): `<![name[ ... ]]>`
-/// (or `]>` for the MS-Office trio). Unknown status keywords raise in
-/// Python (`ParserBase.error`); `unknown_decl` is a no-op.
-fn parse_marked_section(raw: &[char], i: usize) -> Result<usize, ParseFail> {
-    let (name, _) = match scan_name(raw, i + 3, i)? {
-        (None, _) => return Err(ParseFail::Incomplete),
-        (Some(name), j) => (name, j),
-    };
-    let ms_close = name == "temp"
-        || name == "cdata"
-        || name == "ignore"
-        || name == "include"
-        || name == "rcdata";
-    let ms_office = name == "if" || name == "else" || name == "endif";
-    if !ms_close && !ms_office {
-        return Err(StripError { char_offset: i }.into());
-    }
-    // `_markedsectionclose` (`]\s*]\s*>`) or `_msmarkedsectionclose`
-    // (`]\s*>`), searched from `i+3`.
-    let mut s = i + 3;
-    while s < raw.len() {
-        if raw[s] == ']' {
-            let mut p = s + 1;
-            while p < raw.len() && is_py_space(raw[p]) {
-                p += 1;
-            }
-            if !ms_close {
-                if p < raw.len() && raw[p] == '>' {
-                    return Ok(p + 1);
-                }
-            } else if p < raw.len() && raw[p] == ']' {
-                let mut q = p + 1;
-                while q < raw.len() && is_py_space(raw[q]) {
-                    q += 1;
-                }
-                if q < raw.len() && raw[q] == '>' {
-                    return Ok(q + 1);
-                }
-            }
+/// First `]]>` at or after `from` (`rawdata.find(']]>', i+9)`),
+/// returned past the bracket run.
+fn find_cdata_literal(raw: &[char], from: usize) -> Option<usize> {
+    let mut s = from;
+    while s + 2 < raw.len() {
+        if raw[s] == ']' && raw[s + 1] == ']' && raw[s + 2] == '>' {
+            return Some(s + 3);
         }
         s += 1;
     }
-    Err(ParseFail::Incomplete)
+    None
 }
 
 /// `html.unescape` (`html/__init__.py:122-135`): the `_charref` regex
@@ -829,14 +720,12 @@ fn lookup_entity(name: &str) -> Option<&'static str> {
 /// `Page.save()` (`page.py:70-77`) and `PageVersion.save()` (`:175-182`)
 /// share one rule: `description_stripped` is `None` when
 /// `description_html` is `""` or `None`, else `strip_tags` of the HTML.
-/// The `Result` carries [`StripError`] exactly where Python's `save()`
-/// raises.
-pub fn sync_description_stripped(
-    description_html: Option<&str>,
-) -> Result<Option<String>, StripError> {
+/// Infallible: 3.12's `parse_html_declaration` never raises (unknown
+/// `<![...]>` sections are consumed to the first `>`).
+pub fn sync_description_stripped(description_html: Option<&str>) -> Option<String> {
     match description_html {
-        None => Ok(None),
-        Some("") => Ok(None),
-        Some(html) => ml_strip_tags(html).map(Some),
+        None => None,
+        Some("") => None,
+        Some(html) => Some(ml_strip_tags(html)),
     }
 }

@@ -7,12 +7,15 @@
 //! schema owner until switchover.
 //!
 //! Column order in each `*_COLUMNS` const follows the Django `_meta` field
-//! order recorded in `rust-api/fixtures/app_pages/models/page_columns.json`
-//! (F30-04) and `through_columns.json` (F30-05): `BaseModel.id`
+//! order: the `id`-first base/audit prefix (`BaseModel.id`
 //! (`db/models/base.py:18`), audit columns (`TimeAuditModel`,
 //! `UserAuditModel`, `SoftDeleteModel` in `db/mixins.py:19-73`, i.e.
 //! `created_at`, `updated_at`, `created_by_id`, `updated_by_id`,
-//! `deleted_at`), then the model's own fields in declaration order. FK
+//! `deleted_at`)) matches the project convention kept by every merged
+//! sibling port, then the model's own fields in declaration order as
+//! recorded in `rust-api/fixtures/app_pages/models/page_columns.json`
+//! (F30-04) and `through_columns.json` (F30-05) (fixtures carry
+//! own-columns only). FK
 //! entries use the Django attnames (`workspace_id`, `owned_by_id`,
 //! `parent_id`, …). The `labels` / `projects` `ManyToManyField`s
 //! (`page.py:39,52`) create no column on `pages` (their rows live in
@@ -826,15 +829,15 @@ mod tests {
         for vec in vectors {
             let html: Option<&str> = vec["description_html"].as_str();
             let want: Option<&str> = vec["description_stripped_after"].as_str();
-            let got = sync_description_stripped(html).expect("strip succeeds");
+            let got = sync_description_stripped(html);
             assert_eq!(got.as_deref(), want, "vector {}", vec["source"]);
         }
         // The None-vs-"" split the issue calls out: both yield None, while
         // the default "<p></p>" is non-empty so the stripper runs ("" out).
-        assert_eq!(sync_description_stripped(None).unwrap(), None);
-        assert_eq!(sync_description_stripped(Some("")).unwrap(), None);
+        assert_eq!(sync_description_stripped(None), None);
+        assert_eq!(sync_description_stripped(Some("")), None);
         assert_eq!(
-            sync_description_stripped(Some("<p></p>")).unwrap(),
+            sync_description_stripped(Some("<p></p>")),
             Some(String::new())
         );
     }
@@ -1016,10 +1019,10 @@ mod tests {
         assert_eq!(page_version::OWNED_BY_ON_DELETE, OnDelete::Cascade);
         // Same stripped rule as Page (page.py:175-182): None for ""/None,
         // strip otherwise.
-        assert_eq!(sync_description_stripped(None).unwrap(), None);
-        assert_eq!(sync_description_stripped(Some("")).unwrap(), None);
+        assert_eq!(sync_description_stripped(None), None);
+        assert_eq!(sync_description_stripped(Some("")), None);
         assert_eq!(
-            sync_description_stripped(Some("<p>Hello <b>World</b></p>")).unwrap(),
+            sync_description_stripped(Some("<p>Hello <b>World</b></p>")),
             Some("Hello World".to_string())
         );
     }
@@ -1040,9 +1043,10 @@ mod tests {
 
     #[test]
     fn strip_edge_cases_match_python() {
-        // Verified byte-identical against `html_processor.strip_tags`
-        // before committing (see the differential fuzz in the workpad);
-        // a selection is pinned here so regressions fail loudly.
+        // Verified byte-identical against `html_processor.strip_tags` on
+        // the project's Python (3.12) before committing (see the
+        // differential fuzz in the workpad); a selection is pinned here so
+        // regressions fail loudly.
         let cases: &[(&str, &str)] = &[
             ("", ""),
             ("<p></p>", ""),
@@ -1060,18 +1064,27 @@ mod tests {
             ("</>", ""),
             ("</p >", ""),
             ("</ div>", ""),
+            ("</é>", ""),
             ("<!--c-->", ""),
+            ("<!--->", ""),
+            ("<!-->", ""),
             ("<!DOCTYPE html>", ""),
             ("<!foo bar>", ""),
+            ("<!>", ""),
             ("<?php ?>", ""),
             ("<div class=\"a>b\">x</div>", "x"),
             ("<a href='x>y'>t</a>", "t"),
-            ("</div class=\"a>b\">", "b\">"),
+            // End tags scan quote-aware (`locatetagend`): the `>` inside
+            // the quoted value does not end the tag.
+            ("</div class=\"a>b\">", ""),
+            ("<script>a</script foo=\">\" >b", "ab"),
             ("<div<span>", ""),
             ("<div<span>x", "x"),
             ("<a!", ""),
             ("<div/>", ""),
             ("<div/ >", ""),
+            ("<DIV CLASS=\"X\">t</DIV>", "t"),
+            ("<a b\x0bc>t</a>", "t"),
             ("<p>a</p><p>b</p>", "ab"),
             ("<p>a</p trailing", "a"),
             ("text<!--c1-->mid<!--c2-->end", "textmidend"),
@@ -1079,14 +1092,51 @@ mod tests {
             ("<style>a{color:red}</style>", "a{color:red}"),
             ("<script>a</b>c</script>d", "a</b>cd"),
             ("<script>a<b>c</script>", "a<b>c"),
-            // `re.I` fold quirks in the CDATA-end scan: the folded end is
-            // found but `endtagfind` still rejects it, so it is kept as
-            // text and the mode stays on.
-            ("<script>a</ſcript>b", "a</ſcript>"),
-            ("<script>a</scrıpt>b", "a</scrıpt>"),
-            ("<style>a</ſtyle>b", "a</ſtyle>"),
+            // RAWTEXT is script/style/xmp/iframe/noembed/noframes
+            // (case-insensitive); content passes through verbatim.
+            ("<xmp><b></xmp>", "<b>"),
+            ("<iframe><b></iframe>", "<b>"),
+            ("<noembed><b></noembed>", "<b>"),
+            ("<noframes><b></noframes>", "<b>"),
+            ("<XMP><B></XMP>", "<B>"),
+            ("<script>&amp;</script>", "&amp;"),
+            // RCDATA (textarea/title): tags inert, entities decoded.
+            ("<textarea><b></textarea>", "<b>"),
+            ("<title><b></title>", "<b>"),
+            ("<textarea>&amp;</textarea>", "&"),
+            ("<title>&amp;</title>", "&"),
+            ("<textarea><b></textarea>after", "<b>after"),
+            ("<noscript><b></noscript>", ""),
+            ("<plaintext><b>&amp;", "<b>&amp;"),
+            ("<%>", "<%>"),
+            ("<=>", "<=>"),
+            // The CDATA-end scan is ASCII-only with no space after `</`:
+            // folded (`ſ`/`ı`) and spaced ends never terminate the
+            // section, so the buffered tail is dropped.
+            ("<script>a</ſcript>b", ""),
+            ("<script>a</scrıpt>b", ""),
+            ("<style>a</ſtyle>b", ""),
             ("<script>a</ſtyle>b", ""),
+            ("<script>a</ script>b", ""),
+            ("<script>a</script\x0bb>", ""),
+            ("<script>a</script\u{85}b>", ""),
+            ("<style>a</style\u{2000}b>", ""),
+            ("<script>a</script\tb>", "a"),
+            ("<script>a</script b>", "a"),
+            ("<script>a</script/b>", "a"),
+            ("<script>a</script ", "a"),
+            ("<script>a</SCRIPT>b", "ab"),
             ("x<script>y</script>z", "xyz"),
+            // Declarations never raise: consumed to the first `>`.
+            ("<![foo]>", ""),
+            ("<![>", ""),
+            ("x<![foo]>y", "xy"),
+            ("<![CDATA[x]]>", ""),
+            ("<!--[if IE]>x<![endif]-->", ""),
+            // The `&` near-end guard is ASCII-only: a non-ASCII space
+            // after `&` does not terminate the tail.
+            ("x&\u{a0}", ""),
+            ("x&\u{85}", ""),
             ("&<p>;", "&;"),
             ("&;", "&;"),
             ("&#;", "&#;"),
@@ -1099,11 +1149,12 @@ mod tests {
             ("&#xD800;", "�"),
         ];
         for (html, want) in cases {
-            let got = super::strip::ml_strip_tags(html).expect("strip succeeds");
+            let got = super::strip::ml_strip_tags(html);
             assert_eq!(&got, want, "input {html:?}");
         }
         // Dropped tails: `feed` without `close` never emits them (text
-        // before the incomplete construct is still kept: "x</" -> "x").
+        // before the incomplete construct is still kept: "x</" -> "x",
+        // "<script>a</script " -> "a").
         for html in [
             "R&D",
             "fish &amp",
@@ -1115,19 +1166,18 @@ mod tests {
             "<? unclosed",
             "<script>X",
             "<script>a</script",
+            "<script>a</script ",
             "<![CDATA[x",
+            "<![foo",
         ] {
-            let got = super::strip::ml_strip_tags(html).expect("strip succeeds");
+            let got = super::strip::ml_strip_tags(html);
             let want = match html {
                 "a <" => "a ",
                 "x</" => "x",
+                "<script>a</script " => "a",
                 _ => "",
             };
             assert_eq!(&got, want, "input {html:?}");
-        }
-        // Unknown `<![` keywords raise in Python (`ParserBase.error`).
-        for html in ["<![foo]>", "<![>", "x<![foo]>y"] {
-            assert!(super::strip::ml_strip_tags(html).is_err(), "input {html:?}");
         }
     }
 
