@@ -295,10 +295,7 @@ pub struct CallbackSession {
 }
 
 fn session_str(session: &mut crate::middleware::RequestSession, key: &str) -> Option<String> {
-    session
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(str::to_owned)
+    session.get(key).and_then(|v| v.as_str()).map(str::to_owned)
 }
 
 /// Read the callback session keys off the live handle. `None` (no session
@@ -412,11 +409,9 @@ impl Denial {
 impl IntoResponse for Denial {
     fn into_response(self) -> Response {
         match self {
-            Denial::Redirect(location) => (
-                StatusCode::FOUND,
-                [(header::LOCATION, location)],
-            )
-                .into_response(),
+            Denial::Redirect(location) => {
+                (StatusCode::FOUND, [(header::LOCATION, location)]).into_response()
+            }
             denial => {
                 let (status, body) = denial.status_and_body();
                 (status, body.unwrap_or_default()).into_response()
@@ -438,9 +433,7 @@ pub fn redirect(location: String) -> Response {
 /// `SoftDeleteManager` adds `deleted_at IS NULL`, `Meta.ordering =
 /// ("-created_at",)` picks the latest row (D-16 `instance_first_sql`
 /// semantics over `instances`).
-pub async fn instance_setup_done(
-    pool: &sqlx::PgPool,
-) -> Result<Option<bool>, sqlx::Error> {
+pub async fn instance_setup_done(pool: &sqlx::PgPool) -> Result<Option<bool>, sqlx::Error> {
     let row: Option<(bool,)> = sqlx::query_as(
         r#"SELECT "is_setup_done" FROM "instances"
            WHERE "deleted_at" IS NULL ORDER BY "created_at" DESC LIMIT 1"#,
@@ -510,9 +503,14 @@ pub async fn gitea_config(
             Vec::new(),
         )
     };
-    let client_id = config_value(pool, secret_key, "GITEA_CLIENT_ID", env_default("GITEA_CLIENT_ID"))
-        .await
-        .map_err(|_| not_configured())?;
+    let client_id = config_value(
+        pool,
+        secret_key,
+        "GITEA_CLIENT_ID",
+        env_default("GITEA_CLIENT_ID"),
+    )
+    .await
+    .map_err(|_| not_configured())?;
     let client_secret = config_value(
         pool,
         secret_key,
@@ -524,7 +522,11 @@ pub async fn gitea_config(
     let host = config_value(pool, secret_key, "GITEA_HOST", env_default("GITEA_HOST"))
         .await
         .map_err(|_| not_configured())?;
-    if !gitea_configured(client_id.as_deref(), client_secret.as_deref(), host.as_deref()) {
+    if !gitea_configured(
+        client_id.as_deref(),
+        client_secret.as_deref(),
+        host.as_deref(),
+    ) {
         return Err(not_configured());
     }
     let host_normalized =
@@ -628,14 +630,16 @@ pub async fn fetch_token_data(
         .into_iter()
         .map(|(k, v)| (k.to_owned(), v))
         .collect();
-    let headers: Vec<(String, String)> = pidash_services::auth_oauth::providers::TOKEN_JSON_ACCEPT_HEADERS
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
+    let headers: Vec<(String, String)> =
+        pidash_services::auth_oauth::providers::TOKEN_JSON_ACCEPT_HEADERS
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
     let token_response = post_token(client, &token_url, &data, &headers).await?;
-    Ok(
-        pidash_services::auth_oauth::providers::gitea_token_data(&token_response, now),
-    )
+    Ok(pidash_services::auth_oauth::providers::gitea_token_data(
+        &token_response,
+        now,
+    ))
 }
 
 /// `GiteaOAuthProvider.set_user_data` (`gitea.py:149-173`): GET the userinfo,
@@ -746,30 +750,42 @@ pub async fn check_signup(
     secret_key: &str,
     email: &str,
 ) -> Result<(), AuthenticationException> {
-    let flag = config_value(pool, secret_key, "ENABLE_SIGNUP", env_default("ENABLE_SIGNUP"))
-        .await
-        .map_err(|_| {
-            AuthenticationException::new(5015, "SIGNUP_DISABLED", vec![(
+    let flag = config_value(
+        pool,
+        secret_key,
+        "ENABLE_SIGNUP",
+        env_default("ENABLE_SIGNUP"),
+    )
+    .await
+    .map_err(|_| {
+        AuthenticationException::new(
+            5015,
+            "SIGNUP_DISABLED",
+            vec![(
                 "email".to_owned(),
                 serde_json::Value::String(email.to_owned()),
-            )])
-        })?;
+            )],
+        )
+    })?;
     let enabled = flag.as_deref().unwrap_or("1");
     if enabled != "0" {
         return Ok(());
     }
-    let invited: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM workspace_member_invites WHERE email = $1 LIMIT 1"#,
-    )
-    .bind(email)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| {
-        AuthenticationException::new(5015, "SIGNUP_DISABLED", vec![(
-            "email".to_owned(),
-            serde_json::Value::String(email.to_owned()),
-        )])
-    })?;
+    let invited: Option<(uuid::Uuid,)> =
+        sqlx::query_as(r#"SELECT id FROM workspace_member_invites WHERE email = $1 LIMIT 1"#)
+            .bind(email)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| {
+                AuthenticationException::new(
+                    5015,
+                    "SIGNUP_DISABLED",
+                    vec![(
+                        "email".to_owned(),
+                        serde_json::Value::String(email.to_owned()),
+                    )],
+                )
+            })?;
     if invited.is_none() {
         return Err(AuthenticationException::new(
             5015,
@@ -1005,11 +1021,7 @@ pub fn s3_target(
             host.to_owned(),
             format!("/{}", storage.bucket_name),
         )
-    } else if let Some(endpoint) = storage
-        .endpoint_url
-        .as_deref()
-        .filter(|e| !e.is_empty())
-    {
+    } else if let Some(endpoint) = storage.endpoint_url.as_deref().filter(|e| !e.is_empty()) {
         let endpoint = endpoint.trim_end_matches('/').to_owned();
         let signed_host = endpoint
             .rsplit("://")
@@ -1090,11 +1102,7 @@ pub fn s3_authorization(
         .iter()
         .map(|(k, v)| format!("{k}:{v}\n"))
         .collect::<String>();
-    let signed_headers = signed
-        .iter()
-        .map(|(k, _)| *k)
-        .collect::<Vec<_>>()
-        .join(";");
+    let signed_headers = signed.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(";");
     let canonical = format!(
         "{method}\n{canonical_uri}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
     );
@@ -1227,10 +1235,7 @@ pub async fn download_and_upload_avatar(
             content.extend_from_slice(&chunk);
         }
         let file_size = content.len() as i64;
-        let filename = format!(
-            "{}-user-avatar.{extension}",
-            uuid::Uuid::new_v4().simple()
-        );
+        let filename = format!("{}-user-avatar.{extension}", uuid::Uuid::new_v4().simple());
         // `upload_to` with no workspace (`asset.py:17-20`).
         let stored_key = format!("user-{}-{filename}", uuid::Uuid::new_v4().simple());
         let (endpoint, signed_host, prefix) = s3_target(storage, scheme, host);
@@ -1332,7 +1337,10 @@ pub fn head_metadata_json(headers: &reqwest::header::HeaderMap) -> serde_json::V
         let name = name.as_str();
         if let Some(suffix) = name.strip_prefix("x-amz-meta-") {
             if let Ok(value) = value.to_str() {
-                meta.insert(suffix.to_owned(), serde_json::Value::String(value.to_owned()));
+                meta.insert(
+                    suffix.to_owned(),
+                    serde_json::Value::String(value.to_owned()),
+                );
             }
         }
     }
@@ -1418,7 +1426,10 @@ pub async fn delete_old_avatar(
                 .await;
             }
             other => {
-                tracing::warn!("delete_old_avatar S3 delete failed: {:?}", other.map(|r| r.status()));
+                tracing::warn!(
+                    "delete_old_avatar S3 delete failed: {:?}",
+                    other.map(|r| r.status())
+                );
             }
         }
     }
@@ -1690,18 +1701,14 @@ pub async fn process_invitations(
             .await?;
         }
     }
-    sqlx::query(
-        r#"DELETE FROM workspace_member_invites WHERE email = $1 AND accepted = TRUE"#,
-    )
-    .bind(email)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        r#"DELETE FROM project_member_invites WHERE email = $1 AND accepted = TRUE"#,
-    )
-    .bind(email)
-    .execute(pool)
-    .await?;
+    sqlx::query(r#"DELETE FROM workspace_member_invites WHERE email = $1 AND accepted = TRUE"#)
+        .bind(email)
+        .execute(pool)
+        .await?;
+    sqlx::query(r#"DELETE FROM project_member_invites WHERE email = $1 AND accepted = TRUE"#)
+        .bind(email)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1953,9 +1960,7 @@ pub fn request_inputs(headers: &HeaderMap) -> RequestInputs {
     // `ConnectInfo` extractor, so it reads as absent (a missing IP stays
     // JSON null in `device_info` and `last_login_ip` stores NULL) — the
     // same convention the D-01 handlers use for their login stamps.
-    let forwarded = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok());
+    let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
     RequestInputs {
         host: request_host(headers),
         is_secure: request_is_secure(headers),
@@ -1980,8 +1985,7 @@ pub fn initiate_prologue(
     write_session_key(handle, SESSION_HOST, host.to_owned());
     let raw = query_last(query, "next_path").filter(|v| !v.is_empty());
     if let Some(ref next) = raw {
-        let validated =
-            pidash_services::auth_session::shapes::validate_next_path(next);
+        let validated = pidash_services::auth_session::shapes::validate_next_path(next);
         write_session_key(handle, SESSION_NEXT_PATH, validated);
     }
     raw
@@ -2067,7 +2071,8 @@ pub async fn authenticate_user(
     let user_data = fetch_user_data(&client, &config, &access_token)
         .await
         .map_err(AuthError::Provider)?;
-    let user_json = serde_json::to_value(&user_data).map_err(|_| AuthError::Server(Denial::ServerError))?;
+    let user_json =
+        serde_json::to_value(&user_data).map_err(|_| AuthError::Server(Denial::ServerError))?;
     let email = sanitize_email(user_json.get("email")).map_err(AuthError::Provider)?;
     let existing = find_user_by_email(pool, &email)
         .await
@@ -2079,10 +2084,15 @@ pub async fn authenticate_user(
     if let Some(row) = existing {
         user_id = row.id;
         password_field = row.password.clone();
-        let sync_enabled = config_value(pool, secret_key, "ENABLE_GITEA_SYNC", env_default("ENABLE_GITEA_SYNC"))
-            .await
-            .map(|v| v.as_deref() == Some("1"))
-            .unwrap_or(false);
+        let sync_enabled = config_value(
+            pool,
+            secret_key,
+            "ENABLE_GITEA_SYNC",
+            env_default("ENABLE_GITEA_SYNC"),
+        )
+        .await
+        .map(|v| v.as_deref() == Some("1"))
+        .unwrap_or(false);
         if sync_enabled && !is_signup {
             let first = user_json
                 .get("user")
@@ -2162,7 +2172,15 @@ pub async fn authenticate_user(
         let first = if first.is_empty() { "" } else { first };
         let last = if last.is_empty() { "" } else { last };
         insert_user(
-            pool, user_id, &email, &username, &password_field, first, last, &display, now,
+            pool,
+            user_id,
+            &email,
+            &username,
+            &password_field,
+            first,
+            last,
+            &display,
+            now,
         )
         .await
         .map_err(|_| AuthError::Server(Denial::ServerError))?;
@@ -2425,16 +2443,18 @@ async fn app_callback(
         ));
     }
     // Missing code; the echo is validated from here on.
-    let validated_echo = echo_raw
-        .map(pidash_services::auth_session::shapes::validate_next_path);
+    let validated_echo = echo_raw.map(pidash_services::auth_session::shapes::validate_next_path);
     let Some(code) = code else {
         let exc = AuthenticationException::new(
             GITEA_PROVIDER_ERROR_CODE,
             GITEA_PROVIDER_ERROR_NAME,
             Vec::new(),
         );
-        let params =
-            error_params(exc.error_code, &exc.error_message, validated_echo.as_deref());
+        let params = error_params(
+            exc.error_code,
+            &exc.error_message,
+            validated_echo.as_deref(),
+        );
         return redirect(app_callback_error_location(
             session.host.as_deref(),
             &params,
@@ -2492,12 +2512,12 @@ async fn app_callback(
         Some(next) if !next.is_empty() => {
             pidash_services::auth_session::shapes::validate_next_path(next)
         }
-        _ => match redirection_path(&pool, user.id, &user_email(&pool, &user.id).await, now)
-            .await
-        {
-            Ok(path) => path,
-            Err(_) => return Denial::ServerError.into_response(),
-        },
+        _ => {
+            match redirection_path(&pool, user.id, &user_email(&pool, &user.id).await, now).await {
+                Ok(path) => path,
+                Err(_) => return Denial::ServerError.into_response(),
+            }
+        }
     };
     redirect(app_success_location(session.host.as_deref(), &path))
 }
@@ -2581,15 +2601,18 @@ async fn space_callback(
     // Echo iff the session carries a next_path (`if next_path:`); the
     // value is validated on every space branch.
     let echo_raw = session.next_path.as_deref().filter(|v| !v.is_empty());
-    let validated_next = echo_raw
-        .map(pidash_services::auth_session::shapes::validate_next_path);
+    let validated_next = echo_raw.map(pidash_services::auth_session::shapes::validate_next_path);
     if req_state.as_deref() != Some(session.state.as_deref().unwrap_or("")) {
         let exc = AuthenticationException::new(
             GITEA_PROVIDER_ERROR_CODE,
             GITEA_PROVIDER_ERROR_NAME,
             Vec::new(),
         );
-        let params = error_params(exc.error_code, &exc.error_message, validated_next.as_deref());
+        let params = error_params(
+            exc.error_code,
+            &exc.error_message,
+            validated_next.as_deref(),
+        );
         return redirect(space_error_location(&base, &params));
     }
     let Some(code) = code else {
@@ -2598,7 +2621,11 @@ async fn space_callback(
             GITEA_PROVIDER_ERROR_NAME,
             Vec::new(),
         );
-        let params = error_params(exc.error_code, &exc.error_message, validated_next.as_deref());
+        let params = error_params(
+            exc.error_code,
+            &exc.error_message,
+            validated_next.as_deref(),
+        );
         return redirect(space_error_location(&base, &params));
     };
     let pool = match pool_or_500(&state) {
@@ -2624,8 +2651,11 @@ async fn space_callback(
     let user = match authenticated {
         Ok(user) => user,
         Err(AuthError::Provider(exc)) => {
-            let params =
-                error_params(exc.error_code, &exc.error_message, validated_next.as_deref());
+            let params = error_params(
+                exc.error_code,
+                &exc.error_message,
+                validated_next.as_deref(),
+            );
             return redirect(space_error_location(&base, &params));
         }
         Err(AuthError::Server(denial)) => return denial.into_response(),
@@ -2671,7 +2701,9 @@ pub fn routes() -> Router<AppState> {
 
 /// An owned path: GET serves from Rust, every other method falls through
 /// to Django (its 405-after-auth and metadata responses live there).
-fn owned(get_handler: axum::routing::MethodRouter<AppState>) -> axum::routing::MethodRouter<AppState> {
+fn owned(
+    get_handler: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
     get_handler
         .post(crate::edge::proxy)
         .put(crate::edge::proxy)
@@ -2773,7 +2805,10 @@ mod tests {
         let params = error_params(5000, "INSTANCE_NOT_CONFIGURED", Some("/x"));
         let keys: Vec<&str> = params.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(keys, ["error_code", "error_message", "next_path"]);
-        assert_eq!(urlencode_pairs(&params), "error_code=5000&error_message=INSTANCE_NOT_CONFIGURED&next_path=%2Fx");
+        assert_eq!(
+            urlencode_pairs(&params),
+            "error_code=5000&error_message=INSTANCE_NOT_CONFIGURED&next_path=%2Fx"
+        );
     }
 
     #[test]
@@ -2838,10 +2873,7 @@ mod tests {
         assert_eq!(missing.error_message, "INVALID_EMAIL");
         assert_eq!(
             missing.get_error_dict()[2],
-            (
-                "email".to_owned(),
-                serde_json::Value::Null
-            )
+            ("email".to_owned(), serde_json::Value::Null)
         );
         sanitize_email(Some(&serde_json::json!("not-an-email"))).expect_err("invalid");
     }
