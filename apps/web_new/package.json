@@ -1,0 +1,44 @@
+{
+  "name": "web_new",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pi Dash new frontend (web + desktop targets). Scaffold from NEWFRONT-12.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 3010",
+    "build": "vite build --mode web && vite build --mode desktop",
+    "build:web": "vite build --mode web",
+    "build:desktop": "vite build --mode desktop",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --deny-warnings",
+    "check:boundaries": "node checks/check-boundaries.mjs",
+    "check:headers": "node checks/check-headers.mjs",
+    "check:deps": "node checks/check-deps.mjs",
+    "check": "pnpm lint && pnpm check:boundaries && pnpm check:headers && pnpm check:deps",
+    "test": "vitest run",
+    "size": "size-limit"
+  },
+  "dependencies": {
+    "@pidash/api-client": "workspace:*",
+    "@pidash/kit": "workspace:*",
+    "@tanstack/react-query": "^5.90.0",
+    "@tanstack/react-router": "^1.130.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "zustand": "^5.0.0"
+  },
+  "devDependencies": {
+    "@size-limit/file": "^11.1.0",
+    "@tailwindcss/vite": "^4.1.0",
+    "@tanstack/router-plugin": "^1.130.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "babel-plugin-react-compiler": "^1.0.0",
+    "size-limit": "^11.1.0",
+    "tailwindcss": "^4.1.0",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "^3.2.0"
+  }
+}
