@@ -13,10 +13,12 @@ and closes the stream.
 """
 
 import json
+import os
 import time
 import uuid
 
 import httpx
+import pytest
 
 from _harness.config import base_url
 from _harness.db import db_cursor
@@ -134,6 +136,45 @@ def test_sse_missing_thread_is_404(world, member):
         member, f"{threads_url(world)}/threads/{uuid.uuid4()}/events/", max_frames=1
     )
     assert status == 404
+
+
+def test_sse_live_tail_relays_publish_verbatim(world, member):
+    """Live tail: a Redis publish on the thread channel arrives as a
+    verbatim ``data:`` frame.
+    """
+    redis_url = os.environ.get("CONTRACT_REDIS_URL")
+    if not redis_url:
+        pytest.skip("CONTRACT_REDIS_URL is not set (live-tail publish needs it)")
+    import redis as redis_lib
+
+    base = threads_url(world)
+    tid = _new_thread(member, base)
+    publisher = redis_lib.Redis.from_url(redis_url)
+    payload = json.dumps({"seq": 99, "kind": "done"})
+    frames = []
+    end = time.monotonic() + 25.0
+    with member.stream(
+        "GET", f"{base}/threads/{tid}/events/", timeout=15.0
+    ) as resp:
+        assert resp.status_code == 200
+        # The subscription registers before the first bytes flow; give it
+        # a moment, then publish and read until the relayed frame arrives
+        # (keepalives are skipped, the stream never ends on its own).
+        time.sleep(2.5)
+        assert publisher.publish(f"assistant:thread:{tid}", payload) >= 1
+        buf = ""
+        for chunk in resp.iter_text():
+            buf += chunk
+            while "\n\n" in buf:
+                raw, buf = buf.split("\n\n", 1)
+                if raw.startswith(":"):
+                    continue
+                frames.append(raw)
+                break
+            if frames or time.monotonic() > end:
+                break
+    assert len(frames) == 1, f"expected the relayed publish, got {frames!r}"
+    assert frames[0] == f"event: chat.event\ndata: b'{payload}'"
 
 
 def test_sse_bad_after_falls_back_to_zero(world, member):

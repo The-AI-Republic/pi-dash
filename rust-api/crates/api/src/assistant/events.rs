@@ -44,7 +44,7 @@ use super::common::{
     parse_after, pool_ref, py_iso, query_last, request_actor, role_for, server_error,
     thread_not_found, HandlerResult,
 };
-use super::redis::live_tail_channel;
+use super::redis::{live_tail_channel, SSE_KEEPALIVE_FRAME};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
@@ -217,6 +217,58 @@ pub fn sse_frame(event_json: &str) -> String {
     format!("event: chat.event\ndata: {event_json}\n\n")
 }
 
+/// Render raw publish bytes exactly like the f-string in `events.py:89`.
+///
+/// `data` arrives as `bytes` (the subscribe client never sets
+/// `decode_responses`, verified live against redis-py 5.0.4), so
+/// `{data}` renders the `b'...'` repr — including CPython's delimiter
+/// switch to `"` when the payload holds `'` but no `"` (oracle-verified
+/// below against the interpreter).
+pub fn py_bytes_repr(payload: &[u8]) -> String {
+    let quote = if payload.contains(&b'\'') && !payload.contains(&b'"') {
+        b'"'
+    } else {
+        b'\''
+    };
+    let mut out = String::with_capacity(payload.len() + 3);
+    out.push('b');
+    out.push(quote as char);
+    for &byte in payload {
+        match byte {
+            b'\'' if quote == b'\'' => out.push_str("\\'"),
+            b'"' if quote == b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            b'\t' => out.push_str("\\t"),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            0x20..=0x7e => out.push(byte as char),
+            _ => out.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    out.push(quote as char);
+    out
+}
+
+/// One live-tail frame (`events.py:89`): the publish relayed verbatim
+/// through [`py_bytes_repr`].
+pub fn live_tail_frame(payload: &[u8]) -> String {
+    format!("event: chat.event\ndata: {}\n\n", py_bytes_repr(payload))
+}
+
+/// SSE response shell (`events.py:106-115`): `Cache-Control: no-cache`,
+/// `X-Accel-Buffering: no` (disable nginx proxy buffering),
+/// `Content-Encoding: identity` (Django's GZipMiddleware skip).
+fn sse_response(body: axum::body::Body) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header("X-Accel-Buffering", "no")
+        .header(header::CONTENT_ENCODING, "identity")
+        .body(body)
+        .expect("SSE response builds")
+}
+
 /// `assistant_event_stream` (`events.py:50-116`).
 async fn assistant_event_stream(
     State(state): State<AppState>,
@@ -298,40 +350,85 @@ async fn assistant_event_stream(
         })));
     }
 
-    // PENDING(pubsub-receive): the finished stream feeds `frames`, then the
-    // live tail, then 1s keepalives through `sse_body::sse_channel` (the
-    // channel transport itself is merged). The live tail subscribes to
-    // `assistant:thread:<id>` (`events.py:77-79`, channel builder
-    // [`live_tail_channel`]) and relays each publish verbatim
-    // (`event: chat.event\ndata: <data>\n\n`, `events.py:86-89`); an idle
-    // second yields `: keepalive` (`events.py:81-84`, constant
-    // `redis::SSE_KEEPALIVE_FRAME`), and a dropped receiver (client gone)
-    // ends the feeder task. Awaiting the next publish needs a `Stream`
-    // poll that this crate's dependency closure cannot name (see
-    // `redis.rs`); until the follow-up foundation method lands, the exact
-    // replay prefix below serves as a finite body. Headers, auth, cursor,
-    // and frame bytes are already exact, so the contract suite's
-    // replay-prefix reads pass; this route does not merge until the tail
-    // is wired.
-    let _ = live_tail_channel(&thread_id);
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        // `Cache-Control: no-cache`, `X-Accel-Buffering: no` (disable nginx
-        // proxy buffering), `Content-Encoding: identity` (Django's
-        // GZipMiddleware skip) — `events.py:109-115`.
-        .header(header::CACHE_CONTROL, "no-cache")
-        .header("X-Accel-Buffering", "no")
-        .header(header::CONTENT_ENCODING, "identity")
-        .body(axum::body::Body::from(frames.join("")))
-        .expect("SSE response builds");
-    Ok(response)
+    // Live tail (`events.py:77-103`): subscribe to `assistant:thread:<id>`
+    // ([`live_tail_channel`]) after the replay prefix, then relay each
+    // publish verbatim ([`live_tail_frame`], `events.py:86-89`); an idle
+    // second yields `: keepalive` (`events.py:81-84`,
+    // [`SSE_KEEPALIVE_FRAME`]). A transport error ends the feeder like
+    // Python's `except Exception` (`events.py:92-94`), and a dropped
+    // receiver (client gone) ends it through the send failure. The
+    // `finally` half unsubscribes, failures swallowed (`events.py:95-100`);
+    // dropping the `PubSub` closes the connection (`aclose`). Closing idle
+    // Postgres connections is
+    // Django-specific (sqlx holds none per stream). Awaiting the next
+    // publish is the merged [`RedisHandle::next_payload`] foundation
+    // method (PIDASHCONV-267): the `Stream` poll lives in the db crate
+    // because this crate's dependency closure cannot name it.
+    let prefix = frames.join("");
+    let channel = live_tail_channel(&thread_id);
+    let Some(redis) = state.redis().cloned() else {
+        // No cache client: `async_redis_instance()` raises inside the
+        // generator, so the stream ends after the replay prefix — the
+        // same bytes as a finite body.
+        return Ok(sse_response(axum::body::Body::from(prefix)));
+    };
+    let mut pubsub = match redis.subscribe(&channel).await {
+        Ok(pubsub) => pubsub,
+        // A subscribe failure lands in `except` after the replay — the
+        // same prefix bytes as a finite body.
+        Err(_) => return Ok(sse_response(axum::body::Body::from(prefix))),
+    };
+    let (mut sender, body) = crate::sse_body::sse_channel();
+    tokio::spawn(async move {
+        if sender
+            .send_data(bytes::Bytes::from(prefix))
+            .await
+            .is_err()
+        {
+            let _ = pubsub.unsubscribe(channel.as_str()).await;
+            return;
+        }
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                redis.next_payload(&mut pubsub),
+            )
+            .await
+            {
+                Ok(Ok(payload)) => {
+                    if sender
+                        .send_data(bytes::Bytes::from(live_tail_frame(&payload)))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(Err(error)) => {
+                    tracing::error!(%error, thread_id = %thread_id, "assistant SSE tail ended");
+                    break;
+                }
+                Err(_) => {
+                    if sender
+                        .send_data(bytes::Bytes::from_static(
+                            SSE_KEEPALIVE_FRAME.as_bytes(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = pubsub.unsubscribe(channel.as_str()).await;
+    });
+    Ok(sse_response(body))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assistant::redis::SSE_KEEPALIVE_FRAME;
 
     #[test]
     fn py_dumps_matches_stdlib_separators_and_escapes() {
@@ -381,5 +478,37 @@ mod tests {
             "event: chat.event\ndata: {\"seq\": 1}\n\n"
         );
         assert_eq!(SSE_KEEPALIVE_FRAME, ": keepalive\n\n");
+    }
+
+    #[test]
+    fn py_bytes_repr_matches_cpython_bytes_repr() {
+        // Oracle: `repr()` of each input run against the interpreter.
+        let cases: &[(&[u8], &str)] = &[
+            (b"", "b''"),
+            (b"{}", "b'{}'"),
+            (b"{\"seq\": 1}", "b'{\"seq\": 1}'"),
+            (b"a'b", "b\"a'b\""),
+            (b"a\\b", "b'a\\\\b'"),
+            (b"a\nb\rc\td", "b'a\\nb\\rc\\td'"),
+            (b"\x00\x1b\x7f\x80\xff", "b'\\x00\\x1b\\x7f\\x80\\xff'"),
+            ("héllo".as_bytes(), "b'h\\xc3\\xa9llo'"),
+            (b"\"quotes\"", "b'\"quotes\"'"),
+            (b"\"x\"", "b'\"x\"'"),
+            (b"a'b\"c", "b'a\\'b\"c'"),
+            (b"'", "b\"'\""),
+            (b"\"", "b'\"'"),
+            (b"{\"a\": \"it's\"}", "b'{\"a\": \"it\\'s\"}'"),
+        ];
+        for (payload, expected) in cases {
+            assert_eq!(&py_bytes_repr(payload), expected, "payload {payload:?}");
+        }
+    }
+
+    #[test]
+    fn live_tail_frame_relays_publish_verbatim() {
+        assert_eq!(
+            live_tail_frame(b"{\"seq\": 1}"),
+            "event: chat.event\ndata: b'{\"seq\": 1}'\n\n"
+        );
     }
 }

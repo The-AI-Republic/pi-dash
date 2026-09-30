@@ -20,12 +20,15 @@
 //! [`crate::assistant::throttles`] pure functions — and owns the call sites'
 //! failure policy, which mirrors Python per site (see each function).
 //!
-//! The SSE live tail's *receive* half still waits on a follow-up foundation
-//! issue (awaiting the next publish needs a `Stream` poll that neither this
-//! crate's dependency closure nor any new `assistant/` file can name;
-//! `api/Cargo.toml` is read-only): `events.rs` serves the exact replay
-//! prefix plus headers as a finite body until that lands, and nothing here
-//! merges until the tail is wired.
+//! The SSE live tail's *receive* half is the merged
+//! [`pidash_db::redis::RedisHandle::next_payload`] foundation method
+//! (PIDASHCONV-267): awaiting the next publish needs a `Stream` poll that
+//! neither this crate's dependency closure nor any new `assistant/` file
+//! can name (`api/Cargo.toml` is read-only), so the poll lives in the db
+//! crate and `events.rs` awaits plain bytes. When the tail cannot start
+//! (no cache client, subscribe failure), `events.rs` serves the exact
+//! replay prefix as a finite body — the bytes Python's `except` leaves
+//! behind in those cases.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
