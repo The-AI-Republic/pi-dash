@@ -176,8 +176,11 @@ pub const VIEW_NOT_FOUND_BODY: &str = r#"{"detail":"No AnalyticView matches the 
 pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `ValidationError` branch (bad UUIDs, bad dates).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
-/// DRF JSON parse failure on a request body.
-pub const JSON_PARSE_BODY: &str = r#"{"detail":"JSON parse error"}"#;
+/// DRF `JSONParser` failure prefix (`rest_framework/parsers.py` raises
+/// `ParseError('JSON parse error - %s')`); the reason follows the dash.
+/// Blank input carries the CPython position (`line 1 column N+1 (char N)`,
+/// same mapping as the license console's parser).
+pub const JSON_PARSE_PREFIX: &str = "JSON parse error - ";
 
 /// Handler denials with byte-exact bodies.
 #[derive(Debug)]
@@ -196,8 +199,9 @@ pub enum Denial {
     ViewNotFound,
     /// 400, `ValidationError` branch.
     BadValidation,
-    /// 400, malformed JSON body.
-    BadJson,
+    /// 400, malformed JSON body (carries the full `detail` text, reason
+    /// included, like DRF's `ParseError`).
+    BadJson(String),
     /// 400, serializer field errors (`{"name": [...]}`).
     BadFields(Value),
     /// 500, anything Python lets escape (`FieldError`, `TypeError`, DB
@@ -221,7 +225,11 @@ impl Denial {
             Denial::ObjectNotFound => (StatusCode::NOT_FOUND, OBJECT_NOT_FOUND_BODY.to_owned()),
             Denial::ViewNotFound => (StatusCode::NOT_FOUND, VIEW_NOT_FOUND_BODY.to_owned()),
             Denial::BadValidation => (StatusCode::BAD_REQUEST, INVALID_DETAIL_BODY.to_owned()),
-            Denial::BadJson => (StatusCode::BAD_REQUEST, JSON_PARSE_BODY.to_owned()),
+            Denial::BadJson(detail) => (
+                StatusCode::BAD_REQUEST,
+                serde_json::to_string(&serde_json::json!({"detail": detail}))
+                    .expect("json parse body"),
+            ),
             Denial::BadFields(errors) => (
                 StatusCode::BAD_REQUEST,
                 serde_json::to_string(errors).expect("field errors"),
@@ -850,7 +858,7 @@ async fn analytics_body(state: &AppState, slug: &str, query: &QueryMap) -> Resul
             segment.as_deref(),
         )
         .await?;
-        super::render::distribution_from_count_rows(rows, &x_axis)
+        super::render::distribution_from_count_rows(rows, &x_axis, segment.is_some())
     } else {
         let sql = queries::base_plot_estimate_sql(&x_axis, segment.as_deref(), &fragment)
             .ok_or(Denial::ServerError)?;
@@ -863,7 +871,7 @@ async fn analytics_body(state: &AppState, slug: &str, query: &QueryMap) -> Resul
             segment.as_deref(),
         )
         .await?;
-        super::render::distribution_from_estimate_rows(rows, &x_axis)
+        super::render::distribution_from_estimate_rows(rows, &x_axis, segment.is_some())
     };
 
     // Extras: each arm runs only for its axis (`base.py:71-159`); anything
@@ -1701,8 +1709,26 @@ fn parse_pk(raw: &str) -> Result<Uuid, Denial> {
     Uuid::parse_str(raw).map_err(|_| Denial::BadValidation)
 }
 
+/// Map a body-parse failure to DRF's `ParseError` shape. Blank input is
+/// byte-exact (`Expecting value: line 1 column N+1 (char N)`); anything
+/// else carries the parser reason after the same prefix.
+fn json_parse_denial(raw: &[u8], error: &serde_json::Error) -> Denial {
+    if let Ok(text) = std::str::from_utf8(raw) {
+        if text.trim().is_empty() {
+            let len = text.len();
+            return Denial::BadJson(format!(
+                "{JSON_PARSE_PREFIX}Expecting value: line 1 column {} (char {})",
+                len + 1,
+                len
+            ));
+        }
+    }
+    Denial::BadJson(format!("{JSON_PARSE_PREFIX}{error}"))
+}
+
 fn parse_body(raw: &[u8]) -> Result<Map<String, Value>, Denial> {
-    let value: Value = serde_json::from_slice(raw).map_err(|_| Denial::BadJson)?;
+    let value: Value =
+        serde_json::from_slice(raw).map_err(|error| json_parse_denial(raw, &error))?;
     value.as_object().cloned().ok_or_else(|| {
         // DRF interpolates `type(data).__name__`.
         let kind = match &value {
@@ -1962,7 +1988,7 @@ async fn view_destroy(
     extension: Option<axum::Extension<SessionHandle>>,
     Path((slug, pk)): Path<(String, String)>,
 ) -> Response {
-    let _actor = match gated_actor(
+    let actor = match gated_actor(
         &state,
         extension,
         "DELETE",
@@ -1982,22 +2008,30 @@ async fn view_destroy(
         Ok(id) => id,
         Err(denial) => return denial.into_response(),
     };
-    match destroy_view(pool, &slug, &id).await {
+    match destroy_view(pool, &actor, &slug, &id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(denial) => denial.into_response(),
     }
 }
 
 #[allow(clippy::result_large_err)]
-async fn destroy_view(pool: &sqlx::PgPool, slug: &str, id: &Uuid) -> Result<(), Denial> {
+async fn destroy_view(
+    pool: &sqlx::PgPool,
+    actor: &crate::license::Actor,
+    slug: &str,
+    id: &Uuid,
+) -> Result<(), Denial> {
     // The lookup first: a miss is the `get_object()` 404, not a silent 204.
     fetch_view_detail(pool, slug, id).await?;
     // `SoftDeleteModel.delete` stamps `deleted_at` then `save()`s, so the
-    // `auto_now` `updated_at` moves too.
+    // `auto_now` `updated_at` moves too — and `BaseModel.save` on the
+    // updating instance stamps `updated_by` (`db/models/base.py:40-42`).
     sqlx::query(
-        "UPDATE \"analytic_views\" SET \"deleted_at\" = $1, \"updated_at\" = $1 WHERE \"id\" = $2",
+        "UPDATE \"analytic_views\" SET \"deleted_at\" = $1, \"updated_at\" = $1, \
+         \"updated_by_id\" = $2 WHERE \"id\" = $3",
     )
     .bind(chrono::Utc::now())
+    .bind(actor.id)
     .bind(id)
     .execute(pool)
     .await
@@ -2330,6 +2364,42 @@ mod tests {
     fn bad_pk_is_a_validation_400() {
         let denial = parse_pk("nope").expect_err("bad uuid");
         assert!(matches!(denial, Denial::BadValidation));
+    }
+
+    #[test]
+    fn malformed_json_carries_drf_parse_error_shape() {
+        // Empty input is byte-exact with DRF (`parsers.py` raises
+        // `ParseError('JSON parse error - %s')` around the CPython reason).
+        let denial = parse_body(b"").expect_err("empty");
+        match denial {
+            Denial::BadJson(detail) => {
+                let (_, body) = Denial::BadJson(detail).status_and_body();
+                assert_eq!(
+                    body,
+                    r#"{"detail":"JSON parse error - Expecting value: line 1 column 1 (char 0)"}"#
+                );
+            }
+            _ => panic!("wrong denial"),
+        }
+        // Blank input shifts the reported position.
+        let denial = parse_body(b"  ").expect_err("blank");
+        match denial {
+            Denial::BadJson(detail) => {
+                assert!(detail
+                    .starts_with("JSON parse error - Expecting value: line 1 column 3 (char 2)"))
+            }
+            _ => panic!("wrong denial"),
+        }
+        // Other malformed input keeps the prefix with the parser reason.
+        let denial = parse_body(b"{oops").expect_err("garbage");
+        match denial {
+            Denial::BadJson(detail) => {
+                assert!(detail.starts_with("JSON parse error - "));
+                let (_, body) = Denial::BadJson(detail).status_and_body();
+                assert!(body.starts_with(r#"{"detail":"JSON parse error - "#));
+            }
+            _ => panic!("wrong denial"),
+        }
     }
 
     #[test]
