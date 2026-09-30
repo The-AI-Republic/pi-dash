@@ -841,7 +841,7 @@ async fn load_index(
         &composer_rows,
     );
     let mut needs_attention = BTreeMap::new();
-    for ((scope, key), _) in index.iter() {
+    for (scope, key) in index.keys() {
         let flag = rows
             .iter()
             .find(|(row_key, _, _, row_user, _)| {

@@ -144,6 +144,9 @@ struct VersionsContext {
     timezone: chrono_tz::Tz,
 }
 
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn versions_context(
     state: &AppState,
     slug: String,
