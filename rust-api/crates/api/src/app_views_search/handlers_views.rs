@@ -155,8 +155,13 @@ pub const UNAUTHENTICATED_BODY: &str =
     r#"{"detail":"Authentication credentials were not provided."}"#;
 /// `handle_exception`'s `ObjectDoesNotExist` branch (`app/views/base.py`).
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// DRF's default `Http404` body (unresolvable project identifier).
+/// DRF's default `Http404` body (a bare `Http404()` with no message).
 pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Not found."}"#;
+/// `Project.resolve` miss on a non-UUID identifier
+/// (`db/models/project.py:213-217`): the `Http404("Project not found")`
+/// message survives DRF's `Http404` → `NotFound` conversion verbatim, so
+/// the body carries the message, not the default.
+pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 /// `handle_exception`'s `IntegrityError` branch.
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
 /// `handle_exception`'s generic 500 branch.
@@ -376,7 +381,10 @@ async fn resolve_project_id(
     .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::NotFoundDetail)
+    row.map(|row| row.0).ok_or(Denial::Raw(
+        StatusCode::NOT_FOUND,
+        PROJECT_NOT_FOUND_BODY.to_owned(),
+    ))
 }
 
 /// Load the workspace row by slug. A miss raises `DoesNotExist`
