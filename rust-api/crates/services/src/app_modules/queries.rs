@@ -57,11 +57,12 @@
 //!    explicit `deleted_at__isnull=True`, `issue.py:57`) and inherits the
 //!    bridge model's default `ORDER BY created_at DESC` before `LIMIT 1`.
 //!    Both ported as observed.
-//! 4. Estimate inner aliases use the singular (`backlog_estimate_point`,
-//!    `unstarted_estimate_point`, `started_estimate_point`,
-//!    `cancelled_estimate_point`, `completed_estimate_point`) while the
-//!    outer annotation aliases are plural (`..._points`); `total` is plural
-//!    on both sides (`total_estimate_points`). Ported as observed.
+//! 4. Estimate inner aliases use the singular for backlog / unstarted /
+//!    started / cancelled (`backlog_estimate_point`, `unstarted_estimate_point`,
+//!    `started_estimate_point`, `cancelled_estimate_point`) while the outer
+//!    annotation aliases are plural (`..._points`); `completed` and `total`
+//!    are plural on both sides (`completed_estimate_points`,
+//!    `total_estimate_points`, Q1 SQL). Ported as observed.
 //! 5. `retrieve()` evaluates the queryset twice (`queryset.first()` at
 //!    `:424` and `:425`) and `partial_update` re-reads via `.values()`
 //!    after `save()` — ported as handler sequencing notes, not deduped.
@@ -243,19 +244,21 @@ pub const ESTIMATE_GROUPS: &[Option<&str>] = &[
 ];
 
 /// `member_ids = COALESCE(ARRAY_AGG(DISTINCT ...), '{}')`
-/// (`base.py:278-290`, `archive.py:245-254`).
+/// (`base.py:278-290`, `archive.py:245-254`). Q1/Q4 SQL aggregate
+/// `module_members.member_id` (the M2M through table, left-joined to
+/// `modules`); the names below are the real columns, not ORM paths.
 ///
-/// `member_deleted_guard = true` adds `modulemember.deleted_at IS NULL`
+/// `member_deleted_guard = true` adds `module_members.deleted_at IS NULL`
 /// (Q1); `false` omits it (Q4 archive path — ported bug 2, the asymmetry
 /// is intentional and must survive refactors).
 pub fn member_ids_sql(member_deleted_guard: bool) -> String {
     let bridge = if member_deleted_guard {
-        " AND modulemember.deleted_at IS NULL"
+        " AND module_members.deleted_at IS NULL"
     } else {
         ""
     };
     format!(
-        "COALESCE(ARRAY_AGG(DISTINCT members.id) FILTER (WHERE members.id IS NOT NULL{bridge}), '{{}}')"
+        "COALESCE(ARRAY_AGG(DISTINCT module_members.member_id) FILTER (WHERE module_members.member_id IS NOT NULL{bridge}), '{{}}')"
     )
 }
 
@@ -372,19 +375,29 @@ pub const ARCHIVED_MODULE_UPDATE_BODY: &str = "{\"error\":\"Archived module cann
 
 /// `sub_issues` retrieve annotation (`base.py:401-411`,
 /// `archive.py:298-308`): `COUNT` over live module bridges of child
-/// issues (`parent IS NOT NULL`). Base clears ordering (`.order_by()`);
-/// archive keeps the bridge default — both render the same `COUNT`
-/// subquery; handlers keep the call-site spelling.
+/// issues (`parent IS NOT NULL`). The source queryset runs through
+/// `Issue.issue_objects`, so the `IssueManager` base guards apply inside
+/// this subquery too (triage / archived / draft exclusion); base clears
+/// ordering (`.order_by()`), archive keeps the bridge default — both
+/// render the same `COUNT` subquery; handlers keep the call-site spelling.
 pub fn sub_issues_sql() -> String {
-    "SELECT COUNT(issues.id) FROM issues JOIN module_issues ON (issues.id = module_issues.issue_id) WHERE issues.project_id = :project_id AND issues.parent_id IS NOT NULL AND module_issues.module_id = :module_id AND module_issues.deleted_at IS NULL".to_owned()
+    format!(
+        "SELECT COUNT(issues.id) FROM issues LEFT OUTER JOIN states ON (issues.state_id = states.id) JOIN projects ON (issues.project_id = projects.id) JOIN module_issues ON (issues.id = module_issues.issue_id) WHERE {} AND issues.project_id = :project_id AND issues.parent_id IS NOT NULL AND module_issues.module_id = :module_id AND module_issues.deleted_at IS NULL",
+        issue_manager_guards_sql()
+    )
 }
 
 /// `estimate_type` gate (`base.py:417-422`, `archive.py:311-316`):
-/// an `estimates.type = 'points'` estimate exists for the project.
+/// an `estimates.type = 'points'` estimate exists for the project
+/// (`Project.objects.filter(workspace__slug, pk, estimate__isnull=False,
+/// estimate__type="points")`). The `workspace__slug` and `estimate__type`
+/// lookups are joins — `projects` carries `workspace_id` / `estimate_id`,
+/// not the slug or the type — so the fragment joins both tables; the
+/// INNER JOIN on `estimates` also enforces `estimate__isnull=False`.
 /// Guards the `estimate_distribution` block and the points
 /// `completion_chart`.
 pub fn estimate_type_exists_sql() -> String {
-    "SELECT 1 FROM projects WHERE workspace_slug = :slug AND projects.id = :project_id AND estimate_id IS NOT NULL AND estimates.type = 'points'".to_owned()
+    "SELECT 1 FROM projects JOIN workspaces ON (projects.workspace_id = workspaces.id) JOIN estimates ON (projects.estimate_id = estimates.id) WHERE workspaces.slug = :slug AND projects.id = :project_id AND estimates.type = 'points'".to_owned()
 }
 
 /// `avatar_url` `Case` (`base.py:442-460`, repeated `:549-565` and the
@@ -498,7 +511,7 @@ pub fn module_link_scope_where() -> String {
         "module_links.project_id = :project_id",
         "module_links.module_id = :module_id",
         "projects.archived_at IS NULL",
-        "EXISTS (SELECT 1 FROM project_projectmembers pm WHERE pm.project_id = module_links.project_id AND pm.member_id = :user AND pm.is_active = TRUE)",
+        "EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = module_links.project_id AND pm.member_id = :user AND pm.is_active = TRUE)",
     ]
     .join(" AND ")
 }
@@ -581,9 +594,12 @@ pub fn attachment_count_sql() -> String {
 /// `sub_issues_count` in `apply_annotations` (`issue.py:75-80`):
 /// children of the issue itself under the `IssueManager` base (vs
 /// [`sub_issues_sql`], children counted through this module's bridges —
-/// same shape, different outer row).
+/// same shape, different outer row). The manager guards are spelled out
+/// with the `child` alias (Q6 SQL: `LEFT OUTER JOIN states`, triage /
+/// archived-issue / archived-project / draft exclusion); `.order_by()`
+/// clears ordering so no `ORDER BY` is rendered.
 pub fn issue_sub_issues_count_sql() -> String {
-    "SELECT COUNT(child.id) FROM issues child WHERE child.parent_id = issues.id".to_owned()
+    "SELECT COUNT(child.id) FROM issues child LEFT OUTER JOIN states ON (child.state_id = states.id) JOIN projects ON (child.project_id = projects.id) WHERE child.deleted_at IS NULL AND NOT (states.group = 'triage' AND states.group IS NOT NULL) AND NOT (child.archived_at IS NOT NULL) AND NOT (projects.archived_at IS NOT NULL) AND NOT (child.is_draft) AND child.parent_id = issues.id".to_owned()
 }
 
 /// Prefetch hints on the annotated queryset (`issue.py:81`):
@@ -737,19 +753,24 @@ mod tests {
 
     #[test]
     fn member_ids_guard_asymmetry_is_kept() {
-        // Q1 (base.py:283-286): guarded.
+        // Q1 (base.py:283-286): guarded; Q1/Q4 SQL aggregate the through
+        // table's real columns (module_members.member_id).
         let base = member_ids_sql(true);
-        assert!(base.contains("COALESCE(ARRAY_AGG(DISTINCT members.id)"));
-        assert!(base.contains("members.id IS NOT NULL"));
-        assert!(base.contains("modulemember.deleted_at IS NULL"));
+        assert!(base.contains("COALESCE(ARRAY_AGG(DISTINCT module_members.member_id)"));
+        assert!(base.contains("module_members.member_id IS NOT NULL"));
+        assert!(base.contains("module_members.deleted_at IS NULL"));
         assert!(base.ends_with(", '{}')"));
         // Q4 (archive.py:250): unguarded — ported bug 2.
         let archive = member_ids_sql(false);
         assert!(
-            !archive.contains("modulemember.deleted_at IS NULL"),
+            !archive.contains("module_members.deleted_at IS NULL"),
             "archive drops the guard"
         );
-        assert!(archive.contains("members.id IS NOT NULL"));
+        assert!(archive.contains("module_members.member_id IS NOT NULL"));
+        // Both shapes render the same columns the fixture does.
+        let fixture = fixture_text(FIXTURE_SQL);
+        assert!(fixture.contains("ARRAY_AGG(DISTINCT \"module_members\".\"member_id\""));
+        assert!(fixture.contains("\"module_members\".\"deleted_at\" IS NULL"));
         assert_eq!(
             MODULE_ORDER_SQL,
             "is_favorite DESC, modules.created_at DESC"
@@ -806,7 +827,24 @@ mod tests {
         assert!(sub.contains("issues.parent_id IS NOT NULL"));
         assert!(sub.contains("module_issues.module_id = :module_id"));
         assert!(sub.contains(":project_id"));
-        assert!(estimate_type_exists_sql().contains("estimates.type = 'points'"));
+        // Retrieve runs through Issue.issue_objects: manager guards inside.
+        for needle in [
+            "issues.deleted_at IS NULL",
+            "states.group = 'triage'",
+            "NOT (issues.archived_at IS NOT NULL)",
+            "NOT (projects.archived_at IS NOT NULL)",
+            "NOT (issues.is_draft)",
+        ] {
+            assert!(sub.contains(needle), "sub_issues missing {needle}");
+        }
+        let gate = estimate_type_exists_sql();
+        assert!(gate.contains("estimates.type = 'points'"));
+        // workspace__slug / estimate__type are joins (projects carries only
+        // workspace_id / estimate_id); the INNER JOIN doubles as the
+        // estimate__isnull=False gate.
+        assert!(gate.contains("JOIN workspaces ON (projects.workspace_id = workspaces.id)"));
+        assert!(gate.contains("JOIN estimates ON (projects.estimate_id = estimates.id)"));
+        assert!(gate.contains("workspaces.slug = :slug"));
         assert!(avatar_url_case_sql().contains("CONCAT('/api/assets/v2/static/'"));
         assert!(avatar_url_case_sql().contains("THEN assignees.avatar ELSE NULL END"));
         assert!(
@@ -860,7 +898,9 @@ mod tests {
             assert!(scope.contains(needle), "missing {needle}");
         }
         assert_eq!(MODULE_LINK_ORDER_SQL, "module_links.created_at DESC");
-        // Q2 fixture renders DISTINCT with the same scope.
+        // Q2 fixture renders DISTINCT with the same scope; the membership
+        // table is project_members (Q2 SQL), not project_projectmembers.
+        assert!(scope.contains("FROM project_members pm"));
         let fixture = fixture_text(FIXTURE_SQL);
         assert!(fixture.contains("SELECT DISTINCT \"module_links\""));
         assert!(fixture.contains("\"project_members\".\"is_active\""));
@@ -911,10 +951,24 @@ mod tests {
         assert_eq!(ATTACHMENT_ENTITY_TYPE, "ISSUE_ATTACHMENT");
         assert!(attachment_count_sql().contains("entity_type = 'ISSUE_ATTACHMENT'"));
         assert!(attachment_count_sql().contains("file_assets.issue_id = issues.id"));
-        assert_eq!(
-            issue_sub_issues_count_sql(),
-            "SELECT COUNT(child.id) FROM issues child WHERE child.parent_id = issues.id"
-        );
+        // sub_issues_count runs through Issue.issue_objects (Q6 SQL carries
+        // the full manager guard set under the child alias).
+        let sub_count = issue_sub_issues_count_sql();
+        assert!(sub_count.contains("child.parent_id = issues.id"));
+        for needle in [
+            "child.deleted_at IS NULL",
+            "states.group = 'triage'",
+            "NOT (child.archived_at IS NOT NULL)",
+            "NOT (projects.archived_at IS NOT NULL)",
+            "NOT (child.is_draft)",
+            "LEFT OUTER JOIN states ON (child.state_id = states.id)",
+            "JOIN projects ON (child.project_id = projects.id)",
+        ] {
+            assert!(
+                sub_count.contains(needle),
+                "sub_issues_count missing {needle}"
+            );
+        }
         assert_eq!(
             MODULE_ISSUE_PREFETCH,
             &["assignees", "labels", "issue_module__module"]
