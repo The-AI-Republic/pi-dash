@@ -520,13 +520,22 @@ async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::celery::Cele
 /// predicates; the `GROUP BY` stays here so every read groups the same
 /// way. Joins are all LEFT (Django's nullable-FK fan-out): cycles with
 /// no issues still return one row with zero counts and `[]` assignees.
-fn annotated_from(current_only: bool, extra_pk: bool) -> String {
+fn annotated_from(current_only: bool, extra_pk: bool, include_archived: bool) -> String {
     let current = if current_only {
         " AND c.start_date <= $4 AND c.end_date >= $4"
     } else {
         ""
     };
     let pk = if extra_pk { " AND c.id = $5" } else { "" };
+    // `partial_update` reads its row through the unfiltered `get_queryset`
+    // (`base.py:337-338` carries no archived guard — the guard is the
+    // explicit 400 below), so its pre-read keeps archived rows; every
+    // other read excludes them.
+    let archived = if include_archived {
+        ""
+    } else {
+        " AND c.archived_at IS NULL"
+    };
     format!(
         r#"FROM cycles c
            JOIN workspaces w ON w.id = c.workspace_id AND w.slug = $1
@@ -539,8 +548,7 @@ fn annotated_from(current_only: bool, extra_pk: bool) -> String {
              AND p.archived_at IS NULL
              AND EXISTS (SELECT 1 FROM project_members pm
                          WHERE pm.project_id = c.project_id AND pm.member_id = $3
-                           AND pm.is_active AND pm.deleted_at IS NULL)
-             AND c.archived_at IS NULL{current}{pk}
+                           AND pm.is_active AND pm.deleted_at IS NULL){archived}{current}{pk}
            GROUP BY c.id"#
     )
 }
@@ -569,13 +577,20 @@ const SELECT_BASE: &str = r#"c.id, c.workspace_id, c.project_id, c.name, c.descr
 
 /// Full select list over [`annotated_from`]. `sub_issues` rides along
 /// only for retrieve: a correlated count over the grouped row, which is
-/// why it lives in the select list and not in `GROUP BY`.
+/// why it lives in the select list and not in `GROUP BY`. It goes through
+/// `Issue.issue_objects` (`base.py:418`), so the `IssueManager`
+/// exclusions apply (`db/models/issue.py:95-104`): triage states,
+/// archived issues and drafts never count. The `project__archived_at`
+/// exclusion is vacuous here — the outer row already proves the project
+/// live — so only the three row-level guards are ported. The `states`
+/// join is inner, like Django's single-valued-FK exclude traversal, so
+/// null-state rows drop out on both sides.
 fn annotated_select(sub_issues: bool) -> String {
     if !sub_issues {
         return SELECT_BASE.to_owned();
     }
     format!(
-        "{SELECT_BASE}, (SELECT COUNT(*) FROM issues si JOIN cycle_issues sci ON sci.issue_id = si.id WHERE sci.cycle_id = c.id AND sci.deleted_at IS NULL AND si.parent_id IS NOT NULL AND si.project_id = $2 AND si.deleted_at IS NULL) AS sub_issues"
+        "{SELECT_BASE}, (SELECT COUNT(*) FROM issues si JOIN cycle_issues sci ON sci.issue_id = si.id JOIN states s2 ON s2.id = si.state_id WHERE sci.cycle_id = c.id AND sci.deleted_at IS NULL AND si.parent_id IS NOT NULL AND si.project_id = $2 AND si.deleted_at IS NULL AND si.archived_at IS NULL AND si.is_draft = FALSE AND s2.\"group\" != 'triage') AS sub_issues"
     )
 }
 
@@ -592,7 +607,7 @@ async fn fetch_cycle_rows(
     let sql = format!(
         "SELECT row_to_json(__r)::text AS __row FROM (SELECT {} {} ORDER BY is_favorite DESC, c.created_at DESC) AS __r",
         annotated_select(false),
-        annotated_from(current_only, false),
+        annotated_from(current_only, false, false),
     );
     let rows = sqlx::query(&sql)
         .bind(slug)
@@ -607,6 +622,10 @@ async fn fetch_cycle_rows(
 
 /// Fetch one annotated row by pk (create/partial_update re-read,
 /// retrieve): same SQL plus the pk constraint, no tail order.
+/// `include_archived` is only for the `partial_update` pre-read, whose
+/// queryset has no archived guard (`base.py:337-339`: a missing row is
+/// the 500, an archived row is the explicit 400).
+#[allow(clippy::too_many_arguments)]
 async fn fetch_cycle_by_pk(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -615,11 +634,12 @@ async fn fetch_cycle_by_pk(
     now: &chrono::DateTime<chrono::Utc>,
     pk: &uuid::Uuid,
     sub_issues: bool,
+    include_archived: bool,
 ) -> Result<Option<Map<String, Value>>, Denial> {
     let sql = format!(
         "SELECT row_to_json(__r)::text AS __row FROM (SELECT {} {} ) AS __r",
         annotated_select(sub_issues),
-        annotated_from(false, true),
+        annotated_from(false, true, include_archived),
     );
     let row: Option<(String,)> = sqlx::query_as(&sql)
         .bind(slug)
@@ -842,11 +862,17 @@ fn shape_retrieve_row(row: &Map<String, Value>, timezone: &Tz) -> String {
 // CycleWriteSerializer port (`app/serializers/cycle.py:15-44`)
 // ---------------------------------------------------------------------------
 
-/// One validated datetime: the parsed instant plus whether the input
-/// carried a time part (date-only strings parse to midnight).
+/// One validated datetime: the parsed instant plus the calendar date
+/// Python's `validate()` reads (`serializers/cycle.py:29-37`:
+/// `str(data["start_date"].date())`). DRF only re-zones naive inputs
+/// (`make_aware` in the actor zone); aware inputs keep their own offset,
+/// so their date is read in the input offset, not the actor zone. Naive
+/// inputs (date-only strings, naive datetimes) keep their wall date,
+/// which attaching the actor zone never changes.
 #[derive(Debug, Clone, Copy)]
 struct ParsedDate {
     instant: chrono::DateTime<chrono::Utc>,
+    date: chrono::NaiveDate,
 }
 
 /// Parse a serializer date input the way DRF does with
@@ -866,6 +892,7 @@ fn parse_serializer_date(value: &Value, timezone: &Tz) -> Result<ParsedDate, &'s
     if let Ok(aware) = chrono::DateTime::parse_from_rfc3339(text) {
         return Ok(ParsedDate {
             instant: aware.with_timezone(&chrono::Utc),
+            date: aware.date_naive(),
         });
     }
     // `datetime.fromisoformat` extras Django accepts: a space separator
@@ -878,6 +905,7 @@ fn parse_serializer_date(value: &Value, timezone: &Tz) -> Result<ParsedDate, &'s
     if let Ok(aware) = chrono::DateTime::parse_from_rfc3339(&normalized) {
         return Ok(ParsedDate {
             instant: aware.with_timezone(&chrono::Utc),
+            date: aware.date_naive(),
         });
     }
     // Date-only (`datetime.fromisoformat` on 3.11+): naive midnight,
@@ -886,18 +914,21 @@ fn parse_serializer_date(value: &Value, timezone: &Tz) -> Result<ParsedDate, &'s
         let naive = date.and_hms_opt(0, 0, 0).expect("midnight exists");
         return Ok(ParsedDate {
             instant: naive_to_actor(naive, timezone),
+            date,
         });
     }
     // Naive ISO datetime (`fromisoformat` without offset): made aware in
-    // the actor zone.
+    // the actor zone; the wall date survives the attach.
     if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(&normalized, "%Y-%m-%dT%H:%M:%S%.f") {
         return Ok(ParsedDate {
             instant: naive_to_actor(naive, timezone),
+            date: naive.date(),
         });
     }
     if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(&normalized, "%Y-%m-%dT%H:%M:%S") {
         return Ok(ParsedDate {
             instant: naive_to_actor(naive, timezone),
+            date: naive.date(),
         });
     }
     Err("invalid")
@@ -926,6 +957,8 @@ struct CycleWrite {
     description: Option<Value>,
     start: Option<chrono::DateTime<chrono::Utc>>,
     end: Option<chrono::DateTime<chrono::Utc>>,
+    start_date: Option<chrono::NaiveDate>,
+    end_date: Option<chrono::NaiveDate>,
     view_props: Option<Value>,
     sort_order: Option<f64>,
     external_source: Option<Value>,
@@ -1022,8 +1055,10 @@ fn validate_write(
                     out.present.push(field);
                     if field == "start_date" {
                         out.start = Some(parsed.instant);
+                        out.start_date = Some(parsed.date);
                     } else {
                         out.end = Some(parsed.instant);
+                        out.end_date = Some(parsed.date);
                     }
                 }
                 Err(_) => errors.push(err(
@@ -1407,14 +1442,18 @@ fn convert_end(
 
 /// The `validate()` tail (`serializers/cycle.py:16-38`): ordering check
 /// then the `convert_to_utc` rewrite, both only when both dates are
-/// non-null. Returns the rewritten pair.
+/// non-null. Returns the rewritten pair. The rewritten dates come from
+/// the parsed inputs (`str(data["start_date"].date())`), which read
+/// aware datetimes in their own offset — never re-zoned into the actor
+/// zone (see [`ParsedDate`]).
 async fn validate_and_rewrite(
     pool: &sqlx::PgPool,
     raw_body: &Map<String, Value>,
     url_project: &uuid::Uuid,
-    actor_tz: &Tz,
     start: Option<chrono::DateTime<chrono::Utc>>,
     end: Option<chrono::DateTime<chrono::Utc>>,
+    start_date: Option<chrono::NaiveDate>,
+    end_date: Option<chrono::NaiveDate>,
 ) -> Result<
     (
         Option<chrono::DateTime<chrono::Utc>>,
@@ -1434,8 +1473,9 @@ async fn validate_and_rewrite(
     let now = chrono::Utc::now();
     let rewrite_project = rewrite_project_id(pool, raw_body, url_project).await?;
     let project_tz = rewrite_timezone(pool, &rewrite_project).await?;
-    let start_date = start.with_timezone(actor_tz).date_naive();
-    let end_date = end.with_timezone(actor_tz).date_naive();
+    let (Some(start_date), Some(end_date)) = (start_date, end_date) else {
+        return Err(Denial::ServerError);
+    };
     let start = convert_start(&project_tz, start_date, now)?;
     let end = convert_end(&project_tz, end_date)?;
     Ok((Some(start), Some(end)))
@@ -1685,9 +1725,10 @@ async fn cycle_create(
         &pool,
         &object,
         &project_id,
-        &timezone,
         write.start,
         write.end,
+        write.start_date,
+        write.end_date,
     )
     .await?;
     // `Project.objects.get` (via the rewrite, or here for the dateless
@@ -1760,7 +1801,7 @@ async fn cycle_create(
         _ => Denial::ServerError,
     })?;
     debug_assert_eq!(insert.rows_affected(), 1);
-    let row = fetch_cycle_by_pk(&pool, &slug, &project_id, &user_id, &now, &id, false)
+    let row = fetch_cycle_by_pk(&pool, &slug, &project_id, &user_id, &now, &id, false, false)
         .await?
         .ok_or(Denial::ServerError)?;
     if let Ok(origin) = request_origin(&state) {
@@ -1818,7 +1859,7 @@ async fn cycle_partial_update(
     let before = if project.archived_at.is_some() {
         None
     } else {
-        fetch_cycle_by_pk(&pool, &slug, &project_id, &user_id, &now, &pk, false).await?
+        fetch_cycle_by_pk(&pool, &slug, &project_id, &user_id, &now, &pk, false, true).await?
     };
     let Some(before) = before else {
         // `cycle.archived_at` on `None`: `AttributeError` → generic 500.
@@ -1852,15 +1893,16 @@ async fn cycle_partial_update(
         &pool,
         &object,
         &project_id,
-        &timezone,
         write.start,
         write.end,
+        write.start_date,
+        write.end_date,
     )
     .await?;
     let current_instance =
         serde_json::to_string(&Value::Object(before.clone())).unwrap_or("null".to_owned());
     apply_cycle_update(&pool, &pk, &user_id, &now, &write, start, end).await?;
-    let row = fetch_cycle_by_pk(&pool, &slug, &project_id, &user_id, &now, &pk, false)
+    let row = fetch_cycle_by_pk(&pool, &slug, &project_id, &user_id, &now, &pk, false, false)
         .await?
         .ok_or(Denial::ServerError)?;
     if let Ok(origin) = request_origin(&state) {
@@ -2051,7 +2093,8 @@ async fn cycle_retrieve(
     project_row(&pool, &project_id).await?;
     let now = chrono::Utc::now();
     let pk = parse_pk(&pk).ok_or(Denial::BadDetail)?;
-    let row = fetch_cycle_by_pk(&pool, &slug, &project_id, &user_id, &now, &pk, true).await?;
+    let row =
+        fetch_cycle_by_pk(&pool, &slug, &project_id, &user_id, &now, &pk, true, false).await?;
     let Some(row) = row else {
         return Err(Denial::CycleNotFound);
     };
@@ -2301,6 +2344,60 @@ mod tests {
         assert!(parse_serializer_date(&json!("not-a-date"), &tz).is_err());
         assert!(parse_serializer_date(&json!(123), &tz).is_err());
         assert!(parse_serializer_date(&json!(true), &tz).is_err());
+    }
+
+    #[test]
+    fn aware_dates_read_in_input_offset_not_actor_zone() {
+        // `serializers/cycle.py:29-37` reads `data["start_date"].date()`
+        // on the DRF-parsed value, which keeps an aware input's own
+        // offset — a Zulu instant just after UTC midnight is still the
+        // previous day even for a +05:30 actor.
+        let actor: Tz = "Asia/Kolkata".parse().expect("tz");
+        let parsed = parse_serializer_date(&json!("2026-02-28T23:30:00Z"), &actor).expect("aware");
+        assert_eq!(
+            parsed.date,
+            chrono::NaiveDate::from_ymd_opt(2026, 2, 28).expect("date")
+        );
+        // Naive inputs keep their wall date (the actor-zone attach never
+        // moves the wall clock).
+        let parsed = parse_serializer_date(&json!("2026-02-28"), &actor).expect("date-only");
+        assert_eq!(
+            parsed.date,
+            chrono::NaiveDate::from_ymd_opt(2026, 2, 28).expect("date")
+        );
+        let parsed = parse_serializer_date(&json!("2026-02-28T04:00:00"), &actor).expect("naive");
+        assert_eq!(
+            parsed.date,
+            chrono::NaiveDate::from_ymd_opt(2026, 2, 28).expect("date")
+        );
+    }
+
+    #[test]
+    fn sub_issues_carries_issue_manager_exclusions() {
+        // `Issue.issue_objects` (`db/models/issue.py:95-104`) drops
+        // triage, archived and draft rows from the retrieve count.
+        let select = annotated_select(true);
+        assert!(
+            select.contains("JOIN states s2 ON s2.id = si.state_id"),
+            "{select}"
+        );
+        assert!(select.contains("si.archived_at IS NULL"), "{select}");
+        assert!(select.contains("si.is_draft = FALSE"), "{select}");
+        assert!(select.contains("s2.\"group\" != 'triage'"), "{select}");
+        assert!(!annotated_select(false).contains("sub_issues"));
+    }
+
+    #[test]
+    fn update_pre_read_keeps_archived_rows() {
+        // `partial_update` reads through the unfiltered `get_queryset`
+        // (`base.py:337-339`): only its pre-read keeps archived rows, so
+        // the archived guard below it stays reachable.
+        let pre = annotated_from(false, true, true);
+        assert!(!pre.contains("c.archived_at IS NULL"), "{pre}");
+        let reread = annotated_from(false, true, false);
+        assert!(reread.contains("AND c.archived_at IS NULL"), "{reread}");
+        let list = annotated_from(false, false, false);
+        assert!(list.contains("AND c.archived_at IS NULL"), "{list}");
     }
 
     #[test]
