@@ -2411,7 +2411,16 @@ mod tests {
     }
 
     fn seed_dir(name: &str, files: &[(&str, &str)]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("pidash-seed-{name}"));
+        // Unique per call (PIDASHCONV-221): the old fixed
+        // `pidash-seed-{name}` path raced under parallel `cargo test`
+        // (`remove_dir_all` + recreate), so reads saw an empty dir and
+        // every section was silently skipped (all-zero `SeedReport`).
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "pidash-seed-{name}-{}-{unique}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for (file, body) in files {
