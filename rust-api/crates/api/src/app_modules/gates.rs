@@ -151,7 +151,7 @@ pub enum Gate {
     /// `@allow_permission([ADMIN], creator=True, model=Module)`
     /// (`base.py:723`): workspace members who created the module pass on
     /// the fast path; everyone else falls through to the ADMIN role check
-    /// (so MEMBER creators still deny). Denies with [`FORBIDDEN_BODY`].
+    /// (so MEMBER non-creators still deny). Denies with [`FORBIDDEN_BODY`].
     ProjectCreator { roles: &'static [i32] },
     /// `permission_classes = [ProjectEntityPermission]`
     /// (`base.py:763`, `archive.py:43`): safe methods need any active
