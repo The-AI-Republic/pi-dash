@@ -19,4 +19,5 @@
 //! (updated_at 2026-09-28T03:51:35.921141Z); PIDASHCONV-1 rulebook
 //! (updated_at 2026-09-29T18:38:16.331901Z); PIDASHCONV-85 oracle Done.
 
+pub mod queries;
 pub mod shape;
