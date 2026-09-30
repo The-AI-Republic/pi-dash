@@ -34,29 +34,6 @@ env:
   COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
 
 jobs:
-  paths-gate:
-    name: paths allowlist gate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Fail when the PR touches paths outside NEWFRONT-1
-        run: |
-          export BASE_REF="${{ github.base_ref }}"
-          if [ -z "$BASE_REF" ]; then
-            export BASE_REF="web-new-dev"
-          fi
-          export ALLOW='^(apps/web_new/|packages/kit/|packages/api-client/|\.ai_design/new_frontend_implementation/parity/|\.github/workflows/web-new[^/]*\.yml|pnpm-lock\.yaml$)'
-          export TOUCHED=$(git diff --name-only "origin/$BASE_REF...HEAD")
-          echo "$TOUCHED"
-          export OUTSIDE=$(echo "$TOUCHED" | grep -v -E "$ALLOW" || true)
-          if [ -n "$OUTSIDE" ]; then
-            echo "Files outside the NEWFRONT-1 path allowlist:"
-            echo "$OUTSIDE"
-            exit 1
-          fi
-
   install:
     name: install
     runs-on: ubuntu-latest

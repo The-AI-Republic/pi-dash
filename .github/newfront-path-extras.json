@@ -1,0 +1,25 @@
+{
+  "$comment": "Human-maintained. Extra paths a NEWFRONT issue may touch beyond the NEWFRONT-1 allowlist, keyed by issue identifier (matched from the PR branch name, e.g. pi-dash/newfront-104). The gate reads this file from the base branch, never from the PR. testidOnly: every changed line in these paths must contain data-testid. deletionsOnly: files in these paths may only be deleted.",
+  "base": [
+    "^apps/web_new/",
+    "^packages/kit/",
+    "^packages/api-client/",
+    "^\\.ai_design/new_frontend_implementation/parity/",
+    "^\\.github/workflows/web-new[^/]*\\.yml$",
+    "^pnpm-lock\\.yaml$"
+  ],
+  "issues": {
+    "NEWFRONT-18": { "reason": "F-07 desktop flag", "paths": ["^desktop/scripts/dev-prep\\.sh$", "^desktop/tests/"] },
+    "NEWFRONT-19": { "reason": "F-08 parity harness: stable selectors", "paths": ["^apps/(web|admin|space)/"], "testidOnly": true },
+    "NEWFRONT-20": { "reason": "F-09 coexistence routing", "paths": ["^apps/proxy/Caddyfile[^/]*$", "^apps/proxy/Dockerfile\\.ce$"] },
+    "NEWFRONT-21": { "reason": "F-10 baseline numbers", "paths": ["^\\.ai_design/new_frontend_implementation/design\\.md$"] },
+    "NEWFRONT-92": { "reason": "M-01 desktop switch", "paths": ["^desktop/", "^desktop-overlay/"] },
+    "NEWFRONT-104": { "reason": "D17 nested pages backend", "paths": ["^apps/api/pi_dash/app/views/page/", "^apps/api/pi_dash/app/serializers/page\\.py$", "^apps/api/pi_dash/app/urls/page\\.py$", "^apps/api/pi_dash/tests/"] }
+  },
+  "oracleIssues": {
+    "$comment": "Oracle issues may add data-testid attributes to the old apps, nothing else.",
+    "ids": ["NEWFRONT-24","NEWFRONT-26","NEWFRONT-28","NEWFRONT-30","NEWFRONT-32","NEWFRONT-34","NEWFRONT-36","NEWFRONT-38","NEWFRONT-40","NEWFRONT-42","NEWFRONT-44","NEWFRONT-46","NEWFRONT-48","NEWFRONT-50","NEWFRONT-52","NEWFRONT-54","NEWFRONT-56","NEWFRONT-58","NEWFRONT-60","NEWFRONT-62","NEWFRONT-64","NEWFRONT-66","NEWFRONT-68","NEWFRONT-95","NEWFRONT-97"],
+    "paths": ["^apps/(web|admin|space)/"],
+    "testidOnly": true
+  }
+}

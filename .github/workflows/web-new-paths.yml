@@ -1,0 +1,26 @@
+# NEWFRONT paths gate: runs on every PR into web-new-dev, whatever it touches.
+# The checker and its rules are read from the base branch, not from the PR.
+name: web-new-paths
+
+on:
+  pull_request:
+    branches: [web-new-dev]
+
+jobs:
+  paths-gate:
+    name: paths allowlist gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Load the checker from the base branch
+        run: git show "origin/${{ github.base_ref }}:.github/scripts/newfront-check-paths.mjs" > "$RUNNER_TEMP/check-paths.mjs"
+      - name: Check touched paths
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: node "$RUNNER_TEMP/check-paths.mjs"
