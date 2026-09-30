@@ -83,11 +83,10 @@ pub fn device_start_cache_key(authenticated: bool, ident: &str) -> Option<String
 ///
 /// `base_host` keeps a trailing slash in the golden fixture, so the
 /// `rstrip('/')` matters: without it the URI would carry a double slash.
+/// `rstrip` strips *all* trailing slashes, hence `trim_end_matches`
+/// (not `strip_suffix`, which strips only one).
 pub fn verification_uri(base_host: &str) -> String {
-    format!(
-        "{}/auth/device/",
-        base_host.strip_suffix('/').unwrap_or(base_host)
-    )
+    format!("{}/auth/device/", base_host.trim_end_matches('/'))
 }
 
 // ---------------------------------------------------------------------------
@@ -322,12 +321,18 @@ mod tests {
         );
         // The rstrip('/') matters: a bare host with no trailing slash and
         // one with it render identically, never with a double slash.
+        // `rstrip` strips *all* trailing slashes, so a multi-slash host
+        // must also collapse (regression: `strip_suffix` strips one).
         assert_eq!(
             verification_uri("https://app.example.com"),
             "https://app.example.com/auth/device/"
         );
         assert_eq!(
             verification_uri("https://app.example.com/"),
+            "https://app.example.com/auth/device/"
+        );
+        assert_eq!(
+            verification_uri("https://app.example.com///"),
             "https://app.example.com/auth/device/"
         );
     }
