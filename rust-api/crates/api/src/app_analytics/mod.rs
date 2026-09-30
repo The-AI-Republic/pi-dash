@@ -8,8 +8,10 @@
 //! [`render`] ports the workspace advance-analytics HTTP shell
 //! (PIDASHCONV-414): the three `advance-analytics*/` GET routes with their
 //! `get_analytics_filters` scoping, counts, stats, charts and the
-//! `build_analytics_chart` equivalent. Sibling handler issues extend
-//! [`routes`]; merges keep both sides.
+//! `build_analytics_chart` equivalent — plus the handlers-B shell
+//! (PIDASHCONV-399): the four owned routes `saved-analytic-view`,
+//! `export-analytics`, `default-analytics` and `project-stats`.
+//! Sibling handler issues extend [`routes`]; merges keep both sides.
 
 pub mod gates;
 pub mod render;
@@ -19,9 +21,10 @@ use axum::Router;
 use crate::state::AppState;
 
 /// Merge the app-analytics route groups (workspace advance first,
-/// PIDASHCONV-414; sibling handler issues extend the merge; merges keep
-/// both sides). Cutover into the serving router stays with the domain gate
-/// (PIDASHCONV-440), so this is additive only.
+/// PIDASHCONV-414, then handlers-B, PIDASHCONV-399; sibling handler
+/// issues extend the merge; merges keep both sides). Cutover into the
+/// serving router stays with the domain gate (PIDASHCONV-440), so this
+/// is additive only.
 pub fn routes() -> Router<AppState> {
     render::routes()
 }

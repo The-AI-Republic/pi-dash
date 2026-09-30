@@ -77,12 +77,22 @@
 //! [`build_analytics_chart`] and the scope helpers here — same module, no
 //! fork), export-issues (PIDASHCONV-430). Query builders stay in
 //! `pidash_services::app_analytics::queries`, gates in [`super::gates`].
+//! Handlers-B (PIDASHCONV-399) lives in this same module: the four
+//! owned routes `saved-analytic-view/<analytic_id>/` (GET),
+//! `export-analytics/` (POST), `default-analytics/` (GET) and
+//! `project-stats/` (GET) with their session-auth-then-gate order, plot
+//! COUNT/SUM shapes and DRF-byte rendering. Name-sharing with the
+//! advance shell resolved at merge: [`routes`] serves all seven paths,
+//! `json_value_response` / `pool_owned` / `IssuesDenial` are the
+//! handlers-B spellings of the shared private helpers.
+//!
 
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::Router;
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serde_json::{Map, Value};
@@ -91,8 +101,11 @@ use sqlx::Row;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
+use super::gates::{decide_gate, gate_for, tenant_context, GateOutcome};
+use crate::app_issues::{fetch_json_rows, query_last, Denial as IssuesDenial, QueryMap};
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
+use pidash_db::issue_filters::issue_filters_get;
 use pidash_services::app_analytics::queries as q;
 use pidash_types::WorkspaceId;
 
@@ -106,9 +119,14 @@ pub const PATH_ADVANCE: &str = "workspaces/<slug>/advance-analytics/";
 pub const PATH_STATS: &str = "workspaces/<slug>/advance-analytics-stats/";
 pub const PATH_CHARTS: &str = "workspaces/<slug>/advance-analytics-charts/";
 
-/// Register the three workspace advance-analytics GET paths. Owned methods
-/// serve from Rust; everything else proxies to Django (its 401-anon-before-405
-/// and DRF metadata live there) — the `app_cycles` precedent.
+/// Register the owned D-35 analytic paths: the three workspace
+/// advance-analytics GETs (PIDASHCONV-414, handlers-C) plus the four
+/// handlers-B routes (PIDASHCONV-399) — saved-analytic-view GET,
+/// export-analytics POST, default-analytics GET, project-stats GET.
+/// Owned methods serve from Rust; everything else proxies to Django (its
+/// 401-anon-before-405 and DRF metadata live there) — the `app_cycles`
+/// precedent. Sibling handler issues extend this merge; merges keep both
+/// sides.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -123,7 +141,24 @@ pub fn routes() -> Router<AppState> {
             "/api/workspaces/{slug}/advance-analytics-charts/",
             owned(axum::routing::get(charts_get), &["GET"]),
         )
+        .route(
+            "/api/workspaces/{slug}/saved-analytic-view/{analytic_id}/",
+            owned_get(get(get_saved_analytic)),
+        )
+        .route(
+            "/api/workspaces/{slug}/export-analytics/",
+            owned_post(post(post_export_analytics)),
+        )
+        .route(
+            "/api/workspaces/{slug}/default-analytics/",
+            owned_get(get(get_default_analytics)),
+        )
+        .route(
+            "/api/workspaces/{slug}/project-stats/",
+            owned_get(get(get_project_stats)),
+        )
 }
+
 
 /// An owned path: listed methods serve from Rust, everything else proxies
 /// to Django. OPTIONS proxies too: DRF answers metadata (401 anon / 200
@@ -1809,10 +1844,1086 @@ async fn grouped_chart_response(
     Ok(Value::Object(out).to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Handlers-B shell (PIDASHCONV-399); routes merge into routes() above
+// ---------------------------------------------------------------------------
+
+
+
+/// A GET-owned path: the GET handler owns reads, everything else falls
+/// through to Django. `HEAD` rides axum's `get` handling like Django's
+/// `GET`-backed `HEAD`.
+fn owned_get(
+    get_handler: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
+    get_handler
+        .post(crate::edge::proxy)
+        .put(crate::edge::proxy)
+        .patch(crate::edge::proxy)
+        .delete(crate::edge::proxy)
+        .options(crate::edge::proxy)
+}
+
+/// The POST-owned export path: POST owns the acknowledgement, everything
+/// else falls through to Django.
+fn owned_post(
+    post_handler: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
+    post_handler
+        .get(crate::edge::proxy)
+        .put(crate::edge::proxy)
+        .patch(crate::edge::proxy)
+        .delete(crate::edge::proxy)
+        .options(crate::edge::proxy)
+}
+
+fn json_value_response(status: StatusCode, value: &Value) -> Response {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(value.to_string()))
+        .expect("analytic response")
+}
+
+// ---------------------------------------------------------------------------
+// Auth + gate
+// ---------------------------------------------------------------------------
+
+/// The authenticated caller the handlers need: the email for the
+/// export acknowledgement (`str(request.user.email)`). Membership
+/// rows are consumed inside the gate; no handler re-scopes by user.
+struct Authed {
+    email: Option<String>,
+}
+
+fn pool_owned(state: &AppState) -> Result<sqlx::PgPool, IssuesDenial> {
+    state
+        .pools()
+        .map(|pools| pools.primary().clone())
+        .ok_or(IssuesDenial::ServerError)
+}
+
+/// Session auth (`BaseAPIView`: session auth + `IsAuthenticated`) then
+/// the route's `@allow_permission` gate from [`gate_for`], in Django's
+/// order. Anonymous answers 401 before anything else (the slug-existence
+/// oracle stays closed); a caller with no allowed-role row — including
+/// unknown slugs and cross-tenant slugs — answers the decorator 403.
+async fn authed_gate(
+    state: &AppState,
+    slug: &str,
+    method: &str,
+    path: &str,
+    extension: Option<axum::Extension<SessionHandle>>,
+) -> Result<Authed, IssuesDenial> {
+    let pool = pool_owned(state)?;
+    let actor =
+        crate::license::resolve_actor(&pool, state.settings().secret_key.as_bytes(), extension)
+            .await
+            .map_err(|_| IssuesDenial::ServerError)?
+            .ok_or(IssuesDenial::Unauthorized)?;
+    let row = gate_for(method, path).ok_or(IssuesDenial::ServerError)?;
+    // Same row filters as the decorator (`is_active=True`, soft-delete
+    // scope, slug scoping); `role` is non-nullable, the outer Option is
+    // row presence.
+    let member: Option<(Option<i16>,)> = sqlx::query_as(
+        r#"SELECT wm.role FROM workspace_members wm
+           JOIN workspaces w ON w.id = wm.workspace_id
+           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
+    )
+    .bind(slug)
+    .bind(actor.id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|_| IssuesDenial::ServerError)?;
+    let role = member.and_then(|row| row.0).map(i32::from);
+    let allowed = match row.gate {
+        super::gates::Gate::Workspace { roles } | super::gates::Gate::Project { roles } => {
+            role.is_some_and(|role| roles.contains(&role))
+        }
+        // `WorkSpaceAdminPermission` allows ADMIN or MEMBER
+        // (`permissions/workspace.py:61-71`); only the denial body
+        // differs, which never applies to these four routes.
+        super::gates::Gate::ViewsetAdmin => role.is_some_and(|role| {
+            role == ROLE_ADMIN || role == pidash_auth::permissions::ROLE_MEMBER
+        }),
+    };
+    let facts = AllowFacts {
+        workspace: WorkspaceId::from(slug),
+        authenticated: true,
+        is_workspace_member: role.is_some(),
+        has_allowed_workspace_role: allowed,
+        is_creator: false,
+        has_allowed_project_role: false,
+        is_project_member: false,
+        is_workspace_admin: role == Some(ROLE_ADMIN),
+    };
+    match decide_gate(&row.gate, &tenant_context(slug), &facts) {
+        GateOutcome::Allow => Ok(Authed { email: actor.email }),
+        GateOutcome::Deny => Err(IssuesDenial::Forbidden),
+        GateOutcome::Unauthenticated => Err(IssuesDenial::Unauthorized),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Execution SQL: scope, joins, legacy/stored filters
+// ---------------------------------------------------------------------------
+
+/// `FROM` + joins shared by every `Issue.issue_objects` read on this
+/// path. Django's manager exclusion (`db/models/issue.py:95-104`) joins
+/// `states` (triage), `projects` (project-archived) and `workspaces`
+/// (slug); `workspaces` joins on the direct `issues.workspace_id` FK,
+/// which is what `workspace__slug` traverses. All three are INNER, so a
+/// NULL state row drops out exactly like the manager's
+/// `NOT (group = 'triage')` three-valued exclusion. Caller-supplied link
+/// joins (legacy/stored filters, dimensions) append as `extra_joins`.
+/// `with_states` drops the manager `states` join when a dimension join
+/// already targets the table (e.g. `state__group` segments): Postgres
+/// rejects the same table name twice while Django reuses the single
+/// join, and the triage predicate applies over the remaining join.
+fn issue_from(extra_joins: &str) -> String {
+    issue_from_states(extra_joins, true)
+}
+
+fn issue_from_states(extra_joins: &str, with_states: bool) -> String {
+    let states = if with_states {
+        " INNER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\")"
+    } else {
+        ""
+    };
+    format!(
+        "FROM \"issues\" \
+         INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") \
+         INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\"){states}{extra_joins}"
+    )
+}
+
+/// `WHERE` predicates for one `issue_objects` read: the workspace slug
+/// (`$1`, bound first by every handler), the manager + soft-delete scope
+/// ([`q::ISSUE_OBJECTS_SCOPE`], pinned spelling owned by the services
+/// layer), and the caller's compiled filter fragment, if any.
+fn issue_where(slug_ph: &str, filters: Option<&str>) -> String {
+    let mut parts = vec![
+        format!("\"workspaces\".\"slug\" = {slug_ph}"),
+        q::ISSUE_OBJECTS_SCOPE.to_owned(),
+    ];
+    if let Some(fragment) = filters {
+        parts.push(format!("({fragment})"));
+    }
+    parts.join(" AND ")
+}
+
+/// Start a bind chain with the workspace slug at `$1`, matching the
+/// services builders' hardcoded slug placeholder. Returns the binder
+/// (later binds continue at `$2`) — the `"$1"` text itself is discarded
+/// since the statements spell it literally.
+fn slugs_first(slug: &str) -> crate::app_issues::Binder {
+    let mut binder = crate::app_issues::Binder::new();
+    let first = binder.bind_string(slug.to_owned());
+    debug_assert_eq!(first, "$1");
+    binder
+}
+
+/// Remap one `issue_filters` predicate fragment from the D-26
+/// (`app_issues`) alias spelling to this path's quoted-table spelling.
+/// The D-26 renderer emits Django's query aliases (`issue.`,
+/// `label_issue.`, `state.` …); the analytics statements address the
+/// real tables (`"issues".`, `"issue_labels".`, `"states".` …) per the
+/// fixture templates. Longer aliases first so no prefix shadows another
+/// (`issue.` never matches `issue_assignee.` — the patterns all carry
+/// their trailing dot).
+fn remap_legacy(fragment: &str) -> String {
+    fragment
+        .replace("issue_intake.", "\"intake_issues\".")
+        .replace("issue_subscribers.", "\"issue_subscribers\".")
+        .replace("issue_mention.", "\"issue_mentions\".")
+        .replace("issue_assignee.", "\"issue_assignees\".")
+        .replace("label_issue.", "\"issue_labels\".")
+        .replace("issue_cycle.", "\"cycle_issues\".")
+        .replace("issue_module.", "\"module_issues\".")
+        .replace("state.", "\"states\".")
+        .replace("issue.", "\"issues\".")
+}
+
+/// `LEFT JOIN`s for every link table a remapped fragment references.
+/// Uniformly LEFT (never Django's `filter()` INNER): the predicates sit
+/// in `WHERE`, so positive references filter identically either way,
+/// while `__isnull` tests require the outer join. Mirrors the D-26
+/// `RELATION_JOINS` table-to-alias map. Tables already present in
+/// `existing` (dimension/assignee joins composed earlier) are skipped:
+/// Postgres rejects the same table name twice, while Django reuses the
+/// single join.
+fn link_joins_for(fragment: &str, existing: &str) -> String {
+    const LINKS: &[&str] = &[
+        "\"issue_labels\"",
+        "\"issue_assignees\"",
+        "\"cycle_issues\"",
+        "\"module_issues\"",
+        "\"issue_mentions\"",
+        "\"issue_subscribers\"",
+        "\"intake_issues\"",
+    ];
+    let mut out = String::new();
+    for table in LINKS {
+        if fragment.contains(&format!("{table}.")) && !existing.contains(table) {
+            out.push_str(&format!(
+                " LEFT JOIN {table} ON ({table}.\"issue_id\" = \"issues\".\"id\")"
+            ));
+        }
+    }
+    out
+}
+
+/// Compile the request's `issue_filters(request.GET, "GET")` predicates
+/// (`DefaultAnalyticsEndpoint`, `base.py:255`) into a remapped `WHERE`
+/// fragment. Relative dates resolve against the UTC date, exactly like
+/// `timezone.now().date()` in `issue_filters.py`. Link joins compose at
+/// the call site via [`link_joins_for`] (per statement family, so joins
+/// already present are skipped). An empty filter set compiles to no
+/// fragment (the suite's world sends no filter params on these routes).
+fn legacy_filters(
+    query: &QueryMap,
+    binder: &mut crate::app_issues::Binder,
+) -> Result<Option<String>, IssuesDenial> {
+    let flat: HashMap<String, String> = query
+        .keys()
+        .filter_map(|key| query_last(query, key).map(|last| (key.clone(), last)))
+        .collect();
+    let today = chrono::Utc::now().date_naive();
+    let legacy = issue_filters_get(&flat, "", today).map_err(|_| IssuesDenial::ServerError)?;
+    let mut parts = Vec::new();
+    for (name, value) in legacy.predicates() {
+        // Error bodies are already exact (`{"error": "Please provide
+        // valid detail"}` for unparseable UUIDs, 500 for unknown
+        // lookups — Django's `FieldError` generic 500); propagate.
+        let fragment = crate::app_issues::legacy_sql(binder, name, value)?;
+        parts.push(remap_legacy(&fragment));
+    }
+    if parts.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(parts.join(" AND ")))
+}
+
+// ---------------------------------------------------------------------------
+// Stored `AnalyticView.query` compiler (saved-analytic scope)
+// ---------------------------------------------------------------------------
+
+/// Quoted column for one stored-query lookup path. Covers the ORM forms
+/// `issue_filters(..., "POST"/"PATCH")` emits (the only writers of this
+/// column, via `AnalyticViewSerializer.create/update`) plus the
+/// hand-written `workspace__slug` pin the seed uses. Anything else is a
+/// Django `FieldError` → generic 500.
+fn stored_column(path: &str) -> Result<&'static str, IssuesDenial> {
+    Ok(match path {
+        "workspace__slug" => "\"workspaces\".\"slug\"",
+        "priority" | "priority__in" => "\"issues\".\"priority\"",
+        "state__group" | "state__group__in" => "\"states\".\"group\"",
+        "state" | "state__in" => "\"issues\".\"state_id\"",
+        "parent" | "parent__in" => "\"issues\".\"parent_id\"",
+        "project" | "project__in" => "\"issues\".\"project_id\"",
+        "estimate_point" | "estimate_point__in" => "\"issues\".\"estimate_point_id\"",
+        "created_by" | "created_by__in" => "\"issues\".\"created_by_id\"",
+        "name" => "\"issues\".\"name\"",
+        _ => return Err(IssuesDenial::ServerError),
+    })
+}
+
+/// True for the UUID-typed stored columns: values parse-or-500 (Django
+/// coerces via `UUIDField.get_prep_value`; garbage is a
+/// `ValidationError` only on some paths and a DB error on others — both
+/// become the generic 500 here, matching the project-stats B7 handling).
+fn stored_is_uuid(path: &str) -> bool {
+    matches!(
+        path,
+        "state"
+            | "state__in"
+            | "parent"
+            | "parent__in"
+            | "project"
+            | "project__in"
+            | "estimate_point"
+            | "estimate_point__in"
+            | "created_by"
+            | "created_by__in"
+    )
+}
+
+fn bind_stored_value(
+    binder: &mut crate::app_issues::Binder,
+    column: &str,
+    value: &Value,
+    is_uuid: bool,
+) -> Result<String, IssuesDenial> {
+    if value.is_null() {
+        // Django `filter(field=None)` → `IS NULL`.
+        return Ok(format!("{column} IS NULL"));
+    }
+    if is_uuid {
+        let raw = value.as_str().ok_or(IssuesDenial::ServerError)?;
+        let id: uuid::Uuid = raw.parse().map_err(|_| IssuesDenial::ServerError)?;
+        let holder = binder.bind(sea_query::Value::Uuid(Some(Box::new(id))));
+        return Ok(format!("{column} = {holder}"));
+    }
+    let holder = match value {
+        Value::String(text) => binder.bind_string(text.clone()),
+        Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                binder.bind(sea_query::Value::BigInt(Some(int)))
+            } else if let Some(uint) = number.as_u64() {
+                binder.bind(sea_query::Value::BigUnsigned(Some(uint)))
+            } else if let Some(float) = number.as_f64() {
+                binder.bind(sea_query::Value::Double(Some(float)))
+            } else {
+                return Err(IssuesDenial::ServerError);
+            }
+        }
+        Value::Bool(flag) => binder.bind(sea_query::Value::Bool(Some(*flag))),
+        Value::Array(_) | Value::Object(_) => return Err(IssuesDenial::ServerError),
+        Value::Null => unreachable!("null handled above"),
+    };
+    Ok(format!("{column} = {holder}"))
+}
+
+/// One stored-query entry (`key: value` of the `AnalyticView.query`
+/// JSON, used VERBATIM as ORM kwargs, `base.py:195-196`).
+fn stored_predicate(
+    key: &str,
+    value: &Value,
+    binder: &mut crate::app_issues::Binder,
+) -> Result<String, IssuesDenial> {
+    if let Some(path) = key.strip_suffix("__isnull") {
+        let column = stored_column(path)?;
+        let flag = value.as_bool().ok_or(IssuesDenial::ServerError)?;
+        return Ok(if flag {
+            format!("{column} IS NULL")
+        } else {
+            format!("{column} IS NOT NULL")
+        });
+    }
+    if key.ends_with("__in") {
+        let column = stored_column(key)?;
+        let items: Vec<&Value> = match value {
+            Value::Array(items) => items.iter().collect(),
+            // `{"priority__in": "high"}` (the analytic-view CRUD
+            // contract): a lone scalar is a one-element `IN`.
+            single => vec![single],
+        };
+        if items.is_empty() {
+            return Ok("FALSE".to_owned());
+        }
+        let is_uuid = stored_is_uuid(key);
+        let mut holders = Vec::with_capacity(items.len());
+        for item in items {
+            if item.is_null() {
+                // `IN` never matches NULL; Django emits a separate
+                // `IS NULL` clause, which an `IN` list cannot spell —
+                // none of the writers produce it. Stay silent-free: 500.
+                return Err(IssuesDenial::ServerError);
+            }
+            if is_uuid {
+                let raw = item.as_str().ok_or(IssuesDenial::ServerError)?;
+                let id: uuid::Uuid = raw.parse().map_err(|_| IssuesDenial::ServerError)?;
+                holders.push(binder.bind(sea_query::Value::Uuid(Some(Box::new(id)))));
+            } else {
+                let holder = match item {
+                    Value::String(text) => binder.bind_string(text.clone()),
+                    Value::Number(number) => {
+                        if let Some(int) = number.as_i64() {
+                            binder.bind(sea_query::Value::BigInt(Some(int)))
+                        } else if let Some(uint) = number.as_u64() {
+                            binder.bind(sea_query::Value::BigUnsigned(Some(uint)))
+                        } else if let Some(float) = number.as_f64() {
+                            binder.bind(sea_query::Value::Double(Some(float)))
+                        } else {
+                            return Err(IssuesDenial::ServerError);
+                        }
+                    }
+                    Value::Bool(flag) => binder.bind(sea_query::Value::Bool(Some(*flag))),
+                    Value::Array(_) | Value::Object(_) | Value::Null => {
+                        return Err(IssuesDenial::ServerError)
+                    }
+                };
+                holders.push(holder);
+            }
+        }
+        return Ok(format!("{column} IN ({})", holders.join(",")));
+    }
+    let column = stored_column(key)?;
+    bind_stored_value(binder, column, value, stored_is_uuid(key))
+}
+
+/// Compile the stored `AnalyticView.query` JSON to a `WHERE` fragment.
+/// A non-object query is Django's `filter(**None)` `TypeError` →
+/// generic 500. Axes never come from here (they come from `query_dict`,
+/// `base.py:198-199`).
+fn stored_filters(
+    query: &Value,
+    binder: &mut crate::app_issues::Binder,
+) -> Result<Option<String>, IssuesDenial> {
+    let map = match query {
+        Value::Object(map) => map,
+        _ => return Err(IssuesDenial::ServerError),
+    };
+    let mut parts = Vec::new();
+    for (key, value) in map {
+        parts.push(stored_predicate(key, value, binder)?);
+    }
+    if parts.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(parts.join(" AND ")))
+}
+
+// ---------------------------------------------------------------------------
+// Plot regroup (build_graph_plot tail, analytics_plot.py:117-120 + 64-70)
+// ---------------------------------------------------------------------------
+
+/// Python `str()` over a dimension/segment scalar: `None` → `"None"`
+/// (the dead-annotation quirk above), bools capitalised, numbers plain.
+/// Dimensions are scalars in every exercised path.
+fn py_str(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_owned(),
+        Value::Bool(flag) => {
+            if *flag {
+                "True".to_owned()
+            } else {
+                "False".to_owned()
+            }
+        }
+        Value::Number(number) => number.to_string(),
+        Value::String(text) => text.clone(),
+        Value::Array(_) | Value::Object(_) => value.to_string(),
+    }
+}
+
+/// Regroup ordered plot rows the way `itertools.groupby` + `sort_data`
+/// do: contiguous rows (the SQL `ORDER BY "dimension"` guarantees it)
+/// keyed by `str(dimension)`, items `{"dimension", ["segment",]
+/// value_key}`, groups emitted in [`q::sort_data_keys`] order
+/// (`priority` keeps `low,medium,high,urgent,none` present keys —
+/// dropping the `"None"` NULL bucket; every other axis sorts with
+/// `"none"` last).
+fn regroup_plot(
+    rows: &[Map<String, Value>],
+    temp_axis: &str,
+    value_key: &str,
+    segmented: bool,
+) -> Value {
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Vec<Value>> = HashMap::new();
+    for row in rows {
+        let dimension = row.get("dimension").cloned().unwrap_or(Value::Null);
+        let key = py_str(&dimension);
+        let mut item = Map::new();
+        item.insert("dimension".to_owned(), dimension);
+        if segmented {
+            item.insert(
+                "segment".to_owned(),
+                row.get("segment").cloned().unwrap_or(Value::Null),
+            );
+        }
+        item.insert(
+            value_key.to_owned(),
+            row.get(value_key).cloned().unwrap_or(Value::Null),
+        );
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(Value::Object(item));
+    }
+    let mut out = Map::new();
+    for key in q::sort_data_keys(&order, temp_axis) {
+        if let Some(items) = groups.remove(&key) {
+            out.insert(key, Value::Array(items));
+        }
+    }
+    Value::Object(out)
+}
+
+// ---------------------------------------------------------------------------
+// Saved-analytic plot statements
+// ---------------------------------------------------------------------------
+
+/// `SavedAnalyticEndpoint` count + distribution over the stored scope:
+/// `Issue.issue_objects.filter(**stored)` (`base.py:196`), axes from
+/// `query_dict` (`:198-199`), `segment` from the request (`:207`),
+/// distribution/total reuse the Q-01b/Q-01a shapes. Dimension SQL comes
+/// from [`q::dimension_sql`] (same `F(x_axis)` + join mapping the
+/// services layer pins); the scope (slug + manager + stored filters)
+/// composes here because only the handler owns the `FROM` joins.
+fn saved_statements(
+    x_axis: &str,
+    y_axis: &str,
+    segment: Option<&str>,
+    stored: Option<&str>,
+    link_joins: &str,
+) -> Option<(String, String)> {
+    let (dim_expr, dim_join) = q::dimension_sql(x_axis)?;
+    let (seg_select, seg_group, seg_join) = match segment {
+        Some(seg) if !seg.is_empty() => {
+            let (expr, join) = q::dimension_sql(seg)?;
+            // Date segments render through the monthly `Concat`
+            // (`analytics_plot.py:89-91`).
+            let aliased = if q::is_date_axis(seg) {
+                q::month_dimension_expr(seg)
+            } else {
+                expr
+            };
+            (
+                format!(", {aliased} AS \"segment\""),
+                ", \"segment\"".to_owned(),
+                join,
+            )
+        }
+        _ => (String::new(), String::new(), String::new()),
+    };
+    // One join per table: a dimension/segment join targeting `states`
+    // (e.g. `state__group`) subsumes the manager `states` join (the
+    // triage predicate applies over it), and textually identical joins
+    // merge (segment can never equal `x_axis`, so this is defense).
+    let with_states = !(dim_join.contains("\"states\"") || seg_join.contains("\"states\""));
+    let seg_join = if seg_join == dim_join {
+        String::new()
+    } else {
+        seg_join
+    };
+    let plot_joins = format!("{dim_join}{seg_join}{link_joins}");
+    let scope = issue_where("$1", stored);
+    // `queryset.count()`: the bare filtered scope — dimension/segment
+    // joins stay out, or their fanout would inflate the total
+    // (`base.py:216`). The count keeps the manager `states` join (the
+    // plot's `with_states` only concerns the dimension/segment joins).
+    let count_sql = format!("SELECT COUNT(*) {} WHERE ({scope})", issue_from(link_joins));
+    let plot_sql = if y_axis == "estimate" {
+        // `SUM(CAST(estimate_point__value AS float))` grouped by
+        // dimension (`analytics_plot.py:110-115`). The estimate table
+        // joins exactly once: through the dimension/segment when one of
+        // them already brings it, otherwise through the base join.
+        let (_, estimate_join) = q::dimension_sql("estimate_point__value")?;
+        let already = dim_join.contains(q::ESTIMATE_POINT_TABLE)
+            || seg_join.contains(q::ESTIMATE_POINT_TABLE);
+        let base_join = if already {
+            String::new()
+        } else {
+            estimate_join
+        };
+        let seg_join = if segment == Some("estimate_point__value") {
+            String::new()
+        } else {
+            seg_join
+        };
+        let from = issue_from_states(
+            &format!("{base_join}{dim_join}{seg_join}{link_joins}"),
+            with_states,
+        );
+        format!(
+            "SELECT {dim_expr} AS \"dimension\"{seg_select}, \
+             SUM(CAST(\"estimate_points\".\"value\" AS DOUBLE PRECISION)) AS \"estimate\" \
+             {from} WHERE ({scope}) GROUP BY \"dimension\"{seg_group} ORDER BY \"dimension\" ASC"
+        )
+    } else {
+        // `COUNT(*)` grouped by dimension (+ segment),
+        // (`analytics_plot.py:96-107`). Date axes exclude NULL
+        // dimensions (`:85-86`); the guard tests the raw column — a
+        // `CONCAT` expression is never NULL in Postgres (it skips null
+        // inputs), so guarding the expression would keep NULL dates as
+        // `'-'` buckets instead of excluding them.
+        let null_guard = if q::is_date_axis(x_axis) {
+            format!(" AND \"issues\".\"{x_axis}\" IS NOT NULL")
+        } else {
+            String::new()
+        };
+        let from = issue_from_states(&plot_joins, with_states);
+        format!(
+            "SELECT \"dimension\", COUNT(*) AS \"count\" FROM \
+             (SELECT {dim_expr} AS \"dimension\"{seg_select} {from} WHERE ({scope}){null_guard}) \
+             GROUP BY \"dimension\"{seg_group} ORDER BY \"dimension\" ASC"
+        )
+    };
+    Some((count_sql, plot_sql))
+}
+
+/// `GET workspaces/<slug>/saved-analytic-view/<analytic_id>/`
+/// (`base.py:190-222`). Gate first, then the
+/// `AnalyticView.objects.get(pk, workspace__slug)` lookup (miss →
+/// `ObjectDoesNotExist` 404), then axes validation from `query_dict`,
+/// then the stored-scope count + plot.
+async fn get_saved_analytic(
+    State(state): State<AppState>,
+    Path((slug, analytic_id)): Path<(String, String)>,
+    Query(query): Query<QueryMap>,
+    extension: Option<axum::Extension<SessionHandle>>,
+    req: axum::extract::Request,
+) -> Result<Response, IssuesDenial> {
+    // Django's `<uuid:analytic_id>` converter rejects non-UUID segments
+    // at routing time (HTML 404, never reaching the view). Axum path
+    // captures match any segment, so non-UUID tails proxy to Django,
+    // reproducing its routing 404 in every `DEBUG` setting.
+    // Routing precedes auth, like the views-search detail routes.
+    let view_id: uuid::Uuid = match analytic_id.parse() {
+        Ok(id) => id,
+        Err(_) => return Ok(crate::edge::proxy(State(state), req).await),
+    };
+    authed_gate(
+        &state,
+        &slug,
+        "GET",
+        "workspaces/<slug>/saved-analytic-view/<uuid>/",
+        extension,
+    )
+    .await?;
+    let pool = pool_owned(&state)?;
+    // `AnalyticView.objects.get(pk=analytic_id, workspace__slug=slug)` —
+    // the soft-delete-scoped default manager (`AuditModel` carries
+    // `SoftDeleteModel`).
+    let found: Option<(Option<Value>, Option<Value>)> = sqlx::query_as(
+        "SELECT \"analytic_views\".\"query\", \"analytic_views\".\"query_dict\" \
+         FROM \"analytic_views\" \
+         INNER JOIN \"workspaces\" ON (\"analytic_views\".\"workspace_id\" = \"workspaces\".\"id\") \
+         WHERE (\"analytic_views\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2 \
+         AND \"analytic_views\".\"deleted_at\" IS NULL) LIMIT 1",
+    )
+    .bind(view_id)
+    .bind(&slug)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|_| IssuesDenial::ServerError)?;
+    let (stored_query, query_dict) = found.ok_or(IssuesDenial::NotFound)?;
+    // `analytic_view.query_dict.get(...)`: a NULL column is
+    // `None.get` → `AttributeError` → generic 500.
+    let query_dict = query_dict.ok_or(IssuesDenial::ServerError)?;
+    let x_axis = query_dict.get("x_axis").and_then(Value::as_str);
+    let y_axis = query_dict.get("y_axis").and_then(Value::as_str);
+    match q::validate_base_axes(x_axis, y_axis, None) {
+        Ok(()) => {}
+        Err(q::AxisError::Axes) => {
+            return Ok(json_value_response(
+                StatusCode::BAD_REQUEST,
+                &q::axes_error_body(),
+            ));
+        }
+        Err(q::AxisError::Segment) => {
+            return Ok(json_value_response(
+                StatusCode::BAD_REQUEST,
+                &q::segment_error_body(),
+            ));
+        }
+    }
+    let (x_axis, y_axis) = (x_axis.unwrap_or(""), y_axis.unwrap_or(""));
+    // `segment` still comes from the request (`base.py:207`); empty is
+    // falsy and skips the check, exactly like `validate_base_axes`.
+    let segment = query_last(&query, "segment");
+    match q::validate_base_axes(Some(x_axis), Some(y_axis), segment.as_deref()) {
+        Ok(()) => {}
+        Err(q::AxisError::Axes) => {
+            return Ok(json_value_response(
+                StatusCode::BAD_REQUEST,
+                &q::axes_error_body(),
+            ));
+        }
+        Err(q::AxisError::Segment) => {
+            return Ok(json_value_response(
+                StatusCode::BAD_REQUEST,
+                &q::segment_error_body(),
+            ));
+        }
+    }
+    let segmented = segment.as_deref().is_some_and(|seg| !seg.is_empty());
+    let mut binder = slugs_first(&slug);
+    let stored = stored_filters(&stored_query.ok_or(IssuesDenial::ServerError)?, &mut binder)?;
+    let (count_sql, plot_sql) =
+        saved_statements(x_axis, y_axis, segment.as_deref(), stored.as_deref(), "")
+            .ok_or(IssuesDenial::ServerError)?;
+    let values = binder.values();
+    let total = crate::app_issues::fetch_count(&pool, &count_sql, values.clone()).await?;
+    let rows = fetch_json_rows(&pool, &plot_sql, values).await?;
+    let value_key = if y_axis == "estimate" {
+        "estimate"
+    } else {
+        "count"
+    };
+    let distribution = regroup_plot(&rows, x_axis, value_key, segmented);
+    let mut body = Map::new();
+    body.insert("total".to_owned(), Value::from(total));
+    body.insert("distribution".to_owned(), distribution);
+    Ok(json_value_response(StatusCode::OK, &Value::Object(body)))
+}
+
+// ---------------------------------------------------------------------------
+// Export-analytics endpoint
+// ---------------------------------------------------------------------------
+
+/// Celery task enqueued by `ExportAnalyticsEndpoint.post`: the bare
+/// `@shared_task` path (`analytic_plot_export.py:349-350`, D-09 owned —
+/// the Rust worker forwards unregistered names to the broker, so the
+/// endpoint only publishes).
+const ANALYTIC_EXPORT_TASK: &str = "pi_dash.bgtasks.analytic_plot_export.analytic_export_task";
+
+/// Best-effort deferred publish (the space-intake / views-search
+/// precedent): without the queue the response still stands.
+async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::celery::CeleryTaskMessage) {
+    let job = pidash_jobs::queue::NewJob::new(
+        message.task.clone(),
+        Value::Array(message.args.clone()),
+        Value::Object(message.kwargs.clone()),
+    );
+    if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
+        tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; response stands");
+    }
+}
+
+/// `POST workspaces/<slug>/export-analytics/` (`base.py:223-251`).
+/// Same axis validation as the analytics GET, then
+/// `analytic_export_task.delay(email, data, slug)` and the emailed-to
+/// acknowledgement. No queryset runs here (Q-02c).
+async fn post_export_analytics(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    extension: Option<axum::Extension<SessionHandle>>,
+    body: Option<axum::Json<Value>>,
+) -> Result<Response, IssuesDenial> {
+    let authed = authed_gate(
+        &state,
+        &slug,
+        "POST",
+        "workspaces/<slug>/export-analytics/",
+        extension,
+    )
+    .await?;
+    // `request.data` is the parsed body, `{}` when absent.
+    let data = body.map(|body| body.0).unwrap_or(Value::Object(Map::new()));
+    let x_axis = data.get("x_axis").and_then(Value::as_str);
+    let y_axis = data.get("y_axis").and_then(Value::as_str);
+    let segment = data.get("segment").and_then(Value::as_str);
+    match q::validate_base_axes(x_axis, y_axis, segment) {
+        Ok(()) => {}
+        Err(q::AxisError::Axes) => {
+            return Ok(json_value_response(
+                StatusCode::BAD_REQUEST,
+                &q::axes_error_body(),
+            ));
+        }
+        Err(q::AxisError::Segment) => {
+            return Ok(json_value_response(
+                StatusCode::BAD_REQUEST,
+                &q::segment_error_body(),
+            ));
+        }
+    }
+    // `str(request.user.email)`: a NULL email prints `"None"`.
+    let email = authed.email.as_deref().unwrap_or("None");
+    let pool = pool_owned(&state)?;
+    let mut kwargs = Map::new();
+    kwargs.insert("email".to_owned(), Value::from(email));
+    kwargs.insert("data".to_owned(), data);
+    kwargs.insert("slug".to_owned(), Value::from(slug));
+    enqueue_message(
+        &pool,
+        pidash_jobs::celery::CeleryTaskMessage::new(ANALYTIC_EXPORT_TASK, vec![], kwargs),
+    )
+    .await;
+    Ok(json_value_response(
+        StatusCode::OK,
+        &q::base_export_message(email),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Default-analytics endpoint
+// ---------------------------------------------------------------------------
+
+/// Avatar-url `Case` over an already-joined `"users"` table, shared by
+/// the three user aggregations (`base.py:296-311,327-342,352-367`).
+/// Asset id present → `/api/assets/v2/static/<asset>/`, asset null →
+/// the plain `avatar` column, else SQL `NULL` — which is why the seed
+/// renders `""` for the created user (empty-string avatar) but `NULL`
+/// for the pending bucket (no join row at all).
+fn avatar_case(out_alias: &str) -> String {
+    q::avatar_case_sql("\"users\"", out_alias)
+}
+
+/// `GET workspaces/<slug>/default-analytics/` (`base.py:252-390`).
+/// Nine reads over one base scope (`issue_objects` + slug +
+/// `issue_filters(GET)`): totals, classified totals, open count +
+/// classified, completed-month-wise (current UTC year), top-5 creators,
+/// top-5 closers, pending assignees (no limit), and the two estimate
+/// sums. Key order follows the Python response dict (`:375-386`).
+async fn get_default_analytics(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    Query(query): Query<QueryMap>,
+    extension: Option<axum::Extension<SessionHandle>>,
+) -> Result<Response, IssuesDenial> {
+    authed_gate(
+        &state,
+        &slug,
+        "GET",
+        "workspaces/<slug>/default-analytics/",
+        extension,
+    )
+    .await?;
+    let pool = pool_owned(&state)?;
+
+    let mut binder = slugs_first(&slug);
+    let legacy = legacy_filters(&query, &mut binder)?;
+    let scope = issue_where("$1", legacy.as_deref());
+    // Link joins per statement family: the base family carries the full
+    // set, while the assignee family already joins `issue_assignees`
+    // and skips it (one join per table).
+    let legacy_joins = link_joins_for(legacy.as_deref().unwrap_or(""), "");
+
+    // Total + classified (base.py:258-264).
+    let from = issue_from(&legacy_joins);
+    let total_sql = format!("SELECT COUNT(*) {from} WHERE ({scope})");
+    let classified_sql = format!(
+        "SELECT \"states\".\"group\" AS \"state_group\", COUNT(\"states\".\"group\") AS \"state_count\" \
+         {from} WHERE ({scope}) GROUP BY \"states\".\"group\" ORDER BY \"state_group\" ASC"
+    );
+    // Open scope (base.py:266-273): same shape over OPEN_STATE_GROUPS.
+    let open_filter = format!(
+        " AND \"states\".\"group\" IN ({})",
+        q::group_list(&q::open_state_groups())
+    );
+    let open_scope = format!("{scope}{open_filter}");
+    let open_sql = format!("SELECT COUNT(*) {from} WHERE ({open_scope})");
+    let open_classified_sql = format!(
+        "SELECT \"states\".\"group\" AS \"state_group\", COUNT(\"states\".\"group\") AS \"state_count\" \
+         {from} WHERE ({open_scope}) GROUP BY \"states\".\"group\" ORDER BY \"state_group\" ASC"
+    );
+    // Completed month-wise, current UTC year only (base.py:275-282).
+    let year = chrono::Utc::now().year();
+    let year_holder = binder.bind(sea_query::Value::Int(Some(year)));
+    let month_sql = format!(
+        "SELECT EXTRACT(MONTH FROM \"issues\".\"completed_at\")::INTEGER AS \"month\", COUNT(*) AS \"count\" \
+         {from} WHERE ({scope} AND EXTRACT(YEAR FROM \"issues\".\"completed_at\") = {year_holder}) \
+         GROUP BY \"month\" ORDER BY \"month\" ASC"
+    );
+    // Top-5 creators (base.py:291-313): NULL creators excluded; avatar
+    // `Case`; `ORDER BY count DESC LIMIT 5`.
+    let creator_cols = q::CREATED_BY_DETAILS
+        .iter()
+        .map(|alias| {
+            let col = alias.strip_prefix("created_by__").unwrap_or(alias);
+            format!("\"users\".\"{col}\" AS \"{alias}\"")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let creator_group = q::CREATED_BY_DETAILS
+        .iter()
+        .map(|alias| {
+            let col = alias.strip_prefix("created_by__").unwrap_or(alias);
+            format!("\"users\".\"{col}\"")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let creator_from = issue_from(&format!(
+        "{legacy_joins} INNER JOIN \"users\" ON (\"issues\".\"created_by_id\" = \"users\".\"id\")"
+    ));
+    let creators_sql = format!(
+        "SELECT {creator_cols}, COUNT(\"issues\".\"id\") AS \"count\", {} \
+         {creator_from} WHERE ({scope} AND \"issues\".\"created_by_id\" IS NOT NULL) \
+         GROUP BY {creator_group} ORDER BY \"count\" DESC LIMIT 5",
+        avatar_case("created_by__avatar_url")
+    );
+    // Top-5 closers (base.py:322-345): completed only, NULL assignees
+    // excluded. Pending (base.py:347-369): open only, same shape, no
+    // limit. Both traverse the m2m assignee join, hence LEFT JOINs (a
+    // missing assignee is the NULL pending bucket, not a dropped row).
+    let assignee_cols = q::ASSIGNEE_DETAILS
+        .iter()
+        .map(|alias| {
+            let col = alias.strip_prefix("assignees__").unwrap_or(alias);
+            format!("\"users\".\"{col}\" AS \"{alias}\"")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let assignee_group = q::ASSIGNEE_DETAILS
+        .iter()
+        .map(|alias| {
+            let col = alias.strip_prefix("assignees__").unwrap_or(alias);
+            format!("\"users\".\"{col}\"")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let assignee_joins =
+        " LEFT JOIN \"issue_assignees\" ON (\"issue_assignees\".\"issue_id\" = \"issues\".\"id\") \
+         LEFT JOIN \"users\" ON (\"issue_assignees\".\"assignee_id\" = \"users\".\"id\")";
+    let assignee_legacy_joins = link_joins_for(legacy.as_deref().unwrap_or(""), assignee_joins);
+    let assignee_from = issue_from(&format!("{assignee_legacy_joins}{assignee_joins}"));
+    let closer_avatar = avatar_case("assignees__avatar_url");
+    let closers_sql = format!(
+        "SELECT {assignee_cols}, {closer_avatar}, COUNT(\"issues\".\"id\") AS \"count\" \
+         {assignee_from} WHERE ({scope} AND \"issues\".\"completed_at\" IS NOT NULL \
+         AND \"users\".\"id\" IS NOT NULL) \
+         GROUP BY {assignee_group} ORDER BY \"count\" DESC LIMIT 5"
+    );
+    let pending_sql = format!(
+        "SELECT {assignee_cols}, COUNT(\"issues\".\"id\") AS \"count\", {} \
+         {assignee_from} WHERE ({scope} AND \"issues\".\"completed_at\" IS NULL) \
+         GROUP BY {assignee_group} ORDER BY \"count\" DESC",
+        avatar_case("assignees__avatar_url")
+    );
+    // Estimate sums (base.py:371-372): ported bug B1 keeps
+    // `SUM("issues"."point")`. `NULL` (not 0) when no rows match.
+    let est_open_sql =
+        format!("SELECT SUM(\"issues\".\"point\") AS \"sum\" {from} WHERE ({open_scope})");
+    let est_total_sql =
+        format!("SELECT SUM(\"issues\".\"point\") AS \"sum\" {from} WHERE ({scope})");
+
+    let values = binder.values();
+    let total = crate::app_issues::fetch_count(&pool, &total_sql, values.clone()).await?;
+    let classified = fetch_json_rows(&pool, &classified_sql, values.clone()).await?;
+    let open = crate::app_issues::fetch_count(&pool, &open_sql, values.clone()).await?;
+    let open_classified = fetch_json_rows(&pool, &open_classified_sql, values.clone()).await?;
+    let monthwise = fetch_json_rows(&pool, &month_sql, values.clone()).await?;
+    let creators = fetch_json_rows(&pool, &creators_sql, values.clone()).await?;
+    let closers = fetch_json_rows(&pool, &closers_sql, values.clone()).await?;
+    let pending = fetch_json_rows(&pool, &pending_sql, values.clone()).await?;
+    let est_open = fetch_json_rows(&pool, &est_open_sql, values.clone()).await?;
+    let est_total = fetch_json_rows(&pool, &est_total_sql, values).await?;
+
+    let rows_of =
+        |rows: Vec<Map<String, Value>>| Value::Array(rows.into_iter().map(Value::Object).collect());
+    let single_sum = |rows: Vec<Map<String, Value>>| {
+        rows.into_iter()
+            .next()
+            .and_then(|mut row| row.remove("sum"))
+            .unwrap_or(Value::Null)
+    };
+    let mut body = Map::new();
+    body.insert("total_issues".to_owned(), Value::from(total));
+    body.insert("total_issues_classified".to_owned(), rows_of(classified));
+    body.insert("open_issues".to_owned(), Value::from(open));
+    body.insert(
+        "open_issues_classified".to_owned(),
+        rows_of(open_classified),
+    );
+    body.insert("issue_completed_month_wise".to_owned(), rows_of(monthwise));
+    body.insert("most_issue_created_user".to_owned(), rows_of(creators));
+    body.insert("most_issue_closed_user".to_owned(), rows_of(closers));
+    body.insert("pending_issue_user".to_owned(), rows_of(pending));
+    body.insert("open_estimate_sum".to_owned(), single_sum(est_open));
+    body.insert("total_estimate_sum".to_owned(), single_sum(est_total));
+    Ok(json_value_response(StatusCode::OK, &Value::Object(body)))
+}
+
+// ---------------------------------------------------------------------------
+// Project-stats endpoint
+// ---------------------------------------------------------------------------
+
+/// `GET workspaces/<slug>/project-stats/` (`base.py:391-455`).
+/// `?fields=` intersects the five valid fields (empty/unknown → all
+/// five, [`q::project_stats_fields`]); `?project_ids=` narrows by id
+/// (entries verbatim, malformed → generic 500, ported bug B7). Each
+/// annotation is a correlated scalar subquery; the issue subqueries
+/// carry the `issue_objects` manager scope (triage/archived/draft
+/// exclusions) that the fixture template sketches omit — Python
+/// semantics win, and the seed world is clean so the suite cannot tell.
+async fn get_project_stats(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    Query(query): Query<QueryMap>,
+    extension: Option<axum::Extension<SessionHandle>>,
+) -> Result<Response, IssuesDenial> {
+    authed_gate(
+        &state,
+        &slug,
+        "GET",
+        "workspaces/<slug>/project-stats/",
+        extension,
+    )
+    .await?;
+    let pool = pool_owned(&state)?;
+
+    let fields_csv = query_last(&query, "fields").unwrap_or_default();
+    let fields = q::project_stats_fields(&fields_csv);
+    let ids_csv = query_last(&query, "project_ids").unwrap_or_default();
+
+    let mut binder = slugs_first(&slug);
+    // `id__in` from the verbatim csv split (`base.py:411`).
+    let mut id_filter = String::new();
+    if !ids_csv.is_empty() {
+        let mut holders = Vec::new();
+        for raw in ids_csv.split(',') {
+            let id: uuid::Uuid = raw.parse().map_err(|_| IssuesDenial::ServerError)?;
+            holders.push(binder.bind(sea_query::Value::Uuid(Some(Box::new(id)))));
+        }
+        id_filter = format!(" AND \"projects\".\"id\" IN ({})", holders.join(","));
+    }
+
+    let manager = "U0.\"deleted_at\" IS NULL AND S0.\"group\" != 'triage' \
+         AND U0.\"archived_at\" IS NULL AND P0.\"archived_at\" IS NULL AND U0.\"is_draft\" = FALSE";
+    let issue_scope = |extra: &str| {
+        format!(
+            "U0.\"project_id\" = \"projects\".\"id\" AND {manager}{extra}",
+            manager = manager,
+            extra = extra
+        )
+    };
+    let mut selects = vec!["\"projects\".\"id\"".to_owned()];
+    for field in &fields {
+        let sub = match *field {
+            "total_issues" => format!(
+                "(SELECT COUNT(U0.\"id\") FROM \"issues\" U0 \
+                 INNER JOIN \"states\" S0 ON (U0.\"state_id\" = S0.\"id\") \
+                 INNER JOIN \"projects\" P0 ON (U0.\"project_id\" = P0.\"id\") \
+                 WHERE ({})) AS \"total_issues\"",
+                issue_scope("")
+            ),
+            "completed_issues" => format!(
+                "(SELECT COUNT(U0.\"id\") FROM \"issues\" U0 \
+                 INNER JOIN \"states\" S0 ON (U0.\"state_id\" = S0.\"id\") \
+                 INNER JOIN \"projects\" P0 ON (U0.\"project_id\" = P0.\"id\") \
+                 WHERE ({} AND S0.\"group\" IN ({}))) AS \"completed_issues\"",
+                issue_scope(""),
+                q::group_list(&q::closed_state_groups())
+            ),
+            "total_cycles" => "(SELECT COUNT(U0.\"id\") FROM \"cycles\" U0 \
+                 WHERE (U0.\"project_id\" = \"projects\".\"id\" AND U0.\"deleted_at\" IS NULL)) \
+                 AS \"total_cycles\""
+                .to_owned(),
+            "total_modules" => "(SELECT COUNT(U0.\"id\") FROM \"modules\" U0 \
+                 WHERE (U0.\"project_id\" = \"projects\".\"id\" AND U0.\"deleted_at\" IS NULL)) \
+                 AS \"total_modules\""
+                .to_owned(),
+            // `member__is_bot=False, is_active=True` (`base.py:448`).
+            // Spelled inline rather than through
+            // [`q::project_stats_member_where`]: that atom quotes the
+            // alias (`"U0"."is_active"`), but an unquoted `U0` alias
+            // folds to lowercase, so the quoted reference misses the
+            // `FROM` entry and the statement fails to plan. (Flagged
+            // for the queries-layer owner; the services crate is
+            // read-only for port agents.)
+            "total_members" => "(SELECT COUNT(U0.\"id\") FROM \"project_members\" U0 \
+                 INNER JOIN \"users\" ON (U0.\"member_id\" = \"users\".\"id\") \
+                 WHERE (U0.\"project_id\" = \"projects\".\"id\" AND NOT \"users\".\"is_bot\" \
+                 AND U0.\"is_active\" AND U0.\"deleted_at\" IS NULL)) \
+                 AS \"total_members\""
+                .to_owned(),
+            _ => continue,
+        };
+        selects.push(sub);
+    }
+    // `Project.objects.filter(workspace__slug)` is soft-delete scoped
+    // (`SoftDeletionManager`); the fixture sketch omits the guard.
+    let sql = format!(
+        "SELECT {} FROM \"projects\" \
+         INNER JOIN \"workspaces\" ON (\"projects\".\"workspace_id\" = \"workspaces\".\"id\") \
+         WHERE (\"workspaces\".\"slug\" = $1 AND \"projects\".\"deleted_at\" IS NULL{id_filter})",
+        selects.join(", ")
+    );
+    let rows = fetch_json_rows(&pool, &sql, binder.values()).await?;
+    Ok(json_value_response(
+        StatusCode::OK,
+        &Value::Array(rows.into_iter().map(Value::Object).collect()),
+    ))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use serde_json::json;
 
     fn utc(y: i32, m: u32, d: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, m, d, 12, 0, 0).unwrap()
@@ -2095,5 +3206,251 @@ mod tests {
         assert_eq!(q::ADVANCE_OVERVIEW_KEYS[0], "total_users");
         assert_eq!(q::ADVANCE_OVERVIEW_KEYS.len(), 11);
         assert_eq!(q::ADVANCE_WORK_ITEM_KEYS.len(), 5);
+    }
+
+    fn row(pairs: &[(&str, Value)]) -> Map<String, Value> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), value.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn routes_cover_all_four_gated_paths() {
+        // Every handlers-B path has its FX-A-G-01 gate row.
+        for (method, path) in [
+            ("GET", "workspaces/<slug>/saved-analytic-view/<uuid>/"),
+            ("POST", "workspaces/<slug>/export-analytics/"),
+            ("GET", "workspaces/<slug>/default-analytics/"),
+            ("GET", "workspaces/<slug>/project-stats/"),
+        ] {
+            assert!(
+                gate_for(method, path).is_some(),
+                "missing gate row: {method} {path}"
+            );
+        }
+        assert_eq!(
+            ANALYTIC_EXPORT_TASK,
+            "pi_dash.bgtasks.analytic_plot_export.analytic_export_task"
+        );
+    }
+
+    #[test]
+    fn py_str_matches_python_str_for_scalars() {
+        assert_eq!(py_str(&Value::Null), "None");
+        assert_eq!(py_str(&json!(true)), "True");
+        assert_eq!(py_str(&json!(false)), "False");
+        assert_eq!(py_str(&json!("high")), "high");
+        assert_eq!(py_str(&json!(3)), "3");
+    }
+
+    #[test]
+    fn regroup_issue_count_matches_seed_distribution() {
+        // Seed world: one issue per priority bucket (FX-A-H-01 saved pair).
+        let rows = vec![
+            row(&[("dimension", json!("high")), ("count", json!(1))]),
+            row(&[("dimension", json!("medium")), ("count", json!(1))]),
+            row(&[("dimension", json!("urgent")), ("count", json!(1))]),
+        ];
+        assert_eq!(
+            regroup_plot(&rows, "priority", "count", false),
+            json!({
+                "high": [{"dimension": "high", "count": 1}],
+                "medium": [{"dimension": "medium", "count": 1}],
+                "urgent": [{"dimension": "urgent", "count": 1}],
+            })
+        );
+    }
+
+    #[test]
+    fn regroup_drops_null_bucket_on_priority() {
+        // The dead-annotation quirk: NULL dimensions group as "None"
+        // and `sort_data` drops the key on priority axes.
+        let rows = vec![
+            row(&[("dimension", Value::Null), ("count", json!(2))]),
+            row(&[("dimension", json!("high")), ("count", json!(1))]),
+        ];
+        assert_eq!(
+            regroup_plot(&rows, "priority", "count", false),
+            json!({"high": [{"dimension": "high", "count": 1}]})
+        );
+    }
+
+    #[test]
+    fn regroup_segmented_items_carry_segment_key() {
+        let rows = vec![
+            row(&[
+                ("dimension", json!("high")),
+                ("segment", json!("backlog")),
+                ("count", json!(1)),
+            ]),
+            row(&[
+                ("dimension", json!("high")),
+                ("segment", json!("completed")),
+                ("count", json!(2)),
+            ]),
+        ];
+        assert_eq!(
+            regroup_plot(&rows, "priority", "count", true),
+            json!({
+                "high": [
+                    {"dimension": "high", "segment": "backlog", "count": 1},
+                    {"dimension": "high", "segment": "completed", "count": 2},
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn regroup_empty_is_empty_object() {
+        assert_eq!(regroup_plot(&[], "priority", "count", false), json!({}));
+    }
+
+    #[test]
+    fn remap_legacy_rewrites_d26_aliases() {
+        // The D-26 renderer emits Django's aliases with unquoted
+        // columns; the remap rewrites the table qualifier only (both
+        // spellings are the same SQL semantics).
+        assert_eq!(
+            remap_legacy("issue.priority IN ($2)"),
+            "\"issues\".priority IN ($2)"
+        );
+        assert_eq!(
+            remap_legacy("label_issue.label_id IN ($2)"),
+            "\"issue_labels\".label_id IN ($2)"
+        );
+        assert_eq!(
+            remap_legacy("state.\"group\" IN ('backlog')"),
+            "\"states\".\"group\" IN ('backlog')"
+        );
+        assert_eq!(
+            remap_legacy("issue.created_at::date >= $2::date"),
+            "\"issues\".created_at::date >= $2::date"
+        );
+    }
+
+    #[test]
+    fn link_joins_cover_every_remapped_table() {
+        let fragment =
+            "\"issue_labels\".\"label_id\" IN ($2) AND \"cycle_issues\".\"cycle_id\" IS NULL";
+        let joins = link_joins_for(fragment, "");
+        assert!(joins.contains("LEFT JOIN \"issue_labels\""));
+        assert!(joins.contains("LEFT JOIN \"cycle_issues\""));
+        assert!(!joins.contains("\"issue_assignees\""));
+        assert_eq!(link_joins_for("\"issues\".priority IN ($2)", ""), "");
+    }
+
+    #[test]
+    fn link_joins_skip_already_joined_tables() {
+        // The assignee family composes its own `issue_assignees` join;
+        // the legacy set must not repeat it (duplicate table error).
+        let fragment =
+            "\"issue_assignees\".assignee_id IN ($2) AND \"issue_labels\".label_id IN ($3)";
+        let joins = link_joins_for(fragment, " LEFT JOIN \"issue_assignees\" ON (...)");
+        assert!(!joins.contains("\"issue_assignees\""));
+        assert!(joins.contains("LEFT JOIN \"issue_labels\""));
+    }
+
+    #[test]
+    fn segmented_states_reuse_one_states_join() {
+        // `?segment=state__group` (the suite's segmented saved case):
+        // the segment join subsumes the manager `states` join, and the
+        // bare count keeps the manager join with no dimension joins.
+        let (count, plot) = saved_statements(
+            "priority",
+            "issue_count",
+            Some("state__group"),
+            Some("\"workspaces\".\"slug\" = $1"),
+            "",
+        )
+        .expect("known axes");
+        assert_eq!(plot.matches("JOIN \"states\"").count(), 1);
+        assert!(count.contains("JOIN \"states\""));
+        assert!(!count.contains("\"segment\""));
+    }
+
+    #[test]
+    fn saved_count_has_no_dimension_fanout() {
+        // The total is the bare filtered scope: a labels dimension must
+        // not leak its fanning join into the count.
+        let (count, _) = saved_statements(
+            "labels__id",
+            "issue_count",
+            None,
+            Some("\"workspaces\".\"slug\" = $1"),
+            "",
+        )
+        .expect("known axes");
+        assert!(!count.contains("issue_labels"));
+    }
+
+    #[test]
+    fn stored_seed_query_compiles_to_slug_predicate() {
+        // AV1: query={"workspace__slug": "an-ws"} (conftest seed).
+        let mut binder = crate::app_issues::Binder::new();
+        let out = stored_filters(&json!({"workspace__slug": "an-ws"}), &mut binder)
+            .expect("seed query compiles")
+            .expect("non-empty");
+        assert_eq!(out, "\"workspaces\".\"slug\" = $1");
+    }
+
+    #[test]
+    fn stored_in_accepts_lone_scalar() {
+        // `{"priority__in": "high"}` (the analytic-view CRUD contract).
+        let mut binder = crate::app_issues::Binder::new();
+        let out = stored_filters(&json!({"priority__in": "high"}), &mut binder)
+            .expect("compiles")
+            .expect("non-empty");
+        assert_eq!(out, "\"issues\".\"priority\" IN ($1)");
+    }
+
+    #[test]
+    fn stored_unknown_key_is_500() {
+        let mut binder = crate::app_issues::Binder::new();
+        let err = stored_filters(&json!({"nope__in": ["x"]}), &mut binder).unwrap_err();
+        assert!(matches!(err, IssuesDenial::ServerError));
+    }
+
+    #[test]
+    fn stored_non_object_is_500() {
+        let mut binder = crate::app_issues::Binder::new();
+        let err = stored_filters(&json!(["workspace__slug"]), &mut binder).unwrap_err();
+        assert!(matches!(err, IssuesDenial::ServerError));
+    }
+
+    #[test]
+    fn saved_statements_use_dimension_and_scope() {
+        let (count, plot) = saved_statements(
+            "priority",
+            "issue_count",
+            None,
+            Some("\"workspaces\".\"slug\" = $1"),
+            "",
+        )
+        .expect("known axes");
+        assert!(count.starts_with("SELECT COUNT(*)"));
+        assert!(count.contains("\"workspaces\".\"slug\" = $1"));
+        assert!(count.contains(q::ISSUE_OBJECTS_SCOPE));
+        assert!(plot.contains("GROUP BY \"dimension\""));
+        assert!(plot.contains("ORDER BY \"dimension\" ASC"));
+        assert!(!plot.contains("\"segment\""));
+    }
+
+    #[test]
+    fn saved_estimate_plot_sums_cast_float_once() {
+        let (_, plot) =
+            saved_statements("priority", "estimate", None, None, "").expect("known axes");
+        assert!(plot.contains("SUM(CAST(\"estimate_points\".\"value\" AS DOUBLE PRECISION))"));
+        assert_eq!(plot.matches("estimate_points").count(), 3);
+    }
+
+    #[test]
+    fn default_scope_threads_slug_first() {
+        let mut binder = slugs_first("an-ws");
+        let legacy = legacy_filters(&QueryMap::new(), &mut binder).expect("empty params compile");
+        assert!(legacy.is_none());
+        let scope = issue_where("$1", legacy.as_deref());
+        assert!(scope.contains("\"workspaces\".\"slug\" = $1"));
+        assert!(scope.contains(q::ISSUE_OBJECTS_SCOPE));
     }
 }
