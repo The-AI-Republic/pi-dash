@@ -817,19 +817,16 @@ async fn overview_data(
     let total_members = run_member_count(role_sql(Some(15))).await?;
     let total_guests = run_member_count(role_sql(Some(5))).await?;
 
-    // Projects (`project_filters`, no window — plain count).
+    // Projects (`project_filters` through `get_filtered_counts`, so the
+    // current window applies exactly like every other overview count —
+    // `advance.py:62-65` takes any queryset, including projects).
     let pscope = project_scope(ctx)?;
     let psql = with_joins(
-        q::advance_filtered_count_sql("projects", &pscope, None),
+        q::advance_filtered_count_sql("projects", &pscope, wph()),
         "projects",
         PROJECT_JOINS,
     );
-    let total_projects: (i64,) = sqlx::query_as(&psql)
-        .bind(slug)
-        .bind(user_id)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    let total_projects = count_one(pool, &psql, slug, user_id, ctx, RangeKind::Window).await?;
 
     // Work items + cycles (`base_filters`, current window when set).
     let iscope = issue_scope(ctx)?;
@@ -893,7 +890,7 @@ async fn overview_data(
     out.insert("total_admins".to_owned(), count_obj(total_admins));
     out.insert("total_members".to_owned(), count_obj(total_members));
     out.insert("total_guests".to_owned(), count_obj(total_guests));
-    out.insert("total_projects".to_owned(), count_obj(total_projects.0));
+    out.insert("total_projects".to_owned(), count_obj(total_projects));
     out.insert("total_work_items".to_owned(), count_obj(total_work_items));
     out.insert("total_cycles".to_owned(), count_obj(total_cycles));
     out.insert("total_intake".to_owned(), count_obj(total_intake));
@@ -1451,10 +1448,14 @@ fn axis_for(name: &str) -> Option<Axis> {
             key_kind: KeyKind::Date,
             name_kind: KeyKind::Date,
         }),
+        // The users alias must not collide with the ASSIGNEES axis (`ax_users`):
+        // Django reuses one join per association, so `x_axis=ASSIGNEES` with
+        // `group_by=CREATED_BY` (or the reverse) serves 200 there — a shared
+        // alias 500s here on `specified more than once`.
         "CREATED_BY" => Some(Axis {
-            joins: " LEFT OUTER JOIN \"users\" AS \"ax_users\" ON (\"issues\".\"created_by_id\" = \"ax_users\".\"id\")",
+            joins: " LEFT OUTER JOIN \"users\" AS \"ax_created_users\" ON (\"issues\".\"created_by_id\" = \"ax_created_users\".\"id\")",
             key_expr: "\"issues\".\"created_by_id\"",
-            name_expr: "\"ax_users\".\"display_name\"",
+            name_expr: "\"ax_created_users\".\"display_name\"",
             filter: "",
             key_kind: KeyKind::Uuid,
             name_kind: KeyKind::Text,
@@ -1499,6 +1500,42 @@ impl KeyVal {
             KeyVal::Null => Value::from("None"),
         }
     }
+
+    /// The grouped-path row `"key"`: `key if key else "none"`
+    /// (`process_grouped_data`, lowercase) — and like the simple path the
+    /// truthy key keeps its JSON type, so grouped estimate keys render as
+    /// numbers exactly as DRF renders the raw int.
+    fn grouped_key_json(&self) -> Value {
+        if self.is_falsy() {
+            return Value::from("none");
+        }
+        match self {
+            KeyVal::Str(text) => Value::from(text.clone()),
+            KeyVal::Int(n) => Value::from(*n),
+            KeyVal::Date(day) => Value::from(day.format("%Y-%m-%d").to_string()),
+            KeyVal::Uuid(id) => Value::from(id.to_string()),
+            KeyVal::Null => Value::from("none"),
+        }
+    }
+
+    /// The grouped-path row `"name"`: `display_name if display_name else
+    /// "None"` (`process_grouped_data` — the `.get()` default never fires,
+    /// the annotation is always present, so a missing name is `"None"`, not
+    /// the key).
+    fn grouped_name_json(&self) -> Value {
+        self.simple_json()
+    }
+}
+
+/// The grouped-path schema entry: `group_name or "None"`
+/// (`process_grouped_data` — unlike the row key, the group key itself never
+/// substitutes, so an empty estimate value schemas as `"None"`).
+fn grouped_schema_json(group_name: &KeyVal) -> Value {
+    if group_name.is_falsy() {
+        Value::from("None")
+    } else {
+        group_name.simple_json()
+    }
 }
 
 async fn decode_key(
@@ -1528,6 +1565,22 @@ async fn decode_key(
     }
 }
 
+/// Join assembly for the chart selects: the base issue joins plus the axis
+/// joins plus the group joins — except Django reuses one join per
+/// association (`build_simple_chart_response` / `build_grouped_chart_response`
+/// annotate over a single queryset), so when the group axis repeats the x
+/// axis joins they merge instead of repeating: a repeated table or alias is
+/// a Postgres `specified more than once` error (500) where Django serves 200
+/// (e.g. `x_axis=LABELS&group_by=LABELS`).
+fn chart_joins(axis: &Axis, group: Option<&Axis>) -> String {
+    match group {
+        Some(group) if group.joins != axis.joins => {
+            format!("{ISSUE_JOINS}{}{}", axis.joins, group.joins)
+        }
+        _ => format!("{ISSUE_JOINS}{}", axis.joins),
+    }
+}
+
 /// `build_analytics_chart(queryset, x_axis, group_by)`
 /// (`build_chart.py:151-194`).
 ///
@@ -1551,15 +1604,17 @@ pub(crate) async fn build_analytics_chart(
             invalid_axis_body(&format!("Invalid x_axis field: {x_axis}")),
         )
     })?;
-    // `if group_by and group_by not in x_axis_mapper: raise ...`.
+    // `if group_by and group_by not in x_axis_mapper: raise ...` — an empty
+    // `?group_by=` is falsy in Python, so it takes the simple path, not the
+    // 400 (`advance.py:323` passes the raw `GET.get`, `build_chart.py:158`).
     let group = match group_by {
-        Some(name) => Some(axis_for(name).ok_or_else(|| {
+        Some(name) if !name.is_empty() => Some(axis_for(name).ok_or_else(|| {
             Denial::Raw(
                 StatusCode::BAD_REQUEST,
                 invalid_axis_body(&format!("Invalid group_by field: {name}")),
             )
         })?),
-        None => None,
+        _ => None,
     };
 
     let base = issue_scope(ctx)?;
@@ -1574,11 +1629,7 @@ pub(crate) async fn build_analytics_chart(
     // filters, then the group-axis additional filters (`build_chart.py`).
     let group_filter = group.as_ref().map(|axis| axis.filter).unwrap_or("");
     let scope = format!("{base}{}{group_filter}{date_pred}", axis.filter);
-    let joins = format!(
-        "{ISSUE_JOINS}{}{}",
-        axis.joins,
-        group.as_ref().map(|axis| axis.joins).unwrap_or("")
-    );
+    let joins = chart_joins(&axis, group.as_ref());
 
     if let Some(group) = group {
         grouped_chart_response(
@@ -1621,9 +1672,15 @@ async fn simple_chart_response(
     joins: &str,
     axis: &Axis,
 ) -> Result<String, Denial> {
+    // Positional GROUP BY: the select aliases (`key`, `display_name`) can also
+    // name input columns of the joined tables, and two axes can expose the
+    // same bare name (users `display_name` twice, `labels.name` beside
+    // `cycles.name`) — a bare name then misresolves to the inputs (GROUP BY
+    // prefers input columns) and errors `ambiguous` where Django, grouping
+    // the same four select expressions, serves 200.
     let sql = format!(
         "SELECT {} AS \"key\", {} AS \"display_name\", COUNT(DISTINCT \"issues\".\"id\") AS \"count\" \
-         FROM \"issues\"{joins} WHERE ({scope}) GROUP BY \"key\", \"display_name\" ORDER BY \"key\"",
+         FROM \"issues\"{joins} WHERE ({scope}) GROUP BY 1, 2 ORDER BY \"key\"",
         axis.key_expr, axis.name_expr
     );
     let kind = if has_period {
@@ -1667,11 +1724,13 @@ async fn grouped_chart_response(
     axis: &Axis,
     group: &Axis,
 ) -> Result<String, Denial> {
+    // Positional GROUP BY (see the simple path): the same four select
+    // expressions Django groups, without the bare-name input misresolution.
     let sql = format!(
         "SELECT {} AS \"key\", {} AS \"group_key\", {} AS \"group_name\", {} AS \"display_name\", \
          COUNT(DISTINCT \"issues\".\"id\") AS \"count\" \
          FROM \"issues\"{joins} WHERE ({scope}) \
-         GROUP BY \"key\", \"group_key\", \"group_name\", \"display_name\" ORDER BY \"count\" DESC",
+         GROUP BY 1, 2, 3, 4 ORDER BY \"count\" DESC",
         axis.key_expr, group.key_expr, group.name_expr, axis.name_expr
     );
     let kind = if has_period {
@@ -1685,9 +1744,9 @@ async fn grouped_chart_response(
         .map_err(|_| Denial::ServerError)?;
 
     // `process_grouped_data`: insertion-ordered (first-seen row order is
-    // the `-count` order), `key if key else "none"` (lowercase),
-    // `display_name or key or "None"`, `str(group_key) or "none"`,
-    // `schema[g] = group_name or group_key or "None"`.
+    // the `-count` order), `key if key else "none"` (lowercase, raw type),
+    // `display_name or "None"`, `str(group_key) or "none"`,
+    // `schema[g] = group_name or "None"`.
     struct Bucket {
         key: Value,
         name: Value,
@@ -1706,20 +1765,9 @@ async fn grouped_chart_response(
 
         let bucket = buckets.entry(key.clone()).or_insert_with(|| {
             order.push(key.clone());
-            let name = if !display.is_falsy() {
-                display.simple_json()
-            } else if !key.is_falsy() {
-                key.simple_json()
-            } else {
-                Value::from("None")
-            };
             Bucket {
-                key: if key.is_falsy() {
-                    Value::from("none")
-                } else {
-                    Value::from(key.raw_string())
-                },
-                name,
+                key: key.grouped_key_json(),
+                name: display.grouped_name_json(),
                 groups: Vec::new(),
                 total: 0,
             }
@@ -1729,13 +1777,7 @@ async fn grouped_chart_response(
         } else {
             group_key.raw_string()
         };
-        let gname = if !group_name.is_falsy() {
-            group_name.simple_json()
-        } else if !group_key.is_falsy() {
-            Value::from(group_key.raw_string())
-        } else {
-            Value::from("None")
-        };
+        let gname = grouped_schema_json(&group_name);
         if !schema.iter().any(|(name, _)| *name == g) {
             schema.push((g.clone(), gname));
         }
@@ -1923,6 +1965,70 @@ mod tests {
         assert!(KeyVal::Null.is_falsy());
         assert!(!KeyVal::Uuid(id).is_falsy());
         assert_eq!(KeyVal::Int(3).raw_string(), "3");
+    }
+
+    #[test]
+    fn grouped_key_and_name_follow_process_grouped_data() {
+        // Grouped row key: falsy renders lowercase "none", truthy keeps its
+        // JSON type (grouped estimate keys are numbers, as DRF renders them).
+        assert_eq!(KeyVal::Null.grouped_key_json(), Value::from("none"));
+        assert_eq!(
+            KeyVal::Str(String::new()).grouped_key_json(),
+            Value::from("none")
+        );
+        assert_eq!(KeyVal::Int(0).grouped_key_json(), Value::from("none"));
+        assert_eq!(KeyVal::Int(3).grouped_key_json(), Value::from(3));
+        assert_eq!(
+            KeyVal::Str("high".to_owned()).grouped_key_json(),
+            Value::from("high")
+        );
+        // Grouped row name: display_name or "None" — never the key.
+        assert_eq!(
+            KeyVal::Str("AN Backlog".to_owned()).grouped_name_json(),
+            Value::from("AN Backlog")
+        );
+        assert_eq!(KeyVal::Null.grouped_name_json(), Value::from("None"));
+        assert_eq!(
+            KeyVal::Str(String::new()).grouped_name_json(),
+            Value::from("None")
+        );
+        // Grouped schema entry: group_name or "None" — never the group key
+        // (an empty estimate value schemas as "None", not "5").
+        assert_eq!(
+            grouped_schema_json(&KeyVal::Str("3pts".to_owned())),
+            Value::from("3pts")
+        );
+        assert_eq!(
+            grouped_schema_json(&KeyVal::Str(String::new())),
+            Value::from("None")
+        );
+        assert_eq!(grouped_schema_json(&KeyVal::Int(5)), Value::from(5));
+        assert_eq!(grouped_schema_json(&KeyVal::Null), Value::from("None"));
+    }
+
+    #[test]
+    fn chart_joins_merge_repeated_axis_joins() {
+        let labels = axis_for("LABELS").unwrap();
+        let created_by = axis_for("CREATED_BY").unwrap();
+        let assignees = axis_for("ASSIGNEES").unwrap();
+        // Self-grouping reuses the single Django join (a repeated alias is a
+        // Postgres error where Django serves 200).
+        let self_grouped = chart_joins(&labels, Some(&labels));
+        assert_eq!(self_grouped.matches(labels.joins).count(), 1);
+        assert!(self_grouped.contains(ISSUE_JOINS));
+        // Distinct axes concatenate.
+        let mixed = chart_joins(&labels, Some(&created_by));
+        assert!(mixed.contains("issue_labels"));
+        assert!(mixed.contains("ax_created_users"));
+        // The two users axes no longer share an alias.
+        let users = chart_joins(&assignees, Some(&created_by));
+        assert!(users.contains("ax_users"));
+        assert!(users.contains("ax_created_users"));
+        // No group: axis joins only.
+        assert_eq!(
+            chart_joins(&labels, None),
+            format!("{ISSUE_JOINS}{}", labels.joins)
+        );
     }
 
     #[test]

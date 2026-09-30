@@ -245,6 +245,20 @@ def test_advance_overview_values(clients, seed):
     }
 
 
+def test_advance_overview_windowed_project_count(clients, seed):
+    # `get_filtered_counts` windows EVERY overview count, projects included
+    # (`advance.py:45-65` takes any queryset): the seed world is all created
+    # today, so the yesterday window zeros them.
+    resp = clients["admin"].get(
+        f"/api/workspaces/{seed['ws_slug']}/advance-analytics/?date_filter=yesterday"
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total_projects"] == {"count": 0}
+    assert body["total_work_items"] == {"count": 0}
+    assert body["total_users"] == {"count": 0}
+
+
 def test_advance_workitems_and_bad_tab(clients, seed):
     resp = clients["admin"].get(
         f"/api/workspaces/{seed['ws_slug']}/advance-analytics/?tab=work-items"
@@ -336,6 +350,91 @@ def test_advance_chart_custom(clients, seed):
         {"key": "urgent", "name": "urgent", "count": 1},
     ]
     assert body["schema"] == {}
+
+
+def test_advance_chart_custom_empty_group_by(clients, seed):
+    # `?group_by=` (empty) is falsy in Python (`build_chart.py`), so the
+    # simple chart serves — not the group_by 400.
+    plain = clients["admin"].get(
+        f"/api/workspaces/{seed['ws_slug']}/advance-analytics-charts/"
+        "?type=custom-work-items&x_axis=PRIORITY"
+    )
+    assert plain.status_code == 200
+    resp = clients["admin"].get(
+        f"/api/workspaces/{seed['ws_slug']}/advance-analytics-charts/"
+        "?type=custom-work-items&x_axis=PRIORITY&group_by="
+    )
+    assert resp.status_code == 200
+    assert resp.json() == plain.json()
+
+    bad = clients["admin"].get(
+        f"/api/workspaces/{seed['ws_slug']}/advance-analytics-charts/"
+        "?type=custom-work-items&x_axis=PRIORITY&group_by=nope"
+    )
+    assert bad.status_code == 400
+    assert bad.json() == ["Invalid group_by field: nope"]
+
+
+def test_advance_chart_grouped_state_groups(clients, seed):
+    resp = clients["admin"].get(
+        f"/api/workspaces/{seed['ws_slug']}/advance-analytics-charts/"
+        "?type=custom-work-items&x_axis=PRIORITY&group_by=STATE_GROUPS"
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # One bucket per priority; -count ties leave backend order free, so
+    # compare keyed (schema is order-free by nature).
+    assert body["schema"] == {"backlog": "backlog", "completed": "completed"}
+    data = {row["key"]: row for row in body["data"]}
+    assert data == {
+        "high": {"key": "high", "name": "high", "count": 1, "backlog": 1},
+        "urgent": {"key": "urgent", "name": "urgent", "count": 1, "backlog": 1},
+        "medium": {"key": "medium", "name": "medium", "count": 1, "completed": 1},
+    }
+
+
+def test_advance_chart_grouped_shared_joins(clients, seed):
+    # ASSIGNEES and CREATED_BY both join users; self-grouping repeats the
+    # axis joins. Django reuses one join per association and serves 200 in
+    # both cases — a repeated table/alias must not 500.
+    admin = clients["admin"]
+    ws = seed["ws_slug"]
+    both = admin.get(
+        f"/api/workspaces/{ws}/advance-analytics-charts/"
+        "?type=custom-work-items&x_axis=ASSIGNEES&group_by=CREATED_BY"
+    )
+    assert both.status_code == 200
+    assert both.json() == {
+        "data": [
+            {
+                "key": "none",
+                "name": "None",
+                "count": 3,
+                seed["admin"]: 3,
+            }
+        ],
+        "schema": {seed["admin"]: "an_admin"},
+    }
+    self_grouped = admin.get(
+        f"/api/workspaces/{ws}/advance-analytics-charts/"
+        "?type=custom-work-items&x_axis=LABELS&group_by=LABELS"
+    )
+    assert self_grouped.status_code == 200
+    assert self_grouped.json() == {
+        "data": [{"key": "none", "name": "None", "count": 3, "none": 3}],
+        "schema": {"none": "None"},
+    }
+    # Two name-bearing joins (`labels.name` beside `cycles.name`): the same
+    # bare-name GROUP BY ambiguity as the users pair above.
+    names = admin.get(
+        f"/api/workspaces/{ws}/advance-analytics-charts/"
+        "?type=custom-work-items&x_axis=LABELS&group_by=CYCLES"
+    )
+    assert names.status_code == 200
+    assert names.json() == {
+        "data": [{"key": "none", "name": "None", "count": 3, "none": 3}],
+        "schema": {"none": "None"},
+    }
 
 
 def test_project_advance_overview(clients, seed):
