@@ -3,6 +3,8 @@
 /* owner: human). This placeholder grants no license and must be replaced */
 /* with the final header text by F-11 (NEWFRONT-22). */
 @import "tailwindcss";
+@import "@pidash/kit/tokens.css";
+@import "@pidash/kit/kit.css";
 
 .pidash-scaffold {
   font-family: Inter, system-ui, sans-serif;

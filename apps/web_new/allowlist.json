@@ -9,6 +9,6 @@
     "react-dom",
     "zustand"
   ],
-  "@pidash/kit": [],
+  "@pidash/kit": ["@base-ui-components/react", "@tanstack/react-virtual", "lucide-react"],
   "@pidash/api-client": ["zod"]
 }

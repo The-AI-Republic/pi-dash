@@ -1,0 +1,149 @@
+/* Copyright (c) Pi Dash contributors. All rights reserved. */
+/* License for this tree is pending the H-license decision (NEWFRONT-2, */
+/* owner: human). This placeholder grants no license and must be replaced */
+/* with the final header text by F-11 (NEWFRONT-22). */
+/* Design tokens for @pidash/kit (NEWFRONT-16), from the H-visual decision */
+/* (NEWFRONT-5, D12; full spec on the "UI kit and editor" wiki page). */
+/* Dense and neutral, desktop-first: neutral grays, one indigo accent. */
+/* Light theme is the default; the dark theme follows the OS setting unless */
+/* an explicit data-theme override is set on the root element. */
+
+:root {
+  color-scheme: light;
+
+  /* Color */
+  --bg: #ffffff;
+  --surface: #fafafa;
+  --subtle: #f4f4f5;
+  --border: #e4e4e7;
+  --text: #18181b;
+  --text-muted: #71717a;
+  --accent: #5e6ad2;
+  --accent-hover: #4f5bc4;
+  --accent-subtle: #eef0fb;
+  --on-accent: #ffffff;
+  --success: #2f9e5b;
+  --warning: #d9912b;
+  --danger: #e5484d;
+
+  /* Type */
+  --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+  --text-caption-size: 11px;
+  --text-caption-height: 16px;
+  --text-meta-size: 12px;
+  --text-meta-height: 16px;
+  --text-base-size: 13px;
+  --text-base-height: 20px;
+  --text-emphasis-size: 14px;
+  --text-emphasis-height: 20px;
+  --text-h3-size: 16px;
+  --text-h3-height: 24px;
+  --text-h2-size: 20px;
+  --text-h2-height: 28px;
+  --text-h1-size: 24px;
+  --text-h1-height: 32px;
+
+  /* Spacing: 4px grid */
+  --space-0: 0;
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-6: 12px;
+  --space-8: 16px;
+  --space-10: 20px;
+  --space-12: 24px;
+  --space-16: 32px;
+  --space-20: 40px;
+  --space-24: 48px;
+
+  /* Density: compact is the desktop-first default */
+  --density: compact;
+  --control-height: 28px;
+  --control-height-large: 32px;
+  --row-height: 28px;
+
+  /* Shape */
+  --radius-control: 4px;
+  --radius-popover: 6px;
+  --radius-card: 6px;
+  --radius-dialog: 8px;
+  --radius-full: 9999px;
+
+  /* Elevation: lists are flat; overlays and dialogs lift */
+  --shadow-popover: 0 4px 16px rgb(0 0 0 / 0.1);
+  --shadow-dialog: 0 12px 48px rgb(0 0 0 / 0.18);
+  --shadow-none: none;
+
+  /* Focus: always visible, 2px accent ring with 1px offset */
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 1px;
+  --focus-ring-color: var(--accent);
+
+  /* Motion */
+  --motion-duration: 120ms;
+  --motion-easing: ease-out;
+
+  /* Icons */
+  --icon-size: 16px;
+  --icon-stroke: 1.5;
+}
+
+[data-density="comfortable"] {
+  --density: comfortable;
+  --control-height: 32px;
+  --control-height-large: 36px;
+  --row-height: 32px;
+}
+
+/* Explicit theme pins win over the OS preference. */
+[data-theme="light"] {
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b0b0d;
+  --surface: #121214;
+  --subtle: #1a1a1d;
+  --border: #26262a;
+  --text: #ededef;
+  --text-muted: #8b8b93;
+  --accent: #7c85e0;
+  --accent-hover: #8e96e6;
+  --accent-subtle: #1e2140;
+  --on-accent: #101223;
+  --success: #3db86c;
+  --warning: #e5a84a;
+  --danger: #f2555a;
+  --shadow-popover: 0 4px 16px rgb(0 0 0 / 0.5);
+  --shadow-dialog: 0 12px 48px rgb(0 0 0 / 0.6);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0b0b0d;
+    --surface: #121214;
+    --subtle: #1a1a1d;
+    --border: #26262a;
+    --text: #ededef;
+    --text-muted: #8b8b93;
+    --accent: #7c85e0;
+    --accent-hover: #8e96e6;
+    --accent-subtle: #1e2140;
+    --on-accent: #101223;
+    --success: #3db86c;
+    --warning: #e5a84a;
+    --danger: #f2555a;
+    --shadow-popover: 0 4px 16px rgb(0 0 0 / 0.5);
+    --shadow-dialog: 0 12px 48px rgb(0 0 0 / 0.6);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-duration: 0ms;
+  }
+}

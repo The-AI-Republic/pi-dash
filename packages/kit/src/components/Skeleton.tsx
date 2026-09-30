@@ -1,0 +1,35 @@
+// Copyright (c) Pi Dash contributors. All rights reserved.
+// License for this tree is pending the H-license decision (NEWFRONT-2,
+// owner: human). This placeholder grants no license and must be replaced
+// with the final header text by F-11 (NEWFRONT-22).
+import * as React from "react";
+import { cn } from "../lib/cn";
+
+export interface SkeletonProps {
+  /** Width of the placeholder (any CSS length). */
+  width?: string;
+  /** Height of the placeholder (any CSS length). */
+  height?: string;
+  /** Fully round (avatar/dot shapes) instead of control-radius. */
+  round?: boolean;
+  className?: string;
+}
+
+export function Skeleton({
+  width = "100%",
+  height = "12px",
+  round = false,
+  className,
+}: SkeletonProps): React.ReactElement {
+  return (
+    <span
+      aria-hidden="true"
+      style={{ width, height }}
+      className={cn(
+        "animate-shimmer block bg-[linear-gradient(90deg,var(--subtle)_25%,var(--border)_50%,var(--subtle)_75%)] bg-[length:200%_100%]",
+        round ? "rounded-full" : "rounded-(--radius-control)",
+        className
+      )}
+    />
+  );
+}
