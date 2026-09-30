@@ -26,6 +26,8 @@
 //! PIDASHCONV-290) over the F-06 kernel for the same handlers.
 
 pub mod gates;
+pub mod handlers_analytics;
+pub mod handlers_progress;
 
 pub use pidash_services::app_cycles::queries;
 
@@ -40,6 +42,14 @@ pub const COMPLEX_FILTER_ENDPOINTS: &[&str] = &["cycle-issues"];
 /// Endpoints whose list path runs the legacy `issue_filters(params,
 /// 'GET')` dict compiler first (`issue.py:111`).
 pub const LEGACY_FILTER_ENDPOINTS: &[&str] = &["cycle-issues"];
+
+/// Merge the handler routers owned by this domain (PIDASHCONV-410:
+/// progress + analytics; sibling handler issues extend the merge;
+/// merges keep both sides). Cutover into the serving router stays with
+/// the domain gate (PIDASHCONV-388), so this is additive only.
+pub fn routes() -> axum::Router<crate::state::AppState> {
+    handlers_progress::routes().merge(handlers_analytics::routes())
+}
 
 #[cfg(test)]
 mod tests {
