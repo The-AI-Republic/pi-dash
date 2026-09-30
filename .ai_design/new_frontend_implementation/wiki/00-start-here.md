@@ -27,6 +27,7 @@ Why: the old app loads slowly (about 7.6 MB of JS to open an issue list), it is 
 | Quality gates | finish an issue: tests, budgets, CI checks, definition of done |
 | Phases and migration | need to know what is in scope now, or how routes move from `apps/web` |
 | Decisions and open questions | hit a question that looks undecided |
+| Old frontend at a glance | need the size and shape of the old code, where something lives in it, or baseline numbers |
 
 ## Where things live
 
