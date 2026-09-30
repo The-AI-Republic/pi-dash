@@ -126,9 +126,12 @@ fn gate_for_list() -> &'static gates::Gate {
 }
 
 fn gate_for_retrieve() -> &'static gates::Gate {
-    &gates::gate_for("GET", "workspaces/<slug>/projects/<project_id>/modules/<pk>/")
-        .expect("module retrieve gate")
-        .gate
+    &gates::gate_for(
+        "GET",
+        "workspaces/<slug>/projects/<project_id>/modules/<pk>/",
+    )
+    .expect("module retrieve gate")
+    .gate
 }
 
 fn gate_for_partial_update() -> &'static gates::Gate {
@@ -371,13 +374,34 @@ const MODULE_BASE_COLUMNS: &[&str] = &[
 /// requested annotations after (in queryset annotation order), so all
 /// three responses share this order (verified live).
 const SHARED_ROW_ORDER: &[&str] = &[
-    "id", "workspace_id", "project_id", "name", "description",
-    "description_text", "description_html", "start_date", "target_date",
-    "status", "lead_id", "view_props", "sort_order", "external_source",
-    "external_id", "logo_props", "created_at", "updated_at", "is_favorite",
-    "completed_issues", "cancelled_issues", "started_issues",
-    "unstarted_issues", "backlog_issues", "total_issues",
-    "completed_estimate_points", "total_estimate_points", "member_ids",
+    "id",
+    "workspace_id",
+    "project_id",
+    "name",
+    "description",
+    "description_text",
+    "description_html",
+    "start_date",
+    "target_date",
+    "status",
+    "lead_id",
+    "view_props",
+    "sort_order",
+    "external_source",
+    "external_id",
+    "logo_props",
+    "created_at",
+    "updated_at",
+    "is_favorite",
+    "completed_issues",
+    "cancelled_issues",
+    "started_issues",
+    "unstarted_issues",
+    "backlog_issues",
+    "total_issues",
+    "completed_estimate_points",
+    "total_estimate_points",
+    "member_ids",
 ];
 
 /// Detail shell order: `ModuleSerializer.Meta.fields` + detail extras
@@ -468,10 +492,7 @@ async fn fetch_module_rows(
     sql.push_str(" GROUP BY m.id ORDER BY ");
     sql.push_str(&queries::MODULE_ORDER_SQL.replace("modules.", "m."));
     sql.push_str(") AS __r");
-    let mut query = sqlx::query(&sql)
-        .bind(project_id)
-        .bind(slug)
-        .bind(user_id);
+    let mut query = sqlx::query(&sql).bind(project_id).bind(slug).bind(user_id);
     if let Some(id) = module_id {
         query = query.bind(id);
     }
@@ -738,30 +759,24 @@ fn validate_string_field(
     }
 }
 
-fn validate_date_field(
-    errors: &mut FieldErrors,
-    field: &str,
-    value: &Value,
-) -> Option<String> {
+fn validate_date_field(errors: &mut FieldErrors, field: &str, value: &Value) -> Option<String> {
     match value {
         Value::Null => {
             push_error(errors, field, "This field may not be null.".to_owned());
             None
         }
-        Value::String(text) => {
-            match chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d") {
-                Ok(_) => Some(text.clone()),
-                Err(_) => {
-                    push_error(
-                        errors,
-                        field,
-                        "Date has wrong format. Use one of these formats instead: YYYY-MM-DD."
-                            .to_owned(),
-                    );
-                    None
-                }
+        Value::String(text) => match chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d") {
+            Ok(_) => Some(text.clone()),
+            Err(_) => {
+                push_error(
+                    errors,
+                    field,
+                    "Date has wrong format. Use one of these formats instead: YYYY-MM-DD."
+                        .to_owned(),
+                );
+                None
             }
-        }
+        },
         _ => {
             push_error(
                 errors,
@@ -812,10 +827,7 @@ fn pk_int_reaches_lookup(number: &serde_json::Number) -> bool {
 /// strings parse as UUIDs first (`“…” is not a valid UUID.` with curly
 /// quotes); every other JSON type fails UUID validation with its Python
 /// `str()` rendering.
-async fn validate_pk_value(
-    pool: &sqlx::PgPool,
-    value: &Value,
-) -> Result<uuid::Uuid, String> {
+async fn validate_pk_value(pool: &sqlx::PgPool, value: &Value) -> Result<uuid::Uuid, String> {
     match value {
         Value::Null => Err("This field may not be null.".to_owned()),
         Value::Bool(_) => Err("Incorrect type. Expected pk value, received bool.".to_owned()),
@@ -841,7 +853,10 @@ async fn validate_pk_value(
                 }
             }
         },
-        other => Err(format!("\u{201c}{}\u{201d} is not a valid UUID.", py_str(other))),
+        other => Err(format!(
+            "\u{201c}{}\u{201d} is not a valid UUID.",
+            py_str(other)
+        )),
     }
 }
 
@@ -971,7 +986,11 @@ async fn validate_write(
             None
         }
         Some(Value::Null) => {
-            push_error(&mut errors, "name", "This field may not be null.".to_owned());
+            push_error(
+                &mut errors,
+                "name",
+                "This field may not be null.".to_owned(),
+            );
             None
         }
         Some(value) => validate_string_field(&mut errors, "name", value, 255, false),
@@ -990,11 +1009,7 @@ async fn validate_write(
         Some(value) => match coerce_string(value) {
             Ok(text) => Some(text),
             Err(()) => {
-                push_error(
-                    &mut errors,
-                    "description",
-                    "Not a valid string.".to_owned(),
-                );
+                push_error(&mut errors, "description", "Not a valid string.".to_owned());
                 None
             }
         },
@@ -1014,7 +1029,11 @@ async fn validate_write(
     let status = match body.get("status") {
         None => None,
         Some(Value::Null) => {
-            push_error(&mut errors, "status", "This field may not be null.".to_owned());
+            push_error(
+                &mut errors,
+                "status",
+                "This field may not be null.".to_owned(),
+            );
             None
         }
         Some(Value::String(text)) if MODULE_STATUS_CHOICES.contains(&text.as_str()) => {
@@ -1072,7 +1091,10 @@ async fn validate_write(
         }
         Some(value) => parse_sort_order_value(value),
     };
-    if body.get("sort_order").is_some() && sort_order.is_none() && errors.iter().all(|(f, _)| f != "sort_order") {
+    if body.get("sort_order").is_some()
+        && sort_order.is_none()
+        && errors.iter().all(|(f, _)| f != "sort_order")
+    {
         push_error(
             &mut errors,
             "sort_order",
@@ -1136,8 +1158,7 @@ async fn module_context(
     let pool = pool_of(state)?;
     let user_id = actor_user_id(extension)?;
     let project_id = resolve_project_id(&pool, slug, project_raw).await?;
-    let facts =
-        fetch_allow_facts(&pool, slug, &project_id, &user_id, gate_roles(gate)).await?;
+    let facts = fetch_allow_facts(&pool, slug, &project_id, &user_id, gate_roles(gate)).await?;
     check_gate(gate, slug, &facts)?;
     let timezone = actor_timezone(&pool, &user_id).await?;
     Ok((pool, user_id, project_id, timezone))
@@ -1344,11 +1365,21 @@ async fn module_create(
     .bind(parse_date_opt(&input.target_date.clone().flatten()))
     .bind(input.status.clone().unwrap_or_else(|| "planned".to_owned()))
     .bind(input.lead_id.flatten())
-    .bind(input.view_props.clone().unwrap_or(Value::Object(Map::new())))
+    .bind(
+        input
+            .view_props
+            .clone()
+            .unwrap_or(Value::Object(Map::new())),
+    )
     .bind(sort_order)
     .bind(input.external_source.clone().flatten())
     .bind(input.external_id.clone().flatten())
-    .bind(input.logo_props.clone().unwrap_or(Value::Object(Map::new())))
+    .bind(
+        input
+            .logo_props
+            .clone()
+            .unwrap_or(Value::Object(Map::new())),
+    )
     .bind(user_id)
     .execute(&pool)
     .await
@@ -1357,12 +1388,18 @@ async fn module_create(
         // `created_by=module.created_by, updated_by=module.updated_by`
         // (`module.py:83-84`): the crum auto-set row, user/NULL on create.
         replace_members(
-            &pool, &module_id, &project_id, &workspace_id,
-            Some(user_id), None, members,
+            &pool,
+            &module_id,
+            &project_id,
+            &workspace_id,
+            Some(user_id),
+            None,
+            members,
         )
         .await?;
     }
-    let rows = fetch_module_rows(&pool, &project_id, &slug, &user_id, Some(&module_id), false).await?;
+    let rows =
+        fetch_module_rows(&pool, &project_id, &slug, &user_id, Some(&module_id), false).await?;
     let row = rows.into_iter().next().ok_or(Denial::ServerError)?;
     // `model_activity.delay(model_name="module", current_instance=None)`
     // (`base.py:339-347`).
@@ -1465,13 +1502,12 @@ async fn fetch_estimate_type(
     let sql = queries::estimate_type_exists_sql()
         .replace(":slug", "$1")
         .replace(":project_id", "$2");
-    let row: Option<(Option<i32>,)> =
-        sqlx::query_as(&format!("SELECT ({sql}) AS estimate_type"))
-            .bind(slug)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    let row: Option<(Option<i32>,)> = sqlx::query_as(&format!("SELECT ({sql}) AS estimate_type"))
+        .bind(slug)
+        .bind(project_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.and_then(|(found,)| found).is_some())
 }
 /// Shared `FROM/WHERE` for the distribution queries: live module bridges
@@ -1559,7 +1595,11 @@ async fn fetch_assignee_distribution(
         )
     };
     let (total_key, completed_key, pending_key) = if estimate {
-        ("total_estimates", "completed_estimates", "pending_estimates")
+        (
+            "total_estimates",
+            "completed_estimates",
+            "pending_estimates",
+        )
     } else {
         ("total_issues", "completed_issues", "pending_issues")
     };
@@ -1603,7 +1643,11 @@ async fn fetch_label_distribution(
         )
     };
     let (total_key, completed_key, pending_key) = if estimate {
-        ("total_estimates", "completed_estimates", "pending_estimates")
+        (
+            "total_estimates",
+            "completed_estimates",
+            "pending_estimates",
+        )
     } else {
         ("total_issues", "completed_issues", "pending_issues")
     };
@@ -1653,9 +1697,7 @@ fn render_distribution_value(keys: &[&str], row: &Map<String, Value>) -> String 
         out.push_str(key);
         out.push_str("\":");
         let value = row.get(*key).unwrap_or(&Value::Null);
-        if *key == "total_estimates"
-            || *key == "completed_estimates"
-            || *key == "pending_estimates"
+        if *key == "total_estimates" || *key == "completed_estimates" || *key == "pending_estimates"
         {
             out.push_str(&render_float(value));
         } else {
@@ -1795,13 +1837,20 @@ async fn module_retrieve(
     let user_id = actor_user_id(extension)?;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
     let retrieve_gate = gate_for_retrieve();
-    let facts =
-        fetch_allow_facts(&pool, &slug, &project_id, &user_id, gate_roles(retrieve_gate)).await?;
+    let facts = fetch_allow_facts(
+        &pool,
+        &slug,
+        &project_id,
+        &user_id,
+        gate_roles(retrieve_gate),
+    )
+    .await?;
     check_gate(retrieve_gate, &slug, &facts)?;
     let timezone = actor_timezone(&pool, &user_id).await?;
     let module_id = parse_uuid_or_invalid(&pk_raw)?;
     // Existence probe (`queryset.exists()`, `:414`).
-    let rows = fetch_module_rows(&pool, &project_id, &slug, &user_id, Some(&module_id), true).await?;
+    let rows =
+        fetch_module_rows(&pool, &project_id, &slug, &user_id, Some(&module_id), true).await?;
     if rows.is_empty() {
         return Ok(json_response(
             StatusCode::NOT_FOUND,
@@ -1810,7 +1859,8 @@ async fn module_retrieve(
     }
     // The detail read (`queryset.first()` twice, `:424-425` — kept as
     // sequencing, not deduped).
-    let rows = fetch_module_rows(&pool, &project_id, &slug, &user_id, Some(&module_id), true).await?;
+    let rows =
+        fetch_module_rows(&pool, &project_id, &slug, &user_id, Some(&module_id), true).await?;
     let row = rows.into_iter().next().ok_or(Denial::ServerError)?;
     let estimate_type = fetch_estimate_type(&pool, &slug, &project_id).await?;
     let sub_issues = fetch_sub_issues(&pool, &project_id, &module_id).await?;
@@ -1853,12 +1903,19 @@ async fn module_retrieve(
     // `estimate_distribution` (`:427-536`).
     out.push_str(",\"estimate_distribution\":");
     if estimate_type {
-        let assignees = fetch_assignee_distribution(&pool, &slug, &project_id, &module_id, true).await?;
+        let assignees =
+            fetch_assignee_distribution(&pool, &slug, &project_id, &module_id, true).await?;
         let labels = fetch_label_distribution(&pool, &slug, &project_id, &module_id, true).await?;
         out.push_str("{\"assignees\":");
-        out.push_str(&render_distribution_array(ASSIGNEE_ESTIMATE_ORDER, &assignees));
+        out.push_str(&render_distribution_array(
+            ASSIGNEE_ESTIMATE_ORDER,
+            &assignees,
+        ));
         out.push_str(",\"labels\":");
-        out.push_str(&render_distribution_array(queries::LABEL_ESTIMATE_ROW_KEYS, &labels));
+        out.push_str(&render_distribution_array(
+            queries::LABEL_ESTIMATE_ROW_KEYS,
+            &labels,
+        ));
         let has_dates = row.get("start_date").is_some_and(|v| !v.is_null())
             && row.get("target_date").is_some_and(|v| !v.is_null());
         if has_dates {
@@ -1876,7 +1933,14 @@ async fn module_retrieve(
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0);
                 let chart = fetch_burndown_chart(
-                    &pool, &slug, &project_id, &module_id, start, target, total_issues, true,
+                    &pool,
+                    &slug,
+                    &project_id,
+                    &module_id,
+                    start,
+                    target,
+                    total_issues,
+                    true,
                 )
                 .await?;
                 out.push_str(",\"completion_chart\":");
@@ -1888,16 +1952,23 @@ async fn module_retrieve(
         out.push_str("{}");
     }
     // `distribution` (`:538-639`).
-    let assignees = fetch_assignee_distribution(&pool, &slug, &project_id, &module_id, false).await?;
+    let assignees =
+        fetch_assignee_distribution(&pool, &slug, &project_id, &module_id, false).await?;
     let labels = fetch_label_distribution(&pool, &slug, &project_id, &module_id, false).await?;
     out.push_str(",\"distribution\":{\"assignees\":");
     out.push_str(&render_distribution_array(ASSIGNEE_COUNT_ORDER, &assignees));
     out.push_str(",\"labels\":");
-    out.push_str(&render_distribution_array(queries::LABEL_COUNT_ROW_KEYS, &labels));
+    out.push_str(&render_distribution_array(
+        queries::LABEL_COUNT_ROW_KEYS,
+        &labels,
+    ));
     out.push_str(",\"completion_chart\":");
     let has_dates = row.get("start_date").is_some_and(|v| !v.is_null())
         && row.get("target_date").is_some_and(|v| !v.is_null());
-    let total_issues = row.get("total_issues").and_then(|v| v.as_i64()).unwrap_or(0);
+    let total_issues = row
+        .get("total_issues")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     if has_dates && total_issues > 0 {
         let start = row
             .get("start_date")
@@ -1909,7 +1980,14 @@ async fn module_retrieve(
             .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
         if let (Some(start), Some(target)) = (start, target) {
             let chart = fetch_burndown_chart(
-                &pool, &slug, &project_id, &module_id, start, target, total_issues, false,
+                &pool,
+                &slug,
+                &project_id,
+                &module_id,
+                start,
+                target,
+                total_issues,
+                false,
             )
             .await?;
             out.push_str(&chart);
@@ -1928,12 +2006,7 @@ async fn module_retrieve(
     } else {
         project_id.to_string()
     };
-    let visit = tasks::retrieve_visit_emit(
-        &slug,
-        &pk_raw,
-        &user_id.to_string(),
-        &project_wire,
-    );
+    let visit = tasks::retrieve_visit_emit(&slug, &pk_raw, &user_id.to_string(), &project_wire);
     enqueue_task(&pool, visit.task_name(), visit.kwargs()).await;
     Ok(json_response(StatusCode::OK, out))
 }
@@ -2105,10 +2178,16 @@ async fn apply_write_fields(
         set!("description", WriteBind::Text(description.clone()));
     }
     if let Some(description_text) = input.description_text.as_ref() {
-        set!("description_text", WriteBind::Json(description_text.clone()));
+        set!(
+            "description_text",
+            WriteBind::Json(description_text.clone())
+        );
     }
     if let Some(description_html) = input.description_html.as_ref() {
-        set!("description_html", WriteBind::Json(description_html.clone()));
+        set!(
+            "description_html",
+            WriteBind::Json(description_html.clone())
+        );
     }
     if let Some(start_date) = input.start_date.as_ref() {
         set!("start_date", WriteBind::Date(start_date.clone()));
@@ -2129,7 +2208,10 @@ async fn apply_write_fields(
         set!("sort_order", WriteBind::Float(sort_order));
     }
     if let Some(external_source) = input.external_source.as_ref() {
-        set!("external_source", WriteBind::TextOpt(external_source.clone()));
+        set!(
+            "external_source",
+            WriteBind::TextOpt(external_source.clone())
+        );
     }
     if let Some(external_id) = input.external_id.as_ref() {
         set!("external_id", WriteBind::TextOpt(external_id.clone()));
@@ -2202,7 +2284,8 @@ async fn module_update(
     let module_id = parse_uuid_or_invalid(&pk_raw)?;
     // `get_object()` over the base queryset (no archived filter):
     // a miss raises `Http404`, the DRF detail body.
-    let rows = fetch_module_rows(&pool, &project_id, &slug, &user_id, Some(&module_id), false).await?;
+    let rows =
+        fetch_module_rows(&pool, &project_id, &slug, &user_id, Some(&module_id), false).await?;
     if rows.is_empty() {
         return Ok(json_response(
             StatusCode::NOT_FOUND,
@@ -2248,8 +2331,13 @@ async fn module_update(
     if let Some(members) = input.member_ids.as_ref() {
         let (workspace_id, created_by, updated_by) = stored.ok_or(Denial::ServerError)?;
         replace_members(
-            &pool, &module_id, &project_id, &workspace_id,
-            created_by, updated_by, members,
+            &pool,
+            &module_id,
+            &project_id,
+            &workspace_id,
+            created_by,
+            updated_by,
+            members,
         )
         .await?;
     }
@@ -2266,11 +2354,18 @@ async fn module_partial_update(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     body: axum::Json<Value>,
 ) -> HandlerResult {
-    let (pool, user_id, project_id, timezone) =
-        module_context(&state, &slug, &project_raw, extension, gate_for_partial_update()).await?;
+    let (pool, user_id, project_id, timezone) = module_context(
+        &state,
+        &slug,
+        &project_raw,
+        extension,
+        gate_for_partial_update(),
+    )
+    .await?;
     let module_id = parse_uuid_or_invalid(&pk_raw)?;
     // Current row over `.filter(pk=pk)` (no archived filter, `:653`).
-    let rows = fetch_module_rows(&pool, &project_id, &slug, &user_id, Some(&module_id), false).await?;
+    let rows =
+        fetch_module_rows(&pool, &project_id, &slug, &user_id, Some(&module_id), false).await?;
     let current = match rows.into_iter().next() {
         Some(row) => row,
         None => {
@@ -2336,12 +2431,18 @@ async fn module_partial_update(
     if let Some(members) = input.member_ids.as_ref() {
         let (workspace_id, created_by, updated_by) = stored.ok_or(Denial::ServerError)?;
         replace_members(
-            &pool, &module_id, &project_id, &workspace_id,
-            created_by, updated_by, members,
+            &pool,
+            &module_id,
+            &project_id,
+            &workspace_id,
+            created_by,
+            updated_by,
+            members,
         )
         .await?;
     }
-    let rows = fetch_module_rows(&pool, &project_id, &slug, &user_id, Some(&module_id), false).await?;
+    let rows =
+        fetch_module_rows(&pool, &project_id, &slug, &user_id, Some(&module_id), false).await?;
     let row = rows.into_iter().next().ok_or(Denial::ServerError)?;
     // `model_activity.delay(..., current_instance=snapshot)` (`:708-716`).
     let origin = request_origin(&state)?;
@@ -2430,8 +2531,7 @@ async fn module_destroy(
         project_id.to_string()
     };
     let requested_data = python_dumps(&serde_json::json!({"module_id": module_id.to_string()}));
-    let current_instance =
-        python_dumps(&serde_json::json!({"module_name": module_name.clone()}));
+    let current_instance = python_dumps(&serde_json::json!({"module_name": module_name.clone()}));
     for (issue_id,) in &issue_rows {
         let emit = tasks::module_destroy_activity(
             &module_id.to_string(),
@@ -2445,8 +2545,7 @@ async fn module_destroy(
         // `requested_data` is fixed per call site; the builder takes the
         // id only, so assert the wire form here.
         debug_assert_eq!(
-            emit.requested_data,
-            requested_data,
+            emit.requested_data, requested_data,
             "destroy requested_data matches json.dumps"
         );
         enqueue_task(&pool, emit.task_name(), emit.kwargs()).await;
@@ -2501,15 +2600,39 @@ mod tests {
     #[test]
     fn gates_cover_all_six_owned_actions() {
         let rows = [
-            ("POST", "workspaces/<slug>/projects/<project_id>/modules/", "base.py:294"),
-            ("GET", "workspaces/<slug>/projects/<project_id>/modules/", "base.py:353"),
-            ("GET", "workspaces/<slug>/projects/<project_id>/modules/<pk>/", "base.py:395"),
-            ("PATCH", "workspaces/<slug>/projects/<project_id>/modules/<pk>/", "base.py:651"),
-            ("DELETE", "workspaces/<slug>/projects/<project_id>/modules/<pk>/", "base.py:723"),
+            (
+                "POST",
+                "workspaces/<slug>/projects/<project_id>/modules/",
+                "base.py:294",
+            ),
+            (
+                "GET",
+                "workspaces/<slug>/projects/<project_id>/modules/",
+                "base.py:353",
+            ),
+            (
+                "GET",
+                "workspaces/<slug>/projects/<project_id>/modules/<pk>/",
+                "base.py:395",
+            ),
+            (
+                "PATCH",
+                "workspaces/<slug>/projects/<project_id>/modules/<pk>/",
+                "base.py:651",
+            ),
+            (
+                "DELETE",
+                "workspaces/<slug>/projects/<project_id>/modules/<pk>/",
+                "base.py:723",
+            ),
         ];
         for (method, path, source) in rows {
             let row = gates::gate_for(method, path).expect("gate row");
-            assert_eq!(row.source.split(' ').next(), Some(source), "{method} {path}");
+            assert_eq!(
+                row.source.split(' ').next(),
+                Some(source),
+                "{method} {path}"
+            );
         }
         // PUT is the open quirk: no custom action, `IsAuthenticated` only.
         let put = gates::gate_for(
@@ -2528,12 +2651,34 @@ mod tests {
     fn shared_row_order_matches_the_values_set() {
         use std::collections::BTreeSet;
         let expected: BTreeSet<&str> = [
-            "id", "workspace_id", "project_id", "name", "description", "description_text",
-            "description_html", "start_date", "target_date", "status", "lead_id", "member_ids",
-            "view_props", "sort_order", "external_source", "external_id", "logo_props",
-            "is_favorite", "completed_issues", "cancelled_issues", "started_issues",
-            "unstarted_issues", "backlog_issues", "total_issues", "completed_estimate_points",
-            "total_estimate_points", "created_at", "updated_at",
+            "id",
+            "workspace_id",
+            "project_id",
+            "name",
+            "description",
+            "description_text",
+            "description_html",
+            "start_date",
+            "target_date",
+            "status",
+            "lead_id",
+            "member_ids",
+            "view_props",
+            "sort_order",
+            "external_source",
+            "external_id",
+            "logo_props",
+            "is_favorite",
+            "completed_issues",
+            "cancelled_issues",
+            "started_issues",
+            "unstarted_issues",
+            "backlog_issues",
+            "total_issues",
+            "completed_estimate_points",
+            "total_estimate_points",
+            "created_at",
+            "updated_at",
         ]
         .into_iter()
         .collect();
@@ -2546,9 +2691,16 @@ mod tests {
         assert_eq!(
             tail,
             [
-                "is_favorite", "completed_issues", "cancelled_issues", "started_issues",
-                "unstarted_issues", "backlog_issues", "total_issues", "completed_estimate_points",
-                "total_estimate_points", "member_ids",
+                "is_favorite",
+                "completed_issues",
+                "cancelled_issues",
+                "started_issues",
+                "unstarted_issues",
+                "backlog_issues",
+                "total_issues",
+                "completed_estimate_points",
+                "total_estimate_points",
+                "member_ids",
             ]
         );
     }
@@ -2570,8 +2722,12 @@ mod tests {
         let selects = annotation_selects();
         let completed = selects.find("AS completed_issues").expect("alias");
         let cancelled = selects.find("AS cancelled_issues").expect("alias");
-        let completed_group = selects[..completed].rfind("states.group = 'completed'").expect("group");
-        let cancelled_group = selects[..cancelled].rfind("states.group = 'cancelled'").expect("group");
+        let completed_group = selects[..completed]
+            .rfind("states.group = 'completed'")
+            .expect("group");
+        let cancelled_group = selects[..cancelled]
+            .rfind("states.group = 'cancelled'")
+            .expect("group");
         assert!(completed_group < completed);
         assert!(cancelled_group < cancelled);
         assert!(completed < cancelled);
@@ -2620,26 +2776,14 @@ mod tests {
     fn sort_order_coerces_like_drf_float() {
         // DRF `FloatField` is `float(data)` (probed on DRF 3.15.2):
         // bools coerce, padded numeric strings parse.
-        assert_eq!(
-            parse_sort_order_value(&serde_json::json!(true)),
-            Some(1.0)
-        );
-        assert_eq!(
-            parse_sort_order_value(&serde_json::json!(false)),
-            Some(0.0)
-        );
-        assert_eq!(
-            parse_sort_order_value(&serde_json::json!(2)),
-            Some(2.0)
-        );
+        assert_eq!(parse_sort_order_value(&serde_json::json!(true)), Some(1.0));
+        assert_eq!(parse_sort_order_value(&serde_json::json!(false)), Some(0.0));
+        assert_eq!(parse_sort_order_value(&serde_json::json!(2)), Some(2.0));
         assert_eq!(
             parse_sort_order_value(&serde_json::json!(" 1.5 ")),
             Some(1.5)
         );
-        assert_eq!(
-            parse_sort_order_value(&serde_json::json!("abc")),
-            None
-        );
+        assert_eq!(parse_sort_order_value(&serde_json::json!("abc")), None);
         assert_eq!(parse_sort_order_value(&serde_json::json!([1])), None);
         // Python `float()` accepts underscores between digits
         // (`float("1_0")` is `10.0`, verified against CPython).
@@ -2651,10 +2795,7 @@ mod tests {
             parse_sort_order_value(&serde_json::json!("1_000.5")),
             Some(1000.5)
         );
-        assert_eq!(
-            parse_sort_order_value(&serde_json::json!("1__0")),
-            None
-        );
+        assert_eq!(parse_sort_order_value(&serde_json::json!("1__0")), None);
         assert_eq!(parse_sort_order_value(&serde_json::json!("_1")), None);
         assert_eq!(parse_sort_order_value(&serde_json::json!("1_")), None);
     }
@@ -2674,8 +2815,17 @@ mod tests {
         // `test_modules.py::WRITE_MODULE_KEYS` (25 keys).
         assert_eq!(shape::WRITE_RESPONSE_ORDER.len(), 25);
         for key in [
-            "id", "lead_id", "member_ids", "members", "lead", "project", "workspace",
-            "created_by", "updated_by", "deleted_at", "archived_at",
+            "id",
+            "lead_id",
+            "member_ids",
+            "members",
+            "lead",
+            "project",
+            "workspace",
+            "created_by",
+            "updated_by",
+            "deleted_at",
+            "archived_at",
         ] {
             assert!(
                 shape::WRITE_RESPONSE_ORDER.contains(&key),
@@ -2687,7 +2837,14 @@ mod tests {
     #[test]
     fn status_choices_match_the_model() {
         assert_eq!(MODULE_STATUS_CHOICES.len(), 6);
-        for status in ["backlog", "planned", "in-progress", "paused", "completed", "cancelled"] {
+        for status in [
+            "backlog",
+            "planned",
+            "in-progress",
+            "paused",
+            "completed",
+            "cancelled",
+        ] {
             assert!(MODULE_STATUS_CHOICES.contains(&status));
         }
     }
