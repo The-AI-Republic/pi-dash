@@ -3,6 +3,9 @@
 //! Ports `apps/api/pi_dash/api/serializers/` for the types layer:
 //!
 //! * [`intake`] — `intake.py:12-170` (PIDASHCONV-401; fixture `fx-ser-intake`).
+//! * [`file_asset`] — `db/models/asset.py:79-100` (`asset_url`) and
+//!   `serializers/asset.py:93-123` (`FileAssetSerializer` read shape)
+//!   (PIDASHCONV-404; fixture `fx-model-fileasset`).
 //! * [`asset`], [`sticky`] — `asset.py:13-91`, `sticky.py:12-34`
 //!   (PIDASHCONV-392; fixtures `fx-ser-asset`, `fx-ser-sticky`).
 //!   [`asset`] covers the four asset serializers; [`sticky`] covers
@@ -17,5 +20,6 @@
 //! Unknown input keys are ignored, exactly like DRF's `to_internal_value`.
 
 pub mod asset;
+pub mod file_asset;
 pub mod intake;
 pub mod sticky;
