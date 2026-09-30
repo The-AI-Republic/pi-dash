@@ -1,0 +1,126 @@
+# Inventory: Cycles and active cycles
+
+- Area: Cycles and active cycles (Phase 3)
+- ID prefix: `CYC-`
+- Editions: oss, cloud, desktop
+- Status convention: `not started` / `oracle green` / `new green`
+- Parity test column stays empty until oracle scenarios exist (NEWFRONT-48).
+
+All behavior below was learned from reading the old frontend sources and is
+described in fresh prose. Nothing here is copied from the old codebase.
+
+## Rows
+
+| ID | Capability | Who | Edition | Old entry point | API | Acceptance | Parity test | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| CYC-001 | Project cycles list shows the current cycle hero first, then collapsible upcoming and completed groups with per-group counts | any project member incl. guests | all | project cycles list page | GET cycles list (+ progress/analytics reads) | hero plus both groups render with correct counts; collapsing a group hides its rows |  | not started |
+| CYC-002 | Each cycle row shows name, completion ring, status marker, date span, and contextual extras (work-item count on draft/upcoming rows, creator avatar on the active row, favorite marker) | any project member incl. guests | all | project cycles list page, archived cycles list | GET cycles list | every row carries the right markers and extras for its status |  | not started |
+| CYC-003 | Opening a cycle row navigates to that cycle's detail page, whose address is directly shareable and loadable | any project member incl. guests | all | cycle row link; detail route `cycles/{cycleId}` | GET cycle details | pasting the detail address loads the same cycle with its work items |  | not started |
+| CYC-004 | A quick-look panel for any cycle opens over the list through a URL query key and closes back to the plain list address | any project member incl. guests | all | cycle row quick-look action; `?peekCycle=` query key | GET cycle details (or archived-cycle details in archives) | opening sets the key, closing removes it; reload with the key reopens the same panel |  | not started |
+| CYC-005 | Cycles list can be narrowed by typing part of a cycle name in an expanding search box | any project member incl. guests | all | list header search control | none (client-side over loaded cycles) | typing filters rows live; Escape clears the text first and closes the box on a second press; the query survives navigation within the area |  | not started |
+| CYC-006 | Cycles list can be filtered by lifecycle state (in-progress, yet-to-start, finished, draft), multi-select | any project member incl. guests | all | list header filter menu | none (client-side over loaded cycles) | selecting states keeps only matching cycles; deselecting restores them |  | not started |
+| CYC-007 | Cycles list can be filtered by start-date and end-date windows | any project member incl. guests | all | list header filter menu, date sections | none (client-side over loaded cycles) | only cycles overlapping the chosen windows remain listed |  | not started |
+| CYC-008 | Active list filters appear as removable chips with a clear-all action | any project member incl. guests | all | applied-filters bar above the list | none (client-side) | each chip removes one value; clear-all resets search and filters together |  | not started |
+| CYC-009 | Filtering or searching down to zero rows shows a dedicated no-match empty view that differs between filters and search | any project member incl. guests | all | project cycles list, archived cycles list | none (client-side) | empty view suggests dropping filters vs dropping the search text, matching what caused it |  | not started |
+| CYC-010 | When the cycles feature is switched off for a project, the cycles page explains the feature and offers a management shortcut that only admins can use | guests see the explanation; shortcut enabled for admins only | all | project cycles list page | project details (feature flags) | feature-off view renders; shortcut is disabled for non-admins and routes admins to project feature settings |  | not started |
+| CYC-011 | A project with no cycles yet shows a first-run empty view whose creation shortcut is limited to members and admins | member+ for the shortcut; everyone sees the view | all | project cycles list page | GET cycles list | empty view renders; guests cannot trigger creation from it |  | not started |
+| CYC-012 | Loading skeleton stands in for the cycles list while data is being fetched | any project member incl. guests | all | project cycles list, archived cycles list | GET cycles list | skeleton shows during load and is replaced by rows or an empty view |  | not started |
+| CYC-013 | Opening a cycle that does not exist (or was deleted) shows a gone-away view with a way back to the cycles list | any project member incl. guests | all | detail route `cycles/{cycleId}` | GET cycle details (404/empty) | gone-away view renders with a working back-to-list action |  | not started |
+| CYC-014 | A new cycle can be created with a title, optional description, and optional date range; the dialog can target a different project when opened above project level | member+ | all | list header add action; list empty-state shortcut; creation command | POST create cycle | valid input creates the cycle and confirms; the dialog closes; the new row appears |  | not started |
+| CYC-015 | Cycle title is mandatory and length-capped; the date picker does not allow starting in the past | member+ | all | create/update dialog form | none (client-side validation) | empty title blocks submit with an inline error; overlong titles are rejected; past start dates cannot be picked |  | not started |
+| CYC-016 | New cycle dates are checked against existing cycles; undated draft cycles are always allowed | member+ | all | create/update dialog submit | POST date-check | overlapping dated ranges are rejected with an error notice naming the draft workaround; non-overlapping and undated cycles save |  | not started |
+| CYC-017 | Editing a cycle reuses the creation form but skips the overlap check when the dates did not change | member+ | all | row menu edit action; update dialog | PATCH cycle details; POST date-check only when dates changed | unchanged dates save without a check; changed dates are re-validated |  | not started |
+| CYC-018 | Finishing a creation lands the list on the "all cycles" tab remembered from the last visit | member+ | all | create dialog submit | POST create cycle | after creation the stored list tab reads "all" |  | not started |
+| CYC-019 | Creating a cycle that covers today refreshes the active-cycle display without a page reload | member+ | all | create dialog submit | POST create cycle + active-cycle cache refresh | the active-cycle hero updates to include the new cycle |  | not started |
+| CYC-020 | The create/update dialog closes on Escape and follows a stable keyboard tab order starting in the title field | any project member incl. guests | all | create/update dialog | none (client-side) | Escape dismisses without saving; tabbing moves through project, title, description, dates, cancel, submit with title focused first |  | not started |
+| CYC-021 | Creation entry points (header button, empty-state shortcut) are unavailable to guests and viewers | member+ | all | list header; list empty view | none (client-side gating) | guests and viewers see no working creation affordance |  | not started |
+| CYC-022 | Deleting a cycle asks for confirmation, permanently removes it, and returns the user to the list when they were viewing it | member+ | all | row menu delete action; delete confirm dialog | DELETE cycle | confirm deletes and toasts success; from detail or quick-look the user lands back on the list; failures map permission problems to a dedicated message |  | not started |
+| CYC-023 | Finished cycles are read-only: they cannot be edited or deleted and say so where transfer is offered | any project member incl. guests | all | finished cycle rows; transfer banner | none (client-side gating) | edit/delete affordances are absent or inert on finished cycles; the read-only notice is shown |  | not started |
+| CYC-024 | A finished cycle can be archived through a confirmation step and is then found under project archives | member+ | all | row menu archive action; archive confirm dialog | POST archive cycle | archiving confirms success and points at project archives; the cycle leaves the active list |  | not started |
+| CYC-025 | Archiving is offered only for finished cycles; the menu explains the restriction otherwise | member+ | all | row menu archive entry | none (client-side gating) | on unfinished cycles the archive entry is disabled with an explanatory hint |  | not started |
+| CYC-026 | An archived cycle can be restored, which confirms and sends the user to the archives list | member+ | all | archived row menu restore action | DELETE archive (restore) | restore toasts success and navigates to the archives list; failures toast an error |  | not started |
+| CYC-027 | Archived cycles have their own list with separate search and filters plus a dedicated zero-state | any project member incl. guests | all | project archives, cycles tab | GET archived cycles | archived rows render with working search/filters; with none archived, the zero-state explains where archived cycles will appear |  | not started |
+| CYC-028 | Each cycle row exposes a menu: edit, open in new tab, copy link, archive/restore, delete, each gated by role and cycle state | menu visible to all; mutations member+ | all | row hover menu (desktop), inline menu (touch) | PATCH/DELETE/archive endpoints per action | only permitted, state-valid actions are enabled; copy/new-tab always work |  | not started |
+| CYC-029 | Cycles can be marked as personal favorites and unmarked again, with progress feedback | any project member (per-user) | all | row favorite marker; command palette favorite toggle | POST/DELETE favorite cycle | toggling updates the marker and toasts progress and outcome; the first-ever favorite reveals the favorites menu |  | not started |
+| CYC-030 | Command palette offers cycle-scoped actions (toggle favorite, copy cycle address), hidden for archived cycles | any project member incl. guests | all | command palette on a cycle page | POST/DELETE favorite cycle; none for copy | actions run from the palette; archived cycles expose no cycle commands |  | not started |
+| CYC-031 | Remaining work on a finished cycle can be moved to another open cycle via a searchable picker | member+ | all | transfer banner on finished cycles; transfer dialog | POST transfer issues; progress re-reads for both cycles | only open cycles are offered; search narrows them; confirming moves the items, confirms, and refreshes counts on both sides; with no open cycle the dialog explains one must be created |  | not started |
+| CYC-032 | Cycle detail shows the cycle's work items in switchable layouts (list, board, calendar, table, timeline) with per-cycle view preferences | any project member incl. guests | all | detail route `cycles/{cycleId}` header layout switcher | GET cycle issues (layout/filter params) | switching layouts persists per cycle; filters and display options apply within the cycle; small screens get an equivalent layout menu without the timeline option |  | not started |
+| CYC-033 | Cycle detail header offers a cycle switcher, a work-item count badge, an analytics shortcut, and work-item creation (hidden once finished) | switcher/badge/analytics for all; creation member+ | all | detail header | GET cycles list; GET cycle issues (count) | switcher jumps between cycles; badge counts the cycle's items; analytics opens the analytics view; creation is absent on finished cycles and for guests |  | not started |
+| CYC-034 | Breadcrumb trail on cycle pages leads back through project and cycles list | any project member incl. guests | all | detail and list headers | none (client-side) | each crumb navigates to its level; browser back works from the trail |  | not started |
+| CYC-035 | The detail sidebar can be collapsed and stays collapsed across visits on the same browser | any project member incl. guests | all | detail header sidebar toggle | none (client-side) | toggling hides/shows the sidebar; the choice persists across reloads |  | not started |
+| CYC-036 | The sidebar header shows the cycle state marker and allows inline date edits with the same overlap protection as the dialog | viewing for all; editing member+ | all | detail sidebar; quick-look panel | PATCH cycle details; POST date-check | dates save with success confirmation; overlaps are rejected with guidance; guests get a read-only header |  | not started |
+| CYC-037 | The sidebar shows the cycle description (read-only) and the responsible lead with avatar | any project member incl. guests | all | detail sidebar details section | GET cycle details | description text and lead identity render when present |  | not started |
+| CYC-038 | The sidebar progress section breaks the cycle down by workflow state with a burn-up/burn-down chart that can count items or estimates | any project member incl. guests | all | detail sidebar; quick-look panel | GET progress; GET analytics (items + estimates) | counts, chart, and chart-type/measure toggles render; the estimate measure appears only where estimates are enabled; without a valid dated range the chart section stays hidden |  | not started |
+| CYC-039 | Clicking a progress segment or breakdown entry filters the cycle's work items accordingly | any project member incl. guests | all | sidebar progress chart and breakdowns | none (client-side filter update) | clicking applies the matching work-item filter to the cycle view |  | not started |
+| CYC-040 | The sidebar shows a loading skeleton until the cycle data arrives | any project member incl. guests | all | detail sidebar; quick-look panel | GET cycle details | skeleton renders first and is replaced by content |  | not started |
+| CYC-041 | The project cycles list leads with an active-cycle hero: the cycle covering today with progress-by-state, burn-down, and assignee/label/priority breakdowns whose parts filter the cycle view | any project member incl. guests | all | project cycles list top section | GET current cycle; GET issues/progress/analytics reads | the cycle containing today is shown with all cards; breakdown interactions filter the view; per-card empty views appear when there is nothing to break down |  | not started |
+| CYC-042 | With no cycle covering today the hero becomes a no-active-cycle empty view | any project member incl. guests | all | project cycles list top section | GET current cycle (empty) | the empty view explains what an active cycle is instead of showing cards |  | not started |
+| CYC-043 | Workspace-level active cycles is a paid feature: free workspaces see a benefits overview with a path to pricing instead of data | any workspace member | oss (gate) / cloud (full view) | workspace active-cycles page + header upgrade marker | none in OSS (marketing link only) | free workspaces see the benefits overview and pricing path; the header carries the upgrade marker |  | not started |
+| CYC-044 | Cycle dates render with the project's timezone offset and reveal user-timezone equivalents when they differ | any project member incl. guests | all | cycle rows; sidebar date controls | project timezone metadata | the offset chip shows when available; hovering dates reveals the user-timezone reading when zones differ |  | not started |
+| CYC-045 | Cycle data stays fresh through background re-reads: creation and transfers refresh the affected cycles, while the archived list never refetches on focus | any project member incl. guests | all | all cycle surfaces | all cycle endpoints (cache keys) | mutations visibly update counts without reload; archived list does not refetch on window focus |  | not started |
+| CYC-046 | Cycle addresses can be copied to the clipboard and opened in a new tab from the row menu and palette | any project member incl. guests | all | row menu; command palette | none (client-side) | copying confirms; new-tab opens the same cycle in a fresh tab |  | not started |
+| CYC-047 | Guests and viewers are read-only across cycles: they can browse, search, filter, peek, and copy links but cannot create, edit, delete, archive, restore, or transfer | guests/viewers (negative) | all | all cycle surfaces | none (client-side gating; server enforces) | every mutation affordance is absent, disabled, or fails gracefully for these roles |  | not started |
+| CYC-048 | Touch layouts expose cycle actions inline and keep layout switching usable on small screens | any project member incl. guests | all | cycles list and detail on narrow viewports | none (client-side) | row menus render inline instead of on hover; layout switching remains reachable |  | not started |
+
+## Explicitly out of scope for this area (owned elsewhere)
+
+- Assigning a work item to a cycle, cycle columns/pickers in issue layouts, and cycle entries in work-item activity: Issues area.
+- The work-items analytics dialog component opened from the cycle header: Analytics area.
+- The project feature switch that enables/disables cycles: Project settings area (its off-state empty view is CYC-010 above).
+- Project-level open-entity cycle navigation in the command palette shell: Workspace shell / command-palette area.
+- No drag-and-drop, no exports/imports, and no desktop-only cycle behavior were found in the scoped sources.
+
+## Coverage checklist
+
+Route files (each mapped to covering rows):
+
+- `cycles/(list)/page.tsx` (feature gate, zero-state, applied filters, list mount) -> CYC-001, CYC-008, CYC-010, CYC-011, CYC-012
+- `cycles/(list)/layout.tsx` (header shell) -> CYC-021, CYC-032 (header actions live here)
+- `cycles/(list)/header.tsx` (breadcrumb, add-cycle button, search/filter controls) -> CYC-005, CYC-006, CYC-007, CYC-021, CYC-034
+- `cycles/(list)/mobile-header.tsx` (small-screen layout switcher) -> CYC-032, CYC-048
+- `cycles/(detail)/[cycleId]/page.tsx` (detail mount, gone-away view, sidebar collapse) -> CYC-003, CYC-013, CYC-035
+- `cycles/(detail)/layout.tsx` (detail shell) -> CYC-003
+- `cycles/(detail)/header.tsx` (breadcrumb + switcher, layouts, filters/display, analytics, add item, sidebar toggle) -> CYC-032, CYC-033, CYC-034, CYC-035
+- `cycles/(detail)/mobile-header.tsx` (small-screen detail header incl. layout change) -> CYC-032, CYC-048
+- `active-cycles/page.tsx` + `layout.tsx` + `header.tsx` (workspace page shell, title, upgrade marker) -> CYC-043
+- `archives/cycles/page.tsx` + `layout.tsx` (archived cycles mount under project archives) -> CYC-027
+
+Top-level component folders (each mapped to covering rows):
+
+- `core/components/cycles/` root files (`cycles-view`, `cycles-view-header`, `form`, `modal`, `delete-modal`, `transfer-issues`, `transfer-issues-modal`, `cycle-peek-overview`, `quick-actions`) -> CYC-001, CYC-005, CYC-009, CYC-011, CYC-012, CYC-014, CYC-015, CYC-016, CYC-017, CYC-018, CYC-019, CYC-020, CYC-021, CYC-022, CYC-028, CYC-029, CYC-031, CYC-004
+- `core/components/cycles/list/` (grouped list, rows, row actions, peek wiring) -> CYC-001, CYC-002, CYC-003, CYC-004, CYC-023, CYC-028, CYC-029, CYC-031, CYC-044, CYC-046, CYC-048
+- `core/components/cycles/active-cycle/` (hero progress, burn-down, stats cards) -> CYC-041, CYC-042
+- `core/components/cycles/analytics-sidebar/` (header, details, progress, chart, stats) -> CYC-035, CYC-036, CYC-037, CYC-038, CYC-039, CYC-040, CYC-044
+- `core/components/cycles/archived-cycles/` (archived list, header/search/filters, archive confirm, restore) -> CYC-024, CYC-025, CYC-026, CYC-027, CYC-005, CYC-006, CYC-007, CYC-008, CYC-009, CYC-012
+- `core/components/cycles/dropdowns/` + `applied-filters/` (status/start/end filters, estimate measure picker, chips) -> CYC-006, CYC-007, CYC-008, CYC-038
+- `core/components/dropdowns/cycle/` (work-item cycle picker): adjacent to the Issues area; no cycle-area capability — not rowed here.
+- `core/components/issues/issue-layouts/{list,kanban,calendar,spreadsheet}/roots/cycle-root` + `cycle-column` + `quick-action-dropdowns/cycle-issue` + `filters` cycle entries + `issue-detail/cycle-select` + `issue-activity` cycle entry: adjacent to the Issues/Comments areas; cycle detail only hosts them (CYC-032) — not rowed here.
+- `core/components/power-k/menus/cycles.tsx` (cycle option menu used by pickers): shared shell widget, no standalone cycle capability — not rowed here.
+- `core/components/power-k/ui/pages/context-based/cycle/commands.ts` (favorite toggle, copy URL) -> CYC-029, CYC-030, CYC-046
+- `core/components/power-k/ui/pages/open-entity/project-cycles-menu.tsx` (jump-to-cycle navigation): owned by the shell/command-palette area — not rowed here.
+- `core/components/readonly/cycle.tsx` (read-only cycle chip for guests): display-only variant of CYC-002/CYC-047 — covered, no separate row.
+- `ce/components/cycles/` (`active-cycle/root`, `analytics-sidebar` chart, `index` re-exports) -> CYC-041, CYC-038
+- `ce/components/cycles/end-cycle/modal.tsx`: empty stub in OSS (renders nothing); cloud-only end-of-cycle flow lives outside this checkout — no observable OSS capability, no row. Revisit if cloud sources add behavior.
+- `ce/components/cycles/additional-actions.tsx`: empty stub in OSS (renders nothing); extension point only — no row.
+- `ce/components/active-cycles/` (workspace upsell page + benefit list) -> CYC-043
+- `ce/store/cycle/` (type re-export only): no behavior — no row.
+
+API endpoints (each mapped to covering rows):
+
+- `GET /api/workspaces/{ws}/projects/{pid}/cycles/` (list, `cycle_view` param) -> CYC-001, CYC-011, CYC-012, CYC-033, CYC-045
+- `POST /api/workspaces/{ws}/projects/{pid}/cycles/` (create) -> CYC-014, CYC-016, CYC-018, CYC-019
+- `GET /api/workspaces/{ws}/projects/{pid}/cycles/{cid}/` (details) -> CYC-003, CYC-004, CYC-013, CYC-035, CYC-037, CYC-040
+- `PATCH /api/workspaces/{ws}/projects/{pid}/cycles/{cid}/` (update) -> CYC-017, CYC-036
+- `DELETE /api/workspaces/{ws}/projects/{pid}/cycles/{cid}/` (delete) -> CYC-022
+- `GET /api/workspaces/{ws}/projects/{pid}/cycles/{cid}/cycle-issues/` (cycle work items) -> CYC-032, CYC-033, CYC-039
+- `POST /api/workspaces/{ws}/projects/{pid}/cycles/date-check/` (overlap validation) -> CYC-016, CYC-017, CYC-036
+- `POST /api/workspaces/{ws}/projects/{pid}/cycles/{cid}/transfer-issues/` (move leftovers) -> CYC-031
+- `POST /api/workspaces/{ws}/projects/{pid}/user-favorite-cycles/` + `DELETE .../user-favorite-cycles/{cid}/` (favorites) -> CYC-029, CYC-030
+- `POST /api/workspaces/{ws}/projects/{pid}/cycles/{cid}/archive/` (archive) -> CYC-024, CYC-025
+- `DELETE /api/workspaces/{ws}/projects/{pid}/cycles/{cid}/archive/` (restore) -> CYC-026
+- `GET /api/workspaces/{ws}/projects/{pid}/archived-cycles/` + `GET .../archived-cycles/{cid}/` (archived reads) -> CYC-004, CYC-027
+- `GET /api/workspaces/{ws}/cycles/` (workspace-wide cycles for switchers/menus) -> CYC-030, CYC-033
+- `GET /api/workspaces/{ws}/active-cycles/` (paginated workspace actives; backing the paid view, unused in OSS page) -> CYC-043
+- `GET /api/workspaces/{ws}/projects/{pid}/cycles/{cid}/progress/` + `.../cycle-progress/` (progress snapshots incl. cloud variant) -> CYC-038, CYC-041, CYC-045
+- `GET /api/workspaces/{ws}/projects/{pid}/cycles/{cid}/analytics?type=` (items/estimates distributions) -> CYC-038, CYC-041
+
