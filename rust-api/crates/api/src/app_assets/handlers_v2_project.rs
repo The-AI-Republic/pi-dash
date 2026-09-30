@@ -149,6 +149,9 @@ const DUPLICATE_INVALID_ENTITY_BODY: &str = r#"{"error":"Invalid entity type or 
 const DUPLICATE_PROJECT_BODY: &str = r#"{"error":"Project not found"}"#;
 /// Duplicate original miss (`v2.py:757-758`).
 const DUPLICATE_ASSET_BODY: &str = r#"{"error":"Asset not found"}"#;
+/// Unhandled `IntegrityError` via `BaseAPIView.handle_exception`
+/// (`app/views/base.py:221-225`): the PAGE bulk branch has no swallow.
+const PAYLOAD_NOT_VALID_BODY: &str = r#"{"error":"The payload is not valid"}"#;
 
 /// Routes for `app/urls/asset.py:79-113` (all under `/api/assets/v2/`).
 ///
@@ -675,6 +678,31 @@ fn python_truthy(value: &Option<Value>) -> bool {
     }
 }
 
+/// Python `not n` for a JSON number: `0`/`0.0` are falsy, anything else
+/// truthy (mirrors the number arm of [`python_truthy`]).
+fn number_is_zero(n: &serde_json::Number) -> bool {
+    if let Some(i) = n.as_i64() {
+        i == 0
+    } else if let Some(u) = n.as_u64() {
+        u == 0
+    } else {
+        n.as_f64().is_some_and(|f| f == 0.0)
+    }
+}
+
+/// Python `not x` for a JSON body value (`v2.py:641`, `:749`): `false`,
+/// `0`/`0.0`, `""`, `[]` and `{}` are falsy (null handled by the caller).
+fn json_falsy(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Bool(b) => !b,
+        Value::Number(n) => number_is_zero(n),
+        Value::String(s) => s.is_empty(),
+        Value::Array(a) => a.is_empty(),
+        Value::Object(o) => o.is_empty(),
+    }
+}
+
 /// `FileAsset.asset_url` (`db/models/asset.py:79-100`): the static group
 /// answers the static path, `ISSUE_ATTACHMENT` the attachment path (with
 /// `issue_id` rendered `None`-style when unset, exactly like the
@@ -1185,17 +1213,16 @@ async fn post_bulk_asset(
     let Some(data) = parse_data(content_type(&headers).as_deref(), &body) else {
         return server_error();
     };
-    // `asset_ids=data.get("asset_ids", [])` (`:638`): missing or empty →
-    // 400 (`:641-642`); a string iterates into `ValidationError` → the
-    // 400 envelope; any other non-list is not iterable → 500.
+    // `asset_ids=data.get("asset_ids", [])` (`:638`): `if not asset_ids`
+    // (`:641-642`) rejects missing/null and every falsy shape
+    // (`0`/`false`/`""`/`[]`/`{}`) with 400; truthy strings/objects
+    // iterate into `ValidationError` → the 400 envelope; any other
+    // truthy non-list is not iterable → 500.
     let raw_ids: &Vec<Value> = match data.get("asset_ids") {
         None => return raw(StatusCode::BAD_REQUEST, NO_ASSET_IDS_BODY),
-        Some(Value::Array(ids)) if ids.is_empty() => {
-            return raw(StatusCode::BAD_REQUEST, NO_ASSET_IDS_BODY)
-        }
+        Some(v) if json_falsy(v) => return raw(StatusCode::BAD_REQUEST, NO_ASSET_IDS_BODY),
         Some(Value::Array(ids)) => ids,
-        Some(Value::String(_)) => return valid_detail(),
-        Some(Value::Null) => return raw(StatusCode::BAD_REQUEST, NO_ASSET_IDS_BODY),
+        Some(Value::String(_)) | Some(Value::Object(_)) => return valid_detail(),
         Some(_) => return server_error(),
     };
     let mut asset_ids = Vec::with_capacity(raw_ids.len());
@@ -1342,6 +1369,8 @@ async fn post_bulk_asset(
             }
         }
         q::BulkBranch::PageDescription => {
+            // No swallow (`:680-682`): an `IntegrityError` propagates to
+            // `handle_exception` → 400; anything else → 500.
             let result = sqlx::query(
                 r#"UPDATE "file_assets" SET "page_id" = $3
                    WHERE ("file_assets"."id" = ANY($1)
@@ -1353,7 +1382,10 @@ async fn post_bulk_asset(
             .bind(entity_id)
             .execute(&pool)
             .await;
-            if result.is_err() {
+            if let Err(error) = result {
+                if is_integrity_error(&error) {
+                    return raw(StatusCode::BAD_REQUEST, PAYLOAD_NOT_VALID_BODY);
+                }
                 return server_error();
             }
         }
@@ -1481,11 +1513,13 @@ async fn post_duplicate_asset(
         Ok(id) => id,
         Err(denial) => return denial,
     };
-    // Optional project scope (`:749-752`): garbage UUIDs fail UUID
-    // coercion → the 400 envelope; unknown ids → 404.
+    // Optional project scope (`:749-752`): `if project_id:` skips the
+    // check for every falsy shape (`0`/`false`/`""`/`[]`/`{}`/null) and
+    // stores NULL (`:766`); garbage UUIDs fail UUID coercion → the 400
+    // envelope; unknown ids → 404.
     let project_id: Option<Uuid> = match data.get("project_id") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) if s.is_empty() => None,
+        None => None,
+        Some(v) if json_falsy(v) => None,
         Some(other @ (Value::String(_) | Value::Number(_) | Value::Bool(_))) => {
             match coerce_uuid_or_400(Some(other)) {
                 Ok(id) => id,
@@ -1550,14 +1584,14 @@ async fn post_duplicate_asset(
         .and_then(|a| a.get("size"))
         .cloned()
         .unwrap_or(Value::Null);
-    let name_display = match original.attributes.as_ref().and_then(|a| a.get("name")) {
-        Some(Value::String(s)) => Some(s.as_str()),
-        _ => None,
-    };
+    // The f-string renders `.get('name')` with Python `str()`
+    // (`:760`): non-string names (e.g. mint `"name": 5` → `...-5`)
+    // render instead of falling back to `None`.
+    let (name_display, _) = python_str(original.attributes.as_ref().and_then(|a| a.get("name")));
     let destination_key = q::duplicate_destination_key(
         &workspace_id.to_string(),
         &Uuid::new_v4().simple().to_string(),
-        name_display,
+        Some(name_display.as_str()),
     );
     let new_id = Uuid::new_v4();
     let now = Utc::now();
@@ -2504,6 +2538,25 @@ mod tests {
             python_str(Some(&Value::from("shot.png"))),
             ("shot.png".to_owned(), Value::from("shot.png")),
         );
+        // Non-string names render with Python `str()` (`v2.py:760`).
+        assert_eq!(python_str(Some(&Value::from(5))).0, "5");
+        assert_eq!(python_str(Some(&Value::Bool(true))).0, "True");
+    }
+
+    #[test]
+    fn json_falsy_matches_python_not() {
+        assert!(json_falsy(&Value::Null));
+        assert!(json_falsy(&Value::Bool(false)));
+        assert!(!json_falsy(&Value::Bool(true)));
+        assert!(json_falsy(&Value::from(0)));
+        assert!(json_falsy(&serde_json::json!(0.0)));
+        assert!(!json_falsy(&Value::from(5)));
+        assert!(json_falsy(&Value::from("")));
+        assert!(!json_falsy(&Value::from("x")));
+        assert!(json_falsy(&serde_json::json!([])));
+        assert!(!json_falsy(&serde_json::json!([1])));
+        assert!(json_falsy(&serde_json::json!({})));
+        assert!(!json_falsy(&serde_json::json!({"a": 1})));
     }
 
     #[test]
