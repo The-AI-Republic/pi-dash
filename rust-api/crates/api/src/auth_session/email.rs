@@ -12,12 +12,16 @@
 //!
 //! The branch decisions live in the pure kernel
 //! (`pidash_services::auth_session::email`); this module owns the HTTP
-//! shell: form/JSON extraction, the `CsrfViewMiddleware` gate, row
-//! reads/writes, session issuance/deletion, cookie emission, and the
-//! 302/200/400/429 bytes. Sibling D-16 handler issues (magic, password,
-//! CSRF token) extend [`routes`] with their own routers; merges keep
-//! both sides. Every other method on the eight paths proxies to Django
-//! ([`owned`]), where the framework's own 405s live.
+//! shell: form/JSON extraction, the `CsrfViewMiddleware` gate (plus
+//! the DRF `SessionAuthentication` 403 for email-check), row
+//! reads/writes, `login()`/`user_login` session issuance (same-user
+//! keys retained, others cycled), sign-out flush plus the session
+//! middleware's deletion rule, cookie emission, and the
+//! 302/200/400/403/415/429 bytes. Sibling D-16 handler issues
+//! (magic, password, CSRF token) extend [`routes`] with their own
+//! routers; merges keep both sides. Every other method on the eight
+//! paths proxies to Django ([`owned`]), where the framework's own
+//! 405s live.
 //!
 //! Session-middleware interaction: the global `SessionLayer` loads the
 //! presented session into extensions before these handlers run. The
@@ -38,12 +42,14 @@
 //!   activation-mail branch; an inactive existing user does (published
 //!   through the F-09 publisher — broker errors answer 500, like
 //!   `.delay()` raising in Django).
-//! * `process_workspace_project_invitations` runs on every success:
-//!   the member bulk-writes + invite deletes are replayed; the
-//!   per-workspace cache invalidation is a documented no-op (Rust
-//!   serves no cached members rows, so there is nothing to invalidate
-//!   — same reasoning as the D-32 `recent_visited_task` no-op), and
-//!   each `track_event.delay` publishes through the F-09 publisher.
+//! * `process_workspace_project_invitations` runs on every app
+//!   success (the space twins pass no callback): the member
+//!   bulk-writes + invite deletes are replayed; the per-workspace
+//!   cache invalidation is a documented no-op (Rust serves no cached
+//!   members rows, so there is nothing to invalidate — same reasoning
+//!   as the D-32 `recent_visited_task` no-op), and each
+//!   `track_event.delay` publishes its full kwargs (including
+//!   `event_properties`) through the F-09 publisher.
 //! * The email-check throttle is the process-local DRF loop from the
 //!   D-06 governor (shared cache would need a foundation change — a
 //!   new issue, not a workaround); single-process deployments observe
@@ -64,6 +70,7 @@ use pidash_auth::session as session_kernel;
 use pidash_auth::signing::{Signer, SESSION_SIGNING_SALT};
 use pidash_services::auth_session::email as kernel;
 use pidash_services::auth_session::guards as guards_kernel;
+use pidash_services::auth_session::queries as queries_kernel;
 use pidash_services::auth_session::shapes as shapes_kernel;
 use pidash_services::auth_session::tasks as tasks_kernel;
 
@@ -187,9 +194,11 @@ pub fn routes() -> Router<AppState> {
 
 /// What the handlers need from the HTTP envelope. `peer_ip` is the
 /// socket peer (`REMOTE_ADDR` when no `X-Forwarded-For`); all other
-/// fields come straight off the headers.
+/// fields come straight off the headers. `user_agent` stays `None`
+/// when the header is absent (`META.get` returns `None`, stored as
+/// NULL) and `Some("")` when it is present but empty.
 struct Provenance {
-    user_agent: String,
+    user_agent: Option<String>,
     ip: Option<String>,
     csrf_cookie: Option<String>,
     header_token: Option<String>,
@@ -207,8 +216,7 @@ fn provenance(headers: &HeaderMap, peer_ip: Option<String>, cookie_name: &str) -
         user_agent: headers
             .get(header::USER_AGENT)
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_owned(),
+            .map(str::to_owned),
         ip: client_ip(forwarded, peer_ip.as_deref()),
         csrf_cookie: session_kernel::cookie_value(cookie_header, CSRF_COOKIE_NAME),
         header_token: headers
@@ -250,25 +258,97 @@ enum CsrfDenial {
     BadToken,
 }
 
+/// Where the request token came from (`CsrfViewMiddleware._check_token`:
+/// the `csrfmiddlewaretoken` POST field wins when non-empty, else the
+/// `X-CSRFToken` header).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenSource {
+    Post,
+    Header,
+}
+
+impl TokenSource {
+    /// `_bad_token_message` source rendering (`csrf.py:347-352`;
+    /// `CSRF_HEADER_NAME` is the default, parsed as `X-Csrftoken`).
+    fn describe(self) -> &'static str {
+        match self {
+            TokenSource::Post => "POST",
+            TokenSource::Header => "the 'X-Csrftoken' HTTP header",
+        }
+    }
+}
+
+/// Resolve the request token in Django's order: the last
+/// `csrfmiddlewaretoken` form value when non-empty, else the header
+/// when present (even empty — an empty header fails format, it does
+/// not fall through to "missing").
+fn csrf_token_source(
+    pairs: &[(String, String)],
+    header_token: Option<&str>,
+) -> Option<(String, TokenSource)> {
+    if let Some(value) = pairs
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "csrfmiddlewaretoken")
+        .map(|(_, v)| v.as_str())
+        .filter(|v| !v.is_empty())
+    {
+        return Some((value.to_owned(), TokenSource::Post));
+    }
+    header_token.map(|token| (token.to_owned(), TokenSource::Header))
+}
+
+/// `_check_token` + `_does_token_match` over one token: the format
+/// gate first (`has incorrect length` / `has invalid characters`),
+/// then the unmask-and-compare, rendered exactly like
+/// `_bad_token_message`.
+fn csrf_check_token(secret: &str, token: &str, source: TokenSource) -> Result<(), String> {
+    if let Err(error) = csrf_kernel::check_token_format(token) {
+        return Err(format!(
+            "CSRF token from {} {}.",
+            source.describe(),
+            error.reason()
+        ));
+    }
+    if csrf_kernel::tokens_match(token, secret) {
+        Ok(())
+    } else {
+        Err(format!("CSRF token from {} incorrect.", source.describe()))
+    }
+}
+
 /// Mirror `CsrfViewMiddleware.process_view` for these endpoints: the
-/// `csrftoken` cookie must be present and the request token (the
-/// `X-CSRFToken` header, else the `csrfmiddlewaretoken` form field)
-/// must unmask to it.
+/// `csrftoken` cookie must be present and the request token must
+/// check out. A malformed cookie secret can never match (Django
+/// would mint a fresh secret and then fail the compare the same
+/// way); the failure page never renders the reason either way.
 fn csrf_gate(prov: &Provenance, pairs: &[(String, String)]) -> Result<(), CsrfDenial> {
     let Some(secret) = prov.csrf_cookie.as_deref() else {
         return Err(CsrfDenial::NoCookie);
     };
-    let token = prov.header_token.as_deref().map(str::to_owned).or_else(|| {
-        pairs
-            .iter()
-            .rev()
-            .find(|(k, _)| k == "csrfmiddlewaretoken")
-            .map(|(_, v)| v.clone())
-    });
-    match token {
-        Some(token) if csrf_kernel::tokens_match(&token, secret) => Ok(()),
-        _ => Err(CsrfDenial::BadToken),
-    }
+    let Some((token, source)) = csrf_token_source(pairs, prov.header_token.as_deref()) else {
+        return Err(CsrfDenial::BadToken);
+    };
+    csrf_check_token(secret, &token, source).map_err(|_| CsrfDenial::BadToken)
+}
+
+/// DRF `SessionAuthentication.enforce_csrf` denial
+/// (`authentication.py:148`): 403 with the middleware's reason after
+/// `CSRF Failed: `. Only reachable for authenticated callers —
+/// anonymous requests return `None` before the check.
+fn csrf_failure_json(reason: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::VARY, "Cookie"),
+        ],
+        format!(
+            "{{\"detail\":\"CSRF Failed: {}\"}}",
+            reason.replace('\\', "\\\\").replace('"', "\\\"")
+        ),
+    )
+        .into_response()
 }
 
 /// The `csrf_failure` page: 200 + `text/html`, `root_url` =
@@ -334,6 +414,23 @@ fn throttle_429() -> Response {
             (header::VARY, "Cookie"),
         ],
         guards_kernel::throttle_denied_json(),
+    )
+        .into_response()
+}
+
+/// DRF `UnsupportedMediaType` (`exceptions.py:217`): the request's
+/// content type echoed verbatim. `Vary: Cookie`, same as above.
+fn unsupported_media_type_response(content_type: &str) -> Response {
+    (
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::VARY, "Cookie"),
+        ],
+        format!(
+            "{{\"detail\":\"Unsupported media type \\\"{}\\\" in request.\"}}",
+            content_type.replace('\\', "\\\\").replace('"', "\\\"")
+        ),
     )
         .into_response()
 }
@@ -803,6 +900,32 @@ fn default_preferences_json() -> serde_json::Value {
     serde_json::json!({"pages": {"block_display": true}, "navigation": {"default_tab": "work_items", "hide_in_more_menu": []}})
 }
 
+/// `track_event.delay(user_id=..., event_name=...,
+/// slug=..., event_properties=...)` for one accepted workspace
+/// invite: kwargs form like every sibling publisher (and like
+/// `.delay` itself) — the worker's `parse_track_event_call`
+/// requires the `event_properties` object.
+fn track_event_message(
+    user_id: &str,
+    workspace_id: &str,
+    slug: &str,
+    role: i32,
+    joined_at: &str,
+) -> pidash_jobs::CeleryTaskMessage {
+    let call = queries_kernel::workspace_join_track_event_call(
+        user_id,
+        workspace_id,
+        slug,
+        role,
+        joined_at,
+    );
+    pidash_jobs::CeleryTaskMessage::new(
+        pidash_jobs::tasks_webhooks::sinks::TRACK_EVENT_TASK,
+        vec![],
+        call.as_object().cloned().unwrap_or_default(),
+    )
+}
+
 /// Publish one Celery message through the F-09 AMQP publisher.
 /// Broker errors propagate (500), like `.delay()` raising in Django
 /// (same pattern as the D-02 asset-metadata publish).
@@ -826,6 +949,9 @@ async fn publish_message(message: &pidash_jobs::CeleryTaskMessage) -> Result<(),
 /// docs). Each statement is its own autocommit write — no
 /// `transaction.atomic` anywhere — so a later failure keeps the
 /// earlier rows, exactly like Django.
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn post_user_auth_workflow(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
@@ -859,21 +985,14 @@ async fn post_user_auth_workflow(
         .map_err(|_| server_error())?;
     }
     for (workspace_id, role, slug) in &workspace_invites {
-        let message = pidash_jobs::CeleryTaskMessage::new(
-            pidash_jobs::tasks_webhooks::sinks::TRACK_EVENT_TASK,
-            vec![
-                serde_json::Value::String(user_id.to_string()),
-                serde_json::Value::String("user_joined_workspace".to_owned()),
-                serde_json::Value::String(slug.clone()),
-                serde_json::json!({
-                    "user_id": user_id.to_string(),
-                    "workspace_id": workspace_id.to_string(),
-                    "workspace_slug": slug,
-                    "role": role,
-                    "joined_at": now.to_rfc3339(),
-                }),
-            ],
-            serde_json::Map::new(),
+        // `joined_at` is stamped per invite
+        // (`workspace_project_join.py:45-56`).
+        let message = track_event_message(
+            &user_id.to_string(),
+            &workspace_id.to_string(),
+            slug,
+            *role,
+            &chrono::Utc::now().to_rfc3339(),
         );
         publish_message(&message)
             .await
@@ -1011,12 +1130,41 @@ fn csrf_rotate_cookie(secret: &str, ctx: &CookieCtx) -> String {
     })
 }
 
-/// `login()` + `user_login`: cycle the session key (delete the
-/// presented row when any), insert the new row
-/// (`_auth_user_id`/`_auth_user_backend`/`_auth_user_hash` +
-/// `device_info`, mirrored `user_id`/`device_info` columns,
-/// `expire_date = now + SESSION_COOKIE_AGE`), and return the two
-/// `Set-Cookie` values (session + rotated CSRF secret).
+/// The auth keys `login()` writes into the session payload.
+fn auth_payload_entries(
+    user_id: uuid::Uuid,
+    password_field: &str,
+    device_info: &serde_json::Value,
+    secret_key: &[u8],
+) -> Vec<(String, serde_json::Value)> {
+    vec![
+        (
+            "_auth_user_id".to_owned(),
+            serde_json::Value::String(user_id.to_string()),
+        ),
+        (
+            "_auth_user_backend".to_owned(),
+            serde_json::Value::String(MODEL_BACKEND.to_owned()),
+        ),
+        (
+            "_auth_user_hash".to_owned(),
+            serde_json::Value::String(session_auth_hash(password_field, secret_key)),
+        ),
+        ("device_info".to_owned(), device_info.clone()),
+    ]
+}
+
+/// `login()` + `user_login`, keeping Django's key discipline
+/// (`django/contrib/auth/__init__.py:106-118`): a presented session
+/// that already authenticates this same user (id + backend + hash
+/// all check out) keeps its key — the auth entries are merged over
+/// the surviving payload ("data set during the anonymous session is
+/// retained") and the row is updated in place. Anything else
+/// (anonymous session, another user, stale hash) cycles the key:
+/// the presented row is deleted and a fresh row is inserted.
+/// `expire_date = now + SESSION_COOKIE_AGE` on both arms. Returns
+/// the two `Set-Cookie` values (session + rotated CSRF secret, which
+/// `login()` rotates on every login via `rotate_token`).
 #[allow(clippy::too_many_arguments)]
 async fn issue_session(
     pool: &sqlx::PgPool,
@@ -1030,8 +1178,55 @@ async fn issue_session(
     age_secs: i64,
     now_unix: i64,
 ) -> Result<Vec<String>, sqlx::Error> {
-    if let Some(old) = presented_key {
-        if session_kernel::is_plausible_session_key(old) {
+    let signer = Signer::new(secret_key, SESSION_SIGNING_SALT);
+    let entries = auth_payload_entries(user_id, password_field, &device_info, secret_key);
+    let user_id_str = user_id.to_string();
+    let expire_unix = now_unix + age_secs;
+    if let Some(old) = presented_key.filter(|key| session_kernel::is_plausible_session_key(key)) {
+        let row: Option<(String, i64)> = sqlx::query_as(
+            r#"SELECT "session_data", EXTRACT(EPOCH FROM "expire_date")::BIGINT FROM "sessions" WHERE "session_key" = $1"#,
+        )
+        .bind(old)
+        .fetch_optional(pool)
+        .await?;
+        if let Some((session_data, expire_date_unix)) = row {
+            if !session_kernel::is_expired(expire_date_unix, now_unix) {
+                let unwrapped: Option<serde_json::Map<String, serde_json::Value>> =
+                    signer.unsign_object(&session_data).ok();
+                if let Some(mut payload) = unwrapped {
+                    let same_user = payload.get("_auth_user_id").and_then(|v| v.as_str())
+                        == Some(user_id_str.as_str())
+                        && payload.get("_auth_user_backend").and_then(|v| v.as_str())
+                            == Some(MODEL_BACKEND)
+                        && payload.get("_auth_user_hash").and_then(|v| v.as_str())
+                            == Some(session_auth_hash(password_field, secret_key).as_str());
+                    if same_user {
+                        for (key, value) in &entries {
+                            payload.insert(key.clone(), value.clone());
+                        }
+                        let session_data = signer
+                            .sign_object(&payload, now_unix as u64)
+                            .map_err(|_| sqlx::Error::RowNotFound)?;
+                        sqlx::query(
+                            r#"UPDATE "sessions" SET "session_data" = $2,
+                               "expire_date" = to_timestamp($3::DOUBLE PRECISION),
+                               "user_id" = $4, "device_info" = $5
+                               WHERE "session_key" = $1"#,
+                        )
+                        .bind(old)
+                        .bind(&session_data)
+                        .bind(expire_unix as f64)
+                        .bind(user_id.to_string())
+                        .bind(sqlx::types::Json(device_info.clone()))
+                        .execute(pool)
+                        .await?;
+                        return Ok(vec![
+                            session_set_cookie(old, ctx, cookie_name, age_secs, now_unix),
+                            csrf_rotate_cookie(&csrf_kernel::new_secret(), ctx),
+                        ]);
+                    }
+                }
+            }
             sqlx::query(r#"DELETE FROM "sessions" WHERE "session_key" = $1"#)
                 .bind(old)
                 .execute(pool)
@@ -1039,24 +1234,12 @@ async fn issue_session(
         }
     }
     let mut payload = serde_json::Map::new();
-    payload.insert(
-        "_auth_user_id".to_owned(),
-        serde_json::Value::String(user_id.to_string()),
-    );
-    payload.insert(
-        "_auth_user_backend".to_owned(),
-        serde_json::Value::String(MODEL_BACKEND.to_owned()),
-    );
-    payload.insert(
-        "_auth_user_hash".to_owned(),
-        serde_json::Value::String(session_auth_hash(password_field, secret_key)),
-    );
-    payload.insert("device_info".to_owned(), device_info.clone());
-    let signer = Signer::new(secret_key, SESSION_SIGNING_SALT);
+    for (key, value) in &entries {
+        payload.insert(key.clone(), value.clone());
+    }
     let session_data = signer
         .sign_object(&payload, now_unix as u64)
         .map_err(|_| sqlx::Error::RowNotFound)?;
-    let expire_unix = now_unix + age_secs;
     let key = loop {
         let key = session_kernel::generate_session_key();
         let inserted = sqlx::query(
@@ -1083,6 +1266,9 @@ async fn issue_session(
 
 /// `user_activation_email.delay(base_host, user.id)` on the inactive
 /// branch (`base.py:229-230`), through the F-09 publisher.
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn publish_activation(current_site: &str, user_id: uuid::Uuid) -> Result<(), Response> {
     let message = pidash_jobs::CeleryTaskMessage::new(
         tasks_kernel::USER_ACTIVATION_EMAIL_TASK,
@@ -1148,6 +1334,9 @@ fn email_request(
 /// credential checks (`email.py:26-96`, `base.py:90-120`). Called
 /// only after the view's own pre-checks pass, preserving
 /// `Q-provider-order`.
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn provider_outcome(
     pool: &sqlx::PgPool,
     form: kernel::EmailForm,
@@ -1201,6 +1390,9 @@ async fn provider_outcome(
 
 /// Evaluate one attempt: the instance gate + form reads here, the
 /// branch order in the kernel.
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn evaluate_attempt(
     pool: &sqlx::PgPool,
     req: &EmailRequest,
@@ -1276,8 +1468,14 @@ async fn evaluate_attempt(
 /// Run the authenticated tail shared by sign-in and sign-up:
 /// `save_user_data` (+ activation branch), `last_login` stamp,
 /// `post_user_auth_workflow`, `user_login` session issuance, and the
-/// success redirect.
+/// success redirect. `current_site` is the surface base for
+/// `device_info.domain` (`user_login` passes its own flags);
+/// `activation_site` is the flag-less `base_host(request)` the
+/// activation mail builds its profile link from (`base.py:230`).
 #[allow(clippy::too_many_arguments)]
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn run_authenticated(
     pool: &sqlx::PgPool,
     state: &AppState,
@@ -1287,13 +1485,12 @@ async fn run_authenticated(
     user_email: &str,
     was_active: bool,
     current_site: &str,
+    activation_site: &str,
 ) -> Result<Response, Response> {
     let now = chrono::Utc::now();
-    let user_agent = if req.prov.user_agent.is_empty() {
-        None
-    } else {
-        Some(req.prov.user_agent.clone())
-    };
+    // `META.get("HTTP_USER_AGENT")`: `None` when absent (NULL), the
+    // raw value — even empty — when present.
+    let user_agent = req.prov.user_agent.clone();
     let need_activation = save_user_data(
         pool,
         user_id,
@@ -1308,7 +1505,7 @@ async fn run_authenticated(
         .await
         .map_err(|_| server_error())?;
     if need_activation {
-        publish_activation(current_site, user_id).await?;
+        publish_activation(activation_site, user_id).await?;
     }
     // Only the app endpoints pass `callback=post_user_auth_workflow`
     // (`app/email.py:86,208`); the space twins construct the provider
@@ -1318,7 +1515,7 @@ async fn run_authenticated(
         post_user_auth_workflow(pool, user_id, user_email, now).await?;
     }
     let device_info = serde_json::json!({
-        "user_agent": req.prov.user_agent,
+        "user_agent": req.prov.user_agent.as_deref().unwrap_or(""),
         "ip_address": req.prov.ip.clone().map(serde_json::Value::String).unwrap_or(serde_json::Value::Null),
         "domain": current_site,
     });
@@ -1374,6 +1571,10 @@ async fn serve_email_form(state: &AppState, req: &EmailRequest, current_site: &s
         );
         return redirect_response(location, Vec::new());
     }
+    // `save_user_data` mails with flag-less `base_host(request)`
+    // (`base.py:230`); everything else on this path uses the surface
+    // base.
+    let activation_site = req.hosts.root_base.clone();
     let authenticated = match req.form {
         kernel::EmailForm::SignIn => {
             let user = user_row.expect("sign-in authenticated has a row");
@@ -1386,6 +1587,7 @@ async fn serve_email_form(state: &AppState, req: &EmailRequest, current_site: &s
                 &normalized,
                 user.is_active,
                 current_site,
+                &activation_site,
             )
             .await
         }
@@ -1414,6 +1616,7 @@ async fn serve_email_form(state: &AppState, req: &EmailRequest, current_site: &s
                 &normalized,
                 true,
                 current_site,
+                &activation_site,
             )
             .await
         }
@@ -1511,6 +1714,46 @@ async fn signup_space(State(state): State<AppState>, req: axum::extract::Request
 // ---------------------------------------------------------------------------
 // Email-check (`views/app|space/check.py`)
 // ---------------------------------------------------------------------------
+
+/// `request.data` for one email-check call (`request.py:325-355`):
+/// the `email` member when the media type yields one, `None` for the
+/// empty-body `{}` and every other falsy shape, or the content type
+/// back when nothing parses it (DRF 415).
+fn check_request_email(content_type: &str, body: &[u8]) -> Result<Option<String>, String> {
+    if body.is_empty() {
+        return Ok(None);
+    }
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if mime == "application/json" {
+        let parsed: Result<serde_json::Value, _> = serde_json::from_slice(body);
+        // A JSON body that is not an object has no `email` member
+        // (`request.data.get("email", False)` → `False`).
+        return Ok(check_email_input(
+            parsed.as_ref().ok().and_then(|v| v.get("email")),
+        ));
+    }
+    if mime == "application/x-www-form-urlencoded" {
+        return Ok(
+            match kernel::form_field(&form_pairs(Some(content_type), body), "email") {
+                kernel::FormField::Missing => None,
+                kernel::FormField::Present("") => None,
+                kernel::FormField::Present(value) => Some(value.to_owned()),
+            },
+        );
+    }
+    if mime == "multipart/form-data" {
+        // Django's multipart parser would read the fields; there is
+        // no multipart reader here, so the member stays missing
+        // (recorded approximation, like malformed JSON).
+        return Ok(None);
+    }
+    Err(content_type.to_owned())
+}
 
 /// Coerce a JSON `email` member the way the view does:
 /// `request.data.get("email", False)` is falsy for missing, `False`,
@@ -1691,6 +1934,30 @@ async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Res
     )
     .await
     .is_some();
+    // `SessionAuthentication.authenticate`: anonymous callers return
+    // `None` before the CSRF check; authenticated callers without a
+    // valid token get the 403 (`authentication.py:124-148`).
+    if authenticated {
+        let csrf_cookie = session_kernel::cookie_value(cookie_header, CSRF_COOKIE_NAME);
+        let header_token = parts
+            .headers
+            .get("x-csrftoken")
+            .and_then(|v| v.to_str().ok());
+        let content_type = parts
+            .headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok());
+        let pairs = form_pairs(content_type, &body);
+        let Some(secret) = csrf_cookie.as_deref() else {
+            return csrf_failure_json("CSRF cookie not set.");
+        };
+        let Some((token, source)) = csrf_token_source(&pairs, header_token) else {
+            return csrf_failure_json("CSRF token missing.");
+        };
+        if let Err(reason) = csrf_check_token(secret, &token, source) {
+            return csrf_failure_json(&reason);
+        }
+    }
     if !authenticated {
         let ident = if ip.is_empty() {
             "127.0.0.1".to_owned()
@@ -1705,11 +1972,15 @@ async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Res
         let decision = kernel::EmailCheckDecision::NotConfigured;
         return json_400(&decision.error_pairs());
     }
-    let parsed: Result<serde_json::Value, _> = serde_json::from_slice(&body);
-    let email_value = parsed.as_ref().ok().and_then(|v| v.get("email"));
-    // A JSON body that is not an object has no `email` member
-    // (`request.data.get("email", False)` → `False` → REQUIRED).
-    let email_raw = check_email_input(email_value);
+    let content_type = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let email_raw = match check_request_email(content_type, &body) {
+        Ok(email_raw) => email_raw,
+        Err(media_type) => return unsupported_media_type_response(&media_type),
+    };
     let (email_host, magic_login) = match (
         config_value(pool, "EMAIL_HOST", Some(String::new())).await,
         config_value(pool, "ENABLE_MAGIC_LINK_LOGIN", Some("1".to_owned())).await,
@@ -1754,16 +2025,54 @@ async fn email_check_space(State(state): State<AppState>, req: axum::extract::Re
 // Sign-out (`views/app|space/signout.py`)
 // ---------------------------------------------------------------------------
 
-/// Delete-cookie for the session cookie (`response.delete_cookie`
-/// on the emptied session).
+/// Whether the presented session reads empty (`Session.is_empty()`
+/// over `SessionStore.load()`): a missing or expired row, an
+/// undecodable payload, or an empty dict all read empty — and an
+/// implausible key can never match a row, so it reads empty too.
+async fn presented_session_is_empty(
+    pool: &sqlx::PgPool,
+    presented_key: Option<&str>,
+    secret_key: &[u8],
+    now_unix: i64,
+) -> bool {
+    let Some(key) = presented_key.filter(|key| session_kernel::is_plausible_session_key(key))
+    else {
+        return true;
+    };
+    let row: Option<(String, i64)> = sqlx::query_as(
+        r#"SELECT "session_data", EXTRACT(EPOCH FROM "expire_date")::BIGINT FROM "sessions" WHERE "session_key" = $1"#,
+    )
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    let Some((session_data, expire_unix)) = row else {
+        return true;
+    };
+    if session_kernel::is_expired(expire_unix, now_unix) {
+        return true;
+    }
+    let signer = Signer::new(secret_key, SESSION_SIGNING_SALT);
+    let data: Result<serde_json::Value, _> = signer.unsign_object(&session_data);
+    !matches!(data, Ok(serde_json::Value::Object(map)) if !map.is_empty())
+}
+
+/// Delete-cookie for the session cookie, exactly as
+/// `SessionMiddleware` emits it when the post-view session reads
+/// empty (never `Secure`/`HttpOnly`; `Domain` only when configured).
 fn session_delete_cookie(ctx: &CookieCtx, cookie_name: &str) -> String {
     session_kernel::render_delete_cookie(cookie_name, "/", "Lax", ctx.domain.as_deref())
 }
 
-/// Serve one sign-out endpoint: stamp `last_logout_ip/time`, flush
-/// the session row, clear the cookie, redirect. Every failure inside
-/// the `try` — anonymous callers included — redirects to the same
-/// target (`Q-anon-signout`).
+/// Serve one sign-out endpoint: stamp `last_logout_ip/time`, flush,
+/// redirect. `logout(request)` flushes (deletes the row) and the
+/// session middleware then answers with a deletion cookie because
+/// the post-view session reads empty — while every failure inside
+/// the `try` (anonymous callers included) skips the writes and only
+/// redirects (`Q-anon-signout`), keeping the middleware's own rule:
+/// a presented-but-empty session still answers the deletion, a
+/// missing cookie or a live anonymous session answers bare.
 async fn serve_signout(state: &AppState, req: axum::extract::Request, space: bool) -> Response {
     let (parts, body) = req.into_parts();
     let body = axum::body::to_bytes(body, 1024 * 1024)
@@ -1790,45 +2099,55 @@ async fn serve_signout(state: &AppState, req: axum::extract::Request, space: boo
     } else {
         kernel::signout_app_location(&hosts.app_base)
     };
-    let ctx = cookie_ctx(state);
-    let delete_cookie = session_delete_cookie(&ctx, &cookie_name);
     // The `try` body: `request.user` must be authenticated (valid
     // session + hash + active user — `User.objects.get(pk=None)`
     // raises for anonymous callers); then the stamp and the flush.
-    // Any failure skips the writes and only redirects.
-    if let Some(pool) = state.pools().map(|pools| pools.primary()) {
-        let now_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let user_id = resolve_session_user(
-            pool,
-            prov.session_cookie.as_deref(),
-            state.settings().secret_key.as_bytes(),
-            now_unix,
-        )
-        .await;
-        if let Some(user_id) = user_id {
-            let now = chrono::Utc::now();
-            let stamped = sqlx::query(
-                r#"UPDATE "users" SET "last_logout_ip" = $2, "last_logout_time" = $3, "updated_at" = $3 WHERE "id" = $1"#,
-            )
-            .bind(user_id)
-            .bind(prov.ip.clone())
-            .bind(now)
+    // Any failure redirects bare, unless the middleware rule fires
+    // (a presented-but-empty session still answers the deletion).
+    let ctx = cookie_ctx(state);
+    let delete_cookie = session_delete_cookie(&ctx, &cookie_name);
+    let with_delete = || redirect_response(location.clone(), vec![delete_cookie.clone()]);
+    let bare = || redirect_response(location.clone(), Vec::new());
+    let secret = state.settings().secret_key.as_bytes();
+    let Some(pool) = state.pools().map(|pools| pools.primary()) else {
+        return bare();
+    };
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let Some(user_id) =
+        resolve_session_user(pool, prov.session_cookie.as_deref(), secret, now_unix).await
+    else {
+        if prov.session_cookie.is_some()
+            && presented_session_is_empty(pool, prov.session_cookie.as_deref(), secret, now_unix)
+                .await
+        {
+            return with_delete();
+        }
+        return bare();
+    };
+    let now = chrono::Utc::now();
+    let stamped = sqlx::query(
+        r#"UPDATE "users" SET "last_logout_ip" = $2, "last_logout_time" = $3, "updated_at" = $3 WHERE "id" = $1"#,
+    )
+    .bind(user_id)
+    .bind(prov.ip.clone())
+    .bind(now)
+    .execute(pool)
+    .await;
+    if stamped.is_err() {
+        return bare();
+    }
+    // `Session.flush()`: drop the old row; the middleware then
+    // answers the deletion because the post-view session reads empty.
+    if let Some(key) = prov.session_cookie.as_deref() {
+        let _ = sqlx::query(r#"DELETE FROM "sessions" WHERE "session_key" = $1"#)
+            .bind(key)
             .execute(pool)
             .await;
-            if stamped.is_ok() {
-                if let Some(key) = prov.session_cookie.as_deref() {
-                    let _ = sqlx::query(r#"DELETE FROM "sessions" WHERE "session_key" = $1"#)
-                        .bind(key)
-                        .execute(pool)
-                        .await;
-                }
-            }
-        }
     }
-    redirect_response(location, vec![delete_cookie])
+    with_delete()
 }
 
 async fn signout_app(State(state): State<AppState>, req: axum::extract::Request) -> Response {
@@ -1845,7 +2164,7 @@ mod tests {
 
     fn prov_with(secret: Option<&str>, token: Option<&str>) -> Provenance {
         Provenance {
-            user_agent: "UA/1.0".to_owned(),
+            user_agent: Some("UA/1.0".to_owned()),
             ip: Some("2.2.2.2".to_owned()),
             csrf_cookie: secret.map(str::to_owned),
             header_token: token.map(str::to_owned),
@@ -1889,6 +2208,111 @@ mod tests {
                 &form
             ),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn csrf_token_source_prefers_the_form_field() {
+        let secret = "abcdefghijklmnopqrstuvwxyz012345";
+        let masked = csrf_kernel::mask_secret(secret).expect("masks");
+        let bogus = "0".repeat(64);
+        // Form field wins over the header, even when the form value
+        // is wrong and the header is right (`request.POST.get`
+        // first, header fallback second).
+        let form = vec![("csrfmiddlewaretoken".to_owned(), bogus.clone())];
+        assert_eq!(
+            csrf_token_source(&form, Some(&masked)),
+            Some((bogus.clone(), TokenSource::Post))
+        );
+        assert_eq!(
+            csrf_gate(&prov_with(Some(secret), Some(&masked)), &form),
+            Err(CsrfDenial::BadToken)
+        );
+        // An empty form value falls back to the header.
+        let empty = vec![("csrfmiddlewaretoken".to_owned(), String::new())];
+        assert_eq!(
+            csrf_token_source(&empty, Some(&masked)),
+            Some((masked.clone(), TokenSource::Header))
+        );
+        assert_eq!(
+            csrf_gate(&prov_with(Some(secret), Some(&masked)), &empty),
+            Ok(())
+        );
+        // No token anywhere is still missing.
+        let pairs: Vec<(String, String)> = vec![];
+        assert_eq!(csrf_token_source(&pairs, None), None);
+    }
+
+    #[test]
+    fn csrf_check_token_renders_django_reasons() {
+        let secret = "abcdefghijklmnopqrstuvwxyz012345";
+        let masked = csrf_kernel::mask_secret(secret).expect("masks");
+        assert!(csrf_check_token(secret, &masked, TokenSource::Post).is_ok());
+        assert_eq!(
+            csrf_check_token(secret, &"x".repeat(64), TokenSource::Post),
+            Err("CSRF token from POST incorrect.".to_owned())
+        );
+        assert_eq!(
+            csrf_check_token(secret, &"x".repeat(64), TokenSource::Header),
+            Err("CSRF token from the 'X-Csrftoken' HTTP header incorrect.".to_owned())
+        );
+        assert_eq!(
+            csrf_check_token(secret, "short", TokenSource::Header),
+            Err("CSRF token from the 'X-Csrftoken' HTTP header has incorrect length.".to_owned())
+        );
+        assert_eq!(
+            csrf_check_token(secret, &"!".repeat(64), TokenSource::Post),
+            Err("CSRF token from POST has invalid characters.".to_owned())
+        );
+    }
+
+    #[test]
+    fn check_request_email_follows_the_media_type() {
+        // JSON object member.
+        assert_eq!(
+            check_request_email("application/json", br#"{"email":"h@x.com"}"#),
+            Ok(Some("h@x.com".to_owned()))
+        );
+        // Empty body is `{}` whatever the media type.
+        assert_eq!(check_request_email("application/json", b""), Ok(None));
+        assert_eq!(check_request_email("text/plain", b""), Ok(None));
+        // Urlencoded reads the last field; empty stays missing.
+        assert_eq!(
+            check_request_email(
+                "application/x-www-form-urlencoded",
+                b"email=a%40x.com&email=b%40x.com"
+            ),
+            Ok(Some("b@x.com".to_owned()))
+        );
+        assert_eq!(
+            check_request_email("application/x-www-form-urlencoded", b"email="),
+            Ok(None)
+        );
+        // Anything else is the content type back (DRF 415).
+        assert_eq!(
+            check_request_email("text/plain", b"h@x.com"),
+            Err("text/plain".to_owned())
+        );
+        assert_eq!(check_request_email("", b"h@x.com"), Err(String::new()));
+    }
+
+    #[test]
+    fn track_event_message_carries_kwargs_with_properties() {
+        let message = track_event_message("uid", "wid", "ws", 5, "2026-09-30T00:00:00+00:00");
+        assert!(message.args.is_empty());
+        let props = message
+            .kwargs
+            .get("event_properties")
+            .and_then(|v| v.as_object())
+            .expect("event_properties object");
+        assert_eq!(
+            message.kwargs.get("event_name").and_then(|v| v.as_str()),
+            Some("user_joined_workspace")
+        );
+        assert_eq!(props.get("role").and_then(|v| v.as_i64()), Some(5));
+        assert_eq!(
+            props.get("workspace_id").and_then(|v| v.as_str()),
+            Some("wid")
         );
     }
 
