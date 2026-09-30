@@ -67,13 +67,6 @@ pub const COMPLEX_FILTER_ENDPOINTS: &[&str] = &["cycle-issues"];
 /// 'GET')` dict compiler first (`issue.py:111`).
 pub const LEGACY_FILTER_ENDPOINTS: &[&str] = &["cycle-issues"];
 
-/// Merge the cycle-issue + favorites route groups (PIDASHCONV-323); sibling
-/// handler issues (PIDASHCONV-321/357/377/410) merge theirs the same way —
-/// merges keep both sides. The overlay cutover wiring is a follow-up.
-pub fn routes() -> axum::Router<crate::state::AppState> {
-    handlers_cycle_issues::routes().merge(handlers_favorites::routes())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
