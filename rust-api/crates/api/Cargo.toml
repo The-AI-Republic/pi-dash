@@ -48,6 +48,10 @@ sea-query = { version = "0.32", default-features = false, features = ["backend-p
 thiserror = "2"
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono", "json"] }
 uuid = { version = "1", features = ["v4"] }
+# Gitea OAuth handlers (D-17): workspace-members cache invalidation
+# (`KEYS` + `DEL`). Same 1.x line and feature set the db crate builds on,
+# so the lockfile gains no new downloads.
+redis = { version = "1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots"] }
 # License console handlers (D-01): session-auth-hash verification
 # (`django.contrib.auth` `salted_hmac`) and the `email-credentials-check`
 # SMTP conversation (implicit TLS + STARTTLS). All five were already in
@@ -67,9 +71,10 @@ idna = "1"
 # `ring`, not the default `aws-lc-rs`: ring is already vendored (reqwest),
 # so no C-build chain enters the lockfile for the SMTP TLS paths.
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
-# Device-session mint (`mt_` + `token_urlsafe(32)`, D-17 PIDASHCONV-343):
-# same 0.9 line the auth and jobs crates build on, so the lockfile gains
-# no new downloads.
+# Device-session mint (`mt_` + `token_urlsafe(32)`, D-17 PIDASHCONV-343)
+# plus Gitea OAuth draws (password salts, display-name and avatar-color,
+# D-17 PIDASHCONV-341): same 0.9 line the auth and jobs crates build on,
+# so the lockfile gains no new downloads.
 rand = "0.9"
 tokio-rustls = "0.26.5"
 webpki-roots = "1.0.9"
