@@ -11,6 +11,7 @@
 //! - [`context`]: explicit per-request audit/tenant context.
 //! - [`app_analytics`]: analytic-view / exporter-history / importer columns (D-35).
 //! - [`app_assets`]: file-asset columns + helpers (D-31).
+//! - [`app_pages`]: page / page-log / page-label / project-page / page-version columns (D-30).
 //! - [`filter`]: dynamic JSON filters compiled to sea-query conditions.
 //! - [`filterset`]: the `IssueFilterSet` declaration and leaf compiler (F-07).
 //! - [`issue_filters`]: the legacy `issue_filters` query-param compiler (F-07).
@@ -30,6 +31,7 @@ pub mod app_assets;
 pub mod app_cycles;
 pub mod app_intake;
 pub mod app_integrations;
+pub mod app_pages;
 pub mod app_views_search;
 pub mod assistant;
 pub mod auth_oauth;
