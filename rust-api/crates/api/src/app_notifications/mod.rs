@@ -1335,6 +1335,7 @@ async fn destroy(
 
 /// `SoftDeleteModel.delete()` (`db/mixins.py:72-79`): stamp
 /// `deleted_at` (+ `updated_at`/`updated_by` through `save()`).
+#[allow(clippy::result_large_err)]
 async fn soft_delete(
     pool: &PgPool,
     pk: &Uuid,
@@ -1507,6 +1508,7 @@ async fn partial_update(
 
 /// `serializer.save()`: write `snoozed_till` (+ `updated_at` /
 /// `updated_by` through `save()`).
+#[allow(clippy::result_large_err)]
 async fn save_snoozed(
     pool: &PgPool,
     pk: &Uuid,
