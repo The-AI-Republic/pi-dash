@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use sqlx::postgres::PgListener;
 use tokio::sync::{watch, Semaphore};
 
 use crate::amqp::Publisher;
@@ -278,6 +279,23 @@ pub async fn run_worker(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let semaphore = Arc::new(Semaphore::new(config.concurrency.max(1)));
+    // Push-wake (PIDASHCONV-476): LISTEN on the enqueue channel so an idle
+    // worker claims in ms instead of sleeping out the poll interval. A
+    // missed notification only delays a job until the next poll — the sleep
+    // below stays as the fallback, and claiming is unchanged.
+    let mut listener = match PgListener::connect_with(&pool).await {
+        Ok(mut listener) => match listener.listen(queue::JOB_NOTIFY_CHANNEL).await {
+            Ok(()) => Some(listener),
+            Err(error) => {
+                tracing::warn!(%error, "job notify listen failed; using poll fallback");
+                None
+            }
+        },
+        Err(error) => {
+            tracing::warn!(%error, "job notify listener unavailable; using poll fallback");
+            None
+        }
+    };
     loop {
         if *shutdown.borrow() {
             break;
@@ -291,9 +309,21 @@ pub async fn run_worker(
                 }
             }
             Ok(None) => {
-                tokio::select! {
-                    _ = shutdown.wait_for(|stop| *stop) => break,
-                    _ = tokio::time::sleep(config.poll_interval) => {}
+                if let Some(listener) = listener.as_mut() {
+                    tokio::select! {
+                        _ = shutdown.wait_for(|stop| *stop) => break,
+                        _ = tokio::time::sleep(config.poll_interval) => {}
+                        // Any wake re-claims; a foreign-queue notification
+                        // costs at most one empty claim. A listener error
+                        // just wakes the loop — the claim below plus the
+                        // poll sleep keep the worker correct.
+                        _ = listener.recv() => {}
+                    }
+                } else {
+                    tokio::select! {
+                        _ = shutdown.wait_for(|stop| *stop) => break,
+                        _ = tokio::time::sleep(config.poll_interval) => {}
+                    }
                 }
             }
             Ok(Some(job)) => {
@@ -426,5 +456,78 @@ mod tests {
         assert_eq!(config.queue, "celery");
         assert_eq!(config.concurrency, 4);
         assert_eq!(config.poll_interval, Duration::from_secs(1));
+    }
+
+    /// Push-wake pacing (PIDASHCONV-476): an idle worker claims a newly
+    /// enqueued job in ms, without sleeping out `poll_interval` (5s here, so
+    /// a poll-bound worker fails this test at the 2s timeout).
+    /// Needs a live Postgres — export `DATABASE_URL` on its own line first.
+    /// Ignored by default so CI without a database stays green.
+    #[tokio::test]
+    #[ignore = "needs live Postgres via DATABASE_URL"]
+    async fn notify_wake_claims_without_poll_delay() {
+        let url =
+            std::env::var("DATABASE_URL").expect("export DATABASE_URL for the live notify test");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&url)
+            .await
+            .expect("connect scratch database");
+        crate::queue::ensure_schema(&pool)
+            .await
+            .expect("ensure queue schema");
+        // A unique queue: no other worker or leftover row can interfere.
+        let queue = format!("test-notify-{}", uuid::Uuid::new_v4());
+        let (fired_tx, fired_rx) = tokio::sync::oneshot::channel::<()>();
+        let fired_tx = Arc::new(tokio::sync::Mutex::new(Some(fired_tx)));
+        let handler: Handler = Arc::new(move |_job: JobRow| {
+            let fired_tx = fired_tx.clone();
+            Box::pin(async move {
+                if let Some(tx) = fired_tx.lock().await.take() {
+                    let _ = tx.send(());
+                }
+                Ok(Verdict::Ack)
+            }) as Pin<Box<dyn Future<Output = _> + Send>>
+        });
+        let mut registry = Registry::new();
+        registry.register("test.notify.probe", handler);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let worker = tokio::spawn(run_worker(
+            pool.clone(),
+            registry,
+            None,
+            WorkerConfig {
+                queue: queue.clone(),
+                owner: "notify-probe".to_owned(),
+                poll_interval: Duration::from_secs(5),
+                concurrency: 1,
+            },
+            shutdown_rx,
+        ));
+        // Let the worker settle into its idle wait before enqueueing.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let started = std::time::Instant::now();
+        crate::queue::enqueue(
+            &pool,
+            &crate::queue::NewJob {
+                task: "test.notify.probe".to_owned(),
+                args: serde_json::json!([]),
+                kwargs: serde_json::json!({}),
+                queue,
+                visible_at: None,
+                max_retries: crate::queue::DEFAULT_MAX_RETRIES,
+            },
+        )
+        .await
+        .expect("enqueue probe job");
+        let claimed = tokio::time::timeout(Duration::from_secs(2), fired_rx).await;
+        let elapsed = started.elapsed();
+        let _ = shutdown_tx.send(true);
+        worker.await.expect("worker joins after shutdown");
+        let _ = claimed.expect("worker must claim via push-wake, not the 5s poll");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "claim took {elapsed:?}; push-wake should fire in ms"
+        );
     }
 }

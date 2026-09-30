@@ -52,6 +52,11 @@ pub const DEFAULT_RETRY_DELAY_SECS: u64 = 180;
 /// `broker.py` publishes to.
 pub const DEFAULT_QUEUE: &str = "celery";
 
+/// Postgres `LISTEN`/`NOTIFY` channel the worker wakes on (PIDASHCONV-476).
+/// The payload is the queue name; the worker claims its own queue after any
+/// wake, so a foreign-queue notification costs at most one empty claim.
+pub const JOB_NOTIFY_CHANNEL: &str = "rust_job_queue";
+
 /// Row states. There is no `done`: acknowledged jobs are deleted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobStatus {
@@ -179,9 +184,18 @@ pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
 }
 
 fn enqueue_sql() -> &'static str {
-    "INSERT INTO rust_job_queue (celery_id, task, args, kwargs, queue, visible_at, max_retries) \
-     VALUES ($1, $2, $3, $4, $5, COALESCE($6, now()), $7) \
-     RETURNING id"
+    // Push-wake (PIDASHCONV-476): the INSERT carries a `pg_notify` side
+    // effect in the same prepared statement, so the executor-generic core
+    // keeps working inside open transactions and the notification only
+    // delivers at commit — a wake always sees a committed row.
+    "WITH ins AS (\
+        INSERT INTO rust_job_queue (celery_id, task, args, kwargs, queue, visible_at, max_retries) \
+        VALUES ($1, $2, $3, $4, $5, COALESCE($6, now()), $7) \
+        RETURNING id \
+     ), wake AS (\
+        SELECT pg_notify('rust_job_queue', $5) \
+     ) \
+     SELECT ins.id FROM ins, wake"
 }
 
 /// Enqueue a job on a pool handle (outside any request transaction).
@@ -391,5 +405,15 @@ mod tests {
     #[test]
     fn enqueue_is_visible_immediately_by_default() {
         assert!(enqueue_sql().contains("COALESCE($6, now())"));
+    }
+
+    #[test]
+    fn enqueue_carries_notify_wake_in_same_statement() {
+        // The worker's push-wake depends on this: one prepared statement
+        // (the executor-generic core also runs inside open transactions),
+        // notifying the channel the worker listens on with the queue name.
+        assert!(enqueue_sql().contains("pg_notify"));
+        assert!(enqueue_sql().contains(JOB_NOTIFY_CHANNEL));
+        assert!(enqueue_sql().contains("RETURNING id"));
     }
 }
