@@ -633,6 +633,7 @@ fn project_detail(row: &ProjectLite) -> Value {
 /// Unresolvable values answer `{"detail":"Project not found"}` (rendered
 /// here, not through `Denial`, whose `NotFound` is the `ObjectDoesNotExist`
 /// error body owned by the license domain).
+#[allow(clippy::result_large_err)]
 async fn resolve_project_id(pool: &sqlx::PgPool, slug: &str, raw: &str) -> Result<Uuid, Response> {
     if let Ok(id) = raw.parse::<Uuid>() {
         return Ok(id);
