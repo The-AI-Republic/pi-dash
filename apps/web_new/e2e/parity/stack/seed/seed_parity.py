@@ -8,6 +8,10 @@
 # only rows ever replaced are the project's issues. Prints one
 # `PARITY_SEED_JSON:` line; the caller saves it as the seed-facts file
 # the scenarios read.
+#
+# NEWFRONT-113 adds, still get-or-create and scoped to the parity project:
+# a guest member (CMT-002), a published project board plus intake view
+# (CMT-006, CMT-018), and one git-synced comment (CMT-005).
 import json
 import os
 import time
@@ -16,8 +20,17 @@ from django.contrib.auth.hashers import make_password
 from django.db import connection, transaction
 
 from pi_dash.db.models import (
+    DeployBoard,
+    GitCommentSync,
+    GitIssueSync,
+    GitProviderAccount,
+    GitRepository,
+    GitRepositoryBinding,
+    Intake,
+    IntakeIssue,
     Issue,
     IssueActivity,
+    IssueComment,
     IssueSequence,
     Profile,
     Project,
@@ -38,11 +51,19 @@ PASSWORD = os.environ.get("PARITY_SEED_PASSWORD", "Parity-Seed-1")
 # other than the author.
 MENTION_EMAIL = os.environ.get("PARITY_SEED_MENTION_EMAIL", "parity-mention@example.com")
 MENTION_PASSWORD = os.environ.get("PARITY_SEED_MENTION_PASSWORD", "Parity-Seed-2")
+# NEWFRONT-113: second seeded identity, a guest on the seeded project, for
+# the CMT-002 refusal path (guest may only comment on their own item unless
+# the project lets guests use everything).
+GUEST_EMAIL = os.environ.get("PARITY_SEED_GUEST_EMAIL", "parity-guest@example.com")
+GUEST_PASSWORD = os.environ.get("PARITY_SEED_GUEST_PASSWORD", "Parity-Seed-2")
 WORKSPACE_NAME = "Parity Workspace"
 WORKSPACE_SLUG = "parity-ws"
 PROJECT_NAME = "Parity Project"
 PROJECT_IDENTIFIER = "PAR"
 ISSUE_NAMES = ["Parity first issue", "Parity second issue", "Parity third issue"]
+# Marker HTML for the git-synced comment (CMT-005). The scenario finds it by
+# this marker instead of position, so sibling specs can post freely.
+SYNC_COMMENT_MARKER = "parity-git-synced seven"
 
 
 # Every table with a foreign key into issues, mapped to the columns that
@@ -188,6 +209,66 @@ def refresh_project_issues(project, workspace, state, user) -> None:
                     f"{column} IN (SELECT id FROM issues WHERE project_id = %s)" for column in columns
                 )
                 cursor.execute(f"DELETE FROM {table} WHERE {condition}", [pid] * len(columns))
+            cursor.execute("DELETE FROM issues WHERE project_id = %s", [pid])
+            # NEWFRONT-113: every row that references this project's issues or
+            # their comments first (leaf tables before parents), otherwise any
+            # row an earlier scenario run stored blocks the issue rebuild with
+            # a foreign-key violation on reruns that skip parity-reset.sh.
+            # Table list enumerated from pg_constraint on the scratch database.
+            pid = str(project.id)
+            issue_set = "(SELECT id FROM issues WHERE project_id = %s)"
+            comment_set = "(SELECT id FROM issue_comments WHERE issue_id IN " + issue_set + ")"
+            for table, column in [
+                ("git_comment_syncs", "comment_id"),
+                ("github_comment_syncs", "comment_id"),
+                ("comment_reactions", "comment_id"),
+                ("file_assets", "comment_id"),
+                ("issue_activities", "issue_comment_id"),
+                ("git_issue_syncs", "issue_id"),
+                ("github_issue_syncs", "issue_id"),
+                ("file_assets", "issue_id"),
+                ("issue_activities", "issue_id"),
+                ("issue_sequences", "issue_id"),
+                ("issue_labels", "issue_id"),
+                ("issue_assignees", "issue_id"),
+                ("issue_subscribers", "issue_id"),
+                ("issue_reactions", "issue_id"),
+                ("issue_votes", "issue_id"),
+                ("issue_mentions", "issue_id"),
+                ("issue_attachments", "issue_id"),
+                ("issue_links", "issue_id"),
+                ("issue_blockers", "blocked_by_id"),
+                ("issue_blockers", "block_id"),
+                ("issue_relations", "related_issue_id"),
+                ("issue_relations", "issue_id"),
+                ("cycle_issues", "issue_id"),
+                ("module_issues", "issue_id"),
+                ("intake_issues", "issue_id"),
+                ("intake_issues", "duplicate_to_id"),
+                ("issue_versions", "issue_id"),
+                ("issue_description_versions", "issue_id"),
+                ("issue_agent_ticker", "issue_id"),
+                ("git_code_review_links", "issue_id"),
+                ("github_pull_request_links", "issue_id"),
+                ("agent_run", "work_item_id"),
+            ]:
+                scope = comment_set if column in ("comment_id", "issue_comment_id") else issue_set
+                cursor.execute(f"DELETE FROM {table} WHERE {column} IN {scope}", [pid] * scope.count("%s"))
+            # Threaded replies before their parents (specs never thread deeper).
+            cursor.execute(
+                "DELETE FROM issue_comments WHERE parent_id IN " + comment_set,
+                [pid],
+            )
+            cursor.execute(
+                "DELETE FROM issue_comments WHERE issue_id IN " + issue_set,
+                [pid],
+            )
+            # Sub-issues before their parents; drafts pointing at project issues.
+            cursor.execute("DELETE FROM draft_issues WHERE parent_id IN " + issue_set, [pid])
+            cursor.execute(
+                "DELETE FROM issues WHERE parent_id IN " + issue_set + " AND project_id = %s",
+                [pid, pid],
+            )
             cursor.execute("DELETE FROM issues WHERE project_id = %s", [pid])
     for position, name in enumerate(ISSUE_NAMES):
         issue = Issue(
@@ -342,8 +423,9 @@ def build() -> dict:
         project.save(update_fields=["default_state"])
 
     refresh_project_issues(project, workspace, state, user)
+    inbox_issue_id = seed_rules_fixtures(project, workspace, state, user)
 
-    return {
+    facts = {
         "email": EMAIL,
         "password": PASSWORD,
         "workspaceSlug": WORKSPACE_SLUG,
@@ -359,7 +441,149 @@ def build() -> dict:
             "id": str(mention_user.id),
             "displayName": mention_user.display_name,
         },
+        "guestEmail": GUEST_EMAIL,
+        "guestPassword": GUEST_PASSWORD,
     }
+    if inbox_issue_id is not None:
+        facts["inboxIssueId"] = inbox_issue_id
+    return facts
+
+
+def seed_rules_fixtures(project, workspace, state, user) -> None:
+    # NEWFRONT-113 additions. Everything here is get-or-create and scoped to
+    # the parity project, so other areas' scenarios are unaffected.
+    guest, guest_created = User.objects.get_or_create(
+        email=GUEST_EMAIL,
+        defaults={
+            "username": "parity_guest",
+            "password": make_password(GUEST_PASSWORD),
+            "display_name": "Parity Guest",
+            "first_name": "Parity",
+            "last_name": "Guest",
+            "is_active": True,
+            "is_email_verified": True,
+        },
+    )
+    if not guest_created:
+        guest.password = make_password(GUEST_PASSWORD)
+        guest.is_active = True
+        guest.is_email_verified = True
+        guest.save(update_fields=["password", "is_active", "is_email_verified"])
+    guest_profile, _ = Profile.objects.get_or_create(user=guest)
+    guest_profile.is_onboarded = True
+    guest_profile.save(update_fields=["is_onboarded"])
+    WorkspaceMember.objects.get_or_create(
+        workspace=workspace, member=guest, defaults={"role": 5}
+    )
+    ProjectMember.objects.get_or_create(
+        project=project,
+        member=guest,
+        defaults={"role": 5, "workspace_id": workspace.id, "created_by_id": user.id},
+    )
+    Profile.objects.filter(user=guest).update(last_workspace_id=workspace.id)
+
+    # Externally shared project (CMT-006): a published project board gives
+    # the project a public anchor, which is what renders the visibility
+    # toggle, badge and overflow switch.
+    DeployBoard.objects.get_or_create(
+        entity_name="project",
+        entity_identifier=project.id,
+        defaults={"workspace_id": workspace.id, "created_by_id": user.id},
+    )
+    # Intake triage needs the intake view switched on (CMT-018).
+    if not project.intake_view:
+        project.intake_view = True
+        project.save(update_fields=["intake_view"])
+
+    # Git-synced comment (CMT-005): a comment bound to a repository through
+    # the sync chain, so deletes refuse with 409 until the repo is unbound.
+    # By name: sequence counters keep growing across reseeds, so the
+    # seeded issues are not sequence 1..3 after the first reset cycle.
+    first_issue = Issue.objects.filter(project=project, name=ISSUE_NAMES[0]).first()
+    if first_issue is None:
+        return
+    comment, _ = IssueComment.objects.get_or_create(
+        issue=first_issue,
+        project=project,
+        workspace=workspace,
+        comment_html=f"<p>{SYNC_COMMENT_MARKER}</p>",
+        defaults={
+            "actor_id": user.id,
+            "created_by_id": user.id,
+            # is_synced is only true with an external source plus a sync row.
+            "external_source": "github",
+            "external_id": "parity-seed-comment-7",
+        },
+    )
+    if not comment.external_source:
+        comment.external_source = "github"
+        comment.external_id = "parity-seed-comment-7"
+        comment.save(update_fields=["external_source", "external_id"])
+    account, _ = GitProviderAccount.objects.get_or_create(
+        workspace=workspace,
+        provider="github",
+        host_url="https://github.com",
+        defaults={"auth_type": "pat", "created_by_id": user.id},
+    )
+    repository, _ = GitRepository.objects.get_or_create(
+        provider="github",
+        host_url="https://github.com",
+        namespace="parity",
+        name="parity-seed",
+        full_name="parity/parity-seed",
+        defaults={"created_by_id": user.id},
+    )
+    binding, _ = GitRepositoryBinding.objects.get_or_create(
+        repository=repository,
+        project=project,
+        defaults={
+            "workspace_id": workspace.id,
+            "provider_account": account,
+            "actor_id": user.id,
+            "created_by_id": user.id,
+        },
+    )
+    issue_sync, _ = GitIssueSync.objects.get_or_create(
+        binding=binding,
+        issue=first_issue,
+        defaults={
+            "workspace_id": workspace.id,
+            "project_id": project.id,
+            "provider": "github",
+            "external_iid": "7",
+            "created_by_id": user.id,
+        },
+    )
+    GitCommentSync.objects.get_or_create(
+        issue_sync=issue_sync,
+        comment=comment,
+        defaults={
+            "workspace_id": workspace.id,
+            "project_id": project.id,
+            "provider": "github",
+            "external_id": "parity-seed-comment-7",
+            "created_by_id": user.id,
+        },
+    )
+
+    # Intake triage (CMT-018): the intake screen renders inbox issues, so
+    # the project gets an intake and the first issue a pending triage row.
+    intake, _ = Intake.objects.get_or_create(
+        project=project,
+        name="Parity Intake",
+        defaults={"workspace_id": workspace.id, "created_by_id": user.id},
+    )
+    inbox_issue, _ = IntakeIssue.objects.get_or_create(
+        intake=intake,
+        issue=first_issue,
+        defaults={
+            "workspace_id": workspace.id,
+            "project_id": project.id,
+            "status": -2,
+            "created_by_id": user.id,
+        },
+    )
+    return str(inbox_issue.id)
 
 
 facts = build()
