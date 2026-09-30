@@ -144,7 +144,7 @@ def next_queued_run_for_pod(pod: Pod) -> Optional[AgentRun]:
     )
 
 
-def next_for_runner(runner: Runner) -> Optional[AgentRun]:
+def next_for_runner(runner: Runner, *, releasable_run_ids: Optional[list] = None) -> Optional[AgentRun]:
     """Return the next QUEUED run this runner should take.
 
     Personal queue first (runs pinned to this runner), then the pod
@@ -152,8 +152,20 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
     inside each queue. Returns the run row locked
     ``FOR UPDATE SKIP LOCKED`` so concurrent drains don't double-assign.
 
+    ``releasable_run_ids`` — from :func:`releasable_overbudget_pin_ids` —
+    widens the second tier with runs pinned to *another* runner whose pin has
+    outlived the pod's wait budget. They join the pod queue rather than
+    trailing behind it: a run that has already waited out its budget competes
+    on ``created_at`` with the unpinned work, instead of losing the last idle
+    slot to every newer unpinned run the ticker produces (PDASHOSS01-272). The
+    caller releases the pin when such a run is what wins — see
+    :func:`next_assignable_for_runner`.
+
     Must be called inside a ``transaction.atomic()`` block.
     """
+    pin_scope = Q(pinned_runner=runner) | Q(pinned_runner__isnull=True)
+    if releasable_run_ids:
+        pin_scope |= Q(id__in=releasable_run_ids)
     qs = (
         AgentRun.objects.select_for_update(skip_locked=True)
         .filter(
@@ -163,9 +175,7 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
             # managed run is a local run whose install Pi Dash owns.
             executor_kind__in=MACHINE_EXECUTORS,
         )
-        .filter(
-            Q(pinned_runner=runner) | Q(pinned_runner__isnull=True),
-        )
+        .filter(pin_scope)
     )
     qs = filter_runs_usable_by_runner(qs, runner)
     from pi_dash.runner.models import RunnerProvisioning
@@ -176,9 +186,12 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
         qs = qs.filter(executor_kind=AgentExecutorKind.LOCAL_RUNNER)
     return (
         qs
-        # Pinned-to-me sorts before unpinned via an integer rank: 0 for the
-        # personal queue, 1 for the pod queue. ``order_by`` on the rank then
-        # ``created_at`` gives FIFO inside each tier.
+        # Pinned-to-me sorts before everything else via an integer rank: 0
+        # for the personal queue, 1 for the pod queue *and* any over-budget
+        # releasable pin. ``order_by`` on the rank then ``created_at`` gives
+        # FIFO inside each tier — so a released pin and an unpinned run are
+        # ordered purely by age, which is what keeps the released pin from
+        # starving.
         .annotate(
             _is_mine=models.Case(
                 models.When(pinned_runner=runner, then=models.Value(0)),
@@ -191,8 +204,35 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
     )
 
 
-def claim_overbudget_pinned_run(runner: Runner, pod: Optional[Pod] = None) -> Optional[AgentRun]:
-    """Take over a QUEUED run whose pin has outlived the pod's wait budget.
+def clear_run_pin(run: AgentRun) -> Optional[object]:
+    """Drop ``run``'s pin and the parent's stale resume handle.
+
+    The single definition of "release the pin", shared by the operator escape
+    hatches (:class:`~pi_dash.runner.views.runs.AgentRunReleasePinEndpoint` in
+    the web app and
+    :class:`~pi_dash.api.views.issue.AgentRunReleasePinAPIEndpoint` for the
+    CLI) and by the automatic over-budget release in
+    :func:`next_assignable_for_runner`, so the three paths cannot drift apart.
+
+    Returns the runner id the run had been pinned to, or ``None`` when it was
+    not pinned. The caller owns the transaction and the row lock.
+    """
+    pinned_runner_id = run.pinned_runner_id
+    if pinned_runner_id is None:
+        return None
+    run.pinned_runner = None
+    # Clear the parent's stale thread_id too, so the upcoming Assign carries
+    # no resume hint the new runner cannot honour. The handoff comment carries
+    # the human-readable state.
+    if run.parent_run is not None and run.parent_run.thread_id:
+        run.parent_run.thread_id = ""
+        run.parent_run.save(update_fields=["thread_id"])
+    run.save(update_fields=["pinned_runner"])
+    return pinned_runner_id
+
+
+def releasable_overbudget_pin_ids(runner: Runner, pod: Optional[Pod] = None) -> list:
+    """Ids of QUEUED runs in the pod whose pin ``runner`` may take over.
 
     A follow-up run is pinned to the runner that served the issue's previous
     run, so the same machine keeps the work. :func:`next_for_runner` honours
@@ -202,48 +242,46 @@ def claim_overbudget_pinned_run(runner: Runner, pod: Optional[Pod] = None) -> Op
     (PDASHOSS01-272 — 13 runs waited 30 min to 9.5 h on prod with 6 idle
     runners standing by).
 
-    This is the bounded version of the ``release-pin`` operator escape hatch
-    (:class:`~pi_dash.runner.views.runs.AgentRunReleasePinEndpoint`): once the
-    run has waited longer than the pod's pin wait budget *and* an eligible
-    runner is idle, the pin is cleared and the run goes to that runner. It
-    trades session continuity for throughput, which is cheap here — agents
-    re-read the issue, its comments and the workpad at the start of every run.
+    This is the bounded version of the ``release-pin`` operator escape hatch:
+    once a run has waited longer than the pod's pin wait budget *and* an
+    eligible runner is idle, the pin is cleared and the run goes to that
+    runner. It trades session continuity for throughput, which is cheap here —
+    agents re-read the issue, its comments and the workpad at the start of
+    every run.
 
-    Called as the fallback in :func:`drain_pod` / :func:`drain_for_runner`
-    when ``next_for_runner`` finds nothing, so the release only ever happens
-    with a specific idle runner ready to take the work: no idle runner means
-    no release, and the pin keeps waiting.
+    Returning *candidates* rather than a run is what makes the release
+    opportunity-driven rather than a timer: the ids are fed to
+    :func:`next_for_runner`, which only picks one when this specific idle
+    runner has nothing better to do. No idle runner means no release, and the
+    pin keeps waiting.
 
     The wait is measured from ``created_at``. Every path that re-queues a run
     also drops its pin (``apply_run_resume_unavailable``,
     ``apply_assign_rejected_busy``), so a QUEUED *pinned* run has been pinned
     since it was created.
 
-    Must be called inside a ``transaction.atomic()`` block — the run row comes
-    back locked ``FOR UPDATE SKIP LOCKED``. Returns the run with its pin
-    already cleared, or ``None``.
+    The rows come back **unlocked**. This query joins to ``pinned_runner`` (a
+    nullable FK, so Postgres plans a LEFT JOIN) and Postgres refuses
+    ``SELECT … FOR UPDATE`` over the nullable side of an outer join; the lock
+    is taken in :func:`next_for_runner`, where every predicate is either a
+    local column or this id list. Do not fold the two back together.
     """
     from pi_dash.runner.models import RunnerProvisioning
 
     if runner.pod_id is None:
-        return None
+        return []
     # A desktop-bundled runner serves only work pinned to it; handing it
     # released pod work would make one person's laptop the team's build
     # server (same rule as select_runner_in_pod / next_for_runner).
     if runner.provisioning == RunnerProvisioning.DESKTOP_BUNDLED:
-        return None
+        return []
 
     budget_secs = (pod or runner.pod).effective_pin_wait_budget_secs()
     if budget_secs <= 0:
-        return None
+        return []
 
     now = timezone.now()
     alive_threshold = now - HEARTBEAT_GRACE
-    # Two phases on purpose. The candidate query joins to ``pinned_runner``
-    # (a nullable FK, so Postgres plans a LEFT JOIN) and Postgres refuses
-    # ``SELECT … FOR UPDATE`` over the nullable side of an outer join — so the
-    # candidates are gathered unlocked, then re-selected by primary key, where
-    # every remaining predicate is a local column and the row lock is legal.
     candidates = (
         AgentRun.objects.filter(
             pod_id=runner.pod_id,
@@ -274,40 +312,43 @@ def claim_overbudget_pinned_run(runner: Runner, pod: Optional[Pod] = None) -> Op
         )
     )
     candidates = filter_runs_usable_by_runner(candidates, runner)
-    candidate_ids = list(candidates.order_by("created_at").values_list("id", flat=True))
-    if not candidate_ids:
-        return None
+    return list(candidates.order_by("created_at").values_list("id", flat=True))
 
-    run = (
-        AgentRun.objects.select_for_update(skip_locked=True)
-        .filter(
-            id__in=candidate_ids,
-            status=AgentRunStatus.QUEUED,
-            pinned_runner__isnull=False,
-        )
-        .order_by("created_at")
-        .first()
-    )
+
+def next_assignable_for_runner(runner: Runner, pod: Optional[Pod] = None) -> Optional[AgentRun]:
+    """The next run ``runner`` should take, breaking an over-budget pin if
+    that is the run that wins.
+
+    One selection, not a primary plus a fallback: the runner's own pinned work
+    still comes first, and everything else — the unpinned pod queue and any
+    pin that has outlived the pod's budget — competes on ``created_at``. An
+    earlier shape ran the release strictly *after* :func:`next_for_runner`,
+    which made a released pin the lowest-priority work in the pod and let any
+    newer unpinned run take the last idle slot ahead of it, indefinitely.
+
+    Must be called inside a ``transaction.atomic()`` block; the returned run
+    is locked ``FOR UPDATE SKIP LOCKED`` with its pin already cleared.
+    """
+    releasable = releasable_overbudget_pin_ids(runner, pod)
+    run = next_for_runner(runner, releasable_run_ids=releasable)
     if run is None:
         return None
-
-    pinned_runner_id = run.pinned_runner_id
-    run.pinned_runner = None
-    # Mirror the release-pin endpoint: drop the parent's stale thread_id so
-    # the Assign carries no resume hint the new runner cannot honour.
-    if run.parent_run is not None and run.parent_run.thread_id:
-        run.parent_run.thread_id = ""
-        run.parent_run.save(update_fields=["thread_id"])
-    run.save(update_fields=["pinned_runner"])
-    logger.info(
-        "claim_overbudget_pinned_run: released pin run=%s from runner=%s to runner=%s "
-        "after %ss budget (waited %ss)",
-        run.id,
-        pinned_runner_id,
-        runner.id,
-        budget_secs,
-        int((now - run.created_at).total_seconds()),
-    )
+    # Pinned to somebody else => it can only have come from ``releasable``,
+    # so this is the over-budget takeover. Pinned to *this* runner is the
+    # personal queue and keeps its pin.
+    if run.pinned_runner_id is not None and run.pinned_runner_id != runner.id:
+        waited_secs = int((timezone.now() - run.created_at).total_seconds())
+        budget_secs = (pod or runner.pod).effective_pin_wait_budget_secs()
+        previous_runner_id = clear_run_pin(run)
+        logger.info(
+            "next_assignable_for_runner: released pin run=%s from runner=%s to runner=%s "
+            "after %ss budget (waited %ss)",
+            run.id,
+            previous_runner_id,
+            runner.id,
+            budget_secs,
+            waited_secs,
+        )
     return run
 
 
@@ -342,14 +383,11 @@ def drain_pod(pod: Pod) -> int:
             .order_by("-last_heartbeat_at")
         )
         for runner in idle_runners:
-            run = next_for_runner(runner)
-            if run is None:
-                # Nothing for this runner in either queue — but a run pinned
-                # to a *busy* runner may have waited past the pod's pin wait
-                # budget. Releasing it here rather than on a timer means the
-                # pin is only ever broken when there is an idle runner to
-                # hand it to. See PDASHOSS01-272.
-                run = claim_overbudget_pinned_run(runner, pod)
+            # Personal queue, then the pod queue and any over-budget pin,
+            # by age. Releasing a pin here rather than on a timer means it is
+            # only ever broken when there is an idle runner to hand the run
+            # to. See PDASHOSS01-272.
+            run = next_assignable_for_runner(runner, pod)
             if run is None:
                 continue
             run.runner = runner
@@ -406,9 +444,7 @@ def drain_for_runner(runner: Runner) -> bool:
         )
         if locked is None:
             return False
-        run = next_for_runner(locked)
-        if run is None:
-            run = claim_overbudget_pinned_run(locked)
+        run = next_assignable_for_runner(locked)
         if run is None:
             return False
         run.runner = locked

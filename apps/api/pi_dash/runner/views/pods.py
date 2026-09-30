@@ -191,9 +191,19 @@ class PodDetailEndpoint(APIView):
                 # default ``RUNNER_PIN_WAIT_BUDGET_SECS``.
                 pod.pin_wait_budget_secs = None
             else:
+                # ``bool`` is an ``int`` in Python, so a bare ``int(raw)``
+                # would read ``true`` as a one-second budget; and a float
+                # would silently truncate (``12.9`` -> 12) while the string
+                # ``"12.9"`` is a 400, which is an incoherent contract.
+                # Accept only an int, or a string spelling one.
+                if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+                    return Response(
+                        {"error": "pin_wait_budget_secs must be an integer number of seconds"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
                 try:
-                    budget = int(raw)
-                except (TypeError, ValueError):
+                    budget = int(str(raw).strip())
+                except ValueError:
                     return Response(
                         {"error": "pin_wait_budget_secs must be an integer number of seconds"},
                         status=status.HTTP_400_BAD_REQUEST,

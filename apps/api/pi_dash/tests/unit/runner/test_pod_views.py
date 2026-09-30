@@ -276,7 +276,23 @@ def test_admin_can_set_and_clear_pin_wait_budget(db, session_client, project):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("bad", [-1, "soon"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        -1,
+        "soon",
+        # ``bool`` is an ``int`` in Python, so a bare ``int(raw)`` would read
+        # this as a one-second budget.
+        True,
+        False,
+        # A float must not silently truncate to 12 while the string "12.9"
+        # is rejected — the contract has to be the same either way.
+        12.9,
+        "12.9",
+        [600],
+        {"secs": 600},
+    ],
+)
 def test_pin_wait_budget_rejects_bad_values(db, session_client, project, bad):
     pod = Pod.default_for_project(project)
     resp = session_client.patch(
