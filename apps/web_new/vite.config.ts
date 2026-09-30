@@ -11,6 +11,9 @@ import { defineConfig } from "vite";
 
 const target = process.env.PIDASH_TARGET === "desktop" ? "desktop" : "web";
 const here = dirname(fileURLToPath(import.meta.url));
+// Local Django for `pnpm dev`. Overridden per shell with e.g.
+// `export PIDASH_API_ORIGIN="http://127.0.0.1:8123"` on its own line.
+const apiOrigin = process.env.PIDASH_API_ORIGIN ?? "http://localhost:8000";
 
 // Static SPA only (D9). One bundle per target; the desktop bundle is loaded
 // by the Tauri shell. No file swapping: platform differences live behind
@@ -23,19 +26,26 @@ export default defineConfig(({ mode }) => {
     },
     outDir: `dist/${buildTarget}`,
     resolve: {
-      alias: {
+      alias: [
         // Resolve the workspace client to source so dev/test/typecheck
         // never depend on a prior package build; CI builds it anyway.
-        "@pidash/api-client": resolve(here, "../../packages/api-client/src/index.ts"),
+        { find: "@pidash/api-client", replacement: resolve(here, "../../packages/api-client/src/index.ts") },
+        // Same for the design system now that screens render kit components.
+        // Exact match only: the kit CSS entries must keep resolving to the
+        // built package (see styles/app.css).
+        { find: /^@pidash\/kit$/, replacement: resolve(here, "../../packages/kit/src/index.ts") },
         // Single edition swap point: the cloud build replaces this target.
-        "@pidash/edition": resolve(here, "src/core/edition/oss.ts"),
+        { find: "@pidash/edition", replacement: resolve(here, "src/core/edition/oss.ts") },
         // Build-time platform selection: only one implementation is ever
         // bundled, so the web bundle cannot contain desktop code.
-        "@pidash/platform-target":
-          buildTarget === "desktop"
-            ? resolve(here, "src/core/platform/tauri.ts")
-            : resolve(here, "src/core/platform/web.ts"),
-      },
+        {
+          find: "@pidash/platform-target",
+          replacement:
+            buildTarget === "desktop"
+              ? resolve(here, "src/core/platform/tauri.ts")
+              : resolve(here, "src/core/platform/web.ts"),
+        },
+      ],
     },
     plugins: [
       TanStackRouterVite({ target: "react", autoCodeSplitting: true }),
@@ -49,6 +59,12 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 3010,
       strictPort: true,
+      proxy: {
+        // Keep the browser Host: Django compares it against Origin for
+        // native form views, and the session cookie stays host-only.
+        "/auth": { target: apiOrigin, changeOrigin: false },
+        "/api": { target: apiOrigin, changeOrigin: false },
+      },
     },
     build: {
       outDir: `dist/${buildTarget}`,

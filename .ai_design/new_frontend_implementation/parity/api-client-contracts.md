@@ -8,18 +8,21 @@ contract suites (`src/contract/*.contract.test.ts`) skip unless
 
 ## Contracts and suites
 
-| Contract     | Function                 | Suite                                                                                                                                        |
-| ------------ | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| CSRF token   | `getCsrfToken`           | `auth.contract.test.ts` — token parses and is non-empty                                                                                      |
-| Sign-in      | `signIn`                 | `auth.contract.test.ts` — wrong password returns `ok:false` with a code; seeded credentials return `ok:true` and the session reads back `me` |
-| Current user | `getMe`, `getMeSettings` | `users.contract.test.ts` — email matches the seeded user; settings point at the seeded workspace                                             |
-| Workspaces   | `listWorkspaces`         | `users.contract.test.ts` — seeded slug present with role and member count                                                                    |
-| Projects     | `listProjects`           | `projects.contract.test.ts` — seeded identifier present                                                                                      |
-| States       | `listStates`             | `projects.contract.test.ts` — non-empty, one default                                                                                         |
-| Labels       | `listLabels`             | `projects.contract.test.ts` — `contract-bug` present                                                                                         |
-| Members      | `listMembers`            | `projects.contract.test.ts` — admin membership present                                                                                       |
-| Issue list   | `listIssues`             | `issues.contract.test.ts` — ungrouped envelope, seeded rows parse                                                                            |
-| Issue detail | `getIssue`               | `issues.contract.test.ts` — list-then-read round trip                                                                                        |
+| Contract     | Function                                   | Suite                                                                                                                                                                         |
+| ------------ | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CSRF token   | `getCsrfToken`                             | `auth.contract.test.ts` — token parses and is non-empty                                                                                                                       |
+| Sign-in      | `signIn`                                   | `auth.contract.test.ts` — wrong password returns `ok:false` with a code; seeded credentials return `ok:true` and the session reads back `me`                                  |
+| Email check  | `checkEmail`                               | `auth.contract.test.ts` — seeded address reports `existing:true` with its login mode; unknown reports `existing:false`                                                        |
+| Magic code   | `generateMagicCode`, `signInWithMagicCode` | unit stubs (`contracts.test.ts`) prove the JSON shape and the shared redirect convention; live positive flow needs SMTP + redis, covered by the sign-in card in the E2E smoke |
+| Sign-out     | `signOut`                                  | `auth.contract.test.ts` — sign in, sign out, the session no longer reads back `me`                                                                                            |
+| Current user | `getMe`, `getMeSettings`                   | `users.contract.test.ts` — email matches the seeded user; settings point at the seeded workspace                                                                              |
+| Workspaces   | `listWorkspaces`                           | `users.contract.test.ts` — seeded slug present with role and member count                                                                                                     |
+| Projects     | `listProjects`                             | `projects.contract.test.ts` — seeded identifier present                                                                                                                       |
+| States       | `listStates`                               | `projects.contract.test.ts` — non-empty, one default                                                                                                                          |
+| Labels       | `listLabels`                               | `projects.contract.test.ts` — `contract-bug` present                                                                                                                          |
+| Members      | `listMembers`                              | `projects.contract.test.ts` — admin membership present                                                                                                                        |
+| Issue list   | `listIssues`                               | `issues.contract.test.ts` — ungrouped envelope, seeded rows parse                                                                                                             |
+| Issue detail | `getIssue`                                 | `issues.contract.test.ts` — list-then-read round trip                                                                                                                         |
 
 ## From a clean checkout
 

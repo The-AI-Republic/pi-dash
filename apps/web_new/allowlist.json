@@ -5,8 +5,10 @@
     "@pidash/kit",
     "@tanstack/react-query",
     "@tanstack/react-router",
+    "lucide-react",
     "react",
     "react-dom",
+    "zod",
     "zustand"
   ],
   "@pidash/kit": ["@base-ui-components/react", "@tanstack/react-virtual", "lucide-react"],

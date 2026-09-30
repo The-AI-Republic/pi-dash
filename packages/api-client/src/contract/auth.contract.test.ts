@@ -5,7 +5,7 @@
 // Contract: CSRF + sign-in against live Django. Skipped without
 // PIDASH_CONTRACT_BASE_URL (see the runbook).
 import { describe, expect, it } from "vitest";
-import { getCsrfToken, signIn } from "../contracts/auth.js";
+import { checkEmail, generateMagicCode, getCsrfToken, signIn, signOut } from "../contracts/auth.js";
 import { getMe } from "../contracts/users.js";
 import { CONTRACT_EMAIL, CONTRACT_PASSWORD, contractClient, contractEnabled } from "./setup.js";
 
@@ -27,5 +27,30 @@ describe.skipIf(!contractEnabled)("auth contract", () => {
     expect(result).toEqual({ ok: true, location: expect.any(String) });
     const me = await getMe(client);
     expect(me.email).toBe(CONTRACT_EMAIL);
+  });
+
+  it("checks the seeded email and reports its login mode", async () => {
+    const parsed = await checkEmail(contractClient(), CONTRACT_EMAIL);
+    expect(parsed.existing).toBe(true);
+    expect(["MAGIC_CODE", "CREDENTIAL"]).toContain(parsed.status);
+  });
+
+  it("checks an unknown email without leaking existence", async () => {
+    const parsed = await checkEmail(contractClient(), "nobody-knows-this@example.com");
+    expect(parsed.existing).toBe(false);
+  });
+
+  it("rejects a malformed email for code generation", async () => {
+    const error = await generateMagicCode(contractClient(), "not-an-email").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+  });
+
+  it("signs out and the session no longer reads back me", async () => {
+    const client = contractClient();
+    const signedIn = await signIn(client, { email: CONTRACT_EMAIL, password: CONTRACT_PASSWORD });
+    expect(signedIn.ok).toBe(true);
+    await signOut(client);
+    const me = await getMe(client).catch((e: unknown) => e);
+    expect(me).toBeInstanceOf(Error);
   });
 });

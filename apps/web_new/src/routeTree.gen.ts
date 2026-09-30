@@ -10,33 +10,70 @@
 
 import { Route as rootRouteImport } from "./routes/__root";
 import { Route as IndexRouteImport } from "./routes/index";
+import { Route as WsRouteRouteImport } from "./routes/$ws/route";
+import { Route as SignInRouteImport } from "./routes/sign-in";
+import { Route as WsIndexRouteImport } from "./routes/$ws/index";
+import { Route as WsProjectsProjectIdIssuesIndexRouteImport } from "./routes/$ws/projects/$projectId/issues/index";
 
 const IndexRoute = IndexRouteImport.update({
   id: "/",
   path: "/",
   getParentRoute: () => rootRouteImport,
 } as any);
+const WsRouteRoute = WsRouteRouteImport.update({
+  id: "/$ws",
+  path: "/$ws",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const SignInRoute = SignInRouteImport.update({
+  id: "/sign-in",
+  path: "/sign-in",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const WsIndexRoute = WsIndexRouteImport.update({
+  id: "/",
+  path: "/",
+  getParentRoute: () => WsRouteRoute,
+} as any);
+const WsProjectsProjectIdIssuesIndexRoute = WsProjectsProjectIdIssuesIndexRouteImport.update({
+  id: "/projects/$projectId/issues/",
+  path: "/projects/$projectId/issues/",
+  getParentRoute: () => WsRouteRoute,
+} as any);
 
 export interface FileRoutesByFullPath {
   "/": typeof IndexRoute;
+  "/$ws": typeof WsRouteRouteWithChildren;
+  "/sign-in": typeof SignInRoute;
+  "/$ws/": typeof WsIndexRoute;
+  "/$ws/projects/$projectId/issues/": typeof WsProjectsProjectIdIssuesIndexRoute;
 }
 export interface FileRoutesByTo {
   "/": typeof IndexRoute;
+  "/sign-in": typeof SignInRoute;
+  "/$ws": typeof WsIndexRoute;
+  "/$ws/projects/$projectId/issues": typeof WsProjectsProjectIdIssuesIndexRoute;
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   "/": typeof IndexRoute;
+  "/$ws": typeof WsRouteRouteWithChildren;
+  "/sign-in": typeof SignInRoute;
+  "/$ws/": typeof WsIndexRoute;
+  "/$ws/projects/$projectId/issues/": typeof WsProjectsProjectIdIssuesIndexRoute;
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath;
-  fullPaths: "/";
+  fullPaths: "/" | "/$ws" | "/sign-in" | "/$ws/" | "/$ws/projects/$projectId/issues/";
   fileRoutesByTo: FileRoutesByTo;
-  to: "/";
-  id: "__root__" | "/";
+  to: "/" | "/sign-in" | "/$ws" | "/$ws/projects/$projectId/issues";
+  id: "__root__" | "/" | "/$ws" | "/sign-in" | "/$ws/" | "/$ws/projects/$projectId/issues/";
   fileRoutesById: FileRoutesById;
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute;
+  WsRouteRoute: typeof WsRouteRouteWithChildren;
+  SignInRoute: typeof SignInRoute;
 }
 
 declare module "@tanstack/react-router" {
@@ -48,10 +85,52 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof IndexRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/$ws": {
+      id: "/$ws";
+      path: "/$ws";
+      fullPath: "/$ws";
+      preLoaderRoute: typeof WsRouteRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/sign-in": {
+      id: "/sign-in";
+      path: "/sign-in";
+      fullPath: "/sign-in";
+      preLoaderRoute: typeof SignInRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/$ws/": {
+      id: "/$ws/";
+      path: "/";
+      fullPath: "/$ws/";
+      preLoaderRoute: typeof WsIndexRouteImport;
+      parentRoute: typeof WsRouteRoute;
+    };
+    "/$ws/projects/$projectId/issues/": {
+      id: "/$ws/projects/$projectId/issues/";
+      path: "/projects/$projectId/issues";
+      fullPath: "/$ws/projects/$projectId/issues/";
+      preLoaderRoute: typeof WsProjectsProjectIdIssuesIndexRouteImport;
+      parentRoute: typeof WsRouteRoute;
+    };
   }
 }
 
+interface WsRouteRouteChildren {
+  WsIndexRoute: typeof WsIndexRoute;
+  WsProjectsProjectIdIssuesIndexRoute: typeof WsProjectsProjectIdIssuesIndexRoute;
+}
+
+const WsRouteRouteChildren: WsRouteRouteChildren = {
+  WsIndexRoute: WsIndexRoute,
+  WsProjectsProjectIdIssuesIndexRoute: WsProjectsProjectIdIssuesIndexRoute,
+};
+
+const WsRouteRouteWithChildren = WsRouteRoute._addFileChildren(WsRouteRouteChildren);
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  WsRouteRoute: WsRouteRouteWithChildren,
+  SignInRoute: SignInRoute,
 };
 export const routeTree = rootRouteImport._addFileChildren(rootRouteChildren)._addFileTypes<FileRouteTypes>();
