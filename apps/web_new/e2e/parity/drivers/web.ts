@@ -11,11 +11,6 @@
 import type { Locator, Page } from "@playwright/test";
 import type { ParityDriver, ParityTarget } from "./parity-driver";
 
-/** Stable hooks the oracle driver relies on in apps/web. */
-export const WEB_TEST_IDS = {
-  issueName: "parity-issue-name",
-} as const;
-
 export class WebDriver implements ParityDriver {
   readonly target: ParityTarget = "web";
   readonly page: Page;
@@ -49,10 +44,20 @@ export class WebDriver implements ParityDriver {
 
   async openProjectIssues(workspaceSlug: string, projectId: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues`);
-    await this.page.getByTestId(WEB_TEST_IDS.issueName).first().waitFor({ timeout: 120_000 });
+    await this.page.waitForLoadState("domcontentloaded");
   }
 
+  /**
+   * User-visible read of the issues list. Observed on the running old app:
+   * each issue row renders its title as paragraph text inside a main
+   * landmark, and every seeded title is unique on the page — so no
+   * app-side hook is needed. Returns every non-empty paragraph text found
+   * (this includes surrounding chrome such as nav labels); callers match
+   * the names they care about out of it. Scenarios poll this until the
+   * list populates instead of waiting on a fixed selector.
+   */
   async visibleIssueNames(): Promise<string[]> {
-    return this.page.getByTestId(WEB_TEST_IDS.issueName).allTextContents();
+    const texts = await this.page.getByRole("main").locator("p").allTextContents();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
   }
 }

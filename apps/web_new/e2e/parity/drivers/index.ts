@@ -10,7 +10,6 @@ import { WebDriver } from "./web";
 import { WebNewDriver } from "./web-new";
 
 export type { ParityDriver, ParityTarget } from "./parity-driver";
-export { WEB_TEST_IDS } from "./web";
 
 export function parityTargetFromEnv(): ParityTarget {
   const raw = (process.env["PARITY_TARGET"] ?? "web").trim();

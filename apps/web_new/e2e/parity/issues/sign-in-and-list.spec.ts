@@ -22,16 +22,21 @@ test(specTitle(ROWS, "sign in and list a project's issues"), { tag: specTags(ROW
     await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
   });
 
-  const visible = await driver.visibleIssueNames();
-
+  // The list populates asynchronously after navigation; poll the
+  // user-visible read until every seeded title shows up.
   await test.step("every seeded issue is listed", async () => {
-    for (const name of seed.issueNames) expect(visible).toContain(name);
+    await expect
+      .poll(() => driver.visibleIssueNames(), { timeout: 60_000 })
+      .toEqual(expect.arrayContaining([...seed.issueNames]));
   });
 
   await test.step("the server agrees with the screen", async () => {
     const session = await signInSession(seed.email, seed.password);
     const server = await serverIssueNames(seed.workspaceSlug, seed.projectId, session);
     expect(new Set(server)).toEqual(new Set(seed.issueNames));
-    expect(new Set(visible)).toEqual(new Set(server));
+    // The read also contains surrounding chrome text, so this is a subset
+    // check: every issue the server reports for the project is on screen.
+    const visible = await driver.visibleIssueNames();
+    for (const name of server) expect(visible).toContain(name);
   });
 });

@@ -56,9 +56,14 @@ New areas need new actions: add the method to `parity-driver.ts`, implement
 it in `drivers/web.ts`, and add a throwing stub in `drivers/web-new.ts`
 until the area lands. Extend, never fork: one interface, two drivers.
 
-If the old app has no stable selector for something a scenario needs, add
-a `data-testid` attribute in `apps/web` — that is the only change allowed
-there (`parity-issue-name` on the list-row title is the first).
+Prefer user-visible selectors (`getByRole`, `getByText`, `getByPlaceholder`):
+the example scenario reads issue titles as paragraph text in `main`
+landmarks with no app-side hook at all. If the old app genuinely has no
+stable selector for something a scenario needs, a `data-testid` attribute
+in `apps/web` is the only change allowed there — but note the CI paths
+gate only passes `apps/web` diffs whose every changed line carries
+`data-testid`, which a first-time attribute addition cannot satisfy, so
+treat hooks as a last resort needing a human-granted path exception.
 
 ## Old bugs
 
