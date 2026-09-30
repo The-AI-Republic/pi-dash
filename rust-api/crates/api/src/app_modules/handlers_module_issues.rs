@@ -421,9 +421,14 @@ fn wire_row_fields(group_by: Option<&str>, sub_group_by: Option<&str>) -> Vec<St
         }
     }
     fields.extend(
-        ["cycle_id", "link_count", "attachment_count", "sub_issues_count"]
-            .into_iter()
-            .map(str::to_owned),
+        [
+            "cycle_id",
+            "link_count",
+            "attachment_count",
+            "sub_issues_count",
+        ]
+        .into_iter()
+        .map(str::to_owned),
     );
     let swapped: Vec<&str> = [group_by, sub_group_by]
         .into_iter()
@@ -578,9 +583,7 @@ fn group_member_selects(group_by: Option<&str>, sub_group_by: Option<&str>) -> S
         out.push_str(match group {
             "labels__id" => ", label_issue.label_id AS \"labels__id\"",
             "assignees__id" => ", issue_assignee.assignee_id AS \"assignees__id\"",
-            "issue_module__module_id" => {
-                ", issue_module.module_id AS \"issue_module__module_id\""
-            }
+            "issue_module__module_id" => ", issue_module.module_id AS \"issue_module__module_id\"",
             _ => "",
         });
     }
@@ -931,7 +934,11 @@ async fn module_sub_total_pairs(
     for row in rows {
         let bucket: String = row.try_get("bucket").map_err(|_| Denial::ServerError)?;
         let sub: String = row.try_get("sub").map_err(|_| Denial::ServerError)?;
-        out.push((bucket, sub, row.try_get("n").map_err(|_| Denial::ServerError)?));
+        out.push((
+            bucket,
+            sub,
+            row.try_get("n").map_err(|_| Denial::ServerError)?,
+        ));
     }
     Ok(out)
 }
@@ -1149,7 +1156,9 @@ async fn module_grouped_response(
     let page_issue_count = page
         .iter()
         .filter(|row| {
-            row.get("id").map(|id| seen_issues.insert(id.to_string())).unwrap_or(false)
+            row.get("id")
+                .map(|id| seen_issues.insert(id.to_string()))
+                .unwrap_or(false)
         })
         .count();
     Ok(json_response(
@@ -1201,8 +1210,7 @@ fn py_str_item(item: &Value) -> String {
         Value::Bool(false) => "False".to_owned(),
         Value::Null => "None".to_owned(),
         Value::Number(number) => number.to_string(),
-        Value::Array(_) | Value::Object(_) => serde_json::to_string(item)
-            .expect("item renders"),
+        Value::Array(_) | Value::Object(_) => serde_json::to_string(item).expect("item renders"),
     }
 }
 
@@ -1263,14 +1271,8 @@ fn activity_created_kwargs(
         "requested_data".to_owned(),
         Value::String(serde_json::json!({"module_id": module_wire}).to_string()),
     );
-    kwargs.insert(
-        "actor_id".to_owned(),
-        Value::String(actor_id.to_string()),
-    );
-    kwargs.insert(
-        "issue_id".to_owned(),
-        Value::String(issue_id.to_string()),
-    );
+    kwargs.insert("actor_id".to_owned(), Value::String(actor_id.to_string()));
+    kwargs.insert("issue_id".to_owned(), Value::String(issue_id.to_string()));
     kwargs.insert(
         "project_id".to_owned(),
         Value::String(project_id.to_string()),
@@ -1502,10 +1504,7 @@ async fn create_issue_modules(
         if !is_falsy_json(modules_value) {
             let raws: Vec<Value> = match modules_value {
                 Value::Array(items) => items.clone(),
-                Value::String(text) => text
-                    .chars()
-                    .map(|c| Value::String(c.to_string()))
-                    .collect(),
+                Value::String(text) => text.chars().map(|c| Value::String(c.to_string())).collect(),
                 Value::Object(fields) => fields
                     .keys()
                     .map(|key| Value::String(key.clone()))
@@ -1568,14 +1567,17 @@ async fn finish_issue_modules(
     // truthy numbers/bools/`null` are not iterable → `TypeError` → 500 —
     // note an explicit `null` member *inside* the list is fine, it just
     // matches no bridge).
-    let removed_value = body_map.get("removed_modules").cloned().unwrap_or(Value::Array(vec![]));
+    let removed_value = body_map
+        .get("removed_modules")
+        .cloned()
+        .unwrap_or(Value::Array(vec![]));
     let removed_items: Vec<Value> = match &removed_value {
         Value::Array(items) => items.clone(),
-        Value::String(text) => text
-            .chars()
-            .map(|c| Value::String(c.to_string()))
+        Value::String(text) => text.chars().map(|c| Value::String(c.to_string())).collect(),
+        Value::Object(fields) => fields
+            .keys()
+            .map(|key| Value::String(key.clone()))
             .collect(),
-        Value::Object(fields) => fields.keys().map(|key| Value::String(key.clone())).collect(),
         _ => return Err(Denial::ServerError),
     };
     for item in &removed_items {
@@ -1602,14 +1604,7 @@ async fn finish_issue_modules(
             }
             Prep::Null => {
                 detach_module_bridge(
-                    pool,
-                    slug,
-                    project_id,
-                    user_id,
-                    issue_id,
-                    &wire,
-                    None,
-                    origin,
+                    pool, slug, project_id, user_id, issue_id, &wire, None, origin,
                 )
                 .await?;
             }
@@ -1716,12 +1711,10 @@ async fn detach_module_bridge(
     origin: &str,
 ) -> Result<(), Denial> {
     let module_name = match module_id {
-        Some(id) => {
-            match bridge_module_name(pool, slug, project_id, &id, issue_id).await? {
-                Some(name) => name,
-                None => Value::Null,
-            }
-        }
+        Some(id) => match bridge_module_name(pool, slug, project_id, &id, issue_id).await? {
+            Some(name) => name,
+            None => Value::Null,
+        },
         None => Value::Null,
     };
     let mut kwargs = Map::new();
@@ -1733,14 +1726,8 @@ async fn detach_module_bridge(
         "requested_data".to_owned(),
         Value::String(serde_json::json!({"module_id": module_wire}).to_string()),
     );
-    kwargs.insert(
-        "actor_id".to_owned(),
-        Value::String(user_id.to_string()),
-    );
-    kwargs.insert(
-        "issue_id".to_owned(),
-        Value::String(issue_id.to_string()),
-    );
+    kwargs.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
+    kwargs.insert("issue_id".to_owned(), Value::String(issue_id.to_string()));
     kwargs.insert(
         "project_id".to_owned(),
         Value::String(project_id.to_string()),
@@ -1852,10 +1839,7 @@ mod tests {
             "workspaces/<slug>/projects/<project_id>/modules/<module_id>/issues/<issue_id>/",
         )
         .expect("destroy gate");
-        assert_eq!(
-            destroy.source,
-            "issue.py:317 (ModuleIssueViewSet.destroy)"
-        );
+        assert_eq!(destroy.source, "issue.py:317 (ModuleIssueViewSet.destroy)");
         for row in [list, create, reverse, destroy] {
             assert!(matches!(row.gate, gates::Gate::Project { .. }));
         }
@@ -1891,10 +1875,7 @@ mod tests {
         // Keep the `QueryMap` / `OneOrMany` imports live: the list handler
         // reads multi-value params through them.
         let mut query = empty_query();
-        query.insert(
-            "group_by".to_owned(),
-            OneOrMany::One("priority".to_owned()),
-        );
+        query.insert("group_by".to_owned(), OneOrMany::One("priority".to_owned()));
         assert_eq!(query_last(&query, "group_by").as_deref(), Some("priority"));
         assert_eq!(multi_map(&query)["group_by"], vec!["priority".to_owned()]);
     }
@@ -2006,7 +1987,11 @@ mod tests {
             ),
         ];
         for (raw, save, want) in cases {
-            assert_eq!(prep_outcome(prep_raw_item(&raw, save)), want, "input: {raw}");
+            assert_eq!(
+                prep_outcome(prep_raw_item(&raw, save)),
+                want,
+                "input: {raw}"
+            );
         }
         // Lookup path (removals): no ""→None rule — "" is 400 detail and
         // null coerces to a null lookup (201 with a null name).
@@ -2020,7 +2005,11 @@ mod tests {
             (serde_json::json!(5.5), false, "detail"),
         ];
         for (raw, save, want) in cases {
-            assert_eq!(prep_outcome(prep_raw_item(&raw, save)), want, "input: {raw}");
+            assert_eq!(
+                prep_outcome(prep_raw_item(&raw, save)),
+                want,
+                "input: {raw}"
+            );
         }
     }
 
@@ -2040,10 +2029,7 @@ mod tests {
             denial_for_prep(Prep::Payload),
             Denial::BadError(_)
         ));
-        assert!(matches!(
-            denial_for_prep(Prep::Detail),
-            Denial::BadError(_)
-        ));
+        assert!(matches!(denial_for_prep(Prep::Detail), Denial::BadError(_)));
     }
 
     #[test]
@@ -2059,10 +2045,25 @@ mod tests {
         // Pinned live: concrete columns, then the m2m keys, then the
         // scalar annotations, then the surviving arrays.
         let base = vec![
-            "id", "name", "state_id", "sort_order", "completed_at", "estimate_point",
-            "priority", "start_date", "target_date", "sequence_id", "project_id",
-            "parent_id", "created_at", "updated_at", "created_by", "updated_by",
-            "is_draft", "archived_at", "state__group",
+            "id",
+            "name",
+            "state_id",
+            "sort_order",
+            "completed_at",
+            "estimate_point",
+            "priority",
+            "start_date",
+            "target_date",
+            "sequence_id",
+            "project_id",
+            "parent_id",
+            "created_at",
+            "updated_at",
+            "created_by",
+            "updated_by",
+            "is_draft",
+            "archived_at",
+            "state__group",
         ];
         let flat = wire_row_fields(None, None);
         let mut want = base.clone();
@@ -2078,11 +2079,32 @@ mod tests {
         assert_eq!(flat, want);
         // m2m group: key at 19, swapped array re-added last by the kernel.
         let grouped = wire_row_fields(Some("labels__id"), None);
-        assert_eq!(&grouped[18..24], &["state__group", "labels__id", "cycle_id", "link_count", "attachment_count", "sub_issues_count"]);
+        assert_eq!(
+            &grouped[18..24],
+            &[
+                "state__group",
+                "labels__id",
+                "cycle_id",
+                "link_count",
+                "attachment_count",
+                "sub_issues_count"
+            ]
+        );
         assert_eq!(&grouped[24..], &["assignee_ids", "module_ids"]);
         // group + sub m2m: both keys, both arrays out.
         let sub = wire_row_fields(Some("labels__id"), Some("assignees__id"));
-        assert_eq!(&sub[18..25], &["state__group", "labels__id", "assignees__id", "cycle_id", "link_count", "attachment_count", "sub_issues_count"]);
+        assert_eq!(
+            &sub[18..25],
+            &[
+                "state__group",
+                "labels__id",
+                "assignees__id",
+                "cycle_id",
+                "link_count",
+                "attachment_count",
+                "sub_issues_count"
+            ]
+        );
         assert_eq!(&sub[25..], &["module_ids"]);
     }
 
