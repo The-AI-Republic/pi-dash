@@ -68,9 +68,11 @@ async fn stub_app() -> axum::Router {
         }))
         .into_response()
     }
-    async fn sign_in(req: Request) -> Response {
-        // Mirrors Django POST /auth/sign-in/: 302 to / with the session
-        // cookie set on the redirect itself (PIDASHCONV-226).
+    async fn redirect_probe(req: Request) -> Response {
+        // Synthetic upstream 302 to / with the session cookie set on the
+        // redirect itself (PIDASHCONV-226). Lives on a test-only path
+        // because Django's real POST /auth/sign-in/ is Rust-owned now
+        // (D-16 email handlers, PIDASHCONV-422) and no longer proxies.
         assert_eq!(req.method(), axum::http::Method::POST);
         let mut response = (
             StatusCode::FOUND,
@@ -110,7 +112,7 @@ async fn stub_app() -> axum::Router {
         .route("/robots.txt", any(robots))
         .route("/api/v1/things", any(echo))
         .route("/api/v1/relay", any(relay))
-        .route("/auth/sign-in/", any(sign_in))
+        .route("/proxy-redirect-probe/", any(redirect_probe))
         .fallback((StatusCode::NOT_FOUND, "stub 404"))
 }
 
@@ -339,12 +341,14 @@ async fn proxy_forwards_redirect_without_following() {
     // PIDASHCONV-226: the proxy must forward the upstream 302 as-is
     // (status, Location, Set-Cookie, body) instead of following it and
     // returning the redirect target's response with the cookies dropped.
+    // Probes a test-only path (PIDASHCONV-491): the real /auth/sign-in/
+    // is Rust-owned since D-16 and never reaches the proxy.
     let (stub_base, _stub) = spawn(stub_app().await).await;
     let edge = spawn_edge(&stub_base).await;
     let client = no_follow_client();
 
     let response = client
-        .post(format!("{}/auth/sign-in/", edge.base))
+        .post(format!("{}/proxy-redirect-probe/", edge.base))
         .send()
         .await
         .expect("post");
