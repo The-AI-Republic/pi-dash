@@ -161,6 +161,14 @@ impl Overlay {
 /// (`prompting`, PIDASHCONV-158): the four owned paths (section list,
 /// section detail PUT/DELETE, compiled, preview) with their owned
 /// methods; every other method on those paths proxies to Django.
+///
+/// The Assistant group serves the D-06 handlers-C surface
+/// (`assistant`, PIDASHCONV-257): transcribe POST, the desktop
+/// agent-profile GET / agent-token POST pair, and the MCP server
+/// list/create + detail PATCH/DELETE; sibling `ai-assistant/` paths
+/// have no Rust route and keep proxying to Django through the
+/// fallback. Sibling handler issues merge their routers in
+/// `assistant::routes`; merges keep both sides.
 fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
     match group {
         RouteGroup::Web => Router::new()
