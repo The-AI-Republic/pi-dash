@@ -4,7 +4,28 @@
 
 The old frontend is a **reference**: read it and run it to learn what the product does. It is never a **source**: nothing is imported from it, nothing is copied out of it.
 
-"Old frontend" means: `@pi-dash/*` packages (`ui`, `propel`, `editor`, `utils`, `constants`, `types`, `services`, `shared-state`, `hooks`, `i18n`, …), `apps/web/**`, `apps/web/ce/**`, `apps/admin/**`, `apps/space/**`, `desktop-overlay/**`, and the cloud `private-pi-dash/ee-overlay/apps/{web,admin}/**`.
+"Old frontend" means (with the exception of your own code, below): `@pi-dash/*` packages (`ui`, `propel`, `editor`, `utils`, `constants`, `types`, `services`, `shared-state`, `hooks`, `i18n`, …), `apps/web/**`, `apps/web/ce/**`, `apps/admin/**`, `apps/space/**`, `desktop-overlay/**`, and the cloud `private-pi-dash/ee-overlay/apps/{web,admin}/**`.
+
+## Exception: your own code (porting allowed)
+
+These paths were written by AI Republic after the Plane import (verified in git history: added after the initial commit of 2026-04-17, AI Republic commits only). The copying ban does **not** apply to them: you may port their logic into `apps/web_new` and adapt it. For these paths, read → spec → write is optional.
+
+- `apps/web/core/components/{runners,chat,assistant,schedulers}/**`, `apps/web/core/components/agent-runtime.tsx`, `apps/web/core/components/desktop-update-button.tsx`
+- routes under `apps/web/app/(all)/[workspaceSlug]/`: `runners/**`, `schedulers/**`, `prompts/**`, `assistant/**`, `ai-dev-machines/**`, `(projects)/projects/(detail)/[projectId]/{runners,schedulers}/**`, `(settings)/settings/projects/[projectId]/schedulers/**`
+- `apps/web/core/store/{scheduler,prompt-section}.store.ts`
+- `apps/web/core/services/{runner/**,agent-runtime.ts,desktop-session.ts}`
+- `packages/services/src/{runner,assistant,scheduler,prompt-section,auto-pm}/**`, `packages/services/src/{desktop-api-adapter,desktop-event-source}.ts`
+- `desktop-overlay/**`
+
+Still required for ported code:
+
+1. **No runtime imports** from these paths. Move the code into the new trees; the old apps will be deleted.
+2. **Adapt it to the new architecture:** kit instead of `@pi-dash/ui`/`propel`, TanStack Query and contracts instead of MobX stores and axios services, `core/platform` for Tauri calls.
+3. **Anything these files use from Plane code stays reference-only:** imports from `@pi-dash/*` packages, Plane stores, helpers and components. Rewrite those parts. The similarity check still compares your code against Plane's.
+4. **Parity is unchanged:** inventory rows, oracle scenarios and area gates apply as everywhere else.
+5. Ported files get the new license header.
+
+Everything not listed here, including every file present in the initial import (for example `core/components/automation` and parts of `ce/components/desktop`), is treated as Plane code. If you believe another path is AI Republic's own, leave a `process:` comment on NEWFRONT-1; do not treat it as own code until this list is updated.
 
 ## Not allowed
 

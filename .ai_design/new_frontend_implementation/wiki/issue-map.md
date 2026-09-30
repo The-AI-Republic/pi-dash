@@ -81,10 +81,10 @@ Generated when the project was set up (2026-09-29). Pi Dash is the source of tru
 | E-issues | NEWFRONT-71 | Epic: Issues: layouts, detail, peek, filters, bulk edit, relations, attachments | NEWFRONT-28, NEWFRONT-8, NEWFRONT-17, NEWFRONT-20, NEWFRONT-70 |
 | E-comments | NEWFRONT-72 | Epic: Comments, activity, mentions, reactions | NEWFRONT-30, NEWFRONT-8, NEWFRONT-17, NEWFRONT-20, NEWFRONT-71 |
 | E-drafts | NEWFRONT-73 | Epic: Drafts | NEWFRONT-32, NEWFRONT-8, NEWFRONT-17, NEWFRONT-20, NEWFRONT-71 |
-| E-runners | NEWFRONT-74 | Epic: Runners, runs, approvals, runner chat, AI dev machines | NEWFRONT-34, NEWFRONT-9, NEWFRONT-17, NEWFRONT-20, NEWFRONT-70 |
-| E-agents | NEWFRONT-75 | Epic: Schedulers, prompts, assistant | NEWFRONT-36, NEWFRONT-9, NEWFRONT-17, NEWFRONT-20, NEWFRONT-70 |
+| E-runners | NEWFRONT-74 | Epic: Runners, runs, approvals, runner chat, AI dev machines | NEWFRONT-34, NEWFRONT-9, NEWFRONT-17, NEWFRONT-20, NEWFRONT-70, NEWFRONT-102 |
+| E-agents | NEWFRONT-75 | Epic: Schedulers, prompts, assistant | NEWFRONT-36, NEWFRONT-9, NEWFRONT-17, NEWFRONT-20, NEWFRONT-70, NEWFRONT-102 |
 | E-notifications | NEWFRONT-76 | Epic: Notifications | NEWFRONT-38, NEWFRONT-9, NEWFRONT-17, NEWFRONT-20, NEWFRONT-70 |
-| E-desktop | NEWFRONT-77 | Epic: Desktop-only behavior: agent runtime, bare sign-in, updater, deep links, native shell | NEWFRONT-40, NEWFRONT-9, NEWFRONT-17, NEWFRONT-20, NEWFRONT-70, NEWFRONT-18 |
+| E-desktop | NEWFRONT-77 | Epic: Desktop-only behavior: agent runtime, bare sign-in, updater, deep links, native shell | NEWFRONT-40, NEWFRONT-9, NEWFRONT-17, NEWFRONT-20, NEWFRONT-70, NEWFRONT-18, NEWFRONT-102 |
 | E-views | NEWFRONT-78 | Epic: Views (project and workspace) | NEWFRONT-42, NEWFRONT-10, NEWFRONT-17, NEWFRONT-20, NEWFRONT-71 |
 | E-archives | NEWFRONT-79 | Epic: Archives | NEWFRONT-44, NEWFRONT-10, NEWFRONT-17, NEWFRONT-20, NEWFRONT-71 |
 | E-intake | NEWFRONT-80 | Epic: Intake | NEWFRONT-46, NEWFRONT-10, NEWFRONT-17, NEWFRONT-20, NEWFRONT-71 |
@@ -103,3 +103,4 @@ Generated when the project was set up (2026-09-29). Pi Dash is the source of tru
 | E-space | NEWFRONT-99 | Epic: Public boards (space): published project boards and public issue view | NEWFRONT-97, NEWFRONT-10, NEWFRONT-17, NEWFRONT-20, NEWFRONT-71 |
 | M-01 | NEWFRONT-92 | M-01: switch the desktop app to apps/web_new; remove desktop-overlay | NEWFRONT-69, NEWFRONT-70, NEWFRONT-71, NEWFRONT-72, NEWFRONT-73, NEWFRONT-74, NEWFRONT-75, NEWFRONT-76, NEWFRONT-77, NEWFRONT-18, NEWFRONT-21 |
 | M-02 | NEWFRONT-93 | M-02: remove apps/web, apps/admin, apps/space and the old frontend packages | NEWFRONT-69, NEWFRONT-70, NEWFRONT-71, NEWFRONT-72, NEWFRONT-73, NEWFRONT-74, NEWFRONT-75, NEWFRONT-76, NEWFRONT-77, NEWFRONT-78, NEWFRONT-79, NEWFRONT-80, NEWFRONT-81, NEWFRONT-82, NEWFRONT-83, NEWFRONT-84, NEWFRONT-85, NEWFRONT-86, NEWFRONT-87, NEWFRONT-88, NEWFRONT-89, NEWFRONT-90, NEWFRONT-91, NEWFRONT-98, NEWFRONT-99, NEWFRONT-92, NEWFRONT-11, NEWFRONT-3 |
+| F-12 | NEWFRONT-102 | F-12: similarity check — exclude AI Republic's own code from the old-code corpus |  |

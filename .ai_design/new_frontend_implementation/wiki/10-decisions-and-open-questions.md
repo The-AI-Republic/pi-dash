@@ -21,6 +21,7 @@
 | D13 | `apps/admin` and `apps/space` are in scope (NEWFRONT-4). They become route subtrees `/god-mode/*` and `/spaces/*` inside `apps/web_new`, web build only, and are removed with `apps/web` at the end. |
 | D14 | No third-party product analytics (NEWFRONT-6). `core/telemetry` reports errors and startup timings only, to a sink an edition can configure (none by default). The old app's Microsoft Clarity script is intentionally not carried over: inventories record it as "dropped by NEWFRONT-6", not as a parity row. |
 | D15 | Charts: Recharts 3 (NEWFRONT-7), only through `import()`, wrapped in our own chart components in `shared/` that read colors from kit tokens. Needed types: bar, area, line, pie, radar, scatter, treemap, composed. |
+| D16 | AI Republic's own code (runners, runner chat, assistant, schedulers, prompts, agent runtime, AI dev machines, their services and stores, desktop-overlay) may be ported into `apps/web_new`, not only referenced. Exact paths on *Reference, not source*. The similarity check excludes them from the old-code corpus (NEWFRONT-102). Everything present in the initial import is treated as Plane code. |
 
 ## Open
 
