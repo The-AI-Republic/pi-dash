@@ -15,14 +15,19 @@
 //!
 //! Sibling handler issues own their files and share this module's
 //! plumbing (mirrors the D-02 `space` layout): PIDASHCONV-360 (Intake
-//! CRUD) extends [`routes`] with its own router when it lands; merges
-//! keep both sides.
+//! CRUD, [`intakes`]) and PIDASHCONV-385 (intake-issue list + create)
+//! extend [`routes`] with their own routers; merges keep both sides.
 //!
 //! Only the methods above are owned: `PUT` on the detail paths proxies
 //! to Django (BUG-intake-issue-put — `update` carries no decorator, so
 //! any authenticated user passes; the proxy preserves that byte for
 //! byte), as do `POST`/`OPTIONS` and every non-`GET` method on the
 //! versions paths (Django's own 405s live there).
+//!
+//! The intake CRUD routes below own their five methods the same way:
+//! `PUT` on the intake detail and every non-owned method on the intake
+//! paths proxy to Django, where DRF's own 405-after-auth and metadata
+//! responses live.
 //!
 //! Layering: permission gates in `pidash_services::app_intake::permissions`,
 //! serializer shapes in `::shape`, task emits in `::tasks`, SQL fragments
@@ -31,6 +36,7 @@
 //! for the handler-owned lookups/writes, the DRF field-validation
 //! mirrors, and the row rendering.
 
+pub mod intakes;
 pub mod issues;
 pub mod versions;
 
@@ -100,6 +106,17 @@ pub enum Denial {
     NotFoundDetail,
     /// 404, view-inline `{"error": ...}` (missing intake row).
     NotFoundError(String),
+    /// 404, DRF `get_object` miss on intakes: `Http404("No Intake
+    /// matches the given query.")` (PIDASHCONV-360).
+    IntakeNotFound,
+    /// 404, `Project.resolve` miss: `Http404("Project not found")`
+    /// (`db/models/project.py:214-218`, PIDASHCONV-360).
+    ProjectNotFound,
+    /// 404, Django `handler404` (`app/views/error_404.py`,
+    /// `custom_404_view`, prod): unmatched paths, including non-UUID
+    /// ids under `<uuid:>` converters (PIDASHCONV-360; DEBUG renders
+    /// the HTML technical page instead, so no JSON can match there).
+    PageNotFound,
     /// 400, `{"error": ...}` (view-inline).
     BadError(String),
     /// 400, DRF `ParseError` `{"detail": ...}` (per_page/cursor/JSON).
@@ -125,6 +142,18 @@ impl Denial {
             Denial::NotFoundError(message) => (
                 StatusCode::NOT_FOUND,
                 format!("{{\"error\":{}}}", json_string(message)),
+            ),
+            Denial::IntakeNotFound => (
+                StatusCode::NOT_FOUND,
+                r#"{"detail":"No Intake matches the given query."}"#.to_owned(),
+            ),
+            Denial::ProjectNotFound => (
+                StatusCode::NOT_FOUND,
+                r#"{"detail":"Project not found"}"#.to_owned(),
+            ),
+            Denial::PageNotFound => (
+                StatusCode::NOT_FOUND,
+                r#"{"error":"Page not found."}"#.to_owned(),
             ),
             Denial::BadError(message) => (
                 StatusCode::BAD_REQUEST,
@@ -295,10 +324,42 @@ pub fn routes() -> Router<AppState> {
             ),
         )
         .route(
+            "/api/workspaces/{slug}/projects/{project_id}/intakes/",
+            owned(
+                axum::routing::get(intakes::list).post(intakes::create),
+                &["PUT", "PATCH", "DELETE", "OPTIONS"],
+            ),
+        )
+        .route(
             "/api/workspaces/{slug}/projects/{project_id}/inbox-issues/",
             owned(
                 axum::routing::get(issues::collection_list).post(issues::collection_create),
                 &["PUT", "PATCH", "DELETE", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/intakes/{pk}/",
+            owned(
+                axum::routing::get(intakes::retrieve)
+                    .patch(intakes::partial_update)
+                    .delete(intakes::destroy),
+                &["POST", "PUT", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/inboxes/",
+            owned(
+                axum::routing::get(intakes::list).post(intakes::create),
+                &["PUT", "PATCH", "DELETE", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/inboxes/{pk}/",
+            owned(
+                axum::routing::get(intakes::retrieve)
+                    .patch(intakes::partial_update)
+                    .delete(intakes::destroy),
+                &["POST", "PUT", "OPTIONS"],
             ),
         )
         .route(
@@ -643,4 +704,23 @@ pub async fn enqueue_soft_delete(pool: &PgPool, app_label: &str, model_name: &st
         Default::default(),
     );
     enqueue_message(pool, message).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Project.resolve` raises `Http404("Project not found")`
+    /// (`db/models/project.py:214-218`, no trailing period); DRF's
+    /// `exception_handler` maps the args verbatim to `{"detail": ...}`
+    /// (`rest_framework/views.py:81-82`), so the port must not add one.
+    /// Pinned by review (PIDASHCONV-360): the intake tenant lookup
+    /// ([`crate::app_intake::intakes::intake_tenant`]) serves this body
+    /// for identifier-form project ids that resolve to no row.
+    #[test]
+    fn project_resolve_miss_matches_django_byte_for_byte() {
+        let (status, body) = Denial::ProjectNotFound.status_and_body();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, r#"{"detail":"Project not found"}"#);
+    }
 }
