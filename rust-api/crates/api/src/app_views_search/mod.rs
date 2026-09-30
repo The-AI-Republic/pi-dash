@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! App search handlers (D-29, stage 5, PIDASHCONV-276).
+//! App search + views handlers (D-29, stage 5, PIDASHCONV-276 + PIDASHCONV-275).
 //!
 //! Ports `apps/api/pi_dash/app/views/search/` onto the merged D-29
 //! foundation:
@@ -24,9 +24,34 @@
 //! small lookups the issue pipeline needs (parent row, relations, guest
 //! membership), row fetching and the `.values()` shaping.
 //!
-//! [`routes`] merges the search routes; sibling handler issues (views +
-//! favorites, PIDASHCONV-275) extend it with their own routers — merges
-//! keep both sides.
+//! [`routes`] merges the search routes with the views routes below —
+//! merges keep both sides.
+//!
+//! Views (PIDASHCONV-275): the 7 views routes from
+//! `apps/api/pi_dash/app/views/view/base.py` — `WorkspaceViewViewSet`
+//! (global-view routes, `:52-136`), `IssueViewViewSet` (project-view
+//! routes, `:256-398`), `WorkspaceViewIssuesViewSet.list`
+//! (global-view-issues route, `:217-253`), `IssueViewFavoriteViewSet`
+//! (user-favorite-views routes, `:401-433`). Only the owned methods are
+//! registered; every sibling path and non-owned method keeps proxying.
+//! Views queryset SQL lives in
+//! `pidash_services::app_views_search::queries_views`, row shapes in
+//! `...::serializers`, gates in `...::permissions`, the retrieve
+//! publishers in `...::tasks`.
+//!
+//! Ported views bugs (also listed in the PR):
+//! - B1 (`base.py:102-112`): workspace retrieve serializes `.first()`
+//!   unconditionally — unknown pk answers 200 with the serializer's
+//!   `get_initial()` body (not 404, and not JSON `null`).
+//! - B1b (`base.py:317-327`): project retrieve dereferences
+//!   `issue_view.owned_by` after `.first()`; unknown pk plus a guest
+//!   without `guest_view_all_features` raises (500), not 404 — other
+//!   callers get the same `get_initial()` 200 as B1.
+//! - B2 (`serializers/base.py:12-18`): `?fields=` is silently ignored on
+//!   both list views — full objects always render.
+//! - B4 (`base.py:404-411`): the favorite list queryset raises `FieldError`
+//!   (`select_related("view")` names no FK) — every GET answers the
+//!   generic 500.
 //!
 //! Sibling plumbing mirrors the D-26 `app_issues` and D-02 `space` shapes:
 //!
@@ -37,6 +62,7 @@
 //!   so Django's 405-after-auth responses survive byte for byte.
 
 pub mod handlers_search;
+pub mod handlers_views;
 
 use std::collections::HashMap;
 
@@ -47,10 +73,10 @@ use sqlx::{Postgres, Row};
 
 use crate::state::AppState;
 
-/// Merge the app-search route groups. Sibling handler issues extend this
-/// merge with their own routers; merges keep both sides.
+/// Merge the app-search route groups with the views route groups
+/// (PIDASHCONV-275); merges keep both sides.
 pub fn routes() -> Router<AppState> {
-    handlers_search::routes()
+    handlers_search::routes().merge(handlers_views::routes())
 }
 
 /// A search path: the GET handler owns reads, everything else falls
