@@ -20,3 +20,4 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod cycle_shapes;
+pub mod module_shapes;
