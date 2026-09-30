@@ -498,3 +498,276 @@ def test_drain_does_not_rebuild_first_turn_prompt(db, create_user, workspace, po
     assert matcher.drain_for_runner(rA) is True
     run.refresh_from_db()
     assert run.prompt == "original first-turn body"
+
+
+# ---------------------------------------------------------------------------
+# Pin wait budget: a pin to a healthy-but-busy runner is bounded.
+# See PDASHOSS01-272 and ``matcher.claim_overbudget_pinned_run``.
+# ---------------------------------------------------------------------------
+
+
+def _backdate(run, seconds):
+    """Age a run's ``created_at``; the column is ``auto_now_add``."""
+    stamp = timezone.now() - timezone.timedelta(seconds=seconds)
+    AgentRun.objects.filter(pk=run.pk).update(created_at=stamp)
+    run.refresh_from_db()
+    return run
+
+
+def _make_busy(user, workspace, pod, runner):
+    return AgentRun.objects.create(
+        owner=user,
+        created_by=user,
+        workspace=workspace,
+        pod=pod,
+        prompt=f"{runner.name}'s current",
+        runner=runner,
+        status=AgentRunStatus.RUNNING,
+    )
+
+
+@pytest.mark.unit
+def test_drain_pod_releases_overbudget_pin_to_idle_runner(db, create_user, workspace, pod):
+    """The reported incident: pinned to a healthy busy runner, idle runners waiting."""
+    rA = _make_runner(create_user, workspace, pod, "agentA")
+    rB = _make_runner(create_user, workspace, pod, "agentB")
+    _make_busy(create_user, workspace, pod, rA)
+    pinned = _backdate(
+        _make_run(create_user, workspace, pod, prompt="for A later", pinned_runner=rA),
+        3600,
+    )
+
+    n = matcher.drain_pod(pod)
+    pinned.refresh_from_db()
+    assert n == 1
+    assert pinned.status == AgentRunStatus.ASSIGNED
+    assert pinned.runner_id == rB.id
+    assert pinned.pinned_runner_id is None
+
+
+@pytest.mark.unit
+def test_drain_pod_keeps_pin_within_budget(db, create_user, workspace, pod):
+    """Inside the budget the pin is strict — the run waits for its own runner."""
+    rA = _make_runner(create_user, workspace, pod, "agentA")
+    _make_runner(create_user, workspace, pod, "agentB")
+    _make_busy(create_user, workspace, pod, rA)
+    # Aged, but well inside the 600s default.
+    pinned = _backdate(
+        _make_run(create_user, workspace, pod, prompt="for A later", pinned_runner=rA),
+        60,
+    )
+
+    assert matcher.drain_pod(pod) == 0
+    pinned.refresh_from_db()
+    assert pinned.status == AgentRunStatus.QUEUED
+    assert pinned.pinned_runner_id == rA.id
+    assert pinned.runner_id is None
+
+
+@pytest.mark.unit
+def test_drain_pod_keeps_overbudget_pin_when_no_runner_idle(db, create_user, workspace, pod):
+    """No idle runner to hand it to → the pin survives, however long the wait."""
+    rA = _make_runner(create_user, workspace, pod, "agentA")
+    rB = _make_runner(create_user, workspace, pod, "agentB")
+    _make_busy(create_user, workspace, pod, rA)
+    _make_busy(create_user, workspace, pod, rB)
+    pinned = _backdate(
+        _make_run(create_user, workspace, pod, prompt="for A later", pinned_runner=rA),
+        3600,
+    )
+
+    assert matcher.drain_pod(pod) == 0
+    pinned.refresh_from_db()
+    assert pinned.status == AgentRunStatus.QUEUED
+    assert pinned.pinned_runner_id == rA.id
+
+
+@pytest.mark.unit
+def test_drain_pod_honours_overbudget_pin_to_idle_runner(db, create_user, workspace, pod):
+    """The pinned runner is itself idle: it keeps its own run, budget or not.
+
+    ``rB`` has the fresher heartbeat so ``drain_pod`` offers work to it first;
+    it must not steal the run that ``rA`` is about to take.
+    """
+    rA = _make_runner(create_user, workspace, pod, "agentA", heartbeat_ago_s=10)
+    rB = _make_runner(create_user, workspace, pod, "agentB", heartbeat_ago_s=1)
+    pinned = _backdate(
+        _make_run(create_user, workspace, pod, prompt="for A", pinned_runner=rA),
+        3600,
+    )
+
+    assert matcher.drain_pod(pod) == 1
+    pinned.refresh_from_db()
+    assert pinned.runner_id == rA.id
+    assert pinned.status == AgentRunStatus.ASSIGNED
+    assert rB.id != rA.id
+
+
+@pytest.mark.unit
+def test_pod_budget_override_of_zero_disables_auto_release(db, create_user, workspace, pod):
+    rA = _make_runner(create_user, workspace, pod, "agentA")
+    _make_runner(create_user, workspace, pod, "agentB")
+    _make_busy(create_user, workspace, pod, rA)
+    pinned = _backdate(
+        _make_run(create_user, workspace, pod, prompt="for A later", pinned_runner=rA),
+        86400,
+    )
+    pod.pin_wait_budget_secs = 0
+    pod.save(update_fields=["pin_wait_budget_secs"])
+
+    assert matcher.drain_pod(pod) == 0
+    pinned.refresh_from_db()
+    assert pinned.pinned_runner_id == rA.id
+
+
+@pytest.mark.unit
+def test_pod_budget_override_shortens_the_wait(db, create_user, workspace, pod):
+    rA = _make_runner(create_user, workspace, pod, "agentA")
+    rB = _make_runner(create_user, workspace, pod, "agentB")
+    _make_busy(create_user, workspace, pod, rA)
+    pinned = _backdate(
+        _make_run(create_user, workspace, pod, prompt="for A later", pinned_runner=rA),
+        60,
+    )
+    # 60s of waiting is inside the 600s instance default but past this pod's
+    # own 30s budget.
+    pod.pin_wait_budget_secs = 30
+    pod.save(update_fields=["pin_wait_budget_secs"])
+
+    assert matcher.drain_pod(pod) == 1
+    pinned.refresh_from_db()
+    assert pinned.runner_id == rB.id
+    assert pinned.pinned_runner_id is None
+
+
+@pytest.mark.unit
+def test_effective_pin_wait_budget_falls_back_to_instance_default(db, settings, pod):
+    settings.RUNNER_PIN_WAIT_BUDGET_SECS = 900
+    assert pod.pin_wait_budget_secs is None
+    assert pod.effective_pin_wait_budget_secs() == 900
+    pod.pin_wait_budget_secs = 120
+    assert pod.effective_pin_wait_budget_secs() == 120
+
+
+@pytest.mark.unit
+def test_auto_release_clears_parent_thread_id(db, create_user, workspace, pod):
+    """Mirror the release-pin endpoint: the new runner gets no resume hint."""
+    rA = _make_runner(create_user, workspace, pod, "agentA")
+    rB = _make_runner(create_user, workspace, pod, "agentB")
+    parent = _make_busy(create_user, workspace, pod, rA)
+    parent.thread_id = "thread-abc"
+    parent.save(update_fields=["thread_id"])
+    pinned = _make_run(create_user, workspace, pod, prompt="follow-up", pinned_runner=rA)
+    pinned.parent_run = parent
+    pinned.save(update_fields=["parent_run"])
+    _backdate(pinned, 3600)
+
+    assert matcher.drain_pod(pod) == 1
+    pinned.refresh_from_db()
+    parent.refresh_from_db()
+    assert pinned.runner_id == rB.id
+    assert pinned.pinned_runner_id is None
+    assert parent.thread_id == ""
+
+
+@pytest.mark.unit
+def test_managed_run_pin_is_never_auto_released(db, create_user, workspace, pod):
+    """An unpinned managed run is unservable, so its pin must hold."""
+    from pi_dash.core.agent_execution import AgentExecutorKind
+
+    rA = _make_runner(create_user, workspace, pod, "agentA")
+    _make_runner(create_user, workspace, pod, "agentB")
+    _make_busy(create_user, workspace, pod, rA)
+    pinned = _make_run(create_user, workspace, pod, prompt="managed", pinned_runner=rA)
+    AgentRun.objects.filter(pk=pinned.pk).update(executor_kind=AgentExecutorKind.MANAGED_RUNNER)
+    _backdate(pinned, 3600)
+
+    assert matcher.drain_pod(pod) == 0
+    pinned.refresh_from_db()
+    assert pinned.pinned_runner_id == rA.id
+
+
+@pytest.mark.unit
+def test_desktop_bundled_runner_does_not_claim_released_pin(db, create_user, workspace, pod):
+    """A user's laptop must not become the pod's overflow build server."""
+    from pi_dash.runner.models import RunnerProvisioning
+
+    rA = _make_runner(create_user, workspace, pod, "agentA")
+    desktop = _make_runner(create_user, workspace, pod, "desktop")
+    desktop.provisioning = RunnerProvisioning.DESKTOP_BUNDLED
+    desktop.save(update_fields=["provisioning"])
+    _make_busy(create_user, workspace, pod, rA)
+    pinned = _backdate(
+        _make_run(create_user, workspace, pod, prompt="for A later", pinned_runner=rA),
+        3600,
+    )
+
+    assert matcher.drain_pod(pod) == 0
+    pinned.refresh_from_db()
+    assert pinned.pinned_runner_id == rA.id
+
+
+@pytest.mark.unit
+def test_released_pin_still_respects_runner_eligibility(db, create_user, workspace, pod):
+    """Releasing a pin does not widen who may run the work.
+
+    ``other``'s private runner cannot see a run created by and billed to
+    ``create_user``, so the pin stays put even though the budget is spent.
+    """
+    from uuid import uuid4
+
+    from pi_dash.db.models import User, WorkspaceMember
+
+    other = User.objects.create(
+        email=f"other-{uuid4().hex[:8]}@example.com",
+        username=f"other_{uuid4().hex[:8]}",
+    )
+    WorkspaceMember.objects.create(workspace=workspace, member=other, role=15)
+    rA = _make_runner(create_user, workspace, pod, "agentA")
+    _make_runner(other, workspace, pod, "outsiders-runner")
+    _make_busy(create_user, workspace, pod, rA)
+    pinned = _backdate(
+        _make_run(create_user, workspace, pod, prompt="for A later", pinned_runner=rA),
+        3600,
+    )
+
+    assert matcher.drain_pod(pod) == 0
+    pinned.refresh_from_db()
+    assert pinned.pinned_runner_id == rA.id
+
+
+@pytest.mark.unit
+def test_drain_for_runner_claims_overbudget_pin(db, create_user, workspace, pod):
+    """The single-runner immediate-dispatch path releases the pin too."""
+    rA = _make_runner(create_user, workspace, pod, "agentA")
+    rB = _make_runner(create_user, workspace, pod, "agentB")
+    _make_busy(create_user, workspace, pod, rA)
+    pinned = _backdate(
+        _make_run(create_user, workspace, pod, prompt="for A later", pinned_runner=rA),
+        3600,
+    )
+
+    assert matcher.drain_for_runner(rB) is True
+    pinned.refresh_from_db()
+    assert pinned.runner_id == rB.id
+    assert pinned.pinned_runner_id is None
+
+
+@pytest.mark.unit
+def test_overbudget_release_is_fifo_across_two_idle_runners(db, create_user, workspace, pod):
+    """Two over-budget pins, two idle runners: the older one goes out first."""
+    rA = _make_runner(create_user, workspace, pod, "agentA")
+    rB = _make_runner(create_user, workspace, pod, "agentB", heartbeat_ago_s=1)
+    rC = _make_runner(create_user, workspace, pod, "agentC", heartbeat_ago_s=5)
+    _make_busy(create_user, workspace, pod, rA)
+    older = _backdate(_make_run(create_user, workspace, pod, prompt="older", pinned_runner=rA), 7200)
+    newer = _backdate(_make_run(create_user, workspace, pod, prompt="newer", pinned_runner=rA), 3600)
+
+    assert matcher.drain_pod(pod) == 2
+    older.refresh_from_db()
+    newer.refresh_from_db()
+    # rB is offered work first (freshest heartbeat) and takes the older run.
+    assert older.runner_id == rB.id
+    assert newer.runner_id == rC.id
+    assert older.pinned_runner_id is None
+    assert newer.pinned_runner_id is None

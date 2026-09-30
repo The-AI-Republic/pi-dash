@@ -249,6 +249,46 @@ def test_promoting_pod_to_default_demotes_previous_within_project(
     assert old_default.is_default is False
 
 
+@pytest.mark.unit
+def test_admin_can_set_and_clear_pin_wait_budget(db, session_client, project):
+    """Per-pod pin wait budget is settable through the pod PATCH surface."""
+    pod = Pod.default_for_project(project)
+    resp = session_client.patch(
+        f"/api/runners/pods/{pod.id}/",
+        {"pin_wait_budget_secs": 120},
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.data
+    assert resp.data["pin_wait_budget_secs"] == 120
+    pod.refresh_from_db()
+    assert pod.effective_pin_wait_budget_secs() == 120
+
+    # null clears the override and falls back to the instance default.
+    resp = session_client.patch(
+        f"/api/runners/pods/{pod.id}/",
+        {"pin_wait_budget_secs": None},
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.data
+    assert resp.data["pin_wait_budget_secs"] is None
+    pod.refresh_from_db()
+    assert pod.pin_wait_budget_secs is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad", [-1, "soon"])
+def test_pin_wait_budget_rejects_bad_values(db, session_client, project, bad):
+    pod = Pod.default_for_project(project)
+    resp = session_client.patch(
+        f"/api/runners/pods/{pod.id}/",
+        {"pin_wait_budget_secs": bad},
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.data
+    pod.refresh_from_db()
+    assert pod.pin_wait_budget_secs is None
+
+
 # ---------------- soft-delete guards ----------------
 
 

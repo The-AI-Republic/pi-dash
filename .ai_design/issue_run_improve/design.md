@@ -445,6 +445,19 @@ Drain is invoked at three moments:
     that sets `pinned_runner_id = NULL`. The MVP-correct answer is operator-
     driven, not a TTL — TTLs silently lose the resume benefit and are easy
     to misconfigure.
+- **Pinned runner online but busy for hours** (added by PDASHOSS01-272,
+  superseding the "no TTL" call above). The pin is now bounded by a **pin
+  wait budget**: `Pod.pin_wait_budget_secs`, defaulting to the instance-wide
+  `RUNNER_PIN_WAIT_BUDGET_SECS` (600s); `0` restores the unbounded strict
+  pin. The release is _opportunity-driven_ rather than a timer, which is what
+  answers the original objection — `matcher.claim_overbudget_pinned_run` runs
+  only as the fallback inside `drain_pod` / `drain_for_runner` when a
+  specific idle runner has nothing else to do, so the pin is never broken
+  unless there is somewhere better for the run to go, and a pin whose runner
+  is idle-and-assignable is honoured regardless of the budget. Prod incident:
+  13 runs queued 30 min – 9.5 h behind 10 busy runners while 6 sat idle.
+  Managed (desktop-bundled) pins are exempt — an unpinned managed run is
+  unservable by construction.
 - **Multiple paused conversations on the same agent.** issue001, issue003 both
   paused on agentA, both get human comments. R001b and R003b both pin to
   agentA. When agentA finishes issue002, FIFO by `created_at` of the new run
@@ -704,7 +717,9 @@ becomes a fallback rather than the primary mechanism.
   R_next normally. No separate pending-comment storage.
 - Transcript-replay fallback (§6.5).
 - `IssueConversation` entity (one-thread-per-issue is sufficient for v1).
-- TTL-based pin release (§5.7) — operator-driven is enough for v1.
+- ~~TTL-based pin release (§5.7) — operator-driven is enough for v1.~~
+  Reversed by PDASHOSS01-272: the pin now carries a per-pod wait budget and
+  is released to an idle runner past it. See §5.7.
 - Cross-issue / cross-conversation memory.
 - Smarter prompt for fresh-context-from-issue beyond "read the issue + the
   prior handoff comment."
