@@ -66,8 +66,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - ./parity_scratch_settings.py:/code/parity_scratch_settings.py:ro
     environment:
-      DJANGO_SETTINGS_MODULE: pi_dash.settings.local
+      DJANGO_SETTINGS_MODULE: parity_scratch_settings
       SECRET_KEY: parity19-fixed-local-secret-not-used-outside-scratch
       ALLOWED_HOSTS: "*"
       DATABASE_URL: postgresql://parity19:parity19@pg:5432/pidash

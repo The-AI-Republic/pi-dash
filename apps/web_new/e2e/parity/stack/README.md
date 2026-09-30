@@ -24,6 +24,13 @@ are the contract the Playwright config assumes (`PARITY_ORACLE_URL`
 defaults to the proxy on `:13000`, `PARITY_NEW_URL` to web_new on `:3010`,
 `PARITY_API_URL` to `:18019`).
 
+The api service runs on `parity_scratch_settings.py` (mounted read-only),
+which widens only the default anonymous throttle to 600/minute: every
+scenario shares one IP bucket with the frontend's own loader calls, so the
+production 30/minute budget saturates minutes into an oracle run. The
+authentication throttle (30/minute on email-check / magic / forgot) is
+untouched, so rate-limit oracles still trip it.
+
 ## Bring up
 
 From the repo root:

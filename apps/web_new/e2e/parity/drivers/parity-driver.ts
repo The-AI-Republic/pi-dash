@@ -48,6 +48,9 @@ export interface ParityBrowserCookie {
 /** Which create-or-join sub-view of the workspace onboarding step is showing. */
 export type WorkspaceOnboardingView = "create" | "invites" | "join_by_email" | "pending" | "none";
 
+/** Which step of the email-first auth card is currently showing. */
+export type AuthStep = "email" | "password" | "code";
+
 /** User-level actions plus reads shared by both frontend drivers. */
 export interface ParityDriver {
   readonly target: ParityTarget;
@@ -216,4 +219,53 @@ export interface ParityDriver {
   clearEmail(): Promise<void>;
   /** True when the no-authentication-methods card shows. */
   seesNoAuthMethods(): Promise<boolean>;
+
+  // --- Auth sign-up, recovery, guards, landing (NEWFRONT-108, AUTH-009/016).
+  // --- Appended; existing methods above are untouched per the shared driver
+  // --- contract. currentPath keeps the pathname-plus-search shape the guard
+  // --- scenarios assert on (?next_path=); authStep keeps the wider union
+  // --- (the sign-in core also asserts "email"/"unavailable"/"unknown").
+
+  /** Open the sign-up card as a signed-out visitor, with optional query params. */
+  openSignUp(params?: { email?: string; nextPath?: string }): Promise<void>;
+  /** Submit the email-first step; resolves once the next step renders. */
+  submitAuthEmail(email: string): Promise<void>;
+  /** Value currently in the auth card's email field. */
+  authEmailValue(): Promise<string>;
+  /** Value of the card's carried return path, when one is present. */
+  authNextPathValue(): Promise<string | null>;
+  /** Fill the sign-up password fields and submit; ends on the post-auth redirect. */
+  signUpWithPassword(password: string, confirmPassword: string): Promise<void>;
+  /** Fill the unique-code field and submit; ends on the post-auth redirect. */
+  submitUniqueCode(code: string): Promise<void>;
+  /** Resend control on the unique-code step: enabled state plus label. */
+  codeResendState(): Promise<{ disabled: boolean; label: string }>;
+  /** Click the resend control on the unique-code step. */
+  requestNewCode(): Promise<void>;
+  /** Whether the password submit is currently enabled. */
+  passwordSubmitEnabled(): Promise<boolean>;
+  /** Fill the password fields and click submit without requiring a navigation. */
+  fillPasswordFields(password: string, confirmPassword: string): Promise<void>;
+  /** Click the password form submit and settle (navigation optional). */
+  clickPasswordSubmit(): Promise<void>;
+  /** Inline password-confirmation error text, or null when none shows. */
+  passwordMismatchError(): Promise<string | null>;
+  /** Dismissible auth banner text, or null when no banner shows. */
+  authBanner(): Promise<string | null>;
+  /** Wait for the auth banner to appear; resolves with its text. */
+  waitForAuthBanner(): Promise<string>;
+  /** Open the forgot-password page, optionally with a prefilled address. */
+  openForgotPassword(email?: string): Promise<void>;
+  /** Submit the forgot-password form; resolves with the toast text shown. */
+  submitForgotPassword(email: string): Promise<string>;
+  /** Forgot-password resend control: enabled state plus label. */
+  forgotResendState(): Promise<{ disabled: boolean; label: string }>;
+  /** Open the reset-password page with the emailed-link params. */
+  openResetPassword(params: { uid: string; token: string; email: string }): Promise<void>;
+  /** Fill the new-password fields on the reset/set form and submit. */
+  submitNewPassword(password: string, confirmPassword: string): Promise<void>;
+  /** Open the set-password page; requires a signed-in session. */
+  openSetPassword(): Promise<void>;
+  /** Open an arbitrary app path (guards and legacy redirects). */
+  openPath(path: string): Promise<void>;
 }
