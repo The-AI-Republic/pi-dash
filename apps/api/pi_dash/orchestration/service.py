@@ -525,6 +525,43 @@ def _create_continuation_run(*, issue: Issue, parent: AgentRun, creator, pod, tr
     return ContinuationOutcome(created_run=run, reason="created")
 
 
+#: Terminal ``error_code`` values that blame the machine rather than the work:
+#: the run died because its runner stopped answering or never got the Assign,
+#: not because the agent hit a problem in the repo.
+RUNNER_INFRA_ERROR_CODES = frozenset(
+    {
+        "heartbeat_reaped",
+        "dispatch_timeout",
+        "runner_revoked",
+    }
+)
+
+
+def _parent_failed_on_its_runner(parent: AgentRun) -> bool:
+    """Did ``parent`` fail in a way that implicates the runner it ran on?
+
+    Two signals, both terminal-FAILED only — a COMPLETED, CANCELLED or
+    REFUSED parent says nothing bad about the machine:
+
+    - ``started_at is None``: the Assign reached the runner but the agent
+      never started there. That is a startup failure on that machine, e.g.
+      PIDASHCONV-491's ``timed out waiting for muse exec's
+      run.lifecycle.started`` — ``started_at`` is written only by
+      ``RunStartedEndpoint``, so its absence is exactly "never got going".
+    - an infra ``error_code`` (:data:`RUNNER_INFRA_ERROR_CODES`): the runner
+      went dark mid-run or never received the dispatch at all.
+
+    A run that started and *then* failed is deliberately **not** covered: the
+    agent got its session, so the failure is about the work, and re-pinning
+    keeps the repo-locality win.
+    """
+    if parent.status != AgentRunStatus.FAILED:
+        return False
+    if parent.error_code in RUNNER_INFRA_ERROR_CODES:
+        return True
+    return parent.started_at is None
+
+
 def _pinned_runner_for(parent: AgentRun, target_pod: Optional[Pod] = None) -> Optional[Runner]:
     """Return the runner to pin a follow-up to, or None.
 
@@ -534,6 +571,15 @@ def _pinned_runner_for(parent: AgentRun, target_pod: Optional[Pod] = None) -> Op
     or re-fetching. Resume is no longer in play
     (see ``.ai_design/ticking_optimization/design.md``); pinning is best-
     effort and the run is correct on any runner in the pod.
+
+    A retry is **not** pinned back to a runner that just failed the work for
+    an infra or startup reason (:func:`_parent_failed_on_its_runner`).
+    PIDASHCONV-491 is the case: a run died on ``macmini-muse-s11`` without
+    the agent ever starting, the retry was pinned straight back to that
+    machine, and then sat behind a 7-hour run for 6 h 44 m. The pin wait
+    budget (PDASHOSS01-272, ``matcher.releasable_overbudget_pin_ids``) bounds
+    that wait, but only when some runner in the pod is idle — so not
+    choosing the bad pin in the first place is the real fix.
     """
     if parent.runner_id is None:
         return None
@@ -541,6 +587,16 @@ def _pinned_runner_for(parent: AgentRun, target_pod: Optional[Pod] = None) -> Op
     if runner is None:
         return None
     if runner.status == RunnerStatus.REVOKED:
+        return None
+    if _parent_failed_on_its_runner(parent):
+        logger.info(
+            "orchestration: not pinning follow-up to runner=%s — parent run=%s failed there "
+            "(error_code=%r, started=%s)",
+            runner.id,
+            parent.id,
+            parent.error_code,
+            parent.started_at is not None,
+        )
         return None
     if target_pod is not None and runner.pod_id != target_pod.id:
         return None

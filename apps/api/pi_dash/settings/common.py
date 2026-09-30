@@ -524,6 +524,15 @@ RUNNER_AGENT_STALL_THRESHOLD_SECS = int(get_config("RUNNER_AGENT_STALL_THRESHOLD
 # runners age out instead of failing active runs.
 RUNNER_AGENT_OBSERVABILITY_STALE_SECS = int(get_config("RUNNER_AGENT_OBSERVABILITY_STALE_SECS", 90))
 
+# Pin wait budget (PDASHOSS01-272). A follow-up run is pinned to the runner
+# that served the issue's previous run so the same machine keeps the work.
+# When that runner is healthy but mid-way through a multi-hour run, the pin
+# used to hold the queued run for as long as that run lasted, even with idle
+# runners in the same pod. Past this budget the matcher releases the pin to
+# an idle eligible runner — trading session continuity for throughput.
+# Per-pod override: ``Pod.pin_wait_budget_secs``. 0 disables auto-release.
+RUNNER_PIN_WAIT_BUDGET_SECS = int(get_config("RUNNER_PIN_WAIT_BUDGET_SECS", 600))
+
 # Desktop-bundled managed runner. The kill switch gates creation, availability
 # and dispatch; turning it off must never mutate project settings, so issues
 # pinned to ``managed_runner`` simply become unavailable until it is back on.
