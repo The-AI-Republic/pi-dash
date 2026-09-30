@@ -844,11 +844,23 @@ async fn get_csrf_token(
         // A masked (64-char) cookie value unmasks first (`_get_secret`);
         // anything else reuses verbatim and the mask step fails closed.
         Some(Ok(secret)) => secret,
-        Some(Err(_)) => return server_error(),
+        // Django `process_request` catches `InvalidTokenFormat` from
+        // `_get_secret` and mints a fresh cookie (`_add_new_csrf_cookie`)
+        // — a malformed cookie answers 200, never 500.
+        Some(Err(_)) => pidash_auth::csrf::new_secret(),
     };
-    let masked = match pidash_auth::csrf::mask_secret(&secret) {
-        Ok(masked) => masked,
-        Err(_) => return server_error(),
+    let (secret, masked) = match pidash_auth::csrf::mask_secret(&secret) {
+        Ok(masked) => (secret, masked),
+        // A present-but-malformed cookie that survived unmask (a
+        // non-32-char passthrough value) fails the mask the same way;
+        // fall back to a fresh secret like Django.
+        Err(_) => {
+            let fresh = pidash_auth::csrf::new_secret();
+            match pidash_auth::csrf::mask_secret(&fresh) {
+                Ok(masked) => (fresh, masked),
+                Err(_) => return server_error(),
+            }
+        }
     };
     let now = now_unix();
     let secure = state.settings().session.cookie_secure;
@@ -1025,14 +1037,16 @@ async fn change_password(
     }
     let old = data_field(&data, "old_password");
     let new = data_field(&data, "new_password");
-    // `check_password` coerces non-strings via `force_bytes` without
-    // raising, so a present non-string old password is simply wrong
-    // (`common.py:73-80`); only `zxcvbn(new)` raises on non-strings
-    // (`TypeError`/`AttributeError`, i.e. 500).
-    if matches!(new, Field::Scalar | Field::Opaque) {
-        return server_error();
-    }
+    // Presence is Python truthiness (`bool(request.data.get(..., False))`):
+    // `Scalar`/`Opaque` only exist for truthy values (falsy ones read as
+    // `Absent` in `json_field`), so a non-string `new` counts as present
+    // and only `zxcvbn(new)` raises on it (`TypeError`/`AttributeError`,
+    // i.e. 500) — exactly where Python reaches it, after the 400 branches
+    // (`common.py:52-80`). `check_password` coerces non-strings via
+    // `force_bytes` without raising, so a present non-string old password
+    // is simply wrong.
     let old_present = matches!(old, Field::Text(_) | Field::Scalar | Field::Opaque);
+    let new_present = matches!(new, Field::Text(_) | Field::Scalar | Field::Opaque);
     let new_text = match &new {
         Field::Text(text) => Some(text.clone()),
         _ => None,
@@ -1055,15 +1069,16 @@ async fn change_password(
         .as_deref()
         .map(pidash_services::auth_session::password::password_is_weak)
         .unwrap_or(false);
-    let outcome = pw::decide_change_password(
-        is_autoset,
-        old_present,
-        new_text.is_some(),
-        old_matches,
-        new_weak,
-    );
+    let outcome =
+        pw::decide_change_password(is_autoset, old_present, new_present, old_matches, new_weak);
     if outcome != pw::ChangePasswordOutcome::Ok {
         return json_400(&pw::change_password_error_pairs(outcome));
+    }
+    // Python reaches `zxcvbn(new_password)` here, which raises on
+    // non-strings — so a truthy non-string `new` that survived every 400
+    // branch answers 500, never `MISSING_PASSWORD`.
+    if matches!(new, Field::Scalar | Field::Opaque) {
+        return server_error();
     }
     let new_password = new_text.expect("decided Ok");
     let salt = pw::generate_password_salt();
@@ -1151,11 +1166,6 @@ async fn set_password(
         return server_error();
     }
     let password = data_field(&data, "password");
-    // `zxcvbn(password)` raises on every non-string (`TypeError` for
-    // scalars, `AttributeError` for lists/dicts), i.e. 500.
-    if matches!(password, Field::Scalar | Field::Opaque) {
-        return server_error();
-    }
     let password_text = match &password {
         Field::Text(text) => Some(text.clone()),
         _ => None,
@@ -1169,9 +1179,22 @@ async fn set_password(
         .as_deref()
         .map(pidash_services::auth_session::password::password_is_weak)
         .unwrap_or(false);
-    let outcome = pw::decide_set_password(is_autoset, password_text.is_some(), password_weak);
+    // Presence is Python truthiness, like `change_password` above:
+    // `common.py:105-112` returns `PASSWORD_ALREADY_SET` before ever
+    // touching `password`, and `zxcvbn(password)` raises on non-strings
+    // only on the autoset path — so decide first, 500 only when `Ok`.
+    let outcome = pw::decide_set_password(
+        is_autoset,
+        matches!(password, Field::Text(_) | Field::Scalar | Field::Opaque),
+        password_weak,
+    );
     if outcome != pw::SetPasswordOutcome::Ok {
         return json_400(&pw::set_password_error_pairs(outcome));
+    }
+    // Python reaches `zxcvbn(password)` here, which raises on non-strings
+    // (`TypeError` for scalars, `AttributeError` for lists/dicts).
+    if matches!(password, Field::Scalar | Field::Opaque) {
+        return server_error();
     }
     let password_value = password_text.expect("decided Ok");
     let salt = pw::generate_password_salt();
