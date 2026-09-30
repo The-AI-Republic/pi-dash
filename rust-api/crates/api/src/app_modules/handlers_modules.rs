@@ -796,9 +796,19 @@ fn py_repr(value: &Value) -> String {
     }
 }
 
+/// Whether one integer PK input reaches the row lookup: non-negative ints
+/// convert via `uuid.UUID(int=…)` and miss (`Invalid pk …`), while negative
+/// ints fail UUID parsing first (`UUIDField.to_python`,
+/// `django/db/models/fields/__init__.py`, curly-quote branch — verified
+/// against Django 4.2: `to_python(-5)` raises `“−5” is not a valid UUID.`).
+fn pk_int_reaches_lookup(number: &serde_json::Number) -> bool {
+    number.as_i64().map(|n| n >= 0).unwrap_or(true)
+}
+
 /// Validate one user PK (`PrimaryKeyRelatedField` over users with a UUID
 /// pk field, verified live): null fails the null branch; bools fail the
-/// incorrect-type branch; ints go straight to the lookup (never matching);
+/// incorrect-type branch; non-negative ints go straight to the lookup
+/// (never matching a random user id); negative ints fail UUID parsing;
 /// strings parse as UUIDs first (`“…” is not a valid UUID.` with curly
 /// quotes); every other JSON type fails UUID validation with its Python
 /// `str()` rendering.
@@ -810,7 +820,11 @@ async fn validate_pk_value(
         Value::Null => Err("This field may not be null.".to_owned()),
         Value::Bool(_) => Err("Incorrect type. Expected pk value, received bool.".to_owned()),
         Value::Number(number) if number.is_i64() || number.is_u64() => {
-            Err(format!("Invalid pk \"{number}\" - object does not exist."))
+            if pk_int_reaches_lookup(number) {
+                Err(format!("Invalid pk \"{number}\" - object does not exist."))
+            } else {
+                Err(format!("\u{201c}{number}\u{201d} is not a valid UUID."))
+            }
         }
         Value::String(raw) => match raw.parse::<uuid::Uuid>() {
             Err(_) => Err(format!("\u{201c}{raw}\u{201d} is not a valid UUID.")),
@@ -837,6 +851,28 @@ fn py_str(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
         other => py_repr(other),
+    }
+}
+
+/// Rejected `status` input under DRF `ChoiceField` (`fields.py`,
+/// `ChoiceField.to_internal_value`): the offending value renders with
+/// Python `str()`, so booleans keep their capitals (`"True"`/`"False"`,
+/// verified live against DRF 3.15.2).
+fn invalid_choice_message(value: &Value) -> String {
+    format!("\"{}\" is not a valid choice.", py_str(value))
+}
+
+/// One `sort_order` input under DRF `FloatField` (`fields.py:947-954`):
+/// bools coerce (`float(True)` is `1.0`, verified live), numbers pass
+/// through, strings parse like Python `float()` (surrounding whitespace
+/// allowed); anything else is the caller's `invalid` branch. Returns
+/// `None` only on failure.
+fn parse_sort_order_value(value: &Value) -> Option<f64> {
+    match value {
+        Value::Bool(flag) => Some(if *flag { 1.0 } else { 0.0 }),
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
     }
 }
 
@@ -967,11 +1003,7 @@ async fn validate_write(
             None
         }
         Some(other) => {
-            push_error(
-                &mut errors,
-                "status",
-                format!("\"{other}\" is not a valid choice."),
-            );
+            push_error(&mut errors, "status", invalid_choice_message(other));
             None
         }
     };
@@ -989,18 +1021,20 @@ async fn validate_write(
         Some(Value::Null) => None,
         other => other.cloned(),
     };
+    // `FloatField` without `allow_null`: explicit nulls fail the null
+    // branch (verified live against DRF 3.15.2: `This field may not be
+    // null.`), everything else parses per [`parse_sort_order_value`].
     let sort_order = match body.get("sort_order") {
         None => None,
-        Some(Value::Number(number)) => number.as_f64(),
-        Some(Value::String(text)) => text.parse::<f64>().ok(),
-        Some(_) => {
+        Some(Value::Null) => {
             push_error(
                 &mut errors,
                 "sort_order",
-                "A valid number is required.".to_owned(),
+                "This field may not be null.".to_owned(),
             );
             None
         }
+        Some(value) => parse_sort_order_value(value),
     };
     if body.get("sort_order").is_some() && sort_order.is_none() && errors.iter().all(|(f, _)| f != "sort_order") {
         push_error(
@@ -2517,6 +2551,69 @@ mod tests {
             not_dict_body(&serde_json::json!([1])),
             "{\"non_field_errors\":[\"Invalid data. Expected a dictionary, but got list.\"]}"
         );
+    }
+
+    #[test]
+    fn choice_errors_render_python_str() {
+        // DRF `ChoiceField` formats the raw input with `str()`
+        // (probed on DRF 3.15.2): booleans keep their capitals.
+        assert_eq!(
+            invalid_choice_message(&serde_json::json!(true)),
+            "\"True\" is not a valid choice."
+        );
+        assert_eq!(
+            invalid_choice_message(&serde_json::json!(false)),
+            "\"False\" is not a valid choice."
+        );
+        assert_eq!(
+            invalid_choice_message(&serde_json::json!(5)),
+            "\"5\" is not a valid choice."
+        );
+        assert_eq!(
+            invalid_choice_message(&serde_json::json!("abc")),
+            "\"abc\" is not a valid choice."
+        );
+        assert_eq!(
+            invalid_choice_message(&serde_json::json!({"a": 1})),
+            "\"{'a': 1}\" is not a valid choice."
+        );
+    }
+
+    #[test]
+    fn sort_order_coerces_like_drf_float() {
+        // DRF `FloatField` is `float(data)` (probed on DRF 3.15.2):
+        // bools coerce, padded numeric strings parse.
+        assert_eq!(
+            parse_sort_order_value(&serde_json::json!(true)),
+            Some(1.0)
+        );
+        assert_eq!(
+            parse_sort_order_value(&serde_json::json!(false)),
+            Some(0.0)
+        );
+        assert_eq!(
+            parse_sort_order_value(&serde_json::json!(2)),
+            Some(2.0)
+        );
+        assert_eq!(
+            parse_sort_order_value(&serde_json::json!(" 1.5 ")),
+            Some(1.5)
+        );
+        assert_eq!(
+            parse_sort_order_value(&serde_json::json!("abc")),
+            None
+        );
+        assert_eq!(parse_sort_order_value(&serde_json::json!([1])), None);
+    }
+
+    #[test]
+    fn negative_int_pks_skip_the_lookup() {
+        // Django `UUIDField.to_python` rejects negative ints before the
+        // row lookup (probed on Django 4.2); non-negative ints convert
+        // via `uuid.UUID(int=…)` and miss.
+        assert!(!pk_int_reaches_lookup(&serde_json::Number::from(-5)));
+        assert!(pk_int_reaches_lookup(&serde_json::Number::from(5)));
+        assert!(pk_int_reaches_lookup(&serde_json::Number::from(0)));
     }
 
     #[test]
