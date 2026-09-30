@@ -50,9 +50,10 @@
 //!   view), so the observable port performs no cache I/O.
 //! - `PasswordResetTokenGenerator` tokens are single-use (`set_password`
 //!   invalidates outstanding tokens).
-//! - multipart form bodies on the reset views parse as empty (no file
-//!   field exists on these forms; urlencoded and JSON-on-DRF cover every
-//!   product and contract caller).
+//! - multipart text fields parse on every view (DRF `MultiPartParser` on
+//!   the DRF views, `request.POST` on the reset views); file parts are
+//!   ignored (no file field exists on these forms) and malformed bodies
+//!   answer 400 (DRF `ParseError` parity).
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -318,22 +319,132 @@ impl IntoResponse for BodyError {
     }
 }
 
-/// Parse the body per DRF content negotiation.
+/// The request MIME type: the content-type before `;`, lowercased
+/// (`select_parser` matches on the media type the same way).
+fn request_mime(headers: &HeaderMap) -> String {
+    content_type_of(headers)
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase()
+}
+
+/// Multipart boundary from the content-type
+/// (`multipart/form-data; boundary=...`, optionally quoted).
+fn multipart_boundary(headers: &HeaderMap) -> Option<String> {
+    let content_type = content_type_of(headers).unwrap_or_default();
+    let mut parts = content_type.split(';');
+    parts.next()?;
+    for param in parts {
+        let param = param.trim();
+        if let Some(boundary) = param
+            .strip_prefix("boundary=")
+            .or_else(|| param.strip_prefix("Boundary="))
+            .or_else(|| param.strip_prefix("BOUNDARY="))
+        {
+            let boundary = boundary.trim();
+            let boundary = boundary
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .unwrap_or(boundary);
+            if !boundary.is_empty() && boundary.len() <= 70 {
+                return Some(boundary.to_owned());
+            }
+            return None;
+        }
+    }
+    None
+}
+
+/// Parse `multipart/form-data` text fields (DRF `MultiPartParser`, minus
+/// files: no file field exists on these forms, so file parts are
+/// ignored). Repeated names keep every value; `form_field` reads the
+/// last, like `QueryDict.get`. Malformed bodies error (DRF `ParseError`
+/// parity — a 400, never a 500).
+fn parse_multipart(body: &[u8], boundary: &str) -> Result<Vec<(String, String)>, String> {
+    let body = String::from_utf8_lossy(body);
+    let delimiter = format!("--{boundary}");
+    // The body must open with the delimiter (after an ignorable
+    // preamble DRF never sends but tolerates).
+    let mut fields = Vec::new();
+    let mut chunks = body.split(&delimiter);
+    chunks.next();
+    let mut closed = false;
+    for chunk in chunks {
+        // The closing delimiter carries a `--` suffix (plus transport
+        // padding); anything after it is the epilogue.
+        if let Some(rest) = chunk.strip_prefix("--") {
+            if rest.trim_start_matches(['\r', '\n', ' ', '\t']).is_empty()
+                || rest.starts_with("\r\n")
+                || rest.starts_with('\n')
+            {
+                closed = true;
+                break;
+            }
+            return Err("malformed multipart body".to_owned());
+        }
+        let chunk = chunk
+            .strip_prefix("\r\n")
+            .or_else(|| chunk.strip_prefix('\n'))
+            .ok_or_else(|| "malformed multipart body".to_owned())?;
+        let (raw_headers, value) = chunk
+            .split_once("\r\n\r\n")
+            .or_else(|| chunk.split_once("\n\n"))
+            .ok_or_else(|| "malformed multipart body".to_owned())?;
+        let mut name: Option<String> = None;
+        let mut is_file = false;
+        for header_line in raw_headers.split("\r\n").flat_map(|l| l.split('\n')) {
+            let header_line = header_line.trim();
+            if header_line
+                .to_lowercase()
+                .starts_with("content-disposition:")
+            {
+                for param in header_line.split(';') {
+                    let param = param.trim();
+                    if let Some(value) = param.strip_prefix("name=") {
+                        name = Some(value.trim().trim_matches('"').to_owned());
+                    } else if param.to_lowercase().starts_with("filename=") {
+                        is_file = true;
+                    }
+                }
+            }
+        }
+        let Some(name) = name else {
+            return Err("malformed multipart body".to_owned());
+        };
+        if is_file {
+            continue;
+        }
+        // Each part's value ends at the CRLF before the next delimiter.
+        let value = value
+            .strip_suffix("\r\n")
+            .or_else(|| value.strip_suffix('\n'))
+            .unwrap_or(value);
+        // Multipart values are charset-decoded, never url-decoded.
+        fields.push((name, value.to_owned()));
+    }
+    if !closed {
+        return Err("malformed multipart body".to_owned());
+    }
+    Ok(fields)
+}
+
+/// Parse the body per DRF content negotiation (`JSONParser`,
+/// `FormParser`, `MultiPartParser` — this project sets no
+/// `DEFAULT_PARSER_CLASSES` override). An empty body never reaches a
+/// parser (`_parse` returns `{}` without parsing); a non-empty body
+/// under a missing or unknown media type matches no parser (415).
 fn read_body(headers: &HeaderMap, body: &[u8]) -> Result<BodyData, BodyError> {
     if body.is_empty() {
         return Ok(BodyData::default());
     }
     let content_type = content_type_of(headers).unwrap_or_default();
-    let mime = content_type
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
+    let mime = request_mime(headers);
     match mime.as_str() {
-        // DRF `JSONParser` (empty content-type falls through to the
-        // first parser, JSON, in this project's parser order).
-        "application/json" | "" => match serde_json::from_slice::<Value>(body) {
+        // DRF `JSONParser`.
+        "application/json" => match serde_json::from_slice::<Value>(body) {
             Ok(json) => Ok(BodyData {
                 json: Some(json),
                 form: Vec::new(),
@@ -344,32 +455,48 @@ fn read_body(headers: &HeaderMap, body: &[u8]) -> Result<BodyData, BodyError> {
             json: None,
             form: parse_form(body),
         }),
-        // No file field exists on these forms; multipart (which Django
-        // would parse into `request.POST`) reads as empty here.
+        "multipart/form-data" => {
+            let Some(boundary) = multipart_boundary(headers) else {
+                return Err(BodyError::InvalidJson(
+                    "missing multipart boundary".to_owned(),
+                ));
+            };
+            match parse_multipart(body, &boundary) {
+                Ok(form) => Ok(BodyData { json: None, form }),
+                Err(message) => Err(BodyError::InvalidJson(message)),
+            }
+        }
         _ => Err(BodyError::UnsupportedMediaType(content_type)),
     }
 }
 
 /// One form/JSON field: absent (missing, null, `""`, `false`), text, or a
-/// present non-string (whose downstream use raises `TypeError` in
-/// Python, i.e. HTTP 500, except where the view `str()`s it first).
+/// present non-string. Truthy non-strings split two ways because the
+/// downstream Python differs per view: JSON `true` / non-zero numbers
+/// crash `validate_email` (`"@" not in True` → `TypeError`, i.e. 500)
+/// and `zxcvbn` (`TypeError`), while truthy lists/dicts survive the
+/// `in` membership test (`INVALID_EMAIL`, no crash) but still crash
+/// `zxcvbn` (`AttributeError`) and coerce harmlessly through
+/// `force_bytes` in `check_password` (present-but-wrong).
 #[derive(Debug, Clone, PartialEq)]
 enum Field {
     Absent,
     Text(String),
+    /// JSON `true` or a non-zero number.
+    Scalar,
+    /// A truthy JSON array or object.
     Opaque,
 }
 
 fn json_field(json: &Option<Value>, key: &str) -> Option<Field> {
     let value = json.as_ref()?.get(key)?;
     // Python truthiness of `request.data.get(key, False)`: every falsy
-    // JSON value reads as missing; truthy non-strings crash downstream
-    // (`TypeError`, i.e. 500).
+    // JSON value reads as missing.
     Some(match value {
         Value::Null => Field::Absent,
         Value::Bool(value) => {
             if *value {
-                Field::Opaque
+                Field::Scalar
             } else {
                 Field::Absent
             }
@@ -378,7 +505,7 @@ fn json_field(json: &Option<Value>, key: &str) -> Option<Field> {
             if value.as_f64() == Some(0.0) {
                 Field::Absent
             } else {
-                Field::Opaque
+                Field::Scalar
             }
         }
         Value::String(s) if s.is_empty() => Field::Absent,
@@ -576,7 +703,10 @@ fn csrf_cookie_secret(headers: &HeaderMap) -> Option<Result<String, pidash_auth:
 }
 
 /// Request token: the POST field first (POST only), then the
-/// `X-CSRFToken` header (`_check_token`, Django 4.2).
+/// `X-CSRFToken` header (`_check_token`, Django 4.2: `request.POST.get`
+/// or the header, with only a fully-absent token reporting "missing" —
+/// a present-but-empty header value falls into the format gate and
+/// reports "incorrect length").
 fn csrf_request_token(
     data: &BodyData,
     headers: &HeaderMap,
@@ -589,13 +719,18 @@ fn csrf_request_token(
             }
         }
     }
-    match headers
-        .get("x-csrftoken")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned)
-    {
-        Some(token) => (Some(token), "header"),
-        None => (None, "header"),
+    // Duplicate header lines join with `", "` (WSGI `META` semantics),
+    // so a valid token plus an empty twin still fails the format gate
+    // instead of passing on the first line.
+    let values: Vec<&str> = headers
+        .get_all("x-csrftoken")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    if values.is_empty() {
+        (None, "header")
+    } else {
+        (Some(values.join(", ")), "header")
     }
 }
 
@@ -612,7 +747,32 @@ fn header_source_name(source: &str) -> String {
 /// rejection reason. Origin/Referer checks only apply to HTTPS; the
 /// reason never reaches the response body here (the failure page only
 /// reads `root_url`), but the DRF denial echoes it.
-fn check_csrf_token(data: &BodyData, headers: &HeaderMap, is_post: bool) -> Result<(), String> {
+///
+/// The check runs in two phases because DRF's `SessionAuthentication`
+/// reads `request.POST` — and the DRF `request.POST` property parses
+/// the body (`request.py:436 _load_data_and_files` → `_parse`), so a
+/// body-parse failure (400/415) surfaces between the cookie check and
+/// the token comparison: cookie-check → parse → token-check. Anonymous
+/// callers skip both phases (no `enforce_csrf` without a user).
+fn check_csrf_cookie(headers: &HeaderMap) -> Result<String, String> {
+    let secret = match csrf_cookie_secret(headers) {
+        None => return Err("CSRF cookie not set.".to_owned()),
+        Some(Err(error)) => return Err(format!("CSRF cookie {}.", error.reason())),
+        Some(Ok(secret)) => secret,
+    };
+    if let Err(error) = pidash_auth::csrf::check_token_format(&secret) {
+        return Err(format!("CSRF cookie {}.", error.reason()));
+    }
+    Ok(secret)
+}
+
+/// Token comparison over the already-parsed body (runs after
+/// [`read_body`], mirroring `request.POST`-after-`_parse`).
+fn check_csrf_request_token(
+    data: &BodyData,
+    headers: &HeaderMap,
+    is_post: bool,
+) -> Result<(), String> {
     let secret = match csrf_cookie_secret(headers) {
         None => return Err("CSRF cookie not set.".to_owned()),
         Some(Err(error)) => return Err(format!("CSRF cookie {}.", error.reason())),
@@ -625,9 +785,9 @@ fn check_csrf_token(data: &BodyData, headers: &HeaderMap, is_post: bool) -> Resu
     let Some(token) = token else {
         return Err("CSRF token missing.".to_owned());
     };
-    if token.is_empty() {
-        return Err("CSRF token missing.".to_owned());
-    }
+    // A present-but-empty header value is not "missing": it falls into
+    // the format gate below (`_check_token` compares lengths first),
+    // reporting "incorrect length" like Django.
     if let Err(error) = pidash_auth::csrf::check_token_format(&token) {
         return Err(format!(
             "CSRF token from {} {}.",
@@ -830,21 +990,22 @@ async fn change_password(
     let Some(pool) = pool_of(&state) else {
         return server_error();
     };
-    // DRF order: authentication, permission (`IsAuthenticated`),
-    // throttles (default Anon: authenticated callers skip).
+    // DRF order with the CSRF interleave: `SessionAuthentication`
+    // reads `request.POST`, which parses the body between the cookie
+    // check and the token comparison — so cookie-check → parse →
+    // token-check → throttle (skipped: authenticated callers).
     let actor = match authed_actor(&state, &pool, extension.clone()).await {
         Ok(actor) => actor,
         Err(fail) => return actor_fail(fail),
     };
+    if let Err(reason) = check_csrf_cookie(&headers) {
+        return csrf_denied(&reason);
+    }
     let data = match read_body(&headers, &body) {
         Ok(data) => data,
         Err(error) => return error.into_response(),
     };
-    if data_get_raises(&data) {
-        return server_error();
-    }
-    // `SessionAuthentication` CSRF, after authentication like DRF.
-    if let Err(reason) = check_csrf_token(&data, &headers, true) {
+    if let Err(reason) = check_csrf_request_token(&data, &headers, true) {
         return csrf_denied(&reason);
     }
     let peer_addr = peer.0;
@@ -859,14 +1020,19 @@ async fn change_password(
     {
         return throttled(wait);
     }
-    let old = data_field(&data, "old_password");
-    let new = data_field(&data, "new_password");
-    // Non-string values crash `zxcvbn`/`check_password` (`TypeError`,
-    // i.e. 500) everywhere except the falsy-missing branches.
-    if matches!(old, Field::Opaque) || matches!(new, Field::Opaque) {
+    if data_get_raises(&data) {
         return server_error();
     }
-    let old_present = matches!(old, Field::Text(_));
+    let old = data_field(&data, "old_password");
+    let new = data_field(&data, "new_password");
+    // `check_password` coerces non-strings via `force_bytes` without
+    // raising, so a present non-string old password is simply wrong
+    // (`common.py:73-80`); only `zxcvbn(new)` raises on non-strings
+    // (`TypeError`/`AttributeError`, i.e. 500).
+    if matches!(new, Field::Scalar | Field::Opaque) {
+        return server_error();
+    }
+    let old_present = matches!(old, Field::Text(_) | Field::Scalar | Field::Opaque);
     let new_text = match &new {
         Field::Text(text) => Some(text.clone()),
         _ => None,
@@ -957,14 +1123,16 @@ async fn set_password(
         Ok(actor) => actor,
         Err(fail) => return actor_fail(fail),
     };
+    // Cookie-check → parse → token-check → throttle (skipped), mirroring
+    // the `request.POST`-parsing CSRF check (see `check_csrf_cookie`).
+    if let Err(reason) = check_csrf_cookie(&headers) {
+        return csrf_denied(&reason);
+    }
     let data = match read_body(&headers, &body) {
         Ok(data) => data,
         Err(error) => return error.into_response(),
     };
-    if data_get_raises(&data) {
-        return server_error();
-    }
-    if let Err(reason) = check_csrf_token(&data, &headers, true) {
+    if let Err(reason) = check_csrf_request_token(&data, &headers, true) {
         return csrf_denied(&reason);
     }
     let peer_addr = peer.0;
@@ -979,8 +1147,13 @@ async fn set_password(
     {
         return throttled(wait);
     }
+    if data_get_raises(&data) {
+        return server_error();
+    }
     let password = data_field(&data, "password");
-    if matches!(password, Field::Opaque) {
+    // `zxcvbn(password)` raises on every non-string (`TypeError` for
+    // scalars, `AttributeError` for lists/dicts), i.e. 500.
+    if matches!(password, Field::Scalar | Field::Opaque) {
         return server_error();
     }
     let password_text = match &password {
@@ -1157,21 +1330,31 @@ async fn forgot_password(
     headers: HeaderMap,
     peer: Option<std::net::SocketAddr>,
     body: axum::body::Bytes,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     is_space: bool,
 ) -> Response {
     let Some(pool) = pool_of(&state) else {
         return server_error();
     };
-    let data = match read_body(&headers, &body) {
-        Ok(data) => data,
-        Err(error) => return error.into_response(),
-    };
-    if data_get_raises(&data) {
-        return server_error();
-    }
-    // DRF order: authentication (nobody here — callers are anonymous),
-    // permission (`AllowAny`), then `AuthenticationThrottle`.
-    if let Err(wait) = throttle_gate(
+    // DRF order: authentication, permission (`AllowAny`), throttles,
+    // then the handler body parse. `SessionAuthentication` enforces
+    // CSRF for any active session user, even on `AllowAny` views
+    // (`authentication.py:148`); authenticated callers skip
+    // `AuthenticationThrottle`. Unresolvable sessions degrade to
+    // anonymous (Django's `get_user` never raises on a bad cookie).
+    let actor =
+        crate::license::resolve_actor(&pool, state.settings().secret_key.as_bytes(), extension)
+            .await
+            .unwrap_or(None);
+    // Authenticated callers run the parsing CSRF check (cookie-check →
+    // parse → token-check) and skip the throttle; anonymous callers run
+    // the throttle first and parse in the handler below.
+    let authed = actor.is_some();
+    if authed {
+        if let Err(reason) = check_csrf_cookie(&headers) {
+            return csrf_denied(&reason);
+        }
+    } else if let Err(wait) = throttle_gate(
         &state,
         pidash_services::auth_session::AUTHENTICATION_THROTTLE_SCOPE,
         pidash_services::auth_session::AUTHENTICATION_THROTTLE_RATE,
@@ -1181,6 +1364,18 @@ async fn forgot_password(
     .await
     {
         return throttled(wait);
+    }
+    let data = match read_body(&headers, &body) {
+        Ok(data) => data,
+        Err(error) => return error.into_response(),
+    };
+    if authed {
+        if let Err(reason) = check_csrf_request_token(&data, &headers, true) {
+            return csrf_denied(&reason);
+        }
+    }
+    if data_get_raises(&data) {
+        return server_error();
     }
     // Instance gate (`Instance.objects.first()`, `is_setup_done`): a
     // missing row or an unset flag answers INSTANCE_NOT_CONFIGURED.
@@ -1193,12 +1388,15 @@ async fn forgot_password(
     let Ok(smtp) = smtp_configured(&pool, &state.settings().secret_key).await else {
         return server_error();
     };
-    // `validate_email`: the value is `str()`-coerced first, so every
-    // JSON scalar degrades to an invalid email rather than a 500.
+    // `validate_email`: only `ValidationError` is caught
+    // (`app/password_management.py:75-81`). Falsy values and truthy
+    // lists/dicts take the `INVALID_EMAIL` branch (`"@" not in [...]`
+    // is a plain membership test); truthy scalars (`true`, numbers)
+    // raise `TypeError` out of the view, i.e. 500.
     let email = match data_field(&data, "email") {
         Field::Text(value) => value,
-        Field::Absent => String::new(),
-        Field::Opaque => String::new(),
+        Field::Absent | Field::Opaque => String::new(),
+        Field::Scalar => return server_error(),
     };
     let email_valid = crate::license::handlers_auth_forms::email_is_valid(&email);
     let user = match forgot_user_by_email(&pool, &email).await {
@@ -1240,21 +1438,23 @@ async fn forgot_password(
 /// `POST /auth/forgot-password/` (`ForgotPasswordEndpoint`).
 async fn forgot_password_app(
     State(state): State<AppState>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     headers: HeaderMap,
     peer: PeerAddr,
     body: axum::body::Bytes,
 ) -> Response {
-    forgot_password(state, headers, peer.0, body, false).await
+    forgot_password(state, headers, peer.0, body, extension, false).await
 }
 
 /// `POST /auth/spaces/forgot-password/` (`ForgotPasswordSpaceEndpoint`).
 async fn forgot_password_space(
     State(state): State<AppState>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     headers: HeaderMap,
     peer: PeerAddr,
     body: axum::body::Bytes,
 ) -> Response {
-    forgot_password(state, headers, peer.0, body, true).await
+    forgot_password(state, headers, peer.0, body, extension, true).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1307,24 +1507,27 @@ async fn reset_password(
     let Some(pool) = pool_of(&state) else {
         return server_error();
     };
-    // Form only: a JSON body is invisible to `request.POST` and reads as
-    // a missing password below (multipart likewise reads as empty).
-    let data = BodyData {
-        json: None,
-        form: match content_type_of(&headers)
-            .unwrap_or_default()
-            .split(';')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_lowercase()
-            .as_str()
-        {
-            "application/x-www-form-urlencoded" | "" => parse_form(&body),
-            _ => Vec::new(),
-        },
+    // Form only: `request.POST` fills only under a form media type —
+    // a JSON body, a missing content-type, or any other media type
+    // reads as a missing password below — while multipart text fields
+    // parse like the DRF views (a malformed multipart body is a 400,
+    // raised out of Django's own POST parsing).
+    let form = match request_mime(&headers).as_str() {
+        "application/x-www-form-urlencoded" => parse_form(&body),
+        "multipart/form-data" => {
+            let Some(boundary) = multipart_boundary(&headers) else {
+                return BodyError::InvalidJson("missing multipart boundary".to_owned())
+                    .into_response();
+            };
+            match parse_multipart(&body, &boundary) {
+                Ok(form) => form,
+                Err(message) => return BodyError::InvalidJson(message).into_response(),
+            }
+        }
+        _ => Vec::new(),
     };
-    if let Err(reason) = check_csrf_token(&data, &headers, true) {
+    let data = BodyData { json: None, form };
+    if let Err(reason) = check_csrf_request_token(&data, &headers, true) {
         let _ = reason;
         return csrf_failure_page(&base_host_for(&state, false, false));
     }
@@ -1666,6 +1869,8 @@ mod tests {
                 "f": false,
                 "t": true,
                 "nil": null,
+                "list": [1],
+                "dict": {"a": 1},
             })),
             form: Vec::new(),
         };
@@ -1674,10 +1879,14 @@ mod tests {
             Field::Text("x".to_owned())
         );
         assert_eq!(data_field(&json, "new_password"), Field::Absent);
-        assert_eq!(data_field(&json, "n"), Field::Opaque);
+        // Truthy scalars crash `validate_email`/`zxcvbn` (500);
+        // truthy lists/dicts survive the `in` test (400-path).
+        assert_eq!(data_field(&json, "n"), Field::Scalar);
         assert_eq!(data_field(&json, "f"), Field::Absent);
-        assert_eq!(data_field(&json, "t"), Field::Opaque);
+        assert_eq!(data_field(&json, "t"), Field::Scalar);
         assert_eq!(data_field(&json, "nil"), Field::Absent);
+        assert_eq!(data_field(&json, "list"), Field::Opaque);
+        assert_eq!(data_field(&json, "dict"), Field::Opaque);
         assert_eq!(data_field(&json, "missing"), Field::Absent);
         assert!(!data_get_raises(&json));
         // Python-falsy scalars and empties read as missing.
@@ -1706,11 +1915,73 @@ mod tests {
     }
 
     #[test]
+    fn multipart_text_fields_parse_last_wins() {
+        let body = b"--BoUnDaRyStRiNg\r\nContent-Disposition: form-data; name=\"password\"\r\n\r\nsecret123\r\n--BoUnDaRyStRiNg\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--BoUnDaRyStRiNg\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n2\r\n--BoUnDaRyStRiNg--\r\n";
+        let fields = parse_multipart(body, "BoUnDaRyStRiNg").expect("parses");
+        let data = BodyData {
+            json: None,
+            form: fields,
+        };
+        assert_eq!(
+            post_field(&data, "password"),
+            Field::Text("secret123".to_owned())
+        );
+        // Repeated names read the last value, like `QueryDict.get`.
+        assert_eq!(post_field(&data, "a"), Field::Text("2".to_owned()));
+        // File parts are ignored: no file field exists on these forms.
+        let file_body = b"--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"x.bin\"\r\nContent-Type: application/octet-stream\r\n\r\nBYTES\r\n--B--\r\n";
+        assert_eq!(parse_multipart(file_body, "B").expect("parses"), Vec::new());
+        // Malformed bodies error (DRF `ParseError` parity), never empty.
+        assert!(parse_multipart(b"not multipart", "B").is_err());
+        assert!(parse_multipart(
+            b"--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nx\r\n",
+            "B"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn read_body_matches_drf_negotiation() {
+        let json_headers = HeaderMap::from_iter([(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("application/json"),
+        )]);
+        let data = read_body(&json_headers, b"{\"a\": 1}").expect("json parses");
+        assert_eq!(data_field(&data, "a"), Field::Scalar);
+        assert!(read_body(&json_headers, b"{oops").is_err());
+        // A missing or unknown media type matches no parser (415) when
+        // the body is non-empty; an empty body never parses.
+        let bare = HeaderMap::new();
+        assert!(matches!(
+            read_body(&bare, b"{\"a\": 1}"),
+            Err(BodyError::UnsupportedMediaType(_))
+        ));
+        let weird = HeaderMap::from_iter([(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("text/plain"),
+        )]);
+        assert!(matches!(
+            read_body(&weird, b"{\"a\": 1}"),
+            Err(BodyError::UnsupportedMediaType(_))
+        ));
+        assert_eq!(read_body(&bare, b"").expect("empty").json, None);
+        // Multipart without a boundary is a 400, never a 500.
+        let no_boundary = HeaderMap::from_iter([(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("multipart/form-data"),
+        )]);
+        assert!(matches!(
+            read_body(&no_boundary, b"--B\r\n--B--\r\n"),
+            Err(BodyError::InvalidJson(_))
+        ));
+    }
+
+    #[test]
     fn csrf_reasons_match_django_strings() {
         let empty = HeaderMap::new();
         let data = BodyData::default();
         assert_eq!(
-            check_csrf_token(&data, &empty, true),
+            check_csrf_request_token(&data, &empty, true),
             Err("CSRF cookie not set.".to_owned())
         );
         // Malformed cookie secret fails closed at the format gate.
@@ -1720,7 +1991,7 @@ mod tests {
             header::HeaderValue::from_static("csrftoken=short"),
         );
         assert_eq!(
-            check_csrf_token(&data, &bad_cookie, true),
+            check_csrf_request_token(&data, &bad_cookie, true),
             Err("CSRF cookie has incorrect length.".to_owned())
         );
         // Valid secret round-trips through the masked token form.
@@ -1735,7 +2006,7 @@ mod tests {
             "x-csrftoken",
             header::HeaderValue::from_str(&masked).expect("token"),
         );
-        assert_eq!(check_csrf_token(&data, &headers, true), Ok(()));
+        assert_eq!(check_csrf_request_token(&data, &headers, true), Ok(()));
         // A wrong token names the header source like Django.
         headers.insert(
             "x-csrftoken",
@@ -1744,18 +2015,46 @@ mod tests {
             ),
         );
         assert_eq!(
-            check_csrf_token(&data, &headers, true),
+            check_csrf_request_token(&data, &headers, true),
             Err("CSRF token from the 'X-Csrftoken' HTTP header incorrect.".to_owned())
         );
-        // A missing token (header and POST field both empty) is reported.
+        // A missing token (header absent and POST field empty) is reported.
         let mut bare = HeaderMap::new();
         bare.insert(
             header::COOKIE,
             header::HeaderValue::from_str(&format!("csrftoken={secret}")).expect("cookie"),
         );
         assert_eq!(
-            check_csrf_token(&data, &bare, true),
+            check_csrf_request_token(&data, &bare, true),
             Err("CSRF token missing.".to_owned())
+        );
+        // A present-but-empty header value is not "missing": it falls
+        // into the format gate (`incorrect length`, like Django).
+        let mut empty_header = HeaderMap::new();
+        empty_header.insert(
+            header::COOKIE,
+            header::HeaderValue::from_str(&format!("csrftoken={secret}")).expect("cookie"),
+        );
+        empty_header.insert("x-csrftoken", header::HeaderValue::from_static(""));
+        assert_eq!(
+            check_csrf_request_token(&data, &empty_header, true),
+            Err("CSRF token from the 'X-Csrftoken' HTTP header has incorrect length.".to_owned())
+        );
+        // Duplicate header lines join (WSGI `META` semantics): a valid
+        // token plus an empty twin still fails the format gate.
+        let mut duplicated = HeaderMap::new();
+        duplicated.insert(
+            header::COOKIE,
+            header::HeaderValue::from_str(&format!("csrftoken={secret}")).expect("cookie"),
+        );
+        duplicated.insert(
+            "x-csrftoken",
+            header::HeaderValue::from_str(&masked).expect("token"),
+        );
+        duplicated.append("x-csrftoken", header::HeaderValue::from_static(""));
+        assert_eq!(
+            check_csrf_request_token(&data, &duplicated, true),
+            Err("CSRF token from the 'X-Csrftoken' HTTP header has incorrect length.".to_owned())
         );
     }
 

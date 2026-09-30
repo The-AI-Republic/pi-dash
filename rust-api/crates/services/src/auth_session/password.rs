@@ -505,14 +505,22 @@ pub enum UidDecodeError {
     BadUtf8,
 }
 
-/// Decode a uidb64 to the pk string. `binascii.a2b_base64` ignores
-/// non-alphabet bytes, so they are filtered before the length check;
-/// only a `% 4 == 1` remainder (after filtering) fails the decode.
+/// Decode a uidb64 to the pk string (`urlsafe_b64decode` /
+/// `smart_str`). `binascii.a2b_base64` ignores non-alphabet bytes, so
+/// they are filtered before the length check; only a `% 4 == 1`
+/// remainder (after filtering) fails the decode. Like
+/// `urlsafe_b64decode`, the URL-safe pair translates to the standard
+/// pair (`-` → `+`, `_` → `/`) before the standard-alphabet decode, so
+/// `+`/`/` in the input decode rather than error.
 pub fn uidb64_decode(uidb64: &str) -> Result<String, UidDecodeError> {
     let filtered: String = uidb64
         .bytes()
         .filter(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'=' | b'+' | b'/'))
-        .map(|b| b as char)
+        .map(|b| match b {
+            b'-' => '+',
+            b'_' => '/',
+            _ => b as char,
+        })
         .collect();
     if filtered.len() % 4 == 1 {
         return Err(UidDecodeError::BadEncoding);
@@ -522,7 +530,7 @@ pub fn uidb64_decode(uidb64: &str) -> Result<String, UidDecodeError> {
         n => filtered + &"=".repeat(4 - n),
     };
     use base64::Engine;
-    let bytes = base64::engine::general_purpose::URL_SAFE
+    let bytes = base64::engine::general_purpose::STANDARD
         .decode(padded.as_bytes())
         .map_err(|_| UidDecodeError::BadEncoding)?;
     String::from_utf8(bytes).map_err(|_| UidDecodeError::BadUtf8)
