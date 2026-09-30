@@ -9,7 +9,7 @@ area by area; the old apps stay running until each area has moved over.
 The old frontend is a **reference, never a source**: nothing in these trees
 imports `@pi-dash/*`, `apps/web`, `apps/admin`, `apps/space`,
 `desktop-overlay` or the edition overlays. The import-ban lint and the
-boundary check enforce this — see `scripts/check-boundaries.mjs`.
+boundary check enforce this — see `checks/check-boundaries.mjs`.
 
 ## Install
 
@@ -82,7 +82,7 @@ src/
   core/               api/ query/ session/ platform/ edition/ i18n/ theme/ telemetry/
   styles/app.css      Tailwind 4 entry
 e2e/parity/           parity scenarios and drivers (NEWFRONT-19)
-scripts/              check-boundaries.mjs check-headers.mjs check-deps.mjs
+checks/               check-boundaries.mjs check-headers.mjs check-deps.mjs
 LICENSE_HEADER.txt    the ONE file defining the license header (placeholder
                       until NEWFRONT-2 decides; replaced in full by NEWFRONT-22).
                       JSON manifests (package.json, tsconfig, oxlintrc, size-limit,
