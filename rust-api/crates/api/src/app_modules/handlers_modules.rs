@@ -862,18 +862,44 @@ fn invalid_choice_message(value: &Value) -> String {
     format!("\"{}\" is not a valid choice.", py_str(value))
 }
 
-/// One `sort_order` input under DRF `FloatField` (`fields.py:947-954`):
+/// One `sort_order` input under DRF `FloatField` (`fields.py:947-957`):
 /// bools coerce (`float(True)` is `1.0`, verified live), numbers pass
 /// through, strings parse like Python `float()` (surrounding whitespace
-/// allowed); anything else is the caller's `invalid` branch. Returns
-/// `None` only on failure.
+/// allowed, underscores between digits accepted); anything else is the
+/// caller's `invalid` branch. Returns `None` only on failure. The
+/// `MAX_STRING_LENGTH` guard lives with the caller, mirroring DRF's
+/// order (length check runs before parsing).
 fn parse_sort_order_value(value: &Value) -> Option<f64> {
     match value {
         Value::Bool(flag) => Some(if *flag { 1.0 } else { 0.0 }),
         Value::Number(number) => number.as_f64(),
-        Value::String(text) => text.trim().parse::<f64>().ok(),
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if let Ok(parsed) = trimmed.parse::<f64>() {
+                return Some(parsed);
+            }
+            strip_float_underscores(trimmed).and_then(|stripped| stripped.parse::<f64>().ok())
+        }
         _ => None,
     }
+}
+
+/// Python `float()` underscores: each must sit between two ASCII digits
+/// (`float("1_0")` is `10.0`; `"1__0"`, `"_1"`, `"1_"` all fail).
+fn strip_float_underscores(text: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    if !chars.contains(&'_') {
+        return None;
+    }
+    for (index, char) in chars.iter().enumerate() {
+        if *char == '_'
+            && !(matches!(chars.get(index.wrapping_sub(1)), Some(left) if left.is_ascii_digit())
+                && matches!(chars.get(index + 1), Some(right) if right.is_ascii_digit()))
+        {
+            return None;
+        }
+    }
+    Some(chars.iter().filter(|char| **char != '_').collect())
 }
 
 /// Validate the write body (`ModuleWriteSerializer` field rules,
@@ -1023,7 +1049,9 @@ async fn validate_write(
     };
     // `FloatField` without `allow_null`: explicit nulls fail the null
     // branch (verified live against DRF 3.15.2: `This field may not be
-    // null.`), everything else parses per [`parse_sort_order_value`].
+    // null.`); strings over `MAX_STRING_LENGTH` (1000 chars) fail before
+    // parsing (`fields.py:949-950`); everything else parses per
+    // [`parse_sort_order_value`].
     let sort_order = match body.get("sort_order") {
         None => None,
         Some(Value::Null) => {
@@ -1031,6 +1059,14 @@ async fn validate_write(
                 &mut errors,
                 "sort_order",
                 "This field may not be null.".to_owned(),
+            );
+            None
+        }
+        Some(Value::String(text)) if text.chars().count() > 1000 => {
+            push_error(
+                &mut errors,
+                "sort_order",
+                "String value too large.".to_owned(),
             );
             None
         }
@@ -2604,6 +2640,22 @@ mod tests {
             None
         );
         assert_eq!(parse_sort_order_value(&serde_json::json!([1])), None);
+        // Python `float()` accepts underscores between digits
+        // (`float("1_0")` is `10.0`, verified against CPython).
+        assert_eq!(
+            parse_sort_order_value(&serde_json::json!("1_0")),
+            Some(10.0)
+        );
+        assert_eq!(
+            parse_sort_order_value(&serde_json::json!("1_000.5")),
+            Some(1000.5)
+        );
+        assert_eq!(
+            parse_sort_order_value(&serde_json::json!("1__0")),
+            None
+        );
+        assert_eq!(parse_sort_order_value(&serde_json::json!("_1")), None);
+        assert_eq!(parse_sort_order_value(&serde_json::json!("1_")), None);
     }
 
     #[test]
