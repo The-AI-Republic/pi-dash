@@ -36,6 +36,7 @@
 //! Sibling D-16 issues (handlers, guards, queries, tasks) consume these pieces
 //! read-only.
 
+pub mod email;
 pub mod guards;
 pub mod models;
 pub mod queries;
