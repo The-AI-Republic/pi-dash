@@ -20,6 +20,8 @@
 //! this crate owns the mechanism, never task bodies.
 
 pub mod amqp;
+/// Page-view publish envelopes (D-30, PIDASHCONV-293).
+pub mod app_pages;
 /// Assistant turn pipeline + stale-turn sweep (D-06, PIDASHCONV-254).
 pub mod assistant;
 pub mod celery;
