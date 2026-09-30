@@ -462,7 +462,7 @@ pub const LABEL_ESTIMATE_ROW_KEYS: &[&str] = &[
 /// `avatar_url` `Case` (`:176-196`, repeated `:300-315`): the asset URL
 /// when `avatar_asset` is set, else the raw `avatar` field, else NULL.
 pub fn avatar_url_case_sql() -> String {
-    "CASE WHEN assignees.avatar_asset IS NOT NULL THEN CONCAT('/api/assets/v2/static/', assignees.avatar_asset, '/') WHEN assignees.avatar_asset IS NULL THEN assignees.avatar ELSE NULL END".to_owned()
+    "CASE WHEN assignees.avatar_asset_id IS NOT NULL THEN CONCAT('/api/assets/v2/static/', assignees.avatar_asset_id, '/') WHEN assignees.avatar_asset_id IS NULL THEN assignees.avatar ELSE NULL END".to_owned()
 }
 
 /// Estimate-distribution sums (`:203-217`, `:246-260`): total plus
@@ -794,6 +794,14 @@ mod tests {
         assert!(distribution_count_sql(Some(true)).contains("COUNT(issues.id)"));
         assert!(avatar_url_case_sql().contains("CONCAT('/api/assets/v2/static/'"));
         assert!(avatar_url_case_sql().contains("THEN assignees.avatar ELSE NULL END"));
+        // Django FK column is `avatar_asset_id`; bare `avatar_asset` does not exist.
+        assert!(avatar_url_case_sql().contains("assignees.avatar_asset_id"));
+        assert!(
+            !avatar_url_case_sql()
+                .replace("avatar_asset_id", "")
+                .contains("avatar_asset"),
+            "bare avatar_asset column"
+        );
         let scope = transfer_distribution_scope_where();
         assert!(scope.contains(":cycle_id"));
         assert!(scope.contains("issue_cycle_deleted_at IS NULL"));

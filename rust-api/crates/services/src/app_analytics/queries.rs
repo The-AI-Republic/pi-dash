@@ -513,9 +513,9 @@ pub fn base_label_details_sql(filters_sql: &str) -> String {
 pub fn base_assignee_details_sql(filters_sql: &str) -> String {
     format!(
         "SELECT DISTINCT ON (\"{USER_TABLE}\".\"id\") \"{USER_TABLE}\".\"id\" AS \"assignees__id\", \
-         CASE WHEN \"{USER_TABLE}\".\"avatar_asset\" IS NOT NULL \
-         THEN CONCAT('/api/assets/v2/static/', \"{USER_TABLE}\".\"avatar_asset\", '/') \
-         WHEN \"{USER_TABLE}\".\"avatar_asset\" IS NULL THEN \"{USER_TABLE}\".\"avatar\" \
+         CASE WHEN \"{USER_TABLE}\".\"avatar_asset_id\" IS NOT NULL \
+         THEN CONCAT('/api/assets/v2/static/', \"{USER_TABLE}\".\"avatar_asset_id\", '/') \
+         WHEN \"{USER_TABLE}\".\"avatar_asset_id\" IS NULL THEN \"{USER_TABLE}\".\"avatar\" \
          ELSE NULL END AS \"assignees__avatar_url\", \
          \"{USER_TABLE}\".\"display_name\" AS \"assignees__display_name\", \
          \"{USER_TABLE}\".\"first_name\" AS \"assignees__first_name\", \
@@ -525,7 +525,7 @@ pub fn base_assignee_details_sql(filters_sql: &str) -> String {
          ON (\"{ISSUE_TABLE}\".\"id\" = \"{ISSUE_ASSIGNEE_TABLE}\".\"issue_id\") \
          LEFT OUTER JOIN \"{USER_TABLE}\" \
          ON (\"{ISSUE_ASSIGNEE_TABLE}\".\"assignee_id\" = \"{USER_TABLE}\".\"id\"){} \
-         AND (\"{USER_TABLE}\".\"avatar\" IS NOT NULL OR \"{USER_TABLE}\".\"avatar_asset\" IS NOT NULL)) \
+         AND (\"{USER_TABLE}\".\"avatar\" IS NOT NULL OR \"{USER_TABLE}\".\"avatar_asset_id\" IS NOT NULL) \
          ORDER BY \"{USER_TABLE}\".\"id\" ASC",
         workspace_scope().replace("{filters}", filters_sql)
     )
@@ -620,9 +620,9 @@ pub fn group_list(groups: &[&str]) -> String {
 /// (`created_by__avatar_url` / `assignees__avatar_url`).
 pub fn avatar_case_sql(user_alias: &str, out_alias: &str) -> String {
     format!(
-        "CASE WHEN {user_alias}.\"avatar_asset\" IS NOT NULL \
-         THEN CONCAT('/api/assets/v2/static/', {user_alias}.\"avatar_asset\", '/') \
-         WHEN {user_alias}.\"avatar_asset\" IS NULL THEN {user_alias}.\"avatar\" \
+        "CASE WHEN {user_alias}.\"avatar_asset_id\" IS NOT NULL \
+         THEN CONCAT('/api/assets/v2/static/', {user_alias}.\"avatar_asset_id\", '/') \
+         WHEN {user_alias}.\"avatar_asset_id\" IS NULL THEN {user_alias}.\"avatar\" \
          ELSE NULL END AS \"{out_alias}\""
     )
 }
@@ -1265,7 +1265,7 @@ pub fn project_assignee_stats_sql(
          COUNT(DISTINCT \"issues\".\"id\") FILTER (WHERE \"states\".\"group\" = 'unstarted') AS \"un_started_work_items\", \
          COUNT(DISTINCT \"issues\".\"id\") FILTER (WHERE \"states\".\"group\" = 'started') AS \"started_work_items\" \
          FROM \"issues\" WHERE ({scope}) \
-         GROUP BY \"users\".\"display_name\", \"users\".\"id\", \"users\".\"avatar\", \"users\".\"avatar_asset\" \
+         GROUP BY \"users\".\"display_name\", \"users\".\"id\", \"users\".\"avatar\", \"users\".\"avatar_asset_id\" \
          ORDER BY \"display_name\""
     )
 }
@@ -1615,6 +1615,30 @@ mod tests {
         assert!(sql.contains("\"users\".\"id\" IS NOT NULL"));
         assert!(sql.contains("AS \"assignees__avatar_url\""));
         assert!(sql.contains("LIMIT 5"));
+    }
+
+    #[test]
+    fn avatar_columns_use_fk_id_column() {
+        // Django FK `avatar_asset` lives in `users.avatar_asset_id`
+        // (`db/models/user.py:69`); the bare `avatar_asset` column does not exist.
+        for sql in [
+            avatar_case_sql("\"users\"", "created_by__avatar_url"),
+            base_assignee_details_sql("TRUE"),
+            project_assignee_stats_sql(SCOPE, "$2", None),
+        ] {
+            assert!(sql.contains("avatar_asset_id"), "missing FK column: {sql}");
+            assert!(
+                !sql.replace("avatar_asset_id", "").contains("avatar_asset"),
+                "bare avatar_asset column: {sql}"
+            );
+            // PIDASHCONV-498: the Q-01f guard once carried an extra `)`,
+            // unparseable at execution though all `contains` checks passed.
+            assert_eq!(
+                sql.matches('(').count(),
+                sql.matches(')').count(),
+                "unbalanced parens: {sql}"
+            );
+        }
     }
 
     #[test]
