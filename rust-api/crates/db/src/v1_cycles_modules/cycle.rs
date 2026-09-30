@@ -11,14 +11,18 @@
 //!
 //! Fixture (FX-CYCMOD-01):
 //! `rust-api/fixtures/v1_cycles_modules/models/cycle.columns.json`.
-//! Column order in each `COLUMNS` const follows Django `_meta` field
-//! order as recorded there: the 8 inherited audit/project columns first
-//! (`id`, `created_at`, `updated_at`, `created_by_id`, `updated_by_id`,
-//! `deleted_at`, `project_id`, `workspace_id`, from `BaseModel` at
-//! `db/models/base.py:17-21`, `TimeAuditModel`/`UserAuditModel` at
-//! `db/mixins.py:19-44`, `SoftDeleteModel` at `db/mixins.py:64`, and
+//! Column order in each `COLUMNS` const: the 8 inherited audit/project
+//! columns first (`id`, `created_at`, `updated_at`, `created_by_id`,
+//! `updated_by_id`, `deleted_at`, `project_id`, `workspace_id`, from
+//! `BaseModel` at `db/models/base.py:17-21`, `TimeAuditModel`/`UserAuditModel`
+//! at `db/mixins.py:19-44`, `SoftDeleteModel` at `db/mixins.py:64`, and
 //! `ProjectBaseModel` at `db/models/project.py:302-311`), then the model
-//! fields in declaration order. FK entries use the Django attnames
+//! fields in declaration order as recorded in the fixture. The inherited
+//! prefix is `id`-first by family convention (same prefix as the D-27
+//! `app_cycles` port of these tables and the D-02 `space` port): live
+//! `_meta` reports the same 8 columns with `id` sixth, so membership —
+//! not ordinal position — is the contract against Django. FK entries use
+//! the Django attnames
 //! (`project_id`, `workspace_id`, `owned_by_id`, `issue_id`, `cycle_id`,
 //! `user_id`). Every application-level default below is Django-side (the
 //! live tables carry no `column_default`); Rust inserts must supply these
