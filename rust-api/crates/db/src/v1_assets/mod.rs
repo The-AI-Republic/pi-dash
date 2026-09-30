@@ -11,6 +11,8 @@
 //!   enums, row structs, and the `Sticky.save` helpers (PIDASHCONV-404).
 //! * [`entities`] — generated HTML5 reference table backing
 //!   [`model::sticky::unescape`]; do not hand-edit.
+//! * [`intake_queries`] — intake queryset reads (PIDASHCONV-411,
+//!   fixture fx-q-intake).
 //!
 //! Sources (`apps/api/`): `pi_dash/db/models/asset.py:28-110`
 //! (`FileAsset`, `EntityTypeContext`, `asset_url`); `pi_dash/db/models`
@@ -46,4 +48,5 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod entities;
+pub mod intake_queries;
 pub mod model;
