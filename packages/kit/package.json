@@ -1,7 +1,7 @@
 {
   "name": "@pidash/kit",
   "version": "0.0.0",
-  "description": "Pi Dash design system for the new frontend. Empty v0 scaffold from NEWFRONT-12; components land in NEWFRONT-16.",
+  "description": "Pi Dash design system for the new frontend: tokens plus generic UI primitives on Base UI and Tailwind 4.",
   "files": [
     "dist"
   ],
@@ -9,13 +9,38 @@
   "main": "./dist/index.mjs",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "default": "./dist/index.mjs"
+    },
+    "./tokens.css": "./dist/tokens.css",
+    "./kit.css": "./dist/kit.css"
+  },
   "scripts": {
-    "build": "tsdown src/index.ts --dts --format esm",
+    "build": "tsdown src/index.ts --dts --format esm && tailwindcss -i src/kit.css -o dist/kit.css && cp src/tokens.css dist/tokens.css",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint --deny-warnings",
-    "test": "vitest run"
+    "test": "vitest run",
+    "stories": "ladle serve --port 61000",
+    "stories:build": "ladle build"
+  },
+  "dependencies": {
+    "@base-ui-components/react": "1.0.0-rc.0",
+    "@tanstack/react-virtual": "^3.14.0",
+    "lucide-react": "^1.49.0"
   },
   "devDependencies": {
+    "@ladle/react": "^5.1.1",
+    "@tailwindcss/cli": "^4.1.12",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.3.1",
+    "@testing-library/user-event": "^14.5.2",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "jsdom": "^26.1.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
     "tsdown": "catalog:",
     "typescript": "catalog:",
     "vitest": "^3.2.0"

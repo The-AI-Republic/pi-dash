@@ -19,5 +19,5 @@
     "noEmit": true,
     "esModuleInterop": true
   },
-  "include": ["src", "vitest.config.ts"]
+  "include": ["src", ".ladle", "vitest.config.ts"]
 }

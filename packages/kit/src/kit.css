@@ -1,0 +1,82 @@
+/* Copyright (c) Pi Dash contributors. All rights reserved. */
+/* License for this tree is pending the H-license decision (NEWFRONT-2, */
+/* owner: human). This placeholder grants no license and must be replaced */
+/* with the final header text by F-11 (NEWFRONT-22). */
+/* Compiled component styles for @pidash/kit. Tailwind scans the kit */
+/* sources at build time and emits the utilities the components use. Type */
+/* sizes and shadows read the tokens.css variables, which consumers import */
+/* separately, so the type scale stays single-sourced in the tokens. */
+@import "tailwindcss";
+
+/* Type scale from the H-visual decision. */
+@utility text-caption {
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-height);
+}
+
+@utility text-meta {
+  font-size: var(--text-meta-size);
+  line-height: var(--text-meta-height);
+}
+
+@utility text-body {
+  font-size: var(--text-base-size);
+  line-height: var(--text-base-height);
+}
+
+@utility text-emphasis {
+  font-size: var(--text-emphasis-size);
+  line-height: var(--text-emphasis-height);
+}
+
+@utility text-h3 {
+  font-size: var(--text-h3-size);
+  line-height: var(--text-h3-height);
+  font-weight: 600;
+}
+
+@utility text-h2 {
+  font-size: var(--text-h2-size);
+  line-height: var(--text-h2-height);
+  font-weight: 600;
+}
+
+@utility text-h1 {
+  font-size: var(--text-h1-size);
+  line-height: var(--text-h1-height);
+  font-weight: 600;
+}
+
+/* Elevation from the tokens: overlays lift, lists stay flat. */
+@utility shadow-popover {
+  box-shadow: var(--shadow-popover);
+}
+
+@utility shadow-dialog {
+  box-shadow: var(--shadow-dialog);
+}
+
+/* Skeleton shimmer. Duration honors the motion token. */
+@theme {
+  --animate-shimmer: shimmer 1.6s linear infinite;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* No motion under prefers-reduced-motion (H-visual behavior rule). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0ms !important;
+  }
+}
