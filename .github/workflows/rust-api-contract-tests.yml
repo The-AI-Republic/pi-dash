@@ -260,7 +260,11 @@ jobs:
         # without this the django plugin tries to import pi_dash from this dir
         # and collection fails before any test runs. The oracle never touches
         # Django (wire format + DB diff + sinks only).
-        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py
+        # Replay suites (tasks_*/test_rust_replay.py) need the Rust-owned
+        # rust_job_queue table and the Rust worker, neither of which exists
+        # in this Django-only job — they have their own *-rust jobs. Exclude
+        # by glob so future replay suites are skipped here too.
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay.py' tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py
 
       - name: Upload service logs on failure
         if: failure()
