@@ -27,7 +27,8 @@
     "paths": {
       "@pidash/edition": ["./src/core/edition/oss.ts"],
       "@pidash/platform-target": ["./src/core/platform/web.ts"],
-      "@pidash/api-client": ["../../packages/api-client/src/index.ts"]
+      "@pidash/api-client": ["../../packages/api-client/src/index.ts"],
+      "@pidash/kit": ["../../packages/kit/src/index.ts"]
     }
   },
   "include": ["src", "vite.config.ts", "vitest.config.ts"]

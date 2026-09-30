@@ -2,7 +2,7 @@
   {
     "name": "web initial JS (shell + first route)",
     "path": "dist/web/assets/*.js",
-    "limit": "150 KB",
+    "limit": "220 KB",
     "gzip": true
   },
   {

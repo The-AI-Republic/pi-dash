@@ -5,36 +5,28 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { RouterProvider, createRouter } from "@tanstack/react-router";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { createClient } from "@pidash/api-client";
 
+import { createAppClient } from "./core/api/index.js";
+import { platform } from "./core/platform/index.js";
+import { createCachePersistor, createQueryClient, persistReferenceOnly } from "./core/query/index.js";
 import { routeTree } from "./routeTree.gen";
 import { PIDASH_TARGET } from "./target";
-import { platform, toApiTransport } from "./core/platform/index.js";
-import { edition } from "./core/edition/index.js";
-import {
-  createCachePersistor,
-  createQueryClient,
-  persistEverything,
-  persistReferenceOnly,
-} from "./core/query/index.js";
-import { createSessionMiddleware, setSessionClient } from "./core/session/index.js";
 import "./styles/app.css";
 
-// Bootstrap order (Architecture): platform → edition → queryClient → router.
+// Bootstrap order: platform → HTTP client (also points the session hooks
+// at it) → query client (+ cache restore) → router.
+const apiClient = createAppClient();
 const queryClient = createQueryClient();
-const apiClient = createClient({
-  baseUrl: "",
-  transport: toApiTransport(platform),
-  middleware: [...(edition.api ?? []), createSessionMiddleware()],
-});
-setSessionClient(apiClient);
 const persistor = createCachePersistor(queryClient, platform.storage, {
-  shouldPersist: platform.kind === "desktop" ? persistEverything : persistReferenceOnly,
+  shouldPersist: PIDASH_TARGET === "desktop" ? () => true : persistReferenceOnly,
 });
-void persistor.restore();
+await persistor.restore().catch(() => undefined);
 
-const router = createRouter({ routeTree });
+const router = createRouter({
+  routeTree,
+  context: { queryClient, apiClient },
+  defaultPreload: "intent",
+});
 
 declare module "@tanstack/react-router" {
   interface Register {
@@ -47,9 +39,8 @@ if (rootElement === null) {
   throw new Error("Missing #root element");
 }
 
-// PIDASH_TARGET selects core/platform at build time (F-04 expands this into
-// the web/desktop platform modules). Logged once so smoke tests can assert
-// which bundle is being served.
+// PIDASH_TARGET selects core/platform at build time. Logged once so smoke
+// tests can assert which bundle is being served.
 if (import.meta.env.DEV) {
   // eslint-disable-next-line no-console
   console.info(`[web_new] target=${PIDASH_TARGET}`);
@@ -57,8 +48,6 @@ if (import.meta.env.DEV) {
 
 createRoot(rootElement).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
-    </QueryClientProvider>
+    <RouterProvider router={router} />
   </StrictMode>
 );

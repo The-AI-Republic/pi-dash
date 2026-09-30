@@ -17,8 +17,18 @@ export type {
   TransportInit,
   TransportResponse,
 } from "./client.js";
-export { CsrfTokenResponse, getCsrfToken, signIn } from "./contracts/auth.js";
-export type { SignInInput, SignInResult } from "./contracts/auth.js";
+export {
+  CsrfTokenResponse,
+  EmailCheckResponse,
+  MagicGenerateResponse,
+  checkEmail,
+  generateMagicCode,
+  getCsrfToken,
+  signIn,
+  signInWithMagicCode,
+  signOut,
+} from "./contracts/auth.js";
+export type { MagicSignInInput, SignInInput, SignInResult, SignOutResult } from "./contracts/auth.js";
 export { Me, MeSettings, MeSettingsWorkspace, UserLite, getMe, getMeSettings } from "./contracts/users.js";
 export { Workspace, WorkspaceList, WorkspaceLite, listWorkspaces } from "./contracts/workspaces.js";
 export { Project, ProjectList, ProjectLite, listProjects } from "./contracts/projects.js";

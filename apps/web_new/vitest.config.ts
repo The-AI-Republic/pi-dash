@@ -10,14 +10,19 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   resolve: {
-    alias: {
-      "@pidash/api-client": resolve(here, "../../packages/api-client/src/index.ts"),
-      "@pidash/edition": resolve(here, "src/core/edition/oss.ts"),
-      "@pidash/platform-target": resolve(here, "src/core/platform/web.ts"),
-    },
+    alias: [
+      { find: "@pidash/api-client", replacement: resolve(here, "../../packages/api-client/src/index.ts") },
+      { find: /^@pidash\/kit$/, replacement: resolve(here, "../../packages/kit/src/index.ts") },
+      { find: "@pidash/edition", replacement: resolve(here, "src/core/edition/oss.ts") },
+      { find: "@pidash/platform-target", replacement: resolve(here, "src/core/platform/web.ts") },
+    ],
   },
   test: {
+    // Node by default: F-04's platform codec test compares byte buffers
+    // across realms, which jsdom breaks. DOM suites opt into jsdom with a
+    // `// @vitest-environment jsdom` pragma on their first line.
     environment: "node",
+    setupFiles: ["./src/test-setup.ts"],
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
   },
 });

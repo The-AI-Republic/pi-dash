@@ -5,10 +5,3 @@
 @import "tailwindcss";
 @import "@pidash/kit/tokens.css";
 @import "@pidash/kit/kit.css";
-
-.pidash-scaffold {
-  font-family: Inter, system-ui, sans-serif;
-  margin: 0 auto;
-  max-width: 60rem;
-  padding: 2rem;
-}

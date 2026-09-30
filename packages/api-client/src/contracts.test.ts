@@ -7,7 +7,7 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "./errors.js";
 import { createClient } from "./client.js";
-import { getCsrfToken, signIn } from "./contracts/auth.js";
+import { checkEmail, generateMagicCode, getCsrfToken, signIn, signInWithMagicCode, signOut } from "./contracts/auth.js";
 import { getMe, getMeSettings } from "./contracts/users.js";
 import { listWorkspaces } from "./contracts/workspaces.js";
 import { listProjects } from "./contracts/projects.js";
@@ -67,6 +67,100 @@ describe("auth contracts", () => {
       code: "USER_DOES_NOT_EXIST",
       message: "USER_DOES_NOT_EXIST",
     });
+  });
+
+  it("routes the email check to the password or code step", async () => {
+    const seen: string[] = [];
+    const transport = recordingTransport((call) => {
+      seen.push(call.url);
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      return fakeResponse({ body: JSON.stringify({ existing: true, status: "MAGIC_CODE" }) });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await checkEmail(client, "ada@example.com");
+    expect(parsed).toEqual({ existing: true, status: "MAGIC_CODE" });
+    const checkCall = transport.calls.find((call) => call.url.endsWith("/auth/email-check/"));
+    expect(checkCall?.init.method).toBe("POST");
+    expect(checkCall?.init.body).toBe(JSON.stringify({ email: "ada@example.com" }));
+    expect(seen.some((url) => url.endsWith("/auth/get-csrf-token/"))).toBe(true);
+  });
+
+  it("rejects an email-check answer with an unknown mode", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json({ existing: false, status: "OAUTH" }) });
+    const error = await checkEmail(client, "new@example.com").catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("parses the magic-generate key", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ body: JSON.stringify({ key: "magic_ada@example.com" }) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await generateMagicCode(client, "ada@example.com");
+    expect(parsed).toEqual({ key: "magic_ada@example.com" });
+    expect(transport.calls.some((call) => call.url.endsWith("/auth/magic-generate/"))).toBe(true);
+  });
+
+  it("reads magic sign-in from the same redirect convention", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 200, body: "<html>", url: "https://app.test/acme" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const result = await signInWithMagicCode(client, { email: "ada@example.com", code: "123456" });
+    expect(result).toEqual({ ok: true, location: "https://app.test/acme" });
+    const codeCall = transport.calls.find((call) => call.url.endsWith("/auth/magic-sign-in/"));
+    expect(codeCall?.init.headers["Content-Type"]).toBe("application/x-www-form-urlencoded");
+    expect(codeCall?.init.body).toContain("code=123456");
+  });
+
+  it("reads magic sign-in failure from error query params", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({
+            status: 200,
+            body: "<html>",
+            url: "https://app.test/sign-in?error_code=INVALID_MAGIC_CODE_SIGN_IN&error_message=INVALID_MAGIC_CODE_SIGN_IN",
+          })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const result = await signInWithMagicCode(client, { email: "ada@example.com", code: "000000" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("INVALID_MAGIC_CODE_SIGN_IN");
+  });
+
+  it("posts sign-out and reports the landing URL", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 200, body: "<html>", url: "https://app.test/sign-in" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const result = await signOut(client);
+    expect(result).toEqual({ location: "https://app.test/sign-in" });
+    expect(transport.calls.some((call) => call.url.endsWith("/auth/sign-out/"))).toBe(true);
+  });
+
+  it("refetches the CSRF token after session-changing flows", async () => {
+    // Django rotates the CSRF secret on login; the client must not reuse
+    // the pre-login token afterwards (the server answers a bespoke 200
+    // failure page instead of a 403, so reuse fails silently).
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 200, body: "<html>", url: "https://app.test/acme" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await signIn(client, { email: "a@b.c", password: "secret" });
+    await signOut(client);
+    const csrfCalls = transport.calls.filter((call) => call.url.endsWith("/auth/get-csrf-token/"));
+    expect(csrfCalls).toHaveLength(2);
   });
 });
 
