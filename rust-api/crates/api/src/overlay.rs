@@ -198,7 +198,9 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // `app_assets`; D-34 notification viewset core
         // (PIDASHCONV-301) in `app_notifications`; D-27 archived
         // cycles + archive/unarchive (PIDASHCONV-377) in
-        // `app_cycles`; D-35 workspace advance analytics
+        // `app_cycles`; D-28 module CRUD (PIDASHCONV-391) in
+        // `app_modules` (siblings 397/407 extend that merge, keeping
+        // both sides); D-35 workspace advance analytics
         // (PIDASHCONV-414) + analytic handlers-B — saved-analytic-view,
         // export-analytics, default-analytics, project-stats
         // (PIDASHCONV-399; gates: PIDASHCONV-358) in `app_analytics`;
@@ -211,6 +213,7 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
             .merge(crate::app_integrations::routes())
             .merge(crate::app_notifications::routes())
             .merge(crate::app_cycles::routes())
+            .merge(crate::app_modules::routes())
             .merge(crate::app_assets::routes())
             .merge(crate::app_analytics::routes())
             .merge(crate::app_pages::routes()),
