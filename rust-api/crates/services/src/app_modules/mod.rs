@@ -8,6 +8,10 @@
 //!   `ModuleIssueSerializer` (`:137-153`). Sibling issue PIDASHCONV-313
 //!   appends part B (`module.py:156-280`: link / detail / userprops) to
 //!   [`shape`].
+//! * [`models`] — models A (PIDASHCONV-355): `ModuleStatus`, `Module`
+//!   and `ModuleMember` (`db/models/module.py:58-151`) as structs +
+//!   column defs, replaying FX-MOD-01. Sibling issue PIDASHCONV-363
+//!   appends models B (`:152-217`) in its own sections.
 //!
 //! Wiring note: the crate root declares `pub mod app_modules;` (seam for
 //! this issue's new files); every file under this module is new.
@@ -17,6 +21,7 @@
 //! update soft-deletes instead of hard-deleting; duplicate-name checks
 //! race outside a transaction; `validate` only sees input dates, so a
 //! partial update carrying one date skips the start/target check.
+pub mod models;
 pub mod shape;
 
 pub use shape::{
