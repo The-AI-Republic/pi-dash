@@ -241,15 +241,17 @@ const ESTIMATE_TYPE_SQL: &str = "SELECT EXISTS(SELECT 1 FROM projects p \
 
 /// Cycle row plus the `total_issues` annotation (`base.py:791-805`):
 /// distinct bridged issues that are not archived, not draft, not
-/// deleted, on a live bridge row. No `deleted_at` predicate on the
+/// deleted, on a live bridge row. The annotation join carries none of
+/// the `IssueManager` excludes (Django never applies a related
+/// model's default manager across a join): no triage predicate, no
+/// project-archive predicate — unlike `DIST_SCOPE_SQL` below, which
+/// queries through `issue_objects`. No `deleted_at` predicate on the
 /// cycle itself (plain manager — shared quirk with progress B1).
 const CYCLE_SQL: &str = "SELECT c.id, c.start_date, c.end_date, c.progress_snapshot, \
      (SELECT COUNT(DISTINCT ci.issue_id) FROM cycle_issues ci \
       JOIN issues i ON i.id = ci.issue_id AND i.deleted_at IS NULL \
         AND i.archived_at IS NULL AND i.is_draft = FALSE \
-      JOIN projects p ON p.id = i.project_id AND p.archived_at IS NULL \
-      LEFT JOIN states s ON s.id = i.state_id \
-      WHERE ci.cycle_id = c.id AND ci.deleted_at IS NULL AND NOT (s.group = 'triage')) AS total_issues \
+      WHERE ci.cycle_id = c.id AND ci.deleted_at IS NULL) AS total_issues \
      FROM cycles c \
      JOIN workspaces w ON w.id = c.workspace_id AND w.slug = $1 \
      WHERE c.project_id = $2 AND c.id = $3";
@@ -1043,5 +1045,31 @@ mod tests {
         assert!(BURNDOWN_POINTS_SQL.contains("AT TIME ZONE 'UTC'"));
         assert!(CYCLE_SQL.contains("COUNT(DISTINCT ci.issue_id)"));
         assert!(ESTIMATE_TYPE_SQL.contains("e.type = 'points'"));
+    }
+
+    #[test]
+    fn cycle_total_annotation_carries_no_manager_excludes() {
+        // `base.py:792-804`: the `total_issues` annotation filters only
+        // archived/draft/deleted (+ live bridge). The join is not
+        // queried through `issue_objects`, so no triage and no
+        // project-archive predicate — unlike DIST_SCOPE_SQL.
+        let (subquery, _) = CYCLE_SQL.split_once("AS total_issues").expect("alias");
+        for fragment in [
+            "i.deleted_at IS NULL",
+            "i.archived_at IS NULL",
+            "i.is_draft = FALSE",
+            "ci.deleted_at IS NULL",
+        ] {
+            assert!(
+                subquery.contains(fragment),
+                "total_issues subquery must carry {fragment}"
+            );
+        }
+        for fragment in ["triage", "p.archived_at", "JOIN projects", "JOIN states"] {
+            assert!(
+                !subquery.contains(fragment),
+                "total_issues subquery must not carry {fragment}"
+            );
+        }
     }
 }
