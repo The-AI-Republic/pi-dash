@@ -800,13 +800,15 @@ struct ParsedRepository {
 
 const GITHUB_HOST: &str = "https://github.com";
 
-/// Strip one trailing `.git` the way `(?:\.git)?` does: the lazy `name`
-/// segment only yields it when the stem stays non-empty, so `o/.git`
-/// keeps the name `.git` instead of vanishing.
-fn strip_git_suffix_once(rest: &str) -> &str {
-    match rest.strip_suffix(".git") {
+/// Strip one trailing `.git` the way `(?:\.git)?` does next to a lazy `name`
+/// segment: the suffix only strips when the stem stays non-empty, so a name
+/// of exactly `.git` is kept. Callers split `<owner>/<name>` first and apply
+/// this to the name segment only (verified against the real regexes:
+/// `https://github.com/o/.git` parses as `("o", ".git")`).
+fn strip_git_suffix_once(name: &str) -> &str {
+    match name.strip_suffix(".git") {
         Some(stem) if !stem.is_empty() => stem,
-        _ => rest,
+        _ => name,
     }
 }
 
@@ -824,15 +826,11 @@ fn parse_github_repo_url(url: &str) -> Option<(String, String)> {
         // SSH grammar has no trailing-slash allowance (`$` right after
         // the optional suffix); `[^/\s]` forbids all whitespace.
         if rest.contains('/') && !rest.contains(char::is_whitespace) {
-            let rest = strip_git_suffix_once(rest);
-            if rest.ends_with('/') {
-                return None;
-            }
             let (owner, name) = rest.split_once('/')?;
             if owner.is_empty() || name.is_empty() || name.contains('/') {
                 return None;
             }
-            return Some((owner.to_owned(), name.to_owned()));
+            return Some((owner.to_owned(), strip_git_suffix_once(name).to_owned()));
         }
     }
     None
@@ -844,7 +842,6 @@ fn parse_github_repo_url(url: &str) -> Option<(String, String)> {
 /// anchors the end (`/?$`), so `/tree/main` never matches.
 fn split_owner_name(rest: &str) -> Option<(String, String)> {
     let rest = rest.strip_suffix('/').unwrap_or(rest);
-    let rest = strip_git_suffix_once(rest);
     if rest.is_empty() || rest.contains(char::is_whitespace) {
         return None;
     }
@@ -852,7 +849,7 @@ fn split_owner_name(rest: &str) -> Option<(String, String)> {
     if owner.is_empty() || name.is_empty() || name.contains('/') {
         return None;
     }
-    Some((owner.to_owned(), name.to_owned()))
+    Some((owner.to_owned(), strip_git_suffix_once(name).to_owned()))
 }
 
 /// `parse_repo_url` for the GitHub adapter (`adapters/github.py:55-69`):
@@ -945,8 +942,11 @@ fn parse_gitlab_url(url: &str, allowed_hosts: &[String]) -> Option<ParsedReposit
     }
     // URL form (`gitlab.py:236-254`): scheme http/https/ssh, userinfo
     // stripped before the allowlist lookup, `/-/` suffixes dropped.
+    // `urlparse` lowercases the scheme before the membership test, so the
+    // comparison is case-insensitive (`HTTP://gitlab.com/g/r` parses).
     let (scheme, remainder) = candidate.split_once("://")?;
-    if !matches!(scheme, "http" | "https" | "ssh") {
+    let scheme_lower = scheme.to_lowercase();
+    if !matches!(scheme_lower.as_str(), "http" | "https" | "ssh") {
         return None;
     }
     let after_scheme = remainder;
@@ -1083,6 +1083,20 @@ fn credential_token(credential: &serde_json::Map<String, serde_json::Value>) -> 
         .and_then(serde_json::Value::as_str)
         .unwrap_or("")
         .to_owned()
+}
+
+/// Python truthiness for a decoded JSON value, for the `X or ""` / `if X`
+/// branches (`git.py:160`, `services.py:160`): DRF decodes numbers to
+/// int/float, so only an exact zero is falsy.
+fn json_is_falsy(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => true,
+        serde_json::Value::Bool(flag) => !flag,
+        serde_json::Value::Number(number) => number.as_f64().is_some_and(|n| n == 0.0),
+        serde_json::Value::String(text) => text.is_empty(),
+        serde_json::Value::Array(items) => items.is_empty(),
+        serde_json::Value::Object(fields) => fields.is_empty(),
+    }
 }
 
 /// GitHub `_token` (`github.py:87-94`): the Fernet-decrypted value is
@@ -1467,17 +1481,26 @@ async fn post_bind(
         Some(map) => map,
         None => return RepoDenial::ServerError.into_response(),
     };
-    let repo_url = map
-        .get("repo_url")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_owned();
+    // `(request.data.get("repo_url") or "").strip()` (`git.py:160`): only
+    // strings survive — falsy values collapse to the blank check, while a
+    // truthy non-string has no `.strip` (`AttributeError` → base 500).
+    let repo_url = match map.get("repo_url") {
+        Some(serde_json::Value::String(raw)) => raw.trim().to_owned(),
+        Some(value) if !json_is_falsy(value) => {
+            return RepoDenial::ServerError.into_response();
+        }
+        _ => String::new(),
+    };
     if repo_url.is_empty() {
         return RepoDenial::error(StatusCode::BAD_REQUEST, "repo_url is required").into_response();
     }
+    // `resolve_provider_account_repository(..., provider_account_id=...)`
+    // branches on truthiness (`services.py:160`): falsy values (missing,
+    // null, `""`, `0`, `false`, `[]`, `{}`) take the inferred-account
+    // branch; only a truthy value reaches the UUID filter.
     let provider_account_id = match map.get("provider_account_id") {
-        None | Some(serde_json::Value::Null) => None,
+        None => None,
+        Some(value) if json_is_falsy(value) => None,
         Some(serde_json::Value::String(raw)) => match raw.parse::<uuid::Uuid>() {
             Ok(id) => Some(id),
             // `queryset.filter(id=...)` with a bad UUID → `ValidationError`
@@ -1487,7 +1510,7 @@ async fn post_bind(
                     .into_response()
             }
         },
-        // Non-string ids never match the UUID filter either.
+        // Truthy non-string ids never match the UUID filter either.
         Some(_) => {
             return RepoDenial::error(StatusCode::BAD_REQUEST, "Please provide valid detail")
                 .into_response()
@@ -2111,6 +2134,73 @@ mod tests {
             .denial()
             .status_and_body();
         assert_eq!(body, r#"{"error":"Provider rejected this credential"}"#);
+    }
+
+    /// Review fix: the `.git` suffix strips from the name segment only, so
+    /// a repo literally named `.git` parses like the Python regexes do
+    /// (`("o", ".git")`, verified against `utils/github_client.py:236-254`).
+    #[test]
+    fn github_dot_git_name_kept() {
+        let hosts = gitlab_hosts();
+        for url in [
+            "https://github.com/o/.git",
+            "https://github.com/o/.git/",
+            "git@github.com:o/.git",
+        ] {
+            let parsed =
+                parse_repository_url(url, &hosts).unwrap_or_else(|| panic!("parses: {url}"));
+            assert_eq!(parsed.provider, "github", "{url}");
+            assert_eq!(parsed.namespace, "o", "{url}");
+            assert_eq!(parsed.name, ".git", "{url}");
+        }
+        // Ordinary suffix stripping is unchanged.
+        let parsed = parse_repository_url("https://github.com/o/r.git", &hosts).expect("parses");
+        assert_eq!(parsed.name, "r");
+        let parsed =
+            parse_repository_url("https://github.com/o/r.git.git", &hosts).expect("parses");
+        assert_eq!(parsed.name, "r.git");
+    }
+
+    /// Review fix: `urlparse` lowercases the scheme before the membership
+    /// test, so uppercase-scheme GitLab URLs parse (`adapters/gitlab.py:236`).
+    #[test]
+    fn gitlab_uppercase_scheme_parses() {
+        let hosts = gitlab_hosts();
+        let parsed = parse_repository_url("HTTP://gitlab.com/group/repo", &hosts).expect("parses");
+        assert_eq!(parsed.provider, "gitlab");
+        assert_eq!(parsed.namespace, "group");
+        assert_eq!(parsed.name, "repo");
+        assert_eq!(
+            parse_repository_url("FTP://gitlab.com/group/repo", &hosts),
+            None
+        );
+    }
+
+    /// Review fix: Python truthiness behind `or ""` / `if X`
+    /// (`git.py:160`, `services.py:160`).
+    #[test]
+    fn json_truthiness_matches_python() {
+        for falsy in [
+            serde_json::Value::Null,
+            serde_json::json!(false),
+            serde_json::json!(0),
+            serde_json::json!(0.0),
+            serde_json::json!(""),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            assert!(json_is_falsy(&falsy), "{falsy}");
+        }
+        for truthy in [
+            serde_json::json!(true),
+            serde_json::json!(123),
+            serde_json::json!("x"),
+            serde_json::json!("   "),
+            serde_json::json!([0]),
+            serde_json::json!({"a": 0}),
+        ] {
+            assert!(!json_is_falsy(&truthy), "{truthy}");
+        }
     }
 
     #[test]
