@@ -20,7 +20,7 @@ Every issue may touch:
 
 Some issues name extra paths in their body (for example `desktop/**` for F-07 and M-01, `apps/proxy/Caddyfile*` for F-09 and area gates, `data-testid` attributes in `apps/web` for oracle issues). Nothing else, ever. In particular: no other change to `apps/web`, the old `packages/*`, `apps/api`, `apps/live`, `apps/admin`, `apps/space`. A needed backend change is a new issue in PDASHOSS01 (OSS) or PRIVATEPI1 (cloud), related to your issue as a blocker.
 
-CI fails a PR that touches paths outside this list plus the issue's named extras. Reviewers reject it too.
+CI enforces this on every PR into `web-new-dev` (`.github/workflows/web-new-paths.yml`). The issue is taken from the branch name (`pi-dash/newfront-<n>`). Extra paths an issue may touch are listed in `.github/newfront-path-extras.json`, which is human-maintained and read from `web-new-dev`, never from the PR. Oracle issues may change the old apps only on lines that add `data-testid`. If your issue body names an extra path that the file does not grant, leave a `process:` comment here instead of working around the gate. Reviewers reject out-of-bounds PRs too.
 
 ## Issue types
 
