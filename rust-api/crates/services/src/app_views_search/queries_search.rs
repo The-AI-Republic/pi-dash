@@ -708,16 +708,20 @@ pub fn avatar_url_case() -> String {
 
 /// Cycle `status` annotation (`base.py:412-430,604-621`). Django evaluates
 /// `timezone.now()` once per `When`, so the handler binds `now` four times
-/// (same value four times is semantically identical).
+/// (same value four times is semantically identical). The binds render with
+/// an explicit `::timestamptz`: Django sends a timestamptz param while this
+/// builder's text binds arrive typed `text`, and Postgres has no
+/// `timestamptz <= text` operator — the cast keeps the identical instant
+/// comparison (a parameter cast, so no plan change).
 pub fn cycle_status_case(builder: &mut Builder, now: &str) -> String {
     let at1 = builder.text(now);
     let at2 = builder.text(now);
     let at3 = builder.text(now);
     let at4 = builder.text(now);
     format!(
-        "CASE WHEN (cycles.start_date <= {at1} AND cycles.end_date >= {at2}) THEN 'CURRENT' \
-         WHEN cycles.start_date > {at3} THEN 'UPCOMING' \
-         WHEN cycles.end_date < {at4} THEN 'COMPLETED' \
+        "CASE WHEN (cycles.start_date <= {at1}::timestamptz AND cycles.end_date >= {at2}::timestamptz) THEN 'CURRENT' \
+         WHEN cycles.start_date > {at3}::timestamptz THEN 'UPCOMING' \
+         WHEN cycles.end_date < {at4}::timestamptz THEN 'COMPLETED' \
          WHEN (cycles.start_date IS NULL AND cycles.end_date IS NULL) THEN 'DRAFT' \
          ELSE 'DRAFT' END AS status"
     )
@@ -1084,6 +1088,10 @@ pub fn build_issue_search(input: &IssueSearchInput<'_>) -> Result<BuiltQuery, Is
     // `search_issues_and_excluding_parent` (:42-50): self, parent, children.
     // A `None` parent renders Django's `NOT (id IS NULL)` tautology for that
     // arm, which is a no-op — skipped here with identical effect.
+    // The children arm keeps Django's nullable-negation form: `~Q` over a
+    // nullable column compiles to `NOT (col = X AND col IS NOT NULL)`
+    // (verified against Django 4.2.30's compiler output) — a plain
+    // `NOT (col = X)` would drop every NULL-parent (i.e. root) row.
     if input.parent {
         if let Some(xid) = issue_id {
             if let Some(parent) = input.issue_parent_id {
@@ -1093,7 +1101,9 @@ pub fn build_issue_search(input: &IssueSearchInput<'_>) -> Result<BuiltQuery, Is
                     let p = builder.uuid(pid);
                     wheres.push(format!("NOT (issues.id = {p})"));
                 }
-                wheres.push(format!("NOT (issues.parent_id = {x})"));
+                wheres.push(format!(
+                    "NOT (issues.parent_id = {x} AND issues.parent_id IS NOT NULL)"
+                ));
             }
         }
     }
@@ -1657,6 +1667,9 @@ mod tests {
         assert!(sql.contains("issues.project_id = $"));
         assert!(sql.contains("@@ websearch_to_tsquery"));
         assert!(sql.contains("NOT (issues.parent_id = $"));
+        // Nullable-negation form: NULL-parent rows survive the children
+        // exclusion (Django 4.2.30 compiler output for `~Q(parent_id=…)`).
+        assert!(sql.contains("AND issues.parent_id IS NOT NULL)"));
         assert!(sql.contains("issues.id NOT IN ($"));
         assert!(sql.contains("issues.parent_id IS NULL"));
         assert!(sql.contains(
