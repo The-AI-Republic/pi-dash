@@ -18,6 +18,7 @@
 //! - [`space`]: space public API (D-02) read columns + manager scopes.
 //! - [`tx`]: transaction wrapper with post-commit actions.
 //! - [`migrations`]: private migration directory convention (F-10).
+//! - [`v1_cycles_modules`]: api-v1 cycles + modules models (D-20).
 //! - [`v1_projects`]: api-v1 projects/members/states/estimates models (D-19).
 //!
 //! Write paths take a [`context::RequestContext`]; there is no unscoped
@@ -48,6 +49,7 @@ pub mod space;
 pub mod tasks_cleanup;
 pub mod tasks_ticker;
 pub mod tx;
+pub mod v1_cycles_modules;
 pub mod v1_projects;
 
 pub use config::DbConfig;
