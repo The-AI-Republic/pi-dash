@@ -1316,12 +1316,13 @@ async fn module_create(
     .fetch_optional(&pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    // `Module.save` clobbers any input `sort_order` on add (verified
-    // live): `MIN(sibling) - 10000`, else the field default. The input
-    // still validates, but never lands.
+    // `Module.save` (`db/models/module.py:115-124`) only clobbers input
+    // `sort_order` when siblings exist (`MIN(sibling) - 10000`); with no
+    // siblings the validated input lands, defaulting to `65535.0` when
+    // absent (verified live).
     let sort_order = match min_sort.and_then(|(min,)| min) {
         Some(min) => min - 10_000.0,
-        None => 65535.0,
+        None => input.sort_order.unwrap_or(65535.0),
     };
     let module_id: uuid::Uuid = uuid::Uuid::new_v4();
     sqlx::query(

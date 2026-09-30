@@ -161,3 +161,21 @@ def test_requires_auth(api, tenant_a, project_a):
     r = api.get(modules_url(tenant_a, project_a))
     assert r.status_code == 401, r.text
     assert r.json() == {"detail": "Authentication credentials were not provided."}
+
+
+def test_create_sort_order_without_siblings(api, tenant_a, project_a, auth_a):
+    """Module.save only clobbers sort_order when siblings exist: the first
+    module in a project keeps its validated input (default 65535.0 when
+    absent); later creates take MIN(sibling) - 10000 regardless of input."""
+    r = api.post(
+        modules_url(tenant_a, project_a), headers=auth_a,
+        json={"name": "First", "sort_order": 42},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["sort_order"] == 42.0
+    r = api.post(
+        modules_url(tenant_a, project_a), headers=auth_a,
+        json={"name": "Second", "sort_order": 7},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["sort_order"] == 42.0 - 10000
