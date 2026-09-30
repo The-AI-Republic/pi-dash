@@ -4,9 +4,11 @@
 
 //! `pidash run …` subcommands — the agent's view of its own run.
 //!
-//! Distinct from the hidden `__run` daemon entry point (`cli::run`). Today
-//! there is one verb, `yield`, which reports the run's outcome to the
-//! ticking clock; see `.ai_design/ticking_relevance/design.md` §7.
+//! Distinct from the hidden `__run` daemon entry point (`cli::run`). Two
+//! verbs: `yield`, which reports the run's outcome to the ticking clock
+//! (`.ai_design/ticking_relevance/design.md` §7), and `release-pin`, which
+//! unsticks a queued run whose pinned runner will not free up
+//! (PDASHOSS01-272).
 
 use clap::{Args, Subcommand, ValueEnum};
 use serde_json::json;
@@ -24,6 +26,11 @@ pub enum RunCmdCommand {
     /// Report this run's outcome to Pi Dash's ticking clock. Call it once,
     /// as the last `pidash` command of the run, after any state move.
     Yield(YieldArgs),
+    /// Clear a QUEUED run's runner pin so any eligible runner in its pod can
+    /// take it. The recovery path for a run stuck behind a runner that will
+    /// not free up — the pod's pin wait budget releases such a pin
+    /// automatically, but only while some runner in the pod is idle.
+    ReleasePin(ReleasePinArgs),
 }
 
 /// The §7 outcome vocabulary. Kept in sync with
@@ -79,6 +86,13 @@ pub struct YieldArgs {
     pub run_id: Option<String>,
 }
 
+#[derive(Debug, Args)]
+pub struct ReleasePinArgs {
+    /// The QUEUED run whose pin to clear. This is somebody else's stuck run,
+    /// not the caller's own, so there is no environment default.
+    pub run_id: String,
+}
+
 pub async fn run(args: RunCmdArgs, paths: &crate::util::paths::Paths) -> i32 {
     let env = match CliEnv::resolve(paths) {
         Ok(e) => e,
@@ -91,6 +105,7 @@ pub async fn run(args: RunCmdArgs, paths: &crate::util::paths::Paths) -> i32 {
 
     let result = match args.command {
         RunCmdCommand::Yield(y) => cmd_yield(&client, y).await,
+        RunCmdCommand::ReleasePin(r) => cmd_release_pin(&client, r).await,
     };
     match result {
         Ok(()) => 0,
@@ -125,6 +140,29 @@ pub async fn cmd_yield(client: &ApiClient, args: YieldArgs) -> Result<(), CliErr
     Ok(())
 }
 
+/// `POST workspaces/{slug}/agent-runs/{run_id}/release-pin/`.
+///
+/// 409 when the run is not QUEUED or is not pinned, 404 when the caller may
+/// not act on it — both surface through the usual error envelope, so a
+/// coordinator that guessed wrong gets a machine-readable answer rather than
+/// a silent no-op.
+pub async fn cmd_release_pin(client: &ApiClient, args: ReleasePinArgs) -> Result<(), CliError> {
+    let run_id = args.run_id.trim();
+    if run_id.is_empty() {
+        return Err(CliError::new(
+            EXIT_INVALID,
+            "run release-pin needs a run id",
+        ));
+    }
+    let path = release_pin_path(&client.env.workspace_slug, run_id);
+    let resp = client.post(&path, &json!({})).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
 /// Explicit `--run-id` wins; otherwise the run the daemon put in the
 /// environment. Neither → a clear error rather than a 404 from the cloud.
 pub fn resolve_run_id<'a>(
@@ -145,6 +183,10 @@ pub fn resolve_run_id<'a>(
 
 pub fn yield_path(workspace_slug: &str, run_id: &str) -> String {
     format!("workspaces/{workspace_slug}/agent-runs/{run_id}/yield/")
+}
+
+pub fn release_pin_path(workspace_slug: &str, run_id: &str) -> String {
+    format!("workspaces/{workspace_slug}/agent-runs/{run_id}/release-pin/")
 }
 
 #[cfg(test)]
@@ -176,6 +218,14 @@ mod tests {
         assert_eq!(
             yield_path("acme", "123e4567-e89b-12d3-a456-426614174000"),
             "workspaces/acme/agent-runs/123e4567-e89b-12d3-a456-426614174000/yield/"
+        );
+    }
+
+    #[test]
+    fn release_pin_path_shape() {
+        assert_eq!(
+            release_pin_path("acme", "123e4567-e89b-12d3-a456-426614174000"),
+            "workspaces/acme/agent-runs/123e4567-e89b-12d3-a456-426614174000/release-pin/"
         );
     }
 }
