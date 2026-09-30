@@ -13,8 +13,8 @@ use axum::Router;
 use crate::state::AppState;
 
 use super::handlers_project::{
-    archive_project, create_project, delete_project, list_projects, patch_project, retrieve_project,
-    summary, unarchive_project,
+    archive_project, create_project, delete_project, list_projects, patch_project,
+    retrieve_project, summary, unarchive_project,
 };
 
 /// Register the four project paths (`urls/project.py:15-33`).
@@ -61,7 +61,10 @@ mod tests {
         // Port 1 is never bound, so proxied (unowned) methods fail closed
         // with 502 instead of reaching a dev server.
         crate::routes::with_routes(
-            AppState::with_edge("0.1.0", crate::edge::EdgeHandle::for_tests("http://127.0.0.1:1")),
+            AppState::with_edge(
+                "0.1.0",
+                crate::edge::EdgeHandle::for_tests("http://127.0.0.1:1"),
+            ),
             routes(),
         )
     }
@@ -86,11 +89,24 @@ mod tests {
             ("GET", format!("/api/v1/workspaces/acme/projects/{pid}/")),
             ("PATCH", format!("/api/v1/workspaces/acme/projects/{pid}/")),
             ("DELETE", format!("/api/v1/workspaces/acme/projects/{pid}/")),
-            ("POST", format!("/api/v1/workspaces/acme/projects/{pid}/archive/")),
-            ("DELETE", format!("/api/v1/workspaces/acme/projects/{pid}/archive/")),
-            ("GET", format!("/api/v1/workspaces/acme/projects/{pid}/summary/")),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/projects/{pid}/archive/"),
+            ),
+            (
+                "DELETE",
+                format!("/api/v1/workspaces/acme/projects/{pid}/archive/"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/workspaces/acme/projects/{pid}/summary/"),
+            ),
         ] {
-            assert_eq!(status(method, &uri).await, StatusCode::UNAUTHORIZED, "{method} {uri}");
+            assert_eq!(
+                status(method, &uri).await,
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri}"
+            );
         }
     }
 
@@ -103,8 +119,11 @@ mod tests {
             StatusCode::BAD_GATEWAY
         );
         assert_eq!(
-            status("PUT", "/api/v1/workspaces/acme/projects/11111111-1111-1111-1111-111111111111/")
-                .await,
+            status(
+                "PUT",
+                "/api/v1/workspaces/acme/projects/11111111-1111-1111-1111-111111111111/"
+            )
+            .await,
             StatusCode::BAD_GATEWAY
         );
     }

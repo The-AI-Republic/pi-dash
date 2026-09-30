@@ -232,7 +232,9 @@ fn owned(
 
 /// `workspaces/<slug>/projects/` owns GET+POST (`urls/project.py:16-20`).
 #[allow(dead_code)]
-pub fn owned_list(router: axum::routing::MethodRouter<AppState>) -> axum::routing::MethodRouter<AppState> {
+pub fn owned_list(
+    router: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
     owned(router, &["GET", "POST"])
 }
 
@@ -290,7 +292,11 @@ pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
 /// split, empties dropped, `None` when empty.
 pub fn fields_param(query: &QueryMap, key: &str) -> Option<Vec<String>> {
     let raw = query_last(query, key).unwrap_or_default();
-    let fields: Vec<String> = raw.split(',').filter(|f| !f.is_empty()).map(str::to_owned).collect();
+    let fields: Vec<String> = raw
+        .split(',')
+        .filter(|f| !f.is_empty())
+        .map(str::to_owned)
+        .collect();
     if fields.is_empty() {
         None
     } else {
@@ -303,7 +309,12 @@ pub fn fields_param(query: &QueryMap, key: &str) -> Option<Vec<String>> {
 // ---------------------------------------------------------------------------
 
 /// Decoded `api_tokens` row for [`resolve_api_token`].
-type ApiTokenLookup = (String, bool, Option<chrono::DateTime<chrono::Utc>>, uuid::Uuid);
+type ApiTokenLookup = (
+    String,
+    bool,
+    Option<chrono::DateTime<chrono::Utc>>,
+    uuid::Uuid,
+);
 
 /// Decoded `machine_token` row for [`resolve_machine_token`].
 type MachineTokenLookup = (
@@ -322,7 +333,6 @@ type FileAssetLookup = (
     Option<uuid::Uuid>,
     Option<uuid::Uuid>,
 );
-
 
 /// Map a database/driver failure to the generic 500 while logging the site
 /// and error for operators (no secrets: messages never include tokens).
@@ -354,7 +364,9 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
     let user_id = match pidash_auth::token::classify_token(raw) {
         None => return Err(Denial::Unauthorized),
         Some(pidash_auth::token::TokenKind::Api) => resolve_api_token(pool, raw).await?,
-        Some(pidash_auth::token::TokenKind::Machine) => resolve_machine_token(pool, raw, secret_key).await?,
+        Some(pidash_auth::token::TokenKind::Machine) => {
+            resolve_machine_token(pool, raw, secret_key).await?
+        }
     };
     let timezone = request_timezone(pool, &user_id).await?;
     // `api_tokens.last_used` is stamped on every validated call
@@ -366,7 +378,10 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
             .execute(pool)
             .await;
     }
-    Ok(Actor { id: user_id, timezone })
+    Ok(Actor {
+        id: user_id,
+        timezone,
+    })
 }
 
 /// The `api_tokens` columns the validator reads (`db/models/api.py:35-57`).
@@ -391,13 +406,12 @@ async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid,
         .map_err(|_| Denial::InvalidToken)?;
     // Inactive users cannot authenticate (the `users` table has no
     // `deleted_at`; `is_active` is the only liveness signal).
-    let active: Option<bool> = sqlx::query_scalar(
-        r#"SELECT TRUE FROM "users" WHERE "id" = $1 AND "is_active""#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "api-token-user"))?;
+    let active: Option<bool> =
+        sqlx::query_scalar(r#"SELECT TRUE FROM "users" WHERE "id" = $1 AND "is_active""#)
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| db_error(error, "api-token-user"))?;
     if active != Some(true) {
         return Err(Denial::InvalidToken);
     }
@@ -448,20 +462,25 @@ async fn resolve_machine_token(
     .map_err(|error| db_error(error, "machine-token-member"))?
     .unwrap_or(false);
     if !member {
-        let _ = sqlx::query(r#"UPDATE "machine_token" SET "revoked_at" = now() WHERE "token_hash" = $1"#)
-            .bind(&presented_hash)
-            .execute(pool)
-            .await;
-        let _ = sqlx::query(r#"UPDATE "machine_token" SET "last_used_at" = now() WHERE "token_hash" = $1"#)
-            .bind(&presented_hash)
-            .execute(pool)
-            .await;
-        return Err(Denial::InvalidToken);
-    }
-    let _ = sqlx::query(r#"UPDATE "machine_token" SET "last_used_at" = now() WHERE "token_hash" = $1"#)
+        let _ = sqlx::query(
+            r#"UPDATE "machine_token" SET "revoked_at" = now() WHERE "token_hash" = $1"#,
+        )
         .bind(&presented_hash)
         .execute(pool)
         .await;
+        let _ = sqlx::query(
+            r#"UPDATE "machine_token" SET "last_used_at" = now() WHERE "token_hash" = $1"#,
+        )
+        .bind(&presented_hash)
+        .execute(pool)
+        .await;
+        return Err(Denial::InvalidToken);
+    }
+    let _ =
+        sqlx::query(r#"UPDATE "machine_token" SET "last_used_at" = now() WHERE "token_hash" = $1"#)
+            .bind(&presented_hash)
+            .execute(pool)
+            .await;
     Ok(user_id)
 }
 
@@ -496,8 +515,8 @@ pub async fn rewrite_project_id(
     workspace_slug: &str,
     raw: &str,
 ) -> Result<uuid::Uuid, Denial> {
-    use pidash_db::v1_projects::queries_projmem as q;
     use pidash_db::v1_projects::models::project::{classify_lookup, ProjectLookup};
+    use pidash_db::v1_projects::queries_projmem as q;
     let scope = q::TenantScope {
         workspace_slug,
         actor_id: uuid::Uuid::nil(),
@@ -696,10 +715,7 @@ fn render_uuid_opt(value: Option<uuid::Uuid>) -> Value {
     value.map(render_uuid).unwrap_or(Value::Null)
 }
 
-fn render_datetime_opt(
-    value: Option<chrono::DateTime<chrono::Utc>>,
-    tz: &Tz,
-) -> Value {
+fn render_datetime_opt(value: Option<chrono::DateTime<chrono::Utc>>, tz: &Tz) -> Value {
     value
         .map(|dt| Value::String(crate::serializer::render_datetime_in(&dt, tz)))
         .unwrap_or(Value::Null)
@@ -772,17 +788,20 @@ async fn file_asset_url(pool: &PgPool, asset_id: &uuid::Uuid) -> Result<Option<S
         return Ok(None);
     };
     match entity_type.as_deref() {
-        Some("WORKSPACE_LOGO") | Some("USER_AVATAR") | Some("USER_COVER") | Some("PROJECT_COVER") => {
-            Ok(Some(format!("/api/assets/v2/static/{asset_id}/")))
-        }
+        Some("WORKSPACE_LOGO")
+        | Some("USER_AVATAR")
+        | Some("USER_COVER")
+        | Some("PROJECT_COVER") => Ok(Some(format!("/api/assets/v2/static/{asset_id}/"))),
         Some("ISSUE_ATTACHMENT") => {
             let slug: Option<String> = match workspace_id {
-                Some(id) => sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
-                    .bind(id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| Denial::ServerError)?
-                    .flatten(),
+                Some(id) => {
+                    sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
+                        .bind(id)
+                        .fetch_optional(pool)
+                        .await
+                        .map_err(|_| Denial::ServerError)?
+                        .flatten()
+                }
                 None => None,
             };
             Ok(slug.map(|s| {
@@ -793,15 +812,19 @@ async fn file_asset_url(pool: &PgPool, asset_id: &uuid::Uuid) -> Result<Option<S
                 )
             }))
         }
-        Some("ISSUE_DESCRIPTION") | Some("COMMENT_DESCRIPTION") | Some("PAGE_DESCRIPTION")
+        Some("ISSUE_DESCRIPTION")
+        | Some("COMMENT_DESCRIPTION")
+        | Some("PAGE_DESCRIPTION")
         | Some("DRAFT_ISSUE_DESCRIPTION") => {
             let slug: Option<String> = match workspace_id {
-                Some(id) => sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
-                    .bind(id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| Denial::ServerError)?
-                    .flatten(),
+                Some(id) => {
+                    sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
+                        .bind(id)
+                        .fetch_optional(pool)
+                        .await
+                        .map_err(|_| Denial::ServerError)?
+                        .flatten()
+                }
                 None => None,
             };
             Ok(slug.map(|s| {
@@ -878,12 +901,25 @@ pub async fn render_project(
         cover_image_url(pool, asset_id, cover_text.as_deref()).await?,
     );
 
-    let created_at: chrono::DateTime<chrono::Utc> = row.try_get("created_at").map_err(|_| Denial::ServerError)?;
-    let updated_at: chrono::DateTime<chrono::Utc> = row.try_get("updated_at").map_err(|_| Denial::ServerError)?;
-    let deleted_at: Option<chrono::DateTime<chrono::Utc>> = row.try_get("deleted_at").map_err(|_| Denial::ServerError)?;
-    let archived_at: Option<chrono::DateTime<chrono::Utc>> = row.try_get("archived_at").map_err(|_| Denial::ServerError)?;
-    put(&mut map, "created_at", Value::String(crate::serializer::render_datetime_in(&created_at, tz)));
-    put(&mut map, "updated_at", Value::String(crate::serializer::render_datetime_in(&updated_at, tz)));
+    let created_at: chrono::DateTime<chrono::Utc> =
+        row.try_get("created_at").map_err(|_| Denial::ServerError)?;
+    let updated_at: chrono::DateTime<chrono::Utc> =
+        row.try_get("updated_at").map_err(|_| Denial::ServerError)?;
+    let deleted_at: Option<chrono::DateTime<chrono::Utc>> =
+        row.try_get("deleted_at").map_err(|_| Denial::ServerError)?;
+    let archived_at: Option<chrono::DateTime<chrono::Utc>> = row
+        .try_get("archived_at")
+        .map_err(|_| Denial::ServerError)?;
+    put(
+        &mut map,
+        "created_at",
+        Value::String(crate::serializer::render_datetime_in(&created_at, tz)),
+    );
+    put(
+        &mut map,
+        "updated_at",
+        Value::String(crate::serializer::render_datetime_in(&updated_at, tz)),
+    );
     put(&mut map, "deleted_at", render_datetime_opt(deleted_at, tz));
     put(&mut map, "name", Value::String(row_string(row, "name")?));
     put(
@@ -891,10 +927,26 @@ pub async fn render_project(
         "description",
         Value::String(row_string_opt(row, "description")?.unwrap_or_default()),
     );
-    put(&mut map, "description_text", row_json_opt(row, "description_text")?);
-    put(&mut map, "description_html", row_json_opt(row, "description_html")?);
-    put(&mut map, "network", Value::from(row_i16_as_i32(row, "network")?));
-    put(&mut map, "identifier", Value::String(row_string(row, "identifier")?));
+    put(
+        &mut map,
+        "description_text",
+        row_json_opt(row, "description_text")?,
+    );
+    put(
+        &mut map,
+        "description_html",
+        row_json_opt(row, "description_html")?,
+    );
+    put(
+        &mut map,
+        "network",
+        Value::from(row_i16_as_i32(row, "network")?),
+    );
+    put(
+        &mut map,
+        "identifier",
+        Value::String(row_string(row, "identifier")?),
+    );
     put(
         &mut map,
         "emoji",
@@ -922,11 +974,23 @@ pub async fn render_project(
         "cover_image",
         cover_text.map(Value::String).unwrap_or(Value::Null),
     );
-    put(&mut map, "archive_in", Value::from(row_i32(row, "archive_in")?));
+    put(
+        &mut map,
+        "archive_in",
+        Value::from(row_i32(row, "archive_in")?),
+    );
     put(&mut map, "close_in", Value::from(row_i32(row, "close_in")?));
     put(&mut map, "logo_props", row_json_opt(row, "logo_props")?);
-    put(&mut map, "archived_at", render_datetime_opt(archived_at, tz));
-    put(&mut map, "timezone", Value::String(row_string(row, "timezone")?));
+    put(
+        &mut map,
+        "archived_at",
+        render_datetime_opt(archived_at, tz),
+    );
+    put(
+        &mut map,
+        "timezone",
+        Value::String(row_string(row, "timezone")?),
+    );
     put(
         &mut map,
         "external_source",
@@ -941,8 +1005,16 @@ pub async fn render_project(
             .map(Value::String)
             .unwrap_or(Value::Null),
     );
-    put(&mut map, "repo_url", Value::String(row_string_opt(row, "repo_url")?.unwrap_or_default()));
-    put(&mut map, "base_branch", Value::String(row_string_opt(row, "base_branch")?.unwrap_or("main".to_owned())));
+    put(
+        &mut map,
+        "repo_url",
+        Value::String(row_string_opt(row, "repo_url")?.unwrap_or_default()),
+    );
+    put(
+        &mut map,
+        "base_branch",
+        Value::String(row_string_opt(row, "base_branch")?.unwrap_or("main".to_owned())),
+    );
     for key in [
         "agent_default_interval_seconds",
         "agent_default_max_ticks",
@@ -962,15 +1034,41 @@ pub async fn render_project(
         "default_agent_executor",
         Value::String(row_string(row, "default_agent_executor")?),
     );
-    put(&mut map, "created_by", render_uuid_opt(row_uuid_opt(row, "created_by_id")?));
-    put(&mut map, "updated_by", render_uuid_opt(row_uuid_opt(row, "updated_by_id")?));
-    let workspace_id: uuid::Uuid = row.try_get("workspace_id").map_err(|_| Denial::ServerError)?;
+    put(
+        &mut map,
+        "created_by",
+        render_uuid_opt(row_uuid_opt(row, "created_by_id")?),
+    );
+    put(
+        &mut map,
+        "updated_by",
+        render_uuid_opt(row_uuid_opt(row, "updated_by_id")?),
+    );
+    let workspace_id: uuid::Uuid = row
+        .try_get("workspace_id")
+        .map_err(|_| Denial::ServerError)?;
     put(&mut map, "workspace", render_uuid(workspace_id));
-    put(&mut map, "default_assignee", render_uuid_opt(row_uuid_opt(row, "default_assignee_id")?));
-    put(&mut map, "project_lead", render_uuid_opt(row_uuid_opt(row, "project_lead_id")?));
+    put(
+        &mut map,
+        "default_assignee",
+        render_uuid_opt(row_uuid_opt(row, "default_assignee_id")?),
+    );
+    put(
+        &mut map,
+        "project_lead",
+        render_uuid_opt(row_uuid_opt(row, "project_lead_id")?),
+    );
     put(&mut map, "cover_image_asset", render_uuid_opt(asset_id));
-    put(&mut map, "estimate", render_uuid_opt(row_uuid_opt(row, "estimate_id")?));
-    put(&mut map, "default_state", render_uuid_opt(row_uuid_opt(row, "default_state_id")?));
+    put(
+        &mut map,
+        "estimate",
+        render_uuid_opt(row_uuid_opt(row, "estimate_id")?),
+    );
+    put(
+        &mut map,
+        "default_state",
+        render_uuid_opt(row_uuid_opt(row, "default_state_id")?),
+    );
 
     // `BaseSerializer.to_representation` expand (`serializers/base.py:71+`):
     // each requested key present in the output is replaced in place (order
@@ -1017,13 +1115,12 @@ pub async fn render_project(
 /// `expand=workspace`: `WorkspaceLiteSerializer` (`workspace.py:10-21`):
 /// `{"name", "slug", "id"}` in field order.
 async fn expand_workspace(pool: &PgPool, workspace_id: &uuid::Uuid) -> Result<Value, Denial> {
-    let row: Option<(String, String)> = sqlx::query_as(
-        r#"SELECT "name", "slug" FROM "workspaces" WHERE "id" = $1"#,
-    )
-    .bind(workspace_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<(String, String)> =
+        sqlx::query_as(r#"SELECT "name", "slug" FROM "workspaces" WHERE "id" = $1"#)
+            .bind(workspace_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
     Ok(match row {
         Some((name, slug)) => {
             let mut map = serde_json::Map::with_capacity(3);
@@ -1106,14 +1203,21 @@ pub async fn require_project_base(
         members_can_edit_states: false,
         is_workspace_admin: false,
     };
-    if decide(gate, method, &scope, &facts, &workspace::WorkspaceFacts {
-        workspace: pidash_types::WorkspaceId::from(workspace_slug.to_owned()),
-        authenticated: true,
-        has_admin_or_member_role: false,
-        has_admin_role: false,
-        is_member: false,
-        is_admin_unfiltered: false,
-    }, &mutation) {
+    if decide(
+        gate,
+        method,
+        &scope,
+        &facts,
+        &workspace::WorkspaceFacts {
+            workspace: pidash_types::WorkspaceId::from(workspace_slug.to_owned()),
+            authenticated: true,
+            has_admin_or_member_role: false,
+            has_admin_role: false,
+            is_member: false,
+            is_admin_unfiltered: false,
+        },
+        &mutation,
+    ) {
         Ok(())
     } else {
         Err(Denial::Forbidden)
@@ -1231,7 +1335,10 @@ fn coerce_char(
     if trimmed.contains('\u{0}') {
         return Err(CoerceFail::Msg(NULL_CHAR_MSG.to_owned()));
     }
-    if let Some(ch) = trimmed.chars().find(|c| (0xD800..=0xDFFF).contains(&(*c as u32))) {
+    if let Some(ch) = trimmed
+        .chars()
+        .find(|c| (0xD800..=0xDFFF).contains(&(*c as u32)))
+    {
         return Err(CoerceFail::Msg(format!(
             "Surrogate characters are not allowed: U+{:X}.",
             ch as u32
@@ -1291,7 +1398,10 @@ fn coerce_int(value: &Value, min: i32, max: i32) -> Result<i32, CoerceFail> {
     // `re_decimal = re.compile(r'\.0*\s*$')`: trailing `.0…` (+ spaces)
     // stripped before `int()`.
     let stripped = strip_decimal_suffix(&text);
-    let parsed: i64 = stripped.trim().parse().map_err(|_| CoerceFail::Msg(INVALID_INT_MSG.to_owned()))?;
+    let parsed: i64 = stripped
+        .trim()
+        .parse()
+        .map_err(|_| CoerceFail::Msg(INVALID_INT_MSG.to_owned()))?;
     if parsed < i64::from(min) {
         return Err(CoerceFail::Msg(min_value_msg(min)));
     }
@@ -1325,7 +1435,11 @@ fn strip_decimal_suffix(text: &str) -> String {
 /// `Serializer.to_internal_value` into a field error, *not* the
 /// base-handler 400. Misses fail `does_not_exist` with the raw input
 /// echoed.
-async fn coerce_fk_user(pool: &PgPool, field: &str, value: &Value) -> Result<Option<uuid::Uuid>, CoerceFail> {
+async fn coerce_fk_user(
+    pool: &PgPool,
+    field: &str,
+    value: &Value,
+) -> Result<Option<uuid::Uuid>, CoerceFail> {
     if value.is_null() {
         return Ok(None);
     }
@@ -1355,9 +1469,7 @@ async fn coerce_fk_user(pool: &PgPool, field: &str, value: &Value) -> Result<Opt
     let parsed = match text.parse::<uuid::Uuid>() {
         Ok(id) => id,
         Err(_) => {
-            return Err(CoerceFail::Msg(format!(
-                "“{text}” is not a valid UUID."
-            )));
+            return Err(CoerceFail::Msg(format!("“{text}” is not a valid UUID.")));
         }
     };
     // Each FK reads its own queryset: leads/assignees are users;
@@ -1499,9 +1611,7 @@ async fn coerce_field(
                 FieldValue::Fk(None)
             }
             "icon_prop" => FieldValue::Json(Value::Null),
-            "emoji" | "cover_image" | "external_source" | "external_id" => {
-                FieldValue::OptStr(None)
-            }
+            "emoji" | "cover_image" | "external_source" | "external_id" => FieldValue::OptStr(None),
             _ => return Err(CoerceFail::Msg(NULL_MSG.to_owned())),
         }));
     }
@@ -1517,21 +1627,32 @@ async fn coerce_field(
             FieldValue::OptStr(Some(coerce_char(value, true, Some(255))?))
         }
         "cover_image" => FieldValue::OptStr(Some(coerce_char(value, true, None)?)),
-        "module_view" | "cycle_view" | "issue_views_view" | "page_view" | "intake_view"
-        | "guest_view_all_features" | "is_issue_type_enabled" | "is_time_tracking_enabled"
-        | "is_default" | "members_can_edit_states" => FieldValue::Bool(coerce_bool(value)?),
+        "module_view"
+        | "cycle_view"
+        | "issue_views_view"
+        | "page_view"
+        | "intake_view"
+        | "guest_view_all_features"
+        | "is_issue_type_enabled"
+        | "is_time_tracking_enabled"
+        | "is_default"
+        | "members_can_edit_states" => FieldValue::Bool(coerce_bool(value)?),
         "archive_in" | "close_in" => FieldValue::Int(coerce_int(value, 0, 12)?),
         "timezone" => FieldValue::Str({
             let text = coerce_char(value, false, Some(255))?;
-            coerce_choice(&Value::String(text.clone()), super::tz_zones::PYTZ_COMMON_TIMEZONES)
-                .map(|_| text)?
+            coerce_choice(
+                &Value::String(text.clone()),
+                super::tz_zones::PYTZ_COMMON_TIMEZONES,
+            )
+            .map(|_| text)?
         }),
         "repo_url" => FieldValue::Str(coerce_char(value, true, Some(512))?),
         "base_branch" => {
             let text = coerce_char(value, true, Some(128))?;
-            if !text.chars().all(|c| {
-                c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '/' || c == '-'
-            }) {
+            if !text
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '/' || c == '-')
+            {
                 return Err(CoerceFail::Msg(
                     "Branch name may contain only letters, numbers, and . _ / -".to_owned(),
                 ));
@@ -1612,7 +1733,11 @@ pub struct Preamble {
     pub workspace_id: Option<uuid::Uuid>,
 }
 
-pub async fn preamble(state: &AppState, headers: &HeaderMap, slug: &str) -> Result<Preamble, Denial> {
+pub async fn preamble(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+) -> Result<Preamble, Denial> {
     // Anonymous callers 401 before any pool or database access
     // (`APIKeyAuthentication.authenticate` returns `None` without a key).
     if headers
@@ -1654,7 +1779,11 @@ pub fn app_origin(state: &AppState) -> String {
 /// Best-effort post-commit task fan-out (the `.delay()` calls): without a
 /// queue table the response still stands (same precedent as the space
 /// intake handlers).
-pub async fn enqueue_best_effort(pool: &PgPool, task: &str, kwargs: serde_json::Map<String, Value>) {
+pub async fn enqueue_best_effort(
+    pool: &PgPool,
+    task: &str,
+    kwargs: serde_json::Map<String, Value>,
+) {
     let message = pidash_jobs::celery::CeleryTaskMessage::new(task, vec![], kwargs);
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
@@ -1679,8 +1808,15 @@ pub async fn archive_project_inner(
     let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
     // Archive is a POST: the workspace admin-or-member branch.
-    require_project_base(&pre.pool, &workspace_id, slug, &pre.actor.id, Some(&project_id), "POST")
-        .await?;
+    require_project_base(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        Some(&project_id),
+        "POST",
+    )
+    .await?;
     let now = chrono::Utc::now();
     let updated: u64 = sqlx::query(
         r#"UPDATE "projects" SET "archived_at" = $1, "updated_at" = $1, "updated_by_id" = $2 WHERE "id" = $3 AND "workspace_id" = $4 AND "deleted_at" IS NULL"#,
@@ -1753,14 +1889,7 @@ pub async fn unarchive_project_inner(
 /// in source order (the response dict follows this order; Python builds it
 /// from a set, so its order varies per process).
 pub const ALLOWED_SUMMARY_FIELDS: &[&str] = &[
-    "members",
-    "states",
-    "labels",
-    "cycles",
-    "modules",
-    "issues",
-    "intakes",
-    "pages",
+    "members", "states", "labels", "cycles", "modules", "issues", "intakes", "pages",
 ];
 
 /// `GET .../<project_id>/summary/` (`views/project.py:580-603`) with
@@ -1865,14 +1994,30 @@ pub async fn summary_counts(
 ) -> Result<HashMap<String, i64>, Denial> {
     fn subquery(field: &str) -> &'static str {
         match field {
-            "members" => r#"(SELECT COUNT(*) FROM "project_members" WHERE "project_id" = $1 AND "is_active" AND "deleted_at" IS NULL)"#,
-            "states" => r#"(SELECT COUNT(*) FROM "states" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#,
-            "labels" => r#"(SELECT COUNT(*) FROM "labels" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#,
-            "cycles" => r#"(SELECT COUNT(*) FROM "cycles" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#,
-            "modules" => r#"(SELECT COUNT(*) FROM "modules" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#,
-            "issues" => r#"(SELECT COUNT(*) FROM "issues" i JOIN "states" s ON s."id" = i."state_id" WHERE i."project_id" = $1 AND i."deleted_at" IS NULL AND s."group" != 'triage')"#,
-            "intakes" => r#"(SELECT COUNT(*) FROM "intake_issues" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#,
-            "pages" => r#"(SELECT COUNT(*) FROM "project_pages" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#,
+            "members" => {
+                r#"(SELECT COUNT(*) FROM "project_members" WHERE "project_id" = $1 AND "is_active" AND "deleted_at" IS NULL)"#
+            }
+            "states" => {
+                r#"(SELECT COUNT(*) FROM "states" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#
+            }
+            "labels" => {
+                r#"(SELECT COUNT(*) FROM "labels" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#
+            }
+            "cycles" => {
+                r#"(SELECT COUNT(*) FROM "cycles" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#
+            }
+            "modules" => {
+                r#"(SELECT COUNT(*) FROM "modules" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#
+            }
+            "issues" => {
+                r#"(SELECT COUNT(*) FROM "issues" i JOIN "states" s ON s."id" = i."state_id" WHERE i."project_id" = $1 AND i."deleted_at" IS NULL AND s."group" != 'triage')"#
+            }
+            "intakes" => {
+                r#"(SELECT COUNT(*) FROM "intake_issues" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#
+            }
+            "pages" => {
+                r#"(SELECT COUNT(*) FROM "project_pages" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#
+            }
             _ => "(SELECT 0)",
         }
     }
@@ -2033,18 +2178,16 @@ pub async fn enqueue_soft_delete(pool: &PgPool, model: &str, pk: &uuid::Uuid) {
         ],
         Default::default(),
     );
-    enqueue_best_effort(
-        pool,
-        &message.task.clone(),
-        message.kwargs.clone(),
-    )
-    .await;
+    enqueue_best_effort(pool, &message.task.clone(), message.kwargs.clone()).await;
 }
 
 fn page_denial(error: crate::paginator::PageError) -> Denial {
     use crate::paginator::PageError as E;
     match error {
-        E::InvalidPerPage | E::PerPageTooLarge(_) | E::InvalidCursor | E::OffsetTooLarge
+        E::InvalidPerPage
+        | E::PerPageTooLarge(_)
+        | E::InvalidCursor
+        | E::OffsetTooLarge
         | E::NegativeOffset => Denial::BadDetail(error.detail()),
         E::ZeroLimit | E::NegativeSlice | E::NonFiniteCursor | E::MissingOrderKey => {
             Denial::ServerError
@@ -2163,7 +2306,8 @@ pub async fn fetch_detail_row(
 
 pub fn detail_annotations(row: &sqlx::postgres::PgRow) -> Result<ReadAnnotations, Denial> {
     use pidash_db::v1_projects::queries_projmem as q;
-    let mapped = q::map_project_annotations(row).map_err(|error| db_error(error, "map-annotations"))?;
+    let mapped =
+        q::map_project_annotations(row).map_err(|error| db_error(error, "map-annotations"))?;
     Ok(ReadAnnotations {
         total_members: mapped.total_members,
         total_cycles: mapped.total_cycles,
@@ -2194,10 +2338,10 @@ pub async fn list_projects_inner(
     let pre = preamble(state, headers, slug).await?;
     let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_project_base(&pre.pool, &workspace_id, slug, &pre.actor.id, None, "GET").await?;
-    let per_page = crate::paginator::parse_per_page(query_last(query, "per_page").as_deref(), 1000, 1000)
-        .map_err(page_denial)?;
-    let cursor_raw =
-        query_last(query, "cursor").unwrap_or_else(|| format!("{per_page}:0:0"));
+    let per_page =
+        crate::paginator::parse_per_page(query_last(query, "per_page").as_deref(), 1000, 1000)
+            .map_err(page_denial)?;
+    let cursor_raw = query_last(query, "cursor").unwrap_or_else(|| format!("{per_page}:0:0"));
     let cursor = crate::paginator::Cursor::from_string(&cursor_raw).map_err(page_denial)?;
     let order_key = query_last(query, "order_by").unwrap_or_else(|| "sort_order".to_owned());
     let sql = resolve_list_order(&order_key)?;
@@ -2228,14 +2372,17 @@ pub async fn list_projects_inner(
     let has_more = window_rows.len() as i64 > per_page;
     // `results[:limit]` over the evaluated window (negative limits already
     // errored in `offset_window`).
-    let trim = usize::try_from(per_page).unwrap_or(usize::MAX).min(window_rows.len());
+    let trim = usize::try_from(per_page)
+        .unwrap_or(usize::MAX)
+        .min(window_rows.len());
     let page_rows = &window_rows[..trim];
     let fields = fields_param(query, "fields");
     let expand = fields_param(query, "expand");
     let mut rendered: Vec<Value> = Vec::with_capacity(page_rows.len());
     for row in page_rows {
         use pidash_db::v1_projects::queries_projmem as q;
-        let mapped = q::map_project_annotations(row).map_err(|error| db_error(error, "map-annotations"))?;
+        let mapped =
+            q::map_project_annotations(row).map_err(|error| db_error(error, "map-annotations"))?;
         let ann = ReadAnnotations {
             total_members: mapped.total_members,
             total_cycles: mapped.total_cycles,
@@ -2413,11 +2560,12 @@ pub async fn create_project_inner(
     require_project_base(&pre.pool, &workspace_id, slug, &pre.actor.id, None, "POST").await?;
     // `Workspace.objects.get(slug=slug)` — unreachable after a passing
     // permission (membership implies the row), still ported.
-    let ws_exists: bool = sqlx::query_scalar(r#"SELECT EXISTS(SELECT 1 FROM "workspaces" WHERE "id" = $1)"#)
-        .bind(workspace_id)
-        .fetch_one(&pre.pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    let ws_exists: bool =
+        sqlx::query_scalar(r#"SELECT EXISTS(SELECT 1 FROM "workspaces" WHERE "id" = $1)"#)
+            .bind(workspace_id)
+            .fetch_one(&pre.pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
     if !ws_exists {
         return Err(Denial::NotFoundError("Workspace does not exist".to_owned()));
     }
@@ -2468,10 +2616,12 @@ pub async fn create_project_inner(
             .await
             .map_err(|_| Denial::ServerError)?
             .flatten();
-    let timezone = field_str(&data, "timezone").or(ws_tz).unwrap_or_else(|| "UTC".to_owned());
+    let timezone = field_str(&data, "timezone")
+        .or(ws_tz)
+        .unwrap_or_else(|| "UTC".to_owned());
     let default_executor = {
-        let candidate =
-            field_str(&data, "default_agent_executor").unwrap_or_else(|| state.settings().default_agent_executor.clone());
+        let candidate = field_str(&data, "default_agent_executor")
+            .unwrap_or_else(|| state.settings().default_agent_executor.clone());
         if ["local_runner", "cloud_agent", "managed_runner"].contains(&candidate.as_str()) {
             candidate
         } else {
@@ -2564,10 +2714,24 @@ pub async fn create_project_inner(
     // Creator (+ differing lead) become project admins
     // (`views/project.py:228-238`); each membership stamps its
     // `ProjectUserProperty` row (`db/models/project.py:348-364`).
-    add_project_admin(&pre.pool, &workspace_id, &project_id, &pre.actor.id, &pre.actor.id).await?;
+    add_project_admin(
+        &pre.pool,
+        &workspace_id,
+        &project_id,
+        &pre.actor.id,
+        &pre.actor.id,
+    )
+    .await?;
     if let Some(lead_id) = lead {
         if lead_id != pre.actor.id {
-            add_project_admin(&pre.pool, &workspace_id, &project_id, &lead_id, &pre.actor.id).await?;
+            add_project_admin(
+                &pre.pool,
+                &workspace_id,
+                &project_id,
+                &lead_id,
+                &pre.actor.id,
+            )
+            .await?;
         }
     }
     // The 8 `DEFAULT_STATES` (`views/project.py:240-254`, bypassing
@@ -2603,9 +2767,22 @@ pub async fn create_project_inner(
         slug,
         &app_origin(state),
     );
-    enqueue_best_effort(&pre.pool, pidash_services::v1_projects::tasks::MODEL_ACTIVITY_TASK, kwargs)
-        .await;
-    let text = render_project(&pre.pool, &row, Some(&ann), false, &pre.actor.timezone, None, None).await?;
+    enqueue_best_effort(
+        &pre.pool,
+        pidash_services::v1_projects::tasks::MODEL_ACTIVITY_TASK,
+        kwargs,
+    )
+    .await;
+    let text = render_project(
+        &pre.pool,
+        &row,
+        Some(&ann),
+        false,
+        &pre.actor.timezone,
+        None,
+        None,
+    )
+    .await?;
     Ok(json_created(text))
 }
 
@@ -2687,8 +2864,15 @@ pub async fn retrieve_project_inner(
     let pre = preamble(state, headers, slug).await?;
     let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, pk).await?;
-    require_project_base(&pre.pool, &workspace_id, slug, &pre.actor.id, Some(&project_id), "GET")
-        .await?;
+    require_project_base(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        Some(&project_id),
+        "GET",
+    )
+    .await?;
     // `.get()` misses raise `DoesNotExist` into the base-handler 404.
     let row = fetch_detail_row(&pre.pool, slug, &pre.actor.id, &project_id)
         .await?
@@ -2732,18 +2916,18 @@ pub async fn patch_project_inner(
     .await?;
     // `Workspace.objects.get` then `Project.objects.get(pk=pk)` — either
     // miss answers `{"error":"Project does not exist"}`.
-    let ws_exists: bool = sqlx::query_scalar(r#"SELECT EXISTS(SELECT 1 FROM "workspaces" WHERE "id" = $1)"#)
-        .bind(workspace_id)
-        .fetch_one(&pre.pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let plain: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT * FROM "projects" WHERE "id" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let ws_exists: bool =
+        sqlx::query_scalar(r#"SELECT EXISTS(SELECT 1 FROM "workspaces" WHERE "id" = $1)"#)
+            .bind(workspace_id)
+            .fetch_one(&pre.pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    let plain: Option<sqlx::postgres::PgRow> =
+        sqlx::query(r#"SELECT * FROM "projects" WHERE "id" = $1 AND "deleted_at" IS NULL"#)
+            .bind(project_id)
+            .fetch_optional(&pre.pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
     let Some(plain) = plain else {
         return Err(Denial::NotFoundError("Project does not exist".to_owned()));
     };
@@ -2752,22 +2936,38 @@ pub async fn patch_project_inner(
     }
     // Before-image for the activity call (`views/project.py:412`): a plain
     // instance, so the annotation keys are absent (`SkipField`).
-    let snapshot = render_project(&pre.pool, &plain, None, false, &pre.actor.timezone, None, None).await?;
+    let snapshot = render_project(
+        &pre.pool,
+        &plain,
+        None,
+        false,
+        &pre.actor.timezone,
+        None,
+        None,
+    )
+    .await?;
     let project_name: String = plain.try_get("name").map_err(|_| Denial::ServerError)?;
-    let was_default: bool = plain.try_get("is_default").map_err(|_| Denial::ServerError)?;
-    let was_archived: Option<chrono::DateTime<chrono::Utc>> =
-        plain.try_get("archived_at").map_err(|_| Denial::ServerError)?;
+    let was_default: bool = plain
+        .try_get("is_default")
+        .map_err(|_| Denial::ServerError)?;
+    let was_archived: Option<chrono::DateTime<chrono::Utc>> = plain
+        .try_get("archived_at")
+        .map_err(|_| Denial::ServerError)?;
     // `intake_view` defaults to the stored value (`views/project.py:414`).
     // The merge only feeds the serializer: `requested_data` below stays the
     // raw body exactly as sent.
     let input = parse_body(raw_body)?;
     let mut merged = input.clone();
     if !merged.contains_key("intake_view") {
-        let current: bool = plain.try_get("intake_view").map_err(|_| Denial::ServerError)?;
+        let current: bool = plain
+            .try_get("intake_view")
+            .map_err(|_| Denial::ServerError)?;
         merged.insert("intake_view".to_owned(), Value::Bool(current));
     }
     if was_archived.is_some() {
-        return Err(Denial::BadError("Archived project cannot be updated".to_owned()));
+        return Err(Denial::BadError(
+            "Archived project cannot be updated".to_owned(),
+        ));
     }
     let data = coerce_write(&pre.pool, &merged, true, true).await?;
     // Inherited `validate()` first (`ProjectCreateSerializer.validate`).
@@ -2826,19 +3026,25 @@ pub async fn patch_project_inner(
             pidash_services::v1_projects::ser_project::IDENTIFIER_TAKEN_BODY.to_owned(),
         ));
     }
-    apply_project_update(&pre.pool, &project_id, &workspace_id, &pre.actor.id, &data, was_default)
-        .await?;
+    apply_project_update(
+        &pre.pool,
+        &project_id,
+        &workspace_id,
+        &pre.actor.id,
+        &data,
+        was_default,
+    )
+    .await?;
     // `intake_view` newly truthy + no default `Intake` → create it
     // (`views/project.py:431-438`, pre-save name in the title).
-    let intake_view_now: bool = sqlx::query_scalar(
-        r#"SELECT "intake_view" FROM "projects" WHERE "id" = $1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|_| Denial::ServerError)?
-    .flatten()
-    .unwrap_or(false);
+    let intake_view_now: bool =
+        sqlx::query_scalar(r#"SELECT "intake_view" FROM "projects" WHERE "id" = $1"#)
+            .bind(project_id)
+            .fetch_optional(&pre.pool)
+            .await
+            .map_err(|_| Denial::ServerError)?
+            .flatten()
+            .unwrap_or(false);
     if intake_view_now {
         let has_default_intake: bool = sqlx::query_scalar(
             r#"SELECT EXISTS(SELECT 1 FROM "intakes" WHERE "project_id" = $1 AND "is_default" AND "deleted_at" IS NULL)"#,
@@ -2880,9 +3086,22 @@ pub async fn patch_project_inner(
         slug,
         &app_origin(state),
     );
-    enqueue_best_effort(&pre.pool, pidash_services::v1_projects::tasks::MODEL_ACTIVITY_TASK, kwargs)
-        .await;
-    let text = render_project(&pre.pool, &row, Some(&ann), false, &pre.actor.timezone, None, None).await?;
+    enqueue_best_effort(
+        &pre.pool,
+        pidash_services::v1_projects::tasks::MODEL_ACTIVITY_TASK,
+        kwargs,
+    )
+    .await;
+    let text = render_project(
+        &pre.pool,
+        &row,
+        Some(&ann),
+        false,
+        &pre.actor.timezone,
+        None,
+        None,
+    )
+    .await?;
     Ok(json_ok(text))
 }
 
@@ -2955,7 +3174,12 @@ pub async fn apply_project_update(
     if let Some(v) = field_str(data, "description") {
         push_str(&mut sets, &mut binds, "description", v);
     }
-    for key in ["project_lead_id", "default_assignee_id", "default_state_id", "estimate_id"] {
+    for key in [
+        "project_lead_id",
+        "default_assignee_id",
+        "default_state_id",
+        "estimate_id",
+    ] {
         let field = match key {
             "project_lead_id" => "project_lead",
             "default_assignee_id" => "default_assignee",
@@ -2967,7 +3191,12 @@ pub async fn apply_project_update(
         }
     }
     if let Some(v) = field_str(data, "identifier") {
-        push_str(&mut sets, &mut binds, "identifier", ser::normalize_identifier(&v));
+        push_str(
+            &mut sets,
+            &mut binds,
+            "identifier",
+            ser::normalize_identifier(&v),
+        );
     }
     if let Some(v) = field_json(data, "icon_prop") {
         push_json(&mut sets, &mut binds, "icon_prop", v);
@@ -3113,7 +3342,9 @@ pub async fn delete_project_inner(
         return Err(Denial::NotFound);
     };
     if is_default {
-        return Err(Denial::BadError("Default project cannot be deleted".to_owned()));
+        return Err(Denial::BadError(
+            "Default project cannot be deleted".to_owned(),
+        ));
     }
     let now = chrono::Utc::now();
     // `UserFavorite` cascade (`views/project.py:493`): queryset
@@ -3145,8 +3376,12 @@ pub async fn delete_project_inner(
         &app_origin(state),
         &project_id.to_string(),
     );
-    enqueue_best_effort(&pre.pool, pidash_services::v1_projects::tasks::WEBHOOK_ACTIVITY_TASK, kwargs)
-        .await;
+    enqueue_best_effort(
+        &pre.pool,
+        pidash_services::v1_projects::tasks::WEBHOOK_ACTIVITY_TASK,
+        kwargs,
+    )
+    .await;
     Ok(no_content())
 }
 
@@ -3202,11 +3437,17 @@ mod tests {
     fn denial_bodies_are_byte_identical() {
         assert_eq!(
             denial_body(Denial::Unauthorized),
-            (401, r#"{"detail":"Authentication credentials were not provided."}"#.to_owned())
+            (
+                401,
+                r#"{"detail":"Authentication credentials were not provided."}"#.to_owned()
+            )
         );
         assert_eq!(
             denial_body(Denial::InvalidToken),
-            (403, r#"{"detail":"Given API token is not valid"}"#.to_owned())
+            (
+                403,
+                r#"{"detail":"Given API token is not valid"}"#.to_owned()
+            )
         );
         assert_eq!(
             denial_body(Denial::Forbidden),
@@ -3217,7 +3458,10 @@ mod tests {
         );
         assert_eq!(
             denial_body(Denial::NotFound),
-            (404, r#"{"error":"The requested resource does not exist."}"#.to_owned())
+            (
+                404,
+                r#"{"error":"The requested resource does not exist."}"#.to_owned()
+            )
         );
         assert_eq!(
             denial_body(Denial::ProjectNotFound),
@@ -3231,8 +3475,13 @@ mod tests {
             )
         );
         assert_eq!(
-            denial_body(Denial::BadError("Archived project cannot be updated".to_owned())),
-            (400, r#"{"error":"Archived project cannot be updated"}"#.to_owned())
+            denial_body(Denial::BadError(
+                "Archived project cannot be updated".to_owned()
+            )),
+            (
+                400,
+                r#"{"error":"Archived project cannot be updated"}"#.to_owned()
+            )
         );
         assert_eq!(
             denial_body(Denial::NotFoundError("Project not found".to_owned())),
@@ -3242,7 +3491,10 @@ mod tests {
             denial_body(Denial::Conflict(
                 r#"{"identifier":"The project identifier is already taken"}"#.to_owned()
             )),
-            (409, r#"{"identifier":"The project identifier is already taken"}"#.to_owned())
+            (
+                409,
+                r#"{"identifier":"The project identifier is already taken"}"#.to_owned()
+            )
         );
     }
 
@@ -3280,8 +3532,7 @@ mod tests {
         };
         assert_eq!(message, "This field may not be blank.");
         let long = "x".repeat(13);
-        let Err(CoerceFail::Msg(message)) =
-            coerce_char(&Value::String(long), false, Some(12))
+        let Err(CoerceFail::Msg(message)) = coerce_char(&Value::String(long), false, Some(12))
         else {
             panic!("over-long fails");
         };
@@ -3303,10 +3554,7 @@ mod tests {
             coerce_bool(&Value::String("maybe".to_owned())),
             Err(CoerceFail::Msg(_))
         ));
-        assert!(matches!(
-            coerce_bool(&Value::Null),
-            Err(CoerceFail::Msg(_))
-        ));
+        assert!(matches!(coerce_bool(&Value::Null), Err(CoerceFail::Msg(_))));
     }
 
     #[test]
@@ -3337,11 +3585,10 @@ mod tests {
     #[test]
     fn choice_and_timezone_membership() {
         assert_eq!(
-            coerce_choice(&Value::String("cloud_agent".to_owned()), &[
-                "local_runner",
-                "cloud_agent",
-                "managed_runner"
-            ])
+            coerce_choice(
+                &Value::String("cloud_agent".to_owned()),
+                &["local_runner", "cloud_agent", "managed_runner"]
+            )
             .expect("member"),
             "cloud_agent"
         );
@@ -3351,14 +3598,15 @@ mod tests {
             panic!("non-member fails");
         };
         assert_eq!(message, "\"hyper\" is not a valid choice.");
-        assert!(super::super::tz_zones::PYTZ_COMMON_TIMEZONES
-            .windows(2)
-            .all(|w| w[0] < w[1]), "zone list stays sorted for binary search");
         assert!(
             super::super::tz_zones::PYTZ_COMMON_TIMEZONES
-                .binary_search(&"UTC")
-                .is_ok()
+                .windows(2)
+                .all(|w| w[0] < w[1]),
+            "zone list stays sorted for binary search"
         );
+        assert!(super::super::tz_zones::PYTZ_COMMON_TIMEZONES
+            .binary_search(&"UTC")
+            .is_ok());
     }
 
     #[test]
@@ -3371,11 +3619,9 @@ mod tests {
             );
         }
         // Concrete columns and annotations order directly.
-        assert!(
-            resolve_list_order("-identifier")
-                .expect("column")
-                .contains("ORDER BY \"identifier\" DESC")
-        );
+        assert!(resolve_list_order("-identifier")
+            .expect("column")
+            .contains("ORDER BY \"identifier\" DESC"));
         // Unknown keys are Django's `FieldError` → the generic 500.
         assert!(matches!(
             resolve_list_order("nope"),
@@ -3386,23 +3632,24 @@ mod tests {
     #[test]
     fn read_field_order_pins_wire_order() {
         // `[pk] + declared annotations + concrete fields + forward relations`.
-        assert_eq!(&READ_FIELD_ORDER[..9], &[
-            "id",
-            "total_members",
-            "total_cycles",
-            "total_modules",
-            "is_member",
-            "sort_order",
-            "member_role",
-            "is_deployed",
-            "cover_image_url",
-        ]);
-        assert_eq!(&READ_FIELD_ORDER[9..13], &[
-            "created_at",
-            "updated_at",
-            "deleted_at",
-            "name",
-        ]);
+        assert_eq!(
+            &READ_FIELD_ORDER[..9],
+            &[
+                "id",
+                "total_members",
+                "total_cycles",
+                "total_modules",
+                "is_member",
+                "sort_order",
+                "member_role",
+                "is_deployed",
+                "cover_image_url",
+            ]
+        );
+        assert_eq!(
+            &READ_FIELD_ORDER[9..13],
+            &["created_at", "updated_at", "deleted_at", "name",]
+        );
         assert_eq!(
             &READ_FIELD_ORDER[READ_FIELD_ORDER.len() - 8..],
             &[
@@ -3423,8 +3670,14 @@ mod tests {
     fn ser_error_mapping_keeps_phases() {
         use pidash_services::v1_projects::ser_project::ProjectSerError as E;
         // `validate()`-phase failures keep their own bodies.
-        assert!(matches!(ser_denial(E::NameForbidden), Denial::FieldErrors(_)));
-        assert!(matches!(ser_denial(E::CloudAgentUnavailable), Denial::Conflict(_)));
+        assert!(matches!(
+            ser_denial(E::NameForbidden),
+            Denial::FieldErrors(_)
+        ));
+        assert!(matches!(
+            ser_denial(E::CloudAgentUnavailable),
+            Denial::Conflict(_)
+        ));
         // `update()`-tail failures: estimate-scope and unset-default
         // collapse into the identifier 409 (probed against live Django);
         // a provided `default_state` escapes into the base-handler 400
@@ -3433,7 +3686,10 @@ mod tests {
             denial_body(Denial::Conflict(
                 pidash_services::v1_projects::ser_project::IDENTIFIER_TAKEN_BODY.to_owned()
             )),
-            (409, r#"{"identifier":"The project identifier is already taken"}"#.to_owned())
+            (
+                409,
+                r#"{"identifier":"The project identifier is already taken"}"#.to_owned()
+            )
         );
         assert_eq!(
             denial_body(Denial::BadError("Please provide valid detail".to_owned())),
