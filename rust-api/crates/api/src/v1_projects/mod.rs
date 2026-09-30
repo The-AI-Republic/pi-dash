@@ -29,4 +29,3 @@ use crate::state::AppState;
 pub fn routes() -> Router<AppState> {
     handlers_members::routes().merge(handlers_state_estimate::routes())
 }
-}
