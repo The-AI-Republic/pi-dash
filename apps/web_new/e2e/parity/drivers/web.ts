@@ -311,6 +311,21 @@ export class WebDriver implements ParityDriver {
     return img.getAttribute("src");
   }
 
+  // --- preferences: theme, language, timezone, first day of week
+  //     (SHELL-088, 095, 096, 097). The palette preference commands open cmdk
+  //     sub-pages whose options are ordinary [cmdk-item] nodes, so the existing
+  //     palette readers/activators drive them; these two reads observe the
+  //     applied result — the theme as a class on the document root, the
+  //     interface language as the root lang attribute. ---
+
+  async htmlClassList(): Promise<string> {
+    return (await this.page.locator("html").getAttribute("class")) ?? "";
+  }
+
+  async documentLang(): Promise<string> {
+    return (await this.page.locator("html").getAttribute("lang")) ?? "";
+  }
+
   // --- browse route (SHELL-106, negative row) ---
 
   async openBrowseWorkItem(workspaceSlug: string, identifier: string): Promise<void> {

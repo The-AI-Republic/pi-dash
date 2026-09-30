@@ -156,6 +156,14 @@ export class WebNewDriver implements ParityDriver {
     return todo("repoStarIconSrc");
   }
 
+  async htmlClassList(): Promise<string> {
+    return todo("htmlClassList");
+  }
+
+  async documentLang(): Promise<string> {
+    return todo("documentLang");
+  }
+
   async openBrowseWorkItem(_workspaceSlug: string, _identifier: string): Promise<void> {
     return todo("openBrowseWorkItem");
   }

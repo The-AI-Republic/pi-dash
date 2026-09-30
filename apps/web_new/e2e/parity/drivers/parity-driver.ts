@@ -119,6 +119,19 @@ export interface ParityDriver {
   /** The src of the repo-star icon image (theme-adaptive asset), or null. */
   repoStarIconSrc(): Promise<string | null>;
 
+  // --- preferences: theme, language, timezone, first day of week
+  //     (SHELL-088, 095, 096, 097). The four "Change …" preference commands
+  //     open cmdk sub-pages whose options are ordinary [cmdk-item] nodes, so the
+  //     existing palette readers/activators (paletteHasCommand, paletteCommandTitles,
+  //     activatePaletteCommand, typeInCommandPalette) drive them additively.
+  //     These two reads observe the applied result the user sees: the theme is a
+  //     class on <html>, the interface language is the <html> lang attribute. The
+  //     persisted server state is read back through helpers/api. ---
+  /** The class attribute of the document root (theme application is class-based), or "". */
+  htmlClassList(): Promise<string>;
+  /** The lang attribute of the document root (set when the interface language changes). */
+  documentLang(): Promise<string>;
+
   // --- browse route (SHELL-106, negative row) ---
   /** Open the workspace-level browse route for a work-item identifier (e.g. "PROJ-1"). */
   openBrowseWorkItem(workspaceSlug: string, identifier: string): Promise<void>;
