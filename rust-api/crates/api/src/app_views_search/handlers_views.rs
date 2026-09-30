@@ -785,6 +785,7 @@ fn create_query(filters: Option<&Value>) -> Result<Value, Denial> {
 /// - `filters` absent: the PATCH line maps `{}` but `save()` then
 ///   recomputes from the row's own (old) filters, restoring the old
 ///   mapping — so the effective value maps the old filters.
+///
 /// A missing key is NOT the `{}` default here (that reading belongs to
 /// the fixture prose, not the code): the row's filters fill in.
 fn update_query(filters_new: Option<&Value>, filters_old: Option<&Value>) -> Result<Value, Denial> {
