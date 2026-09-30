@@ -42,19 +42,24 @@
 //!   popped off `request.data`, so the intake-branch `requested_data`
 //!   dump never contains them (the create path pops nothing).
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use pidash_db::app_intake::queries as queries;
+use pidash_db::issue_filters::{FilterValue, IssueFilterError, ISSUE_FILTER_KEYS, issue_filters_get};
 use pidash_services::app_intake::permissions as guards;
 use pidash_services::app_intake::tasks as intake_tasks;
 
+use crate::app_issues::resolve_gate;
+use crate::middleware::SessionHandle;
+
 use super::{
-    actor, enqueue_message, enqueue_soft_delete, guard_denial, guest_view_all, intake_id_for,
-    is_issue_creator, json_truthy, load_membership, parse_body, parse_id, pool_of,
-    raw_json_response, resolve_tenant, Denial,
+    actor, enqueue_message, enqueue_soft_delete, guard_denial, guards_error, guest_view_all,
+    intake_id_for, is_issue_creator, json_truthy, load_membership, parse_body, parse_id, pool_of,
+    query_last, raw_json_response, resolve_tenant, Denial, QueryMap,
 };
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
@@ -3442,4 +3447,2691 @@ async fn soft_delete_bridge(
     .await
     .map_err(|_| Denial::ServerError)?;
     Ok(())
+}
+
+// Intake-issue list + create (D-32, stage 5, PIDASHCONV-385).
+//
+// Port of `IntakeIssueViewSet.list` (`base.py:176-219`) and `.create`
+// (`base.py:222-326`) from `apps/api/pi_dash/app/views/intake/base.py`,
+// with collection routes from `app/urls/intake.py:29-56` (the
+// `inbox-issues` alias shares the viewset).
+//
+// Action map:
+//
+// * `list`: intake-`None` 404 `{"error": "Intake not found"}`;
+//   `issue_filters(GET, prefix "issue__")` compiled by [`compile_filter`];
+//   `label_ids` annotate; `order_by` default `-issue__created_at`;
+//   status CSV default `"-2"` minus `"null"` tokens; guest narrowing;
+//   `BasePaginator` 12-key envelope with `IntakeIssueSerializer`
+//   (`many=True`) rows. 200.
+// * `create`: 400 `"Name is required"` unless `issue.name` is truthy;
+//   400 `"Invalid priority"` unless the priority (default `"none"`) is in
+//   the allowlist; triage state get-or-create; `IssueCreateSerializer`
+//   with `allow_triage_state` context; `IntakeIssue` create with source
+//   `IN_APP`; `issue.activity.created` + description-version emits;
+//   re-fetch with label/assignee annotates; `IntakeIssueDetailSerializer`
+//   200; serializer errors 400.
+//
+// Layering: param parsing, role gates and shapes live in
+// `pidash_services::app_intake` and `pidash_db::app_intake`; the session
+// gate (`@allow_permission([ADMIN, MEMBER, GUEST])` + `IsAuthenticated`
+// order) is `crate::app_issues::resolve_gate`; the paginator envelope is
+// `pidash_services::app_issues::envelope`. This module owns the HTTP
+// shell, the `issue_filters` SQL compiler (transcribed from
+// `api/src/app_issues` `legacy_sql`/`legacy_text_sql` against the real
+// table names — those fns are private, so the compiler lives here
+// instead of crossing the module boundary), the write path, and the row
+// fetching.
+//
+// # Ported bugs and quirks (translate, don't redesign)
+//
+// * QUIRK-create-no-intake (`:265`): create looks the intake up with
+//   `.first()` and dereferences `.id` unguarded, so a missing intake row
+//   is a 500, not the list's 404. Ported as-is.
+// * QUIRK-order-by-passthrough (`:198`): the raw `order_by` param is
+//   interpolated into `ORDER BY`; an unknown field raises at execution
+//   and answers the 500 envelope. Ported as-is.
+// * QUIRK-status-coercion (`:200-202`): a non-numeric status token fails
+//   `IntegerField` coercion at execution (500); an explicit `?status=`
+//   with only `"null"` tokens leaves no filter (all statuses list).
+//   Ported as-is via `parse_intake_status`.
+// * QUIRK-non-dict-issue (create `:223`): a non-object `issue` value
+//   raises `AttributeError` before the name gate (500); explicit `null`
+//   does the same. Ported as-is.
+// * QUIRK-priority-model-default: a missing priority validates as
+//   `"none"` and the serializer inserts the model default `"none"`
+//   (unlike the space twin's `"low"` fallback — same serializer, the
+//   space view passes the value explicitly).
+// * QUIRK-per-page-zero: `?per_page=0` divides by zero in `max_hits`
+//   (500); negative values take the same 500 arm here (Django answers
+//   200 with degenerate slices — absurd input, divergence documented).
+// * Fresh-create detail constants: a just-created issue has no ticker,
+//   runs, relations or subscriptions, so `agent_ticker`/`agent_status`
+//   are null, `relations_summary` is empty, `has_open_blockers` is
+//   false, and `is_subscribed`/`is_intake` (declared read-only fields
+//   with no model attribute) are skipped by DRF, not nulled. Likewise
+//   `cycle_id`/`module_ids`/the three counts render only when the
+//   instance carries the annotation, which the create re-fetch does not
+//   select — absent keys, not nulls.
+//
+// Task delivery: `serve` carries no AMQP publisher (only the worker
+// does), so `.delay()` calls enqueue a [`pidash_jobs::queue::NewJob`]
+// into `rust_job_queue`; the worker forwards Python-owned names to the
+// broker. Enqueue is best-effort after commit: a missing queue table
+// must not turn user-visible writes into 500s, so failures are traced
+// and the response stands.
+
+// ---------------------------------------------------------------------------
+// list
+// ---------------------------------------------------------------------------
+
+/// `list` (`base.py:177-219`).
+pub async fn collection_list(
+    State(state): State<AppState>,
+    Path((slug, project_raw)): Path<(String, String)>,
+    Query(query): Query<QueryMap>,
+    extension: Option<axum::Extension<SessionHandle>>,
+) -> Response {
+    let gate = match resolve_gate(&state, &slug, &project_raw, extension).await {
+        Ok(gate) => gate,
+        Err(denial) => return denial.into_response(),
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    // `Intake.objects.filter(workspace__slug, project_id).first()`
+    // (`:178`); default ordering is `name` (`db/models/intake.py:35`).
+    // A miss answers 404 (`:179-180`).
+    let intake_id: Option<Uuid> = match sqlx::query_scalar(
+        "SELECT \"intakes\".\"id\" FROM \"intakes\" WHERE (\"intakes\".\"workspace_id\" = $1 AND \"intakes\".\"project_id\" = $2 AND \"intakes\".\"deleted_at\" IS NULL) ORDER BY \"intakes\".\"name\" ASC LIMIT 1",
+    )
+    .bind(gate.workspace_id)
+    .bind(gate.project_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let Some(intake_id) = intake_id else {
+        return guards_error(guards::intake_not_found());
+    };
+    // `Project.objects.get(pk=...)` (`:182`) is subsumed by the gate's
+    // tenant lookup (same 404 when the row is gone).
+    let today = Utc::now().with_timezone(&gate.timezone).date_naive();
+    let compiled = match compile_filter(&query, today) {
+        Ok(compiled) => compiled,
+        Err(response) => return response,
+    };
+    let order_by = query_last(&query, "order_by").unwrap_or_else(|| "-issue__created_at".to_string());
+    let statuses = match queries::parse_intake_status(query_last(&query, "status").as_deref()) {
+        Ok(statuses) => statuses,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let page = match list_page(&query) {
+        Ok(page) => page,
+        Err(response) => return response,
+    };
+    let list_query = queries::IntakeIssueListQuery {
+        order_by: &order_by,
+        statuses,
+        issue_filters_sql: compiled.fragment.as_deref(),
+        issue_filter_binds: compiled.bind_count,
+        guest_created_by: gate.guest_scoped,
+        limit: page.limit,
+        offset: page.offset,
+    };
+    let sql = queries::intake_issue_list_sql(&list_query);
+    let mut statement = sqlx::query(&sql).bind(intake_id).bind(gate.project_id);
+    statement = bind_owned(statement, &compiled.binds);
+    if let Some(statuses) = &list_query.statuses {
+        for status in statuses {
+            statement = statement.bind(*status);
+        }
+    }
+    if list_query.guest_created_by {
+        statement = statement.bind(gate.user_id);
+    }
+    let rows = match statement.fetch_all(pool).await {
+        Ok(rows) => rows,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    // Total over the same scope (`queryset.count()`; the `GROUP BY`
+    // collapses fanout, so `COUNT(DISTINCT id)` matches).
+    let total: i64 = {
+        let mut count_sql = String::from(
+            "SELECT COUNT(DISTINCT \"intake_issues\".\"id\") FROM \"intake_issues\" LEFT OUTER JOIN \"issues\" ON (\"intake_issues\".\"issue_id\" = \"issues\".\"id\") LEFT OUTER JOIN \"issue_labels\" ON (\"issues\".\"id\" = \"issue_labels\".\"issue_id\") LEFT OUTER JOIN \"labels\" ON (\"issue_labels\".\"label_id\" = \"labels\".\"id\")",
+        );
+        count_sql.push_str(&compiled.joins);
+        count_sql.push_str(" WHERE (\"intake_issues\".\"intake_id\" = $1 AND \"intake_issues\".\"project_id\" = $2 AND \"intake_issues\".\"deleted_at\" IS NULL");
+        let mut next = 3;
+        if let Some(fragment) = &compiled.fragment {
+            count_sql.push_str(&format!(" AND ({fragment})"));
+            next += compiled.bind_count;
+        }
+        if let Some(statuses) = &list_query.statuses {
+            let holders = statuses
+                .iter()
+                .enumerate()
+                .map(|(ix, _)| format!("${}", next + ix))
+                .collect::<Vec<_>>()
+                .join(", ");
+            count_sql.push_str(&format!(" AND \"intake_issues\".\"status\" IN ({holders})"));
+            next += statuses.len();
+        }
+        if list_query.guest_created_by {
+            count_sql.push_str(&format!(" AND \"intake_issues\".\"created_by_id\" = ${next}"));
+        }
+        count_sql.push(')');
+        let mut count_statement = sqlx::query_scalar::<_, i64>(&count_sql)
+            .bind(intake_id)
+            .bind(gate.project_id);
+        count_statement = bind_owned_scalar(count_statement, &compiled.binds);
+        if let Some(statuses) = &list_query.statuses {
+            for status in statuses {
+                count_statement = count_statement.bind(*status);
+            }
+        }
+        if list_query.guest_created_by {
+            count_statement = count_statement.bind(gate.user_id);
+        }
+        match count_statement.fetch_one(pool).await {
+            Ok(total) => total,
+            Err(_) => return Denial::ServerError.into_response(),
+        }
+    };
+    // The second fetch Django's `select_related("issue")` folds in: the
+    // list projection selects only intake columns, so issue columns come
+    // from one `IN` query (no soft-delete guard — `select_related`
+    // follows the FK unconditionally).
+    let issue_ids: Vec<Uuid> = rows
+        .iter()
+        .filter_map(|row| row.try_get::<Uuid, _>("issue_id").ok())
+        .collect();
+    let nested = match fetch_list_issues(pool, &issue_ids).await {
+        Ok(nested) => nested,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let mut rendered = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let issue_id: Uuid = match row.try_get("issue_id") {
+            Ok(id) => id,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        let Some(issue) = nested.get(&issue_id) else {
+            return Denial::ServerError.into_response();
+        };
+        rendered.push(render_list_row(row, issue, gate.timezone));
+    }
+    let results_json = serde_json::Value::Array(rendered).to_string();
+    // `limit <= 0` never reaches here (`list_page` rejects it the way
+    // the `ZeroDivisionError` in `max_hits` rejects `per_page=0`).
+    // (`div_ceil` is unstable on this toolchain; the manual form matches
+    // `math.ceil` for non-negative inputs.)
+    let total_pages = (total + page.limit - 1) / page.limit;
+    let next_cursor = format!("{}:{}:0", page.limit, page.page + 1);
+    let prev_cursor = format!("{}:{}:1", page.limit, page.page - 1);
+    // `next.has_results` is `page_results.count() > limit` over the
+    // over-fetched window — exactly `total > offset + limit`.
+    let body = pidash_services::app_issues::envelope(
+        None,
+        None,
+        total,
+        &next_cursor,
+        &prev_cursor,
+        total > page.offset + page.limit,
+        page.page > 0,
+        rows.len(),
+        total_pages,
+        total,
+        &results_json,
+    );
+    raw_json_response(body)
+}
+
+
+// ---------------------------------------------------------------------------
+// Pagination: BasePaginator.get_per_page + OffsetPaginator.get_result
+// ---------------------------------------------------------------------------
+
+/// The paginator window: `limit` (`per_page`), `page` (`cursor.offset`),
+/// `offset` (`page * limit`).
+struct ListPage {
+    limit: i64,
+    page: i64,
+    offset: i64,
+}
+
+/// `BasePaginator.get_per_page` (`utils/paginator.py:642-652`) plus the
+/// cursor half of `OffsetPaginator.get_result` (`:124-164`): the intake
+/// list passes no `order_by` to the paginator, so no re-ordering applies
+/// here. Errors answer DRF `ParseError` bodies (`{"detail": ...}` 400);
+/// a negative page answers `{"detail": "Error in parsing"}` 400 via
+/// `BadPaginationError`; `per_page <= 0` answers 500 (Django divides by
+/// zero computing `max_hits`).
+#[allow(clippy::result_large_err)]
+fn list_page(query: &QueryMap) -> Result<ListPage, Response> {
+    let per_page = match query_last(query, "per_page") {
+        None => 1000,
+        Some(raw) => match parse_python_int(&raw) {
+            Some(value) => value,
+            None => {
+                return Err(
+                    Denial::BadDetail("Invalid per_page parameter.".to_owned()).into_response(),
+                );
+            }
+        },
+    };
+    if per_page > 1000 {
+        return Err(Denial::BadDetail(
+            "Invalid per_page value. Cannot exceed 1000.".to_owned(),
+        )
+        .into_response());
+    }
+    if per_page <= 0 {
+        return Err(Denial::ServerError.into_response());
+    }
+    let raw_cursor = query_last(query, "cursor").unwrap_or_else(|| format!("{per_page}:0:0"));
+    let ( _value, page, _is_prev) = match parse_cursor(&raw_cursor) {
+        Some(cursor) => cursor,
+        None => {
+            return Err(
+                Denial::BadDetail("Invalid cursor parameter.".to_owned()).into_response(),
+            );
+        }
+    };
+    let offset = page.saturating_mul(per_page);
+    if offset < 0 {
+        return Err(Denial::BadDetail("Error in parsing".to_owned()).into_response());
+    }
+    Ok(ListPage {
+        limit: per_page,
+        page,
+        offset,
+    })
+}
+
+/// Python `int()`: surrounding whitespace stripped, optional sign, ASCII
+/// digits only (no float shapes, no underscores).
+fn parse_python_int(raw: &str) -> Option<i64> {
+    let text = raw.trim();
+    let digits = text.strip_prefix('+').or_else(|| text.strip_prefix('-')).unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse::<i64>().ok()
+}
+
+/// `Cursor.from_string` (`utils/paginator.py:48-58`): exactly three
+/// `:`-separated parts; float iff the value part contains `.`.
+fn parse_cursor(raw: &str) -> Option<(CursorValue, i64, bool)> {
+    let mut bits = raw.split(':');
+    let (value_raw, offset_raw, prev_raw) = match (bits.next(), bits.next(), bits.next(), bits.next()) {
+        (Some(v), Some(o), Some(p), None) => (v, o, p),
+        _ => return None,
+    };
+    let value = if value_raw.contains('.') {
+        CursorValue::Float(value_raw.parse::<f64>().ok()?)
+    } else {
+        CursorValue::Int(value_raw.parse::<i64>().ok()?)
+    };
+    let offset = offset_raw.parse::<i64>().ok()?;
+    let is_prev = prev_raw.parse::<i64>().ok().map(|n| n != 0)?;
+    Some((value, offset, is_prev))
+}
+
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+enum CursorValue {
+    Int(i64),
+    Float(f64),
+}
+
+// ---------------------------------------------------------------------------
+// issue_filters compiler: issue_filters(GET, prefix "issue__") to SQL
+// ---------------------------------------------------------------------------
+
+/// One dynamic bind, in placeholder order.
+#[derive(Debug, Clone)]
+enum OwnedBind {
+    Uuid(Uuid),
+    Text(String),
+    Int(i32),
+    Date(chrono::NaiveDate),
+}
+
+/// The compiled filter: extra JOINs, the `AND`-joined fragment (no
+/// leading `AND`), and the binds in `$3..` order.
+struct CompiledFilter {
+    joins: String,
+    fragment: Option<String>,
+    binds: Vec<OwnedBind>,
+    bind_count: usize,
+}
+
+/// Compile `issue_filters(request.GET, "GET", "issue__")` (`base.py:183`)
+/// to SQL. Param parsing is the shared `pidash_db::issue_filters` kernel
+/// (`issue_filters_get`); predicate compilation is transcribed from
+/// `api/src/app_issues` `legacy_sql`/`legacy_text_sql` (private there)
+/// against the real table names of the list query. Django `filter()`
+/// joins are INNER; an `__isnull` lookup on a relation forces that
+/// relation's join LEFT.
+#[allow(clippy::result_large_err)]
+fn compile_filter(
+    query: &QueryMap,
+    today: chrono::NaiveDate,
+) -> Result<CompiledFilter, Response> {
+    let mut params = std::collections::HashMap::new();
+    for key in ISSUE_FILTER_KEYS {
+        if let Some(last) = query_last(query, key) {
+            params.insert((*key).to_owned(), last);
+        }
+    }
+    let filter = match issue_filters_get(&params, "issue__", today) {
+        Ok(filter) => filter,
+        Err(IssueFilterError::DateOverflow) => return Err(Denial::ServerError.into_response()),
+    };
+    let predicates = filter.predicates();
+    // Relation joins: LEFT when an __isnull lookup touches the relation,
+    // else INNER (Django's filter()/exclude() join rule).
+    let uses = |marker: &str| predicates.iter().any(|(name, _)| name.contains(marker));
+    let isnull_uses = |marker: &str| {
+        predicates.iter().any(|(name, _)| {
+            name.contains(marker) && name.ends_with("__isnull")
+        })
+    };
+    let mut joins = String::new();
+    if uses("issue__state__group") {
+        joins.push_str(" INNER JOIN \"states\" ON (\"states\".\"id\" = \"issues\".\"state_id\")");
+    }
+    if uses("assignees") || uses("issue_assignee") {
+        let kind = if isnull_uses("assignees") || isnull_uses("issue_assignee") {
+            "LEFT OUTER JOIN"
+        } else {
+            "INNER JOIN"
+        };
+        joins.push_str(&format!(
+            " {kind} \"issue_assignees\" ON (\"issue_assignees\".\"issue_id\" = \"issues\".\"id\")"
+        ));
+    }
+    if uses("issue_mention") {
+        joins.push_str(
+            " INNER JOIN \"issue_mentions\" ON (\"issue_mentions\".\"issue_id\" = \"issues\".\"id\")",
+        );
+    }
+    if uses("issue_cycle") {
+        let kind = if isnull_uses("issue_cycle") {
+            "LEFT OUTER JOIN"
+        } else {
+            "INNER JOIN"
+        };
+        joins.push_str(&format!(
+            " {kind} \"cycle_issues\" ON (\"cycle_issues\".\"issue_id\" = \"issues\".\"id\")"
+        ));
+    }
+    if uses("issue_module") {
+        let kind = if isnull_uses("issue_module") {
+            "LEFT OUTER JOIN"
+        } else {
+            "INNER JOIN"
+        };
+        joins.push_str(&format!(
+            " {kind} \"module_issues\" ON (\"module_issues\".\"issue_id\" = \"issues\".\"id\")"
+        ));
+    }
+    if uses("issue_subscribers") {
+        let kind = if isnull_uses("issue_subscribers") {
+            "LEFT OUTER JOIN"
+        } else {
+            "INNER JOIN"
+        };
+        joins.push_str(&format!(
+            " {kind} \"issue_subscribers\" ON (\"issue_subscribers\".\"issue_id\" = \"issues\".\"id\")"
+        ));
+    }
+    // `label_issue`/`labels` ride the base query's LEFT joins.
+    let mut binds = Vec::new();
+    let mut next = 3usize;
+    let mut parts = Vec::new();
+    for (name, value) in predicates {
+        match compile_predicate(name, value, &mut binds, &mut next)? {
+            Some(sql) => parts.push(sql),
+            None => return Err(Denial::ServerError.into_response()),
+        }
+    }
+    let bind_count = binds.len();
+    Ok(CompiledFilter {
+        joins,
+        fragment: if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" AND "))
+        },
+        binds,
+        bind_count,
+    })
+}
+
+/// Bind `$n` placeholders for one compiled predicate. `None` is the
+/// `FieldError` arm (unknown column): Django raises and the 500 envelope
+/// answers.
+#[allow(clippy::result_large_err)]
+fn compile_predicate(
+    name: &str,
+    value: &FilterValue,
+    binds: &mut Vec<OwnedBind>,
+    next: &mut usize,
+) -> Result<Option<String>, Response> {
+    // `__isnull` flags.
+    if let Some(path) = name.strip_suffix("__isnull") {
+        let column = match isnull_column(path) {
+            Some(column) => column,
+            None => return Ok(None),
+        };
+        let flag = match value {
+            FilterValue::Flag(flag) => *flag,
+            _ => return Err(Denial::ServerError.into_response()),
+        };
+        return Ok(Some(if flag {
+            format!("{column} IS NULL")
+        } else {
+            format!("{column} IS NOT NULL")
+        }));
+    }
+    match value {
+        FilterValue::Uuids(ids) => {
+            let column = match uuid_in_column(name) {
+                Some(column) => column,
+                None => return Ok(None),
+            };
+            if ids.is_empty() {
+                return Ok(Some("FALSE".to_owned()));
+            }
+            let mut holders = Vec::with_capacity(ids.len());
+            for id in ids {
+                holders.push(placeholder(next));
+                binds.push(OwnedBind::Uuid(*id));
+            }
+            Ok(Some(format!("{column} IN ({})", holders.join(","))))
+        }
+        FilterValue::Strings(items) => {
+            let column = match strings_in_column(name) {
+                Some(column) => column,
+                None => return Ok(None),
+            };
+            if items.is_empty() {
+                return Ok(Some("FALSE".to_owned()));
+            }
+            if name == "issue__issue_intake__status__in" {
+                let mut numbers = Vec::with_capacity(items.len());
+                for item in items {
+                    match item.parse::<i32>() {
+                        Ok(number) => numbers.push(number),
+                        Err(_) => {
+                            return Err(Denial::BadError(
+                                "Please provide valid detail".to_owned(),
+                            )
+                            .into_response());
+                        }
+                    }
+                }
+                let mut holders = Vec::with_capacity(numbers.len());
+                for number in numbers {
+                    holders.push(placeholder(next));
+                    binds.push(OwnedBind::Int(number));
+                }
+                return Ok(Some(format!(
+                    "EXISTS (SELECT 1 FROM \"intake_issues\" \"ii\" WHERE (\"ii\".\"issue_id\" = \"issues\".\"id\" AND \"ii\".\"status\" IN ({})))",
+                    holders.join(",")
+                )));
+            }
+            if name == "issue__estimate_point__in" {
+                let mut holders = Vec::with_capacity(items.len());
+                for item in items {
+                    let id: Uuid = match item.parse() {
+                        Ok(id) => id,
+                        Err(_) => {
+                            return Err(Denial::BadError(
+                                "Please provide valid detail".to_owned(),
+                            )
+                            .into_response());
+                        }
+                    };
+                    holders.push(placeholder(next));
+                    binds.push(OwnedBind::Uuid(id));
+                }
+                return Ok(Some(format!("{column} IN ({})", holders.join(","))));
+            }
+            let mut holders = Vec::with_capacity(items.len());
+            for item in items {
+                holders.push(placeholder(next));
+                binds.push(OwnedBind::Text(item.clone()));
+            }
+            Ok(Some(format!("{column} IN ({})", holders.join(","))))
+        }
+        FilterValue::Text(text) => compile_text_predicate(name, text, binds, next),
+        FilterValue::Flag(_) => Err(Denial::ServerError.into_response()),
+        FilterValue::Day(day) => {
+            let (column, operator) = match day_comparison(name) {
+                Some(pair) => pair,
+                None => return Ok(None),
+            };
+            let holder = placeholder(next);
+            binds.push(OwnedBind::Date(*day));
+            Ok(Some(format!("{column} {operator} {holder}::date")))
+        }
+        FilterValue::Null => {
+            let column = match isnull_column(name) {
+                Some(column) => column,
+                None => return Ok(None),
+            };
+            Ok(Some(format!("{column} IS NULL")))
+        }
+    }
+}
+
+fn placeholder(next: &mut usize) -> String {
+    let holder = format!("${next}");
+    *next += 1;
+    holder
+}
+
+/// Columns for `__isnull` predicates (and bare `Null` values), real table
+/// names for the list query.
+fn isnull_column(path: &str) -> Option<&'static str> {
+    Some(match path {
+        "issue__parent" => "\"issues\".\"parent_id\"",
+        "issue__labels" => "\"issue_labels\".\"label_id\"",
+        "issue__assignees" => "\"issue_assignees\".\"assignee_id\"",
+        "issue__created_by" => "\"issues\".\"created_by_id\"",
+        "issue__issue_cycle__cycle_id" => "\"cycle_issues\".\"cycle_id\"",
+        "issue__issue_module__module_id" => "\"module_issues\".\"module_id\"",
+        "issue__label_issue__deleted_at" => "\"issue_labels\".\"deleted_at\"",
+        "issue__issue_assignee__deleted_at" => "\"issue_assignees\".\"deleted_at\"",
+        "issue__issue_cycle__deleted_at" => "\"cycle_issues\".\"deleted_at\"",
+        "issue__issue_module__deleted_at" => "\"module_issues\".\"deleted_at\"",
+        "issue__issue_subscribers__deleted_at" => "\"issue_subscribers\".\"deleted_at\"",
+        "issue__target_date" => "\"issues\".\"target_date\"",
+        "issue__start_date" => "\"issues\".\"start_date\"",
+        _ => return None,
+    })
+}
+
+/// Columns for UUID `__in` predicates. `logged_by` has no model field:
+/// Django raises `FieldError` (generic 500).
+fn uuid_in_column(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "issue__state__in" => "\"issues\".\"state_id\"",
+        "issue__parent__in" => "\"issues\".\"parent_id\"",
+        "issue__labels__in" => "\"issue_labels\".\"label_id\"",
+        "issue__assignees__in" => "\"issue_assignees\".\"assignee_id\"",
+        "issue__issue_mention__mention__id__in" => "\"issue_mentions\".\"mention_id\"",
+        "issue__created_by__in" => "\"issues\".\"created_by_id\"",
+        "issue__project__in" => "\"issues\".\"project_id\"",
+        "issue__issue_cycle__cycle_id__in" => "\"cycle_issues\".\"cycle_id\"",
+        "issue__issue_module__module_id__in" => "\"module_issues\".\"module_id\"",
+        "issue__issue_subscribers__subscriber_id__in" => "\"issue_subscribers\".\"subscriber_id\"",
+        _ => return None,
+    })
+}
+
+/// Columns for string `__in` predicates.
+fn strings_in_column(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "issue__state__group__in" => "\"states\".\"group\"",
+        "issue__estimate_point__in" => "\"issues\".\"estimate_point_id\"",
+        "issue__priority__in" => "\"issues\".\"priority\"",
+        "issue__issue_intake__status__in" => "\"intake_issues\".\"status\"",
+        _ => return None,
+    })
+}
+
+/// `(column, operator)` for `Day` predicates (`__gte` / `__lte`).
+fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
+    let (term, operator) = name.rsplit_once("__")?;
+    let column = match term {
+        "issue__created_at__date" => "\"issues\".\"created_at\"::date",
+        "issue__completed_at__date" => "\"issues\".\"completed_at\"::date",
+        "issue__start_date" => "\"issues\".\"start_date\"",
+        "issue__target_date" => "\"issues\".\"target_date\"",
+        _ => return None,
+    };
+    let operator = match operator {
+        "gte" => ">=",
+        "lte" => "<=",
+        _ => return None,
+    };
+    Some((column, operator))
+}
+
+/// Text predicates: `name__icontains`, explicit date bounds
+/// (`__gte`/`__lte` on a `__date` term or plain date term), and the
+/// single-value `__contains` form.
+#[allow(clippy::result_large_err)]
+fn compile_text_predicate(
+    name: &str,
+    text: &str,
+    binds: &mut Vec<OwnedBind>,
+    next: &mut usize,
+) -> Result<Option<String>, Response> {
+    if name == "issue__name__icontains" {
+        // Django `icontains`: LIKE with `\`, `%`, `_` escaped.
+        let escaped = text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let holder = placeholder(next);
+        binds.push(OwnedBind::Text(format!("%{escaped}%")));
+        return Ok(Some(format!("\"issues\".\"name\" ILIKE {holder}")));
+    }
+    let Some((term, operator)) = name.rsplit_once("__") else {
+        return Ok(None);
+    };
+    let operator = match operator {
+        "gte" => ">=",
+        "lte" => "<=",
+        "contains" => "=",
+        _ => return Ok(None),
+    };
+    let column = match term {
+        "issue__created_at__date" => "\"issues\".\"created_at\"::date",
+        "issue__completed_at__date" => "\"issues\".\"completed_at\"::date",
+        "issue__start_date" => "\"issues\".\"start_date\"",
+        "issue__target_date" => "\"issues\".\"target_date\"",
+        _ => return Ok(None),
+    };
+    // Explicit bounds must parse as dates: Django's `get_prep_value`
+    // raises `ValidationError` (400 invalid detail) on garbage.
+    if text.parse::<chrono::NaiveDate>().is_err() && parse_datetime_param(text).is_none() {
+        return Err(Denial::BadError("Please provide valid detail".to_owned()).into_response());
+    }
+    if operator == "=" {
+        // Single-value form on a date term: Django's `contains`
+        // lookup, i.e. LIKE with metacharacters escaped.
+        let escaped = text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let holder = placeholder(next);
+        binds.push(OwnedBind::Text(format!("%{escaped}%")));
+        return Ok(Some(format!("{column}::text LIKE {holder}")));
+    }
+    let holder = placeholder(next);
+    binds.push(OwnedBind::Text(text.to_owned()));
+    Ok(Some(format!("{column} {operator} {holder}::date")))
+}
+
+/// Parse an `updated_at__gt`-style datetime param the way Django's
+/// `DateTimeField.get_prep_value` does (naive values attach UTC).
+/// Garbage is a `ValidationError`, not SQL text.
+fn parse_datetime_param(text: &str) -> Option<DateTime<Utc>> {
+    if let Ok(aware) = DateTime::parse_from_rfc3339(text) {
+        return Some(aware.with_timezone(&Utc));
+    }
+    for format in [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y %H:%M",
+        "%m/%d/%y %H:%M:%S",
+        "%m/%d/%y %H:%M",
+        "%Y-%m-%d",
+        "%m/%d/%Y",
+        "%m/%d/%y",
+    ] {
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(text, format) {
+            return Some(naive.and_utc());
+        }
+        if let Ok(date) = chrono::NaiveDate::parse_from_str(text, format) {
+            return Some(date.and_hms_opt(0, 0, 0)?.and_utc());
+        }
+    }
+    None
+}
+
+/// Chain owned binds into a row-fetch statement.
+fn bind_owned<'q>(
+    mut statement: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    binds: &'q [OwnedBind],
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    for bind in binds {
+        statement = match bind {
+            OwnedBind::Uuid(id) => statement.bind(*id),
+            OwnedBind::Text(text) => statement.bind(text.clone()),
+            OwnedBind::Int(number) => statement.bind(*number),
+            OwnedBind::Date(day) => statement.bind(*day),
+        };
+    }
+    statement
+}
+
+/// Chain owned binds into a scalar statement.
+fn bind_owned_scalar<'q>(
+    mut statement: sqlx::query::QueryScalar<'q, sqlx::Postgres, i64, sqlx::postgres::PgArguments>,
+    binds: &'q [OwnedBind],
+) -> sqlx::query::QueryScalar<'q, sqlx::Postgres, i64, sqlx::postgres::PgArguments> {
+    for bind in binds {
+        statement = match bind {
+            OwnedBind::Uuid(id) => statement.bind(*id),
+            OwnedBind::Text(text) => statement.bind(text.clone()),
+            OwnedBind::Int(number) => statement.bind(*number),
+            OwnedBind::Date(day) => statement.bind(*day),
+        };
+    }
+    statement
+}
+
+// ---------------------------------------------------------------------------
+// list rendering: IntakeIssueSerializer rows
+// ---------------------------------------------------------------------------
+
+/// The issue columns the list's nested `IssueIntakeSerializer` renders
+/// (`issue.py:1026-1035`).
+struct ListIssue {
+    id: Uuid,
+    name: String,
+    priority: String,
+    sequence_id: i32,
+    project_id: Uuid,
+    created_at: DateTime<Utc>,
+    created_by_id: Option<Uuid>,
+}
+
+/// One `IN` fetch for the page's issues (what `select_related("issue")`
+/// folds into the Django query).
+async fn fetch_list_issues(
+    pool: &PgPool,
+    ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, ListIssue>, sqlx::Error> {
+    let mut out = std::collections::HashMap::with_capacity(ids.len());
+    if ids.is_empty() {
+        return Ok(out);
+    }
+    // Dynamically-sized `IN` lists cannot bind as one placeholder with
+    // sqlx; the ids are server-generated UUIDs already read back from
+    // the page query, so inline them as literals.
+    let list = ids
+        .iter()
+        .map(|id| format!("'{id}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let rows = sqlx::query(&format!(
+        "SELECT \"id\", \"name\", \"priority\", \"sequence_id\", \"project_id\", \"created_at\", \"created_by_id\" FROM \"issues\" WHERE (\"id\" IN ({list}))"
+    ))
+    .fetch_all(pool)
+    .await?;
+    for row in rows {
+        let issue = ListIssue {
+            id: row.try_get("id")?,
+            name: row.try_get("name")?,
+            priority: row.try_get("priority")?,
+            sequence_id: row.try_get("sequence_id")?,
+            project_id: row.try_get("project_id")?,
+            created_at: row.try_get("created_at")?,
+            created_by_id: row.try_get("created_by_id")?,
+        };
+        out.insert(issue.id, issue);
+    }
+    Ok(out)
+}
+
+/// `IntakeIssueSerializer` row (`intake.py:27-41` + `to_representation`
+/// `:86-90`): explicit `Meta.fields` order; the annotated `label_ids`
+/// ride the nested issue object.
+fn render_list_row(
+    row: &sqlx::postgres::PgRow,
+    issue: &ListIssue,
+    timezone: chrono_tz::Tz,
+) -> serde_json::Value {
+    let label_ids: Vec<Uuid> = row
+        .try_get::<Vec<Uuid>, _>("label_ids")
+        .unwrap_or_default();
+    let mut nested = serde_json::Map::with_capacity(8);
+    nested.insert("id".to_owned(), uuid_string(&issue.id));
+    nested.insert(
+        "name".to_owned(),
+        serde_json::Value::String(issue.name.clone()),
+    );
+    nested.insert(
+        "priority".to_owned(),
+        serde_json::Value::String(issue.priority.clone()),
+    );
+    nested.insert(
+        "sequence_id".to_owned(),
+        serde_json::Value::from(issue.sequence_id),
+    );
+    nested.insert("project_id".to_owned(), uuid_string(&issue.project_id));
+    nested.insert(
+        "created_at".to_owned(),
+        serde_json::Value::String(crate::serializer::render_datetime_in(
+            &issue.created_at,
+            &timezone,
+        )),
+    );
+    nested.insert(
+        "label_ids".to_owned(),
+        serde_json::Value::Array(label_ids.into_iter().map(|id| uuid_string(&id)).collect()),
+    );
+    nested.insert("created_by".to_owned(), opt_uuid(&issue.created_by_id));
+    let mut body = serde_json::Map::with_capacity(7);
+    body.insert(
+        "id".to_owned(),
+        serde_json::Value::String(row.try_get::<Uuid, _>("id").map(|id| id.to_string()).unwrap_or_default()),
+    );
+    body.insert(
+        "status".to_owned(),
+        serde_json::Value::from(row.try_get::<i32, _>("status").unwrap_or(-2)),
+    );
+    body.insert(
+        "duplicate_to".to_owned(),
+        row.try_get::<Option<Uuid>, _>("duplicate_to")
+            .map(|id| opt_uuid(&id))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    body.insert(
+        "snoozed_till".to_owned(),
+        row.try_get::<Option<DateTime<Utc>>, _>("snoozed_till")
+            .map(|moment| opt_dt(&moment, timezone))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    body.insert(
+        "source".to_owned(),
+        row.try_get::<Option<String>, _>("source")
+            .map(|source| opt_string(&source))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    body.insert("issue".to_owned(), serde_json::Value::Object(nested));
+    body.insert(
+        "created_by".to_owned(),
+        row.try_get::<Option<Uuid>, _>("created_by_id")
+            .map(|id| opt_uuid(&id))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    serde_json::Value::Object(body)
+}
+
+// ---------------------------------------------------------------------------
+// create
+// ---------------------------------------------------------------------------
+
+/// `create` (`base.py:222-326`).
+pub async fn collection_create(
+    State(state): State<AppState>,
+    Path((slug, project_raw)): Path<(String, String)>,
+    extension: Option<axum::Extension<SessionHandle>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let gate = match resolve_gate(&state, &slug, &project_raw, extension).await {
+        Ok(gate) => gate,
+        Err(denial) => return denial.into_response(),
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    let mut data = match parse_body(&body) {
+        Ok(data) => data,
+        Err(response) => return response,
+    };
+    // `request.data.get("issue", {})`: missing → `{}`; a non-dict raises
+    // before the name gate (500) — and so does an explicit `null`.
+    let issue_value = data
+        .get("issue")
+        .cloned()
+        .unwrap_or(serde_json::Value::Object(Default::default()));
+    let serde_json::Value::Object(issue_data) = issue_value else {
+        return Denial::ServerError.into_response();
+    };
+    // `:223-224`: falsy name (missing, `""`, null, false, 0) → 400.
+    let name_value = issue_data
+        .get("name")
+        .cloned()
+        .unwrap_or(serde_json::Value::Bool(false));
+    if !json_truthy(&name_value) {
+        return Denial::BadError("Name is required".to_owned()).into_response();
+    }
+    // `:227-234`: priority defaults to `"none"`; a present non-string
+    // (including null) denies, as does a string outside the allowlist.
+    // The value itself flows through the serializer below.
+    // (A bare match guard would fall through to the catch-all on
+    // valid strings; the if/else pins the pass case.)
+    if let Some(serde_json::Value::String(priority)) = issue_data.get("priority") {
+        if !["low", "medium", "high", "urgent", "none"].contains(&priority.as_str()) {
+            return Denial::BadError("Invalid priority".to_owned()).into_response();
+        }
+    } else if issue_data.get("priority").is_some() {
+        return Denial::BadError("Invalid priority".to_owned()).into_response();
+    };
+    // Project context for the serializer (`:236,255-261`): workspace id
+    // (backfilled from the project) and the default assignee.
+    let project_row: Option<(Option<Uuid>,)> = match sqlx::query_as(
+        "SELECT \"projects\".\"default_assignee_id\" FROM \"projects\" WHERE (\"projects\".\"id\" = $1)",
+    )
+    .bind(gate.project_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let Some((default_assignee_id,)) = project_row else {
+        return Denial::ServerError.into_response();
+    };
+    // Triage get-or-create (`:239-249`): the triage-manager lookup scopes
+    // project + workspace slug; `State.save` resequences to
+    // `max(non-triage project states) + 15000`, keeping the passed
+    // `65000` only when no non-triage state exists.
+    let triage_id = match ensure_triage_state(pool, &gate).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    // `request.data["issue"]["state_id"] = triage_state.id` (`:250`):
+    // the mutation lands in the serializer input AND in both Celery
+    // dumps below (UUIDs render as strings, like `DjangoJSONEncoder`).
+    // Mutate `data` itself so the dumps see it; re-clone the input.
+    if let Some(issue_obj) = data.get_mut("issue").and_then(|v| v.as_object_mut()) {
+        issue_obj.insert(
+            "state_id".to_owned(),
+            serde_json::Value::String(triage_id.to_string()),
+        );
+    }
+    let serde_json::Value::Object(issue_data) = data.get("issue").cloned().unwrap_or_default()
+    else {
+        return Denial::ServerError.into_response();
+    };
+    // `IssueCreateSerializer(...).is_valid()` (`:253-263`): the reachable
+    // field validations; serializer errors answer 400 (`:325-326`).
+    let validated = match validate_issue_create(pool, &gate, state.settings(), &issue_data, default_assignee_id).await
+    {
+        Ok(validated) => validated,
+        Err(response) => return response,
+    };
+    let now = Utc::now();
+    // Serialize sequence assignment the way `Issue.save` does
+    // (`db/models/issue.py:313-343`): transaction-level advisory lock on
+    // the project, `MAX+1` sequence, tag-stripped text, `MAX+10000` sort
+    // order. Lock failure degrades to the plain path.
+    let _ = sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(advisory_key(&gate.project_id))
+        .execute(pool)
+        .await;
+    let sequence_id: i32 = match sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MAX(\"sequence\") FROM \"issue_sequences\" WHERE (\"issue_sequences\".\"project_id\" = $1)",
+    )
+    .bind(gate.project_id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(max) => max.map(|max| max + 1).unwrap_or(1) as i32,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let sort_order: f64 = match sqlx::query_scalar::<_, Option<f64>>(
+        "SELECT MAX(\"sort_order\") FROM \"issues\" WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"project_id\" = $1 AND \"issues\".\"state_id\" = $2)",
+    )
+    .bind(gate.project_id)
+    .bind(triage_id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(max) => max.map(|max| max + 10000.0).unwrap_or(65535.0),
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let issue_id = Uuid::new_v4();
+    // `IssueCreateSerializer.create` (`serializers/issue.py:387-462`) +
+    // `Issue.save` + `BaseModel.save` (crum `created_by`): the full row.
+    if let Err(response) = insert_issue(pool, &gate, &validated, issue_id, triage_id, sequence_id, sort_order, now, default_assignee_id).await {
+        return response;
+    }
+    if let Err(error) = sqlx::query(
+        "INSERT INTO \"issue_sequences\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", \"sequence\", \"deleted\") VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, FALSE)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(now)
+    .bind(now)
+    .bind(gate.user_id)
+    .bind(gate.project_id)
+    .bind(gate.workspace_id)
+    .bind(issue_id)
+    .bind(i64::from(sequence_id))
+    .execute(pool)
+    .await
+    {
+        return db_error(error);
+    }
+    // `IntakeIssue.objects.create(...)` (`:265-272`): the intake id is
+    // the FIRST intake row for the project (name ordering); the
+    // `.first()` dereference is unguarded, so a missing row is a 500
+    // (QUIRK-create-no-intake).
+    let intake_row: Option<Uuid> = match sqlx::query_scalar(
+        "SELECT \"intakes\".\"id\" FROM \"intakes\" WHERE (\"intakes\".\"workspace_id\" = $1 AND \"intakes\".\"project_id\" = $2 AND \"intakes\".\"deleted_at\" IS NULL) ORDER BY \"intakes\".\"name\" ASC LIMIT 1",
+    )
+    .bind(gate.workspace_id)
+    .bind(gate.project_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let Some(first_intake_id) = intake_row else {
+        return Denial::ServerError.into_response();
+    };
+    let bridge_id = Uuid::new_v4();
+    if let Err(error) = sqlx::query(
+        "INSERT INTO \"intake_issues\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"intake_id\", \"issue_id\", \"status\", \"snoozed_till\", \"duplicate_to_id\", \"source\", \"source_email\", \"external_source\", \"external_id\", \"extra\") VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, -2, NULL, NULL, 'IN_APP', NULL, NULL, NULL, '{}')",
+    )
+    .bind(bridge_id)
+    .bind(now)
+    .bind(now)
+    .bind(gate.user_id)
+    .bind(gate.project_id)
+    .bind(gate.workspace_id)
+    .bind(first_intake_id)
+    .bind(issue_id)
+    .execute(pool)
+    .await
+    {
+        return db_error(error);
+    }
+    // Emits (`:274-292`): `requested_data`/`updated_issue` dump the full
+    // (mutated) request JSON; `current_instance` is `None`; the origin is
+    // `base_host(is_app=True)`.
+    let epoch = Utc::now().timestamp();
+    let dump = super::python_dumps(&data);
+    let origin = match app_origin(&state) {
+        Some(origin) => origin,
+        None => return Denial::ServerError.into_response(),
+    };
+    let activity = intake_tasks::intake_create_activity(
+        dump.clone(),
+        gate.user_id.to_string(),
+        issue_id.to_string(),
+        gate.project_id.to_string(),
+        epoch,
+        origin,
+        bridge_id.to_string(),
+    );
+    enqueue_message(
+        pool,
+        pidash_jobs::celery::CeleryTaskMessage::new(activity.task_name(), vec![], activity.kwargs()),
+    )
+    .await;
+    let version = intake_tasks::intake_create_description_version(
+        dump,
+        issue_id.to_string(),
+        gate.user_id.to_string(),
+    );
+    enqueue_message(
+        pool,
+        pidash_jobs::celery::CeleryTaskMessage::new(version.task_name(), vec![], version.kwargs()),
+    )
+    .await;
+    // Re-fetch with the label/assignee annotates (`:293-322`) and render
+    // the detail (`:323-324`).
+    match render_created_detail(pool, &gate, first_intake_id, issue_id, bridge_id).await {
+        Ok(body) => raw_json_response(body),
+        Err(response) => response,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// create: triage state
+// ---------------------------------------------------------------------------
+
+/// Triage get-or-create (`base.py:239-249`).
+///
+/// `State.triage_objects.filter(project_id, workspace__slug).first()`:
+/// the triage manager keeps `group = 'triage'` rows; `Meta.ordering` is
+/// `sequence`. On a miss the row is created with `State.save` semantics:
+/// `slug` from the name and `sequence = max(non-triage project states) +
+/// 15000`, keeping the passed `65000` when no non-triage state exists
+/// (the max query runs over `State.objects`, which excludes triage).
+#[allow(clippy::result_large_err)]
+async fn ensure_triage_state(
+    pool: &PgPool,
+    gate: &crate::app_issues::Gate,
+) -> Result<Uuid, Response> {
+    let existing: Option<Uuid> = match sqlx::query_scalar(
+        "SELECT \"states\".\"id\" FROM \"states\" INNER JOIN \"workspaces\" ON (\"states\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"states\".\"project_id\" = $1 AND \"workspaces\".\"slug\" = $2 AND \"states\".\"group\" = 'triage' AND \"states\".\"deleted_at\" IS NULL) ORDER BY \"states\".\"sequence\" ASC LIMIT 1",
+    )
+    .bind(gate.project_id)
+    .bind(
+        sqlx::query_scalar::<_, String>("SELECT \"slug\" FROM \"workspaces\" WHERE (\"id\" = $1)")
+            .bind(gate.workspace_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|_| Denial::ServerError.into_response())?,
+    )
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(_) => return Err(Denial::ServerError.into_response()),
+    };
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+    let max_sequence: Option<f64> = match sqlx::query_scalar(
+        "SELECT MAX(\"sequence\") FROM \"states\" WHERE (\"states\".\"project_id\" = $1 AND \"states\".\"group\" != 'triage')",
+    )
+    .bind(gate.project_id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(max) => max,
+        Err(_) => return Err(Denial::ServerError.into_response()),
+    };
+    let sequence = max_sequence.map(|max| max + 15000.0).unwrap_or(65000.0);
+    let new_id = Uuid::new_v4();
+    let now = Utc::now();
+    // Full `State.objects.create` row: explicit kwargs plus the
+    // `save()`-filled columns (`description=""`, `slug="triage"`,
+    // `is_triage=False`) and the crum `created_by`.
+    if let Err(error) = sqlx::query(
+        "INSERT INTO \"states\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"name\", \"description\", \"slug\", \"color\", \"project_id\", \"workspace_id\", \"sequence\", \"group\", \"default\", \"is_triage\") VALUES ($1, $2, $3, $4, 'Triage', '', 'triage', '#4E5355', $5, $6, $7, 'triage', false, false)",
+    )
+    .bind(new_id)
+    .bind(now)
+    .bind(now)
+    .bind(gate.user_id)
+    .bind(gate.project_id)
+    .bind(gate.workspace_id)
+    .bind(sequence)
+    .execute(pool)
+    .await
+    {
+        return Err(db_error(error));
+    }
+    Ok(new_id)
+}
+
+/// `convert_uuid_to_integer(project.id)` (`utils/uuid.py:19-26`): sha256
+/// of the string form, first 8 bytes big-endian signed. The lock
+/// serializes sequence assignment (`db/models/issue.py:318`).
+fn advisory_key(project_id: &Uuid) -> i64 {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(project_id.to_string().as_bytes());
+    i64::from_be_bytes(digest[..8].try_into().expect("eight bytes"))
+}
+
+/// `base_host(request, is_app=True)` (`utils/host.py:61-65`):
+/// `APP_BASE_URL` when set, else the `WEB_URL or APP_BASE_URL` origin.
+/// Both unset is `ImproperlyConfigured` (500).
+fn app_origin(state: &AppState) -> Option<String> {
+    let settings = state.settings();
+    if let Some(base) = &settings.urls.app_base_url {
+        return Some(base.clone());
+    }
+    if let Some(web) = &settings.urls.web_url {
+        return Some(web.clone());
+    }
+    settings.urls.app_base_url.clone()
+}
+
+
+/// Map a database failure onto the `handle_exception` matrix: integrity
+/// violations (SQLSTATE 23xxx) → 400; anything else → the 500 envelope.
+fn db_error(error: sqlx::Error) -> Response {
+    if let sqlx::Error::Database(db_error) = &error {
+        if db_error.code().as_deref().unwrap_or("").starts_with("23") {
+            return Denial::BadError("The payload is not valid".to_owned()).into_response();
+        }
+    }
+    Denial::ServerError.into_response()
+}
+
+// ---------------------------------------------------------------------------
+// bodies and scalars
+// ---------------------------------------------------------------------------
+
+fn uuid_string(id: &Uuid) -> serde_json::Value {
+    serde_json::Value::String(id.to_string())
+}
+
+
+
+
+// ---------------------------------------------------------------------------
+// create: IssueCreateSerializer validation
+// ---------------------------------------------------------------------------
+
+/// The validated issue attributes (`IssueCreateSerializer.is_valid`,
+/// `serializers/issue.py:136-385`): DRF field order for error bodies,
+/// then the `validate()` checks in code order. Only reachable validations
+/// are implemented; every arm cites its source.
+#[derive(Debug, Clone)]
+struct ValidatedCreate {
+    parent_id: Option<Uuid>,
+    assigned_pod_id: Option<Uuid>,
+    label_ids: Option<Vec<Uuid>>,
+    assignee_ids: Option<Vec<Uuid>>,
+    point: Option<i32>,
+    name: String,
+    description_json: serde_json::Value,
+    description_html: Option<String>,
+    priority: String,
+    complexity_score: i32,
+    start_date: Option<chrono::NaiveDate>,
+    target_date: Option<chrono::NaiveDate>,
+    // Validated then discarded: `Issue.save` always overrides
+    // `sequence_id` with `MAX+1`.
+    #[allow(dead_code)]
+    sequence_id: Option<i32>,
+    sort_order: Option<f64>,
+    completed_at: Option<DateTime<Utc>>,
+    archived_at: Option<chrono::NaiveDate>,
+    is_draft: bool,
+    external_source: Option<String>,
+    external_id: Option<String>,
+    git_work_branch: String,
+    created_via: Option<String>,
+    agent_executor: Option<String>,
+    estimate_point_id: Option<Uuid>,
+    type_id: Option<Uuid>,
+    deleted_at: Option<DateTime<Utc>>,
+}
+
+/// Field-level validation (`to_internal_value` for each writable field,
+/// `serializers/issue.py:136-204`): collects every field error before
+/// `validate()` runs. `issue_data` already carries the server-set
+/// `state_id`.
+#[allow(clippy::result_large_err)]
+async fn validate_issue_create(
+    pool: &PgPool,
+    gate: &crate::app_issues::Gate,
+    settings: &pidash_db::config::Settings,
+    issue_data: &serde_json::Map<String, serde_json::Value>,
+    _default_assignee_id: Option<Uuid>,
+) -> Result<ValidatedCreate, Response> {
+    let mut field_errors = serde_json::Map::new();
+    // `state_id` is server-set to the triage row (`base.py:250`), which
+    // the triage lookup just ensured — the PK + project checks below
+    // always pass on this path.
+    let triage_id = match issue_data.get("state_id") {
+        Some(serde_json::Value::String(raw)) => raw.parse::<Uuid>().ok(),
+        _ => None,
+    };
+    // Declared-field order first: state_id, parent_id, assigned_pod_id,
+    // label_ids, assignee_ids.
+    let parent_id = match opt_pk_field(issue_data, "parent_id", pool, "issues").await {
+        Ok(id) => id,
+        Err(message) => {
+            field_errors.insert("parent_id".to_owned(), serde_json::json!([message]));
+            None
+        }
+    };
+    let assigned_pod_id = match opt_pk_field(issue_data, "assigned_pod_id", pool, "pod").await {
+        Ok(id) => id,
+        Err(message) => {
+            field_errors.insert("assigned_pod_id".to_owned(), serde_json::json!([message]));
+            None
+        }
+    };
+    let label_ids = match opt_uuid_list_field(issue_data, "label_ids", pool, "labels").await {
+        Ok(ids) => ids,
+        Err(body) => {
+            field_errors.insert("label_ids".to_owned(), body);
+            None
+        }
+    };
+    let assignee_ids = match opt_uuid_list_field(issue_data, "assignee_ids", pool, "users").await {
+        Ok(ids) => ids,
+        Err(body) => {
+            field_errors.insert("assignee_ids".to_owned(), body);
+            None
+        }
+    };
+    // Auto fields in `Meta` order: point, name, description_json,
+    // description_html, priority (already gated), complexity_score,
+    // dates, sequence_id, sort_order, completed_at, archived_at,
+    // is_draft, external_*, git_work_branch, created_via,
+    // agent_executor, estimate_point, type, deleted_at.
+    let point = match opt_int_field(issue_data, "point") {
+        Ok(value) => {
+            if let Some(point) = value {
+                if !(0..=12).contains(&point) {
+                    field_errors.insert(
+                        "point".to_owned(),
+                        serde_json::json!([if point < 0 {
+                            "Ensure this value is greater than or equal to 0."
+                        } else {
+                            "Ensure this value is less than or equal to 12."
+                        }]),
+                    );
+                }
+            }
+            value.filter(|point| (0..=12).contains(point))
+        }
+        Err(message) => {
+            field_errors.insert("point".to_owned(), serde_json::json!([message]));
+            None
+        }
+    };
+    // `name` passed the view's truthiness gate; the serializer trims and
+    // applies blank/max_length (`CharField`, `max_length=255`).
+    let name = match issue_data.get("name") {
+        Some(value) => match char_internal(value) {
+            Ok(name) if name.is_empty() => {
+                field_errors.insert("name".to_owned(), serde_json::json!(["This field may not be blank."]));
+                String::new()
+            }
+            Ok(name) if name.chars().count() > 255 => {
+                field_errors.insert(
+                    "name".to_owned(),
+                    serde_json::json!(["Ensure this field has no more than 255 characters."]),
+                );
+                String::new()
+            }
+            Ok(name) => name,
+            Err(()) => {
+                let message = if value.is_null() {
+                    "This field may not be null."
+                } else {
+                    "Not a valid string."
+                };
+                field_errors.insert("name".to_owned(), serde_json::json!([message]));
+                String::new()
+            }
+        },
+        None => {
+            field_errors.insert("name".to_owned(), serde_json::json!(["This field is required."]));
+            String::new()
+        }
+    };
+    let description_json = match issue_data.get("description_json") {
+        None => serde_json::json!({}),
+        Some(serde_json::Value::Null) => {
+            field_errors.insert(
+                "description_json".to_owned(),
+                serde_json::json!(["This field may not be null."]),
+            );
+            serde_json::json!({})
+        }
+        Some(value) => value.clone(),
+    };
+    // `TextField(blank=True, default="<p></p>")`: missing → default;
+    // null → 400; anything else trims like `CharField`.
+    let description_html = match issue_data.get("description_html") {
+        None => Some(crate::space::sanitize::DEFAULT_DESCRIPTION_HTML.to_owned()),
+        Some(serde_json::Value::Null) => {
+            field_errors.insert(
+                "description_html".to_owned(),
+                serde_json::json!(["This field may not be null."]),
+            );
+            None
+        }
+        Some(value) => match char_internal(value) {
+            Ok(html) => Some(html),
+            Err(()) => {
+                let message = if value.is_null() {
+                    "This field may not be null."
+                } else {
+                    "Not a valid string."
+                };
+                field_errors.insert("description_html".to_owned(), serde_json::json!([message]));
+                None
+            }
+        },
+    };
+    let priority = match issue_data.get("priority") {
+        Some(serde_json::Value::String(priority)) => priority.clone(),
+        _ => "none".to_owned(),
+    };
+    // No `null=True` on these integers: explicit null fails.
+    for key in ["complexity_score", "sequence_id"] {
+        if issue_data.get(key) == Some(&serde_json::Value::Null) {
+            field_errors.insert(key.to_owned(), serde_json::json!(["This field may not be null."]));
+        }
+    }
+    if issue_data.get("sort_order") == Some(&serde_json::Value::Null) {
+        field_errors.insert("sort_order".to_owned(), serde_json::json!(["This field may not be null."]));
+    }
+    // `complexity_score` carries model `MinValueValidator(0)` /
+    // `MaxValueValidator(10)`: DRF runs field validators during
+    // field-level validation, so their messages win and
+    // `validate_complexity_score` (same bounds, custom message) is
+    // unreachable dead code on this path.
+    let complexity_score = match opt_int_field(issue_data, "complexity_score") {
+        Ok(value) => {
+            if let Some(score) = value {
+                if score < 0 {
+                    field_errors.insert(
+                        "complexity_score".to_owned(),
+                        serde_json::json!([
+                            "Ensure this value is greater than or equal to 0."
+                        ]),
+                    );
+                } else if score > 10 {
+                    field_errors.insert(
+                        "complexity_score".to_owned(),
+                        serde_json::json!(["Ensure this value is less than or equal to 10."]),
+                    );
+                }
+            }
+            value.filter(|score| (0..=10).contains(score)).unwrap_or(0)
+        }
+        Err(message) => {
+            field_errors.insert("complexity_score".to_owned(), serde_json::json!([message]));
+            0
+        }
+    };
+    let start_date = match opt_date_field(issue_data, "start_date") {
+        Ok(value) => value,
+        Err(message) => {
+            field_errors.insert("start_date".to_owned(), serde_json::json!([message]));
+            None
+        }
+    };
+    let target_date = match opt_date_field(issue_data, "target_date") {
+        Ok(value) => value,
+        Err(message) => {
+            field_errors.insert("target_date".to_owned(), serde_json::json!([message]));
+            None
+        }
+    };
+    let sequence_id = match opt_int_field(issue_data, "sequence_id") {
+        Ok(value) => value,
+        Err(message) => {
+            field_errors.insert("sequence_id".to_owned(), serde_json::json!([message]));
+            None
+        }
+    };
+    let sort_order = match opt_float_field(issue_data, "sort_order") {
+        Ok(value) => value,
+        Err(message) => {
+            field_errors.insert("sort_order".to_owned(), serde_json::json!([message]));
+            None
+        }
+    };
+    let completed_at = match opt_datetime_field(issue_data, "completed_at") {
+        Ok(value) => value,
+        Err(message) => {
+            field_errors.insert("completed_at".to_owned(), serde_json::json!([message]));
+            None
+        }
+    };
+    let archived_at = match opt_date_field(issue_data, "archived_at") {
+        Ok(value) => value,
+        Err(message) => {
+            field_errors.insert("archived_at".to_owned(), serde_json::json!([message]));
+            None
+        }
+    };
+    // `is_draft` has no `null=True`: explicit null fails (missing → False).
+    let is_draft = match issue_data.get("is_draft") {
+        None => false,
+        Some(serde_json::Value::Null) => {
+            field_errors.insert("is_draft".to_owned(), serde_json::json!(["This field may not be null."]));
+            false
+        }
+        Some(_) => match opt_bool_field(issue_data, "is_draft") {
+            Ok(value) => value.unwrap_or(false),
+            Err(message) => {
+                field_errors.insert("is_draft".to_owned(), serde_json::json!([message]));
+                false
+            }
+        },
+    };
+    let external_source = match opt_limited_string(issue_data, "external_source", 255) {
+        Ok(value) => value,
+        Err(message) => {
+            field_errors.insert("external_source".to_owned(), serde_json::json!([message]));
+            None
+        }
+    };
+    let external_id = match opt_limited_string(issue_data, "external_id", 255) {
+        Ok(value) => value,
+        Err(message) => {
+            field_errors.insert("external_id".to_owned(), serde_json::json!([message]));
+            None
+        }
+    };
+    // `blank=True` but no `null=True`: explicit null fails. The
+    // `RegexValidator` allows only `[A-Za-z0-9._/-]*`.
+    let git_work_branch = match issue_data.get("git_work_branch") {
+        None => String::new(),
+        Some(serde_json::Value::Null) => {
+            field_errors.insert(
+                "git_work_branch".to_owned(),
+                serde_json::json!(["This field may not be null."]),
+            );
+            String::new()
+        }
+        Some(serde_json::Value::String(branch)) => {
+            if branch.len() > 128 {
+                field_errors.insert(
+                    "git_work_branch".to_owned(),
+                    serde_json::json!(["Ensure this field has no more than 128 characters."]),
+                );
+                String::new()
+            } else if !branch
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'-'))
+            {
+                field_errors.insert(
+                    "git_work_branch".to_owned(),
+                    serde_json::json!([
+                        "Branch name may contain only letters, numbers, and . _ / -"
+                    ]),
+                );
+                String::new()
+            } else {
+                branch.clone()
+            }
+        }
+        Some(serde_json::Value::Number(number)) => number.to_string(),
+        Some(_) => {
+            field_errors.insert(
+                "git_work_branch".to_owned(),
+                serde_json::json!(["Not a valid string."]),
+            );
+            String::new()
+        }
+    };
+    // `description_stripped` input is validated like any `CharField`
+    // but `Issue.save` recomputes it unconditionally, so the value is
+    // validated and discarded.
+    if let Some(value) = issue_data.get("description_stripped") {
+        if char_internal(value).is_err() {
+            let message = if value.is_null() {
+                "This field may not be null."
+            } else {
+                "Not a valid string."
+            };
+            field_errors.insert("description_stripped".to_owned(), serde_json::json!([message]));
+        }
+    }
+    let created_via = match opt_limited_string(issue_data, "created_via", 32) {
+        Ok(value) => value,
+        Err(message) => {
+            field_errors.insert("created_via".to_owned(), serde_json::json!([message]));
+            None
+        }
+    };
+    let agent_executor = match issue_data.get("agent_executor") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(executor))
+            if ["local_runner", "cloud_agent", "managed_runner"].contains(&executor.as_str()) =>
+        {
+            Some(executor.clone())
+        }
+        Some(serde_json::Value::String(executor)) => {
+            field_errors.insert(
+                "agent_executor".to_owned(),
+                serde_json::json!([format!("\"{executor}\" is not a valid choice.")]),
+            );
+            None
+        }
+        Some(_) => {
+            field_errors.insert(
+                "agent_executor".to_owned(),
+                serde_json::json!(["Not a valid string."]),
+            );
+            None
+        }
+    };
+    let estimate_point_id = match opt_pk_field(issue_data, "estimate_point", pool, "estimate_points")
+        .await
+    {
+        Ok(id) => id,
+        Err(message) => {
+            field_errors.insert("estimate_point".to_owned(), serde_json::json!([message]));
+            None
+        }
+    };
+    let type_id = match opt_pk_field(issue_data, "type", pool, "issue_types").await {
+        Ok(id) => id,
+        Err(message) => {
+            field_errors.insert("type".to_owned(), serde_json::json!([message]));
+            None
+        }
+    };
+    let deleted_at = match opt_datetime_field(issue_data, "deleted_at") {
+        Ok(value) => value,
+        Err(message) => {
+            field_errors.insert("deleted_at".to_owned(), serde_json::json!([message]));
+            None
+        }
+    };
+    if !field_errors.is_empty() {
+        // Field errors skip `validate()` entirely (DRF order).
+        return Err(Denial::BadJson(serde_json::Value::Object(field_errors)).into_response());
+    }
+    // `validate()` (`serializers/issue.py:206-385`) in code order. The
+    // sync lock needs an instance (create has none); binary validation
+    // is dead (`description_binary` is read-only).
+    if let (Some(start), Some(target)) = (start_date, target_date) {
+        if start > target {
+            return Err(Denial::BadJson(serde_json::json!({
+                "non_field_errors": ["Start date cannot exceed target date"]
+            }))
+            .into_response());
+        }
+    }
+    if let Some(pod_id) = assigned_pod_id {
+        check_assigned_pod(pool, gate.project_id, pod_id).await?;
+    }
+    // Executor availability (`validate`, `:276-310`): the enum check
+    // above is field-level; these are the `validate()` gates.
+    if let Some(executor) = agent_executor.as_deref() {
+        check_agent_executor(pool, settings, gate.user_id, executor).await?;
+    }
+    let description_html = match description_html {
+        Some(html) if !html.is_empty() => {
+            match crate::space::sanitize::sanitize_html(&html) {
+                crate::space::sanitize::Sanitize::Clean(clean) => Some(clean),
+                crate::space::sanitize::Sanitize::Invalid => {
+                    return Err(Denial::BadJson(serde_json::json!({
+                        "error": "html content is not valid"
+                    }))
+                    .into_response());
+                }
+            }
+        }
+        other => other,
+    };
+    // Assignees keep active project members (`role__gte=15`); labels
+    // keep project labels (`validate`, `:337-354`).
+    let assignee_ids = match assignee_ids {
+        Some(ids) if !ids.is_empty() => Some(filter_project_assignees(pool, gate.project_id, &ids).await?),
+        _ => None,
+    };
+    let label_ids = match label_ids {
+        Some(ids) if !ids.is_empty() => Some(filter_project_labels(pool, gate.project_id, &ids).await?),
+        _ => None,
+    };
+    // `state` is the server-set triage row: the project check always
+    // passes on this path (`allow_triage_state` context).
+    let _ = triage_id;
+    if let Some(parent) = parent_id {
+        let in_project: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM \"issues\" WHERE (\"issues\".\"project_id\" = $1 AND \"issues\".\"id\" = $2))",
+        )
+        .bind(gate.project_id)
+        .bind(parent)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?;
+        if !in_project {
+            return Err(Denial::BadJson(serde_json::json!({
+                "non_field_errors": ["Parent is not valid issue_id please pass a valid issue_id"]
+            }))
+            .into_response());
+        }
+    }
+    if let Some(estimate) = estimate_point_id {
+        let in_project: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM \"estimate_points\" WHERE (\"estimate_points\".\"project_id\" = $1 AND \"estimate_points\".\"id\" = $2))",
+        )
+        .bind(gate.project_id)
+        .bind(estimate)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?;
+        if !in_project {
+            return Err(Denial::BadJson(serde_json::json!({
+                "non_field_errors": ["Estimate point is not valid please pass a valid estimate_point_id"]
+            }))
+            .into_response());
+        }
+    }
+    Ok(ValidatedCreate {
+        parent_id,
+        assigned_pod_id,
+        label_ids,
+        assignee_ids,
+        point,
+        name,
+        description_json,
+        description_html,
+        priority,
+        complexity_score,
+        start_date,
+        target_date,
+        sequence_id,
+        sort_order,
+        completed_at,
+        archived_at,
+        is_draft,
+        external_source,
+        external_id,
+        git_work_branch,
+        created_via,
+        agent_executor,
+        estimate_point_id,
+        type_id,
+        deleted_at,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// field coercions (DRF to_internal_value, in serializer field order)
+// ---------------------------------------------------------------------------
+
+
+/// `PrimaryKeyRelatedField.to_internal_value` (`relations.py:252-263`)
+/// with a UUID `pk_field`: bools fail `incorrect_type` up front; strings
+/// parse as UUIDs (curly-quote `not a valid UUID` message); ints go
+/// straight to the lookup (`does_not_exist` — no UUID row ever matches);
+/// floats/dicts/lists fail with the UUID message over their Python
+/// `str()` (`5.5`, `{}`, `[]`).
+#[allow(clippy::result_large_err)]
+async fn resolve_pk(pool: &PgPool, table: &str, raw: &serde_json::Value) -> Result<Uuid, String> {
+    // Ints coerce through `UUID(int=n)` (`UUIDField.get_prep_value`):
+    // out-of-range negatives fail `incorrect_type`, the rest look up a
+    // (practically never matching) UUID while the message keeps the
+    // original digits.
+    enum Key {
+        Uuid(Uuid),
+        Int(Uuid, String),
+    }
+    let key = match raw {
+        serde_json::Value::Bool(_) => {
+            return Err("Incorrect type. Expected pk value, received bool.".to_owned());
+        }
+        serde_json::Value::String(text) => match text.parse::<Uuid>() {
+            Ok(id) => Key::Uuid(id),
+            Err(_) => return Err(uuid_invalid(text)),
+        },
+        serde_json::Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                if int < 0 {
+                    return Err(
+                        "Incorrect type. Expected pk value, received int.".to_owned()
+                    );
+                }
+                Key::Int(Uuid::from_u128(int as u128), int.to_string())
+            } else if let Some(int) = number.as_u64() {
+                Key::Int(Uuid::from_u128(u128::from(int)), int.to_string())
+            } else if let Some(float) = number.as_f64() {
+                return Err(uuid_invalid(&crate::paginator::py_float_str(float)));
+            } else {
+                return Err("Incorrect type. Expected pk value, received float.".to_owned());
+            }
+        }
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            return Err(uuid_invalid(&python_str_repr(raw)));
+        }
+        serde_json::Value::Null => {
+            return Err("Incorrect type. Expected pk value, received NoneType.".to_owned());
+        }
+    };
+    // Same-table parameterization keeps one helper. The querysets here
+    // (`Issue.objects`, `Pod.all_objects`, plain `Label`/`EstimatePoint`/
+    // `IssueType` managers) are unfiltered, so no soft-delete guard.
+    let (id, display) = match &key {
+        Key::Uuid(id) => (*id, id.to_string()),
+        Key::Int(id, text) => (*id, text.clone()),
+    };
+    let exists: bool = sqlx::query_scalar(&format!(
+        "SELECT EXISTS (SELECT 1 FROM \"{table}\" WHERE (\"id\" = $1))"
+    ))
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| "Incorrect type. Expected pk value, received str.".to_owned())?;
+    if !exists {
+        return Err(format!("Invalid pk \"{display}\" - object does not exist."));
+    }
+    Ok(id)
+}
+
+/// DRF `UUIDField` failure message: curly quotes around the input.
+fn uuid_invalid(input: &str) -> String {
+    format!("\u{201c}{input}\u{201d} is not a valid UUID.")
+}
+
+/// Python `str()` for JSON values (DRF error-message interpolation):
+/// single-quoted strings, `True`/`False`/`None`, Python float repr.
+fn python_str_repr(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "None".to_owned(),
+        serde_json::Value::Bool(true) => "True".to_owned(),
+        serde_json::Value::Bool(false) => "False".to_owned(),
+        serde_json::Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                int.to_string()
+            } else if let Some(int) = number.as_u64() {
+                int.to_string()
+            } else if let Some(float) = number.as_f64() {
+                crate::paginator::py_float_str(float)
+            } else {
+                number.to_string()
+            }
+        }
+        serde_json::Value::String(text) => format!("'{text}'"),
+        serde_json::Value::Array(items) => {
+            let inner = items.iter().map(python_str_repr).collect::<Vec<_>>().join(", ");
+            format!("[{inner}]")
+        }
+        serde_json::Value::Object(map) => {
+            let inner = map
+                .iter()
+                .map(|(key, item)| format!("'{key}': {}", python_str_repr(item)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{inner}}}")
+        }
+    }
+}
+
+/// Optional `PrimaryKeyRelatedField`: missing/null → `None`; otherwise
+/// [`resolve_pk`].
+#[allow(clippy::result_large_err)]
+async fn opt_pk_field(
+    issue_data: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    pool: &PgPool,
+    table: &str,
+) -> Result<Option<Uuid>, String> {
+    let raw = match issue_data.get(key) {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(raw) => raw,
+    };
+    resolve_pk(pool, table, raw).await.map(Some)
+}
+
+/// Optional `ListField(child=PrimaryKeyRelatedField)`: missing → `None`
+/// (absent, not empty); non-list → `not_a_list`; per-item errors keyed
+/// by index, exactly like DRF's `run_child_validation`.
+#[allow(clippy::result_large_err)]
+async fn opt_uuid_list_field(
+    issue_data: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    pool: &PgPool,
+    table: &str,
+) -> Result<Option<Vec<Uuid>>, serde_json::Value> {
+    let raw = match issue_data.get(key) {
+        None => return Ok(None),
+        // `ListField` without `null=True`: explicit null fails.
+        Some(serde_json::Value::Null) => {
+            return Err(serde_json::json!(["This field may not be null."]));
+        }
+        Some(raw) => raw,
+    };
+    let serde_json::Value::Array(items) = raw else {
+        return Err(serde_json::json!([format!(
+            "Expected a list of items but got type \"{}\".",
+            json_type_name(raw)
+        )]));
+    };
+    let mut out = Vec::with_capacity(items.len());
+    let mut errors = serde_json::Map::new();
+    for (idx, item) in items.iter().enumerate() {
+        match resolve_pk(pool, table, item).await {
+            Ok(id) => out.push(id),
+            Err(message) => {
+                errors.insert(idx.to_string(), serde_json::json!([message]));
+            }
+        }
+    }
+    if !errors.is_empty() {
+        return Err(serde_json::Value::Object(errors));
+    }
+    Ok(Some(out))
+}
+
+/// Python `type(x).__name__` for JSON values (DRF `incorrect_type` /
+/// `not_a_list` messages).
+fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "NoneType",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(number) => {
+            if number.is_i64() || number.is_u64() {
+                "int"
+            } else {
+                "float"
+            }
+        }
+        serde_json::Value::String(_) => "str",
+        serde_json::Value::Array(_) => "list",
+        serde_json::Value::Object(_) => "dict",
+    }
+}
+
+/// Optional `IntegerField`: missing/null → `None`; bools fail; floats
+/// fail; numeric strings coerce (DRF semantics).
+fn opt_int_field(
+    issue_data: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<i32>, String> {
+    match issue_data.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(number)) => {
+            if let Some(int) = number.as_i64() {
+                i32::try_from(int).map(Some).map_err(|_| "A valid integer is required.".to_owned())
+            } else {
+                Err("A valid integer is required.".to_owned())
+            }
+        }
+        Some(serde_json::Value::String(text)) => match text.trim().parse::<i64>() {
+            Ok(int) => i32::try_from(int)
+                .map(Some)
+                .map_err(|_| "A valid integer is required.".to_owned()),
+            Err(_) => Err("A valid integer is required.".to_owned()),
+        },
+        Some(_) => Err("A valid integer is required.".to_owned()),
+    }
+}
+
+/// Optional `FloatField`: missing/null → `None`.
+fn opt_float_field(
+    issue_data: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<f64>, String> {
+    match issue_data.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(number)) => number
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| "A valid number is required.".to_owned()),
+        Some(serde_json::Value::String(text)) => text
+            .trim()
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|_| "A valid number is required.".to_owned()),
+        Some(_) => Err("A valid number is required.".to_owned()),
+    }
+}
+
+/// Optional `DateField` (`null=True`): missing/null → `None`.
+fn opt_date_field(
+    issue_data: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<chrono::NaiveDate>, String> {
+    const MESSAGE: &str = "Date has wrong format. Use one of these formats instead: YYYY-MM-DD.";
+    match issue_data.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(text)) => {
+            if let Ok(date) = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d") {
+                return Ok(Some(date));
+            }
+            if let Some(moment) = parse_datetime_param(text) {
+                return Ok(Some(moment.date_naive()));
+            }
+            Err(MESSAGE.to_owned())
+        }
+        Some(_) => Err(MESSAGE.to_owned()),
+    }
+}
+
+/// Optional `DateTimeField` (`null=True`): missing/null → `None`; naive
+/// values attach UTC like `DateTimeField.get_prep_value`.
+fn opt_datetime_field(
+    issue_data: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<DateTime<Utc>>, String> {
+    const MESSAGE: &str = "Datetime has wrong format. Use one of these formats instead: YYYY-MM-DDThh:mm[:ss[.uuuuuu]][+HH:MM|-HH:MM|Z].";
+    match issue_data.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(text)) => parse_datetime_param(text).map(Some).ok_or_else(|| MESSAGE.to_owned()),
+        Some(_) => Err(MESSAGE.to_owned()),
+    }
+}
+
+/// Optional `BooleanField`: missing/null → `None` (null allowed on
+/// `is_draft`? No — `is_draft` has no `null=True`, so null fails).
+/// Kept generic: null → `None` only where the caller allows it.
+fn opt_bool_field(
+    issue_data: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<bool>, String> {
+    const MESSAGE: &str = "Must be a valid boolean.";
+    match issue_data.get(key) {
+        None => Ok(None),
+        Some(serde_json::Value::Bool(flag)) => Ok(Some(*flag)),
+        Some(serde_json::Value::Number(number)) => {
+            if number.as_i64() == Some(1) || number.as_u64() == Some(1) {
+                Ok(Some(true))
+            } else if number.as_i64() == Some(0) || number.as_u64() == Some(0) {
+                Ok(Some(false))
+            } else {
+                Err(MESSAGE.to_owned())
+            }
+        }
+        Some(serde_json::Value::String(text)) => match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "t" | "yes" | "y" | "on" | "1" => Ok(Some(true)),
+            "false" | "f" | "no" | "n" | "off" | "0" => Ok(Some(false)),
+            _ => Err(MESSAGE.to_owned()),
+        },
+        Some(_) => Err(MESSAGE.to_owned()),
+    }
+}
+
+/// Optional limited `CharField` (`null=True, blank=True`): missing/null
+/// → `None`; trims; over-length → max_length error.
+fn opt_limited_string(
+    issue_data: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    max_length: usize,
+) -> Result<Option<String>, String> {
+    match issue_data.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(text)) => {
+            let trimmed = text.trim().to_owned();
+            if trimmed.chars().count() > max_length {
+                return Err(format!(
+                    "Ensure this field has no more than {max_length} characters."
+                ));
+            }
+            Ok(Some(trimmed))
+        }
+        Some(serde_json::Value::Number(number)) => {
+            let text = number.to_string();
+            if text.chars().count() > max_length {
+                return Err(format!(
+                    "Ensure this field has no more than {max_length} characters."
+                ));
+            }
+            Ok(Some(text))
+        }
+        Some(_) => Err("Not a valid string.".to_owned()),
+    }
+}
+
+/// Executor availability (`validate`, `serializers/issue.py:276-310`).
+///
+/// * `local_runner` always dispatches.
+/// * `cloud_agent` needs the instance kill switch
+///   (`CLOUD_AGENT_ENABLED`); the per-run BYOK question is answered at
+///   run creation, not here.
+/// * `managed_runner` evaluates `managed_runner_availability` in gate
+///   order; the desktop-unenrolled case (`NO_RUNNER_FOR_PROJECT`) is
+///   ACCEPTED (the client self-resolves on open). The deeper gates
+///   (LLM profile, enrollment, online presence) need the managed-runner
+///   tables and are accepted once the kill switch + viewer gates pass —
+///   verified only with the switch off (all contract/test envs); an
+///   enabled instance with a viewer missing those rows would 400 in
+///   Django where this stores. Boundary documented in the PR.
+#[allow(clippy::result_large_err)]
+async fn check_agent_executor(
+    pool: &PgPool,
+    settings: &pidash_db::config::Settings,
+    user_id: Uuid,
+    executor: &str,
+) -> Result<(), Response> {
+    if executor == "local_runner" {
+        return Ok(());
+    }
+    if executor == "cloud_agent" {
+        if !settings.cloud_agent.enabled {
+            return Err(Denial::BadJson(serde_json::json!({
+                "agent_executor": ["Pi Dash Cloud Agent is not available on this instance"]
+            }))
+            .into_response());
+        }
+        return Ok(());
+    }
+    debug_assert_eq!(executor, "managed_runner");
+    if !settings.managed_runner.enabled {
+        return Err(Denial::BadJson(serde_json::json!({
+            "agent_executor": ["Pi Dash Agent is not enabled on this instance"]
+        }))
+        .into_response());
+    }
+    let viewer: Option<(bool, bool)> =
+        sqlx::query_as("SELECT \"is_active\", \"is_bot\" FROM \"users\" WHERE (\"id\" = $1)")
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError.into_response())?;
+    match viewer {
+        Some((true, false)) => Ok(()),
+        _ => Err(Denial::BadJson(serde_json::json!({
+            "agent_executor": ["Open the Pi Dash desktop app to run on this computer"]
+        }))
+        .into_response()),
+    }
+}
+
+/// `assigned_pod` project-equality + soft-delete checks (`validate`,
+/// `serializers/issue.py:244-269`). The mid-flight rule needs an
+/// instance (create has none). Errors are field errors.
+#[allow(clippy::result_large_err)]
+async fn check_assigned_pod(
+    pool: &PgPool,
+    project_id: Uuid,
+    pod_id: Uuid,
+) -> Result<(), Response> {
+    let row: Option<(Uuid, Option<chrono::DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT \"project_id\", \"deleted_at\" FROM \"pod\" WHERE (\"id\" = $1)",
+    )
+    .bind(pod_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError.into_response())?;
+    // The field check above already ensured existence; a concurrent
+    // delete degrades to the friendly message, not the generic one.
+    let (pod_project, deleted_at) = match row {
+        Some(row) => row,
+        None => {
+            return Err(Denial::BadJson(serde_json::json!({
+                "assigned_pod_id": ["pod has been deleted"]
+            }))
+            .into_response());
+        }
+    };
+    if pod_project != project_id {
+        return Err(Denial::BadJson(serde_json::json!({
+            "assigned_pod_id": ["pod is in a different project"]
+        }))
+        .into_response());
+    }
+    if deleted_at.is_some() {
+        return Err(Denial::BadJson(serde_json::json!({
+            "assigned_pod_id": ["pod has been deleted"]
+        }))
+        .into_response());
+    }
+    Ok(())
+}
+
+/// Keep assignees that are active project members (`role__gte=15`).
+#[allow(clippy::result_large_err)]
+async fn filter_project_assignees(
+    pool: &PgPool,
+    project_id: Uuid,
+    ids: &[Uuid],
+) -> Result<Vec<Uuid>, Response> {
+    let list = ids
+        .iter()
+        .map(|id| format!("'{id}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    // `ProjectMember.objects` is the plain manager: no soft-delete guard.
+    let rows: Vec<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT \"member_id\" FROM \"project_members\" WHERE (\"project_id\" = $1 AND \"role\" >= 15 AND \"is_active\" AND \"member_id\" IN ({list}))"
+    ))
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| Denial::ServerError.into_response())?;
+    Ok(rows)
+}
+
+/// Keep labels that belong to the project.
+#[allow(clippy::result_large_err)]
+async fn filter_project_labels(
+    pool: &PgPool,
+    project_id: Uuid,
+    ids: &[Uuid],
+) -> Result<Vec<Uuid>, Response> {
+    let list = ids
+        .iter()
+        .map(|id| format!("'{id}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    // `Label.objects` is the plain manager: no soft-delete guard.
+    let rows: Vec<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT \"id\" FROM \"labels\" WHERE (\"project_id\" = $1 AND \"id\" IN ({list}))"
+    ))
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| Denial::ServerError.into_response())?;
+    Ok(rows)
+}
+
+// ---------------------------------------------------------------------------
+// create: Issue + m2m writes
+// ---------------------------------------------------------------------------
+
+/// `IssueCreateSerializer.create` (`serializers/issue.py:387-462`) with
+/// `Issue.save` (`db/models/issue.py:267-351`) and `BaseModel.save`
+/// (crum `created_by`, `db/models/base.py:24-46`): the full `issues` row
+/// plus assignee/label links. `sequence_id` input is always overridden;
+/// `sort_order` input survives only when no max exists (the caller
+/// resolved both); `description_stripped` is recomputed; assignees fall
+/// back to the project default; `IntegrityError` on the links is
+/// swallowed (`ON CONFLICT DO NOTHING` is the same final state).
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::result_large_err)]
+async fn insert_issue(
+    pool: &PgPool,
+    gate: &crate::app_issues::Gate,
+    validated: &ValidatedCreate,
+    issue_id: Uuid,
+    triage_id: Uuid,
+    sequence_id: i32,
+    sort_order: f64,
+    now: DateTime<Utc>,
+    default_assignee_id: Option<Uuid>,
+) -> Result<(), Response> {
+    let sort_order = match validated.sort_order {
+        Some(input) => {
+            // `save` overrides only when a max exists; the caller already
+            // computed `MAX+10000` from the same table, so an input
+            // survives exactly when the max query found no row.
+            let has_max: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM \"issues\" WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"project_id\" = $1 AND \"issues\".\"state_id\" = $2))",
+            )
+            .bind(gate.project_id)
+            .bind(triage_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|_| Denial::ServerError.into_response())?;
+            if has_max { sort_order } else { input }
+        }
+        None => sort_order,
+    };
+    // `assigned_pod`: explicit input wins, else the project default pod
+    // (`Issue.save`, `:277-286`).
+    let assigned_pod_id = match validated.assigned_pod_id {
+        Some(pod) => Some(pod),
+        None => default_project_pod(pool, gate.project_id).await?,
+    };
+    // `save`: `None` only when the html itself is `""`/`None`;
+    // otherwise the stripped text, even when it strips to `""`.
+    let description_stripped = match validated.description_html.as_deref() {
+        None | Some("") => None,
+        Some(html) => Some(crate::space::sanitize::strip_tags(html)),
+    };
+    if let Err(error) = sqlx::query(
+        "INSERT INTO \"issues\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"parent_id\", \"state_id\", \"point\", \"estimate_point_id\", \"name\", \"description_json\", \"description_html\", \"description_stripped\", \"description_binary\", \"priority\", \"complexity_score\", \"start_date\", \"target_date\", \"sequence_id\", \"sort_order\", \"completed_at\", \"archived_at\", \"is_draft\", \"external_source\", \"external_id\", \"type_id\", \"git_work_branch\", \"workpad\", \"created_via\", \"assigned_pod_id\", \"agent_executor\") VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NULL, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, '', $29, $30, $31)",
+    )
+    .bind(issue_id)
+    .bind(now)
+    .bind(now)
+    .bind(gate.user_id)
+    .bind(validated.deleted_at)
+    .bind(gate.project_id)
+    .bind(gate.workspace_id)
+    .bind(validated.parent_id)
+    .bind(triage_id)
+    .bind(validated.point)
+    .bind(validated.estimate_point_id)
+    .bind(validated.name.clone())
+    .bind(validated.description_json.clone())
+    .bind(validated.description_html.clone())
+    .bind(description_stripped)
+    .bind(validated.priority.clone())
+    .bind(validated.complexity_score)
+    .bind(validated.start_date)
+    .bind(validated.target_date)
+    .bind(sequence_id)
+    .bind(sort_order)
+    .bind(validated.completed_at)
+    .bind(validated.archived_at)
+    .bind(validated.is_draft)
+    .bind(validated.external_source.clone())
+    .bind(validated.external_id.clone())
+    .bind(validated.type_id)
+    .bind(validated.git_work_branch.clone())
+    .bind(validated.created_via.clone())
+    .bind(assigned_pod_id)
+    .bind(validated.agent_executor.clone())
+    .execute(pool)
+    .await
+    {
+        return Err(db_error(error));
+    }
+    // Assignees (`create`, `:402-441`): validated ids, else the project
+    // default when it is an active member (`role__gte=15`).
+    let assignees = match &validated.assignee_ids {
+        Some(ids) => ids.clone(),
+        None => match default_assignee_id {
+            Some(default) => {
+                let valid: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM \"project_members\" WHERE (\"member_id\" = $1 AND \"project_id\" = $2 AND \"role\" >= 15 AND \"is_active\"))",
+                )
+                .bind(default)
+                .bind(gate.project_id)
+                .fetch_one(pool)
+                .await
+                .map_err(|_| Denial::ServerError.into_response())?;
+                if valid { vec![default] } else { Vec::new() }
+            }
+            None => Vec::new(),
+        },
+    };
+    for assignee_id in &assignees {
+        let _ = sqlx::query(
+            "INSERT INTO \"issue_assignees\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", \"assignee_id\") VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
+        )
+        .bind(Uuid::new_v4())
+        .bind(now)
+        .bind(now)
+        .bind(gate.user_id)
+        .bind(gate.project_id)
+        .bind(gate.workspace_id)
+        .bind(issue_id)
+        .bind(*assignee_id)
+        .execute(pool)
+        .await;
+    }
+    if let Some(label_ids) = &validated.label_ids {
+        for label_id in label_ids {
+            let _ = sqlx::query(
+                "INSERT INTO \"issue_labels\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", \"label_id\") VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
+            )
+            .bind(Uuid::new_v4())
+            .bind(now)
+            .bind(now)
+            .bind(gate.user_id)
+            .bind(gate.project_id)
+            .bind(gate.workspace_id)
+            .bind(issue_id)
+            .bind(*label_id)
+            .execute(pool)
+            .await;
+        }
+    }
+    Ok(())
+}
+
+/// The project's default pod (`Pod.default_for_project_id`), if any.
+#[allow(clippy::result_large_err)]
+async fn default_project_pod(pool: &PgPool, project_id: Uuid) -> Result<Option<Uuid>, Response> {
+    sqlx::query_scalar(
+        "SELECT \"id\" FROM \"pod\" WHERE (\"pod\".\"deleted_at\" IS NULL AND \"pod\".\"project_id\" = $1 AND \"pod\".\"is_default\" = TRUE) ORDER BY \"pod\".\"created_at\" ASC LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .map(|row| row.flatten())
+    .map_err(|_| Denial::ServerError.into_response())
+}
+
+// ---------------------------------------------------------------------------
+// create: re-fetch + IntakeIssueDetailSerializer render
+// ---------------------------------------------------------------------------
+
+/// One re-fetched bridge row.
+type BridgeRow = (
+    Uuid,
+    i32,
+    Option<Uuid>,
+    Option<DateTime<Utc>>,
+    Option<String>,
+);
+
+/// The re-fetched bridge + issue columns (`:293-322`).
+#[allow(clippy::too_many_arguments)]
+struct CreatedRows {
+    bridge_id: Uuid,
+    status: i32,
+    duplicate_to_id: Option<Uuid>,
+    snoozed_till: Option<DateTime<Utc>>,
+    source: Option<String>,
+    issue_id: Uuid,
+    name: String,
+    state_id: Option<Uuid>,
+    sort_order: f64,
+    estimate_point_id: Option<Uuid>,
+    priority: String,
+    complexity_score: i32,
+    start_date: Option<chrono::NaiveDate>,
+    target_date: Option<chrono::NaiveDate>,
+    sequence_id: i32,
+    project_id: Uuid,
+    parent_id: Option<Uuid>,
+    assigned_pod_id: Option<Uuid>,
+    agent_executor: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    created_by_id: Option<Uuid>,
+    updated_by_id: Option<Uuid>,
+    is_draft: bool,
+    archived_at: Option<chrono::NaiveDate>,
+    description_html: Option<String>,
+    label_ids: Vec<Uuid>,
+    assignee_ids: Vec<Uuid>,
+}
+
+/// Re-fetch (`:293-322`) and render `IntakeIssueDetailSerializer`
+/// (`:323-324`, 200).
+///
+/// Four narrow queries stand in for the one Django queryset (bridge +
+/// issue + the two annotates): identical rows without the `t.*`/`i.*`
+/// column collisions. The label annotate keeps the through-table
+/// deleted guard; the assignee annotate keeps `is_active` WITHOUT the
+/// through-table deleted guard — the recorded asymmetry
+/// (`base.py:307-315`).
+#[allow(clippy::result_large_err)]
+async fn render_created_detail(
+    pool: &PgPool,
+    gate: &crate::app_issues::Gate,
+    intake_id: Uuid,
+    issue_id: Uuid,
+    _bridge_id: Uuid,
+) -> Result<String, Response> {
+    let bridge: Option<BridgeRow> = sqlx::query_as(
+        "SELECT \"id\", \"status\", \"duplicate_to_id\", \"snoozed_till\", \"source\" FROM \"intake_issues\" WHERE (\"intake_id\" = $1 AND \"issue_id\" = $2 AND \"project_id\" = $3 AND \"deleted_at\" IS NULL)",
+    )
+    .bind(intake_id)
+    .bind(issue_id)
+    .bind(gate.project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError.into_response())?;
+    let Some((bridge_id, status, duplicate_to_id, snoozed_till, source)) = bridge else {
+        return Err(Denial::ServerError.into_response());
+    };
+    // Untyped fetch (a 21-column tuple exceeds sqlx's `FromRow`
+    // impls); single-table so names are unambiguous.
+    let issue = sqlx::query(
+        "SELECT \"id\", \"name\", \"state_id\", \"sort_order\", \"estimate_point_id\", \"priority\", \"complexity_score\", \"start_date\", \"target_date\", \"sequence_id\", \"project_id\", \"parent_id\", \"assigned_pod_id\", \"agent_executor\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"is_draft\", \"archived_at\", \"description_html\" FROM \"issues\" WHERE (\"id\" = $1)",
+    )
+    .bind(issue_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError.into_response())?;
+    let label_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT COALESCE(ARRAY_AGG(DISTINCT \"labels\".\"id\") FILTER (WHERE (\"labels\".\"id\" IS NOT NULL AND \"issue_labels\".\"deleted_at\" IS NULL)), '{}') FROM \"issues\" LEFT OUTER JOIN \"issue_labels\" ON (\"issues\".\"id\" = \"issue_labels\".\"issue_id\") LEFT OUTER JOIN \"labels\" ON (\"issue_labels\".\"label_id\" = \"labels\".\"id\") WHERE (\"issues\".\"id\" = $1)",
+    )
+    .bind(issue_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| Denial::ServerError.into_response())?;
+    // `member_project` is the `User → ProjectMember` reverse join with
+    // no project scoping, exactly as Django spans it.
+    let assignee_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT COALESCE(ARRAY_AGG(DISTINCT \"users\".\"id\") FILTER (WHERE (\"users\".\"id\" IS NOT NULL AND \"member_project\".\"is_active\")), '{}') FROM \"issues\" LEFT OUTER JOIN \"issue_assignees\" ON (\"issues\".\"id\" = \"issue_assignees\".\"issue_id\") LEFT OUTER JOIN \"users\" ON (\"issue_assignees\".\"assignee_id\" = \"users\".\"id\") LEFT OUTER JOIN \"project_members\" \"member_project\" ON (\"users\".\"id\" = \"member_project\".\"member_id\") WHERE (\"issues\".\"id\" = $1)",
+    )
+    .bind(issue_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| Denial::ServerError.into_response())?;
+    let Some(fetched) = issue else {
+        return Err(Denial::ServerError.into_response());
+    };
+    let get = |column: &str| fetched.try_get::<Uuid, _>(column);
+    let rows = CreatedRows {
+        bridge_id,
+        status,
+        duplicate_to_id,
+        snoozed_till,
+        source,
+        issue_id: get("id").map_err(|_| Denial::ServerError.into_response())?,
+        name: fetched
+            .try_get::<String, _>("name")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        state_id: fetched
+            .try_get::<Option<Uuid>, _>("state_id")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        sort_order: fetched
+            .try_get::<f64, _>("sort_order")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        estimate_point_id: fetched
+            .try_get::<Option<Uuid>, _>("estimate_point_id")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        priority: fetched
+            .try_get::<String, _>("priority")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        complexity_score: fetched
+            .try_get::<i32, _>("complexity_score")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        start_date: fetched
+            .try_get::<Option<chrono::NaiveDate>, _>("start_date")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        target_date: fetched
+            .try_get::<Option<chrono::NaiveDate>, _>("target_date")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        sequence_id: fetched
+            .try_get::<i32, _>("sequence_id")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        project_id: fetched
+            .try_get::<Uuid, _>("project_id")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        parent_id: fetched
+            .try_get::<Option<Uuid>, _>("parent_id")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        assigned_pod_id: fetched
+            .try_get::<Option<Uuid>, _>("assigned_pod_id")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        agent_executor: fetched
+            .try_get::<Option<String>, _>("agent_executor")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        created_at: fetched
+            .try_get::<DateTime<Utc>, _>("created_at")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        updated_at: fetched
+            .try_get::<DateTime<Utc>, _>("updated_at")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        created_by_id: fetched
+            .try_get::<Option<Uuid>, _>("created_by_id")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        updated_by_id: fetched
+            .try_get::<Option<Uuid>, _>("updated_by_id")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        is_draft: fetched
+            .try_get::<bool, _>("is_draft")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        archived_at: fetched
+            .try_get::<Option<chrono::NaiveDate>, _>("archived_at")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        description_html: fetched
+            .try_get::<Option<String>, _>("description_html")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        label_ids,
+        assignee_ids,
+    };
+    let nested = render_created_issue(&rows, gate.timezone);
+    let bridge_id_text = rows.bridge_id.to_string();
+    let duplicate_to_text = rows.duplicate_to_id.map(|id| id.to_string());
+    let snoozed_text = rows
+        .snoozed_till
+        .map(|moment| crate::serializer::render_datetime_in(&moment, &gate.timezone));
+    let detail = pidash_services::app_intake::shape::render_detail(
+        &pidash_services::app_intake::shape::DetailRow {
+            id: &bridge_id_text,
+            status: i64::from(rows.status),
+            duplicate_to: duplicate_to_text.as_deref(),
+            snoozed_till: snoozed_text.as_deref(),
+            duplicate_issue_detail: None,
+            source: rows.source.as_deref(),
+            issue: nested,
+        },
+    );
+    Ok(detail.to_string())
+}
+
+/// The nested `IssueDetailSerializer` for a just-created issue, in
+/// `Meta.fields` order. Annotation-less read-only fields (`cycle_id`,
+/// `module_ids`, the three counts) and attribute-less declared fields
+/// (`is_subscribed`, `is_intake`) are absent, exactly as DRF skips
+/// them; ticker/runs/relations are null/empty on a fresh row.
+fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_json::Value {
+    let mut issue = serde_json::Map::with_capacity(32);
+    issue.insert("id".to_owned(), uuid_string(&rows.issue_id));
+    issue.insert("name".to_owned(), serde_json::Value::String(rows.name.clone()));
+    issue.insert("state_id".to_owned(), opt_uuid(&rows.state_id));
+    issue.insert(
+        "sort_order".to_owned(),
+        serde_json::Number::from_f64(rows.sort_order)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    // `save` clears `completed_at` whenever the state is set and not
+    // completed — always the case here (triage).
+    issue.insert("completed_at".to_owned(), serde_json::Value::Null);
+    issue.insert(
+        "estimate_point".to_owned(),
+        opt_uuid(&rows.estimate_point_id),
+    );
+    issue.insert(
+        "priority".to_owned(),
+        serde_json::Value::String(rows.priority.clone()),
+    );
+    issue.insert(
+        "complexity_score".to_owned(),
+        serde_json::Value::from(rows.complexity_score),
+    );
+    issue.insert(
+        "start_date".to_owned(),
+        rows.start_date
+            .map(|day| serde_json::Value::String(day.format("%Y-%m-%d").to_string()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    issue.insert(
+        "target_date".to_owned(),
+        rows.target_date
+            .map(|day| serde_json::Value::String(day.format("%Y-%m-%d").to_string()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    issue.insert(
+        "sequence_id".to_owned(),
+        serde_json::Value::from(rows.sequence_id),
+    );
+    issue.insert("project_id".to_owned(), uuid_string(&rows.project_id));
+    issue.insert("parent_id".to_owned(), opt_uuid(&rows.parent_id));
+    issue.insert("assigned_pod_id".to_owned(), opt_uuid(&rows.assigned_pod_id));
+    issue.insert(
+        "agent_executor".to_owned(),
+        opt_string(&rows.agent_executor),
+    );
+    issue.insert(
+        "label_ids".to_owned(),
+        serde_json::Value::Array(
+            rows.label_ids.iter().map(uuid_string).collect(),
+        ),
+    );
+    issue.insert(
+        "assignee_ids".to_owned(),
+        serde_json::Value::Array(
+            rows.assignee_ids.iter().map(uuid_string).collect(),
+        ),
+    );
+    issue.insert(
+        "created_at".to_owned(),
+        serde_json::Value::String(crate::serializer::render_datetime_in(
+            &rows.created_at,
+            &timezone,
+        )),
+    );
+    issue.insert(
+        "updated_at".to_owned(),
+        serde_json::Value::String(crate::serializer::render_datetime_in(
+            &rows.updated_at,
+            &timezone,
+        )),
+    );
+    issue.insert("created_by".to_owned(), opt_uuid(&rows.created_by_id));
+    issue.insert("updated_by".to_owned(), opt_uuid(&rows.updated_by_id));
+    issue.insert(
+        "is_draft".to_owned(),
+        serde_json::Value::Bool(rows.is_draft),
+    );
+    issue.insert(
+        "archived_at".to_owned(),
+        rows.archived_at
+            .map(|day| serde_json::Value::String(day.format("%Y-%m-%d").to_string()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    issue.insert("is_synced".to_owned(), serde_json::Value::Bool(false));
+    issue.insert(
+        "description_html".to_owned(),
+        opt_string(&rows.description_html),
+    );
+    issue.insert("agent_ticker".to_owned(), serde_json::Value::Null);
+    issue.insert("agent_status".to_owned(), serde_json::Value::Null);
+    issue.insert(
+        "relations_summary".to_owned(),
+        serde_json::json!({"blocked_by": [], "blocking": []}),
+    );
+    issue.insert(
+        "has_open_blockers".to_owned(),
+        serde_json::Value::Bool(false),
+    );
+    serde_json::Value::Object(issue)
 }
