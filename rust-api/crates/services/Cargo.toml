@@ -34,6 +34,9 @@ minijinja = { version = "2" }
 # no lock churn).
 regex = "1"
 idna = "1"
+# D-30 page serializers: base64→bytes validation mirrors CPython
+# base64.b64decode (same locked base64 0.22.x as pidash-api, no lock churn).
+base64 = "0.22"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

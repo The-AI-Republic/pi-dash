@@ -2624,6 +2624,7 @@ dependencies = [
 name = "pidash-services"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "crc32fast",
  "flate2",
