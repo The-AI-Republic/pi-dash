@@ -183,4 +183,95 @@ export class WebNewDriver implements ParityDriver {
   async isInOnboardingCreationDisabledNoticeVisible(): Promise<boolean> {
     return todo("isInOnboardingCreationDisabledNoticeVisible");
   }
+
+  // --- Auth sign-in core (NEWFRONT-107). Throwing stubs per the shared
+  // --- driver contract; the sign-in area fills these in when it lands.
+
+  async openSignInWithParams(_params: Record<string, string>): Promise<void> {
+    return todo("openSignInWithParams");
+  }
+
+  async submitEmail(_email: string): Promise<void> {
+    return todo("submitEmail");
+  }
+
+  async submitPassword(_password: string): Promise<void> {
+    return todo("submitPassword");
+  }
+
+  async authStep(): Promise<"email" | "password" | "code" | "unavailable" | "unknown"> {
+    return todo("authStep");
+  }
+
+  async bannerText(): Promise<string | null> {
+    return todo("bannerText");
+  }
+
+  async dismissBanner(): Promise<void> {
+    return todo("dismissBanner");
+  }
+
+  async seesWorkspaceInviteHeader(_workspaceName: string): Promise<boolean> {
+    return todo("seesWorkspaceInviteHeader");
+  }
+
+  async seesGenericSignInHeader(): Promise<boolean> {
+    return todo("seesGenericSignInHeader");
+  }
+
+  async seesGenericSignUpHeader(): Promise<boolean> {
+    return todo("seesGenericSignUpHeader");
+  }
+
+  async seesConfirmPassword(): Promise<boolean> {
+    return todo("seesConfirmPassword");
+  }
+
+  async passwordPrimaryButtonLabel(): Promise<string | null> {
+    return todo("passwordPrimaryButtonLabel");
+  }
+
+  async forgotPasswordEntry(): Promise<"link" | "popover" | "absent"> {
+    return todo("forgotPasswordEntry");
+  }
+
+  async seesUniqueCodeButton(): Promise<boolean> {
+    return todo("seesUniqueCodeButton");
+  }
+
+  async requestUniqueCode(): Promise<void> {
+    return todo("requestUniqueCode");
+  }
+
+  async resendCodeLabel(): Promise<string | null> {
+    return todo("resendCodeLabel");
+  }
+
+  async clickResendCode(): Promise<void> {
+    return todo("clickResendCode");
+  }
+
+  async submitCode(_code: string): Promise<void> {
+    return todo("submitCode");
+  }
+
+  async providerSignInButtons(): Promise<string[]> {
+    return todo("providerSignInButtons");
+  }
+
+  async clickProviderButton(_name: string): Promise<void> {
+    return todo("clickProviderButton");
+  }
+
+  async clearEmail(): Promise<void> {
+    return todo("clearEmail");
+  }
+
+  async seesNoAuthMethods(): Promise<boolean> {
+    return todo("seesNoAuthMethods");
+  }
+
+  async forgotPasswordPopoverText(): Promise<string | null> {
+    return todo("forgotPasswordPopoverText");
+  }
 }

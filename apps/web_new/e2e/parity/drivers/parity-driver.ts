@@ -97,6 +97,7 @@ export interface ParityDriver {
    * intermittently under parallel parity runs.
    */
   mentionsEnsureSignedIn(email: string, password: string): Promise<void>;
+
   // -------------------------------------------------------------------------
   // Workspace onboarding + creation (NEWFRONT-111, rows AUTH-034..043).
   // Sign-in itself is another area's row, so onboarding scenarios enter the
@@ -167,4 +168,52 @@ export interface ParityDriver {
   isStandaloneCreationDisabledVisible(): Promise<boolean>;
   isRequestInstanceAdminLinkVisible(): Promise<boolean>;
   isInOnboardingCreationDisabledNoticeVisible(): Promise<boolean>;
+
+  // --- Auth sign-in core (NEWFRONT-107, AUTH-001/008). Appended; existing
+  // --- methods above are untouched per the shared driver contract.
+
+  /** Open the sign-in card with query params (error_code, invitation, email). */
+  openSignInWithParams(params: Record<string, string>): Promise<void>;
+  /** Submit the email step and wait until the card leaves it. */
+  submitEmail(email: string): Promise<void>;
+  /** Submit the password step; ends in a full page load (success or error). */
+  submitPassword(password: string): Promise<void>;
+  /** Which sign-in card step is currently visible. */
+  authStep(): Promise<"email" | "password" | "code" | "unavailable" | "unknown">;
+  /** Text of the dismissible error banner, or null when none shows. */
+  bannerText(): Promise<string | null>;
+  /** Dismiss the error banner. */
+  dismissBanner(): Promise<void>;
+  /** True when the card header names the given workspace (invitation match). */
+  seesWorkspaceInviteHeader(workspaceName: string): Promise<boolean>;
+  /** True when the generic sign-in header shows. */
+  seesGenericSignInHeader(): Promise<boolean>;
+  /** True when the generic sign-up header shows. */
+  seesGenericSignUpHeader(): Promise<boolean>;
+  /** True when the password step shows the confirm-password field (sign-up mode). */
+  seesConfirmPassword(): Promise<boolean>;
+  /** Label of the primary button on the password step, or null when absent. */
+  passwordPrimaryButtonLabel(): Promise<string | null>;
+  /** How the forgot-password entry presents: reset link vs explanation popover. */
+  forgotPasswordEntry(): Promise<"link" | "popover" | "absent">;
+  /** Open the forgot-password explanation and return its text (mail-less mode). */
+  forgotPasswordPopoverText(): Promise<string | null>;
+  /** True when the "sign in with unique code" secondary button shows. */
+  seesUniqueCodeButton(): Promise<boolean>;
+  /** Move from the password step to the code step. */
+  requestUniqueCode(): Promise<void>;
+  /** Label of the resend control on the code step, or null when absent. */
+  resendCodeLabel(): Promise<string | null>;
+  /** Click the resend control on the code step. */
+  clickResendCode(): Promise<void>;
+  /** Submit the code step; ends in a full page load (success or error). */
+  submitCode(code: string): Promise<void>;
+  /** Names of the visible third-party provider buttons (empty when none). */
+  providerSignInButtons(): Promise<string[]>;
+  /** Click a third-party provider button (starts a full-page provider flow). */
+  clickProviderButton(name: string): Promise<void>;
+  /** Clear the locked email on the password/code step, resetting the card. */
+  clearEmail(): Promise<void>;
+  /** True when the no-authentication-methods card shows. */
+  seesNoAuthMethods(): Promise<boolean>;
 }

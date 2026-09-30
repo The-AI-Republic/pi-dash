@@ -15,6 +15,22 @@ function apiBaseFromEnv(): string {
   return raw;
 }
 
+/**
+ * Fetch that rides out HTTP 429s. The seeded stack throttles anonymous calls
+ * per minute per IP (shared by every parallel run on this machine), and a
+ * throttled request never reaches its view — so retrying it cannot
+ * double-apply anything. Backs off between attempts, then returns the last
+ * response for the caller to interpret.
+ */
+async function fetchTolerant(input: string, init?: RequestInit, retries = 5): Promise<Response> {
+  const backoffMs = [5000, 10000, 20000, 30000, 45000];
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(input, init);
+    if (res.status !== 429 || attempt >= retries) return res;
+    await new Promise((resolve) => setTimeout(resolve, backoffMs[Math.min(attempt, backoffMs.length - 1)]));
+  }
+}
+
 export function seedFactsFromEnv(): ParitySeedFacts {
   const file = process.env["PARITY_SEED_FILE"];
   if (!file)
@@ -44,14 +60,14 @@ export async function signInSession(
 ): Promise<string> {
   // The credential endpoint is a native form POST guarded by CSRF, so fetch
   // a token first exactly like the sign-in card does, then submit the form.
-  const tokenRes = await fetch(`${apiBase}/auth/get-csrf-token/`);
+  const tokenRes = await fetchTolerant(`${apiBase}/auth/get-csrf-token/`);
   if (!tokenRes.ok) throw new Error(`[parity] CSRF token fetch failed with HTTP ${tokenRes.status}.`);
   const tokenPayload = (await tokenRes.json()) as { csrf_token?: unknown };
   const token = typeof tokenPayload.csrf_token === "string" ? tokenPayload.csrf_token : "";
   if (token === "") throw new Error("[parity] CSRF token response carried no token.");
   const preCookies = cookieHeader(setCookieHeaders(tokenRes));
   const body = new URLSearchParams({ email, password, csrfmiddlewaretoken: token });
-  const res = await fetch(`${apiBase}/auth/sign-in/`, {
+  const res = await fetchTolerant(`${apiBase}/auth/sign-in/`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded", cookie: preCookies },
     body,
@@ -213,6 +229,127 @@ export async function serverNotificationsWithSession(
   });
 }
 
+/** Result of the email-first routing check. */
+export interface EmailCheckResult {
+  existing: boolean;
+  status: "MAGIC_CODE" | "CREDENTIAL";
+}
+
+/**
+ * Raw email-check call; throws carrying the server's error_code on failure.
+ * Always anonymous: this endpoint enforces CSRF for session-authenticated
+ * callers, so sending a session cookie would 403. Throttle spikes are
+ * ridden out by the fetch retry instead.
+ */
+export async function emailCheck(email: string, apiBase: string = apiBaseFromEnv()): Promise<EmailCheckResult> {
+  const res = await fetchTolerant(`${apiBase}/auth/email-check/`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  const payload: unknown = await res.json();
+  if (!res.ok) {
+    const code = (payload as { error_code?: unknown }).error_code;
+    throw new Error(`[parity] email-check failed with HTTP ${res.status} (error_code ${String(code)}).`);
+  }
+  return payload as EmailCheckResult;
+}
+
+/** Instance auth capability flags as the server reports them. */
+export async function instanceConfig(
+  apiBase: string = apiBaseFromEnv(),
+  sessionCookie = ""
+): Promise<Record<string, boolean | string | null>> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/instances/`,
+    sessionCookie === "" ? undefined : { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] instance read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { config?: unknown };
+  if (typeof payload.config !== "object" || payload.config === null) {
+    throw new Error("[parity] instance response carried no config object.");
+  }
+  return payload.config as Record<string, boolean | string | null>;
+}
+
+/**
+ * Flip instance configuration keys and return the previous values for every
+ * key, so the caller can restore them afterwards. The session must come from
+ * adminSignInSession: the license endpoints read the admin session cookie.
+ */
+export async function patchInstanceConfig(
+  patch: Record<string, string>,
+  adminSessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, string>> {
+  const beforeRes = await fetchTolerant(`${apiBase}/api/instances/configurations/`, {
+    headers: { cookie: adminSessionCookie },
+  });
+  if (!beforeRes.ok) throw new Error(`[parity] instance configurations read failed with HTTP ${beforeRes.status}.`);
+  const rows = (await beforeRes.json()) as { key?: unknown; value?: unknown }[];
+  const before: Record<string, string> = {};
+  for (const key of Object.keys(patch)) {
+    const row = rows.find((r) => r.key === key);
+    before[key] = typeof row?.value === "string" ? row.value : "";
+  }
+  const res = await fetchTolerant(`${apiBase}/api/instances/configurations/`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", cookie: adminSessionCookie },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error(`[parity] instance configurations patch failed with HTTP ${res.status}.`);
+  return before;
+}
+
+/** A workspace invitation row as the server reports it. */
+export interface InvitationFacts {
+  id: string;
+  email: string;
+  workspaceName: string;
+}
+
+/** Invite one address to a workspace; resolves with the created invitation. */
+export async function createInvitation(
+  workspaceSlug: string,
+  email: string,
+  ownerSessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<InvitationFacts> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/invitations/`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: ownerSessionCookie },
+    body: JSON.stringify({ emails: [{ email, role: 15 }] }),
+  });
+  if (!res.ok) throw new Error(`[parity] invitation create failed with HTTP ${res.status}.`);
+  const list = await listInvitations(workspaceSlug, ownerSessionCookie, apiBase);
+  const row = list.find((inv) => inv.email.toLowerCase() === email.toLowerCase());
+  if (!row) throw new Error(`[parity] invitation for ${email} not found after create.`);
+  return row;
+}
+
+/** Every pending invitation of a workspace, as the owner sees them. */
+export async function listInvitations(
+  workspaceSlug: string,
+  ownerSessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<InvitationFacts[]> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/invitations/`, {
+    headers: { cookie: ownerSessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] invitation list failed with HTTP ${res.status}.`);
+  const rows: unknown = await res.json();
+  const list: unknown[] = Array.isArray(rows) ? rows : [];
+  return list.map((row) => {
+    const record = row as { id?: unknown; email?: unknown; workspace?: { name?: unknown } };
+    if (typeof record.id !== "string" || typeof record.email !== "string") {
+      throw new Error("[parity] invitation row carried no id/email.");
+    }
+    const workspaceName = record.workspace?.name;
+    if (typeof workspaceName !== "string") throw new Error("[parity] invitation row carried no workspace name.");
+    return { id: record.id, email: record.email, workspaceName };
+  });
+}
+
 /**
  * Mention notifications visible to one user (NEWFRONT-115). Signs in as
  * that user, so the mention scenario can prove the fan-out reached the
@@ -228,6 +365,130 @@ export async function serverNotificationsFor(
   return serverNotificationsWithSession(workspaceSlug, sessionCookie, apiBase);
 }
 
+/**
+ * Ask the server for a one-time code by email. Resolves with the issued key;
+ * throws carrying the server's error_code when mail is unconfigured (5025)
+ * or attempts are exhausted.
+ */
+export async function magicGenerate(email: string, apiBase: string = apiBaseFromEnv()): Promise<string> {
+  const res = await fetchTolerant(`${apiBase}/auth/magic-generate/`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  const payload: unknown = await res.json();
+  if (!res.ok) {
+    const code = (payload as { error_code?: unknown }).error_code;
+    throw new Error(`[parity] magic-generate failed with HTTP ${res.status} (error_code ${String(code)}).`);
+  }
+  const key = (payload as { key?: unknown }).key;
+  if (typeof key !== "string") throw new Error("[parity] magic-generate response carried no key.");
+  return key;
+}
+
+/** Outcome of posting the code form straight at the server. */
+export interface NativeCodeResult {
+  status: number;
+  location: string;
+  sessionCookie: boolean;
+}
+
+/** Submit a one-time code the way the code form does; never throws. */
+export async function nativeMagicSignIn(
+  email: string,
+  code: string,
+  apiBase: string = apiBaseFromEnv(),
+  sessionCookie = ""
+): Promise<NativeCodeResult> {
+  const tokenRes = await fetchTolerant(
+    `${apiBase}/auth/get-csrf-token/`,
+    sessionCookie === "" ? undefined : { headers: { cookie: sessionCookie } }
+  );
+  if (!tokenRes.ok) throw new Error(`[parity] CSRF token fetch failed with HTTP ${tokenRes.status}.`);
+  const tokenPayload = (await tokenRes.json()) as { csrf_token?: unknown };
+  const token = typeof tokenPayload.csrf_token === "string" ? tokenPayload.csrf_token : "";
+  const preCookies = cookieHeader(setCookieHeaders(tokenRes));
+  const body = new URLSearchParams({ email, code, csrfmiddlewaretoken: token });
+  const res = await fetchTolerant(`${apiBase}/auth/magic-sign-in/`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", cookie: preCookies },
+    body,
+    redirect: "manual",
+  });
+  const location = res.headers.get("location") ?? "";
+  const gotSessionCookie = cookieHeader([...setCookieHeaders(tokenRes), ...setCookieHeaders(res)]).includes(
+    "session-id="
+  );
+  return { status: res.status, location, sessionCookie: gotSessionCookie };
+}
+
+/** The public single-invitation fetch the sign-in header uses (no session). */
+export async function singleInvitation(
+  workspaceSlug: string,
+  invitationId: string,
+  apiBase: string = apiBaseFromEnv(),
+  sessionCookie = ""
+): Promise<InvitationFacts> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/invitations/${invitationId}/join/`,
+    sessionCookie === "" ? undefined : { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] single invitation fetch failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as { id?: unknown; email?: unknown; workspace?: { name?: unknown } };
+  if (typeof record.email !== "string") throw new Error("[parity] single invitation carried no email.");
+  const workspaceName = record.workspace?.name;
+  if (typeof workspaceName !== "string") throw new Error("[parity] single invitation carried no workspace name.");
+  return { id: typeof record.id === "string" ? record.id : invitationId, email: record.email, workspaceName };
+}
+
+/** Remove an invitation created in-spec. */
+export async function deleteInvitation(
+  workspaceSlug: string,
+  invitationId: string,
+  ownerSessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/invitations/${invitationId}/`, {
+    method: "DELETE",
+    headers: { cookie: ownerSessionCookie },
+  });
+  if (!res.ok && res.status !== 204) throw new Error(`[parity] invitation delete failed with HTTP ${res.status}.`);
+}
+
+/**
+ * Sign in to the instance admin surface (god-mode); resolves with a session
+ * cookie header carrying the admin session. The license endpoints (instance
+ * configurations) read a separate admin session cookie, so the app sign-in
+ * session is not enough there.
+ */
+export async function adminSignInSession(
+  email: string,
+  password: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const tokenRes = await fetchTolerant(`${apiBase}/auth/get-csrf-token/`);
+  if (!tokenRes.ok) throw new Error(`[parity] CSRF token fetch failed with HTTP ${tokenRes.status}.`);
+  const tokenPayload = (await tokenRes.json()) as { csrf_token?: unknown };
+  const token = typeof tokenPayload.csrf_token === "string" ? tokenPayload.csrf_token : "";
+  if (token === "") throw new Error("[parity] CSRF token response carried no token.");
+  const preCookies = cookieHeader(setCookieHeaders(tokenRes));
+  const body = new URLSearchParams({ email, password, csrfmiddlewaretoken: token });
+  const res = await fetchTolerant(`${apiBase}/api/instances/admins/sign-in/`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", cookie: preCookies },
+    body,
+    redirect: "manual",
+  });
+  if (res.status !== 302) {
+    throw new Error(`[parity] admin sign-in failed with HTTP ${res.status} for ${email}.`);
+  }
+  const header = cookieHeader([...setCookieHeaders(tokenRes), ...setCookieHeaders(res)]);
+  if (!header.includes("admin-session-id=")) {
+    throw new Error("[parity] admin sign-in response carried no admin session cookie.");
+  }
+  return header;
+}
+
 /** Names of the project's issues as the server reports them, in API order. */
 export async function serverIssueNames(
   workspaceSlug: string,
@@ -235,7 +496,7 @@ export async function serverIssueNames(
   sessionCookie: string,
   apiBase: string = apiBaseFromEnv()
 ): Promise<string[]> {
-  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/`, {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/`, {
     headers: { cookie: sessionCookie },
   });
   if (!res.ok) throw new Error(`[parity] issues read failed with HTTP ${res.status}.`);
@@ -694,10 +955,9 @@ export async function slugAvailable(user: FreshUser, slug: string): Promise<bool
   return payload.status === true;
 }
 
-/** The instance config block (is_self_managed, is_workspace_creation_disabled, ...). */
-export async function instanceConfig(apiBase: string = apiBaseFromEnv()): Promise<Record<string, unknown>> {
-  const res = await fetch(`${apiBase}/api/instances/`);
-  if (!res.ok) throw new Error(`[parity] instance read failed with HTTP ${res.status}.`);
-  const payload = (await res.json()) as { config?: Record<string, unknown> };
-  return payload.config ?? {};
-}
+// NOTE (NEWFRONT-107 rebase onto NEWFRONT-111): NEWFRONT-111 added a narrower
+// duplicate instanceConfig(apiBase) helper at this spot. It had no callers
+// anywhere in the tree; every live caller uses the superset
+// instanceConfig(apiBase, sessionCookie) above (same endpoint, plus optional
+// session cookie and throttle retries), so the duplicate is removed here
+// instead of forked.

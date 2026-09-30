@@ -19,9 +19,12 @@ export class WebDriver implements ParityDriver {
     this.page = page;
   }
 
+  /** Every wait below is explicitly bounded: the suite config leaves action and navigation timeouts at Playwright's unbounded defaults, so a bare waitFor would hang to the test timeout instead of failing honestly. */
+  private static readonly WAIT_MS = 30_000;
+
   async openEntry(): Promise<void> {
     await this.page.goto("/");
-    await this.page.getByPlaceholder("name@company.com").first().waitFor();
+    await this.waitForCard();
   }
 
   private submitOf(form: Locator): Locator {
@@ -35,16 +38,246 @@ export class WebDriver implements ParityDriver {
     const emailForm = page.locator("form", { has: emailField });
     await this.submitOf(emailForm).click();
     const passwordField = page.getByPlaceholder("Enter password");
-    await passwordField.waitFor();
+    await passwordField.waitFor({ timeout: WebDriver.WAIT_MS });
     await passwordField.fill(password);
     const passwordForm = page.locator("form", { has: passwordField });
     // The old app posts the native form, so this ends in a full page load.
-    await Promise.all([page.waitForURL(/\/[^/]+\//), this.submitOf(passwordForm).click()]);
+    await Promise.all([
+      page.waitForURL(/\/[^/]+\//, { timeout: WebDriver.WAIT_MS }),
+      this.submitOf(passwordForm).click(),
+    ]);
   }
 
   async openProjectIssues(workspaceSlug: string, projectId: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues`);
-    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.waitForLoadState("domcontentloaded", { timeout: WebDriver.WAIT_MS });
+  }
+
+  async openSignInWithParams(params: Record<string, string>): Promise<void> {
+    const query = new URLSearchParams(params).toString();
+    await this.page.goto(query === "" ? "/" : `/?${query}`);
+    await this.waitForCard();
+  }
+
+  /**
+   * Wait until the sign-in card settles. Either a form step renders, or
+   * (methods disabled) the no-methods card renders instead of any form.
+   * When the shared stack throttles the instance-config fetch, the old app
+   * shows a startup-failure screen instead of the card; that screen carries
+   * the failed URL, so reloading it is a safe GET that converges once the
+   * throttle minute passes (bounded: at most three reloads).
+   */
+  private async waitForCard(): Promise<void> {
+    // Settle with all branches bounded: a blank or stalled page resolves
+    // every branch as absent instead of hanging the race. Rounds are short
+    // because the usual cause is a network blip (failed sub-resources leave
+    // a blank page that a reload fixes), not a slow app.
+    const page = this.page;
+    const roundMs = 15_000;
+    const formInput = page
+      .locator(
+        'input[placeholder="name@company.com"], input[placeholder="Enter password"], input[placeholder="123456"]'
+      )
+      .first();
+    const noMethods = page.getByText("No authentication methods available");
+    const startupFailure = page.getByText("didn't start up correctly");
+    const seen = async (target: { waitFor: (options: { timeout: number }) => Promise<void> }): Promise<boolean> =>
+      target.waitFor({ timeout: roundMs }).then(
+        () => true,
+        () => false
+      );
+    for (let attempt = 0; ; attempt++) {
+      const [form, noMethod, maintenance] = await Promise.all([seen(formInput), seen(noMethods), seen(startupFailure)]);
+      if (form || noMethod || attempt >= 5) return;
+      if (maintenance) {
+        await page.waitForTimeout(10_000);
+        await page.reload({ timeout: WebDriver.WAIT_MS }).catch(() => {});
+      } else {
+        // Nothing rendered at all (stalled load): reload once per round too.
+        await page.reload({ timeout: WebDriver.WAIT_MS }).catch(() => {});
+      }
+    }
+  }
+
+  async submitEmail(email: string): Promise<void> {
+    const page = this.page;
+    const emailField = page.getByPlaceholder("name@company.com").first();
+    await emailField.fill(email);
+    const emailForm = page.locator("form", { has: emailField });
+    await this.submitOf(emailForm).click();
+    // The email check round-trips to the server, then the card shows the
+    // password or code step. Either placeholder marks the transition.
+    await page
+      .locator('input[placeholder="Enter password"], input[placeholder="123456"]')
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  /**
+   * The old app posts the native form, so the submit ends in a full page
+   * load whether the credentials were right or wrong. The load wait never
+   * fails the test: when it times out the scenario's polls still decide
+   * against whatever actually rendered.
+   */
+  private async nativeSubmit(form: Locator): Promise<void> {
+    const page = this.page;
+    await Promise.all([
+      page.waitForLoadState("domcontentloaded", { timeout: WebDriver.WAIT_MS }).catch(() => {}),
+      this.submitOf(form).click(),
+    ]);
+  }
+
+  async submitPassword(password: string): Promise<void> {
+    const page = this.page;
+    const passwordField = page.getByPlaceholder("Enter password");
+    await passwordField.fill(password);
+    await this.nativeSubmit(page.locator("form", { has: passwordField }));
+  }
+
+  async authStep(): Promise<"email" | "password" | "code" | "unavailable" | "unknown"> {
+    const page = this.page;
+    if (
+      await page
+        .getByText("No authentication methods available")
+        .count()
+        .then((n) => n > 0)
+    ) {
+      return "unavailable";
+    }
+    if ((await page.getByPlaceholder("Enter password").count()) > 0) return "password";
+    if ((await page.getByPlaceholder("123456").count()) > 0) return "code";
+    if ((await page.getByPlaceholder("name@company.com").count()) > 0) return "email";
+    return "unknown";
+  }
+
+  async bannerText(): Promise<string | null> {
+    const alert = this.page.getByRole("alert");
+    if ((await alert.count()) === 0) return null;
+    const text = (await alert.first().innerText()).trim();
+    return text === "" ? null : text;
+  }
+
+  async dismissBanner(): Promise<void> {
+    await this.page.getByRole("alert").getByRole("button").first().click();
+  }
+
+  async seesWorkspaceInviteHeader(workspaceName: string): Promise<boolean> {
+    // The invitation header reads as one line ("Join <workspace>"); any
+    // visible line pairing an invitation verb with the workspace name
+    // proves the match, without coupling to the header markup.
+    const candidates = this.page.getByText(/join/i);
+    const count = await candidates.count();
+    for (let i = 0; i < count; i++) {
+      if ((await candidates.nth(i).innerText()).trim().includes(workspaceName)) return true;
+    }
+    return false;
+  }
+
+  async seesGenericSignInHeader(): Promise<boolean> {
+    return (await this.page.getByText("Welcome back to Pi Dash.").count()) > 0;
+  }
+
+  async seesGenericSignUpHeader(): Promise<boolean> {
+    return (await this.page.getByText("Create your Pi Dash account.").count()) > 0;
+  }
+
+  async seesConfirmPassword(): Promise<boolean> {
+    return (await this.page.getByPlaceholder("Confirm password").count()) > 0;
+  }
+
+  async passwordPrimaryButtonLabel(): Promise<string | null> {
+    const field = this.page.getByPlaceholder("Enter password");
+    if ((await field.count()) === 0) return null;
+    const form = this.page.locator("form", { has: field });
+    const label = await form.locator('button[type="submit"]').first().innerText();
+    return label.trim() === "" ? null : label.trim();
+  }
+
+  async forgotPasswordEntry(): Promise<"link" | "popover" | "absent"> {
+    const page = this.page;
+    const entry = page.getByText("Forgot your password?");
+    if ((await entry.count()) === 0) return "absent";
+    // The reset link navigates to the forgot-password page; the mail-less
+    // explanation is a popover toggle with no destination.
+    const asLink = entry.locator("xpath=ancestor-or-self::a");
+    if ((await asLink.count()) > 0) return "link";
+    return "popover";
+  }
+
+  async seesUniqueCodeButton(): Promise<boolean> {
+    return (await this.page.getByRole("button", { name: "Sign in with unique code" }).count()) > 0;
+  }
+
+  async requestUniqueCode(): Promise<void> {
+    await this.page.getByRole("button", { name: "Sign in with unique code" }).click();
+    await this.page.getByPlaceholder("123456").waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async resendCodeLabel(): Promise<string | null> {
+    const page = this.page;
+    const resend = page.getByRole("button", { name: /resend/i });
+    if ((await resend.count()) === 0) return null;
+    const label = (await resend.first().innerText()).trim();
+    return label === "" ? null : label;
+  }
+
+  async clickResendCode(): Promise<void> {
+    await this.page
+      .getByRole("button", { name: /resend/i })
+      .first()
+      .click();
+  }
+
+  async submitCode(code: string): Promise<void> {
+    const page = this.page;
+    const codeField = page.getByPlaceholder("123456");
+    await codeField.fill(code);
+    await this.nativeSubmit(page.locator("form", { has: codeField }));
+  }
+
+  async providerSignInButtons(): Promise<string[]> {
+    const names: string[] = [];
+    for (const provider of ["Google", "GitHub", "GitLab", "Gitea"]) {
+      const button = this.page.getByRole("button", { name: new RegExp(`Sign in with ${provider}`, "i") });
+      if ((await button.count()) > 0) names.push(provider);
+    }
+    return names;
+  }
+
+  async clickProviderButton(name: string): Promise<void> {
+    await this.page.getByRole("button", { name: new RegExp(`Sign in with ${name}`, "i") }).click();
+  }
+
+  async clearEmail(): Promise<void> {
+    const field =
+      (await this.page.getByPlaceholder("Enter password").count()) > 0
+        ? this.page.getByPlaceholder("Enter password")
+        : this.page.getByPlaceholder("123456");
+    const form = this.page.locator("form", { has: field });
+    await form.getByRole("button", { name: "Clear email" }).click();
+    await this.page.getByPlaceholder("name@company.com").first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async seesNoAuthMethods(): Promise<boolean> {
+    // The card explains login is unavailable, points at the administrator,
+    // and shows no form at all.
+    const page = this.page;
+    const heading = page.getByText("No authentication methods available");
+    if ((await heading.count()) === 0) return false;
+    const card = heading.locator("..");
+    const cardText = ((await card.innerText()) ?? "").toLowerCase();
+    return cardText.includes("administrator") && (await page.getByPlaceholder("name@company.com").count()) === 0;
+  }
+
+  async forgotPasswordPopoverText(): Promise<string | null> {
+    const page = this.page;
+    const entry = page.getByText("Forgot your password?");
+    if ((await entry.count()) === 0) return null;
+    await entry.first().click();
+    const panel = page.getByText(/smtp/i);
+    if ((await panel.count()) === 0) return null;
+    const text = (await panel.first().innerText()).trim();
+    return text === "" ? null : text;
   }
 
   /**
