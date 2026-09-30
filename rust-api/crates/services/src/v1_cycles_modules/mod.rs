@@ -11,13 +11,19 @@
 //!   the orchestration the queries layer calls with DB-loaded facts.
 //! * `module_shapes` — owned by the sibling issue PIDASHCONV-285; declared
 //!   there.
+//! * [`module_queries`] — the read-choice logic around the five module
+//!   querysets M1-M5 (PIDASHCONV-308: archived filter per endpoint,
+//!   kwargs vs GET order defaults, acting-user requirement, wire shape
+//!   per method). The SQL lives in the db sibling
+//!   (`pidash_db::v1_cycles_modules::module_queries`).
 //!
 //! Wiring note: the crate root declares `pub mod v1_cycles_modules;` (seam
 //! for this issue's new files); every file under this module is new.
-//! Sibling issues add their own `*_shapes` siblings to this `mod.rs`; on
-//! rebase keep both sides.
+//! Sibling issues add their own siblings to this `mod.rs` (e.g.
+//! PIDASHCONV-307 `cycle_queries`); on rebase keep both sides.
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod cycle_shapes;
+pub mod module_queries;
 pub mod module_shapes;
