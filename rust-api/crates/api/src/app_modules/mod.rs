@@ -8,10 +8,12 @@
 //! the HTTP shell; merges keep both sides.
 //!
 //! [`handlers_modules`] ports `ModuleViewSet` CRUD (PIDASHCONV-391);
-//! [`routes`] merges its routes — sibling handler issues (397, 407)
-//! extend the merge; merges keep both sides.
+//! [`handlers_module_issues`] ports `ModuleIssueViewSet` (PIDASHCONV-397);
+//! [`routes`] merges their routes — sibling handler issue 407 extends the
+//! merge; merges keep both sides.
 
 pub mod gates;
+pub mod handlers_module_issues;
 pub mod handlers_modules;
 
 use axum::Router;
@@ -19,9 +21,10 @@ use axum::Router;
 use crate::state::AppState;
 
 /// Merge the app-modules route groups (ModuleViewSet CRUD first,
-/// PIDASHCONV-391; sibling handler issues extend the merge; merges keep
-/// both sides). Cutover into the serving router stays with the domain
-/// gate (PIDASHCONV-416), so this is additive only.
+/// PIDASHCONV-391, then the module-issue routes, PIDASHCONV-397; sibling
+/// handler issue 407 extends the merge; merges keep both sides). Cutover
+/// into the serving router stays with the domain gate (PIDASHCONV-416),
+/// so this is additive only.
 pub fn routes() -> Router<AppState> {
-    handlers_modules::routes()
+    handlers_modules::routes().merge(handlers_module_issues::routes())
 }
