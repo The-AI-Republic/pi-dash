@@ -261,6 +261,9 @@ fn pool(state: &AppState) -> Option<&sqlx::PgPool> {
 
 /// `IsAuthenticated` (`app/views/base.py:189-194`): anonymous answers
 /// DRF `NotAuthenticated` (401) before any gate runs.
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn require_actor(
     state: &AppState,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
@@ -282,6 +285,9 @@ async fn require_actor(
 /// `workspaces` row carries no `deleted_at` filter (Django does not
 /// filter joined tables) while the membership row uses the default
 /// manager (`deleted_at IS NULL`) plus `is_active`.
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn workspace_role(
     pool: &sqlx::PgPool,
     user_id: &Uuid,
@@ -303,6 +309,9 @@ async fn workspace_role(
 
 /// Active project role for `(user, project_id, slug)`, or `None`.
 /// Mirrors the project-level lookup (`app/permissions/base.py:53-64`).
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn project_role(
     pool: &sqlx::PgPool,
     user_id: &Uuid,
@@ -330,6 +339,9 @@ const GATE_ROLES: &[i32] = &[ROLE_ADMIN, ROLE_MEMBER, ROLE_GUEST];
 
 /// `@allow_permission(..., level="WORKSPACE")`: active workspace
 /// membership with a listed role.
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn gate_workspace(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -358,6 +370,9 @@ async fn gate_workspace(
 /// project membership with a listed role, or the workspace-admin
 /// override (project member + workspace ADMIN passes regardless of
 /// project role, `app/permissions/base.py:56-64`).
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn gate_project(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -390,6 +405,9 @@ async fn gate_project(
 /// anything else resolves as a workspace-scoped upper-cased identifier
 /// (soft-deleted projects excluded); an unresolvable value answers
 /// `{"detail":"Project not found"}` 404.
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn resolve_project_id(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -414,6 +432,9 @@ async fn resolve_project_id(
 
 /// `Workspace.objects.get(slug=slug)` (`v2.py:548,748`): default manager,
 /// so a soft-deleted slug answers the `DoesNotExist` 404 envelope.
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn workspace_lookup(pool: &sqlx::PgPool, slug: &str) -> Result<Uuid, Response> {
     let row: Option<(Uuid,)> =
         sqlx::query_as(r#"SELECT id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL"#)
@@ -1415,6 +1436,9 @@ async fn post_bulk_asset(
 
 /// Workspace id for bulk scoping (the slug already passed the gate; a
 /// missing row here is unreachable through Django, hence the 500).
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn workspace_id_of(pool: &sqlx::PgPool, slug: &str) -> Result<Uuid, Response> {
     let row: Option<(Uuid,)> =
         sqlx::query_as(r#"SELECT id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL"#)
