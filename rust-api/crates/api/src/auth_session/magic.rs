@@ -932,9 +932,13 @@ async fn redirection_path(
     .bind(user.id)
     .fetch_optional(pool)
     .await?;
+    // `get_redirection_path` (`redirection_path.py:36`): unfiltered
+    // `.filter(email=)` under the soft-delete manager — unaccepted
+    // invites count too (unlike the join arm above, which takes
+    // `accepted=True`).
     let invite_count: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM \"workspace_member_invites\" \
-         WHERE \"email\" = $1 AND \"accepted\" = TRUE AND \"deleted_at\" IS NULL",
+         WHERE \"email\" = $1 AND \"deleted_at\" IS NULL",
     )
     .bind(&user.email)
     .fetch_one(pool)
