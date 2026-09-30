@@ -583,6 +583,8 @@ pub fn map_project_annotations(row: &PgRow) -> Result<ProjectAnnotations, sqlx::
         Err(sqlx::Error::ColumnNotFound(_)) => None,
         Err(e) => return Err(e),
     };
+    // `pm.role` is smallint (INT2); sqlx does not widen INT2 into i32.
+    let member_role: Option<i16> = row.try_get("member_role")?;
     Ok(ProjectAnnotations {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
@@ -591,7 +593,7 @@ pub fn map_project_annotations(row: &PgRow) -> Result<ProjectAnnotations, sqlx::
         total_members: row.try_get("total_members")?,
         total_cycles: row.try_get("total_cycles")?,
         total_modules: row.try_get("total_modules")?,
-        member_role: row.try_get("member_role")?,
+        member_role: member_role.map(i32::from),
         is_deployed: row.try_get("is_deployed")?,
         sort_order,
     })
@@ -657,9 +659,11 @@ pub struct WorkspaceMemberRow {
 
 /// Map one Q3 row.
 pub fn map_workspace_member(row: &PgRow) -> Result<WorkspaceMemberRow, sqlx::Error> {
+    // `workspace_members.role` is smallint (INT2); widen to i32.
+    let role: i16 = row.try_get("role")?;
     Ok(WorkspaceMemberRow {
         member_id: row.try_get("member_id")?,
-        role: row.try_get("role")?,
+        role: i32::from(role),
         workspace_id: row.try_get("workspace_id")?,
     })
 }
@@ -731,12 +735,14 @@ pub struct InviteRow {
 
 /// Map one Q6 invite row.
 pub fn map_invite_row(row: &PgRow) -> Result<InviteRow, sqlx::Error> {
+    // `workspace_member_invites.role` is smallint (INT2); widen to i32.
+    let role: i16 = row.try_get("role")?;
     Ok(InviteRow {
         id: row.try_get("id")?,
         email: row.try_get("email")?,
         accepted: row.try_get("accepted")?,
         responded_at: row.try_get("responded_at")?,
-        role: row.try_get("role")?,
+        role: i32::from(role),
     })
 }
 
@@ -1037,12 +1043,12 @@ mod tests {
         "CREATE TEMPORARY TABLE workspaces (id UUID PRIMARY KEY, slug TEXT NOT NULL UNIQUE, owner_id UUID NOT NULL, deleted_at TIMESTAMPTZ)",
         "CREATE TEMPORARY TABLE users (id UUID PRIMARY KEY, first_name TEXT NOT NULL DEFAULT '', last_name TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', avatar TEXT, is_bot BOOLEAN NOT NULL DEFAULT FALSE, deleted_at TIMESTAMPTZ)",
         "CREATE TEMPORARY TABLE projects (id UUID PRIMARY KEY, workspace_id UUID NOT NULL, name TEXT NOT NULL DEFAULT '', identifier TEXT NOT NULL DEFAULT '', network INTEGER NOT NULL DEFAULT 2, project_lead_id UUID, default_assignee_id UUID, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), deleted_at TIMESTAMPTZ)",
-        "CREATE TEMPORARY TABLE project_members (id UUID PRIMARY KEY, project_id UUID NOT NULL, workspace_id UUID NOT NULL, member_id UUID, role INTEGER NOT NULL DEFAULT 5, sort_order DOUBLE PRECISION NOT NULL DEFAULT 65535, is_active BOOLEAN NOT NULL DEFAULT TRUE, deleted_at TIMESTAMPTZ)",
+        "CREATE TEMPORARY TABLE project_members (id UUID PRIMARY KEY, project_id UUID NOT NULL, workspace_id UUID NOT NULL, member_id UUID, role SMALLINT NOT NULL DEFAULT 5, sort_order DOUBLE PRECISION NOT NULL DEFAULT 65535, is_active BOOLEAN NOT NULL DEFAULT TRUE, deleted_at TIMESTAMPTZ)",
         "CREATE TEMPORARY TABLE cycles (id UUID PRIMARY KEY, project_id UUID NOT NULL, deleted_at TIMESTAMPTZ)",
         "CREATE TEMPORARY TABLE modules (id UUID PRIMARY KEY, project_id UUID NOT NULL, deleted_at TIMESTAMPTZ)",
         "CREATE TEMPORARY TABLE deploy_boards (id UUID PRIMARY KEY, project_id UUID NOT NULL, workspace_id UUID NOT NULL, deleted_at TIMESTAMPTZ)",
-        "CREATE TEMPORARY TABLE workspace_members (id UUID PRIMARY KEY, workspace_id UUID NOT NULL, member_id UUID NOT NULL, role INTEGER NOT NULL DEFAULT 5, deleted_at TIMESTAMPTZ)",
-        "CREATE TEMPORARY TABLE workspace_member_invites (id UUID PRIMARY KEY, workspace_id UUID NOT NULL, email TEXT NOT NULL, accepted BOOLEAN NOT NULL DEFAULT FALSE, responded_at TIMESTAMPTZ, role INTEGER NOT NULL DEFAULT 5, deleted_at TIMESTAMPTZ)",
+        "CREATE TEMPORARY TABLE workspace_members (id UUID PRIMARY KEY, workspace_id UUID NOT NULL, member_id UUID NOT NULL, role SMALLINT NOT NULL DEFAULT 5, deleted_at TIMESTAMPTZ)",
+        "CREATE TEMPORARY TABLE workspace_member_invites (id UUID PRIMARY KEY, workspace_id UUID NOT NULL, email TEXT NOT NULL, accepted BOOLEAN NOT NULL DEFAULT FALSE, responded_at TIMESTAMPTZ, role SMALLINT NOT NULL DEFAULT 5, deleted_at TIMESTAMPTZ)",
     ];
 
     fn live_uuid(s: &str) -> uuid::Uuid {
@@ -1106,20 +1112,22 @@ mod tests {
             .execute(&mut **tx)
             .await
             .expect("seed private project");
+        // `role` binds as i16: the live column is smallint (INT2), and the
+        // scratch DDL pins SMALLINT so these tests cover the INT2 decode.
         for (id, project, member, role, sort) in [
-            (MEMBERSHIP, PROJECT, MEMBER, 20, 55535.0),
+            (MEMBERSHIP, PROJECT, MEMBER, 20i16, 55535.0),
             (
                 "88888888-8888-8888-8888-888888888888",
                 PROJECT,
                 MEMBER2,
-                15,
+                15i16,
                 60000.0,
             ),
             (
                 "99999999-9999-9999-9999-999999999999",
                 PROJECT,
                 BOT,
-                15,
+                15i16,
                 61000.0,
             ),
             // The member also holds the private project: member scoping
@@ -1128,7 +1136,7 @@ mod tests {
                 "aaaaaaaa-1111-2222-3333-444444444444",
                 PRIVATE_PROJECT,
                 MEMBER,
-                15,
+                15i16,
                 50000.0,
             ),
         ] {
