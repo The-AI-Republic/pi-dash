@@ -214,7 +214,11 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // `v1_projects::routes`; sibling handler issues extend the merge;
         // merges keep both sides).
         RouteGroup::ApiV1 => crate::auth_oauth::routes().merge(crate::v1_projects::routes()),
-        RouteGroup::Runner | RouteGroup::RunnerWeb | RouteGroup::Auth => Router::new(),
+        // Auth handlers merge their router here (D-17 Gitea OAuth
+        // initiate/callback, PIDASHCONV-341; sibling handler issues
+        // 335/336/339 extend the merge; merges keep both sides).
+        RouteGroup::Auth => crate::auth_oauth::oauth_gitea::routes(),
+        RouteGroup::Runner | RouteGroup::RunnerWeb => Router::new(),
     }
 }
 

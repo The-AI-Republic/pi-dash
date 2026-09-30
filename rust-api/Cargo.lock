@@ -2504,6 +2504,7 @@ dependencies = [
  "pidash-services",
  "pidash-types",
  "rand 0.9.5",
+ "redis",
  "reqwest",
  "rust_decimal",
  "rustls",
