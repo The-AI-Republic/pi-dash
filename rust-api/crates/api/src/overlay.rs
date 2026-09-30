@@ -139,7 +139,9 @@ impl Overlay {
 /// (446), the project-github bind + status routes (450), the two git
 /// project-repository paths (452), and the two AI-assistant POSTs plus
 /// the Unsplash GET (454); sibling D-33 handler issues extend that
-/// merge, keeping both sides. Registration is the cutover
+/// merge, keeping both sides — plus the D-31 legacy v1 asset routes
+/// (`app_assets`, PIDASHCONV-394; sibling handler issues 400/412 extend
+/// that merge, keeping both sides). Registration is the cutover
 /// granularity — sibling paths have no Rust route and keep proxying to
 /// Django through the fallback, so no per-path flag is needed.
 ///
@@ -202,7 +204,8 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
             .merge(crate::app_intake::routes())
             .merge(crate::app_integrations::routes())
             .merge(crate::app_notifications::routes())
-            .merge(crate::app_cycles::routes()),
+            .merge(crate::app_cycles::routes())
+            .merge(crate::app_assets::routes()),
         RouteGroup::License => crate::license::routes(),
         // Space handlers merge their routers here (intake: PIDASHCONV-177;
         // sibling handler issues extend the merge; merges keep both sides).
