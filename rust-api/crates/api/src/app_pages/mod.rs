@@ -1,8 +1,9 @@
 #![forbid(unsafe_code)]
 
-//! App page favorites + description handlers (D-30, stage 5, PIDASHCONV-332).
+//! App page favorites + description + state-op handlers (D-30, stage 5,
+//! PIDASHCONV-332 and PIDASHCONV-328).
 //!
-//! Ports four endpoints from `apps/api/pi_dash/app/views/page/base.py`
+//! Ports nine endpoints from `apps/api/pi_dash/app/views/page/base.py`
 //! (routes in `apps/api/pi_dash/app/urls/page.py`):
 //!
 //! * `POST .../favorite-pages/<page_id>/` (`PageFavoriteViewSet.create`,
@@ -21,9 +22,23 @@
 //!   `PageBinaryUpdateSerializer` save, conditional `page_transaction`
 //!   plus unconditional `track_page_version` publishes, 200
 //!   `{"message":"Updated successfully"}`.
+//! * `POST .../pages/<page_id>/archive/` (`archive`, `base.py:308-337`):
+//!   owner-or-admin (`role <= 15` member who is not the owner 400s),
+//!   favorite rows soft-deleted, recursive CTE stamps the subtree, 200
+//!   `{"archived_at": ...}` from a second `now()` call.
+//! * `DELETE .../pages/<page_id>/archive/` (`unarchive`, `base.py:339-366`):
+//!   same guard ("un archive" body), parent-archived detach, CTE with
+//!   `NULL`, 204.
+//! * `POST .../pages/<page_id>/lock/` (`lock`, `base.py:246-256`) and
+//!   `DELETE .../lock/` (`unlock`, `base.py:258-269`): `is_locked` flip
+//!   plus save, 204.
+//! * `POST .../pages/<page_id>/access/` (`access`, `base.py:271-289`):
+//!   access defaults to 0, owner-only change 400, save, 204.
 //!
 //! Fixtures: `rust-api/fixtures/app_pages/handlers/io.golden.json`
-//! (F30-11, per-action I/O + routes), `serializers/page_binary_update.golden.json`
+//! (F30-11, per-action I/O + routes), `queries/archive_cte.sql` +
+//! `.rows.json` (F30-08, CTE + hierarchy before/after),
+//! `serializers/page_binary_update.golden.json`
 //! (F30-02, binary/HTML validation vectors),
 //! `guards/permissions.golden.json` (F30-09, class + inline guards),
 //! `tasks/publish.golden.json` (F30-10, publish envelopes).
@@ -73,6 +88,19 @@
 //!   stripped `NULL`); `null` fails with `"This field may not be null."`;
 //!   bools/lists/dicts fail with `"Not a valid string."`; numbers coerce
 //!   via `str()`; `description_json` accepts any JSON value as-is.
+//! * QUIRK-double-now (`base.py:335` vs `:337`): the archive CTE stamps
+//!   `datetime.now()` and the 200 body renders `str(datetime.now())`
+//!   from a SECOND call, so the body timestamp may differ from the stored
+//!   `archived_at` by microseconds. Two `now()` calls are ported, not one.
+//! * QUIRK-access-default (`base.py:272`): the access endpoint defaults a
+//!   missing `access` key to `0`, so posting `{}` resets the page to
+//!   public; the guard compares against the stored value, so the absent
+//!   key never denies.
+//! * QUIRK-member-fallthrough (`base.py:317-322,348-353`): the
+//!   archive/unarchive guard denies only when the requester IS an active
+//!   member with `role <= 15` and is not the owner — an admin (`role 20`)
+//!   or a non-member falls through to the action (the permission class
+//!   normally gates first).
 //!
 //! Task delivery: `serve` carries no AMQP publisher (only the worker does),
 //! so `.delay()` calls enqueue a [`pidash_jobs::queue::NewJob`] into
@@ -135,6 +163,27 @@ pub const FAVORITE_ENTITY_TYPE: &str = "page";
 pub const FAVORITE_DEFAULT_SEQUENCE: f64 = 65535.0;
 /// Sequence step (`db/models/favorite.py:45`).
 pub const FAVORITE_SEQUENCE_STEP: f64 = 10000.0;
+/// Archive owner-or-admin denial (`base.py:317-326`).
+pub const ARCHIVE_OWNER_ADMIN_BODY: &str =
+    r#"{"error":"Only the owner or admin can archive the page"}"#;
+/// Unarchive owner-or-admin denial (`base.py:348-357`; "un archive" with a
+/// space, ported verbatim).
+pub const UNARCHIVE_OWNER_ADMIN_BODY: &str =
+    r#"{"error":"Only the owner or admin can un archive the page"}"#;
+/// Owner-only access-change denial (`base.py:281-285`; the same body also
+/// covers `partial_update` at `:176-180` and its `DoesNotExist` branch at
+/// `:196-200`).
+pub const ACCESS_OWNER_BODY: &str =
+    r#"{"error":"Access cannot be updated since this page is owned by someone else"}"#;
+/// The archive/unarchive recursive CTE (`base.py:59-72`), executed with
+/// params `($1, $2) = (page_id, archived_at)`: `archived_at` is the first
+/// `now()` on archive (`:335`) and `NULL` on unarchive (`:364`).
+/// `archived_at` is a `DateField` (`db/models/page.py:47`), so the stamp
+/// binds as a date (Django truncates its `datetime.now()` on write).
+/// Same statement as
+/// [`pidash_services::app_pages::queries::archive_cte_sql`] with sqlx
+/// positional placeholders; the unit test pins them equivalent.
+pub const STATE_CTE_SQL: &str = "WITH RECURSIVE descendants AS (SELECT id FROM pages WHERE id = $1 UNION ALL SELECT pages.id FROM pages, descendants WHERE pages.parent_id = descendants.id) UPDATE pages SET archived_at = $2 WHERE id IN (SELECT id FROM descendants)";
 
 // ---------------------------------------------------------------------------
 // Denial
@@ -249,9 +298,9 @@ fn owned(
     router
 }
 
-/// Register the favorites + description routes (`app/urls/page.py`).
-/// Sibling D-30 handler issues extend this router with their own paths;
-/// merges keep both sides.
+/// Register the favorites + description + state-op routes
+/// (`app/urls/page.py`). Sibling D-30 handler issues extend this router
+/// with their own paths; merges keep both sides.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -266,6 +315,27 @@ pub fn routes() -> Router<AppState> {
             owned(
                 axum::routing::get(description_retrieve).patch(description_partial_update),
                 &["POST", "PUT", "DELETE", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/archive/",
+            owned(
+                axum::routing::post(archive_page).delete(unarchive_page),
+                &["GET", "PUT", "PATCH", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/lock/",
+            owned(
+                axum::routing::post(lock_page).delete(unlock_page),
+                &["GET", "PUT", "PATCH", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/access/",
+            owned(
+                axum::routing::post(access_page),
+                &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
             ),
         )
 }
@@ -564,6 +634,602 @@ pub async fn favorite_destroy(
         .execute(pool)
         .await
         .is_err()
+    {
+        return Denial::ServerError.into_response();
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+// ---------------------------------------------------------------------------
+// State ops (archive / unarchive / lock / unlock / access)
+// ---------------------------------------------------------------------------
+
+/// One project-scoped state-op row (`base.py:247-252` lock, `:260-264`
+/// unlock, `:273-278` access, `:309-314` archive, `:341-345` unarchive):
+/// `Page.objects.get(pk, workspace__slug, projects__id,
+/// project_pages__deleted_at__isnull=True)` — the default manager drops
+/// soft-deleted pages. A miss is `DoesNotExist` → 404
+/// ([`OBJECT_NOT_FOUND_BODY`]).
+#[derive(Debug, sqlx::FromRow)]
+struct StatePage {
+    owned_by_id: uuid::Uuid,
+    access: i16,
+    parent_id: Option<uuid::Uuid>,
+    description_html: String,
+}
+
+async fn fetch_state_page(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    page_id: &uuid::Uuid,
+) -> Result<Option<StatePage>, Denial> {
+    sqlx::query_as(
+        r#"SELECT p.owned_by_id, p.access, p.parent_id, p.description_html
+           FROM pages p
+           JOIN workspaces w ON w.id = p.workspace_id
+           JOIN project_pages pp ON pp.page_id = p.id
+               AND pp.project_id = $2 AND pp.deleted_at IS NULL
+           WHERE p.id = $1 AND w.slug = $3 AND p.deleted_at IS NULL"#,
+    )
+    .bind(page_id)
+    .bind(project_id)
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)
+}
+
+/// The archive/unarchive owner-or-admin-15 probe (`base.py:318-320`,
+/// `:349-351`): an active membership row with `role <= 15` for this
+/// project — no workspace scoping, ported as observed. Admins (`role 20`)
+/// never match it; non-members match nothing (both fall through to the
+/// action; the permission class normally gates first).
+async fn member_lte15_exists(
+    pool: &PgPool,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> Result<bool, Denial> {
+    // `role` is a `PositiveSmallIntegerField` (SMALLINT); the comparison
+    // stays in SQL so no decode is needed.
+    let row: (bool,) = sqlx::query_as(
+        r#"SELECT EXISTS(SELECT 1 FROM project_members pm
+           WHERE pm.project_id = $1 AND pm.member_id = $2
+           AND pm.is_active AND pm.role <= 15 AND pm.deleted_at IS NULL)"#,
+    )
+    .bind(project_id)
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(row.0)
+}
+
+/// `str(datetime.now())` (`base.py:337`): naive local time rendered with
+/// a space separator and microseconds only when nonzero (CPython omits
+/// `.000000`).
+pub fn python_datetime_string(stamp: &chrono::NaiveDateTime) -> String {
+    use chrono::Timelike;
+    let base = stamp.format("%Y-%m-%d %H:%M:%S").to_string();
+    let micros = stamp.nanosecond() / 1_000;
+    if micros == 0 {
+        base
+    } else {
+        format!("{base}.{micros:06}")
+    }
+}
+
+/// The archive 200 body from the SECOND `now()` call (`base.py:337`,
+/// QUIRK-double-now).
+pub fn archived_at_body(second_now: &chrono::NaiveDateTime) -> String {
+    format!(
+        "{{\"archived_at\":{}}}",
+        json_string(&python_datetime_string(second_now))
+    )
+}
+
+/// The guard-domain coercion for the `access` request value
+/// (`base.py:281`): the guard compares the raw value against the stored
+/// integer with Python `!=`, so only values that can numerically equal a
+/// stored integer coerce — JSON integers, integral floats and bools
+/// (`1.0` and `true` equal `1`); strings, non-integral floats, nulls,
+/// lists and dicts never equal an integer (the caller maps them to a
+/// never-equal sentinel).
+pub fn access_int(value: &Value) -> Option<i32> {
+    if let Some(int) = value.as_i64() {
+        return i32::try_from(int).ok();
+    }
+    if let Some(float) = value.as_f64() {
+        if float.fract() == 0.0 && float >= f64::from(i32::MIN) && float <= f64::from(i32::MAX) {
+            return Some(float as i32);
+        }
+        return None;
+    }
+    value.as_bool().map(i32::from)
+}
+
+/// The assignment-domain coercion for the `access` request value
+/// (`base.py:272,287`): `page.access = access` runs the
+/// `PositiveSmallIntegerField` prep, i.e. `int(value)`, and `save()`
+/// skips validators — so non-integral floats truncate toward zero
+/// (`1.5` stores `1`), numeric strings parse (`"1"` stores `1`), and
+/// anything `int()` rejects (null, lists, dicts, `"abc"`, `"1.5"`,
+/// out-of-range integers) fails at prep or at the SMALLINT column, both
+/// surfacing as 500. `None` (absent key) defaults to `0`. A `None` return
+/// is the 500 branch; out-of-`i16` integers stay `i32` here so the
+/// database itself rejects them exactly like Django's column does.
+pub fn access_assign(raw: Option<&Value>) -> Option<i32> {
+    let value = match raw {
+        None => return Some(0),
+        Some(value) => value,
+    };
+    if let Some(int) = value.as_i64() {
+        return i32::try_from(int).ok();
+    }
+    if let Some(float) = value.as_f64() {
+        if float >= f64::from(i32::MIN) && float <= f64::from(i32::MAX) {
+            return Some(float as i32);
+        }
+        return None;
+    }
+    if let Some(boolean) = value.as_bool() {
+        return Some(i32::from(boolean));
+    }
+    if let Some(text) = value.as_str() {
+        return access_int_str(text);
+    }
+    None
+}
+
+/// `int(text, 10)` for the assignment path above (ASCII-digit subset —
+/// the API domain): surrounding whitespace stripped, one optional sign,
+/// digits with single separators between them (`"1_0"` is `10`);
+/// anything else (`""`, `"0x1"`, `"1.5"`, `"1__0"`) is not an integer.
+fn access_int_str(raw: &str) -> Option<i32> {
+    let text = raw.trim_matches(|c: char| c.is_whitespace());
+    let digits = text
+        .strip_prefix('+')
+        .or_else(|| text.strip_prefix('-'))
+        .unwrap_or(text);
+    if digits.is_empty()
+        || !digits.bytes().all(|b| b.is_ascii_digit() || b == b'_')
+        || !digits.bytes().next().is_some_and(|b| b.is_ascii_digit())
+        || !digits.bytes().last().is_some_and(|b| b.is_ascii_digit())
+        || digits.as_bytes().windows(2).any(|w| w == b"__")
+    {
+        return None;
+    }
+    let mut magnitude: i64 = 0;
+    for byte in digits.bytes() {
+        if byte == b'_' {
+            continue;
+        }
+        magnitude = magnitude
+            .checked_mul(10)?
+            .checked_add(i64::from(byte - b'0'))?;
+    }
+    let signed = if text.starts_with('-') {
+        -magnitude
+    } else {
+        magnitude
+    };
+    i32::try_from(signed).ok()
+}
+
+/// `Page.save()`'s `description_stripped` recompute
+/// (`db/models/page.py:70-77`): `None` when the stored HTML is empty,
+/// else `strip_tags`. Every state-op write below is a plain `save()`, so
+/// it rewrites the column with the recomputed value (a no-op here — the
+/// HTML is untouched — but ported so the statement writes what Django
+/// writes).
+fn stripped_of(html: &str) -> Option<String> {
+    if html.is_empty() {
+        None
+    } else {
+        Some(crate::space::sanitize::strip_tags(html))
+    }
+}
+
+/// `request.data` for the access endpoint (`base.py:272`): empty bodies
+/// validate as `{}`; anything else must parse as JSON.
+async fn read_json_body(req: Request) -> Result<Value, Denial> {
+    let (_parts, body) = req.into_parts();
+    let bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return Err(Denial::ServerError),
+    };
+    if bytes.is_empty() {
+        return Ok(Value::Object(Map::new()));
+    }
+    serde_json::from_slice(&bytes).map_err(|_| Denial::BadDetail("JSON parse error".to_owned()))
+}
+
+/// `POST .../pages/<page_id>/archive/` (`PageViewSet.archive`,
+/// `base.py:308-337`): the owner-or-admin-15 guard, the favorites
+/// soft-delete (`:328-333`, a queryset `.delete()` → `deleted_at` stamp,
+/// no task), the CTE with the FIRST `now()` (`:335`), and the 200 body
+/// from the SECOND `now()` (`:337`, QUIRK-double-now).
+pub async fn archive_page(
+    State(state): State<AppState>,
+    Path((slug, project_raw, page_raw)): Path<(String, String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    let Ok(page_id) = parse_page_id(&page_raw) else {
+        return crate::edge::proxy(State(state), req).await;
+    };
+    // `IsAuthenticated` precedes the project rewrite: anonymous callers
+    // 401 here, never 404 on the project id. The gate re-reads the same
+    // session user below.
+    if let Err(denial) = actor_user_id(extension.clone()) {
+        return denial.into_response();
+    }
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    let project_id = match resolve_project_id(pool, &slug, &project_raw).await {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    let gate = match gate::resolve_gate(
+        &state,
+        "POST",
+        &slug,
+        &project_id,
+        Some(page_id),
+        extension,
+    )
+    .await
+    {
+        Ok(gate) => gate,
+        Err(denial) => return denial.into_response(),
+    };
+    let page = match fetch_state_page(pool, &slug, &project_id, &page_id).await {
+        Ok(page) => page,
+        Err(denial) => return denial.into_response(),
+    };
+    let Some(page) = page else {
+        return Denial::ObjectNotFound.into_response();
+    };
+    let is_owner = page.owned_by_id == gate.user_id;
+    let lte15 = match member_lte15_exists(pool, &project_id, &gate.user_id).await {
+        Ok(lte15) => lte15,
+        Err(denial) => return denial.into_response(),
+    };
+    if gate::check_archive(is_owner, lte15) == gate::StateOpOutcome::Deny {
+        return json_response(StatusCode::BAD_REQUEST, ARCHIVE_OWNER_ADMIN_BODY.to_owned());
+    }
+    if sqlx::query(
+        r#"UPDATE user_favorites SET deleted_at = now()
+           WHERE entity_type = 'page' AND entity_identifier = $1 AND project_id = $2
+           AND workspace_id = (SELECT id FROM workspaces WHERE slug = $3)
+           AND deleted_at IS NULL"#,
+    )
+    .bind(page_id)
+    .bind(project_id)
+    .bind(slug.as_str())
+    .execute(pool)
+    .await
+    .is_err()
+    {
+        return Denial::ServerError.into_response();
+    }
+    let now_db = chrono::Utc::now().naive_utc();
+    if sqlx::query(STATE_CTE_SQL)
+        .bind(page_id)
+        .bind(now_db.date())
+        .execute(pool)
+        .await
+        .is_err()
+    {
+        return Denial::ServerError.into_response();
+    }
+    let now_body = chrono::Utc::now().naive_utc();
+    json_response(StatusCode::OK, archived_at_body(&now_body))
+}
+
+/// `DELETE .../pages/<page_id>/archive/` (`PageViewSet.unarchive`,
+/// `base.py:339-366`): the same guard ("un archive" body), the
+/// parent-archived detach (`:360-362`), the CTE with `NULL` (`:364`), 204.
+pub async fn unarchive_page(
+    State(state): State<AppState>,
+    Path((slug, project_raw, page_raw)): Path<(String, String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    let Ok(page_id) = parse_page_id(&page_raw) else {
+        return crate::edge::proxy(State(state), req).await;
+    };
+    // `IsAuthenticated` precedes the project rewrite: anonymous callers
+    // 401 here, never 404 on the project id. The gate re-reads the same
+    // session user below.
+    if let Err(denial) = actor_user_id(extension.clone()) {
+        return denial.into_response();
+    }
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    let project_id = match resolve_project_id(pool, &slug, &project_raw).await {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    let gate = match gate::resolve_gate(
+        &state,
+        "DELETE",
+        &slug,
+        &project_id,
+        Some(page_id),
+        extension,
+    )
+    .await
+    {
+        Ok(gate) => gate,
+        Err(denial) => return denial.into_response(),
+    };
+    let page = match fetch_state_page(pool, &slug, &project_id, &page_id).await {
+        Ok(page) => page,
+        Err(denial) => return denial.into_response(),
+    };
+    let Some(page) = page else {
+        return Denial::ObjectNotFound.into_response();
+    };
+    let is_owner = page.owned_by_id == gate.user_id;
+    let lte15 = match member_lte15_exists(pool, &project_id, &gate.user_id).await {
+        Ok(lte15) => lte15,
+        Err(denial) => return denial.into_response(),
+    };
+    if gate::check_unarchive(is_owner, lte15) == gate::StateOpOutcome::Deny {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            UNARCHIVE_OWNER_ADMIN_BODY.to_owned(),
+        );
+    }
+    // Detach when the parent is still archived (`:360-362`): unarchiving
+    // a child of an archived parent breaks the hierarchy — the page is
+    // reparented to the top before the CTE clears its own subtree, and
+    // the archived parent keeps its timestamp.
+    if let Some(parent_id) = page.parent_id {
+        let parent: Option<(Option<chrono::NaiveDate>,)> = match sqlx::query_as(
+            r#"SELECT p.archived_at FROM pages p WHERE p.id = $1 AND p.deleted_at IS NULL"#,
+        )
+        .bind(parent_id)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(parent) => parent,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        // A dangling `parent_id` (row gone) raises `DoesNotExist` on
+        // `page.parent` in Django → the 404 branch, ported as observed.
+        let Some((parent_archived,)) = parent else {
+            return Denial::ObjectNotFound.into_response();
+        };
+        if parent_archived.is_some()
+            && sqlx::query(
+                r#"UPDATE pages SET parent_id = NULL, updated_at = now(), updated_by_id = $1
+                   WHERE id = $2"#,
+            )
+            .bind(gate.user_id)
+            .bind(page_id)
+            .execute(pool)
+            .await
+            .is_err()
+        {
+            return Denial::ServerError.into_response();
+        }
+    }
+    if sqlx::query(STATE_CTE_SQL)
+        .bind(page_id)
+        .bind(None::<chrono::NaiveDate>)
+        .execute(pool)
+        .await
+        .is_err()
+    {
+        return Denial::ServerError.into_response();
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `POST .../pages/<page_id>/lock/` (`PageViewSet.lock`,
+/// `base.py:246-256`): `is_locked = True` plus `save()`, 204.
+pub async fn lock_page(
+    State(state): State<AppState>,
+    Path((slug, project_raw, page_raw)): Path<(String, String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    write_lock(
+        State(state),
+        slug,
+        project_raw,
+        page_raw,
+        extension,
+        req,
+        true,
+    )
+    .await
+}
+
+/// `DELETE .../pages/<page_id>/lock/` (`PageViewSet.unlock`,
+/// `base.py:258-269`): `is_locked = False` plus `save()`, 204.
+pub async fn unlock_page(
+    State(state): State<AppState>,
+    Path((slug, project_raw, page_raw)): Path<(String, String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    write_lock(
+        State(state),
+        slug,
+        project_raw,
+        page_raw,
+        extension,
+        req,
+        false,
+    )
+    .await
+}
+
+/// The lock/unlock closure over the scoped page fetch (`:246-269`): the
+/// two actions differ only in the stored flag and the gate method.
+async fn write_lock(
+    State(state): State<AppState>,
+    slug: String,
+    project_raw: String,
+    page_raw: String,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+    locked: bool,
+) -> Response {
+    let Ok(page_id) = parse_page_id(&page_raw) else {
+        return crate::edge::proxy(State(state), req).await;
+    };
+    // `IsAuthenticated` precedes the project rewrite: anonymous callers
+    // 401 here, never 404 on the project id. The gate re-reads the same
+    // session user below.
+    if let Err(denial) = actor_user_id(extension.clone()) {
+        return denial.into_response();
+    }
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    let project_id = match resolve_project_id(pool, &slug, &project_raw).await {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    let method = if locked { "POST" } else { "DELETE" };
+    let gate = match gate::resolve_gate(
+        &state,
+        method,
+        &slug,
+        &project_id,
+        Some(page_id),
+        extension,
+    )
+    .await
+    {
+        Ok(gate) => gate,
+        Err(denial) => return denial.into_response(),
+    };
+    let page = match fetch_state_page(pool, &slug, &project_id, &page_id).await {
+        Ok(page) => page,
+        Err(denial) => return denial.into_response(),
+    };
+    let Some(page) = page else {
+        return Denial::ObjectNotFound.into_response();
+    };
+    if sqlx::query(
+        r#"UPDATE pages SET is_locked = $1, description_stripped = $2,
+           updated_at = now(), updated_by_id = $3 WHERE id = $4"#,
+    )
+    .bind(locked)
+    .bind(stripped_of(page.description_html.as_str()))
+    .bind(gate.user_id)
+    .bind(page_id)
+    .execute(pool)
+    .await
+    .is_err()
+    {
+        return Denial::ServerError.into_response();
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `POST .../pages/<page_id>/access/` (`PageViewSet.access`,
+/// `base.py:271-289`): the access value defaults to 0 (`:272`, so `{}`
+/// posts reset the page to public — QUIRK-access-default); the guard
+/// denies a change by a non-owner (`:281-285`); the save writes the value,
+/// 204.
+pub async fn access_page(
+    State(state): State<AppState>,
+    Path((slug, project_raw, page_raw)): Path<(String, String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    let Ok(page_id) = parse_page_id(&page_raw) else {
+        return crate::edge::proxy(State(state), req).await;
+    };
+    // `IsAuthenticated` precedes the project rewrite: anonymous callers
+    // 401 here, never 404 on the project id. The gate re-reads the same
+    // session user below.
+    if let Err(denial) = actor_user_id(extension.clone()) {
+        return denial.into_response();
+    }
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    let project_id = match resolve_project_id(pool, &slug, &project_raw).await {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    let gate = match gate::resolve_gate(
+        &state,
+        "POST",
+        &slug,
+        &project_id,
+        Some(page_id),
+        extension,
+    )
+    .await
+    {
+        Ok(gate) => gate,
+        Err(denial) => return denial.into_response(),
+    };
+    let page = match fetch_state_page(pool, &slug, &project_id, &page_id).await {
+        Ok(page) => page,
+        Err(denial) => return denial.into_response(),
+    };
+    let Some(page) = page else {
+        return Denial::ObjectNotFound.into_response();
+    };
+    let parsed = match read_json_body(req).await {
+        Ok(parsed) => parsed,
+        Err(denial) => return denial.into_response(),
+    };
+    let object = match parsed.as_object() {
+        Some(object) => object,
+        // `request.data.get("access", …)` on a non-object body: Django
+        // raises before the view runs — the 400 detail branch, ported as
+        // observed on the description PATCH sibling.
+        None => return Denial::BadDetail("Invalid request".to_owned()).into_response(),
+    };
+    // Guard input (`:281`): the absent key defaults to the stored value
+    // (never denies); a present key carries its integer, or a
+    // never-equal sentinel when it is not an integer (Python `!=`
+    // against the stored int is always true there).
+    let raw = object.get("access");
+    let requested = raw.and_then(access_int);
+    let probe = raw.map(|_| requested.unwrap_or(i32::MIN));
+    if gate::check_access(page.access.into(), probe, page.owned_by_id == gate.user_id)
+        == gate::AccessOutcome::Deny
+    {
+        return json_response(StatusCode::BAD_REQUEST, ACCESS_OWNER_BODY.to_owned());
+    }
+    // Assignment (`:272,287`): `request.data.get("access", 0)` then
+    // `page.access = access` runs the field prep (`int(value)`, verified
+    // against `PositiveSmallIntegerField.get_prep_value`: `1.5` → `1`,
+    // `"1"` → `1`). Anything `int()` rejects fails at prep or at the
+    // SMALLINT column — both 500 here. The value binds as `i32` so an
+    // out-of-range integer is rejected by the column itself, exactly
+    // like Django's save.
+    let Some(effective) = access_assign(raw) else {
+        return Denial::ServerError.into_response();
+    };
+    if sqlx::query(
+        r#"UPDATE pages SET access = $1, description_stripped = $2,
+           updated_at = now(), updated_by_id = $3 WHERE id = $4"#,
+    )
+    .bind(effective)
+    .bind(stripped_of(page.description_html.as_str()))
+    .bind(gate.user_id)
+    .bind(page_id)
+    .execute(pool)
+    .await
+    .is_err()
     {
         return Denial::ServerError.into_response();
     }
@@ -1451,6 +2117,197 @@ mod tests {
         assert_eq!(FAVORITE_ENTITY_TYPE, "page");
         assert_eq!(FAVORITE_DEFAULT_SEQUENCE, 65535.0);
         assert_eq!(FAVORITE_SEQUENCE_STEP, 10000.0);
+    }
+
+    /// Every response body/status byte the state ops own, as the contract
+    /// suite pins them (F30-11).
+    #[test]
+    fn state_op_bodies_match_f30_11() {
+        let parsed = golden(F30_11);
+        let archive = action(&parsed, "archive");
+        assert_eq!(archive["valid"]["status"], 200);
+        assert_eq!(
+            archive["valid"]["body"]["archived_at"].as_str().expect("archived_at key"),
+            "<str(datetime.now()) \u{2014} SECOND now() call, may differ from DB value (double-now)>"
+        );
+        assert_eq!(archive["non_owner_non_admin"]["status"], 400);
+        assert_eq!(
+            archive["non_owner_non_admin"]["body"],
+            serde_json::json!({"error": "Only the owner or admin can archive the page"})
+        );
+        assert_eq!(
+            ARCHIVE_OWNER_ADMIN_BODY,
+            r#"{"error":"Only the owner or admin can archive the page"}"#
+        );
+        assert_eq!(ARCHIVE_OWNER_ADMIN_BODY, gate::ARCHIVE_OWNER_ADMIN_BODY);
+        let unarchive = action(&parsed, "unarchive");
+        assert_eq!(unarchive["valid"]["status"], 204);
+        assert_eq!(unarchive["non_owner_non_admin"]["status"], 400);
+        assert_eq!(
+            unarchive["non_owner_non_admin"]["body"],
+            serde_json::json!({"error": "Only the owner or admin can un archive the page"})
+        );
+        assert_eq!(
+            UNARCHIVE_OWNER_ADMIN_BODY,
+            r#"{"error":"Only the owner or admin can un archive the page"}"#
+        );
+        assert_eq!(UNARCHIVE_OWNER_ADMIN_BODY, gate::UNARCHIVE_OWNER_ADMIN_BODY);
+        assert!(UNARCHIVE_OWNER_ADMIN_BODY.contains("un archive"));
+        let lock = action(&parsed, "lock");
+        assert_eq!(lock["valid"]["status"], 204);
+        let unlock = action(&parsed, "unlock");
+        assert_eq!(unlock["valid"]["status"], 204);
+        let access = action(&parsed, "access");
+        assert_eq!(access["valid"]["status"], 204);
+        assert_eq!(access["non_owner_change"]["status"], 400);
+        assert_eq!(
+            access["non_owner_change"]["body"],
+            serde_json::json!({"error": "Access cannot be updated since this page is owned by someone else"})
+        );
+        assert_eq!(
+            ACCESS_OWNER_BODY,
+            r#"{"error":"Access cannot be updated since this page is owned by someone else"}"#
+        );
+        assert_eq!(ACCESS_OWNER_BODY, gate::ACCESS_OWNER_BODY);
+        // The three owned paths are registered with Django's methods.
+        let routes: Vec<&str> = parsed["routes"]
+            .as_array()
+            .expect("golden carries routes")
+            .iter()
+            .map(|route| route.as_str().expect("route strings"))
+            .collect();
+        assert!(routes.iter().any(|route| route.contains("archive")));
+        assert!(routes.iter().any(|route| route.contains("lock")));
+        assert!(routes.iter().any(|route| route.contains("access")));
+    }
+
+    /// The executable CTE is the fixture CTE verbatim (F30-08,
+    /// `base.py:59-72`), modulo Django `%s` vs sqlx `$n` placeholders.
+    #[test]
+    fn state_cte_matches_f30_08_verbatim() {
+        let verbatim = pidash_services::app_pages::queries::archive_cte_sql().replace("%s", "{}");
+        let executable = STATE_CTE_SQL.replace("$1", "{}").replace("$2", "{}");
+        let squeeze = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(squeeze(&executable), squeeze(&verbatim));
+        assert_eq!(STATE_CTE_SQL.matches("$1").count(), 1);
+        assert_eq!(STATE_CTE_SQL.matches("$2").count(), 1);
+    }
+
+    /// `str(datetime.now())` rendering (`base.py:337`): space separator,
+    /// microseconds only when nonzero; the 200 body carries the single
+    /// `archived_at` key.
+    #[test]
+    fn archive_body_renders_like_py_datetime() {
+        use chrono::NaiveDate;
+        let with_micros = NaiveDate::from_ymd_opt(2026, 9, 30)
+            .expect("date")
+            .and_hms_micro_opt(13, 5, 22, 123_456)
+            .expect("datetime");
+        assert_eq!(
+            python_datetime_string(&with_micros),
+            "2026-09-30 13:05:22.123456"
+        );
+        let whole_second = NaiveDate::from_ymd_opt(2026, 9, 30)
+            .expect("date")
+            .and_hms_opt(13, 5, 22)
+            .expect("datetime");
+        assert_eq!(python_datetime_string(&whole_second), "2026-09-30 13:05:22");
+        assert_eq!(
+            archived_at_body(&with_micros),
+            r#"{"archived_at":"2026-09-30 13:05:22.123456"}"#
+        );
+        // Sub-microsecond residue is truncated like CPython's microsecond
+        // clock (999ns never rounds up into the body).
+        let sub_micro = NaiveDate::from_ymd_opt(2026, 9, 30)
+            .expect("date")
+            .and_hms_nano_opt(13, 5, 22, 999)
+            .expect("datetime");
+        assert_eq!(python_datetime_string(&sub_micro), "2026-09-30 13:05:22");
+    }
+
+    /// `access` value coercion (`base.py:272,287`): integers pass, integral
+    /// floats and bools match Python equality, the rest is unstorable.
+    #[test]
+    fn access_value_coercion() {
+        assert_eq!(access_int(&serde_json::json!(0)), Some(0));
+        assert_eq!(access_int(&serde_json::json!(1)), Some(1));
+        assert_eq!(access_int(&serde_json::json!(1.0)), Some(1));
+        assert_eq!(access_int(&serde_json::json!(true)), Some(1));
+        assert_eq!(access_int(&serde_json::json!(false)), Some(0));
+        assert_eq!(access_int(&serde_json::json!(1.5)), None);
+        assert_eq!(access_int(&serde_json::json!("1")), None);
+        assert_eq!(access_int(&serde_json::json!(null)), None);
+        assert_eq!(access_int(&serde_json::json!([1])), None);
+        assert_eq!(access_int(&serde_json::json!({"a": 1})), None);
+        // Out-of-domain integers do not fit the SMALLINT column.
+        assert_eq!(
+            access_int(&serde_json::json!(i64::from(i32::MAX) + 1)),
+            None
+        );
+    }
+
+    /// The assignment coercion follows `int(value)` (verified against
+    /// `PositiveSmallIntegerField.get_prep_value` on the Django venv:
+    /// `1.5` → `1`, `"1"` → `1`, `True` → `1`, `70000` passes prep and
+    /// fails at the column).
+    #[test]
+    fn access_assign_matches_py_int() {
+        let assign = |v: Option<serde_json::Value>| access_assign(v.as_ref());
+        assert_eq!(assign(None), Some(0));
+        assert_eq!(assign(Some(serde_json::json!(1))), Some(1));
+        assert_eq!(assign(Some(serde_json::json!(1.0))), Some(1));
+        assert_eq!(assign(Some(serde_json::json!(1.5))), Some(1));
+        assert_eq!(assign(Some(serde_json::json!(-1.5))), Some(-1));
+        assert_eq!(assign(Some(serde_json::json!(true))), Some(1));
+        assert_eq!(assign(Some(serde_json::json!("1"))), Some(1));
+        assert_eq!(assign(Some(serde_json::json!("  +1 "))), Some(1));
+        assert_eq!(assign(Some(serde_json::json!("1_0"))), Some(10));
+        assert_eq!(assign(Some(serde_json::json!("-2"))), Some(-2));
+        // Out-of-`i16` integers pass prep; the SMALLINT column rejects
+        // them (bound as `i32` so the database itself says no).
+        assert_eq!(assign(Some(serde_json::json!(70_000))), Some(70_000));
+        assert_eq!(assign(Some(serde_json::json!("abc"))), None);
+        assert_eq!(assign(Some(serde_json::json!("1.5"))), None);
+        assert_eq!(assign(Some(serde_json::json!(""))), None);
+        assert_eq!(assign(Some(serde_json::json!("0x1"))), None);
+        assert_eq!(assign(Some(serde_json::json!("1__0"))), None);
+        assert_eq!(assign(Some(serde_json::json!(null))), None);
+        assert_eq!(assign(Some(serde_json::json!([1]))), None);
+        assert_eq!(assign(Some(serde_json::json!({"a": 1}))), None);
+        assert_eq!(assign(Some(serde_json::json!(1e30))), None);
+    }
+
+    /// The unarchive detach predicate (F30-08 `:360-362`): only a page
+    /// with a parent whose parent is still archived is reparented; the
+    /// archived parent keeps its timestamp while the subtree clears.
+    #[test]
+    fn unarchive_hierarchy_matches_f30_08() {
+        const F30_08: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/app_pages/queries/archive_cte.rows.json"
+        );
+        let raw = std::fs::read_to_string(F30_08).expect("fixture exists");
+        let fixture: Value = serde_json::from_str(&raw).expect("fixture is valid JSON");
+        let child = fixture["after_unarchive_child_with_archived_parent"]
+            .as_array()
+            .expect("after unarchive")
+            .iter()
+            .find(|row| row["id"] == "C")
+            .expect("child row");
+        assert!(child["archived_at"].is_null());
+        assert!(child["parent_id"].is_null());
+        let root = fixture["after_unarchive_child_with_archived_parent"]
+            .as_array()
+            .expect("after unarchive")
+            .iter()
+            .find(|row| row["id"] == "R")
+            .expect("root row");
+        assert_eq!(root["archived_at"], "<now1>");
+        // Both ported bugs are recorded on the fixture.
+        let bugs = fixture["bugs"].as_array().expect("bugs array");
+        assert!(bugs
+            .iter()
+            .any(|bug| bug.as_str().unwrap_or("").contains("datetime.now")));
     }
 
     /// The streaming transport (`base.py:509-518`): one chunk per response —
