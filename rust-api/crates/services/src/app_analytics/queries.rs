@@ -54,8 +54,6 @@
 //! `rust-api/fixtures/app_analytics/TRACE.md`). Unit tests replay it: structural SQL
 //! fragments against the recorded templates, bodies/statuses asserted equal.
 
-use pidash_db::app_analytics::models::analytic_view;
-use serde_json::{json, Value};
 //! D-35 default / project / advance / exporter query builders (stage 5, PIDASHCONV-349).
 //!
 //! Ports the query layer named by the issue:
@@ -130,6 +128,9 @@ use serde_json::{json, Value};
 //!   `id__in`; a malformed UUID raises at query time (Django 500), it is never
 //!   validated. The builder takes the split list verbatim; handlers must keep
 //!   the no-validation order (filter first, fail in the DB).
+
+use pidash_db::app_analytics::models::analytic_view;
+use serde_json::{json, Value};
 
 use crate::app_issues::ordering::STATE_ORDER;
 
@@ -588,6 +589,8 @@ pub fn sort_data_keys(keys: &[String], temp_axis: &str) -> Vec<String> {
         let mut sorted = keys.to_vec();
         sorted.sort_by_key(|key| (key == "none", key.clone()));
         sorted
+    }
+}
 /// Open state groups (`utils/constants.py:86`: `STATE_GROUP_ORDER[:-2]`).
 /// Reuses the D-26 [`STATE_ORDER`]; the open slice is the first five entries.
 pub fn open_state_groups() -> Vec<&'static str> {
@@ -604,7 +607,8 @@ pub fn group_list(groups: &[&str]) -> String {
     groups
         .iter()
         .map(|g| format!("'{g}'"))
-        .collect::<Vec<_        .join(",")
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// The avatar-url `Case` shared by Q-03d/Q-03e/Q-03f and Q-05d
@@ -1558,6 +1562,9 @@ mod tests {
         assert_eq!(
             segment_error_body(),
             json!({"error": "Both segment and x axis cannot be same and segment should be valid"})
+        );
+    }
+
     use crate::app_issues::ordering::order_sql;
 
     const SCOPE: &str = "\"workspaces\".\"slug\" = $1";
@@ -1963,6 +1970,9 @@ mod tests {
         assert!(keys.contains("total"));
         assert!(keys.contains("distribution"));
         assert!(keys.contains("extras"));
+    }
+
+    #[test]
     fn exporter_list_sql_filters_type_orders_created() {
         let sql = exporter_list_sql("$1", "$2");
         assert!(sql.contains("\"exporters\".\"type\" = $2"));
