@@ -21,12 +21,28 @@
 //! * [`queries`] — user/session/instance SQL builders, adapter create/update
 //!   descriptors, the invite-join write sequence, F-05 password delegation.
 //!
-//! Sibling D-16 issues (handlers, guards, tasks) consume these pieces
+//! Plus the guard kernel named by PIDASHCONV-393:
+//!
+//! * [`guards`] — per-endpoint permission/throttle table and the DRF
+//!   `SimpleRateThrottle` counter math (`rate_limit.py`, the view
+//!   declarations, and the DRF settings defaults).
+//!
+//! Sibling D-16 issues (handlers, guards, queries, tasks) consume these pieces
 //! read-only.
 
+pub mod guards;
 pub mod models;
 pub mod queries;
 pub mod shapes;
+
+pub use guards::{
+    allow_request, anon_cache_key, drf_throttled_body, endpoint_guards, parse_rate,
+    throttle_cache_key, throttle_denied_body, throttle_denied_json, throttle_wait,
+    unauthenticated_body, user_cache_key, AuthEndpoint, EndpointGuards, PermissionPolicy, Surface,
+    ThrottleDecision, ThrottlePolicy, AUTHENTICATION_THROTTLE_RATE, AUTHENTICATION_THROTTLE_SCOPE,
+    DEFAULT_ANON_RATE, DEFAULT_ANON_SCOPE, EMAIL_VERIFICATION_THROTTLE_RATE,
+    EMAIL_VERIFICATION_THROTTLE_SCOPE,
+};
 
 pub use shapes::{
     allowed_hosts_for, base_host, csrf_context, endpoint_kind, error_code, error_dict_json,
