@@ -8,6 +8,9 @@
 //! * [`ser_project`] — project serializers (PIDASHCONV-348).
 //! * [`ser_workflow`] — state / estimate serializers (PIDASHCONV-351).
 //! * [`ser_collab`] — member / invite / user serializers (PIDASHCONV-350).
+//! * [`tasks`] — project task publishers: `model_activity` x2 +
+//!   `webhook_activity` x1 as transactional Celery-v2 enqueues
+//!   (PIDASHCONV-368).
 //!
 //! Wiring note: the crate root declares `pub mod v1_projects;` (seam for
 //! this issue's new files); every file under this module is new. Sibling
@@ -19,3 +22,4 @@
 pub mod ser_collab;
 pub mod ser_project;
 pub mod ser_workflow;
+pub mod tasks;
