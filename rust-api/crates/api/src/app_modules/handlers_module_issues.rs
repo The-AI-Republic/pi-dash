@@ -212,7 +212,7 @@ pub(crate) async fn resolve_project_id(
     .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::NotFoundDetail)
+    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
 }
 
 /// Badly-formed UUIDs in paths render the `ValidationError` branch
