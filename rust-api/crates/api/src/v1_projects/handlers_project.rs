@@ -725,6 +725,14 @@ fn row_i32(row: &sqlx::postgres::PgRow, col: &str) -> Result<i32, Denial> {
     row.try_get(col).map_err(|_| Denial::ServerError)
 }
 
+/// `projects.network` is `PositiveSmallIntegerField` (INT2); sqlx does not
+/// widen INT2 into i32, so decode i16 and widen (same hazard as the
+/// `member_role` fix in PIDASHCONV-478).
+fn row_i16_as_i32(row: &sqlx::postgres::PgRow, col: &str) -> Result<i32, Denial> {
+    let v: i16 = row.try_get(col).map_err(|_| Denial::ServerError)?;
+    Ok(i32::from(v))
+}
+
 fn row_json_opt(row: &sqlx::postgres::PgRow, col: &str) -> Result<Value, Denial> {
     let value: Option<Value> = row.try_get(col).map_err(|_| Denial::ServerError)?;
     Ok(value.unwrap_or(Value::Null))
@@ -885,7 +893,7 @@ pub async fn render_project(
     );
     put(&mut map, "description_text", row_json_opt(row, "description_text")?);
     put(&mut map, "description_html", row_json_opt(row, "description_html")?);
-    put(&mut map, "network", Value::from(row_i32(row, "network")?));
+    put(&mut map, "network", Value::from(row_i16_as_i32(row, "network")?));
     put(&mut map, "identifier", Value::String(row_string(row, "identifier")?));
     put(
         &mut map,
@@ -1859,7 +1867,7 @@ pub async fn summary_counts(
         match field {
             "members" => r#"(SELECT COUNT(*) FROM "project_members" WHERE "project_id" = $1 AND "is_active" AND "deleted_at" IS NULL)"#,
             "states" => r#"(SELECT COUNT(*) FROM "states" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#,
-            "labels" => r#"SELECT COUNT(*) FROM "labels" WHERE "project_id" = $1 AND "deleted_at" IS NULL"#,
+            "labels" => r#"(SELECT COUNT(*) FROM "labels" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#,
             "cycles" => r#"(SELECT COUNT(*) FROM "cycles" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#,
             "modules" => r#"(SELECT COUNT(*) FROM "modules" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#,
             "issues" => r#"(SELECT COUNT(*) FROM "issues" i JOIN "states" s ON s."id" = i."state_id" WHERE i."project_id" = $1 AND i."deleted_at" IS NULL AND s."group" != 'triage')"#,
@@ -2130,7 +2138,19 @@ pub async fn fetch_detail_row(
     project_id: &uuid::Uuid,
 ) -> Result<Option<sqlx::postgres::PgRow>, Denial> {
     use pidash_db::v1_projects::queries_projmem as q;
-    let sql = format!("{} AND p.id = $3", q::project_detail_sql());
+    // NB: the detail base ends with `GROUP BY p.id, w.id` (and
+    // `project_detail_sql()` appends `ORDER BY`), so the pk predicate must
+    // be spliced into the WHERE clause — appending AND after GROUP BY is a
+    // boolean-type error (`w.id AND ...`).
+    let sql = format!(
+        "{}\n{}",
+        q::PROJECT_DETAIL_BASE_SQL.replacen(
+            "GROUP BY p.id, w.id",
+            "AND p.id = $3 GROUP BY p.id, w.id",
+            1
+        ),
+        q::ORDER_BASE
+    );
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
         .bind(slug)
         .bind(actor_id)
@@ -3034,6 +3054,9 @@ pub async fn apply_project_update(
             Bound::Json(v) => query.bind(v),
         };
     }
+    // `$N` in the WHERE clause is the project id (the SET placeholders are
+    // `$1..=$N-1`); without this bind the update matches nothing.
+    query = query.bind(project_id);
     match query.execute(&mut *tx).await {
         Ok(_) => {}
         Err(sqlx::Error::Database(db)) if db.code().as_deref() == Some("23505") => {
