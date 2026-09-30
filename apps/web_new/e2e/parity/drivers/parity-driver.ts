@@ -35,6 +35,19 @@ export interface ParitySeedFacts {
   };
 }
 
+/** A cookie shaped for a browser context, used to enter the app pre-authenticated. */
+export interface ParityBrowserCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  httpOnly: boolean;
+  sameSite: "Lax";
+}
+
+/** Which create-or-join sub-view of the workspace onboarding step is showing. */
+export type WorkspaceOnboardingView = "create" | "invites" | "join_by_email" | "pending" | "none";
+
 /** User-level actions plus reads shared by both frontend drivers. */
 export interface ParityDriver {
   readonly target: ParityTarget;
@@ -84,4 +97,74 @@ export interface ParityDriver {
    * intermittently under parallel parity runs.
    */
   mentionsEnsureSignedIn(email: string, password: string): Promise<void>;
+  // -------------------------------------------------------------------------
+  // Workspace onboarding + creation (NEWFRONT-111, rows AUTH-034..043).
+  // Sign-in itself is another area's row, so onboarding scenarios enter the
+  // app pre-authenticated by injecting a minted user's session cookies, then
+  // drive the onboarding/creation UI through these actions and reads.
+  // -------------------------------------------------------------------------
+
+  /** Enter the app at `path` already signed in as the owner of `cookies`. */
+  openAuthenticated(path: string, cookies: ParityBrowserCookie[]): Promise<void>;
+  /** The current location's path (what the address bar shows). */
+  currentPath(): Promise<string>;
+  /** Whether any element with this visible text is present. */
+  hasVisibleText(text: string): Promise<boolean>;
+
+  // --- create-or-join step (AUTH-034/035/038/043) ---
+  /** Wait until the create-or-join step has settled on a sub-view. */
+  awaitWorkspaceStep(): Promise<void>;
+  /** Which create-or-join sub-view is currently visible. */
+  visibleWorkspaceView(): Promise<WorkspaceOnboardingView>;
+  fillWorkspaceName(name: string): Promise<void>;
+  fillWorkspaceSlug(slug: string): Promise<void>;
+  /** The normalized value currently shown in the workspace URL/slug field. */
+  workspaceSlugValue(): Promise<string>;
+  /** Pick a team-size pill by its visible label (onboarding create view). */
+  selectTeamSizePill(label: string): Promise<void>;
+  /** Pick a team-size option by label from the standalone dropdown. */
+  selectTeamSizeDropdown(label: string): Promise<void>;
+  submitCreateWorkspace(): Promise<void>;
+  isCreateWorkspaceSubmitDisabled(): Promise<boolean>;
+  /** The visible inline slug error, or null when none is shown. */
+  workspaceSlugErrorText(): Promise<string | null>;
+  /** From the create view, open the join-by-admin-email sub-view. */
+  gotoJoinByEmailFromCreate(): Promise<void>;
+  /** From the create view, open the invites sub-view (only when invites exist). */
+  gotoInvitesFromCreate(): Promise<void>;
+
+  // --- join-by-email + pending (AUTH-036) ---
+  fillWorkspaceAdminEmail(email: string): Promise<void>;
+  submitJoinRequest(): Promise<void>;
+  /** Whether the pending/holding view names the given admin email. */
+  pendingApprovalNamesEmail(email: string): Promise<boolean>;
+  /** From the pending or join-by-email view, switch to creating a workspace. */
+  createInsteadFromPending(): Promise<void>;
+
+  // --- invites list (AUTH-034) ---
+  selectInviteByWorkspace(workspaceName: string): Promise<void>;
+  continueWithSelectedInvites(): Promise<void>;
+
+  // --- invite-members step (AUTH-037/039) ---
+  awaitInviteMembersStep(): Promise<void>;
+  isInviteMembersStepVisible(): Promise<boolean>;
+  inviteRowCount(): Promise<number>;
+  fillInviteRow(index: number, email: string): Promise<void>;
+  clickAddAnotherInvite(): Promise<void>;
+  isSendInvitesDisabled(): Promise<boolean>;
+  sendInvites(): Promise<void>;
+  deferInvites(): Promise<void>;
+
+  // --- back navigation (AUTH-043) ---
+  isOnboardingBackVisible(): Promise<boolean>;
+  clickOnboardingBack(): Promise<void>;
+
+  // --- first-run product tour (AUTH-042) ---
+  isTourWelcomeVisible(): Promise<boolean>;
+  declineTour(): Promise<void>;
+
+  // --- creation-disabled states (AUTH-041) ---
+  isStandaloneCreationDisabledVisible(): Promise<boolean>;
+  isRequestInstanceAdminLinkVisible(): Promise<boolean>;
+  isInOnboardingCreationDisabledNoticeVisible(): Promise<boolean>;
 }

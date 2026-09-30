@@ -9,7 +9,7 @@
 // form, landing in the workspace. Later oracle issues extend this driver
 // (never fork it) as new areas need new actions.
 import type { Locator, Page } from "@playwright/test";
-import type { ParityDriver, ParityTarget } from "./parity-driver";
+import type { ParityBrowserCookie, ParityDriver, ParityTarget, WorkspaceOnboardingView } from "./parity-driver";
 
 export class WebDriver implements ParityDriver {
   readonly target: ParityTarget = "web";
@@ -333,5 +333,205 @@ export class WebDriver implements ParityDriver {
     // The edited plain text appearing while the old body disappears proves
     // the save landed.
     await page.getByText(plainText).first().waitFor({ timeout: 60_000 });
+  // -------------------------------------------------------------------------
+  // Workspace onboarding + creation (NEWFRONT-111, rows AUTH-034..043).
+  // Selectors follow the running old app: onboarding step headings render as
+  // <h1> (CommonOnboardingHeader), form fields carry <label htmlFor> so
+  // getByLabel resolves them, and actions are plain buttons named by their
+  // visible text. The old app exposes no data-testid, so the two icon-only
+  // controls this area needs (the header back chevron) are reached
+  // structurally, never by a hook added to apps/web.
+  // -------------------------------------------------------------------------
+
+  private async isShown(locator: Locator): Promise<boolean> {
+    if ((await locator.count()) === 0) return false;
+    return locator.first().isVisible();
+  }
+
+  async openAuthenticated(path: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.page.context().addCookies(cookies);
+    await this.page.goto(path);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async currentPath(): Promise<string> {
+    return new URL(this.page.url()).pathname;
+  }
+
+  async hasVisibleText(text: string): Promise<boolean> {
+    return this.isShown(this.page.getByText(text, { exact: false }));
+  }
+
+  async awaitWorkspaceStep(): Promise<void> {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      if ((await this.visibleWorkspaceView()) !== "none") return;
+      await this.page.waitForTimeout(500);
+    }
+    throw new Error("[parity] workspace create-or-join step never appeared.");
+  }
+
+  async visibleWorkspaceView(): Promise<WorkspaceOnboardingView> {
+    const page = this.page;
+    if (await this.isShown(page.getByText("Waiting for approval", { exact: false }))) return "pending";
+    if (await this.isShown(page.getByRole("heading", { name: "Join invites or create a workspace", exact: true })))
+      return "invites";
+    if (await this.isShown(page.getByRole("heading", { name: "Join an existing workspace", exact: true })))
+      return "join_by_email";
+    if (await this.isShown(page.getByRole("heading", { name: "Create your workspace", exact: true }))) return "create";
+    return "none";
+  }
+
+  async fillWorkspaceName(name: string): Promise<void> {
+    await this.page.getByLabel("Name your workspace").fill(name);
+  }
+
+  async fillWorkspaceSlug(slug: string): Promise<void> {
+    await this.page.getByLabel("Set your workspace's URL").fill(slug);
+  }
+
+  async workspaceSlugValue(): Promise<string> {
+    return this.page.getByLabel("Set your workspace's URL").inputValue();
+  }
+
+  async selectTeamSizePill(label: string): Promise<void> {
+    await this.page.getByRole("button", { name: label, exact: true }).click();
+  }
+
+  async selectTeamSizeDropdown(label: string): Promise<void> {
+    // The standalone form uses a CustomSelect: click the trigger (shows the
+    // placeholder until a choice is made), then the option.
+    await this.page.getByText("Select a range", { exact: false }).first().click();
+    await this.page.getByText(label, { exact: true }).last().click();
+  }
+
+  async submitCreateWorkspace(): Promise<void> {
+    await this.page.getByRole("button", { name: "Create workspace", exact: true }).click();
+  }
+
+  async isCreateWorkspaceSubmitDisabled(): Promise<boolean> {
+    return this.page.getByRole("button", { name: "Create workspace", exact: true }).isDisabled();
+  }
+
+  async workspaceSlugErrorText(): Promise<string | null> {
+    const candidates = [
+      "Workspace URL is already taken!",
+      "URLs can contain only ('-') and alphanumeric characters.",
+      "Limit your URL to 48 characters.",
+    ];
+    for (const text of candidates) {
+      const loc = this.page.getByText(text, { exact: false });
+      if (await this.isShown(loc)) return (await loc.first().textContent())?.trim() ?? text;
+    }
+    return null;
+  }
+
+  async gotoJoinByEmailFromCreate(): Promise<void> {
+    await this.page.getByRole("button", { name: "Join an existing workspace by admin email", exact: true }).click();
+  }
+
+  async gotoInvitesFromCreate(): Promise<void> {
+    await this.page.getByRole("button", { name: "Join existing workspace", exact: true }).click();
+  }
+
+  async fillWorkspaceAdminEmail(email: string): Promise<void> {
+    await this.page.getByLabel("Workspace admin email").fill(email);
+  }
+
+  async submitJoinRequest(): Promise<void> {
+    await this.page.getByRole("button", { name: "Send join request", exact: true }).click();
+  }
+
+  async pendingApprovalNamesEmail(email: string): Promise<boolean> {
+    await this.page.getByText("Waiting for approval", { exact: false }).first().waitFor();
+    return this.hasVisibleText(email);
+  }
+
+  async createInsteadFromPending(): Promise<void> {
+    await this.page.getByRole("button", { name: "Create your own workspace instead", exact: true }).click();
+  }
+
+  async selectInviteByWorkspace(workspaceName: string): Promise<void> {
+    // Each invite row shows the workspace name and a checkbox. Find the row
+    // carrying the name and toggle its checkbox; fall back to the sole
+    // checkbox when the row grouping is not addressable.
+    const row = this.page
+      .locator("div")
+      .filter({ hasText: workspaceName })
+      .filter({ has: this.page.getByRole("checkbox") });
+    if ((await row.count()) > 0) {
+      await row.last().getByRole("checkbox").first().click();
+      return;
+    }
+    await this.page.getByRole("checkbox").first().click();
+  }
+
+  async continueWithSelectedInvites(): Promise<void> {
+    await this.page.getByRole("button", { name: "Continue", exact: true }).click();
+  }
+
+  async awaitInviteMembersStep(): Promise<void> {
+    await this.page.getByRole("heading", { name: "Invite your teammates", exact: true }).waitFor({ timeout: 30_000 });
+  }
+
+  async isInviteMembersStepVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("heading", { name: "Invite your teammates", exact: true }));
+  }
+
+  async inviteRowCount(): Promise<number> {
+    return this.page.locator('input[name^="emails."][name$=".email"]').count();
+  }
+
+  async fillInviteRow(index: number, email: string): Promise<void> {
+    await this.page.locator(`input[name="emails.${index}.email"]`).fill(email);
+  }
+
+  async clickAddAnotherInvite(): Promise<void> {
+    await this.page.getByRole("button", { name: "Add another", exact: true }).click();
+  }
+
+  async isSendInvitesDisabled(): Promise<boolean> {
+    return this.page.getByRole("button", { name: "Continue", exact: true }).isDisabled();
+  }
+
+  async sendInvites(): Promise<void> {
+    await this.page.getByRole("button", { name: "Continue", exact: true }).click();
+  }
+
+  async deferInvites(): Promise<void> {
+    // The label uses a curly apostrophe; match either form.
+    await this.page.getByRole("button", { name: /I.?ll do it later/ }).click();
+  }
+
+  /** The icon-only header back control: the empty-text button in the sticky header. */
+  private headerBackButton(): Locator {
+    return this.page.locator('div.sticky.top-0.z-10 button[type="button"]').filter({ hasText: /^\s*$/ });
+  }
+
+  async isOnboardingBackVisible(): Promise<boolean> {
+    return this.isShown(this.headerBackButton());
+  }
+
+  async clickOnboardingBack(): Promise<void> {
+    await this.headerBackButton().first().click();
+  }
+
+  async isTourWelcomeVisible(): Promise<boolean> {
+    return this.hasVisibleText("Take a Product Tour");
+  }
+
+  async declineTour(): Promise<void> {
+    await this.page.getByRole("button", { name: "No thanks, I will explore it myself", exact: true }).click();
+  }
+
+  async isStandaloneCreationDisabledVisible(): Promise<boolean> {
+    return this.hasVisibleText("Only your instance admin can create workspaces");
+  }
+
+  async isRequestInstanceAdminLinkVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("link", { name: "Request instance admin", exact: true }));
+  }
+
+  async isInOnboardingCreationDisabledNoticeVisible(): Promise<boolean> {
+    return this.hasVisibleText("your instance admin has restricted creation");
   }
 }
