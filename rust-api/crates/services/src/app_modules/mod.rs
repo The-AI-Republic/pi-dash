@@ -15,6 +15,11 @@
 //! * [`queries`] — queries (PIDASHCONV-374): the five queryset units +
 //!   `apply_annotations` (`base.py:78-292, :774-802`, `archive.py:45-256`,
 //!   `issue.py:53-94`) as SQL-text builders replaying FX-MOD-03.
+//! * [`tasks`] — tasks (PIDASHCONV-384): the eight `.delay()` publishers
+//!   (`base.py:339-347, :641-647, :708-716, :728-741`,
+//!   `issue.py:232-245,272-285,294-312,325-335`) as Celery v2 payload
+//!   builders over the jobs plane (plane itself read-only), replaying
+//!   FX-MOD-05.
 //!
 //! Wiring note: the crate root declares `pub mod app_modules;` (seam for
 //! this issue's new files); every file under this module is new.
@@ -24,9 +29,12 @@
 //! update soft-deletes instead of hard-deleting; duplicate-name checks
 //! race outside a transaction; `validate` only sees input dates, so a
 //! partial update carrying one date skips the start/target check.
+//! Tasks-range bugs live in [`tasks`]: raw-vs-`str()` actor/project ids,
+//! the link-add RAW module ref, and the None-unsafe link-destroy lookup.
 pub mod models;
 pub mod queries;
 pub mod shape;
+pub mod tasks;
 
 pub use shape::{
     date_violation_body, duplicate_link_body, duplicate_link_update_body, duplicate_name_body,
