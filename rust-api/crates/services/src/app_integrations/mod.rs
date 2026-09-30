@@ -36,5 +36,6 @@
 //!   [`validate_update_url`] takes the already-resolved context value, and
 //!   the PATCH caller passes `None`.
 
+pub mod external;
 pub mod serializers;
 pub mod tasks;

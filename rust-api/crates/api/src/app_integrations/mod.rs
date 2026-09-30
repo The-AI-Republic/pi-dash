@@ -6,12 +6,15 @@
 //! handlers fetch membership rows through the workspace-scoped handle and
 //! decide here.
 //!
+//! [`handlers_external`] owns the external-integration HTTP shell
+//! (PIDASHCONV-454): the two AI-assistant POSTs and the Unsplash GET.
 //! [`handlers_github_proj`] owns the project-level GitHub HTTP shell
 //! (PIDASHCONV-450): bind POST plus status GET/PATCH/DELETE. Sibling
 //! handler issues merge their own routers into [`routes`]; merges keep
 //! both sides.
 
 pub mod gates;
+pub mod handlers_external;
 pub mod handlers_github_proj;
 pub mod handlers_github_ws;
 pub mod hmac;
@@ -24,5 +27,7 @@ use crate::state::AppState;
 /// paths serve from Rust, everything else keeps proxying). Sibling
 /// handler issues extend this merge; merges keep both sides.
 pub fn routes() -> Router<AppState> {
-    handlers_github_proj::routes().merge(handlers_github_ws::routes())
+    handlers_external::routes()
+        .merge(handlers_github_proj::routes())
+        .merge(handlers_github_ws::routes())
 }

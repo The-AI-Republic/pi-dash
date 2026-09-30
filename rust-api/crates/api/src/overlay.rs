@@ -132,8 +132,9 @@ impl Overlay {
 ///
 /// The App group serves the issue-list family (`app_issues`, pilot 2 of
 /// D-26): exactly the four list GETs — plus the D-33 app-integration
-/// family (`app_integrations`, PIDASHCONV-450): the project-github bind
-/// POST and status GET/PATCH/DELETE; sibling D-33 handler issues extend
+/// family (`app_integrations`, PIDASHCONV-450/454): the project-github
+/// bind POST and status GET/PATCH/DELETE plus the two AI-assistant
+/// POSTs and the Unsplash GET; sibling D-33 handler issues extend
 /// that merge, keeping both sides. Registration is the cutover
 /// granularity — sibling paths have no Rust route and keep proxying to
 /// Django through the fallback, so no per-path flag is needed.
@@ -178,8 +179,9 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // `app_issues`; D-32 intake-issues/inbox-issues list+create,
         // PIDASHCONV-385, plus intake-issue detail + versions,
         // PIDASHCONV-395, in `app_intake`; D-33 project-github
-        // (PIDASHCONV-450) + workspace GitHub handlers (PIDASHCONV-446),
-        // both in `app_integrations`; sibling handler issues extend the
+        // (PIDASHCONV-450) + workspace GitHub handlers (PIDASHCONV-446)
+        // + external LLM/Unsplash (PIDASHCONV-454), all in
+        // `app_integrations`; sibling handler issues extend the
         // merge; merges keep both sides).
         RouteGroup::App => crate::app_issues::routes()
             .merge(crate::app_intake::routes())
