@@ -247,10 +247,11 @@ pub fn validate_sticky_descriptions(
     html: Option<&str>,
     binary: Option<&str>,
 ) -> Result<Option<String>, StickyValidateError> {
+    let mut sanitized: Option<String> = None;
     if let Some(text) = html {
         if !text.is_empty() {
             match sanitize_html(text) {
-                SanitizeOutcome::Clean(clean) => return Ok(Some(clean)),
+                SanitizeOutcome::Clean(clean) => sanitized = Some(clean),
                 SanitizeOutcome::Invalid => return Err(StickyValidateError::HtmlInvalid),
             }
         }
@@ -260,7 +261,7 @@ pub fn validate_sticky_descriptions(
             return Err(StickyValidateError::BinaryInvalid);
         }
     }
-    Ok(html.map(str::to_owned))
+    Ok(sanitized.or_else(|| html.map(str::to_owned)))
 }
 
 /// Which `validate()` arm failed.
