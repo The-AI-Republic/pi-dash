@@ -1,3 +1,5 @@
 
 # Generated parity seed facts (never committed)
 e2e/parity/.seed.json
+test-results/
+dist/
