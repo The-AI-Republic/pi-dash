@@ -48,8 +48,10 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use pidash_db::app_intake::queries as queries;
-use pidash_db::issue_filters::{FilterValue, IssueFilterError, ISSUE_FILTER_KEYS, issue_filters_get};
+use pidash_db::app_intake::queries;
+use pidash_db::issue_filters::{
+    issue_filters_get, FilterValue, IssueFilterError, ISSUE_FILTER_KEYS,
+};
 use pidash_services::app_intake::permissions as guards;
 use pidash_services::app_intake::tasks as intake_tasks;
 
@@ -1696,6 +1698,9 @@ pub async fn default_state_for(pool: &PgPool, project_id: &Uuid) -> Result<Optio
 /// accepting while the linked issue sits in TRIAGE needs a project
 /// default state. Returns the default state id (for the transition)
 /// or an error body.
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 pub async fn validate_accept_transition(
     pool: &PgPool,
     workspace_id: &Uuid,
@@ -3564,7 +3569,8 @@ pub async fn collection_list(
         Ok(compiled) => compiled,
         Err(response) => return response,
     };
-    let order_by = query_last(&query, "order_by").unwrap_or_else(|| "-issue__created_at".to_string());
+    let order_by =
+        query_last(&query, "order_by").unwrap_or_else(|| "-issue__created_at".to_string());
     let statuses = match queries::parse_intake_status(query_last(&query, "status").as_deref()) {
         Ok(statuses) => statuses,
         Err(_) => return Denial::ServerError.into_response(),
@@ -3621,7 +3627,9 @@ pub async fn collection_list(
             next += statuses.len();
         }
         if list_query.guest_created_by {
-            count_sql.push_str(&format!(" AND \"intake_issues\".\"created_by_id\" = ${next}"));
+            count_sql.push_str(&format!(
+                " AND \"intake_issues\".\"created_by_id\" = ${next}"
+            ));
         }
         count_sql.push(')');
         let mut count_statement = sqlx::query_scalar::<_, i64>(&count_sql)
@@ -3690,7 +3698,6 @@ pub async fn collection_list(
     raw_json_response(body)
 }
 
-
 // ---------------------------------------------------------------------------
 // Pagination: BasePaginator.get_per_page + OffsetPaginator.get_result
 // ---------------------------------------------------------------------------
@@ -3718,27 +3725,25 @@ fn list_page(query: &QueryMap) -> Result<ListPage, Response> {
             Some(value) => value,
             None => {
                 return Err(
-                    Denial::BadDetail("Invalid per_page parameter.".to_owned()).into_response(),
+                    Denial::BadDetail("Invalid per_page parameter.".to_owned()).into_response()
                 );
             }
         },
     };
     if per_page > 1000 {
-        return Err(Denial::BadDetail(
-            "Invalid per_page value. Cannot exceed 1000.".to_owned(),
-        )
-        .into_response());
+        return Err(
+            Denial::BadDetail("Invalid per_page value. Cannot exceed 1000.".to_owned())
+                .into_response(),
+        );
     }
     if per_page <= 0 {
         return Err(Denial::ServerError.into_response());
     }
     let raw_cursor = query_last(query, "cursor").unwrap_or_else(|| format!("{per_page}:0:0"));
-    let ( _value, page, _is_prev) = match parse_cursor(&raw_cursor) {
+    let (_value, page, _is_prev) = match parse_cursor(&raw_cursor) {
         Some(cursor) => cursor,
         None => {
-            return Err(
-                Denial::BadDetail("Invalid cursor parameter.".to_owned()).into_response(),
-            );
+            return Err(Denial::BadDetail("Invalid cursor parameter.".to_owned()).into_response());
         }
     };
     let offset = page.saturating_mul(per_page);
@@ -3756,7 +3761,10 @@ fn list_page(query: &QueryMap) -> Result<ListPage, Response> {
 /// digits only (no float shapes, no underscores).
 fn parse_python_int(raw: &str) -> Option<i64> {
     let text = raw.trim();
-    let digits = text.strip_prefix('+').or_else(|| text.strip_prefix('-')).unwrap_or(text);
+    let digits = text
+        .strip_prefix('+')
+        .or_else(|| text.strip_prefix('-'))
+        .unwrap_or(text);
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
@@ -3767,10 +3775,11 @@ fn parse_python_int(raw: &str) -> Option<i64> {
 /// `:`-separated parts; float iff the value part contains `.`.
 fn parse_cursor(raw: &str) -> Option<(CursorValue, i64, bool)> {
     let mut bits = raw.split(':');
-    let (value_raw, offset_raw, prev_raw) = match (bits.next(), bits.next(), bits.next(), bits.next()) {
-        (Some(v), Some(o), Some(p), None) => (v, o, p),
-        _ => return None,
-    };
+    let (value_raw, offset_raw, prev_raw) =
+        match (bits.next(), bits.next(), bits.next(), bits.next()) {
+            (Some(v), Some(o), Some(p), None) => (v, o, p),
+            _ => return None,
+        };
     let value = if value_raw.contains('.') {
         CursorValue::Float(value_raw.parse::<f64>().ok()?)
     } else {
@@ -3818,10 +3827,7 @@ struct CompiledFilter {
 /// joins are INNER; an `__isnull` lookup on a relation forces that
 /// relation's join LEFT.
 #[allow(clippy::result_large_err)]
-fn compile_filter(
-    query: &QueryMap,
-    today: chrono::NaiveDate,
-) -> Result<CompiledFilter, Response> {
+fn compile_filter(query: &QueryMap, today: chrono::NaiveDate) -> Result<CompiledFilter, Response> {
     let mut params = std::collections::HashMap::new();
     for key in ISSUE_FILTER_KEYS {
         if let Some(last) = query_last(query, key) {
@@ -3837,9 +3843,9 @@ fn compile_filter(
     // else INNER (Django's filter()/exclude() join rule).
     let uses = |marker: &str| predicates.iter().any(|(name, _)| name.contains(marker));
     let isnull_uses = |marker: &str| {
-        predicates.iter().any(|(name, _)| {
-            name.contains(marker) && name.ends_with("__isnull")
-        })
+        predicates
+            .iter()
+            .any(|(name, _)| name.contains(marker) && name.ends_with("__isnull"))
     };
     let mut joins = String::new();
     if uses("issue__state__group") {
@@ -3969,10 +3975,8 @@ fn compile_predicate(
                     match item.parse::<i32>() {
                         Ok(number) => numbers.push(number),
                         Err(_) => {
-                            return Err(Denial::BadError(
-                                "Please provide valid detail".to_owned(),
-                            )
-                            .into_response());
+                            return Err(Denial::BadError("Please provide valid detail".to_owned())
+                                .into_response());
                         }
                     }
                 }
@@ -3992,10 +3996,8 @@ fn compile_predicate(
                     let id: Uuid = match item.parse() {
                         Ok(id) => id,
                         Err(_) => {
-                            return Err(Denial::BadError(
-                                "Please provide valid detail".to_owned(),
-                            )
-                            .into_response());
+                            return Err(Denial::BadError("Please provide valid detail".to_owned())
+                                .into_response());
                         }
                     };
                     holders.push(placeholder(next));
@@ -4117,7 +4119,10 @@ fn compile_text_predicate(
 ) -> Result<Option<String>, Response> {
     if name == "issue__name__icontains" {
         // Django `icontains`: LIKE with `\`, `%`, `_` escaped.
-        let escaped = text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let escaped = text
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
         let holder = placeholder(next);
         binds.push(OwnedBind::Text(format!("%{escaped}%")));
         return Ok(Some(format!("\"issues\".\"name\" ILIKE {holder}")));
@@ -4146,7 +4151,10 @@ fn compile_text_predicate(
     if operator == "=" {
         // Single-value form on a date term: Django's `contains`
         // lookup, i.e. LIKE with metacharacters escaped.
-        let escaped = text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let escaped = text
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
         let holder = placeholder(next);
         binds.push(OwnedBind::Text(format!("%{escaped}%")));
         return Ok(Some(format!("{column}::text LIKE {holder}")));
@@ -4282,9 +4290,7 @@ fn render_list_row(
     issue: &ListIssue,
     timezone: chrono_tz::Tz,
 ) -> serde_json::Value {
-    let label_ids: Vec<Uuid> = row
-        .try_get::<Vec<Uuid>, _>("label_ids")
-        .unwrap_or_default();
+    let label_ids: Vec<Uuid> = row.try_get::<Vec<Uuid>, _>("label_ids").unwrap_or_default();
     let mut nested = serde_json::Map::with_capacity(8);
     nested.insert("id".to_owned(), uuid_string(&issue.id));
     nested.insert(
@@ -4315,7 +4321,11 @@ fn render_list_row(
     let mut body = serde_json::Map::with_capacity(7);
     body.insert(
         "id".to_owned(),
-        serde_json::Value::String(row.try_get::<Uuid, _>("id").map(|id| id.to_string()).unwrap_or_default()),
+        serde_json::Value::String(
+            row.try_get::<Uuid, _>("id")
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+        ),
     );
     body.insert(
         "status".to_owned(),
@@ -4440,7 +4450,14 @@ pub async fn collection_create(
     };
     // `IssueCreateSerializer(...).is_valid()` (`:253-263`): the reachable
     // field validations; serializer errors answer 400 (`:325-326`).
-    let validated = match validate_issue_create(pool, &gate, state.settings(), &issue_data, default_assignee_id).await
+    let validated = match validate_issue_create(
+        pool,
+        &gate,
+        state.settings(),
+        &issue_data,
+        default_assignee_id,
+    )
+    .await
     {
         Ok(validated) => validated,
         Err(response) => return response,
@@ -4478,7 +4495,19 @@ pub async fn collection_create(
     let issue_id = Uuid::new_v4();
     // `IssueCreateSerializer.create` (`serializers/issue.py:387-462`) +
     // `Issue.save` + `BaseModel.save` (crum `created_by`): the full row.
-    if let Err(response) = insert_issue(pool, &gate, &validated, issue_id, triage_id, sequence_id, sort_order, now, default_assignee_id).await {
+    if let Err(response) = insert_issue(
+        pool,
+        &gate,
+        &validated,
+        issue_id,
+        triage_id,
+        sequence_id,
+        sort_order,
+        now,
+        default_assignee_id,
+    )
+    .await
+    {
         return response;
     }
     if let Err(error) = sqlx::query(
@@ -4552,7 +4581,11 @@ pub async fn collection_create(
     );
     enqueue_message(
         pool,
-        pidash_jobs::celery::CeleryTaskMessage::new(activity.task_name(), vec![], activity.kwargs()),
+        pidash_jobs::celery::CeleryTaskMessage::new(
+            activity.task_name(),
+            vec![],
+            activity.kwargs(),
+        ),
     )
     .await;
     let version = intake_tasks::intake_create_description_version(
@@ -4667,7 +4700,6 @@ fn app_origin(state: &AppState) -> Option<String> {
     settings.urls.app_base_url.clone()
 }
 
-
 /// Map a database failure onto the `handle_exception` matrix: integrity
 /// violations (SQLSTATE 23xxx) → 400; anything else → the 500 envelope.
 fn db_error(error: sqlx::Error) -> Response {
@@ -4686,9 +4718,6 @@ fn db_error(error: sqlx::Error) -> Response {
 fn uuid_string(id: &Uuid) -> serde_json::Value {
     serde_json::Value::String(id.to_string())
 }
-
-
-
 
 // ---------------------------------------------------------------------------
 // create: IssueCreateSerializer validation
@@ -4811,7 +4840,10 @@ async fn validate_issue_create(
     let name = match issue_data.get("name") {
         Some(value) => match char_internal(value) {
             Ok(name) if name.is_empty() => {
-                field_errors.insert("name".to_owned(), serde_json::json!(["This field may not be blank."]));
+                field_errors.insert(
+                    "name".to_owned(),
+                    serde_json::json!(["This field may not be blank."]),
+                );
                 String::new()
             }
             Ok(name) if name.chars().count() > 255 => {
@@ -4833,7 +4865,10 @@ async fn validate_issue_create(
             }
         },
         None => {
-            field_errors.insert("name".to_owned(), serde_json::json!(["This field is required."]));
+            field_errors.insert(
+                "name".to_owned(),
+                serde_json::json!(["This field is required."]),
+            );
             String::new()
         }
     };
@@ -4879,11 +4914,17 @@ async fn validate_issue_create(
     // No `null=True` on these integers: explicit null fails.
     for key in ["complexity_score", "sequence_id"] {
         if issue_data.get(key) == Some(&serde_json::Value::Null) {
-            field_errors.insert(key.to_owned(), serde_json::json!(["This field may not be null."]));
+            field_errors.insert(
+                key.to_owned(),
+                serde_json::json!(["This field may not be null."]),
+            );
         }
     }
     if issue_data.get("sort_order") == Some(&serde_json::Value::Null) {
-        field_errors.insert("sort_order".to_owned(), serde_json::json!(["This field may not be null."]));
+        field_errors.insert(
+            "sort_order".to_owned(),
+            serde_json::json!(["This field may not be null."]),
+        );
     }
     // `complexity_score` carries model `MinValueValidator(0)` /
     // `MaxValueValidator(10)`: DRF runs field validators during
@@ -4896,9 +4937,7 @@ async fn validate_issue_create(
                 if score < 0 {
                     field_errors.insert(
                         "complexity_score".to_owned(),
-                        serde_json::json!([
-                            "Ensure this value is greater than or equal to 0."
-                        ]),
+                        serde_json::json!(["Ensure this value is greater than or equal to 0."]),
                     );
                 } else if score > 10 {
                     field_errors.insert(
@@ -4960,7 +4999,10 @@ async fn validate_issue_create(
     let is_draft = match issue_data.get("is_draft") {
         None => false,
         Some(serde_json::Value::Null) => {
-            field_errors.insert("is_draft".to_owned(), serde_json::json!(["This field may not be null."]));
+            field_errors.insert(
+                "is_draft".to_owned(),
+                serde_json::json!(["This field may not be null."]),
+            );
             false
         }
         Some(_) => match opt_bool_field(issue_data, "is_draft") {
@@ -5037,7 +5079,10 @@ async fn validate_issue_create(
             } else {
                 "Not a valid string."
             };
-            field_errors.insert("description_stripped".to_owned(), serde_json::json!([message]));
+            field_errors.insert(
+                "description_stripped".to_owned(),
+                serde_json::json!([message]),
+            );
         }
     }
     let created_via = match opt_limited_string(issue_data, "created_via", 32) {
@@ -5069,15 +5114,14 @@ async fn validate_issue_create(
             None
         }
     };
-    let estimate_point_id = match opt_pk_field(issue_data, "estimate_point", pool, "estimate_points")
-        .await
-    {
-        Ok(id) => id,
-        Err(message) => {
-            field_errors.insert("estimate_point".to_owned(), serde_json::json!([message]));
-            None
-        }
-    };
+    let estimate_point_id =
+        match opt_pk_field(issue_data, "estimate_point", pool, "estimate_points").await {
+            Ok(id) => id,
+            Err(message) => {
+                field_errors.insert("estimate_point".to_owned(), serde_json::json!([message]));
+                None
+            }
+        };
     let type_id = match opt_pk_field(issue_data, "type", pool, "issue_types").await {
         Ok(id) => id,
         Err(message) => {
@@ -5116,27 +5160,29 @@ async fn validate_issue_create(
         check_agent_executor(pool, settings, gate.user_id, executor).await?;
     }
     let description_html = match description_html {
-        Some(html) if !html.is_empty() => {
-            match crate::space::sanitize::sanitize_html(&html) {
-                crate::space::sanitize::Sanitize::Clean(clean) => Some(clean),
-                crate::space::sanitize::Sanitize::Invalid => {
-                    return Err(Denial::BadJson(serde_json::json!({
-                        "error": "html content is not valid"
-                    }))
-                    .into_response());
-                }
+        Some(html) if !html.is_empty() => match crate::space::sanitize::sanitize_html(&html) {
+            crate::space::sanitize::Sanitize::Clean(clean) => Some(clean),
+            crate::space::sanitize::Sanitize::Invalid => {
+                return Err(Denial::BadJson(serde_json::json!({
+                    "error": "html content is not valid"
+                }))
+                .into_response());
             }
-        }
+        },
         other => other,
     };
     // Assignees keep active project members (`role__gte=15`); labels
     // keep project labels (`validate`, `:337-354`).
     let assignee_ids = match assignee_ids {
-        Some(ids) if !ids.is_empty() => Some(filter_project_assignees(pool, gate.project_id, &ids).await?),
+        Some(ids) if !ids.is_empty() => {
+            Some(filter_project_assignees(pool, gate.project_id, &ids).await?)
+        }
         _ => None,
     };
     let label_ids = match label_ids {
-        Some(ids) if !ids.is_empty() => Some(filter_project_labels(pool, gate.project_id, &ids).await?),
+        Some(ids) if !ids.is_empty() => {
+            Some(filter_project_labels(pool, gate.project_id, &ids).await?)
+        }
         _ => None,
     };
     // `state` is the server-set triage row: the project check always
@@ -5207,7 +5253,6 @@ async fn validate_issue_create(
 // field coercions (DRF to_internal_value, in serializer field order)
 // ---------------------------------------------------------------------------
 
-
 /// `PrimaryKeyRelatedField.to_internal_value` (`relations.py:252-263`)
 /// with a UUID `pk_field`: bools fail `incorrect_type` up front; strings
 /// parse as UUIDs (curly-quote `not a valid UUID` message); ints go
@@ -5235,9 +5280,7 @@ async fn resolve_pk(pool: &PgPool, table: &str, raw: &serde_json::Value) -> Resu
         serde_json::Value::Number(number) => {
             if let Some(int) = number.as_i64() {
                 if int < 0 {
-                    return Err(
-                        "Incorrect type. Expected pk value, received int.".to_owned()
-                    );
+                    return Err("Incorrect type. Expected pk value, received int.".to_owned());
                 }
                 Key::Int(Uuid::from_u128(int as u128), int.to_string())
             } else if let Some(int) = number.as_u64() {
@@ -5300,7 +5343,11 @@ fn python_str_repr(value: &serde_json::Value) -> String {
         }
         serde_json::Value::String(text) => format!("'{text}'"),
         serde_json::Value::Array(items) => {
-            let inner = items.iter().map(python_str_repr).collect::<Vec<_>>().join(", ");
+            let inner = items
+                .iter()
+                .map(python_str_repr)
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("[{inner}]")
         }
         serde_json::Value::Object(map) => {
@@ -5399,7 +5446,9 @@ fn opt_int_field(
         None | Some(serde_json::Value::Null) => Ok(None),
         Some(serde_json::Value::Number(number)) => {
             if let Some(int) = number.as_i64() {
-                i32::try_from(int).map(Some).map_err(|_| "A valid integer is required.".to_owned())
+                i32::try_from(int)
+                    .map(Some)
+                    .map_err(|_| "A valid integer is required.".to_owned())
             } else {
                 Err("A valid integer is required.".to_owned())
             }
@@ -5464,7 +5513,9 @@ fn opt_datetime_field(
     const MESSAGE: &str = "Datetime has wrong format. Use one of these formats instead: YYYY-MM-DDThh:mm[:ss[.uuuuuu]][+HH:MM|-HH:MM|Z].";
     match issue_data.get(key) {
         None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(text)) => parse_datetime_param(text).map(Some).ok_or_else(|| MESSAGE.to_owned()),
+        Some(serde_json::Value::String(text)) => parse_datetime_param(text)
+            .map(Some)
+            .ok_or_else(|| MESSAGE.to_owned()),
         Some(_) => Err(MESSAGE.to_owned()),
     }
 }
@@ -5588,18 +5639,13 @@ async fn check_agent_executor(
 /// `serializers/issue.py:244-269`). The mid-flight rule needs an
 /// instance (create has none). Errors are field errors.
 #[allow(clippy::result_large_err)]
-async fn check_assigned_pod(
-    pool: &PgPool,
-    project_id: Uuid,
-    pod_id: Uuid,
-) -> Result<(), Response> {
-    let row: Option<(Uuid, Option<chrono::DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT \"project_id\", \"deleted_at\" FROM \"pod\" WHERE (\"id\" = $1)",
-    )
-    .bind(pod_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError.into_response())?;
+async fn check_assigned_pod(pool: &PgPool, project_id: Uuid, pod_id: Uuid) -> Result<(), Response> {
+    let row: Option<(Uuid, Option<chrono::DateTime<Utc>>)> =
+        sqlx::query_as("SELECT \"project_id\", \"deleted_at\" FROM \"pod\" WHERE (\"id\" = $1)")
+            .bind(pod_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError.into_response())?;
     // The field check above already ensured existence; a concurrent
     // delete degrades to the friendly message, not the generic one.
     let (pod_project, deleted_at) = match row {
@@ -5710,7 +5756,11 @@ async fn insert_issue(
             .fetch_one(pool)
             .await
             .map_err(|_| Denial::ServerError.into_response())?;
-            if has_max { sort_order } else { input }
+            if has_max {
+                sort_order
+            } else {
+                input
+            }
         }
         None => sort_order,
     };
@@ -5779,7 +5829,11 @@ async fn insert_issue(
                 .fetch_one(pool)
                 .await
                 .map_err(|_| Denial::ServerError.into_response())?;
-                if valid { vec![default] } else { Vec::new() }
+                if valid {
+                    vec![default]
+                } else {
+                    Vec::new()
+                }
             }
             None => Vec::new(),
         },
@@ -6034,7 +6088,10 @@ async fn render_created_detail(
 fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_json::Value {
     let mut issue = serde_json::Map::with_capacity(32);
     issue.insert("id".to_owned(), uuid_string(&rows.issue_id));
-    issue.insert("name".to_owned(), serde_json::Value::String(rows.name.clone()));
+    issue.insert(
+        "name".to_owned(),
+        serde_json::Value::String(rows.name.clone()),
+    );
     issue.insert("state_id".to_owned(), opt_uuid(&rows.state_id));
     issue.insert(
         "sort_order".to_owned(),
@@ -6075,22 +6132,21 @@ fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_js
     );
     issue.insert("project_id".to_owned(), uuid_string(&rows.project_id));
     issue.insert("parent_id".to_owned(), opt_uuid(&rows.parent_id));
-    issue.insert("assigned_pod_id".to_owned(), opt_uuid(&rows.assigned_pod_id));
+    issue.insert(
+        "assigned_pod_id".to_owned(),
+        opt_uuid(&rows.assigned_pod_id),
+    );
     issue.insert(
         "agent_executor".to_owned(),
         opt_string(&rows.agent_executor),
     );
     issue.insert(
         "label_ids".to_owned(),
-        serde_json::Value::Array(
-            rows.label_ids.iter().map(uuid_string).collect(),
-        ),
+        serde_json::Value::Array(rows.label_ids.iter().map(uuid_string).collect()),
     );
     issue.insert(
         "assignee_ids".to_owned(),
-        serde_json::Value::Array(
-            rows.assignee_ids.iter().map(uuid_string).collect(),
-        ),
+        serde_json::Value::Array(rows.assignee_ids.iter().map(uuid_string).collect()),
     );
     issue.insert(
         "created_at".to_owned(),

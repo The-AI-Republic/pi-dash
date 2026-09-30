@@ -278,6 +278,9 @@ fn enforce(outcome: GateOutcome) -> Result<(), Response> {
 /// anything else resolves as a workspace-scoped upper-cased identifier
 /// (soft-deleted projects excluded); an unresolvable value answers the
 /// verbatim `{"detail":"Project not found"}` 404 (probed live).
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn resolve_project_id(pool: &sqlx::PgPool, slug: &str, raw: &str) -> Result<Uuid, Response> {
     if let Ok(id) = raw.parse::<Uuid>() {
         return Ok(id);
@@ -1167,6 +1170,9 @@ fn repo_url_field(fields: &Vec<(String, BodyField)>) -> Result<String, Response>
 /// `try`, so it is the 401); 401 → 401, 404 → 404, 403 (a plain
 /// `GithubPermissionError`, not caught) and every other failure
 /// (transport, non-2xx, bad JSON) → the logged 502.
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn verify_repo(
     token: &str,
     owner: &str,
