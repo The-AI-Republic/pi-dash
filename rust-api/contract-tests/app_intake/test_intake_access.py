@@ -106,3 +106,25 @@ def test_unauthenticated_denied(admin, settings):
     urls = intake_urls(admin)
     r = anonymous_client(settings.base_url).get(urls["intakes"])
     assert r.status_code in (401, 403), r.text[:500]
+
+
+def test_unknown_project_identifier_404(make_tenant):
+    """A non-UUID project identifier that resolves to nothing answers 404
+    {"detail": "Project not found"} on the owned intake collection routes:
+    Project.resolve raises Http404("Project not found") and DRF's
+    exception_handler preserves the message. (PIDASHCONV-465.)"""
+    tenant = make_tenant(role=ADMIN)
+    bad = (
+        f"/api/workspaces/{tenant['workspace']['slug']}"
+        f"/projects/NO-SUCH-PROJECT"
+    )
+    for path in (
+        f"{bad}/intakes/",
+        f"{bad}/inboxes/",
+        f"{bad}/intake-issues/",
+        f"{bad}/inbox-issues/",
+    ):
+        r = tenant["client"].get(path)
+        assert r.status_code == 404, (path, r.status_code, r.text[:300])
+        assert r.json() == {"detail": "Project not found"}, (
+            path, r.text[:300])

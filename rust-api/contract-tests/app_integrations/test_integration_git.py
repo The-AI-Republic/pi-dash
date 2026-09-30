@@ -218,3 +218,23 @@ def test_outsider_denied(outsider_client, world):
     response = outsider_client.get(ws_url(world, "integrations", "git", "providers"))
     assert response.status_code == 403
     assert response.json() == DENIED
+
+
+def test_unknown_project_identifier_404(admin, world):
+    # A non-UUID project identifier that resolves to nothing answers 404
+    # {"detail": "Project not found"}: Project.resolve raises
+    # Http404("Project not found") and DRF's exception_handler preserves
+    # the message. (PIDASHCONV-465.)
+    bad = (
+        f"/api/workspaces/{world['workspace']['slug']}"
+        f"/projects/NO-SUCH-PROJECT"
+    )
+    for method, path, payload in (
+        ("get", f"{bad}/repository/", None),
+        ("post", f"{bad}/repository/bind/",
+         {"repo_url": "https://github.com/octo/demo"}),
+    ):
+        response = admin.request(method, path, json=payload)
+        assert response.status_code == 404, (method, path, response.status_code)
+        assert response.json() == {"detail": "Project not found"}, (
+            method, path, response.text[:300])

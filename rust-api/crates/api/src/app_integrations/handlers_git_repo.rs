@@ -151,9 +151,14 @@ pub const UNAUTHENTICATED_BODY: &str =
     r#"{"detail":"Authentication credentials were not provided."}"#;
 /// `handle_exception`'s generic 500 branch (`views/base.py:147-149`).
 pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
-/// DRF's default `Http404` body (unresolvable project identifier,
-/// missing workspace/project row in the bind body).
+/// DRF's default `Http404` body (missing workspace/project row in the
+/// bind body).
 pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Not found."}"#;
+/// DRF `exception_handler` maps `Http404(*args)` to `NotFound(*args)`, so
+/// the `_rewrite_project_kwarg` miss (`Project.resolve`, "Project not
+/// found") renders with the resolve message — verified against live
+/// Django, not the bare default.
+pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 /// `get_binding` miss (`git.py:136-137`) and the unbind answer
 /// (`git.py:154`).
 pub const UNBOUND_BODY: &str = r#"{"bound":false}"#;
@@ -172,6 +177,8 @@ enum RepoDenial {
     Forbidden,
     /// 404, DRF `Http404` default body.
     NotFoundDetail,
+    /// 404, `{"detail":"Project not found"}` (project-kwarg rewrite miss).
+    ProjectNotFound,
     /// `{"error": message}` with an explicit status (view-inline 400s,
     /// the `_error_response` mapping, the 409 resolution branches).
     Error(StatusCode, String),
@@ -188,6 +195,9 @@ impl RepoDenial {
                 crate::permissions::PERMISSION_DENIED_BODY.to_owned(),
             ),
             RepoDenial::NotFoundDetail => (StatusCode::NOT_FOUND, NOT_FOUND_DETAIL_BODY.to_owned()),
+            RepoDenial::ProjectNotFound => {
+                (StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned())
+            }
             RepoDenial::Error(status, message) => (*status, message.clone()),
             RepoDenial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -283,7 +293,7 @@ async fn resolve_project_id(
     .fetch_optional(pool)
     .await
     .map_err(|_| RepoDenial::ServerError)?;
-    row.map(|row| row.0).ok_or(RepoDenial::NotFoundDetail)
+    row.map(|row| row.0).ok_or(RepoDenial::ProjectNotFound)
 }
 
 /// `@allow_permission` at the default `"PROJECT"` level: an active project

@@ -312,6 +312,12 @@ async fn llm_config(
         .map_err(|_| raw_body(StatusCode::BAD_REQUEST, LLM_CONFIG_REQUIRED_BODY))
 }
 
+/// DRF `exception_handler` maps `Http404(*args)` to `NotFound(*args)`, so
+/// the `_rewrite_project_kwarg` miss (`Project.resolve`, "Project not
+/// found") renders with the resolve message — verified against live
+/// Django, not the bare default.
+const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
+
 fn raw_body(status: StatusCode, body: &'static str) -> Response {
     Response::builder()
         .status(status)
@@ -624,8 +630,11 @@ fn project_detail(row: &ProjectLite) -> Value {
 /// Resolve the `project_id` URL kwarg: a UUID passes through, anything
 /// else resolves as a workspace-scoped identifier
 /// (`_rewrite_project_kwarg`, `views/base.py:49-77` + `Project.resolve`).
-/// Unresolvable values answer the 404 error body.
-async fn resolve_project_id(pool: &sqlx::PgPool, slug: &str, raw: &str) -> Result<Uuid, Denial> {
+/// Unresolvable values answer `{"detail":"Project not found"}` (rendered
+/// here, not through `Denial`, whose `NotFound` is the `ObjectDoesNotExist`
+/// error body owned by the license domain).
+#[allow(clippy::result_large_err)]
+async fn resolve_project_id(pool: &sqlx::PgPool, slug: &str, raw: &str) -> Result<Uuid, Response> {
     if let Ok(id) = raw.parse::<Uuid>() {
         return Ok(id);
     }
@@ -638,8 +647,9 @@ async fn resolve_project_id(pool: &sqlx::PgPool, slug: &str, raw: &str) -> Resul
     .bind(normalized)
     .fetch_optional(pool)
     .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|(id,)| id).ok_or(Denial::NotFound)
+    .map_err(|_| Denial::ServerError.into_response())?;
+    row.map(|(id,)| id)
+        .ok_or_else(|| raw_body(StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY))
 }
 
 // ---------------------------------------------------------------------------
@@ -665,7 +675,7 @@ async fn post_project_assistant(
     };
     let project_id = match resolve_project_id(&pool, &slug, &project_id_raw).await {
         Ok(id) => id,
-        Err(denial) => return denial.into_response(),
+        Err(response) => return response,
     };
     let row = gate_for("POST", "workspaces/<slug>/projects/<id>/ai-assistant/")
         .expect("project assistant gate");

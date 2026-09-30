@@ -254,3 +254,25 @@ def test_tenant_positive_control(clients, seed):
     assert clients["outsider"].get(
         f"{_base(seed['other_slug'], seed['other_project'])}/issues/"
         f"{seed['other_issue']}/").status_code == 200
+
+
+def test_unknown_project_identifier_404(clients, seed):
+    # A non-UUID project identifier that resolves to nothing answers 404
+    # {"detail": "Project not found"} on every list-family route:
+    # Project.resolve raises Http404("Project not found") and DRF's
+    # exception_handler preserves the message. UUID-form misses pass the
+    # rewrite through untouched, so they are not covered here.
+    # (PIDASHCONV-465.)
+    member = clients["member"]
+    bad = f"/api/workspaces/{seed['ws_slug']}/projects/NO-SUCH-PROJECT"
+    for path in (
+        f"{bad}/issues/",
+        f"{bad}/issues/list/",
+        f"{bad}/issues-detail/",
+        f"{bad}/v2/issues/",
+        f"{bad}/deleted-issues/",
+    ):
+        resp = member.get(path)
+        assert resp.status_code == 404, (path, resp.status_code)
+        assert resp.json() == {"detail": "Project not found"}, (
+            path, resp.text[:300])

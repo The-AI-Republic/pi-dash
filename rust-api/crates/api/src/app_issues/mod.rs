@@ -122,8 +122,11 @@ pub const UNAUTHENTICATED_BODY: &str =
     r#"{"detail":"Authentication credentials were not provided."}"#;
 /// `handle_exception`'s `ObjectDoesNotExist` branch.
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// DRF's default `Http404` body (unresolvable project identifier).
-pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Not found."}"#;
+/// DRF `exception_handler` maps `Http404(*args)` to `NotFound(*args)`, so
+/// the `_rewrite_project_kwarg` miss (`Project.resolve`, "Project not
+/// found") renders with the resolve message — verified against live
+/// Django, not the bare default.
+pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 /// `handle_exception`'s generic 500 branch.
 pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `ValidationError` branch (bad UUID in `issues=`).
@@ -174,8 +177,8 @@ pub enum Denial {
     Forbidden,
     /// 404, `ObjectDoesNotExist` branch.
     NotFound,
-    /// 404, DRF `Http404` default body.
-    NotFoundDetail,
+    /// 404, `{"detail":"Project not found"}` (project-kwarg rewrite miss).
+    ProjectNotFound,
     /// 400, `{"detail": ...}` (`ParseError`, filter validation).
     BadDetail(String),
     /// 400, `{"error": ...}` (view-inline).
@@ -195,7 +198,7 @@ impl Denial {
                 crate::permissions::PERMISSION_DENIED_BODY.to_owned(),
             ),
             Denial::NotFound => (StatusCode::NOT_FOUND, NOT_FOUND_BODY.to_owned()),
-            Denial::NotFoundDetail => (StatusCode::NOT_FOUND, NOT_FOUND_DETAIL_BODY.to_owned()),
+            Denial::ProjectNotFound => (StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned()),
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
                 format!("{{\"detail\":{}}}", json_string(message)),
@@ -251,7 +254,7 @@ pub struct Gate {
 /// MEMBER, GUEST])` + guest scoping, in Django's order: anonymous skips
 /// the identifier rewrite (the slug-existence oracle stays closed) and is
 /// rejected 401 before anything else; the rewrite 404s unresolvable
-/// identifiers with the DRF detail body; the role gate 403s before the
+/// identifiers with `{"detail":"Project not found"}`; the role gate 403s before the
 /// view body runs, so a missing project row for a valid UUID answers 403
 /// (no membership) rather than 404.
 pub async fn resolve_gate(
@@ -316,7 +319,7 @@ async fn resolve_project_id(
     .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::NotFoundDetail)
+    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
 }
 
 /// `allow_permission([ADMIN, MEMBER, GUEST])` at `PROJECT` level: an
@@ -2834,8 +2837,8 @@ mod tests {
             r#"{"error":"The required object does not exist."}"#
         );
         assert_eq!(
-            Denial::NotFoundDetail.status_and_body().1,
-            r#"{"detail":"Not found."}"#
+            Denial::ProjectNotFound.status_and_body().1,
+            r#"{"detail":"Project not found"}"#
         );
     }
 
