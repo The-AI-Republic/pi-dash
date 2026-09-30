@@ -581,10 +581,12 @@ fn github_remote_repo(payload: &serde_json::Value) -> pidash_types::integrations
     }
 }
 
-/// `_split_full_path` (`adapters/gitlab.py:78-83`): strip `.git`, strip
-/// `/`, rsplit on `/`.
+/// `_split_full_path` (`adapters/gitlab.py:78-83`): strip `/`, strip
+/// `.git`, rsplit on `/` — in that order (`_strip_git_suffix` runs on
+/// the already slash-stripped path).
 fn split_full_path(path: &str) -> Option<(String, String)> {
-    let stripped = path.strip_suffix(".git").unwrap_or(path).trim_matches('/');
+    let stripped = path.trim_matches('/');
+    let stripped = stripped.strip_suffix(".git").unwrap_or(stripped);
     if stripped.is_empty() || !stripped.contains('/') {
         return None;
     }
@@ -628,7 +630,8 @@ fn gitlab_remote_repo(payload: &serde_json::Value) -> pidash_types::integrations
 
 /// `_normalize_host` (`adapters/gitlab.py:37-46`): strip, trailing-`/`
 /// strip, empty → gitlab.com, scheme prepend (case-sensitive, like
-/// `normalize_host_url`), then lowercase scheme + netloc.
+/// `normalize_host_url`), then lowercase scheme + netloc with the path
+/// dropped (`f"{scheme}://{netloc}"`, not scheme + netloc + tail).
 fn gitlab_normalize_host(host: &str) -> String {
     let host = host.trim().trim_end_matches('/');
     if host.is_empty() {
@@ -648,13 +651,7 @@ fn gitlab_normalize_host(host: &str) -> String {
             if netloc.is_empty() {
                 return host.to_owned();
             }
-            let tail = &rest[netloc.len()..];
-            format!(
-                "{}://{}{}",
-                scheme.to_lowercase(),
-                netloc.to_lowercase(),
-                tail
-            )
+            format!("{}://{}", scheme.to_lowercase(), netloc.to_lowercase())
         }
         _ => host.to_owned(),
     }
@@ -949,6 +946,9 @@ fn stored_token(account: &GitProviderAccount, keyring: &Keyring) -> Result<Strin
 fn data_field(data: &serde_json::Value, key: &str) -> Result<Option<String>, Denial> {
     match data.get(key) {
         None | Some(serde_json::Value::Null) => Ok(None),
+        // `""` is falsy, so `(request.data.get(key) or <default>)` takes
+        // the default — including for `auth_type` (`"" or "pat"`, git.py:78).
+        Some(serde_json::Value::String(s)) if s.is_empty() => Ok(None),
         Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
         Some(serde_json::Value::Bool(false)) => Ok(None),
         Some(serde_json::Value::Number(n)) if n.as_i64() == Some(0) || n.as_u64() == Some(0) => {
@@ -1081,17 +1081,15 @@ async fn create_account(
     } else {
         GITLAB_DEFAULT_HOST
     };
+    // `(request.data.get("host_url") or <default>).rstrip("/")`: the `or`
+    // runs before the strip, so an all-slash value (`"///"`, truthy) strips
+    // down to `""` instead of falling back to the default.
     let host_url = match data_field(&data, "host_url") {
         Ok(value) => value
             .unwrap_or_else(|| default_host.to_owned())
             .trim_end_matches('/')
             .to_owned(),
         Err(denial) => return denial_response(denial),
-    };
-    let host_url = if host_url.is_empty() {
-        default_host.to_owned()
-    } else {
-        host_url
     };
     // `create_provider_account` (`services.py:72-116`).
     let normalized_host = queries_git::normalize_host_url(&host_url);
@@ -1445,9 +1443,11 @@ mod tests {
             gitlab_normalize_host("gitlab.example.com/"),
             "https://gitlab.example.com"
         );
+        // `_normalize_host` drops the path (`f"{scheme}://{netloc}"`,
+        // `adapters/gitlab.py:44-46`), it does not keep the tail.
         assert_eq!(
             gitlab_normalize_host("https://Git.Example.COM/x/"),
-            "https://git.example.com/x"
+            "https://git.example.com"
         );
         assert_eq!(
             gitlab_normalize_host("http://git.internal:8080/"),
@@ -1459,11 +1459,13 @@ mod tests {
 
     #[test]
     fn data_field_mirrors_or_semantics() {
-        let data = serde_json::json!({"a": " x ", "b": 0, "c": false, "d": 7});
+        let data = serde_json::json!({"a": " x ", "b": 0, "c": false, "d": 7, "e": ""});
         assert_eq!(data_field(&data, "a").unwrap(), Some(" x ".to_owned()));
         assert_eq!(data_field(&data, "b").unwrap(), None);
         assert_eq!(data_field(&data, "c").unwrap(), None);
         assert_eq!(data_field(&data, "missing").unwrap(), None);
+        // `""` is falsy: `("" or "pat")` takes the default (git.py:78).
+        assert_eq!(data_field(&data, "e").unwrap(), None);
         assert!(data_field(&data, "d").is_err());
     }
 
@@ -1512,5 +1514,11 @@ mod tests {
             ("g/sub", "r")
         );
         assert!(repo.is_private);
+        // Slashes strip before the `.git` suffix (`_split_full_path`,
+        // `adapters/gitlab.py:78-83`): `"g/r.git/"` splits to `("g", "r")`.
+        assert_eq!(
+            split_full_path("g/r.git/"),
+            Some(("g".to_owned(), "r".to_owned()))
+        );
     }
 }
