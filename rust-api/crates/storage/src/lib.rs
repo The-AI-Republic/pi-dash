@@ -46,6 +46,6 @@ pub use avatar::{
     content_length_allowed, head_to_storage_metadata, ENTITY_TYPE_USER_AVATAR,
 };
 pub use s3::{
-    resolve_server_endpoint, sha256_hex, sign_delete, sign_put, validate_storage, ResolvedEndpoint,
-    SignedRequest, StorageError,
+    resolve_server_endpoint, sha256_hex, sign_delete, sign_head, sign_put, validate_storage,
+    ResolvedEndpoint, SignedRequest, StorageError,
 };

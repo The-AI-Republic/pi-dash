@@ -59,18 +59,28 @@
 //!   headers bind NULL into NOT NULL columns, so the stamps update raises
 //!   (500), exactly like Django's `save()`.
 //!
-//! # Documented divergences (no workspace precedent; follow-up owned)
+//! # Wired success effects (PIDASHCONV-475; via PIDASHCONV-479/480)
 //!
-//! * Avatar persistence (`download_and_upload_avatar`, `delete_old_avatar`):
-//!   no S3 client exists anywhere in `rust-api/`, so the port takes
-//!   Python's own failure branch — the provider avatar URL is stored
-//!   directly, as `base.py:335-345` does whenever the upload fails.
-//!   Tracked by the follow-up issue in the PR body.
+//! * Avatar persistence (`download_and_upload_avatar`, `delete_old_avatar`,
+//!   `base.py:139-254,285-287`): the provider bytes download over reqwest
+//!   (10s timeout, `DATA_UPLOAD_MAX_MEMORY_SIZE` guards) and upload through
+//!   the assets/storage-owned signer (`pidash_storage::sign_put`,
+//!   `sign_head`, `sign_delete` — PIDASHCONV-480; this domain never signs
+//!   SigV4 itself), then a `FileAsset` row (`USER_AVATAR`, uploaded) is
+//!   inserted and the FK set. Every S3 failure takes Python's own fallback
+//!   — the provider URL is stored directly, as `base.py:335-345` does —
+//!   and nothing here 500s.
 //! * Cache invalidation (`invalidate_cache_directly`, one Redis `KEYS` +
-//!   `DEL` per joined workspace): `pidash_db::redis::RedisHandle` exposes
-//!   no keys/del API and foundation crates are read-only, so the call is
-//!   a documented no-op (same precedent as `recent_visited_task` in
-//!   `app_issues`). Tracked by the same follow-up.
+//!   `DEL` per joined workspace): `RedisHandle::invalidate_matching`
+//!   (PIDASHCONV-479) runs per joined workspace slug with the exact
+//!   `*{path}*` pattern; Redis failures propagate like Python.
+//! * `BUG-content-type-exact-match` (via the shared helper,
+//!   `base.py:165-175`): the extension allowlist keys on the raw
+//!   `Content-Type` header value, so `"image/png; charset=binary"` misses
+//!   and falls back to the provider URL, exactly like Python.
+//!
+//! # Remaining documented divergences
+//!
 //! * Celery `.delay()` publishes (`user_activation_email`, `track_event`)
 //!   enqueue into the Postgres job queue (`pidash_jobs::queue::enqueue`,
 //!   warn-and-continue on failure) per the `handlers_webhook` precedent.
@@ -94,6 +104,7 @@ use serde_json::Value;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_db::redis::RedisHandle;
 
 use pidash_services::auth_oauth::error::AuthenticationException;
 use pidash_services::auth_oauth::exchange::map_exchange_error;
@@ -397,6 +408,14 @@ pub struct RequestContext<'a> {
     pub space_base: String,
     pub pool: sqlx::PgPool,
     pub session: SessionHandle,
+    /// Shared Redis handle for the join-path cache invalidation
+    /// (`invalidate_cache_directly`, PIDASHCONV-479). `None` when
+    /// `REDIS_URL` is unset — the join path then 500s like Python does
+    /// when its cache backend is down.
+    pub redis: Option<RedisHandle>,
+    /// S3 endpoint/credentials for the avatar upload + delete
+    /// (`pidash_storage`, PIDASHCONV-480).
+    pub storage: pidash_db::config::StorageSettings,
 }
 
 impl<'a> RequestContext<'a> {
@@ -442,6 +461,8 @@ impl<'a> RequestContext<'a> {
             session: session
                 .map(|extension| extension.0)
                 .ok_or_else(server_error)?,
+            redis: state.redis().cloned(),
+            storage: state.settings().storage.clone(),
         })
     }
 
@@ -1235,31 +1256,34 @@ pub async fn google_sync_enabled(pool: &sqlx::PgPool, secret: &str) -> Result<bo
     Ok(config_display(&values[0]) == "1")
 }
 
+/// `settings.DATA_UPLOAD_MAX_MEMORY_SIZE` (`settings/common.py:594`):
+/// `int(get_config("FILE_SIZE_LIMIT", 5242880))`.
+pub const AVATAR_MAX_BYTES: u64 = 5_242_880;
+
 /// `sync_user_data` (`adapter/base.py:256-287`): names, display name
 /// (`get_display_name` — google payloads carry no `display_name`, so the
-/// email prefix always wins), and the avatar URL. The old asset row is
-/// deleted and the FK cleared (the S3 object delete and the re-upload
-/// have no workspace precedent — see the module docs); the FK stays
-/// untouched when no asset was linked.
+/// email prefix always wins), then the avatar pair: `delete_old_avatar`
+/// first (S3 object + row + FK/field clear), then `download_and_upload_avatar`.
+/// On success only the new FK is set (the avatar string keeps the `""` the
+/// delete wrote); on failure the provider URL is stored — `base.py:278-284`
+/// verbatim. The FK stays untouched when no asset was linked.
+#[allow(clippy::too_many_arguments)]
 pub async fn sync_user_data(
+    client: &reqwest::Client,
     pool: &sqlx::PgPool,
+    storage: &pidash_db::config::StorageSettings,
+    scheme: &str,
+    host: &str,
     user: &UserRow,
     email: &str,
     first_name: &str,
     last_name: &str,
     avatar_url: &str,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), CallbackError> {
-    if user.avatar_asset_id.is_some() {
-        sqlx::query("DELETE FROM \"file_assets\" WHERE \"id\" = $1")
-            .bind(user.avatar_asset_id)
-            .execute(pool)
-            .await
-            .map_err(|_| CallbackError::Internal)?;
-    }
     sqlx::query(
         "UPDATE \"users\" SET \"first_name\" = $1, \"last_name\" = $2, \
-         \"display_name\" = $3, \"avatar\" = $4, \"avatar_asset_id\" = NULL \
-         WHERE \"id\" = $5",
+         \"display_name\" = $3 WHERE \"id\" = $4",
     )
     .bind(if first_name.is_empty() {
         String::new()
@@ -1272,12 +1296,384 @@ pub async fn sync_user_data(
         last_name.to_owned()
     })
     .bind(get_display_name(email))
-    .bind(avatar_url)
     .bind(user.id)
     .execute(pool)
     .await
     .map_err(|_| CallbackError::Internal)?;
+    delete_old_avatar(
+        client,
+        pool,
+        storage,
+        scheme,
+        host,
+        user.id,
+        user.avatar_asset_id,
+        now,
+    )
+    .await;
+    match download_and_upload_avatar(
+        client, pool, storage, scheme, host, avatar_url, user.id, now,
+    )
+    .await
+    {
+        Some(asset_id) => {
+            sqlx::query("UPDATE \"users\" SET \"avatar_asset_id\" = $1 WHERE \"id\" = $2")
+                .bind(asset_id)
+                .bind(user.id)
+                .execute(pool)
+                .await
+                .map_err(|_| CallbackError::Internal)?;
+        }
+        None => {
+            sqlx::query("UPDATE \"users\" SET \"avatar\" = $1 WHERE \"id\" = $2")
+                .bind(avatar_url)
+                .bind(user.id)
+                .execute(pool)
+                .await
+                .map_err(|_| CallbackError::Internal)?;
+        }
+    }
     Ok(())
+}
+
+/// `download_and_upload_avatar` (`adapter/base.py:139-218`): provider
+/// download (10s timeout, `Content-Length` pre-check, exact-match
+/// content-type allowlist, streaming size guard), SigV4 PUT through the
+/// shared signer, HEAD metadata, `FileAsset` row. ANY failure returns
+/// `None` so the caller falls back to the provider URL
+/// (`except Exception: log_exception; return None`). `storage` /
+/// `scheme` / `host` mirror the `S3Storage(request)` server-side call the
+/// avatar flow makes (`base.py:198`, `is_server=False`).
+#[allow(clippy::too_many_arguments)]
+pub async fn download_and_upload_avatar(
+    client: &reqwest::Client,
+    pool: &sqlx::PgPool,
+    storage: &pidash_db::config::StorageSettings,
+    scheme: &str,
+    host: &str,
+    avatar_url: &str,
+    user_id: uuid::Uuid,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<uuid::Uuid> {
+    if avatar_url.is_empty() {
+        return None;
+    }
+    // `get_avatar_download_headers` (`base.py:122-123`): empty for the base
+    // adapter — no provider overrides it for google.
+    let response = match client
+        .get(avatar_url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(%error, "avatar download failed; falling back to provider URL");
+            return None;
+        }
+    };
+    let mut response = match response.error_for_status() {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(%error, "avatar download status failed; falling back to provider URL");
+            return None;
+        }
+    };
+    let headers = response.headers().clone();
+    // `if content_length and int(content_length) > max_size: return None`
+    // (`base.py:155-158`): a missing (or empty) header imposes no limit; an
+    // unparseable one raises in Python, i.e. the same `None` outcome.
+    match headers
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+    {
+        None => {}
+        Some(raw) => match raw.parse::<i64>() {
+            Ok(length)
+                if pidash_storage::content_length_allowed(
+                    Some(length),
+                    AVATAR_MAX_BYTES as i64,
+                ) => {}
+            _ => {
+                tracing::warn!(
+                    "avatar over size limit or bad length; falling back to provider URL"
+                );
+                return None;
+            }
+        },
+    }
+    // Raw header value, defaulting exactly like Python (`base.py:160`);
+    // the exact-match allowlist (and its bug) lives in the shared helper.
+    let content_type = headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_owned();
+    let extension = match pidash_storage::avatar_extension(Some(&content_type)) {
+        Some(extension) => extension,
+        None => {
+            tracing::warn!("avatar content type not allowed; falling back to provider URL");
+            return None;
+        }
+    };
+    let mut content = Vec::new();
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(error) => {
+                tracing::warn!(%error, "avatar stream failed; falling back to provider URL");
+                return None;
+            }
+        };
+        if !pidash_storage::chunk_fits(content.len() as u64, chunk.len() as u64, AVATAR_MAX_BYTES) {
+            tracing::warn!("avatar over size limit; falling back to provider URL");
+            return None;
+        }
+        content.extend_from_slice(&chunk);
+    }
+    let file_size = content.len() as i64;
+    // `f"{uuid4hex}-user-avatar.{extension}"` (`base.py:188`): the S3 key
+    // and, verbatim, the `asset` column (`objects.create` stores the raw
+    // string — `upload_to` never applies).
+    let filename =
+        pidash_storage::avatar_object_key(&uuid::Uuid::new_v4().simple().to_string(), extension);
+    if pidash_storage::validate_storage(storage).is_err() {
+        tracing::warn!("avatar storage misconfigured; falling back to provider URL");
+        return None;
+    }
+    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let date_stamp = now.format("%Y%m%d").to_string();
+    let signed = pidash_storage::sign_put(
+        storage,
+        scheme,
+        host,
+        &filename,
+        &content_type,
+        &content,
+        &amz_date,
+        &date_stamp,
+    );
+    let put = match client
+        .put(signed.url)
+        .header("Authorization", signed.authorization)
+        .header("x-amz-date", signed.amz_date)
+        .header("x-amz-content-sha256", signed.content_sha256)
+        .header(reqwest::header::CONTENT_TYPE, content_type.clone())
+        .body(content)
+        .send()
+        .await
+    {
+        Ok(put) => put,
+        Err(error) => {
+            tracing::warn!(%error, "avatar S3 PUT failed; falling back to provider URL");
+            return None;
+        }
+    };
+    if !put.status().is_success() {
+        tracing::warn!(status = %put.status(), "avatar S3 PUT rejected; falling back to provider URL");
+        return None;
+    }
+    // `get_object_metadata` (`storage.py:156-174`): HEAD the stored key; a
+    // HEAD failure records `None` (NULL metadata) while the row is still
+    // created.
+    let metadata = head_storage_metadata(client, storage, scheme, host, &filename, &now).await;
+    let asset_id = uuid::Uuid::new_v4();
+    if insert_file_asset(
+        pool,
+        asset_id,
+        &filename,
+        extension,
+        &content_type,
+        file_size,
+        user_id,
+        metadata,
+        now,
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!("avatar FileAsset insert failed; falling back to provider URL");
+        return None;
+    }
+    Some(asset_id)
+}
+
+/// `S3Storage.get_object_metadata` (`storage.py:156-174`) executed over a
+/// shared-signed HEAD: the response headers projected through the shared
+/// mapper (`LastModified` HTTP-date → ISO-8601, `Metadata` the
+/// `x-amz-meta-*` map — `{}` for avatar uploads). `None` on any failure,
+/// exactly Python's logged-and-`None` contract.
+pub async fn head_storage_metadata(
+    client: &reqwest::Client,
+    storage: &pidash_db::config::StorageSettings,
+    scheme: &str,
+    host: &str,
+    object_key: &str,
+    now: &chrono::DateTime<chrono::Utc>,
+) -> Option<serde_json::Value> {
+    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let date_stamp = now.format("%Y%m%d").to_string();
+    let signed =
+        pidash_storage::sign_head(storage, scheme, host, object_key, &amz_date, &date_stamp);
+    let head = client
+        .head(signed.url)
+        .header("Authorization", signed.authorization)
+        .header("x-amz-date", signed.amz_date)
+        .header("x-amz-content-sha256", signed.content_sha256)
+        .send()
+        .await
+        .ok()?;
+    if !head.status().is_success() {
+        return None;
+    }
+    let headers = head.headers();
+    let header_str = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    let content_length = headers
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<i64>().ok());
+    let last_modified = header_str("last-modified")
+        .and_then(|value| chrono::DateTime::parse_from_rfc2822(&value).ok())
+        .map(|dt| dt.to_rfc3339());
+    Some(pidash_storage::head_to_storage_metadata(
+        header_str("content-type").as_deref(),
+        content_length,
+        last_modified.as_deref(),
+        header_str("etag").as_deref(),
+        None,
+    ))
+}
+
+/// New `FileAsset` row (`base.py:197-206`): `attributes={name, type,
+/// size}` (`{provider}-avatar.{extension}`), `asset` the bare filename,
+/// `user` + `created_by` set, entity `USER_AVATAR`, uploaded flag, S3
+/// head metadata (`None` → NULL when the HEAD failed, like boto3's
+/// `None`). Every other column rides its Django default (the reviewed
+/// column list mirrors the D-17 gitea port of the same table).
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_file_asset(
+    pool: &sqlx::PgPool,
+    id: uuid::Uuid,
+    stored_key: &str,
+    extension: &str,
+    content_type: &str,
+    file_size: i64,
+    user_id: uuid::Uuid,
+    storage_metadata: Option<serde_json::Value>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), sqlx::Error> {
+    let attributes =
+        pidash_storage::avatar_attributes(PROVIDER, extension, content_type, file_size);
+    sqlx::query(
+        r#"INSERT INTO file_assets
+           (id, created_at, updated_at, attributes, asset,
+            created_by_id, updated_by_id, workspace_id,
+            is_deleted, deleted_at, is_archived,
+            comment_id, entity_type, external_id, external_source,
+            is_uploaded, issue_id, page_id, project_id,
+            size, storage_metadata, user_id, draft_issue_id, entity_identifier)
+           VALUES ($1,$2,$2,$3,$4,$5,NULL,NULL,
+                   FALSE,NULL,FALSE,
+                   NULL,'USER_AVATAR',NULL,NULL,
+                   TRUE,NULL,NULL,NULL,
+                   $6,$7,$5,NULL,NULL)"#,
+    )
+    .bind(id)
+    .bind(now)
+    .bind(attributes)
+    .bind(stored_key)
+    .bind(user_id)
+    .bind(file_size as f64)
+    .bind(storage_metadata)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// `delete_old_avatar` (`adapter/base.py:285-287`): when the user carries
+/// an avatar asset, delete the S3 object + the row and clear both columns.
+/// `FileAsset.DoesNotExist` passes silently; any other failure is logged
+/// and the flow continues (`except Exception: log_exception; return`) —
+/// so this returns `()` always and never fails the pipeline.
+///
+/// Row-delete policy mirrors `delete_files` exactly: the S3 multi-delete
+/// is idempotent and its `ClientError` collapses to `False`, after which
+/// Python still deletes the row — so any *answered* HTTP response (even
+/// an error status) deletes the row + clears the FK. Only a *transport*
+/// failure (Python's non-`ClientError` raise, e.g. connection loss) or a
+/// misconfigured backend (Python fails lazily on first use) keeps the
+/// old avatar intact.
+#[allow(clippy::too_many_arguments)]
+pub async fn delete_old_avatar(
+    client: &reqwest::Client,
+    pool: &sqlx::PgPool,
+    storage: &pidash_db::config::StorageSettings,
+    scheme: &str,
+    host: &str,
+    user_id: uuid::Uuid,
+    avatar_asset_id: Option<uuid::Uuid>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let Some(asset_id) = avatar_asset_id else {
+        return;
+    };
+    let row: Option<(String,)> =
+        match sqlx::query_as("SELECT \"asset\" FROM \"file_assets\" WHERE \"id\" = $1")
+            .bind(asset_id)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::warn!(%error, "delete_old_avatar lookup failed");
+                return;
+            }
+        };
+    let Some((key,)) = row else {
+        return;
+    };
+    if pidash_storage::validate_storage(storage).is_err() {
+        tracing::warn!("delete_old_avatar storage misconfigured; keeping old avatar");
+        return;
+    }
+    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let date_stamp = now.format("%Y%m%d").to_string();
+    let signed = pidash_storage::sign_delete(storage, scheme, host, &key, &amz_date, &date_stamp);
+    match client
+        .delete(signed.url)
+        .header("Authorization", signed.authorization)
+        .header("x-amz-date", signed.amz_date)
+        .header("x-amz-content-sha256", signed.content_sha256)
+        .send()
+        .await
+    {
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, "delete_old_avatar S3 delete failed; keeping old avatar");
+            return;
+        }
+    }
+    if sqlx::query("DELETE FROM \"file_assets\" WHERE \"id\" = $1")
+        .bind(asset_id)
+        .execute(pool)
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let _ = sqlx::query(
+        "UPDATE \"users\" SET \"avatar_asset_id\" = NULL, \"avatar\" = '' WHERE \"id\" = $1",
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await;
 }
 
 /// Best-effort `.delay()` through the Postgres job queue
@@ -1569,13 +1965,25 @@ pub fn map_invite_role(role: i16) -> i16 {
     }
 }
 
+/// `invalidate_cache_directly(path, url_params=False, user=False,
+/// multiple=True)` with `request=None` (`utils/cache.py:54-75` +
+/// `workspace_project_join.py:39-44`): `user=False` forces
+/// `auth_header=None`, so `generate_cache_key` returns the bare path and
+/// `multiple=True` deletes every key matching `*{path}*` (`KEYS` + `DEL`).
+/// Any Redis failure raises in Python, so it surfaces as a 500 here too.
+pub fn workspace_members_cache_pattern(workspace_slug: &str) -> String {
+    format!("*/api/workspaces/{workspace_slug}/members/*")
+}
+
 /// `process_workspace_project_invitations`
 /// (`workspace_project_join.py:20-91`): workspace joins (membership +
-/// `track_event` per invite; cache invalidation is a documented no-op —
-/// see the module docs), project-invite workspace joins (mapped role),
-/// the buggy project joins, then both invite deletes.
+/// per-invite cache invalidation + `track_event`; invalidation runs
+/// before the event publish, `join.py:39-45` order),
+/// project-invite workspace joins (mapped role), the buggy project joins,
+/// then both invite deletes.
 pub async fn process_invitations(
     pool: &sqlx::PgPool,
+    redis: Option<&RedisHandle>,
     user_id: uuid::Uuid,
     email: &str,
     now: chrono::DateTime<chrono::Utc>,
@@ -1587,6 +1995,14 @@ pub async fn process_invitations(
         .collect();
     insert_workspace_members(pool, &workspace_rows, now).await?;
     for invite in &workspace_invites {
+        // `invalidate_cache_directly(path=f"/api/workspaces/{slug}/members/",
+        // user=False, multiple=True)` — a missing handle 500s, like Python
+        // with its cache backend down.
+        let handle = redis.ok_or(CallbackError::Internal)?;
+        handle
+            .invalidate_matching(&workspace_members_cache_pattern(&invite.slug))
+            .await
+            .map_err(|_| CallbackError::Internal)?;
         let mut properties = serde_json::Map::new();
         properties.insert("user_id".to_owned(), Value::String(user_id.to_string()));
         properties.insert(
@@ -1809,9 +2225,10 @@ pub struct AuthedUser {
 
 /// Full success pipeline for one `code`: config (5105), token exchange +
 /// userinfo (5115), sanitize (5005/5035), lookup, signup (profile +
-/// avatar-URL fallback, then IDP sync for the new user when enabled —
-/// `not is_signup`, never for existing users), stamps, post-auth
-/// workflow on the app side (`with_callback`), account upsert.
+/// avatar upload attempt with provider-URL fallback, then IDP sync for
+/// the new user when enabled — `not is_signup`, never for existing
+/// users), stamps, post-auth workflow on the app side (`with_callback`),
+/// account upsert.
 pub async fn authenticate_google(
     ctx: &RequestContext<'_>,
     secret: &str,
@@ -1824,6 +2241,9 @@ pub async fn authenticate_google(
     let client = reqwest::Client::builder()
         .build()
         .map_err(|_| CallbackError::Internal)?;
+    // `request.scheme` for the server-side S3 calls (`S3Storage(request)`,
+    // `base.py:198` — `is_server=False` signs the public host).
+    let scheme = if ctx.secure { "https" } else { "http" };
     let token_response =
         fetch_user_token(&client, code, &client_id, &client_secret, &callback_uri).await?;
     let tokens = token_fields(&token_response)?;
@@ -1863,10 +2283,46 @@ pub async fn authenticate_google(
                     .await
                     .map_err(|_| CallbackError::Internal)?;
                 row.avatar = avatar_url.to_owned();
+                // `avatar_asset = download_and_upload_avatar(...)`;
+                // success sets the FK too, failure keeps the provider URL
+                // (`base.py:330-345`). No old avatar exists to delete.
+                if let Some(asset_id) = download_and_upload_avatar(
+                    &client,
+                    &ctx.pool,
+                    &ctx.storage,
+                    scheme,
+                    &ctx.host,
+                    avatar_url,
+                    row.id,
+                    now,
+                )
+                .await
+                {
+                    sqlx::query("UPDATE \"users\" SET \"avatar_asset_id\" = $1 WHERE \"id\" = $2")
+                        .bind(asset_id)
+                        .bind(row.id)
+                        .execute(&ctx.pool)
+                        .await
+                        .map_err(|_| CallbackError::Internal)?;
+                    row.avatar_asset_id = Some(asset_id);
+                }
             }
             get_or_create_profile(&ctx.pool, row.id, now).await?;
             if !is_signup && google_sync_enabled(&ctx.pool, secret).await? {
-                sync_user_data(&ctx.pool, &row, &email, first_name, last_name, avatar_url).await?;
+                sync_user_data(
+                    &client,
+                    &ctx.pool,
+                    &ctx.storage,
+                    scheme,
+                    &ctx.host,
+                    &row,
+                    &email,
+                    first_name,
+                    last_name,
+                    avatar_url,
+                    now,
+                )
+                .await?;
             }
             row
         }
@@ -1882,7 +2338,7 @@ pub async fn authenticate_google(
     )
     .await?;
     if with_callback {
-        process_invitations(&ctx.pool, user.id, &email, now).await?;
+        process_invitations(&ctx.pool, ctx.redis.as_ref(), user.id, &email, now).await?;
     }
     upsert_account(&ctx.pool, user.id, &user_data, &tokens, now).await?;
     Ok(AuthedUser { row: user, email })
@@ -2263,5 +2719,27 @@ mod tests {
         assert_eq!(map_invite_role(5), 5);
         assert_eq!(map_invite_role(15), 15);
         assert_eq!(map_invite_role(20), 15);
+    }
+
+    #[test]
+    fn workspace_members_cache_pattern_matches_python() {
+        // `workspace_project_join.py:39-44`: `path` is the bare
+        // `/api/workspaces/{slug}/members/` (`user=False`, `request=None`)
+        // and `multiple=True` wraps it as `*{key}*` (`cache.py:66-67`).
+        assert_eq!(
+            workspace_members_cache_pattern("acme"),
+            "*/api/workspaces/acme/members/*"
+        );
+        assert_eq!(
+            workspace_members_cache_pattern("ai-republic"),
+            "*/api/workspaces/ai-republic/members/*"
+        );
+    }
+
+    #[test]
+    fn avatar_size_limit_matches_settings_default() {
+        // `FILE_SIZE_LIMIT` / `DATA_UPLOAD_MAX_MEMORY_SIZE`
+        // (`settings/common.py:428,594`): `int(get_config(..., 5242880))`.
+        assert_eq!(AVATAR_MAX_BYTES, 5_242_880);
     }
 }
