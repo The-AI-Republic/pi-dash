@@ -179,8 +179,8 @@ pub const COUNT_ALIASES: &[&str] = &[
 /// The five state groups feeding the count/estimate subqueries, in source
 /// order (`base.py:86-135`); `None` is the total (no group filter).
 pub const COUNT_GROUPS: &[Option<&str>] = &[
-    Some("cancelled"),
     Some("completed"),
+    Some("cancelled"),
     Some("started"),
     Some("unstarted"),
     Some("backlog"),
