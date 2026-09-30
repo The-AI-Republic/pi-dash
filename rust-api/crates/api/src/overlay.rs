@@ -205,9 +205,9 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // (PIDASHCONV-414) + analytic handlers-B — saved-analytic-view,
         // export-analytics, default-analytics, project-stats
         // (PIDASHCONV-399; gates: PIDASHCONV-358) in `app_analytics`;
-        // D-30 page favorites + description (PIDASHCONV-332) in
-        // `app_pages`; sibling handler issues extend the merge; merges
-        // keep both sides).
+        // D-30 page favorites + description (PIDASHCONV-332) + state
+        // ops (PIDASHCONV-328) in `app_pages`; sibling handler issues
+        // extend the merge; merges keep both sides).
         RouteGroup::App => crate::app_issues::routes()
             .merge(crate::app_views_search::routes())
             .merge(crate::app_intake::routes())
