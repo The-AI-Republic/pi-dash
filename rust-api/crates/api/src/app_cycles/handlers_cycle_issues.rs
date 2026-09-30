@@ -31,9 +31,6 @@
 //!
 //! # Ported bugs (translate, don't redesign — also listed in the PR)
 //!
-//! * `create` with a `NULL` cycle `end_date` raises `TypeError`
-//!   (`None < timezone.now()`, `:232`) → generic 500. Draft cycles 500 on
-//!   every add here too.
 //! * `destroy` on a missing bridge still answers 204: `filter().delete()`
 //!   on an empty set with no existence check (`:301-320`).
 //! * `retrieve` / `update` / `partial_update` on the detail path fall
@@ -1013,6 +1010,17 @@ pub const CYCLE_COMPLETED_BODY: &str =
 /// 201 success envelope (`issue.py:297`).
 pub const CYCLE_ISSUE_CREATE_BODY: &str = r#"{"message":"success"}"#;
 
+/// Completed-cycle check (`issue.py:232`): `if cycle.end_date is not None
+/// and cycle.end_date < timezone.now()`. The `is not None` guard
+/// short-circuits, so a dateless (`NULL`) cycle is never completed and the
+/// create falls through to 201.
+fn cycle_is_completed(
+    end: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    matches!(end, Some(end) if end < now)
+}
+
 /// Python truthiness over a decoded JSON value for `if not issues:`
 /// (`issue.py:227`): `null`, `false`, `0`/`0.0`, `""`, `[]` and `{}` are
 /// falsy; every other value — non-empty strings/arrays/objects, non-zero
@@ -1097,17 +1105,12 @@ async fn cycle_issue_create(
     .await
     .map_err(|_| Denial::ServerError)?;
     let (_, workspace_id, end_date) = cycle.ok_or(Denial::NotFound)?;
-    // Completed-cycle refusal (`:232-236`); a NULL `end_date` raises
-    // `TypeError` in Python → generic 500 here too (ported bug).
-    match end_date {
-        None => return Err(Denial::ServerError),
-        Some(end) if end < chrono::Utc::now() => {
-            return Ok(json_response(
-                StatusCode::BAD_REQUEST,
-                CYCLE_COMPLETED_BODY.to_owned(),
-            ));
-        }
-        Some(_) => {}
+    // Completed-cycle refusal (`:232-236`).
+    if cycle_is_completed(end_date, chrono::Utc::now()) {
+        return Ok(json_response(
+            StatusCode::BAD_REQUEST,
+            CYCLE_COMPLETED_BODY.to_owned(),
+        ));
     }
     // UUID coercion happens at the `__in` filter (`:239`), after the
     // cycle lookup and the end-date check above.
@@ -1258,7 +1261,13 @@ async fn cycle_issue_create(
         Value::String(
             serde_json::json!({
                 "updated_cycle_issues": updated_activity,
-                "created_cycle_issues": created_activity,
+                // `serializers.serialize("json", created_records)` (`:288`)
+                // embeds a *string*; the consumer `json.loads`es it
+                // (`bgtasks/issue_activities_task.py:771`), so an array
+                // here would poison the `cycle.activity.created` task.
+                "created_cycle_issues": Value::String(
+                    serde_json::to_string(&created_activity).expect("activity payload"),
+                ),
             })
             .to_string(),
         ),
@@ -1413,6 +1422,23 @@ mod tests {
             Err(Denial::ServerError) => (500, "server-error".to_owned()),
             Err(other) => panic!("unexpected denial: {other:?}"),
         }
+    }
+
+    #[test]
+    fn null_end_date_never_completes_the_cycle() {
+        // `if cycle.end_date is not None and ...` (issue.py:232): the
+        // guard short-circuits, so a dateless cycle always proceeds.
+        use chrono::TimeZone;
+        let now = chrono::Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        assert!(!cycle_is_completed(None, now));
+        assert!(cycle_is_completed(
+            Some(chrono::Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap()),
+            now
+        ));
+        assert!(!cycle_is_completed(
+            Some(chrono::Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap()),
+            now
+        ));
     }
 
     #[test]
