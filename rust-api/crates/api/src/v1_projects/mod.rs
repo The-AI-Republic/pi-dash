@@ -8,8 +8,20 @@
 //!
 //! Wiring note: the crate root declares `pub mod v1_projects;` (seam for
 //! this issue's new files); every file under this module is new. Sibling
-//! issues add their own handler modules here; on rebase keep both sides.
+//! issues add their own handler modules here and merge their routers into
+//! [`routes`]; on rebase keep both sides.
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
+pub mod handlers_members;
 pub mod perms;
+
+use axum::Router;
+
+use crate::state::AppState;
+
+/// Domain router: member / invite / user routes (PIDASHCONV-371). Sibling
+/// D-19 handler issues merge their routers here; merges keep both sides.
+pub fn routes() -> Router<AppState> {
+    handlers_members::routes()
+}
