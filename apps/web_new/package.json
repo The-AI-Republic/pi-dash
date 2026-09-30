@@ -14,7 +14,8 @@
     "check:boundaries": "node checks/check-boundaries.mjs",
     "check:headers": "node checks/check-headers.mjs",
     "check:deps": "node checks/check-deps.mjs",
-    "check": "pnpm lint && pnpm check:boundaries && pnpm check:headers && pnpm check:deps",
+    "check:similarity": "node checks/check-similarity.mjs",
+    "check": "pnpm lint && pnpm check:boundaries && pnpm check:headers && pnpm check:deps && pnpm check:similarity",
     "test": "vitest run",
     "size": "size-limit"
   },
