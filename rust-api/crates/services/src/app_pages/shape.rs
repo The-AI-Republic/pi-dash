@@ -281,8 +281,13 @@ pub fn validate_binary_text(text: &str) -> Result<Vec<u8>, &'static str> {
 /// (`page.py:187`): `validate=False`, so bytes outside the standard
 /// alphabet are discarded before decoding rather than rejected. The
 /// strict `STANDARD` engine runs over the filtered text, so lengths and
-/// padding fail exactly where `binascii` fails.
+/// padding fail exactly where `binascii` fails for ASCII input.
+/// Non-ASCII input is rejected up front: `binascii` only accepts
+/// ASCII-only `str` (`ValueError` otherwise, caught at `page.py:195-198`).
 pub fn decode_base64_lenient(value: &str) -> Result<Vec<u8>, String> {
+    if !value.is_ascii() {
+        return Err("string argument should contain only ASCII characters".to_owned());
+    }
     let filtered: String = value
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '+' || *c == '/' || *c == '=')
@@ -551,6 +556,21 @@ mod tests {
         ));
         assert!(is_blank(""));
         assert!(!is_blank("x"));
+    }
+
+    #[test]
+    fn non_ascii_base64_rejected_like_cpython() {
+        // `binascii.a2b_base64` rejects non-ASCII `str` outright
+        // (`ValueError`, caught at page.py:195-198), even when the ASCII
+        // remainder would decode: `b64decode("iVBORw0KGgo=é")` raises.
+        assert_eq!(
+            validate_description_binary("iVBORw0KGgo=é").expect_err("must fail"),
+            DECODE_FAILED_MESSAGE
+        );
+        assert_eq!(
+            validate_binary_text("iVBORw0KGgo=é"),
+            Err(BINARY_BASE64_MESSAGE)
+        );
     }
 
     #[test]
