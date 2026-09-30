@@ -267,3 +267,14 @@ def test_tenant_isolation(api, seed, tenant_a, tenant_b, project_a, auth_a, auth
     r = api.get(_views_url(tenant_a, project_a), headers=auth_b)
     assert r.status_code == 403, r.text
     assert r.json() == {"error": "You don't have the required permissions."}
+
+
+def test_unknown_project_identifier_404(api, tenant_a, auth_a):
+    """A non-UUID project identifier that resolves to no row raises
+    Http404("Project not found") in _rewrite_project_kwarg
+    (db/models/project.py:213-217); DRF's Http404 -> NotFound conversion
+    keeps the message, so the body is {"detail": "Project not found"} --
+    not the bare {"detail": "Not found."}."""
+    r = api.get(_views_url(tenant_a, "NOPE"), headers=auth_a)
+    assert r.status_code == 404, r.text
+    assert r.json() == {"detail": "Project not found"}

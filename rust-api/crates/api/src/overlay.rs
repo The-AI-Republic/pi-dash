@@ -180,8 +180,9 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
             .route("/", any(web::health_check))
             .route("/robots.txt", any(web::robots_txt)),
         // App handlers merge their routers here (D-26 issue lists in
-        // `app_issues`; D-29 search, PIDASHCONV-276, in
-        // `app_views_search`; D-32 intake-issues/inbox-issues list+create,
+        // `app_issues`; D-29 search (PIDASHCONV-276) + views/favorites
+        // (PIDASHCONV-275), both in `app_views_search`;
+        // D-32 intake-issues/inbox-issues list+create,
         // PIDASHCONV-385, plus intake-issue detail + versions,
         // PIDASHCONV-395, in `app_intake`; D-33 git provider-accounts
         // (PIDASHCONV-451) + project-github (PIDASHCONV-450) +

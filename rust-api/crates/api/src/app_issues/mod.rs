@@ -710,7 +710,15 @@ pub fn complex_filter(query: &QueryMap) -> Result<Option<Condition>, Denial> {
 use pidash_db::issue_filters::FilterValue;
 
 /// A legacy predicate compiled to SQL text (placeholders bound inline).
-fn legacy_sql(binder: &mut Binder, name: &str, value: &FilterValue) -> Result<String, Denial> {
+/// Shared `pub(crate)` with the views handlers (D-29), whose view-issues
+/// list applies the same `issue_filters(params, "GET")` stack over the
+/// same `issue` alias — referenced, never re-ported. Visibility only; no
+/// behavior change.
+pub(crate) fn legacy_sql(
+    binder: &mut Binder,
+    name: &str,
+    value: &FilterValue,
+) -> Result<String, Denial> {
     // `__isnull` flags.
     if let Some(path) = name.strip_suffix("__isnull") {
         let column = isnull_column(path).ok_or(Denial::ServerError)?;
