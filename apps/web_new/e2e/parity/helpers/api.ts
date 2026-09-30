@@ -1459,6 +1459,175 @@ export async function createWorkspace(
   return payload.slug;
 }
 
+/** Shell-preference reads and writes for the chrome/tabs scenarios (NEWFRONT-126). */
+
+async function authedJson(
+  path: string,
+  sessionCookie: string,
+  init: { method?: string; body?: unknown } = {},
+  apiBase: string = apiBaseFromEnv()
+): Promise<unknown> {
+  const res = await fetch(`${apiBase}${path}`, {
+    method: init.method ?? "GET",
+    headers: {
+      cookie: sessionCookie,
+      ...(init.body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    body: init.body === undefined ? undefined : JSON.stringify(init.body),
+  });
+  if (!res.ok) throw new Error(`[parity] ${init.method ?? "GET"} ${path} failed with HTTP ${res.status}.`);
+  if (res.status === 204) return null;
+  return (await res.json()) as unknown;
+}
+
+/** Workspace sidebar pin/order map as the server stores it. */
+export async function getSidebarPreferences(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, { is_pinned?: boolean; sort_order?: number }>> {
+  return (await authedJson(
+    `/api/workspaces/${workspaceSlug}/sidebar-preferences/`,
+    sessionCookie,
+    {},
+    apiBase
+  )) as Record<string, { is_pinned?: boolean; sort_order?: number }>;
+}
+
+/** Replace pin/order entries in bulk; used to restore state after a scenario. */
+export async function patchSidebarPreferences(
+  workspaceSlug: string,
+  sessionCookie: string,
+  entries: Array<{ key: string; is_pinned: boolean; sort_order: number }>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await authedJson(
+    `/api/workspaces/${workspaceSlug}/sidebar-preferences/`,
+    sessionCookie,
+    { method: "PATCH", body: entries },
+    apiBase
+  );
+}
+
+/** Workspace-level user properties (project-list display preferences live here). */
+export async function getWorkspaceUserProperties(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  return (await authedJson(`/api/workspaces/${workspaceSlug}/user-properties/`, sessionCookie, {}, apiBase)) as Record<
+    string,
+    unknown
+  >;
+}
+
+/** Patch workspace-level user properties; used to restore state after a scenario. */
+export async function patchWorkspaceUserProperties(
+  workspaceSlug: string,
+  sessionCookie: string,
+  body: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  return (await authedJson(
+    `/api/workspaces/${workspaceSlug}/user-properties/`,
+    sessionCookie,
+    { method: "PATCH", body },
+    apiBase
+  )) as Record<string, unknown>;
+}
+
+/** Per-project per-member tab preferences as the server stores them. */
+export async function getProjectUserProperties(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  return (await authedJson(
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/user-properties/`,
+    sessionCookie,
+    {},
+    apiBase
+  )) as Record<string, unknown>;
+}
+
+/** Patch per-project tab preferences; used to restore state after a scenario. */
+export async function patchProjectUserProperties(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  body: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  return (await authedJson(
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/user-properties/`,
+    sessionCookie,
+    { method: "PATCH", body },
+    apiBase
+  )) as Record<string, unknown>;
+}
+
+/** Create a project; scenarios that need a second project clean it up after. */
+export async function createProject(
+  workspaceSlug: string,
+  sessionCookie: string,
+  body: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  return (await authedJson(
+    `/api/workspaces/${workspaceSlug}/projects/`,
+    sessionCookie,
+    { method: "POST", body },
+    apiBase
+  )) as Record<string, unknown>;
+}
+
+/** One project as the server reports it (feature flags live here). */
+export async function getProject(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  return (await authedJson(
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
+    sessionCookie,
+    {},
+    apiBase
+  )) as Record<string, unknown>;
+}
+
+/** Patch a project; scenarios restore every flag they flip. */
+export async function patchProject(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  body: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  return (await authedJson(
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
+    sessionCookie,
+    { method: "PATCH", body },
+    apiBase
+  )) as Record<string, unknown>;
+}
+
+/** Delete a project created by a scenario. */
+export async function deleteProject(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await authedJson(
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
+    sessionCookie,
+    { method: "DELETE" },
+    apiBase
+  );
+}
+
 /** Names of the project's issues as the server reports them, in API order. */
 /** Paginated-or-array list readback shared by the widget collections. */
 async function collectionRows(res: Response, what: string): Promise<Record<string, unknown>[]> {

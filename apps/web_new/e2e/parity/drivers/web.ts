@@ -8,6 +8,12 @@
 // moves to the password step, and the password submit posts the native
 // form, landing in the workspace. Later oracle issues extend this driver
 // (never fork it) as new areas need new actions.
+// Shell-chrome extension (NEWFRONT-126): every selector below was observed
+// on the running old app, never copied from its sources. Stable landmarks
+// come from element ids and accessible names; three icon-only controls
+// carry data-testid hooks added for this suite (sidebar-toggle,
+// personalize-nav, project-actions-trigger). Tab reads scope to the nested
+// workspace main so sidebar rows and issue rows never leak in.
 import { expect, type Locator, type Page } from "@playwright/test";
 import type {
   ParityBrowserCookie,
@@ -279,16 +285,23 @@ export class WebDriver implements ParityDriver {
 
   async signInWithPassword(email: string, password: string): Promise<void> {
     // The dev server occasionally swallows a submit, so every pass is
-    // retried whole until the workspace landing is confirmed.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    // retried whole until the workspace landing is confirmed. The scratch
+    // stack also throttles anonymous calls per host IP, and every agent on
+    // this host shares that bucket, so back off quietly between passes.
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
         await this.signInAttempt(email, password);
         return;
       } catch {
-        // Still on entry or a swallowed submit: run the pass again.
+        if (attempt === 2) break;
+        await this.page.waitForTimeout(25_000);
       }
     }
-    await this.signInAttempt(email, password);
+    try {
+      await this.signInAttempt(email, password);
+    } catch {
+      throw new Error("[parity] sign-in never landed in the workspace.");
+    }
   }
 
   private async signInAttempt(email: string, password: string): Promise<void> {
@@ -301,14 +314,16 @@ export class WebDriver implements ParityDriver {
     // into 429s under concurrent parity runs.
     await this.submitAuthEmail(email);
     const passwordField = page.getByPlaceholder("Enter password");
-    await passwordField.waitFor({ timeout: WebDriver.WAIT_MS });
+    await passwordField.waitFor({ timeout: 30_000 });
     await passwordField.fill(password);
     const passwordForm = page.locator("form", { has: passwordField });
     // The old app posts the native form, so this ends in a full page load.
-    // Wait for the navigation itself: a URL regex also matches the bare
-    // origin ("//host/"), which would return before the sign-in POST lands.
+    // Wait for the workspace chrome rather than any URL change: the
+    // password-step URL already satisfies a path matcher, so a URL wait
+    // would resolve before the login POST answers and the next navigation
+    // would cancel it, losing the session.
     await Promise.all([
-      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: WebDriver.WAIT_MS }),
+      page.locator("#main-sidebar").waitFor({ state: "attached", timeout: 30_000 }),
       this.submitOf(passwordForm).click(),
     ]);
   }
@@ -4258,6 +4273,373 @@ export class WebDriver implements ParityDriver {
     const btn = this.page.getByRole("button", { name: "Comment & Run" }).first();
     await btn.waitFor({ timeout: WebDriver.OPEN_MS });
     return btn.isDisabled().catch(() => true);
+
+  // Shell chrome (NEWFRONT-126). The old app boots its workspace shell from
+  // full page loads, and a load occasionally lands on the signed-out entry
+  // with a next_path hint before the session read resolves; loads also
+  // self-heal back, so navigation retries the load until the sidebar mounts.
+  private async gotoShell(url: string): Promise<void> {
+    const page = this.page;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await page.goto(url);
+      await page.waitForLoadState("domcontentloaded");
+      try {
+        // Attached, not visible: a collapsed sidebar is in the DOM at zero
+        // width, and navigation must still count it as mounted.
+        await page.locator("#main-sidebar").waitFor({ state: "attached", timeout: 45_000 });
+        return;
+      } catch {
+        if (attempt === 2) throw new Error(`[parity] sidebar never mounted at ${url}.`);
+      }
+    }
+  }
+
+  async openWorkspaceHome(workspaceSlug: string): Promise<void> {
+    await this.gotoShell(`/${workspaceSlug}/`);
+  }
+
+  async openProjectsList(workspaceSlug: string): Promise<void> {
+    await this.gotoShell(`/${workspaceSlug}/projects`);
+  }
+
+  async openProjectTab(workspaceSlug: string, projectId: string, tab: string): Promise<void> {
+    await this.gotoShell(`/${workspaceSlug}/projects/${projectId}/${tab}`);
+  }
+
+  /** The mounted sidebar (the peek twin carries no id, so it never matches). */
+  private sidebar(): Locator {
+    return this.page.locator("#main-sidebar");
+  }
+
+  /** The workspace content main nested inside the page main. */
+  private shellMain(): Locator {
+    return this.page.locator("main main");
+  }
+
+  /** Tab strip region: the bar holding the project switcher and tab links. */
+  private tabStrip(): Locator {
+    return this.shellMain().first();
+  }
+
+  async sidebarPresent(): Promise<boolean> {
+    return (await this.sidebar().count()) > 0;
+  }
+
+  async sidebarWidth(): Promise<number | null> {
+    if ((await this.sidebar().count()) === 0) return null;
+    const box = await this.sidebar().boundingBox();
+    if (box === null) return null;
+    // A collapsed sidebar keeps a one-pixel border in its box; report that
+    // as closed so callers read a clean open/closed signal.
+    const width = Math.round(box.width);
+    return width <= 1 ? 0 : width;
+  }
+
+  async portalPresent(): Promise<boolean> {
+    return (await this.page.locator("#full-screen-portal").count()) > 0;
+  }
+
+  /**
+   * The rail renders only when the build enables it; the content padding
+   * records the decision (the rail branch drops the left padding class), so
+   * this read stays meaningful on builds with and without the strip.
+   */
+  async railPresent(): Promise<boolean> {
+    return await this.page.evaluate(() => {
+      const padded = document.querySelector(".pl-0\\!");
+      const settingsLinks = [...document.querySelectorAll('a[href$="/settings"]')].filter(
+        (el) => (el.textContent ?? "").trim() === "Settings"
+      );
+      return padded !== null || settingsLinks.length > 0;
+    });
+  }
+
+  /**
+   * Tabs of the strip in order, deduplicated by destination: the strip also
+   * renders a hidden measuring copy of every tab for overflow math, and the
+   * copy shares each destination, so the first hit per href is the visible
+   * tab. Scoped to the workspace main so sidebar and issue rows stay out.
+   */
+  async projectTabs(): Promise<Array<{ name: string; href: string }>> {
+    const links = this.shellMain().locator('a[href*="/projects/"]:visible');
+    const count = await links.count();
+    const seen = new Set<string>();
+    const tabs: Array<{ name: string; href: string }> = [];
+    for (let i = 0; i < count; i++) {
+      const href = (await links.nth(i).getAttribute("href")) ?? "";
+      const name = ((await links.nth(i).textContent()) ?? "").trim().replace(/\s+/g, " ");
+      if (href === "" || name === "" || seen.has(href)) continue;
+      seen.add(href);
+      tabs.push({ name, href });
+    }
+    return tabs;
+  }
+
+  /**
+   * The active tab follows the address: a tab is highlighted when the
+   * current path equals its destination or nests under it, and work-item
+   * detail pages (which live outside every tab path) keep the tracking tab
+   * highlighted instead.
+   */
+  async activeTabName(): Promise<string | null> {
+    const tabs = await this.projectTabs();
+    if (tabs.length === 0) return null;
+    const path = new URL(this.page.url()).pathname;
+    if (path.includes("/browse/")) {
+      const tracking = tabs.find((t) => t.name === "Work Items");
+      return tracking?.name ?? null;
+    }
+    const match = tabs.find((t) => path === t.href || path === `${t.href}/` || path.startsWith(`${t.href}/`));
+    return match?.name ?? null;
+  }
+
+  async editionBadgePresent(): Promise<boolean> {
+    return (await this.page.getByRole("button", { name: "Community" }).count()) > 0;
+  }
+
+  async desktopUpdatePresent(): Promise<boolean> {
+    return (
+      (await this.sidebar()
+        .getByRole("button", { name: /update/i })
+        .count()) > 0
+    );
+  }
+
+  async upgradePillCount(): Promise<number> {
+    return await this.page.getByText("Pro", { exact: true }).count();
+  }
+
+  async topBarControls(): Promise<{
+    workspaceMenu: boolean;
+    sidebarToggle: boolean;
+    search: boolean;
+    inbox: boolean;
+    help: boolean;
+    starLink: boolean;
+    accountFallback: boolean;
+  }> {
+    const page = this.page;
+    const starLink = (await page.getByRole("link", { name: "Star us on GitHub" }).count()) > 0;
+    const workspaceMenu = (await page.getByRole("button", { name: "Open workspace switcher" }).count()) > 0;
+    const sidebarToggle = (await page.getByTestId("sidebar-toggle").count()) > 0;
+    const search = (await page.locator('input[placeholder*="Search" i], input[type="search"]').count()) > 0;
+    const inbox = (await page.locator('a[href*="/notifications"]').count()) > 0;
+    // The help trigger carries a question-mark icon found nowhere else.
+    const help = (await page.locator("button:has(svg.lucide-circle-help)").count()) > 0;
+    // The compact account control renders after the star link inside the
+    // same action group; the sidebar hosts its own account card outside
+    // that group, so the sibling-scoped lookup never confuses the two.
+    let accountFallback = false;
+    if (starLink) {
+      const afterStar = page
+        .getByRole("link", { name: "Star us on GitHub" })
+        .locator('xpath=following-sibling::*//button[@aria-haspopup="menu"]');
+      accountFallback = (await afterStar.count()) > 0;
+    }
+    return { workspaceMenu, sidebarToggle, search, inbox, help, starLink, accountFallback };
+  }
+
+  async toggleSidebar(): Promise<void> {
+    await this.page.getByTestId("sidebar-toggle").click();
+  }
+
+  async openPersonalizeDialog(): Promise<void> {
+    await this.sidebar().getByTestId("personalize-nav").click();
+    await this.page.getByRole("heading", { name: "Customize navigation" }).waitFor({ timeout: 15_000 });
+  }
+
+  async personalizeDialogOpen(): Promise<boolean> {
+    return (await this.page.getByRole("heading", { name: "Customize navigation" }).count()) > 0;
+  }
+
+  private dialogCheckbox(name: string): Locator {
+    const dialog = this.page.locator('[role="dialog"]');
+    const row = dialog.getByText(name, { exact: true });
+    return row.locator(
+      'xpath=ancestor::div[./input[@type="checkbox"] or .//input[@type="checkbox"]][1]//input[@type="checkbox"]'
+    );
+  }
+
+  async personalItemChecked(name: string): Promise<boolean | null> {
+    const box = this.dialogCheckbox(name);
+    if ((await box.count()) === 0) return null;
+    return await box.first().isChecked();
+  }
+
+  async setPersonalItemEnabled(name: string, enabled: boolean): Promise<void> {
+    const box = this.dialogCheckbox(name).first();
+    await box.scrollIntoViewIfNeeded();
+    const checked = await box.isChecked();
+    if (checked !== enabled) await box.click({ force: true });
+  }
+
+  async projectNavMode(): Promise<"ACCORDION" | "TABBED" | null> {
+    const dialog = this.page.locator('[role="dialog"]');
+    if ((await dialog.getByRole("radio", { name: "Accordion sidebar navigation" }).count()) === 0) return null;
+    const tabbed = dialog.getByRole("radio", { name: "Tabbed Navigation" });
+    return (await tabbed.isChecked()) ? "TABBED" : "ACCORDION";
+  }
+
+  async setProjectNavMode(mode: "ACCORDION" | "TABBED"): Promise<void> {
+    const dialog = this.page.locator('[role="dialog"]');
+    await dialog
+      .getByRole("radio", { name: mode === "TABBED" ? "Tabbed Navigation" : "Accordion sidebar navigation" })
+      .check({ force: true });
+  }
+
+  async projectCapInput(): Promise<string | null> {
+    const dialog = this.page.locator('[role="dialog"]');
+    const toggle = dialog.getByRole("checkbox", { name: "Show limited projects on sidebar" });
+    if ((await toggle.count()) === 0) return null;
+    if (!(await toggle.isChecked())) return null;
+    const input = dialog.locator('input[type="number"]');
+    if ((await input.count()) === 0) return null;
+    return await input.first().inputValue();
+  }
+
+  async projectCapEnabled(): Promise<boolean | null> {
+    const dialog = this.page.locator('[role="dialog"]');
+    const toggle = dialog.getByRole("checkbox", { name: "Show limited projects on sidebar" });
+    if ((await toggle.count()) === 0) return null;
+    return await toggle.isChecked();
+  }
+
+  async setProjectCap(enabled: boolean, count?: number): Promise<void> {
+    const dialog = this.page.locator('[role="dialog"]');
+    const toggle = dialog.getByRole("checkbox", { name: "Show limited projects on sidebar" });
+    const checked = await toggle.isChecked();
+    if (checked !== enabled) await toggle.click({ force: true });
+    if (enabled && count !== undefined) {
+      const input = dialog.locator('input[type="number"]').first();
+      await input.fill(String(count));
+    }
+  }
+
+  async projectHeaderText(): Promise<string | null> {
+    const switcher = this.shellMain().locator('button[aria-haspopup="listbox"]').first();
+    if ((await switcher.count()) === 0) return null;
+    return ((await switcher.textContent()) ?? "").trim().replace(/\s+/g, " ") || null;
+  }
+
+  /**
+   * The header name sits in a width-capped truncating line: when the name
+   * is long, its scrollable width exceeds its laid-out width while the
+   * computed overflow hides the rest behind an ellipsis.
+   */
+  async projectHeaderTruncated(): Promise<boolean> {
+    return await this.shellMain()
+      .locator('button[aria-haspopup="listbox"] p')
+      .first()
+      .evaluate((el) => {
+        const style = getComputedStyle(el);
+        return el.scrollWidth > el.clientWidth && style.textOverflow === "ellipsis";
+      })
+      .catch(() => false);
+  }
+
+  async openProjectSwitcher(): Promise<void> {
+    await this.shellMain().locator('button[aria-haspopup="listbox"]').first().click();
+  }
+
+  async switcherOptionNames(): Promise<string[]> {
+    const options = this.page.getByRole("option");
+    const texts = await options.allTextContents();
+    return texts.map((t) => t.trim().replace(/\s+/g, " ")).filter((t) => t.length > 0);
+  }
+
+  async chooseSwitcherOption(name: string): Promise<void> {
+    await this.page.getByRole("option", { name }).click();
+  }
+
+  async openProjectActions(): Promise<void> {
+    await this.shellMain().getByTestId("project-actions-trigger").click();
+  }
+
+  async projectActionNames(): Promise<string[]> {
+    const items = this.page.getByRole("menuitem");
+    const texts = await items.allTextContents();
+    return texts.map((t) => t.trim().replace(/\s+/g, " ")).filter((t) => t.length > 0);
+  }
+
+  async clickProjectAction(name: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name }).click();
+  }
+
+  async readClipboardText(): Promise<string> {
+    return await this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async toastText(): Promise<string | null> {
+    const region = this.page.locator('[aria-label="Notifications"]');
+    if ((await region.count()) === 0) return null;
+    const text = ((await region.first().textContent()) ?? "").trim().replace(/\s+/g, " ");
+    return text === "" ? null : text;
+  }
+
+  async rightClickTab(name: string): Promise<void> {
+    await this.shellMain().getByRole("link", { name, exact: true }).click({ button: "right" });
+  }
+
+  async contextMenuItems(): Promise<string[]> {
+    // Radix renders menu items at the document level while the menu is
+    // open; closed app menus unmount their items, so the open menu owns
+    // every item on the page.
+    const texts = await this.page.getByRole("menuitem").allTextContents();
+    return texts.map((t) => t.trim().replace(/\s+/g, " ")).filter((t) => t.length > 0);
+  }
+
+  async clickContextMenuItem(name: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name }).first().click();
+  }
+
+  async openOverflowMenu(): Promise<void> {
+    // The trigger is the icon button placed after every tab link: it sits
+    // past the last tab but ahead of the page content, while the strip's
+    // hidden measuring copies stay wrapped in an opacity-0 container.
+    const candidates = this.tabStrip().locator(
+      'xpath=.//button[.//svg][not(@aria-haspopup)][not(ancestor::div[contains(@class,"opacity-0")])]'
+    );
+    const index = await this.shellMain()
+      .first()
+      .evaluate((main) => {
+        const buttons = [...main.querySelectorAll("button")].filter(
+          (b) => b.querySelector("svg") && !b.hasAttribute("aria-haspopup") && !b.closest(".opacity-0")
+        );
+        const tabs = [...main.querySelectorAll('a[href*="/projects/"]')].filter((a) => !a.closest(".opacity-0"));
+        if (tabs.length === 0) return -1;
+        const lastTab = tabs[tabs.length - 1];
+        // 4 is DOCUMENT_POSITION_FOLLOWING.
+        const trigger = buttons.find((b) => (lastTab.compareDocumentPosition(b) & 4) !== 0);
+        return trigger === undefined ? -1 : buttons.indexOf(trigger);
+      });
+    if (index < 0) throw new Error("[parity] no tab overflow trigger on this page.");
+    await candidates.nth(index).click();
+  }
+
+  async overflowRowNames(): Promise<string[]> {
+    const menu = this.page.locator('[role="menu"]');
+    const texts = await menu
+      .getByRole("menuitem")
+      .allTextContents()
+      .catch(() => [] as string[]);
+    return texts.map((t) => t.trim().replace(/\s+/g, " ")).filter((t) => t.length > 0);
+  }
+
+  async restoreOverflowTab(name: string): Promise<void> {
+    const menu = this.page.locator('[role="menu"]');
+    const row = menu.getByRole("menuitem", { name: new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) });
+    // The restore control only shows on row hover.
+    await row.hover();
+    await row.getByTitle("Show").click();
+  }
+
+  async setViewportSize(width: number, height: number): Promise<void> {
+    await this.page.setViewportSize({ width, height });
+  }
+
+  async openNotifications(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/notifications/`);
+    await this.page.waitForLoadState("domcontentloaded");
   }
 
   // Activity feed (NEWFRONT-114). All reads scope from the user-visible

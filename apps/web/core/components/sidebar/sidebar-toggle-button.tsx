@@ -21,6 +21,7 @@ export const AppSidebarToggleButton = observer(function AppSidebarToggleButton()
       size="base"
       variant="ghost"
       icon={PanelLeft}
+      data-testid="sidebar-toggle"
       onClick={() => {
         if (sidebarPeek) toggleSidebarPeek(false);
         toggleSidebar();
