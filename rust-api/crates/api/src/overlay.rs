@@ -215,7 +215,6 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // merges keep both sides).
         RouteGroup::ApiV1 => crate::auth_oauth::routes().merge(crate::v1_projects::routes()),
         RouteGroup::Runner | RouteGroup::RunnerWeb | RouteGroup::Auth => Router::new(),
-        _ => Router::new(),
     }
 }
 
