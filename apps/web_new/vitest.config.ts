@@ -23,6 +23,8 @@ export default defineConfig({
     // `// @vitest-environment jsdom` pragma on their first line.
     environment: "node",
     setupFiles: ["./src/test-setup.ts"],
-    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    // Feature tests live under src; checks/ carries the tests for the CI gate
+    // scripts (e.g. the similarity check's own-code exclusion, F-12).
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx", "checks/**/*.test.mjs"],
   },
 });
