@@ -1,0 +1,176 @@
+# Feature inventory — Views (project and workspace) (Phase 3)
+
+- Area: Views — saved project views (list + detail) and workspace views (static defaults + custom, list + detail)
+- ID prefix: `VIEW-`
+- Editions: oss, cloud, desktop
+- Status of this file: draft for human sign-off (H-signoff-3 via NEWFRONT-10)
+- Method: read of the old sources listed in the coverage checklist (routes, `core/components/views`,
+  `core/components/workspace/views`, `ce/components/views`, plus the backing stores, services, hooks,
+  command-palette wiring and constants). The old app was not run against a seeded stack in this pass
+  (no local backend here); every row must still pass the oracle run (NEWFRONT-42) against the live old
+  app before implementation starts. The cloud `ee-overlay` tree is not in this checkout, so cloud-only
+  behavior is derived from the `ce/` seams and marked as needing oracle confirmation. The running-app
+  pass may add rows here as comments. Descriptions are paraphrased; no old strings, code, or styles
+  are reused.
+- Dropped by decision, not rowed: product-analytics element ids on the header buttons (no third-party
+  analytics in the new app). Negative rows (VIEW-043 through VIEW-047) record load-bearing absences
+  the new app must preserve.
+
+| ID | Capability | Who | Edition | Old entry point | API | Acceptance | Parity test | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| VIEW-001 | Open the project's saved-views list with project breadcrumb trail | all project roles (view) | all | route `projects/[projectId]/views/` list page and its header | GET `/api/workspaces/{ws}/projects/{p}/views/` | List shows every saved view of the project; header shows the project breadcrumb plus a trailing views crumb; the browser tab title carries the project name followed by views | | not started |
+| VIEW-002 | Flag gate: views disabled for the project shows an explanatory empty state with a settings shortcut | all (see); shortcut action project ADMIN only | all | same list page when the project's views feature is off | UI-only (reads project feature flags) | Instead of the list, a themed illustration with an explanation and a Manage-features button appears; the button navigates to the project features settings screen and is disabled for non-admins | | not started |
+| VIEW-003 | Add-view action in the list header opens the create dialog | any role that can see the list, guests included | all | Add button in the list header | POST `/api/workspaces/{ws}/projects/{p}/views/` on submit | The create dialog opens from the header button; creation itself is validated server-side | | not started |
+| VIEW-004 | Search saved views by name with an expandable search field | all | all | search control in the list header | client | Collapsed field shows only a search icon; opening it focuses a text box; typing filters the list by name substring; Escape clears the query first and collapses the empty field on a second press; clicking outside collapses it when the query is empty | | not started |
+| VIEW-005 | Order the views list by name, creation or update time, ascending or descending | all | all | order control in the list header (compact variant on small screens) | client | The list re-orders immediately on selection; the active sort key and direction persist as the user's list preference | | not started |
+| VIEW-006 | Filter the views list by favorites, access type, creation date and creator | all | all | filters menu in the list header (compact variant on small screens) | client | Favorites is a single toggle; access type offers private and public; creation date offers relative date options; creator offers project members; the menu has its own search box; selections combine with the name search | | not started |
+| VIEW-007 | Applied list-filter chips with per-chip removal and clear-all | all | all | chip strip above the list, rendered only while any list filter is active | client | One chip per active filter dimension showing its values; each value (and each whole dimension) can be removed individually; a clear-all chip resets everything; removing the last filter hides the strip | | not started |
+| VIEW-008 | Loading placeholder while the views list loads | all | all | list area before first fetch resolves | GET `/api/workspaces/{ws}/projects/{p}/views/` | A skeleton list shows until the fetch completes; it never shows alongside rows or an empty state | | not started |
+| VIEW-009 | Zero-views onboarding empty state with a creation shortcut | all (create action reachable by every project role including guests) | all | list area when the project has no saved views | UI-only | Themed art with an explanation of saved views plus a create action that opens the create dialog | | not started |
+| VIEW-010 | No-match empty state when search/filters exclude every view | all | all | list area when views exist but the filtered set is empty | client | A search-themed empty message suggests adjusting the search terms; the underlying views are untouched | | not started |
+| VIEW-011 | View row identity: icon, name, deep link, access badge, owner and publish state | all (see) | all | each row of the project views list | UI-only | Row shows the view's custom icon (or a default glyph), its name, and links to the view detail page; a badge shows public vs private with an explanatory tooltip; the owner's avatar is shown; a highlighted Live marker appears only when the view has been published | | not started |
+| VIEW-012 | Favorite / unfavorite a saved view from the list | project ADMIN or MEMBER (guests see no star) | all | star control on each list row | POST `/api/workspaces/{ws}/projects/{p}/user-favorite-views/`; DELETE `/api/workspaces/{ws}/projects/{p}/user-favorite-views/{viewId}/` | Toggling updates the star immediately with success/failure notices; the first-ever favorite also expands the sidebar favorites section so the user sees where it went | | not started |
+| VIEW-013 | Create dialog: title, description, icon, access, layout, display and work-item filters | any role that can open the dialog (see VIEW-003) | all (access selector cloud, see VIEW-019) | create dialog from the list header, the list empty state, or the command palette | POST `/api/workspaces/{ws}/projects/{p}/views/` | Title is required and capped at 255 characters with inline errors; description is free text; an icon picker offers emoji or glyph icons; a layout picker, display-options dropdown and a project-level work-item filter builder (shown expanded) prefill from defaults; the dialog closes on Escape or Cancel without saving | | not started |
+| VIEW-014 | Create success navigates to the new view; failure keeps the dialog open | same as VIEW-013 | all | submit action of the create dialog | POST `/api/workspaces/{ws}/projects/{p}/views/` | On success the app navigates to the new view's detail page and shows a success notice; on failure it shows an error notice and the dialog stays open with the user's input intact | | not started |
+| VIEW-015 | Edit dialog prefilled with the view's current definition; owner-only entry | owner of the view | all | edit action in the row menu | PATCH `/api/workspaces/{ws}/projects/{p}/views/{viewId}/` | The dialog opens with the current title, description, icon, access, layout, display and filter values; saving refreshes the view's live filter state and shows a success notice; failure shows an error notice without closing | | not started |
+| VIEW-016 | Delete a saved view with explicit confirmation | owner of the view, or project ADMIN | all | delete action in the row menu | DELETE `/api/workspaces/{ws}/projects/{p}/views/{viewId}/` | A confirmation dialog warns that the layout, sort, filter and display choices are permanently deleted with no restore; confirming deletes, navigates back to the views list and shows a success notice; failure shows an error notice | | not started |
+| VIEW-017 | Row quick menu: edit, open in new tab, copy link, delete | edit: owner; delete: owner or project ADMIN; open/copy: all | all | overflow menu on each list row (compact trigger on small screens) | UI-only until an action runs | Menu items render per permission (edit hidden for non-owners, delete hidden unless owner or admin); each action behaves as its own row states | | not started |
+| VIEW-018 | Copy a deep link to a saved view; open a view in a new tab | all | all | row menu actions; also the detail header menu | client (clipboard + new tab) | Copy writes the full view URL to the clipboard and shows a link-copied notice; open-in-new-tab loads the same view standalone | | not started |
+| VIEW-019 | Access selector: shared with the project vs visible only to the owner | owner choosing; enforced per role server-side | cloud (OSS dialog has no selector; new views keep the default) | access control inside the create/edit dialog | part of the create/update view payloads | The dialog offers a shared option and an owner-only option with explanatory text; the list badge, list filters and detail lock indicator follow the choice; OSS needs oracle confirmation that no selector renders | | not started |
+| VIEW-020 | Publish a saved view to a public read-only link with Live state | project ADMIN or owner | cloud (OSS shows only the resulting Live badge; the publish dialog and menu entry are stubs) | publish action in the row/detail menus; Live badge on the row | part of the view payload (`anchor`); link derived client-side | Publishing generates a public link and the row shows a Live marker; unpublishing removes both; opening the publish dialog shows the link with copy support; needs oracle confirmation on the cloud build | | not started |
+| VIEW-021 | Open a saved view's detail page with project breadcrumb trail | all project roles (view) | all | route `projects/[projectId]/views/[viewId]` | GET `/api/workspaces/{ws}/projects/{p}/views/{viewId}/` | The page renders the view's saved layout populated with its issues; the browser tab title carries the project name followed by the view name; the breadcrumb shows project, views list and the current view | | not started |
+| VIEW-022 | Missing or forbidden view shows an error empty state with a way back | all | all | same detail route when the fetch fails | GET `/api/workspaces/{ws}/projects/{p}/views/{viewId}/` | Instead of the layout, an illustration explains the view does not exist or is not accessible, with a button returning to the views list | | not started |
+| VIEW-023 | View switcher: jump between the project's saved views without leaving detail | all | all | view dropdown in the detail breadcrumb | client (navigates to another VIEW-021) | The dropdown lists every saved view of the project with search; picking one navigates to that view's detail page | | not started |
+| VIEW-024 | Private-view lock indicator in the detail header | all (see) | all | detail header next to the breadcrumb | UI-only (reads the view's access) | Owner-only views show a lock glyph with an explanatory tooltip; shared views show nothing extra | | not started |
+| VIEW-025 | Layout switcher inside a view detail, hidden for locked views | all (switching is a personal display choice) | all | layout control in the detail header | saved through the view's display-filter update path | Offers list, board, calendar, spreadsheet and timeline layouts; changing re-renders the view's issues in that layout and persists the choice; locked views show no switcher | | not started |
+| VIEW-026 | Display options and work-item filters inside a view detail, hidden for locked views | all (view); edits to shared views follow the editor's role | all | display dropdown and filter toggle in the detail header | saved through the view's display-filter update path | Display options match the active layout (with project-feature-dependent entries disabled when the feature is off); the filter toggle edits the view's saved work-item query; locked views show neither control | | not started |
+| VIEW-027 | Add a work item from inside a view | project ADMIN or MEMBER | all | Add button in the detail header | work-item create endpoint (owned by the issues area) | The button is hidden for guests and other read-only roles; the created item appears in the view when it matches the saved query | | not started |
+| VIEW-028 | A view detail lists exactly the issues matching its saved query | all (view) | all | issue layouts hosted by the detail page | GET `/api/workspaces/{ws}/projects/{p}/views/{viewId}/issues/` | Grouping, pagination, skeletons and row behavior follow the active layout exactly as on the project issues screens; issue-level capabilities themselves are owned by the issues area, not repeated here | | not started |
+| VIEW-029 | Open the workspace views list with search across defaults and customs | all workspace members | all | route `workspace-views/` list page | GET `/api/workspaces/{ws}/views/` | The page shows a search box above a combined list of static default views and the workspace's custom views; the browser tab title carries the workspace name; typing filters both groups by name | | not started |
+| VIEW-030 | Static default views always present: all items, assigned to me, created by me, subscribed | all workspace members | all | top of the workspace views list; also the tab strip | client (static definitions, translated names) | The four defaults always render with localized names and link to their detail pages; they can never be edited, deleted or favorited | | not started |
+| VIEW-031 | Default-view row actions are limited to open in new tab and copy link | all | all | overflow menu on a default row and in the detail header | client (clipboard + new tab) | No edit or delete entries exist for defaults; copy writes the view URL with a link-copied notice; open-in-new-tab loads the same view standalone | | not started |
+| VIEW-032 | Custom workspace view row: name, description, deep link, edit/delete menu | all (see); menu entries permission-gated | all | each custom row of the workspace views list | UI-only until an action runs | Row shows the name (truncated at length) with its description underneath and links to the detail page; the overflow menu offers edit and delete, enforced as VIEW-037 states | | not started |
+| VIEW-033 | Workspace view tab strip with auto-scrolled active tab and creation shortcut | all (see); creation shortcut workspace ADMIN or MEMBER | all | secondary header above workspace view pages | GET `/api/workspaces/{ws}/views/` | A horizontally scrollable strip shows a tab per default and custom view with per-tab menus; navigating brings the active tab into view automatically; a trailing add button (members and admins only) opens the create dialog | | not started |
+| VIEW-034 | Create a custom workspace view: title, description, access, display and filters | workspace ADMIN or MEMBER | all (access selector cloud, see VIEW-019) | Add buttons on the workspace views pages and tab strip | POST `/api/workspaces/{ws}/views/` | Title is required and capped at 255 characters with inline errors; description is free text; display options are fixed to the spreadsheet set; a workspace-level work-item filter builder is shown expanded; success navigates to the new view with a success notice; failure shows an error notice and keeps the dialog | | not started |
+| VIEW-035 | Edit a custom workspace view with the current definition prefilled | owner of the view | all | edit actions on the custom row and tab menus | PATCH `/api/workspaces/{ws}/views/{viewId}/` | The dialog opens with current values; saving persists the query alongside the other fields, refreshes the live filter state and shows a success notice; failure shows an error notice without closing | | not started |
+| VIEW-036 | Delete a custom workspace view with confirmation | owner of the view, or workspace ADMIN | all | delete actions on the custom row and tab menus | DELETE `/api/workspaces/{ws}/views/{viewId}/` | A confirmation dialog requires explicit confirm; success removes the view with a success notice; failure shows an error notice | | not started |
+| VIEW-037 | Workspace view quick menu: edit, open in new tab, copy link, delete | edit: owner; delete: owner or workspace ADMIN; open/copy: all | all | overflow menus on custom rows, tabs and the detail header | UI-only until an action runs | Entries render per permission; defaults expose only the open/copy pair (VIEW-031); copy and new-tab behave as VIEW-018 | | not started |
+| VIEW-038 | Workspace view detail: switcher, layout and display controls, add action, issue list | all (see); add action workspace ADMIN or MEMBER | all (layout selector cloud, see VIEW-040) | route `workspace-views/[globalViewId]` and its header | GET `/api/workspaces/{ws}/views/{viewId}/` for customs (defaults are static) | The header switcher spans defaults and customs with search; display dropdown and filter toggle hide for locked views; an Add-view button opens the create dialog; the body renders the issue list root for both defaults and customs | | not started |
+| VIEW-039 | Workspace views loading and empty behavior | all | all | workspace views list and detail areas | GET `/api/workspaces/{ws}/views/` | A skeleton list shows while customs load; with no customs the list shows only the four defaults (no special empty art); detail pages for unknown custom ids resolve through the same missing-view handling as VIEW-022 | | not started |
+| VIEW-040 | Layout choice inside a workspace view detail | all (switching is a personal display choice) | cloud (OSS renders the spreadsheet layout with no selector) | layout control in the workspace view detail header | saved through the workspace view's display-filter update path | Where available, the selector changes the rendering layout and persists it; locked views show no selector; OSS needs oracle confirmation that only the default layout renders | | not started |
+| VIEW-041 | Project settings toggle enabling views for a project | project ADMIN | all | project features settings screen, views section | project feature-flag update endpoint (owned by the project-settings area) | Non-admins see a not-authorized notice instead of the toggle; flipping it on unlocks the views list and every creation entry point; flipping it off replaces the list with the VIEW-002 empty state | | not started |
+| VIEW-042 | Command-palette creation and jumping for views | creation: project MEMBER or ADMIN with the feature on; jumping: all | all | command palette create command (two-key shortcut) and view-jump menu | same endpoints as the dialogs | The create command is visible and enabled only inside a project with views enabled and member-level permission; activating it opens the same create dialog as VIEW-013; the jump menu lists the project's views and navigates on selection | | not started |
+| VIEW-043 | No live updates anywhere in views (negative row) | all | all | project and workspace views lists and details | n/a (fetch-on-mount only) | Lists and details never refresh from other users' changes without navigation or a manual reload; only the acting user's own mutations update what they see | | not started |
+| VIEW-044 | Keyboard support: Escape and tab order; no other view shortcuts (negative row) | all | all | create/edit dialogs, list search fields | n/a | Escape closes the create/edit dialogs and collapses the list search as VIEW-004 states; dialogs expose a logical tab order across fields and actions; no other keyboard shortcuts exist for views besides the palette creation shortcut in VIEW-042 | | not started |
+| VIEW-045 | Views have shareable deep links that resolve for anyone with access | all | all | view URLs used by copy-link, new-tab and switcher navigation | the detail GETs (VIEW-021, VIEW-038) | Opening a copied link loads the same list position or detail state; users without access get the missing-view empty state instead of the content | | not started |
+| VIEW-046 | Desktop build: views behave exactly as on web (negative row) | all | desktop | same routes inside the desktop shell | same endpoints | No desktop-only view capability, layout difference or offline behavior was found in the sources; the desktop app serves the same pages | | not started |
+| VIEW-047 | No drag-and-drop, exports or imports for views (negative row) | all | all | views lists, rows and dialogs | n/a | View order comes only from the sort control; rows cannot be reordered by drag; no export, import or print action exists for views | | not started |
+
+## Coverage checklist
+
+Every route file, top-level component folder and API endpoint in the issue scope, each mapped to
+the row IDs that cover it. Anything unmapped is explained, not dropped silently.
+
+### Routes
+
+| Source | Covered by | Notes |
+| --- | --- | --- |
+| `app/(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/views/(list)/page.tsx` (flag gate, applied chips, list mount, tab title) | VIEW-001, VIEW-002, VIEW-007 | — |
+| `.../views/(list)/header.tsx` (breadcrumbs, filter/sort controls, Add button) | VIEW-001, VIEW-003, VIEW-004, VIEW-005, VIEW-006 | — |
+| `.../views/(list)/layout.tsx` (desktop + mobile header slots, content wrapper) | VIEW-001, VIEW-004, VIEW-005, VIEW-006 | thin shell; behavior rowed under the headers it mounts |
+| `.../views/(list)/mobile-header.tsx` (compact sort + filters for small screens) | VIEW-004, VIEW-005, VIEW-006 | — |
+| `.../views/(detail)/layout.tsx` (detail header slot, content wrapper) | VIEW-021 | thin shell |
+| `.../views/(detail)/[viewId]/page.tsx` (detail fetch, error empty state, tab title, layout root) | VIEW-021, VIEW-022, VIEW-028 | — |
+| `.../views/(detail)/[viewId]/header.tsx` (breadcrumbs, switcher, lock icon, layout/display controls, add item, quick actions) | VIEW-023, VIEW-024, VIEW-025, VIEW-026, VIEW-027, VIEW-017 | — |
+| `app/(all)/[workspaceSlug]/(projects)/workspace-views/page.tsx` (search box, defaults + customs lists, tab title) | VIEW-029, VIEW-030 | — |
+| `.../workspace-views/header.tsx` (detail header: switcher, layout/display controls, Add button, quick actions) | VIEW-038, VIEW-040, VIEW-034 | route-level header for detail pages |
+| `.../workspace-views/layout.tsx` (header slot, content wrapper) | VIEW-038 | thin shell |
+| `.../workspace-views/[globalViewId]/page.tsx` (default-vs-custom resolution, list root, tab title) | VIEW-030, VIEW-038 | — |
+| `app/(all)/[workspaceSlug]/(settings)/settings/projects/[projectId]/features/views/page.tsx` (admin gate, enable-views toggle) | VIEW-041 | header file in the same folder is a thin breadcrumb shell |
+| `app/(all)/[workspaceSlug]/(settings)/settings/projects/[projectId]/features/views/header.tsx` | VIEW-041 | breadcrumb shell only |
+
+### Core component folders
+
+| Source | Covered by | Notes |
+| --- | --- | --- |
+| `core/components/views/views-list.tsx` (loader, no-match empty, zero-views empty with create action) | VIEW-008, VIEW-009, VIEW-010 | — |
+| `core/components/views/view-list-item.tsx` (icon, name, deep link, responsive quick actions) | VIEW-011, VIEW-017 | — |
+| `core/components/views/view-list-item-action.tsx` (access badge, Live badge, owner avatar, favorite star, desktop menu) | VIEW-011, VIEW-012, VIEW-017, VIEW-020 | publish dialog it mounts is the OSS stub (VIEW-020) |
+| `core/components/views/view-list-header.tsx` (expandable search with Escape/outside-click, sort, filters) | VIEW-004, VIEW-005, VIEW-006 | — |
+| `core/components/views/quick-actions.tsx` (owner/admin-gated menu: edit, new-tab, copy, delete, publish slot) | VIEW-015, VIEW-016, VIEW-017, VIEW-018, VIEW-020 | — |
+| `core/components/views/modal.tsx` (create/update orchestration, navigation + notices, Escape close, filter refresh) | VIEW-013, VIEW-014, VIEW-015, VIEW-044 | — |
+| `core/components/views/form.tsx` (title/description validation, icon picker, access/layout/display controls, filter builder, tab order) | VIEW-013, VIEW-015, VIEW-019, VIEW-044 | access control child is the OSS stub (VIEW-019) |
+| `core/components/views/delete-view-modal.tsx` (permanence warning, delete + navigation + notices) | VIEW-016 | — |
+| `core/components/views/filters/filter-selection.tsx` (favorites toggle, access/date/creator filters, menu search) | VIEW-006 | access sub-filter is the OSS stub (VIEW-019) |
+| `core/components/views/filters/order-by.tsx` (sort key + direction menu) | VIEW-005 | sort keys: name, created, updated |
+| `core/components/views/applied-filters/` (`root.tsx` chip strip, `access.tsx`, `index.tsx` barrel) | VIEW-007 | — |
+| `core/components/views/helper.tsx` (layout switch for workspace detail rendering) | VIEW-038, VIEW-040 | additional-layouts branch is the OSS stub (VIEW-040) |
+| `core/components/workspace/views/views-list.tsx` (fetch-on-mount, skeleton, search filtering) | VIEW-029, VIEW-039 | — |
+| `core/components/workspace/views/view-list-item.tsx` (name, description, deep link, edit/delete menu) | VIEW-032, VIEW-037 | row menu itself is ungated; enforcement lives in the menus of VIEW-037 and server-side |
+| `core/components/workspace/views/header.tsx` (scrollable tab strip, active-tab auto-scroll, gated add button) | VIEW-033 | — |
+| `core/components/workspace/views/default-view-list-item.tsx` (static row with translated name) | VIEW-030 | — |
+| `core/components/workspace/views/default-view-quick-action.tsx` (defaults limited menu: new-tab, copy) | VIEW-031 | — |
+| `core/components/workspace/views/modal.tsx` (create/update orchestration, navigation + notices) | VIEW-034, VIEW-035 | — |
+| `core/components/workspace/views/form.tsx` (title/description validation, access control, spreadsheet-fixed display options, workspace filter builder) | VIEW-034, VIEW-035, VIEW-019 | — |
+| `core/components/workspace/views/quick-action.tsx` (owner/admin-gated menu for customs) | VIEW-036, VIEW-037 | — |
+| `core/components/workspace/views/delete-view-modal.tsx` (confirm + notices) | VIEW-036 | — |
+| `core/components/power-k/menus/views.tsx` (view-jump menu: search, select, empty text) | VIEW-042 | — |
+| `core/components/power-k/config/creation/command.ts` (create_view command: two-key shortcut, member + flag gates) | VIEW-042 | — |
+| `core/components/common/quick-actions-helper.tsx` (`useViewMenuItems`: edit owner-only, delete owner-or-admin) | VIEW-017, VIEW-037 | shared by project and workspace menus |
+
+### Cloud (ce) component folders
+
+| Source | Covered by | Notes |
+| --- | --- | --- |
+| `ce/components/views/access-controller.tsx` | VIEW-019 | OSS no-op stub returning nothing; real control lives in the private cloud overlay — needs oracle confirmation |
+| `ce/components/views/helper.tsx` (`GlobalViewLayoutSelection`, `WorkspaceAdditionalLayouts`, `AdditionalHeaderItems`) | VIEW-040 | OSS no-op stubs; real selectors live in the private cloud overlay — needs oracle confirmation |
+| `ce/components/views/filters/access-filter.tsx` (`FilterByAccess`) | VIEW-019 | OSS no-op stub; access list-filtering is cloud-only — needs oracle confirmation |
+| `ce/components/views/publish/` (`modal.tsx`, `use-view-publish.tsx`, `index.ts` barrel) | VIEW-020 | OSS no-op stubs; publish dialog and menu entry are cloud-only — needs oracle confirmation |
+| `ce/components/command-palette/modals/project-level.tsx` (hosts the project create-view dialog) | VIEW-013 | dialog host only; dialog behavior rowed under VIEW-013 |
+| `ce/components/issues/issue-layouts/empty-states/team-view-issues.tsx` | — | dead code for parity purposes: legacy team-view empty state with no references from the views screens |
+
+### Client state, hooks and services
+
+| Module | Covering rows | Notes |
+| --- | --- | --- |
+| `core/store/project-view.store.ts` (list fetch, detail fetch, create/update/delete, list search/sort/filter state, favorites) | VIEW-001, VIEW-004, VIEW-005, VIEW-006, VIEW-012, VIEW-013, VIEW-015, VIEW-016 | — |
+| `core/store/global-view.store.ts` (customs fetch, search, detail lookup, create/update/delete) | VIEW-029, VIEW-032, VIEW-034, VIEW-035, VIEW-036 | — |
+| `core/store/issue/project-views/` (`filter.store.ts`, `issue.store.ts`, `index.ts` barrel; view-issues query params + paged fetch) | VIEW-028 | — |
+| `core/hooks/store/use-project-view.ts` + `core/hooks/store/use-global-view.ts` | VIEW-001, VIEW-029 | thin store bindings; no standalone behavior |
+| `core/services/view.service.ts` (8 project-view calls incl. favorites) | VIEW-001, VIEW-012, VIEW-013, VIEW-015, VIEW-016, VIEW-021, VIEW-028 | — |
+| `core/services/workspace.service.ts` view methods (custom workspace-view CRUD) | VIEW-029, VIEW-034, VIEW-035, VIEW-036, VIEW-038 | `updateWorkspaceView` (POST `workspace-views/` with view props) has zero callers — dead code: no row |
+| `ce/store/project-view.store.ts` + `ce/store/global-view.store.ts` | — | dead code for parity purposes: pure re-exports of the core stores |
+| `ce/store/issue/team-views/` (`filter.store.ts`, `issue.store.ts`, `index.ts` barrel) | — | dead code for parity purposes: classes marked never-used, extending the project-view filter store only for types |
+| `helpers/views.helper.ts` (access specifiers: icons + labels for public/private) | VIEW-011, VIEW-019 | — |
+| `packages/constants` view constants (sort key/direction options) + `DEFAULT_GLOBAL_VIEWS_LIST` (four static keys) | VIEW-005, VIEW-030 | supporting constants; no standalone behavior |
+| `packages/types` view types (`IProjectView`, `IWorkspaceView`, `EViewAccess`, filter shapes) | — | type definitions only; behavior covered by the rows above |
+
+### API endpoints
+
+| Endpoint | Covering rows |
+| --- | --- |
+| `GET /api/workspaces/{ws}/projects/{p}/views/` (list project views) | VIEW-001, VIEW-008 |
+| `POST /api/workspaces/{ws}/projects/{p}/views/` (create project view) | VIEW-003, VIEW-013, VIEW-014 |
+| `GET /api/workspaces/{ws}/projects/{p}/views/{viewId}/` (view details) | VIEW-021, VIEW-022 |
+| `PATCH /api/workspaces/{ws}/projects/{p}/views/{viewId}/` (update project view) | VIEW-015 |
+| `DELETE /api/workspaces/{ws}/projects/{p}/views/{viewId}/` (delete project view) | VIEW-016 |
+| `GET /api/workspaces/{ws}/projects/{p}/views/{viewId}/issues/` (issues matching a view) | VIEW-028 |
+| `POST /api/workspaces/{ws}/projects/{p}/user-favorite-views/` (favorite a view) | VIEW-012 |
+| `DELETE /api/workspaces/{ws}/projects/{p}/user-favorite-views/{viewId}/` (unfavorite) | VIEW-012 |
+| `GET /api/workspaces/{ws}/views/` (list custom workspace views) | VIEW-029, VIEW-039 |
+| `POST /api/workspaces/{ws}/views/` (create custom workspace view) | VIEW-034 |
+| `GET /api/workspaces/{ws}/views/{viewId}/` (custom view details) | VIEW-038 |
+| `PATCH /api/workspaces/{ws}/views/{viewId}/` (update custom workspace view) | VIEW-035 |
+| `DELETE /api/workspaces/{ws}/views/{viewId}/` (delete custom workspace view) | VIEW-036 |
+| `POST /api/workspaces/{ws}/workspace-views/` (workspace view props) | — dead code: `updateWorkspaceView` has no callers |
+
+### Sweeps with no view behavior (no rows; confirmed absent)
+
+- Desktop overlay (`desktop-overlay/`): no view-specific code — covered by VIEW-046.
+- Realtime channels (websocket/SSE/polling) in the view stores: none; fetch-on-mount only — covered by VIEW-043.
+- Drag-and-drop, exports, imports on views screens: none — covered by VIEW-047.
+- Keyboard shortcuts for views beyond Escape/tab-order/palette creation: none — covered by VIEW-042, VIEW-044.
+- Empty-state image assets (`app/assets/empty-state/.../views-*.webp`, `onboarding/views.webp`, `empty-state/view.svg`): presentational only, no behavior — covered by VIEW-002, VIEW-009, VIEW-010, VIEW-022.
+- Sidebar favorites section rendering the favorited views and the workspace sidebar views entry: owned by the shell area (NEWFRONT-27); the favorite toggle itself is VIEW-012.
+- Issue layouts, filter builders, display-option sets and work-item CRUD exercised inside views: owned by the issues area (NEWFRONT-27); VIEW-028 covers only that a view applies its saved query.
+
