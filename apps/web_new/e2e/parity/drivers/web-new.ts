@@ -36,4 +36,135 @@ export class WebNewDriver implements ParityDriver {
   async visibleIssueNames(): Promise<string[]> {
     return todo("visibleIssueNames");
   }
+
+  // Command palette / search / help / browse / repo-star (NEWFRONT-127).
+  // Skeleton stubs: throw until the apps/web_new palette area lands.
+
+  async currentUrlPath(): Promise<string> {
+    return todo("currentUrlPath");
+  }
+
+  async goToPath(_path: string): Promise<void> {
+    return todo("goToPath");
+  }
+
+  async hasVisibleText(_text: string): Promise<boolean> {
+    return todo("hasVisibleText");
+  }
+
+  async pressPaletteOpenChord(): Promise<void> {
+    return todo("pressPaletteOpenChord");
+  }
+
+  async isCommandPaletteOpen(): Promise<boolean> {
+    return todo("isCommandPaletteOpen");
+  }
+
+  async commandPalettePlaceholder(): Promise<string | null> {
+    return todo("commandPalettePlaceholder");
+  }
+
+  async focusAndTypeTopBarSearch(_text: string): Promise<void> {
+    return todo("focusAndTypeTopBarSearch");
+  }
+
+  async closeCommandPaletteViaBackdrop(): Promise<void> {
+    return todo("closeCommandPaletteViaBackdrop");
+  }
+
+  async typeInCommandPalette(_text: string): Promise<void> {
+    return todo("typeInCommandPalette");
+  }
+
+  async commandPaletteQueryValue(): Promise<string> {
+    return todo("commandPaletteQueryValue");
+  }
+
+  async pressInCommandPalette(_key: string): Promise<void> {
+    return todo("pressInCommandPalette");
+  }
+
+  async paletteGroupHeadings(): Promise<string[]> {
+    return todo("paletteGroupHeadings");
+  }
+
+  async paletteCommandTitles(): Promise<string[]> {
+    return todo("paletteCommandTitles");
+  }
+
+  async paletteHasCommand(_title: string): Promise<boolean> {
+    return todo("paletteHasCommand");
+  }
+
+  async activatePaletteCommand(_title: string): Promise<void> {
+    return todo("activatePaletteCommand");
+  }
+
+  async paletteSelectedItemText(): Promise<string | null> {
+    return todo("paletteSelectedItemText");
+  }
+
+  async paletteSearchResultsHeading(): Promise<string | null> {
+    return todo("paletteSearchResultsHeading");
+  }
+
+  async isPaletteSearchHeadingPulsing(): Promise<boolean> {
+    return todo("isPaletteSearchHeadingPulsing");
+  }
+
+  async paletteHasWorkspaceLevelToggle(): Promise<boolean> {
+    return todo("paletteHasWorkspaceLevelToggle");
+  }
+
+  async isWorkspaceLevelToggleEnabled(): Promise<boolean> {
+    return todo("isWorkspaceLevelToggleEnabled");
+  }
+
+  async toggleWorkspaceLevel(): Promise<void> {
+    return todo("toggleWorkspaceLevel");
+  }
+
+  async countSearchRequests(_action: () => Promise<void>): Promise<number> {
+    return todo("countSearchRequests");
+  }
+
+  async lastSearchRequestParams(): Promise<Record<string, string> | null> {
+    return todo("lastSearchRequestParams");
+  }
+
+  async isShortcutsDialogOpen(): Promise<boolean> {
+    return todo("isShortcutsDialogOpen");
+  }
+
+  async pressShortcutsDialogChord(): Promise<void> {
+    return todo("pressShortcutsDialogChord");
+  }
+
+  async typeShortcutsFilter(_text: string): Promise<void> {
+    return todo("typeShortcutsFilter");
+  }
+
+  async shortcutsDialogCommandTitles(): Promise<string[]> {
+    return todo("shortcutsDialogCommandTitles");
+  }
+
+  async repoStarLinkAttributes(): Promise<{ href: string; target: string; rel: string } | null> {
+    return todo("repoStarLinkAttributes");
+  }
+
+  async repoStarIconSrc(): Promise<string | null> {
+    return todo("repoStarIconSrc");
+  }
+
+  async openBrowseWorkItem(_workspaceSlug: string, _identifier: string): Promise<void> {
+    return todo("openBrowseWorkItem");
+  }
+
+  async browseShowsWorkItemDetail(): Promise<boolean> {
+    return todo("browseShowsWorkItemDetail");
+  }
+
+  async browseShowsWorkspaceWideList(): Promise<boolean> {
+    return todo("browseShowsWorkspaceWideList");
+  }
 }

@@ -37,4 +37,93 @@ export interface ParityDriver {
   openProjectIssues(workspaceSlug: string, projectId: string): Promise<void>;
   /** Names of the issues currently rendered in the list, in display order. */
   visibleIssueNames(): Promise<string[]>;
+
+  // -------------------------------------------------------------------------
+  // Command palette / Power-K, search, help, browse, repo-star
+  // (NEWFRONT-127, rows SHELL-080, 082, 083, 084, 085, 087, 089, 094, 103, 106).
+  // Added additively to the interface (never forking a driver). The palette is
+  // a cmdk surface inside a Headless-UI dialog: scenarios drive it with the
+  // real keyboard chord and read what the user sees (placeholder, group
+  // headings, command titles, the selected row, the server-search heading).
+  // -------------------------------------------------------------------------
+
+  /** The current location's path (what the address bar shows). */
+  currentUrlPath(): Promise<string>;
+  /** Navigate to an arbitrary path already authenticated (workspace pages). */
+  goToPath(path: string): Promise<void>;
+  /** Whether any element with this visible text is present. */
+  hasVisibleText(text: string): Promise<boolean>;
+
+  // --- palette open / close / reset (SHELL-080, SHELL-082) ---
+  /** Press the global open chord (Ctrl/Cmd+K). */
+  pressPaletteOpenChord(): Promise<void>;
+  /** Whether the centered modal palette is open (dialog + command input shown). */
+  isCommandPaletteOpen(): Promise<boolean>;
+  /** The palette search input's placeholder (identifies root vs a sub-page), or null. */
+  commandPalettePlaceholder(): Promise<string | null>;
+  /** Focus the top-bar search input (an always-present text field) and type into it. */
+  focusAndTypeTopBarSearch(text: string): Promise<void>;
+  /** Click the modal backdrop (outside the panel) to close the palette. */
+  closeCommandPaletteViaBackdrop(): Promise<void>;
+
+  // --- palette query + keyboard flow (SHELL-083, SHELL-085) ---
+  /** Type into the open palette's command input. */
+  typeInCommandPalette(text: string): Promise<void>;
+  /** The current value of the palette command input. */
+  commandPaletteQueryValue(): Promise<string>;
+  /** Press a key while the palette input is focused (Escape/Backspace/ArrowDown/Enter/etc.). */
+  pressInCommandPalette(key: string): Promise<void>;
+  /** Visible group headings currently rendered in the palette, in display order. */
+  paletteGroupHeadings(): Promise<string[]>;
+  /** Visible command item titles currently rendered in the palette, in display order. */
+  paletteCommandTitles(): Promise<string[]>;
+  /** Whether a command with this exact title is currently listed. */
+  paletteHasCommand(title: string): Promise<boolean>;
+  /** Activate (click) a palette command by its exact visible title. */
+  activatePaletteCommand(title: string): Promise<void>;
+  /** The text of the currently highlighted (aria-selected) palette item, or null. */
+  paletteSelectedItemText(): Promise<string | null>;
+
+  // --- server search (SHELL-084) ---
+  /** The "Search results for …" heading text shown for a server search, or null. */
+  paletteSearchResultsHeading(): Promise<string | null>;
+  /** Whether the search-results heading is showing its in-flight pulse. */
+  isPaletteSearchHeadingPulsing(): Promise<boolean>;
+  /** Whether the footer workspace-level scope toggle is present. */
+  paletteHasWorkspaceLevelToggle(): Promise<boolean>;
+  /** Whether that scope toggle is enabled (disabled when no project is in context). */
+  isWorkspaceLevelToggleEnabled(): Promise<boolean>;
+  /** Flip the footer workspace-level scope toggle. */
+  toggleWorkspaceLevel(): Promise<void>;
+  /**
+   * Count palette search requests to GET /workspaces/{slug}/search/ while
+   * running `action` (proves debounce coalescing and the no-network blank case).
+   */
+  countSearchRequests(action: () => Promise<void>): Promise<number>;
+  /** The query params of the most recent palette search request, or null. */
+  lastSearchRequestParams(): Promise<Record<string, string> | null>;
+
+  // --- shortcuts reference dialog (SHELL-094) ---
+  /** Whether the keyboard-shortcuts reference dialog is open. */
+  isShortcutsDialogOpen(): Promise<boolean>;
+  /** Press the global chord that opens the shortcuts dialog (Ctrl/Cmd+/). */
+  pressShortcutsDialogChord(): Promise<void>;
+  /** Type into the shortcuts dialog's filter box. */
+  typeShortcutsFilter(text: string): Promise<void>;
+  /** Visible command titles listed in the shortcuts dialog, in display order. */
+  shortcutsDialogCommandTitles(): Promise<string[]>;
+
+  // --- repo-star action (SHELL-103) ---
+  /** The repo-star link's {href,target,rel} attributes, or null when absent. */
+  repoStarLinkAttributes(): Promise<{ href: string; target: string; rel: string } | null>;
+  /** The src of the repo-star icon image (theme-adaptive asset), or null. */
+  repoStarIconSrc(): Promise<string | null>;
+
+  // --- browse route (SHELL-106, negative row) ---
+  /** Open the workspace-level browse route for a work-item identifier (e.g. "PROJ-1"). */
+  openBrowseWorkItem(workspaceSlug: string, identifier: string): Promise<void>;
+  /** Whether the browse route rendered the project-scoped work-item detail view. */
+  browseShowsWorkItemDetail(): Promise<boolean>;
+  /** Whether any workspace-wide list/grid of work items exists on the browse route. */
+  browseShowsWorkspaceWideList(): Promise<boolean>;
 }

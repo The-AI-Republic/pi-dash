@@ -84,3 +84,66 @@ export async function serverIssueNames(
     return name;
   });
 }
+
+/** The project's short-code identifier (e.g. "PARI"), read from the server. */
+export async function serverProjectIdentifier(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { identifier?: unknown };
+  if (typeof payload.identifier !== "string" || payload.identifier.length === 0) {
+    throw new Error("[parity] project payload carried no identifier.");
+  }
+  return payload.identifier;
+}
+
+/**
+ * The browse-route key for the first seeded work item ("IDENT-seq"), which the
+ * workspace browse route (`/{slug}/browse/{key}`) resolves to a detail view.
+ * SHELL-106 proves that key opens the project-scoped detail, not a browser.
+ */
+export async function serverFirstWorkItemKey(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ key: string; name: string }> {
+  const identifier = await serverProjectIdentifier(workspaceSlug, projectId, sessionCookie, apiBase);
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] issues read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  const first = rows[0] as { sequence_id?: unknown; name?: unknown } | undefined;
+  if (!first || typeof first.sequence_id !== "number" || typeof first.name !== "string") {
+    throw new Error("[parity] could not resolve the first work item's sequence_id/name.");
+  }
+  return { key: `${identifier}-${first.sequence_id}`, name: first.name };
+}
+
+/** The signed-in user's profile (theme, language, start_of_the_week, …). */
+export async function serverUserProfile(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`${apiBase}/api/users/me/profile/`, { headers: { cookie: sessionCookie } });
+  if (!res.ok) throw new Error(`[parity] profile read failed with HTTP ${res.status}.`);
+  return (await res.json()) as Record<string, unknown>;
+}
+
+/** The signed-in user's account record (user_timezone, …). */
+export async function serverUserAccount(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`${apiBase}/api/users/me/`, { headers: { cookie: sessionCookie } });
+  if (!res.ok) throw new Error(`[parity] user read failed with HTTP ${res.status}.`);
+  return (await res.json()) as Record<string, unknown>;
+}
