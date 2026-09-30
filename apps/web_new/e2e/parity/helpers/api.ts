@@ -439,12 +439,25 @@ function jarToHeader(jar: Map<string, string>): string {
 }
 
 async function fetchCsrf(apiBase: string): Promise<{ token: string; setCookies: string[] }> {
-  const res = await fetch(`${apiBase}/auth/get-csrf-token/`);
-  if (!res.ok) throw new Error(`[parity] CSRF token fetch failed with HTTP ${res.status}.`);
-  const payload = (await res.json()) as { csrf_token?: unknown };
-  const token = typeof payload.csrf_token === "string" ? payload.csrf_token : "";
-  if (token === "") throw new Error("[parity] CSRF token response carried no token.");
-  return { token, setCookies: setCookieHeaders(res) };
+  // The scratch API throttles auth endpoints under burst load (parallel
+  // parity runs share one host). Back off and retry on 429/5xx instead of
+  // failing the scenario: the throttle clears within seconds.
+  let lastStatus = 0;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const res = await fetch(`${apiBase}/auth/get-csrf-token/`);
+    lastStatus = res.status;
+    if (res.ok) {
+      const payload = (await res.json()) as { csrf_token?: unknown };
+      const token = typeof payload.csrf_token === "string" ? payload.csrf_token : "";
+      if (token === "") throw new Error("[parity] CSRF token response carried no token.");
+      return { token, setCookies: setCookieHeaders(res) };
+    }
+    if (res.status !== 429 && res.status < 500) {
+      throw new Error(`[parity] CSRF token fetch failed with HTTP ${res.status}.`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000 * (attempt + 1)));
+  }
+  throw new Error(`[parity] CSRF token fetch failed with HTTP ${lastStatus} after retries.`);
 }
 
 /**
