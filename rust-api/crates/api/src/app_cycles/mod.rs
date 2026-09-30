@@ -32,6 +32,8 @@
 pub mod gates;
 pub mod handlers_analytics;
 pub mod handlers_archive;
+pub mod handlers_cycle_issues;
+pub mod handlers_favorites;
 pub mod handlers_progress;
 
 use axum::Router;
@@ -39,12 +41,14 @@ use axum::Router;
 use crate::state::AppState;
 
 /// Merge the app-cycles route groups (archive first, PIDASHCONV-377;
-/// progress + analytics via PIDASHCONV-410; sibling handler issues
-/// extend the merge; merges keep both sides). Cutover into the serving
-/// router stays with the domain gate (PIDASHCONV-388), so this is
-/// additive only.
+/// cycle-issues + favorites via PIDASHCONV-323; progress + analytics via
+/// PIDASHCONV-410; sibling handler issues extend the merge; merges keep
+/// both sides). Cutover into the serving router stays with the domain
+/// gate (PIDASHCONV-388), so this is additive only.
 pub fn routes() -> Router<AppState> {
     handlers_archive::routes()
+        .merge(handlers_cycle_issues::routes())
+        .merge(handlers_favorites::routes())
         .merge(handlers_progress::routes())
         .merge(handlers_analytics::routes())
 }
@@ -62,6 +66,13 @@ pub const COMPLEX_FILTER_ENDPOINTS: &[&str] = &["cycle-issues"];
 /// Endpoints whose list path runs the legacy `issue_filters(params,
 /// 'GET')` dict compiler first (`issue.py:111`).
 pub const LEGACY_FILTER_ENDPOINTS: &[&str] = &["cycle-issues"];
+
+/// Merge the cycle-issue + favorites route groups (PIDASHCONV-323); sibling
+/// handler issues (PIDASHCONV-321/357/377/410) merge theirs the same way —
+/// merges keep both sides. The overlay cutover wiring is a follow-up.
+pub fn routes() -> axum::Router<crate::state::AppState> {
+    handlers_cycle_issues::routes().merge(handlers_favorites::routes())
+}
 
 #[cfg(test)]
 mod tests {
