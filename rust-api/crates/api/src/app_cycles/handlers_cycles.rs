@@ -864,11 +864,12 @@ fn shape_retrieve_row(row: &Map<String, Value>, timezone: &Tz) -> String {
 
 /// One validated datetime: the parsed instant plus the calendar date
 /// Python's `validate()` reads (`serializers/cycle.py:29-37`:
-/// `str(data["start_date"].date())`). DRF only re-zones naive inputs
-/// (`make_aware` in the actor zone); aware inputs keep their own offset,
-/// so their date is read in the input offset, not the actor zone. Naive
-/// inputs (date-only strings, naive datetimes) keep their wall date,
-/// which attaching the actor zone never changes.
+/// `str(data["start_date"].date())`). DRF's `enforce_timezone` re-zones
+/// every input into the activated (actor) zone — naive inputs are made
+/// aware there, aware inputs are `astimezone`d into it — so the date is
+/// read in the actor zone, never in the input's own offset. Naive inputs
+/// (date-only strings, naive datetimes) keep their wall date, which
+/// attaching the actor zone never changes.
 #[derive(Debug, Clone, Copy)]
 struct ParsedDate {
     instant: chrono::DateTime<chrono::Utc>,
@@ -881,10 +882,12 @@ struct ParsedDate {
 /// and date-only strings parse; anything else fails `invalid` with the
 /// `DATETIME_FORMAT_HINT` message. Naive results are made aware in the
 /// actor zone (`enforce_timezone` under `USE_TZ`); aware results are
-/// converted to it. Non-string JSON (numbers, bools, arrays, objects)
-/// fails the same way — JSON has no date objects, and DRF's `strptime`
-/// suppresses the `TypeError` into `invalid`.
+/// `astimezone`d into it, so the calendar date is read in the actor
+/// zone. Non-string JSON (numbers, bools, arrays, objects) fails the
+/// same way — JSON has no date objects, and DRF's `strptime` suppresses
+/// the `TypeError` into `invalid`.
 fn parse_serializer_date(value: &Value, timezone: &Tz) -> Result<ParsedDate, &'static str> {
+    use chrono::TimeZone as _;
     let text = match value {
         Value::String(text) => text.as_str(),
         _ => return Err("invalid"),
@@ -892,7 +895,7 @@ fn parse_serializer_date(value: &Value, timezone: &Tz) -> Result<ParsedDate, &'s
     if let Ok(aware) = chrono::DateTime::parse_from_rfc3339(text) {
         return Ok(ParsedDate {
             instant: aware.with_timezone(&chrono::Utc),
-            date: aware.date_naive(),
+            date: timezone.from_utc_datetime(&aware.naive_utc()).date_naive(),
         });
     }
     // `datetime.fromisoformat` extras Django accepts: a space separator
@@ -905,7 +908,7 @@ fn parse_serializer_date(value: &Value, timezone: &Tz) -> Result<ParsedDate, &'s
     if let Ok(aware) = chrono::DateTime::parse_from_rfc3339(&normalized) {
         return Ok(ParsedDate {
             instant: aware.with_timezone(&chrono::Utc),
-            date: aware.date_naive(),
+            date: timezone.from_utc_datetime(&aware.naive_utc()).date_naive(),
         });
     }
     // Date-only (`datetime.fromisoformat` on 3.11+): naive midnight,
@@ -1443,9 +1446,9 @@ fn convert_end(
 /// The `validate()` tail (`serializers/cycle.py:16-38`): ordering check
 /// then the `convert_to_utc` rewrite, both only when both dates are
 /// non-null. Returns the rewritten pair. The rewritten dates come from
-/// the parsed inputs (`str(data["start_date"].date())`), which read
-/// aware datetimes in their own offset — never re-zoned into the actor
-/// zone (see [`ParsedDate`]).
+/// the parsed inputs (`str(data["start_date"].date())`), which DRF's
+/// `enforce_timezone` reads in the actor zone — aware inputs are
+/// `astimezone`d into it before `.date()` (see [`ParsedDate`]).
 async fn validate_and_rewrite(
     pool: &sqlx::PgPool,
     raw_body: &Map<String, Value>,
@@ -2347,16 +2350,27 @@ mod tests {
     }
 
     #[test]
-    fn aware_dates_read_in_input_offset_not_actor_zone() {
-        // `serializers/cycle.py:29-37` reads `data["start_date"].date()`
-        // on the DRF-parsed value, which keeps an aware input's own
-        // offset — a Zulu instant just after UTC midnight is still the
-        // previous day even for a +05:30 actor.
+    fn aware_dates_read_in_actor_zone_like_drf() {
+        // DRF's `enforce_timezone` (`fields.py`) `astimezone`s every
+        // input into the activated (actor) zone before `validate()` reads
+        // `.date()` — a Zulu instant just before UTC midnight is already
+        // the next day for a +05:30 actor.
         let actor: Tz = "Asia/Kolkata".parse().expect("tz");
         let parsed = parse_serializer_date(&json!("2026-02-28T23:30:00Z"), &actor).expect("aware");
         assert_eq!(
             parsed.date,
-            chrono::NaiveDate::from_ymd_opt(2026, 2, 28).expect("date")
+            chrono::NaiveDate::from_ymd_opt(2026, 3, 1).expect("date")
+        );
+        assert_eq!(parsed.instant.to_rfc3339(), "2026-02-28T23:30:00+00:00");
+        // A +14:00 input near midnight for a UTC actor reads the UTC
+        // date, not the input-offset date (live Django vector: the UTC
+        // date equals "today", so `convert_to_utc` returns now).
+        let utc: Tz = "UTC".parse().expect("tz");
+        let parsed =
+            parse_serializer_date(&json!("2026-10-01T00:30:00+14:00"), &utc).expect("aware");
+        assert_eq!(
+            parsed.date,
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 30).expect("date")
         );
         // Naive inputs keep their wall date (the actor-zone attach never
         // moves the wall clock).
