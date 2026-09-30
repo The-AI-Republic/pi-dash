@@ -13,6 +13,7 @@ run's database.
 | `redis`  | redis:7-alpine                                                            | 16319          | Django cache backend                                           |
 | `mq`     | rabbitmq:3-management-alpine                                              | none published | Broker for background tasks                                    |
 | `api`    | built from `apps/api` (`Dockerfile.dev`, lean migrate-plus-serve command) | 18019          | Django + uvicorn, migrates on boot                             |
+| `worker` | same image as `api` (celery worker, default queue)                        | none published | Consumes background tasks: mention links, notifications        |
 | `oracle` | built from the repo (`apps/web/Dockerfile.dev`)                           | internal :3000 | Old app with same-origin API calls                             |
 | `proxy`  | caddy:2-alpine (`stack/Caddyfile`)                                        | 13000          | One origin: frontend plus `/auth`, `/api`, `/static` to Django |
 | `live`   | built from `apps/live` (opt-in profile `full`)                            | 13001          | Realtime server for realtime rows                              |
@@ -87,5 +88,8 @@ desktop build of web_new with the same seeded stack.
 - workspace `Parity Workspace` (`parity-ws`), owned by that user;
 - project `Parity Project` (`PAR`), flat list layout preference;
 - one `Todo` state plus three issues: `Parity first/second/third issue`.
+- second member `parity-mention@example.com` (password `Parity-Seed-2`,
+  display name `Parity Mention`), workspace + project member, so mention
+  scenarios have someone to @-mention besides the author.
 
 To change the seed, edit that file and rerun `parity-up.sh`.
