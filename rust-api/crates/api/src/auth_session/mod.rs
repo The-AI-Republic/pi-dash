@@ -14,11 +14,9 @@
 //! * [`middleware`] — D-16 session-cookie semantics + tower wiring over
 //!   the F-08 session layer (reused read-only).
 pub mod email;
-//!
-//! Plus the magic-link handler port, named by PIDASHCONV-431:
-//!
-//! * [`magic`] — the six magic-link routes (generate/sign-in/sign-up,
-//!   app + space) with [`routes`]; merges keep both sides.
+// Plus the magic-link handler port, named by PIDASHCONV-431: [`magic`]
+// (six routes: generate/sign-in/sign-up, app + space) wired through
+// [`routes`]; merges keep both sides.
 pub mod magic;
 pub mod middleware;
 pub mod render;
@@ -42,5 +40,4 @@ pub use render::{
 /// (PIDASHCONV-431); merges keep both sides.
 pub fn routes() -> axum::Router<crate::state::AppState> {
     email::routes().merge(magic_routes())
-}
 }

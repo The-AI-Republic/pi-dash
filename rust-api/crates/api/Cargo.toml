@@ -64,10 +64,8 @@ md-5 = "0.10.6"
 # `CiphertextBlob`/`Plaintext`. Same 0.22 line the db crate builds on, so
 # the lockfile gains no new downloads.
 base64 = "0.22"
-# Magic-link handlers (D-16, PIDASHCONV-431): the sign-in/up views read
-# urlencoded forms. `redis` already rides the D-17 line above; reqwest's
-# transitive serde_urlencoded 0.7.1, so the lockfile gains no new downloads.
-serde_urlencoded = "0.7"
+# Magic-link sign-in/up views read urlencoded forms via the D-16 email
+# line below (`serde_urlencoded`; same 0.7 line, no new downloads).
 # Assistant config validation (D-06): IDN second pass of the Django
 # `URLValidator` port. Same 1.x line already in the lockfile, so no new
 # downloads.
