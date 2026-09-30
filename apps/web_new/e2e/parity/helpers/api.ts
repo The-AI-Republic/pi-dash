@@ -1440,6 +1440,161 @@ export async function approveDeviceCode(
   };
 }
 
+export interface WorkspaceInviteRef {
+  id: string;
+  token: string;
+  email: string;
+}
+
+/**
+ * Invite addresses to a workspace as an admin session. Resolves with the
+ * created invitation ids plus tokens, read back from the workspace
+ * invitation list so scenarios can build real emailed links.
+ */
+export async function createWorkspaceInvites(
+  workspaceSlug: string,
+  adminSessionCookie: string,
+  emails: { email: string; role: number }[],
+  apiBase: string = apiBaseFromEnv()
+): Promise<WorkspaceInviteRef[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/invitations/`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: adminSessionCookie },
+    body: JSON.stringify({ emails }),
+  });
+  if (!res.ok) throw new Error(`[parity] invite create failed with HTTP ${res.status}.`);
+  const listed = await workspaceInvitations(workspaceSlug, adminSessionCookie, apiBase);
+  return emails.map(({ email }) => {
+    const found = listed.find((row) => row.email === email);
+    if (!found) throw new Error(`[parity] created invite for ${email} was not listed back.`);
+    return found;
+  });
+}
+
+/** Every invitation row of a workspace, as an admin session sees it. */
+export async function workspaceInvitations(
+  workspaceSlug: string,
+  adminSessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<WorkspaceInviteRef[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/invitations/`, {
+    headers: { cookie: adminSessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] invitation list failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const record = row as { id?: unknown; token?: unknown; email?: unknown };
+    if (typeof record.id !== "string" || typeof record.token !== "string" || typeof record.email !== "string") {
+      throw new Error("[parity] invitation row carried no string id/token/email.");
+    }
+    return { id: record.id, token: record.token, email: record.email };
+  });
+}
+
+/** Pending invitations of the session owner. */
+export async function myInvitations(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ id: string; workspaceSlug: string }[]> {
+  const res = await fetch(`${apiBase}/api/users/me/workspaces/invitations/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] my-invitations read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const record = row as { id?: unknown; workspace?: { slug?: unknown } };
+    if (typeof record.id !== "string" || typeof record.workspace?.slug !== "string") {
+      throw new Error("[parity] my-invitation row carried no string id/workspace slug.");
+    }
+    return { id: record.id, workspaceSlug: record.workspace.slug };
+  });
+}
+
+/** Answer a single invitation over the API (setup for stale-state variants). */
+export async function answerSingleInvitation(
+  workspaceSlug: string,
+  invitationId: string,
+  accepted: boolean,
+  token: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/invitations/${invitationId}/join/`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: sessionCookie },
+    body: JSON.stringify({ accepted, token }),
+  });
+  if (!res.ok) throw new Error(`[parity] invitation answer failed with HTTP ${res.status}.`);
+}
+
+/** Emails of the workspace members as the server reports them. */
+export async function workspaceMemberEmails(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/members/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] member list failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const record = row as { member?: { email?: unknown }; email?: unknown };
+    const email = record.member?.email ?? record.email;
+    if (typeof email !== "string") throw new Error("[parity] member row carried no string email.");
+    return email;
+  });
+}
+
+export interface UserProfileState {
+  is_onboarded: boolean;
+  role?: string;
+  use_case?: string;
+  onboarding_step?: Record<string, boolean>;
+  last_workspace_id?: string;
+}
+
+/** The session owner's profile flags as the server reports them. */
+export async function userProfile(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<UserProfileState> {
+  const res = await fetch(`${apiBase}/api/users/me/profile/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] profile read failed with HTTP ${res.status}.`);
+  return (await res.json()) as UserProfileState;
+}
+
+/** The session owner's user row (name fields) as the server reports them. */
+export async function currentUser(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ first_name?: string; last_name?: string; display_name?: string }> {
+  const res = await fetch(`${apiBase}/api/users/me/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] user read failed with HTTP ${res.status}.`);
+  return (await res.json()) as { first_name?: string; last_name?: string; display_name?: string };
+}
+
+/**
+ * Mark the session owner onboarded via the marker endpoint only (test
+ * setup; the UI path is another row). Named apart from markOnboarded,
+ * which takes a FreshUser and also completes every onboarding-step flag.
+ */
+export async function markSessionOnboarded(sessionCookie: string, apiBase: string = apiBaseFromEnv()): Promise<void> {
+  const res = await fetch(`${apiBase}/api/users/me/onboard/`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", cookie: sessionCookie },
+    body: JSON.stringify({ is_onboarded: true }),
+  });
+  if (!res.ok) throw new Error(`[parity] onboard mark failed with HTTP ${res.status}.`);
+}
+
 /** Create a workspace as the session's user; resolves with its slug. */
 export async function createWorkspace(
   sessionCookie: string,
