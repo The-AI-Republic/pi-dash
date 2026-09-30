@@ -655,7 +655,9 @@ async fn exchange_github(
     }
 
     // `__get_email` (`github.py:108-135`): transport → 5120, non-list or
-    // missing primary → 5120, decode failure → 500.
+    // missing primary → 5120, decode failure → 500. The status is never
+    // checked (`raise_for_status` is absent there, unlike the token and
+    // userinfo legs), so a non-2xx body decodes like any other.
     let emails_response = http
         .get(providers::GITHUB_EMAILS_URL)
         .header(
@@ -665,9 +667,6 @@ async fn exchange_github(
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|_| provider_error())?;
-    let emails_response = emails_response
-        .error_for_status()
         .map_err(|_| provider_error())?;
     let emails_bytes = emails_response
         .bytes()
@@ -1309,11 +1308,14 @@ fn login_session(
     } else {
         shapes::base_host(&host_settings(settings), false, false, false)
     };
+    // `user_login` (`login.py:21-25`, D-16 `device_info` precedent): the
+    // user-agent default is `""` when the header is absent (the login-stamp
+    // `None` above stays NULL — different site, different parity).
     session_set(
         handle,
         "device_info",
         serde_json::json!({
-            "user_agent": user_agent(headers),
+            "user_agent": user_agent(headers).as_deref().unwrap_or(""),
             "ip_address": client_ip(headers, remote_addr),
             "domain": domain,
         }),
@@ -1636,6 +1638,34 @@ mod tests {
             let resp = space_callback(State(state.clone()), None, Query(params)).await;
             assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         }
+    }
+
+    // `user_login` device_info (`login.py:21-25`, D-16 precedent): an
+    // absent User-Agent stores `""`, an absent IP stays null.
+    #[test]
+    fn login_device_info_absent_header_defaults() {
+        let settings = test_settings();
+        let handle = SessionHandle::new(crate::middleware::RequestSession::empty());
+        let user = ResolvedUser {
+            id: Uuid::new_v4(),
+            password_field: "pw".to_owned(),
+        };
+        login_session(
+            &handle,
+            &settings,
+            &HeaderMap::new(),
+            None,
+            &user,
+            true,
+            false,
+        );
+        let info = handle
+            .lock()
+            .get("device_info")
+            .expect("device_info")
+            .clone();
+        assert_eq!(info["user_agent"], Value::String(String::new()));
+        assert!(info["ip_address"].is_null());
     }
 
     // `sanitize_email` goldens (`adapter/base.py`).
