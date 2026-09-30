@@ -23,6 +23,9 @@ export default defineConfig({
     // `// @vitest-environment jsdom` pragma on their first line.
     environment: "node",
     setupFiles: ["./src/test-setup.ts"],
-    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    // Feature tests live under src. Named checks/ files only: other checks
+    // carry node:test self-tests (e.g. coexistence-routes, run via
+    // test:coexistence) that vitest must not sweep up.
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx", "checks/check-similarity.test.mjs"],
   },
 });

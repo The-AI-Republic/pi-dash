@@ -10,14 +10,23 @@
 // (Evaluated jscpd 5.3.3 first: its Rust engine silently misses a verbatim
 // 130-token block inside a 1300-line file, so it cannot enforce the >= 50
 // token contract. This script replaces it with exact, auditable semantics.)
+//
+// AI Republic's own code (F-12 / NEWFRONT-102) is excluded from the old-code
+// corpus: those paths were written by us after the Plane import and may be
+// ported into the new trees, so a port of them must not fail this check. The
+// exact path list lives in `ownCode` below and mirrors the wiki page
+// "Reference, not source" > "Exception: your own code". The exclusion is for
+// this similarity gate only: the import ban (check-boundaries, oxlint) still
+// forbids importing own-code paths at runtime, and anything own code uses from
+// Plane code stays reference-only and is still compared here.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const MIN_TOKENS = 50;
 
 const here = dirname(fileURLToPath(import.meta.url));
-const root = resolve(join(here, "..", "..", ".."));
+const repoRoot = resolve(join(here, "..", "..", ".."));
 
 const newTrees = ["apps/web_new", "packages/kit", "packages/api-client"];
 
@@ -52,12 +61,100 @@ const ignoreList = [
   },
 ];
 
+// AI Republic's own code — excluded from the OLD-code corpus only (F-12).
+// Exactly the paths from the wiki page "Reference, not source" >
+// "Exception: your own code"; each entry carries a one-line reason. Patterns
+// use `{a,b}` alternation and a trailing `/**` (this directory and everything
+// under it); everything else is an exact repo-relative file path. Nothing
+// outside this list is excluded. Keep in sync with the wiki section.
+const ownCode = [
+  {
+    pattern: "apps/web/core/components/{runners,chat,assistant,schedulers}/**",
+    reason: "Runner, runner-chat, assistant and scheduler UI components (AI Republic).",
+  },
+  {
+    pattern: "apps/web/core/components/agent-runtime.tsx",
+    reason: "Agent-runtime host component (AI Republic).",
+  },
+  {
+    pattern: "apps/web/core/components/desktop-update-button.tsx",
+    reason: "Desktop updater button (AI Republic).",
+  },
+  {
+    pattern: "apps/web/app/(all)/[workspaceSlug]/{runners,schedulers,prompts,assistant,ai-dev-machines}/**",
+    reason: "Runner, scheduler, prompt, assistant and AI-dev-machine routes (AI Republic).",
+  },
+  {
+    pattern: "apps/web/app/(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/{runners,schedulers}/**",
+    reason: "Project-scoped runner and scheduler routes (AI Republic).",
+  },
+  {
+    pattern: "apps/web/app/(all)/[workspaceSlug]/(settings)/settings/projects/[projectId]/schedulers/**",
+    reason: "Project scheduler-settings routes (AI Republic).",
+  },
+  {
+    pattern: "apps/web/core/store/{scheduler,prompt-section}.store.ts",
+    reason: "Scheduler and prompt-section stores (AI Republic).",
+  },
+  {
+    pattern: "apps/web/core/services/{runner/**,agent-runtime.ts,desktop-session.ts}",
+    reason: "Runner, agent-runtime and desktop-session services (AI Republic).",
+  },
+  {
+    pattern: "packages/services/src/{runner,assistant,scheduler,prompt-section,auto-pm}/**",
+    reason: "Runner, assistant, scheduler, prompt-section and auto-PM service logic (AI Republic).",
+  },
+  {
+    pattern: "packages/services/src/{desktop-api-adapter,desktop-event-source}.ts",
+    reason: "Desktop API adapter and desktop event source (AI Republic).",
+  },
+  {
+    pattern: "desktop-overlay/**",
+    reason: "Desktop overlay (AI Republic).",
+  },
+];
+
+// Expand `{a,b,c}` alternation into concrete patterns. Handles several brace
+// groups per pattern; the wiki uses no nested braces.
+function expandBraces(pattern) {
+  const match = pattern.match(/\{([^{}]*)\}/);
+  if (match === null) return [pattern];
+  const [full, inner] = match;
+  const before = pattern.slice(0, match.index);
+  const after = pattern.slice(match.index + full.length);
+  const expanded = [];
+  for (const option of inner.split(",")) {
+    expanded.push(...expandBraces(before + option + after));
+  }
+  return expanded;
+}
+
+const ownCodePatterns = ownCode.flatMap((entry) => expandBraces(entry.pattern));
+
+function toPosix(repoRel) {
+  return repoRel.split(sep).join("/");
+}
+
 function isIgnored(repoRel) {
-  const normalized = repoRel.split(sep).join("/");
+  const normalized = toPosix(repoRel);
   return ignoreList.some((entry) => normalized === entry.suffix || normalized.endsWith(`/${entry.suffix}`));
 }
 
-function collectFiles(trees) {
+// True when a repo-relative path is AI Republic's own code (excluded from the
+// old corpus). A `**` pattern matches the directory and everything under it;
+// any other pattern is an exact file match.
+function isOwnCode(repoRel) {
+  const normalized = toPosix(repoRel);
+  return ownCodePatterns.some((pattern) => {
+    if (pattern.endsWith("/**")) {
+      const prefix = pattern.slice(0, -"/**".length);
+      return normalized === prefix || normalized.startsWith(`${prefix}/`);
+    }
+    return normalized === pattern;
+  });
+}
+
+function collectFiles(trees, root) {
   const files = [];
   function walk(dir) {
     for (const entry of readdirSync(dir)) {
@@ -66,7 +163,7 @@ function collectFiles(trees) {
         if (!skipDirs.has(entry)) walk(full);
       } else if (extensions.some((ext) => entry.endsWith(ext))) {
         const repoRel = relative(root, full);
-        if (!isIgnored(repoRel)) files.push({ full, repoRel });
+        if (!isIgnored(repoRel)) files.push({ full, repoRel: toPosix(repoRel) });
       }
     }
   }
@@ -129,47 +226,6 @@ function windowHash(ids, start) {
   return 4294967296 * (2097151 & h2) + (h1 >>> 0);
 }
 
-const oldFiles = collectFiles(oldTrees).map((file) => ({ ...file, side: "old" }));
-const newFiles = collectFiles(newTrees).map((file) => ({ ...file, side: "new" }));
-
-// Shared token-id vocabulary so window comparison is integer comparison.
-const vocab = new Map();
-function tokenId(token) {
-  let id = vocab.get(token);
-  if (id === undefined) {
-    id = vocab.size + 1;
-    vocab.set(token, id);
-  }
-  return id;
-}
-
-function indexFile(file) {
-  const text = readFileSync(file.full, "utf8");
-  const { tokens, tokenLines } = tokenize(text);
-  return { ...file, ids: tokens.map(tokenId), tokenLines };
-}
-
-const indexedOld = oldFiles.map(indexFile);
-const indexedNew = newFiles.map(indexFile);
-
-// Index every MIN_TOKENS window of every old file: hash -> [fileIdx, pos].
-// Position packs as fileIdx * 2^24 + pos (files and offsets fit easily).
-const POS_BITS = 24;
-const POS_MASK = (1 << POS_BITS) - 1;
-const index = new Map();
-indexedOld.forEach((file, fileIdx) => {
-  const { ids } = file;
-  for (let pos = 0; pos + MIN_TOKENS <= ids.length; pos++) {
-    const hash = windowHash(ids, pos);
-    let list = index.get(hash);
-    if (list === undefined) {
-      list = [];
-      index.set(hash, list);
-    }
-    list.push(fileIdx * 2 ** POS_BITS + pos);
-  }
-});
-
 function windowsEqual(aIds, aStart, bIds, bStart) {
   for (let i = 0; i < MIN_TOKENS; i++) {
     if (aIds[aStart + i] !== bIds[bStart + i]) return false;
@@ -177,71 +233,134 @@ function windowsEqual(aIds, aStart, bIds, bStart) {
   return true;
 }
 
-const offenders = [];
-for (const newFile of indexedNew) {
-  const { ids } = newFile;
-  let pos = 0;
-  while (pos + MIN_TOKENS <= ids.length) {
-    const hash = windowHash(ids, pos);
-    const candidates = index.get(hash);
-    let best = null;
-    if (candidates !== undefined) {
-      for (const packed of candidates) {
-        const oldIdx = Math.floor(packed / 2 ** POS_BITS);
-        const oldPos = packed & POS_MASK;
-        const oldFile = indexedOld[oldIdx];
-        if (!windowsEqual(ids, pos, oldFile.ids, oldPos)) continue; // hash collision
-        let start = pos;
-        let oldStart = oldPos;
-        while (start > 0 && oldStart > 0 && ids[start - 1] === oldFile.ids[oldStart - 1]) {
-          start--;
-          oldStart--;
-        }
-        let end = pos + MIN_TOKENS;
-        let oldEnd = oldPos + MIN_TOKENS;
-        while (end < ids.length && oldEnd < oldFile.ids.length && ids[end] === oldFile.ids[oldEnd]) {
-          end++;
-          oldEnd++;
-        }
-        if (best === null || end - start > best.length) {
-          best = { oldFile, oldStart, oldEnd, length: end - start, start, end };
+// Position packs as fileIdx * 2^POS_BITS + pos (files and offsets fit easily).
+const POS_BITS = 24;
+const POS_MASK = (1 << POS_BITS) - 1;
+
+// Run the check over a repo. `root` defaults to this checkout; `oldTrees` /
+// `newTrees` default to the real trees. AI Republic's own code is filtered out
+// of the old corpus (isOwnCode); nothing else is. Returns the offenders and
+// the number of files scanned — the CLI turns that into output and an exit
+// code, and the test drives it over a hermetic fixture repo.
+function runSimilarityCheck({ root = repoRoot, oldTrees: oldT = oldTrees, newTrees: newT = newTrees } = {}) {
+  const oldFiles = collectFiles(oldT, root)
+    .filter((file) => !isOwnCode(file.repoRel))
+    .map((file) => ({ ...file, side: "old" }));
+  const newFiles = collectFiles(newT, root).map((file) => ({ ...file, side: "new" }));
+
+  // Shared token-id vocabulary so window comparison is integer comparison.
+  const vocab = new Map();
+  function tokenId(token) {
+    let id = vocab.get(token);
+    if (id === undefined) {
+      id = vocab.size + 1;
+      vocab.set(token, id);
+    }
+    return id;
+  }
+
+  function indexFile(file) {
+    const text = readFileSync(file.full, "utf8");
+    const { tokens, tokenLines } = tokenize(text);
+    return { ...file, ids: tokens.map(tokenId), tokenLines };
+  }
+
+  const indexedOld = oldFiles.map(indexFile);
+  const indexedNew = newFiles.map(indexFile);
+
+  // Index every MIN_TOKENS window of every old file: hash -> [packed(fileIdx,pos)].
+  const index = new Map();
+  indexedOld.forEach((file, fileIdx) => {
+    const { ids } = file;
+    for (let pos = 0; pos + MIN_TOKENS <= ids.length; pos++) {
+      const hash = windowHash(ids, pos);
+      let list = index.get(hash);
+      if (list === undefined) {
+        list = [];
+        index.set(hash, list);
+      }
+      list.push(fileIdx * 2 ** POS_BITS + pos);
+    }
+  });
+
+  const offenders = [];
+  for (const newFile of indexedNew) {
+    const { ids } = newFile;
+    let pos = 0;
+    while (pos + MIN_TOKENS <= ids.length) {
+      const hash = windowHash(ids, pos);
+      const candidates = index.get(hash);
+      let best = null;
+      if (candidates !== undefined) {
+        for (const packed of candidates) {
+          const oldIdx = Math.floor(packed / 2 ** POS_BITS);
+          const oldPos = packed & POS_MASK;
+          const oldFile = indexedOld[oldIdx];
+          if (!windowsEqual(ids, pos, oldFile.ids, oldPos)) continue; // hash collision
+          let start = pos;
+          let oldStart = oldPos;
+          while (start > 0 && oldStart > 0 && ids[start - 1] === oldFile.ids[oldStart - 1]) {
+            start--;
+            oldStart--;
+          }
+          let end = pos + MIN_TOKENS;
+          let oldEnd = oldPos + MIN_TOKENS;
+          while (end < ids.length && oldEnd < oldFile.ids.length && ids[end] === oldFile.ids[oldEnd]) {
+            end++;
+            oldEnd++;
+          }
+          if (best === null || end - start > best.length) {
+            best = { oldFile, oldStart, oldEnd, length: end - start, start, end };
+          }
         }
       }
-    }
-    if (best !== null) {
-      offenders.push({
-        tokens: best.length,
-        newFile: newFile.repoRel,
-        newStartLine: lineOf(newFile.tokenLines, best.start),
-        newEndLine: lineOf(newFile.tokenLines, best.end - 1),
-        oldFile: best.oldFile.repoRel,
-        oldStartLine: lineOf(best.oldFile.tokenLines, best.oldStart),
-        oldEndLine: lineOf(best.oldFile.tokenLines, best.oldEnd - 1),
-      });
-      pos = best.end; // report maximal matches without overlap
-    } else {
-      pos++;
+      if (best !== null) {
+        offenders.push({
+          tokens: best.length,
+          newFile: newFile.repoRel,
+          newStartLine: lineOf(newFile.tokenLines, best.start),
+          newEndLine: lineOf(newFile.tokenLines, best.end - 1),
+          oldFile: best.oldFile.repoRel,
+          oldStartLine: lineOf(best.oldFile.tokenLines, best.oldStart),
+          oldEndLine: lineOf(best.oldFile.tokenLines, best.oldEnd - 1),
+        });
+        pos = best.end; // report maximal matches without overlap
+      } else {
+        pos++;
+      }
     }
   }
+
+  return { offenders, scanned: indexedOld.length + indexedNew.length };
 }
 
-const scanned = indexedOld.length + indexedNew.length;
-if (offenders.length > 0) {
-  console.error(
-    `Similarity check failed: ${offenders.length} block(s) of >= ${MIN_TOKENS} tokens shared with the old frontend.`
-  );
-  console.error(
-    "The old frontend is a reference, never a source: read it, spec the behavior in prose, write new code from the spec."
-  );
-  for (const offender of offenders.slice(0, 20)) {
+function main() {
+  const { offenders, scanned } = runSimilarityCheck();
+  if (offenders.length > 0) {
     console.error(
-      `  - ${offender.tokens} tokens: ${offender.newFile}:${offender.newStartLine}-${offender.newEndLine} <> ${offender.oldFile}:${offender.oldStartLine}-${offender.oldEndLine}`
+      `Similarity check failed: ${offenders.length} block(s) of >= ${MIN_TOKENS} tokens shared with the old frontend.`
     );
+    console.error(
+      "The old frontend is a reference, never a source: read it, spec the behavior in prose, write new code from the spec."
+    );
+    for (const offender of offenders.slice(0, 20)) {
+      console.error(
+        `  - ${offender.tokens} tokens: ${offender.newFile}:${offender.newStartLine}-${offender.newEndLine} <> ${offender.oldFile}:${offender.oldStartLine}-${offender.oldEndLine}`
+      );
+    }
+    if (offenders.length > 20) console.error(`  ... and ${offenders.length - 20} more`);
+    process.exit(1);
   }
-  if (offenders.length > 20) console.error(`  ... and ${offenders.length - 20} more`);
-  process.exit(1);
+
+  console.log(
+    `Similarity check passed: no >= ${MIN_TOKENS}-token block shared with the old frontend (${scanned} files scanned).`
+  );
 }
 
-console.log(
-  `Similarity check passed: no >= ${MIN_TOKENS}-token block shared with the old frontend (${scanned} files scanned).`
-);
+// Run as a CLI when invoked directly (`node .../check-similarity.mjs`); stay a
+// pure module when imported (e.g. by the test), so importing has no side effect.
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}
+
+export { MIN_TOKENS, ownCode, ownCodePatterns, expandBraces, isOwnCode, runSimilarityCheck };
