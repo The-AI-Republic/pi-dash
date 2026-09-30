@@ -42,7 +42,14 @@ export interface EventStream {
 
 /** Custom title bar (desktop only). */
 export interface TitleBarApi {
+  /** Mirror the in-app location in the native window title. */
   setTitle(title: string): void;
+  /**
+   * True when the shell draws macOS traffic lights over the page, so the
+   * title bar must indent its leading content. False on other platforms;
+   * the web platform exposes no window capability at all.
+   */
+  readonly trafficLightInset: boolean;
 }
 
 /** One native menu entry wired to the command registry. */

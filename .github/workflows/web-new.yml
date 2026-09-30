@@ -16,6 +16,8 @@ on:
       - ".ai_design/new_frontend_implementation/parity/**"
       - ".github/workflows/web-new*.yml"
       - "pnpm-lock.yaml"
+      - "desktop/scripts/dev-prep.sh"
+      - "desktop/tests/**"
   push:
     branches: [web-new-dev]
     paths:
@@ -25,6 +27,8 @@ on:
       - ".ai_design/new_frontend_implementation/parity/**"
       - ".github/workflows/web-new*.yml"
       - "pnpm-lock.yaml"
+      - "desktop/scripts/dev-prep.sh"
+      - "desktop/tests/**"
 
 concurrency:
   group: web-new-${{ github.ref }}

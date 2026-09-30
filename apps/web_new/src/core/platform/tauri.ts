@@ -9,7 +9,7 @@
 // build-time alias; the no-Tauri bundle check proves it.
 
 import { createPersistentStore } from "./storage.js";
-import type { EventStream, Platform, StreamInit, StreamMessage, Unsubscribe } from "./types.js";
+import type { EventStream, Platform, StreamInit, StreamMessage, TitleBarApi, Unsubscribe } from "./types.js";
 
 /** Subset of the Tauri webview globals this module touches. */
 interface TauriInvokeCore {
@@ -242,6 +242,33 @@ function desktopStream(url: string, init: StreamInit = {}): EventStream {
   return { messages, close };
 }
 
+/**
+ * The shell draws macOS traffic lights over the page, so the title bar
+ * must leave room for them. Read from the browser UA surface (no Tauri
+ * dependency in this module): userAgentData first, legacy platform after.
+ */
+function isMacOs(): boolean {
+  const nav = globalThis.navigator as (Navigator & { userAgentData?: { platform?: string } }) | undefined;
+  if (!nav) return false;
+  const hinted = nav.userAgentData?.platform;
+  if (typeof hinted === "string" && hinted.length > 0) return hinted.toLowerCase().startsWith("mac");
+  return (nav.platform ?? "").toLowerCase().startsWith("mac");
+}
+
+const desktopWindow: TitleBarApi = {
+  trafficLightInset: isMacOs(),
+  setTitle(title: string): void {
+    if (typeof globalThis.document !== "undefined") {
+      globalThis.document.title = title;
+    }
+    // Best-effort native title (the shell starts on "Pi Dash"): a missing
+    // or older shell rejects the invoke and the document title still wins.
+    const core = nativeApiOrigin()?.core;
+    if (!core) return;
+    core.invoke("plugin:window|set_title", { label: "main", value: title }).catch(() => undefined);
+  },
+};
+
 function trackFocus(callback: (focused: boolean) => void): Unsubscribe {
   if (typeof globalThis.window === "undefined") return () => undefined;
   const report = (): void => callback(!globalThis.document.hidden);
@@ -274,4 +301,5 @@ export const platform: Platform = {
   },
   storage: createPersistentStore("pidash.desktop"),
   onFocusChange: trackFocus,
+  window: desktopWindow,
 };

@@ -30,6 +30,11 @@ describe("platform selection", () => {
     expect(webPlatform.agentRuntime).toBeUndefined();
     expect(webPlatform.updates).toBeUndefined();
   });
+
+  it("exposes the title-bar capability on the desktop platform", () => {
+    expect(typeof desktopPlatform.window?.setTitle).toBe("function");
+    expect(typeof desktopPlatform.window?.trafficLightInset).toBe("boolean");
+  });
 });
 
 describe("memory store", () => {
