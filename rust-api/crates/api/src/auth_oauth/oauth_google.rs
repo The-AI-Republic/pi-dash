@@ -1382,13 +1382,18 @@ pub async fn download_and_upload_avatar(
     let headers = response.headers().clone();
     // `if content_length and int(content_length) > max_size: return None`
     // (`base.py:155-158`): a missing (or empty) header imposes no limit; an
-    // unparseable one raises in Python, i.e. the same `None` outcome.
+    // unparseable one raises in Python, i.e. the same `None` outcome. A
+    // present-but-undecodable value never parses either — requests would
+    // hand Python a raw string that `int()` rejects.
     match headers
         .get(reqwest::header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
     {
-        None => {}
+        None if headers.contains_key(reqwest::header::CONTENT_LENGTH) => {
+            tracing::warn!("avatar undecodable length; falling back to provider URL");
+            return None;
+        }
+        None | Some("") => {}
         Some(raw) => match raw.parse::<i64>() {
             Ok(length)
                 if pidash_storage::content_length_allowed(
@@ -1405,11 +1410,19 @@ pub async fn download_and_upload_avatar(
     }
     // Raw header value, defaulting exactly like Python (`base.py:160`);
     // the exact-match allowlist (and its bug) lives in the shared helper.
-    let content_type = headers
+    // A present-but-undecodable value misses the allowlist, like Python's
+    // raw-string lookup miss — only a truly missing header defaults.
+    let content_type = match headers
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .unwrap_or("image/jpeg")
-        .to_owned();
+    {
+        Some(value) => value.to_owned(),
+        None if headers.contains_key(reqwest::header::CONTENT_TYPE) => {
+            tracing::warn!("avatar undecodable content type; falling back to provider URL");
+            return None;
+        }
+        None => "image/jpeg".to_owned(),
+    };
     let extension = match pidash_storage::avatar_extension(Some(&content_type)) {
         Some(extension) => extension,
         None => {
