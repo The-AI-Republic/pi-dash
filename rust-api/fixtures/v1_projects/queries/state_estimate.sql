@@ -15,16 +15,20 @@ JOIN project_members vis
       AND vis.is_active AND vis.deleted_at IS NULL)
 WHERE w.slug = %(slug)s AND s.project_id = %(project)s
   AND s.group <> 'triage' AND s.deleted_at IS NULL
-  AND p.archived_at IS NULL AND p.deleted_at IS NULL AND w.deleted_at IS NULL;
+  AND p.archived_at IS NULL;
 -- select_related project + workspace adds the JOINs above (already present
 -- for filtering) and pulls p.*/w.* in one round trip. Archived projects hide
--- ALL their states; triage states never appear through objects.
+-- ALL their states; triage states never appear through objects. The
+-- workspaces/projects joins carry NO deleted predicate (Django scopes only
+-- the base model through its manager) — states in a soft-deleted workspace
+-- or project stay visible.
 
 -- S2 state delete/patch direct gets (views/state.py:231,278): both go through
--- State.objects, so triage rows and soft-deleted rows stay excluded (the
--- delete's explicit is_triage=False is redundant). Neither checks
--- project.archived_at — states of an ARCHIVED project can still be patched
--- and deleted while the list/detail querysets (S1) hide them.
+-- State.objects, so triage-GROUP rows and soft-deleted rows stay excluded.
+-- Neither checks project.archived_at — states of an ARCHIVED project can
+-- still be patched and deleted while the list/detail querysets (S1) hide
+-- them. The delete get (L231) adds an explicit is_triage=False; the patch
+-- get (L278) does NOT, so an is_triage=True row keeps serving PATCH.
 
 -- E1 estimate queryset (views/estimate.py:35-36): no membership filter at the
 -- queryset level (membership is enforced by ProjectEntityPermission only).

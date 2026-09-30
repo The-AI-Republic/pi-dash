@@ -52,11 +52,14 @@
 //!   states, `name` for estimates, the *string* `value` column for estimate
 //!   points) applies at queryset evaluation / pagination time, which the
 //!   handlers layer owns (PIDASHCONV-372).
-//! * S2 ported asymmetry: the delete direct get (`state.py:231`) and the
-//!   patch direct get (`state.py:278`) go through `State.objects` (so triage
-//!   and soft-deleted rows stay excluded) but do NOT join `projects`, so
-//!   they skip the `archived_at` guard — states of an archived project can
-//!   still be patched and deleted while the list/detail scopes hide them.
+//! * S2 ported asymmetry: both direct gets go through `State.objects`
+//!   (triage-group and soft-deleted rows stay excluded) but do NOT join
+//!   `projects`, so they skip the `archived_at` guard — states of an
+//!   archived project can still be patched and deleted while the
+//!   list/detail scopes hide them. The delete get (`state.py:231`) adds an
+//!   explicit `is_triage=False`; the patch get (`state.py:278`) does NOT,
+//!   so an `is_triage=True` row keeps serving PATCH while every other
+//!   path hides it.
 //! * E1 ported shape: one estimate per project is a code-level check
 //!   (`.first()` + 409, `estimate.py:56-62`), not a DB constraint —
 //!   concurrent POSTs can create two rows.
@@ -130,8 +133,12 @@ fn join_member_visibility(sel: &mut SelectStatement, table: &str) {
 /// Shared `WHERE` for the state list and detail scopes
 /// (`views/state.py:49-56,172-179`): workspace slug, project id, an active
 /// membership row for the acting user, the `is_triage=False` view filter,
-/// the default-manager triage exclusion, and the soft-delete scope on all
-/// three tables plus the archived-project guard.
+/// the default-manager triage exclusion, the soft-delete scope on the
+/// `states` and `project_members` rows, plus the archived-project guard.
+/// The `workspaces` / `projects` joins carry NO deleted predicate: Django
+/// only scopes the base model through its manager, and the joined tables
+/// ride along unscoped (verified against live Django SQL — states in a
+/// soft-deleted workspace/project stay visible).
 /// Binds `$1 = workspace slug`, `$2 = project id`, `$3 = member (user) id`.
 fn state_scope_condition() -> Condition {
     let states = Alias::new(state::TABLE.to_owned());
@@ -139,7 +146,7 @@ fn state_scope_condition() -> Condition {
     let projects = Alias::new(PROJECT_TABLE.to_owned());
     let vis = Alias::new(VIS_TABLE.to_owned());
     Condition::all()
-        .add(Expr::col((workspaces.clone(), Alias::new("slug"))).eq(Expr::cust("$1")))
+        .add(Expr::col((workspaces, Alias::new("slug"))).eq(Expr::cust("$1")))
         .add(Expr::col((states.clone(), Alias::new("project_id"))).eq(Expr::cust("$2")))
         // `project__project_projectmember__member=user,
         // project__project_projectmember__is_active=True` (the project_id
@@ -152,11 +159,9 @@ fn state_scope_condition() -> Condition {
         .add(Expr::col((states.clone(), Alias::new("is_triage"))).eq(false))
         // Default-manager scope (`StateManager`, `db/models/state.py:82-83`).
         .add(Expr::col((states.clone(), Alias::new("group"))).ne(state::TRIAGE_GROUP))
-        .add(Expr::col((states.clone(), Alias::new("deleted_at"))).is_null())
-        // `project__archived_at__isnull=True` + joined-table manager scopes.
-        .add(Expr::col((projects.clone(), Alias::new("archived_at"))).is_null())
-        .add(Expr::col((projects, Alias::new("deleted_at"))).is_null())
-        .add(Expr::col((workspaces, Alias::new("deleted_at"))).is_null())
+        .add(Expr::col((states, Alias::new("deleted_at"))).is_null())
+        // `project__archived_at__isnull=True` (`state.py:56,179`).
+        .add(Expr::col((projects, Alias::new("archived_at"))).is_null())
 }
 
 /// `State.objects.filter(...)...distinct()` for the list and detail views
@@ -266,13 +271,14 @@ pub fn map_state_row(row: &PgRow) -> Result<state::State, sqlx::Error> {
 // ---------------------------------------------------------------------------
 
 /// `State.objects.get(is_triage=False, pk=state_id, project_id=...,
-/// workspace__slug=...)` (`views/state.py:231,278`).
+/// workspace__slug=...)` — the DELETE direct get (`views/state.py:231`).
 ///
-/// Ported as-is: this goes through the default manager (triage and
-/// soft-deleted rows stay excluded; the explicit `is_triage=False` is
-/// redundant wherever `group = 'triage'` and `is_triage` agree) but does
-/// NOT join `projects`, so the `archived_at` guard is skipped — states of
-/// an archived project can still be patched and deleted.
+/// Ported as-is: this goes through the default manager (triage-group and
+/// soft-deleted rows stay excluded) plus the view's explicit
+/// `is_triage=False`, but does NOT join `projects`, so the `archived_at`
+/// guard is skipped — states of an archived project can still be deleted.
+/// The `workspaces` join carries no deleted predicate (same scoping rule
+/// as the list/detail scopes above).
 /// Binds `$1 = workspace slug`, `$2 = project id`, `$3 = state id`.
 pub fn state_direct_sql() -> String {
     use sea_query::PostgresQueryBuilder;
@@ -284,19 +290,18 @@ pub fn state_direct_sql() -> String {
     join_workspace(&mut sel, state::TABLE);
     sel.cond_where(
         Condition::all()
-            .add(Expr::col((workspaces.clone(), Alias::new("slug"))).eq(Expr::cust("$1")))
+            .add(Expr::col((workspaces, Alias::new("slug"))).eq(Expr::cust("$1")))
             .add(Expr::col((states.clone(), Alias::new("project_id"))).eq(Expr::cust("$2")))
             .add(Expr::col((states.clone(), Alias::new("id"))).eq(Expr::cust("$3")))
             .add(Expr::col((states.clone(), Alias::new("is_triage"))).eq(false))
             .add(Expr::col((states.clone(), Alias::new("group"))).ne(state::TRIAGE_GROUP))
-            .add(Expr::col((states, Alias::new("deleted_at"))).is_null())
-            .add(Expr::col((workspaces, Alias::new("deleted_at"))).is_null()),
+            .add(Expr::col((states, Alias::new("deleted_at"))).is_null()),
     );
     sel.limit(1);
     sel.to_string(PostgresQueryBuilder)
 }
 
-/// One state row for the delete/patch paths, or `None`.
+/// One state row for the delete path, or `None`.
 pub async fn fetch_state_direct<'e, E>(
     ex: E,
     workspace_slug: &str,
@@ -307,6 +312,53 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     let row: Option<PgRow> = sqlx::query(&state_direct_sql())
+        .bind(workspace_slug)
+        .bind(project_id)
+        .bind(state_id)
+        .fetch_optional(ex)
+        .await?;
+    row.map(|r| map_state_row(&r)).transpose()
+}
+
+/// `State.objects.get(workspace__slug=..., project_id=..., pk=...)` — the
+/// PATCH direct get (`views/state.py:278`). Unlike the delete get it carries
+/// NO `is_triage` filter: `is_triage` is a writable field, so a row flipped
+/// to `is_triage=True` keeps serving PATCH while the list/detail/delete
+/// paths hide it. The default-manager scope (triage-group + soft-deleted
+/// rows excluded) still applies; the `archived_at` guard is skipped like
+/// the delete get.
+/// Binds `$1 = workspace slug`, `$2 = project id`, `$3 = state id`.
+pub fn state_direct_for_patch_sql() -> String {
+    use sea_query::PostgresQueryBuilder;
+    let states = Alias::new(state::TABLE.to_owned());
+    let workspaces = Alias::new(WORKSPACE_TABLE.to_owned());
+    let mut sel = Query::select();
+    sel.from(Alias::new(state::TABLE.to_owned()));
+    select_table_columns(&mut sel, state::TABLE, state::COLUMNS);
+    join_workspace(&mut sel, state::TABLE);
+    sel.cond_where(
+        Condition::all()
+            .add(Expr::col((workspaces, Alias::new("slug"))).eq(Expr::cust("$1")))
+            .add(Expr::col((states.clone(), Alias::new("project_id"))).eq(Expr::cust("$2")))
+            .add(Expr::col((states.clone(), Alias::new("id"))).eq(Expr::cust("$3")))
+            .add(Expr::col((states.clone(), Alias::new("group"))).ne(state::TRIAGE_GROUP))
+            .add(Expr::col((states, Alias::new("deleted_at"))).is_null()),
+    );
+    sel.limit(1);
+    sel.to_string(PostgresQueryBuilder)
+}
+
+/// One state row for the patch path, or `None`.
+pub async fn fetch_state_direct_for_patch<'e, E>(
+    ex: E,
+    workspace_slug: &str,
+    project_id: uuid::Uuid,
+    state_id: uuid::Uuid,
+) -> Result<Option<state::State>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let row: Option<PgRow> = sqlx::query(&state_direct_for_patch_sql())
         .bind(workspace_slug)
         .bind(project_id)
         .bind(state_id)
@@ -649,8 +701,14 @@ mod tests {
         assert!(sql.contains(r#""states"."is_triage" = FALSE"#), "{sql}");
         assert!(sql.contains(r#""states"."group" <> 'triage'"#), "{sql}");
         assert!(sql.contains(r#""projects"."archived_at" IS NULL"#), "{sql}");
-        // Soft-delete scope on every table in the scope.
-        assert_eq!(sql.matches(r#""deleted_at" IS NULL"#).count(), 4, "{sql}");
+        // Soft-delete scope on the base table + the membership rows only.
+        // The `workspaces` / `projects` joins carry NO deleted predicate:
+        // Django scopes only the base model through its manager (verified
+        // against live Django SQL; the old count of 4 hid states of
+        // soft-deleted workspaces/projects that Python still serves).
+        assert_eq!(sql.matches(r#""deleted_at" IS NULL"#).count(), 2, "{sql}");
+        assert!(!sql.contains(r#""workspaces"."deleted_at""#), "{sql}");
+        assert!(!sql.contains(r#""projects"."deleted_at""#), "{sql}");
         // No point/estimate filter leaks into the state scope.
         assert!(!sql.contains("estimate"), "{sql}");
     }
@@ -667,8 +725,11 @@ mod tests {
 
     #[test]
     fn state_direct_skips_archived_guard() {
-        // FX-Q-STATEEST S2 (`views/state.py:231,278`): triage + soft-delete
-        // still excluded, but no `projects` join and no archived check.
+        // FX-Q-STATEEST S2 delete get (`views/state.py:231`): triage-flag +
+        // triage-group + soft-deleted rows still excluded, but no `projects`
+        // join and no archived check. The `workspaces` join carries no
+        // deleted predicate (same scoping rule as S1; the old count of 2
+        // hid direct gets in soft-deleted workspaces that Python serves).
         let sql = state_direct_sql();
         assert!(!sql.contains("DISTINCT"), "{sql}");
         assert!(!sql.contains(r#"JOIN "projects""#), "{sql}");
@@ -676,7 +737,25 @@ mod tests {
         assert!(sql.contains(r#""states"."id" = ($3)"#), "{sql}");
         assert!(sql.contains(r#""states"."is_triage" = FALSE"#), "{sql}");
         assert!(sql.contains(r#""states"."group" <> 'triage'"#), "{sql}");
-        assert_eq!(sql.matches(r#""deleted_at" IS NULL"#).count(), 2, "{sql}");
+        assert_eq!(sql.matches(r#""deleted_at" IS NULL"#).count(), 1, "{sql}");
+        assert!(sql.contains("LIMIT 1"), "{sql}");
+    }
+
+    #[test]
+    fn state_direct_for_patch_has_no_is_triage_filter() {
+        // FX-Q-STATEEST S2b patch get (`views/state.py:278`): the
+        // default-manager scope (triage-group + soft-deleted excluded) with
+        // NO `is_triage` filter and NO archived check.
+        let sql = state_direct_for_patch_sql();
+        assert!(!sql.contains("DISTINCT"), "{sql}");
+        assert!(!sql.contains(r#"JOIN "projects""#), "{sql}");
+        assert!(!sql.contains("archived_at"), "{sql}");
+        // No `is_triage` filter predicate (the column is still projected
+        // for the row struct).
+        assert!(!sql.contains(r#""is_triage" = FALSE"#), "{sql}");
+        assert!(sql.contains(r#""states"."id" = ($3)"#), "{sql}");
+        assert!(sql.contains(r#""states"."group" <> 'triage'"#), "{sql}");
+        assert_eq!(sql.matches(r#""deleted_at" IS NULL"#).count(), 1, "{sql}");
         assert!(sql.contains("LIMIT 1"), "{sql}");
     }
 
@@ -1087,6 +1166,58 @@ mod tests {
                 .expect("miss"),
             None
         );
+        tx.rollback().await.expect("rollback");
+    }
+
+    /// FX-Q-STATEEST S2b replay: the PATCH direct get (`state.py:278`)
+    /// carries no `is_triage` filter, so a row flipped to `is_triage=True`
+    /// (writable field) stays reachable for PATCH while the delete direct
+    /// get and the list/detail scopes hide it.
+    #[tokio::test]
+    async fn live_state_direct_for_patch_ignores_is_triage() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = live_tx(&pool).await;
+        let ws = live_uuid(1);
+        let proja = live_uuid(10);
+        seed_workspace(&mut tx, ws, "acme").await;
+        seed_project(&mut tx, proja, ws, false).await;
+        // Backlog row with the triage FLAG set (not the triage group).
+        seed_state(
+            &mut tx,
+            live_uuid(52),
+            proja,
+            ws,
+            "flagged",
+            "backlog",
+            true,
+            false,
+        )
+        .await;
+
+        // PATCH direct get serves it …
+        assert_eq!(
+            fetch_state_direct_for_patch(&mut *tx, "acme", proja, live_uuid(52))
+                .await
+                .expect("patch direct")
+                .map(|s| s.name),
+            Some("flagged".to_string())
+        );
+        // … while the DELETE direct get 404s it …
+        assert_eq!(
+            fetch_state_direct(&mut *tx, "acme", proja, live_uuid(52))
+                .await
+                .expect("delete direct"),
+            None
+        );
+        // … and the list scope hides it too.
+        let user = live_uuid(20);
+        seed_membership(&mut tx, live_uuid(30), proja, ws, user, true).await;
+        assert!(fetch_state_list(&mut *tx, "acme", proja, user)
+            .await
+            .expect("list")
+            .is_empty());
         tx.rollback().await.expect("rollback");
     }
 
