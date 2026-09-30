@@ -193,12 +193,13 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // + project-github (PIDASHCONV-450) + git project-repository
         // (PIDASHCONV-452) + external LLM/Unsplash (PIDASHCONV-454)
         // + git provider-accounts (PIDASHCONV-451) + webhooks
-        // (PIDASHCONV-453), all in `app_integrations`; D-34
-        // notification viewset core (PIDASHCONV-301) in
-        // `app_notifications`; D-27 archived cycles +
-        // archive/unarchive (PIDASHCONV-377) in `app_cycles`;
-        // sibling handler issues extend the merge; merges keep both
-        // sides).
+        // (PIDASHCONV-453), all in `app_integrations`; D-31 v2
+        // user/workspace/static/restore assets (PIDASHCONV-400) in
+        // `app_assets`; D-34 notification viewset core
+        // (PIDASHCONV-301) in `app_notifications`; D-27 archived
+        // cycles + archive/unarchive (PIDASHCONV-377) in
+        // `app_cycles`; sibling handler issues extend the merge;
+        // merges keep both sides).
         RouteGroup::App => crate::app_issues::routes()
             .merge(crate::app_views_search::routes())
             .merge(crate::app_intake::routes())
