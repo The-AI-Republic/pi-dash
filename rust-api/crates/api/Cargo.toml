@@ -71,6 +71,9 @@ tokio-rustls = "0.26.5"
 webpki-roots = "1.0.9"
 tower = { version = "0.5" }
 tracing = "0.1"
+# GitHub App JWT (`build_app_jwt`, RS256): same 9.x line the auth and jobs
+# crates build on, so the lockfile gains no new downloads.
+jsonwebtoken = "9"
 # Reverse proxy to Django. Default features are off on purpose: transparent
 # decompression (gzip/br/zstd) would alter relayed bytes, and native-tls would
 # add a system TLS dependency to CI. rustls with bundled roots covers https

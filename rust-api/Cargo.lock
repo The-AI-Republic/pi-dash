@@ -2496,6 +2496,7 @@ dependencies = [
  "http",
  "http-body-util",
  "idna",
+ "jsonwebtoken",
  "md-5 0.10.6",
  "pidash-auth",
  "pidash-db",

@@ -8,14 +8,19 @@
 //!
 //! [`handlers_external`] owns the external-integration HTTP shell
 //! (PIDASHCONV-454): the two AI-assistant POSTs and the Unsplash GET.
-//! [`handlers_github_proj`] owns the project-level GitHub HTTP shell
-//! (PIDASHCONV-450): bind POST plus status GET/PATCH/DELETE. Sibling
-//! handler issues merge their own routers into [`routes`]; merges keep
-//! both sides.
+//! [`handlers_github_app`] serves the five GitHub App install-flow
+//! endpoints (PIDASHCONV-443); [`handlers_github_proj`] owns the
+//! project-level GitHub HTTP shell (PIDASHCONV-450): bind POST plus
+//! status GET/PATCH/DELETE; [`handlers_github_ws`] owns the
+//! workspace-level GitHub shell (PIDASHCONV-446); [`handlers_git_repo`]
+//! owns the git project repository + bind shell (PIDASHCONV-452).
+//! Sibling handler issues merge their own routers into [`routes`];
+//! merges keep both sides.
 //!
-//! [`handlers_webhook`] serves the webhook family (PIDASHCONV-453); sibling
-//! handler issues own their files and share this module's plumbing
-//! (mirrors the D-32 `app_intake` layout):
+//! [`handlers_git_accounts`] serves the git provider-accounts family
+//! (PIDASHCONV-451); [`handlers_webhook`] serves the webhook family
+//! (PIDASHCONV-453); sibling handler issues own their files and share
+//! this module's plumbing (mirrors the D-32 `app_intake` layout):
 //!
 //! - [`Denial`]: exact error bodies (`app/views/base.py` matrix, DRF
 //!   `NotAuthenticated` default, the allow-style 403).
@@ -32,6 +37,7 @@ pub mod gates;
 pub mod handlers_external;
 pub mod handlers_git_accounts;
 pub mod handlers_git_repo;
+pub mod handlers_github_app;
 pub mod handlers_github_proj;
 pub mod handlers_github_ws;
 pub mod handlers_webhook;
@@ -55,6 +61,7 @@ use crate::state::AppState;
 pub fn routes() -> Router<AppState> {
     handlers_external::routes()
         .merge(handlers_git_accounts::routes())
+        .merge(handlers_github_app::routes())
         .merge(handlers_github_proj::routes())
         .merge(handlers_github_ws::routes())
         .merge(handlers_git_repo::routes())

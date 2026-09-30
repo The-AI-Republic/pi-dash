@@ -131,13 +131,13 @@ impl Overlay {
 /// endpoints arrive with their domain ports.
 ///
 /// The App group serves the issue-list family (`app_issues`, pilot 2 of
-/// D-26): exactly the four list GETs — plus the D-33 app-integration
-/// family (`app_integrations`, PIDASHCONV-450: the project-github
-/// bind POST and status GET/PATCH/DELETE; PIDASHCONV-452: the two git
-/// project-repository paths with their owned methods; PIDASHCONV-446:
-/// workspace GitHub handlers; PIDASHCONV-454: the two AI-assistant
-/// POSTs and the Unsplash GET; sibling D-33 handler issues extend
-/// that merge, keeping both sides). Registration is the cutover
+/// D-26): exactly the four list GETs — plus the D-33 app-integrations
+/// family (`app_integrations`, PIDASHCONV-443/446/450/452/454): the five
+/// GitHub App install-flow routes (443), the workspace GitHub shell
+/// (446), the project-github bind + status routes (450), the two git
+/// project-repository paths (452), and the two AI-assistant POSTs plus
+/// the Unsplash GET (454); sibling D-33 handler issues extend that
+/// merge, keeping both sides. Registration is the cutover
 /// granularity — sibling paths have no Rust route and keep proxying to
 /// Django through the fallback, so no per-path flag is needed.
 ///
@@ -184,11 +184,11 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // (PIDASHCONV-275), both in `app_views_search`;
         // D-32 intake-issues/inbox-issues list+create,
         // PIDASHCONV-385, plus intake-issue detail + versions,
-        // PIDASHCONV-395, in `app_intake`; D-33 git provider-accounts
-        // (PIDASHCONV-451) + project-github (PIDASHCONV-450) +
-        // workspace GitHub handlers (PIDASHCONV-446)
-        // + git project-repository (PIDASHCONV-452)
-        // + external LLM/Unsplash (PIDASHCONV-454) + webhooks
+        // PIDASHCONV-395, in `app_intake`; D-33 GitHub App install flow
+        // (PIDASHCONV-443) + workspace GitHub handlers (PIDASHCONV-446)
+        // + project-github (PIDASHCONV-450) + git project-repository
+        // (PIDASHCONV-452) + external LLM/Unsplash (PIDASHCONV-454)
+        // + git provider-accounts (PIDASHCONV-451) + webhooks
         // (PIDASHCONV-453), all in `app_integrations`; sibling handler
         // issues extend the merge; merges keep both sides).
         RouteGroup::App => crate::app_issues::routes()
