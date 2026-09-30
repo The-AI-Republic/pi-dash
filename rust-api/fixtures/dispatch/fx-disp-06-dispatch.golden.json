@@ -1,0 +1,73 @@
+{
+  "fixture_id": "FX-DISP-06",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "apps/api/pi_dash/cloud_agent/creation.py:11-89 (execution_fields)",
+    "apps/api/pi_dash/cloud_agent/creation.py:92-145 (_managed_execution_fields + _MANAGED_REFUSAL_DETAIL)",
+    "apps/api/pi_dash/cloud_agent/creation.py:148-152 (dispatch_after_commit)",
+    "apps/api/pi_dash/cloud_agent/creation.py:155-177 (lock_cloud_creation_capacity)",
+    "apps/api/pi_dash/cloud_agent/dispatch.py:20-48 (dispatch_waiting)",
+    "apps/api/pi_dash/cloud_agent/dispatch.py:51-58 (_publish)",
+    "apps/api/pi_dash/cloud_agent/dispatch.py:61-70 (dispatch_agent_run)",
+    "apps/api/pi_dash/cloud_agent/events.py:9-25 (append)"
+  ],
+  "method": "DB before/after + sweep SQL recorded as ORM shapes verbatim from source (no live DB on this runner: full boot needs Postgres + app registry; SQL below is compiler-form, rows are shape-derived per the assistant-fixture precedent). Pure branches (local_runner fields, error-code truncation, event-cap arithmetic) mirror executed vectors from FX-DISP-01/04/05.",
+  "execution_fields": {
+    "local_runner": {
+      "executor_kind": "<resolved>",
+      "tool_plan": {}
+    },
+    "cloud_agent_fields": [
+      "executor_kind",
+      "tool_plan",
+      "pinned_runner=None",
+      "optional _cloud_admission_error {code, detail}"
+    ],
+    "cloud_guards_in_order": [
+      "not user_has_llm_config(actor) -> CloudAgentUnavailable(llm message)",
+      "enforce_creation_rate(workspace_id, actor_id, automatic); manual re-raises, automatic captures {code, detail}",
+      "atomic: lock Workspace row; count QUEUED cloud runs; >= CLOUD_AGENT_MAX_QUEUED_PER_WORKSPACE -> quota error (raise or capture)"
+    ],
+    "managed_fields": [
+      "executor_kind=managed_runner",
+      "tool_plan={}",
+      "pinned_runner",
+      "optional error_code=desktop_not_connected"
+    ],
+    "managed_branches": [
+      "available -> pinned_runner=online_managed_runner(project, actor)",
+      "automatic and transient (NOT_CONNECTED + enrolled exists) -> pinned to latest-heartbeat enrolled + error_code desktop_not_connected",
+      "else raise ManagedRunnerUnavailable(reason, detail)"
+    ]
+  },
+  "managed_refusal_detail": {
+    "managed_runner_disabled": "Pi Dash Agent is not enabled on this instance.",
+    "desktop_not_connected": "Open the Pi Dash desktop app on the machine you want this to run on.",
+    "llm_config_missing": "The run creator has no AI provider configured. Configure one in Pi Dash AI settings.",
+    "gateway_scopes_missing": "Sign in to Pi Dash again to refresh your AI access.",
+    "byok_not_supported_on_desktop": "Pi Dash Agent on desktop uses OpenHub. Switch your AI provider to OpenHub to run here; Pi Dash AI and the Cloud Agent keep using your own key.",
+    "no_managed_runner_for_project": "This project has no Pi Dash Agent on your desktop yet."
+  },
+  "dispatch_after_commit": "transaction.on_commit(lambda: dispatch_agent_run(run_id))",
+  "lock_cloud_creation_capacity": {
+    "non_cloud": "returns None immediately",
+    "shape": "lock Workspace row; count QUEUED; over cap -> automatic returns {code, detail}, manual raises CloudAgentAdmissionError(run_quota_exceeded)"
+  },
+  "dispatch_waiting": {
+    "disabled": "CLOUD_AGENT_ENABLED False -> 0, no DB writes",
+    "shape": "lock workspace; running=count(RUNNING); offered=count(QUEUED with lease in future); capacity=max(0, MAX_RUNNING-running-offered); oldest QUEUED unlocked/expired rows up to capacity, ordered by created_at; set lease_expires_at=now+LEASE_SECONDS, dispatch_attempts+1; on_commit publish -> run_cloud_agent.delay per id",
+    "sql_sketches": [
+      "SELECT ... FROM \"agent_run\" WHERE executor_kind=%s AND workspace_id=%s AND status=%s FOR UPDATE; -- workspace lock",
+      "SELECT COUNT(*) FROM \"agent_run\" WHERE executor_kind=%s AND workspace_id=%s AND status='running';",
+      "SELECT ... FROM \"agent_run\" WHERE status='queued' AND (lease_expires_at IS NULL OR lease_expires_at <= now) ORDER BY created_at LIMIT %s FOR UPDATE SKIP LOCKED;",
+      "UPDATE \"agent_run\" SET lease_expires_at=%s, dispatch_attempts=dispatch_attempts+1 WHERE id=%s AND status='queued';"
+    ]
+  },
+  "dispatch_agent_run": {
+    "shape": "only(id,status,executor_kind,pod_id,workspace_id) get; missing or not QUEUED -> return; cloud -> dispatch_waiting(workspace_id); else runner.services.matcher.drain_pod_by_id(pod_id)"
+  },
+  "events_append": {
+    "shape": "atomic: lock AgentRun row; count events; limit=CLOUD_AGENT_MAX_EVENTS; count >= limit-2 -> maybe insert events_truncated marker (if count < limit-1 and none exists), return False; else seq=max+1, create(kind[:64], payload), return True",
+    "reserved_rows": "1 terminal + 1 truncation marker inside the configured maximum"
+  }
+}

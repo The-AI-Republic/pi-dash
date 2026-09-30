@@ -1,0 +1,191 @@
+{
+  "fixture_id": "FX-DISP-03",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "apps/api/pi_dash/core/agent_execution.py:57-66 (effective_executor_for_issue)",
+    "apps/api/pi_dash/core/agent_execution.py:69-80 (user_has_llm_config)",
+    "apps/api/pi_dash/core/agent_execution.py:83-128 (agent_executor_options)",
+    "apps/api/pi_dash/cloud_agent/api.py:5-8 (CloudAgentUnavailableAPI 409 body)",
+    "apps/api/pi_dash/cloud_agent/policy.py:57-72 (resolve_executor_kind)",
+    "apps/api/pi_dash/cloud_agent/policy.py:75-94 (github_available_for_project)",
+    "apps/api/pi_dash/cloud_agent/policy.py:97-159 (build_tool_plan)",
+    "apps/api/pi_dash/cloud_agent/policy.py:162-196 (resolve_current_tool_names)",
+    "apps/api/pi_dash/managed_runner/policy.py:76-96 (managed_runner_availability gates)"
+  ],
+  "method": "resolve_executor_kind matrix, build_tool_plan goldens, effective_executor_for_issue, user_has_llm_config False-branches: executed against the real code offline (settings.configure + override_settings, fake project/actor objects; build_tool_plan with project=None so the DB-backed github gate is skipped per policy.py:119-122). agent_executor_options 3-row shape, github_available_for_project filter shape, resolve_current_tool_names re-intersection, managed_runner_availability gate order: recorded verbatim from source + unit tests (full app registry + DB required; tests/unit/managed_runner/test_policy.py:36-123, tests/unit/cloud_agent/test_cloud_agent.py:549-575).",
+  "effective_executor_for_issue": {
+    "override_wins": "cloud_agent",
+    "none_inherits_project_default": "local_runner",
+    "missing_attr_inherits": "local_runner"
+  },
+  "user_has_llm_config_false_branches": {
+    "none": false,
+    "inactive": false,
+    "bot": false,
+    "note": "True-branch delegates to ee.assistant.model_provider.has_usable_llm_config (EE seam, not executed here)"
+  },
+  "resolve_executor_kind_matrix": [
+    {
+      "requested": null,
+      "project_default": "local_runner",
+      "result": "local_runner"
+    },
+    {
+      "requested": "cloud_agent",
+      "project_default": "local_runner",
+      "result": "cloud_agent"
+    },
+    {
+      "requested": "managed_runner",
+      "managed_enabled": false,
+      "raises": "ManagedRunnerUnavailable",
+      "code": "managed_runner_disabled"
+    },
+    {
+      "requested": "bogus",
+      "raises": "ValueError",
+      "message": "unknown agent executor"
+    },
+    {
+      "requested": "cloud_agent",
+      "cloud_enabled": false,
+      "raises": "CloudAgentUnavailable",
+      "code": "cloud_agent_unavailable"
+    }
+  ],
+  "agent_executor_options_shape": {
+    "rows": [
+      "cloud_agent",
+      "local_runner",
+      "managed_runner"
+    ],
+    "row_keys": [
+      "kind",
+      "available",
+      "reason_code"
+    ],
+    "cloud_reasons": {
+      "unavailable": "cloud_agent_unavailable",
+      "no_llm_config": "llm_config_missing"
+    },
+    "local_reason": "no_local_runner",
+    "local_excludes_desktop_bundled": "Runner exclude(provisioning=DESKTOP_BUNDLED); bundled-only project reports available=False (test_policy.py:139-156)",
+    "managed_reason_passthrough": "managed_runner_availability(project, user) reason verbatim",
+    "cloud_user_gate": "cloud_available and user is not None and not user_has_llm_config(user) -> False/llm_config_missing"
+  },
+  "build_tool_plan": {
+    "direct_has_issue": {
+      "v": 1,
+      "catalog_version": 1,
+      "tools": [
+        "github_get_file",
+        "github_get_linked_pull_request",
+        "pidash_get_current_issue",
+        "pidash_list_current_issue_comments",
+        "pidash_list_issue_relations",
+        "pidash_list_linked_code_reviews",
+        "pidash_list_project_states",
+        "pidash_search_project_issues"
+      ],
+      "required_tools": [],
+      "limits": {
+        "model_requests": 25,
+        "tool_calls": 20,
+        "writes": 3,
+        "input_tokens": 144000,
+        "output_tokens": 16000,
+        "total_tokens": 160000,
+        "wall_seconds": 285
+      },
+      "unavailable_capabilities": [
+        "filesystem",
+        "shell",
+        "worktree"
+      ],
+      "extra_toolsets": false
+    },
+    "direct_no_issue_tools": [
+      "github_get_file",
+      "pidash_list_issue_relations",
+      "pidash_list_project_states",
+      "pidash_search_project_issues"
+    ],
+    "scheduler_tools": [
+      "github_get_file",
+      "github_get_linked_pull_request",
+      "pidash_get_current_issue",
+      "pidash_get_project_issue",
+      "pidash_list_current_issue_comments",
+      "pidash_list_issue_relations",
+      "pidash_list_linked_code_reviews",
+      "pidash_list_project_states",
+      "pidash_search_project_issues"
+    ],
+    "writes_enabled_direct_tools": [
+      "github_get_file",
+      "github_get_linked_pull_request",
+      "pidash_add_current_issue_comment",
+      "pidash_get_current_issue",
+      "pidash_list_current_issue_comments",
+      "pidash_list_issue_relations",
+      "pidash_list_linked_code_reviews",
+      "pidash_list_project_states",
+      "pidash_relate_issues",
+      "pidash_search_project_issues",
+      "pidash_transition_current_issue",
+      "pidash_unrelate_issues",
+      "pidash_update_current_issue_workpad"
+    ],
+    "writes_enabled_scheduler_tools": [
+      "github_get_file",
+      "github_get_linked_pull_request",
+      "pidash_add_current_issue_comment",
+      "pidash_create_project_issue",
+      "pidash_get_current_issue",
+      "pidash_get_project_issue",
+      "pidash_list_current_issue_comments",
+      "pidash_list_issue_relations",
+      "pidash_list_linked_code_reviews",
+      "pidash_list_project_states",
+      "pidash_relate_issues",
+      "pidash_search_project_issues",
+      "pidash_transition_current_issue",
+      "pidash_unrelate_issues",
+      "pidash_update_current_issue_workpad"
+    ],
+    "disabled_tool_removed": true,
+    "required_capabilities_missing": {
+      "raises": "CloudCapabilityUnavailable",
+      "code": "cloud_capability_unavailable",
+      "message": "Cloud Agent cannot provide required capabilities: shell_exec"
+    },
+    "required_capabilities_ok": [
+      "github_get_file"
+    ],
+    "note_github_project_gate": "project is not None and not github_available_for_project(project) strips github_* (policy.py:119-122); fixtures use project=None so the gate is skipped; see FX-DISP-05 github-context"
+  },
+  "github_available_for_project_shape": {
+    "kill_switch": "CLOUD_AGENT_GITHUB_TOOLS_ENABLED False -> False without touching DB",
+    "filter": "GitRepositoryBinding(project_id, workspace_id, deleted_at__isnull, repository.provider=github, repository.host_url=https://github.com, provider_account.workspace_id, provider=github, host_url, auth_type=github_app, status=connected, verified_at__isnull=False, workspace_integration.github_app_installation.verified_at__isnull=False, suspended_at__isnull=True).exists()"
+  },
+  "managed_runner_availability_gates": [
+    "not managed_runner_is_enabled() -> (False, managed_runner_disabled)",
+    "user None/inactive/bot -> (False, desktop_not_connected)",
+    "managed_llm_profile(user).available False -> (False, profile.reason_code or llm_config_missing)",
+    "no enrolled_managed_runners(project, user) -> (False, no_managed_runner_for_project)",
+    "online_managed_runner(project, user) None -> (False, desktop_not_connected)",
+    "else (True, '')"
+  ],
+  "resolve_current_tool_names_shape": {
+    "rule": "planned tools minus CLOUD_AGENT_DISABLED_TOOLS; minus WRITE_TOOLS unless CLOUD_AGENT_WRITES_ENABLED; minus github_* unless github_available_for_project(project); minus github_get_linked_pull_request unless a live GitCodeReviewLink exists for the run issue; required_tools still missing -> RequiredToolUnavailable",
+    "sorted": true
+  },
+  "cloud_unavailable_api_shape": {
+    "status": 409,
+    "detail": {
+      "error": "Pi Dash Cloud Agent is not currently available",
+      "code": "cloud_agent_unavailable"
+    },
+    "code": "cloud_agent_unavailable"
+  }
+}

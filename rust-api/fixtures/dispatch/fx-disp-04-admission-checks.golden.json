@@ -1,0 +1,102 @@
+{
+  "fixture_id": "FX-DISP-04",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "apps/api/pi_dash/cloud_agent/admission.py:15-19 (CloudAgentAdmissionError)",
+    "apps/api/pi_dash/cloud_agent/admission.py:22-29 (_consume)",
+    "apps/api/pi_dash/cloud_agent/admission.py:32-58 (_take)",
+    "apps/api/pi_dash/cloud_agent/admission.py:61-76 (enforce_creation_rate)",
+    "apps/api/pi_dash/managed_runner/permissions.py:12-28 (IsDesktopSession)",
+    "apps/api/pi_dash/cloud_agent/checks.py:8-74 (cloud_agent_configuration_check)",
+    "apps/api/pi_dash/managed_runner/checks.py:20-50 (managed_runner_configuration_check)"
+  ],
+  "method": "Admission allow/deny/cache-down + cloud checks E001/E002/E005/E007/E008 + IsDesktopSession denial branches: executed against the real code offline (locmem cache, sqlite :memory: for on_commit, override_settings). Bucket/retry_after values are time-shaped (bucket=now//60, retry=60-now%60); shapes recorded with the live example. Managed checks E001..E004 recorded verbatim from source (import requires the full app registry: orchestration.agent_phases + prompting.recipes pull db models).",
+  "cloud_admission_error_shape": {
+    "class": "RuntimeError subclass",
+    "attrs": [
+      "code",
+      "retry_after_seconds"
+    ],
+    "codes": [
+      "run_quota_exceeded",
+      "admission_unavailable"
+    ]
+  },
+  "admission_key_shapes": {
+    "workspace_key": "cloud-agent:admission:workspace:<workspace_id>:29845934",
+    "user_key": "cloud-agent:admission:user:<actor_id>:29845934",
+    "retry_after_seconds": 23,
+    "bucket": 29845934
+  },
+  "admission_allow_manual": "allowed (no raise)",
+  "admission_automatic_skips_user_bucket": "allowed despite full user bucket",
+  "admission_deny_user_bucket": {
+    "code": "run_quota_exceeded",
+    "detail": "Cloud Agent creation rate exceeded",
+    "retry_after_seconds": 23
+  },
+  "admission_deny_workspace_bucket": {
+    "code": "run_quota_exceeded",
+    "detail": "Cloud Agent creation rate exceeded",
+    "retry_after_seconds": 23
+  },
+  "admission_cache_down": {
+    "code": "admission_unavailable",
+    "detail": "Cloud Agent admission is temporarily unavailable"
+  },
+  "admission_semantics": {
+    "check_then_consume": "_take rejects on current count, consumes only on_commit so rolled-back creations burn no quota (admission.py:34-42)",
+    "burst_overshoot": "check-then-increment window lets concurrent bursts slightly overshoot; workspace queue cap is the hard limit (admission.py:40-42)",
+    "consume_best_effort": "_consume swallows cache errors with a logged exception (admission.py:26-29)"
+  },
+  "is_desktop_session": {
+    "denial_body": {
+      "error": "desktop_session_required",
+      "detail": "This endpoint is available to the Pi Dash desktop app."
+    },
+    "deny_unauthenticated": false,
+    "deny_no_user": false,
+    "deny_missing_user_attr": false,
+    "allow_branch": "authenticated + ee.authentication.desktop.request_is_desktop(request) True (EE seam, not executed here)"
+  },
+  "cloud_agent_configuration_check": {
+    "clean": [],
+    "E001": [
+      [
+        "cloud_agent.E001",
+        "DEFAULT_AGENT_EXECUTOR is invalid"
+      ]
+    ],
+    "E002": [
+      [
+        "cloud_agent.E002",
+        "Cloud default requires CLOUD_AGENT_ENABLED"
+      ]
+    ],
+    "E005": [
+      [
+        "cloud_agent.E005",
+        "CLOUD_AGENT_DISABLED_TOOLS contains unknown names: nope_tool"
+      ]
+    ],
+    "E007": [
+      [
+        "cloud_agent.E007",
+        "Cloud Agent execution, soft, and hard timeouts must be positive and strictly increasing"
+      ]
+    ],
+    "E008": [
+      [
+        "cloud_agent.E008",
+        "Cloud Agent limits must be positive: CLOUD_AGENT_TOOL_CALL_LIMIT"
+      ]
+    ],
+    "retired": "E002/E003/E004/E006 covered platform model settings and are retired (checks.py:15-17); active ids are E001/E002/E005/E007/E008"
+  },
+  "managed_runner_configuration_check": {
+    "E001": "DEFAULT_AGENT_EXECUTOR=managed_runner requires MANAGED_RUNNER_ENABLED",
+    "E002": "one per orchestration phase whose template_name is missing from prompting.recipes.MANAGED_RECIPES",
+    "E003": "MANAGED_RUNNER_MAX_PER_USER_PROJECT must be at least 1 (< 1)",
+    "E004": "MANAGED_RUNNER_QUEUED_MAX_AGE_SECS must be positive (<= 0)"
+  }
+}

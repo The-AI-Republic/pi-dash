@@ -1,0 +1,187 @@
+{
+  "fixture_id": "FX-DISP-01",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "apps/api/pi_dash/cloud_agent/errors.py:7-13 (_SECRET_PATTERNS)",
+    "apps/api/pi_dash/cloud_agent/errors.py:16-20 (sanitize_error)",
+    "apps/api/pi_dash/cloud_agent/errors.py:23-31 (_is_usage_limit)",
+    "apps/api/pi_dash/cloud_agent/errors.py:34-44 (classify_error)",
+    "apps/api/pi_dash/cloud_agent/output.py:1-13 (CloudAgentOutput)",
+    "apps/api/pi_dash/managed_runner/errors.py:15-34 (ManagedRunnerReason)",
+    "apps/api/pi_dash/managed_runner/errors.py:36-45 (ManagedRunnerUnavailable)",
+    "apps/api/pi_dash/core/agent_execution.py:7-23 (AgentExecutorKind + MACHINE_EXECUTORS)",
+    "apps/api/pi_dash/core/agent_execution.py:26-31 (get_default_agent_executor)"
+  ],
+  "method": "Executed against the real Python offline (project .venv, minimal settings.configure, no DB): sanitize_error/classify_error/_is_usage_limit imported the real errors.py (stdlib re only); CloudAgentOutput schema + constraint probes via pydantic 2.13.5 on the real output.py; ManagedRunnerReason/ManagedRunnerUnavailable imported the real managed_runner/errors.py (pure); AgentExecutorKind/MACHINE_EXECUTORS/get_default_agent_executor via Django TextChoices with settings.configure + override_settings. pydantic_ai NOT installed so _is_usage_limit type-branch records False (matches ImportError path errors.py:29-30).",
+  "sanitize_error": [
+    {
+      "input": "ValueError('boom')",
+      "output": "boom"
+    },
+    {
+      "input": "auth header leak",
+      "output": "authorization: Bearer [REDACTED] and done"
+    },
+    {
+      "input": "sk- key leak",
+      "output": "key [REDACTED] leaked here"
+    },
+    {
+      "input": "ghp_ leak",
+      "output": "token [REDACTED] here"
+    },
+    {
+      "input": "empty str -> class name",
+      "output": "RuntimeError"
+    },
+    {
+      "input": "20000-char message",
+      "output_len": 16000,
+      "truncated_to_16000": true
+    }
+  ],
+  "classify_error": [
+    {
+      "input": "plain",
+      "message": "connection reset",
+      "code": "provider_error",
+      "text_echo": true
+    },
+    {
+      "input": "usage-limit-phrase",
+      "message": "The next request would exceed the request_limit of 25",
+      "code": "iteration_limit",
+      "text_echo": true
+    },
+    {
+      "input": "usage-limit-words",
+      "message": "usage limit hit",
+      "code": "iteration_limit",
+      "text_echo": true
+    },
+    {
+      "input": "content-filter",
+      "message": "blocked by content filter",
+      "code": "provider_refusal",
+      "text_echo": true
+    },
+    {
+      "input": "content_filter",
+      "message": "content_filter triggered",
+      "code": "provider_refusal",
+      "text_echo": true
+    },
+    {
+      "input": "safety-refusal",
+      "message": "safety refusal by policy",
+      "code": "provider_refusal",
+      "text_echo": true
+    },
+    {
+      "input": "model-refused",
+      "message": "model refused the request",
+      "code": "provider_refusal",
+      "text_echo": true
+    },
+    {
+      "input": "connection-refused-must-be-provider-error",
+      "message": "Connection refused by host",
+      "code": "provider_error",
+      "text_echo": true
+    }
+  ],
+  "is_usage_limit": {
+    "pydantic_ai_installed": false,
+    "result_for_plain": false
+  },
+  "cloud_agent_output": {
+    "outcome_enum": {
+      "enum": [
+        "completed",
+        "blocked",
+        "noop"
+      ],
+      "title": "Outcome",
+      "type": "string"
+    },
+    "summary": {
+      "maxLength": 30000,
+      "title": "Summary",
+      "type": "string"
+    },
+    "evidence": {
+      "items": {
+        "maxLength": 1000,
+        "type": "string"
+      },
+      "maxItems": 10,
+      "title": "Evidence",
+      "type": "array"
+    },
+    "limitations": {
+      "items": {
+        "maxLength": 500,
+        "type": "string"
+      },
+      "maxItems": 10,
+      "title": "Limitations",
+      "type": "array"
+    },
+    "required": [
+      "outcome",
+      "summary"
+    ],
+    "example_dump": {
+      "outcome": "completed",
+      "summary": "did it",
+      "evidence": [
+        "e1"
+      ],
+      "limitations": [
+        "l1"
+      ]
+    },
+    "constraint_probes": {
+      "bad_outcome": "ValidationError",
+      "evidence_11": "ValidationError",
+      "evidence_1001_chars": "ValidationError",
+      "limitations_501": "ValidationError",
+      "summary_30001": "ValidationError"
+    }
+  },
+  "managed_runner": {
+    "codes": {
+      "DISABLED": "managed_runner_disabled",
+      "NOT_CONNECTED": "desktop_not_connected",
+      "LLM_CONFIG_MISSING": "llm_config_missing",
+      "GATEWAY_SCOPES_MISSING": "gateway_scopes_missing",
+      "BYOK_UNSUPPORTED": "byok_not_supported_on_desktop",
+      "NO_RUNNER_FOR_PROJECT": "no_managed_runner_for_project"
+    },
+    "is_ValueError": true,
+    "default_detail_is_code": true,
+    "explicit_detail": "custom detail",
+    "code_attr": "managed_runner_disabled"
+  },
+  "agent_executor_kind": {
+    "values": [
+      "local_runner",
+      "cloud_agent",
+      "managed_runner"
+    ],
+    "labels": {
+      "local_runner": "Local Runner",
+      "cloud_agent": "Pi Dash Cloud Agent",
+      "managed_runner": "Pi Dash Agent"
+    },
+    "machine_executors": [
+      "local_runner",
+      "managed_runner"
+    ]
+  },
+  "get_default_agent_executor": {
+    "valid_setting_passthrough": "local_runner",
+    "invalid_setting_falls_back_to_local_runner": "local_runner",
+    "cloud_setting_passthrough": "cloud_agent"
+  }
+}
