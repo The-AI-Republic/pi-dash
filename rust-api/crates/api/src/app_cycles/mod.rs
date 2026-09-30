@@ -32,6 +32,8 @@
 pub mod gates;
 pub mod handlers_analytics;
 pub mod handlers_archive;
+pub mod handlers_cycle_issues;
+pub mod handlers_favorites;
 pub mod handlers_progress;
 
 use axum::Router;
@@ -39,12 +41,14 @@ use axum::Router;
 use crate::state::AppState;
 
 /// Merge the app-cycles route groups (archive first, PIDASHCONV-377;
-/// progress + analytics via PIDASHCONV-410; sibling handler issues
-/// extend the merge; merges keep both sides). Cutover into the serving
-/// router stays with the domain gate (PIDASHCONV-388), so this is
-/// additive only.
+/// cycle-issues + favorites via PIDASHCONV-323; progress + analytics via
+/// PIDASHCONV-410; sibling handler issues extend the merge; merges keep
+/// both sides). Cutover into the serving router stays with the domain
+/// gate (PIDASHCONV-388), so this is additive only.
 pub fn routes() -> Router<AppState> {
     handlers_archive::routes()
+        .merge(handlers_cycle_issues::routes())
+        .merge(handlers_favorites::routes())
         .merge(handlers_progress::routes())
         .merge(handlers_analytics::routes())
 }
