@@ -1299,16 +1299,13 @@ fn email_domain_part_valid(domain: &str) -> bool {
 
 /// The ASCII domain alternative, `((?:label\.)+)(TLD)\Z`
 /// (case-insensitive): at least one dotted label, every label 1-63 chars of
-/// alnum/hyphen not starting or ending with `-`, the TLD 2-63 (digits and
-/// hyphens allowed, so `a@b.12` passes and `a@b.c` fails).
+/// alnum/hyphen not starting or ending with `-`; the TLD is
+/// `[A-Z0-9-]{2,63}` with only a trailing `-` excluded (`(?<!-)`), so a
+/// leading-dash TLD such as `a@b.-cd` passes while `a@b.c` fails.
 fn email_domain_valid(domain: &str) -> bool {
     let mut labels = domain.split('.');
     let tld = labels.next_back().unwrap_or("");
-    if !(2..=63).contains(&tld.len())
-        || !tld.bytes().all(email_domain_byte)
-        || tld.starts_with('-')
-        || tld.ends_with('-')
-    {
+    if !(2..=63).contains(&tld.len()) || !tld.bytes().all(email_domain_byte) || tld.ends_with('-') {
         return false;
     }
     let mut any = false;
@@ -2539,10 +2536,13 @@ mod tests {
         assert!(is_valid_email("a@bücher.de"));
         assert!(is_valid_email("\"ab\"@example.com"));
         assert!(is_valid_email("Test@Example.COM"));
+        // The TLD lookbehind `(?<!-)` excludes only a trailing dash.
+        assert!(is_valid_email("a@b.-cd"));
         assert!(is_valid_email(&format!("{}@example.com", "a".repeat(65))));
         assert!(!is_valid_email("not-an-email"));
         assert!(!is_valid_email("a@b"));
         assert!(!is_valid_email("a@b.c"));
+        assert!(!is_valid_email("a@b.c-"));
         assert!(!is_valid_email("@example.com"));
         assert!(!is_valid_email("a@1.2.3"));
         assert!(!is_valid_email("a..b@example.com"));
