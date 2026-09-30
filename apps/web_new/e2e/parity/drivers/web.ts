@@ -7577,6 +7577,42 @@ export class WebDriver implements ParityDriver {
     return names;
   }
 
+  // --- Invitation inbox + onboarding start (NEWFRONT-110, AUTH-026/033).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract.
+  async openInvitations(): Promise<void> {
+    await this.page.goto("/invitations");
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  /**
+   * Workspace names of the invitation cards. Each card renders the
+   * workspace name as its title line next to shorter chrome (avatar
+   * initial, role label); the empty state instead renders a "no pending
+   * invites" heading and no cards. The name is the longest text line,
+   * which needs no knowledge of the role labels.
+   */
+  async invitationWorkspaceNames(): Promise<string[]> {
+    const page = this.page;
+    await page
+      .getByRole("heading", { name: /join a workspace|no pending invites/i })
+      .first()
+      .waitFor();
+    if (await this.invitationsEmptyStateVisible()) return [];
+    const cards = page.locator("div.cursor-pointer");
+    const count = await cards.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const lines = ((await cards.nth(i).innerText()) ?? "")
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const longest = lines.sort((a, b) => b.length - a.length)[0];
+      if (longest !== undefined) names.push(longest);
+    }
+    return names;
+  }
+
   async settingsLabelsAddVisible(): Promise<boolean> {
     return this.page.getByRole("button", { name: "Add label", exact: true }).isVisible();
   }
@@ -9570,5 +9606,94 @@ export class WebDriver implements ParityDriver {
     const text = ((await box.textContent()) ?? "").trim();
     if (text.length > 0) return true;
     return (await box.locator("svg").count()) > 0;
+  }
+
+  async toggleInvitation(workspaceName: string): Promise<void> {
+    await this.page.locator("div.cursor-pointer", { hasText: workspaceName }).first().click();
+  }
+
+  async acceptSelectedInvitations(): Promise<void> {
+    const page = this.page;
+    const accept = page.getByRole("button", { name: /accept.*join/i });
+    await accept.click();
+  }
+
+  async invitationsEmptyStateVisible(): Promise<boolean> {
+    return (await this.page.getByRole("heading", { name: /no pending invites/i }).count()) > 0;
+  }
+
+  async openInvitationLink(workspaceSlug: string, invitationId: string, token: string): Promise<void> {
+    const params = new URLSearchParams({ invitation_id: invitationId, slug: workspaceSlug, token });
+    await this.page.goto(`/workspace-invitations?${params.toString()}`);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async pageText(): Promise<string> {
+    await this.page.locator("body").waitFor();
+    return ((await this.page.locator("body").innerText()) ?? "").trim();
+  }
+
+  async acceptSingleInvitation(): Promise<void> {
+    await this.page.getByRole("button", { name: "Accept" }).click();
+  }
+
+  async declineSingleInvitation(): Promise<void> {
+    await this.page.getByRole("button", { name: "Ignore" }).click();
+  }
+
+  async openOnboarding(): Promise<void> {
+    await this.page.goto("/onboarding");
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  private async clickStepButton(name: string | RegExp): Promise<void> {
+    await this.page.getByRole("button", { name }).first().click();
+  }
+
+  async advanceCliInstall(): Promise<void> {
+    await this.clickStepButton(/done, continue/i);
+  }
+
+  async skipCliInstall(): Promise<void> {
+    await this.clickStepButton(/skip for now/i);
+  }
+
+  async submitProfileStep(displayName: string): Promise<void> {
+    const page = this.page;
+    const nameField = page.getByPlaceholder("Enter your full name");
+    await nameField.waitFor();
+    await nameField.fill(displayName);
+    await this.clickStepButton(/continue/i);
+  }
+
+  async submitRoleStep(roleLabel: string): Promise<void> {
+    const page = this.page;
+    await page.getByRole("button", { name: roleLabel }).click();
+    await this.clickStepButton(/^continue$/i);
+  }
+
+  async skipRoleStep(): Promise<void> {
+    await this.clickStepButton(/^skip$/i);
+  }
+
+  async submitUseCaseStep(useCaseLabels: string[]): Promise<void> {
+    const page = this.page;
+    for (const label of useCaseLabels) {
+      await page.getByRole("button", { name: label }).click();
+    }
+    await this.clickStepButton(/^continue$/i);
+  }
+
+  async skipUseCaseStep(): Promise<void> {
+    await this.clickStepButton(/^skip$/i);
+  }
+
+  async goBackOnboardingStep(): Promise<void> {
+    // The header back control is the only chevron button on the step.
+    await this.page
+      .locator("button")
+      .filter({ has: this.page.locator("svg") })
+      .first()
+      .click();
   }
 }
