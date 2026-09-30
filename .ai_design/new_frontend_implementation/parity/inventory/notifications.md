@@ -1,0 +1,111 @@
+# Notifications — feature inventory
+
+Area: Notifications (Phase 2). ID prefix: NTF-. Editions covered: oss, cloud, desktop.
+Old sources: the workspace notifications route, the workspace-notifications component
+tree (core + cloud-edition overrides), and the notification preferences that change
+delivery. Built by reading the old sources; the old app was not run in this environment,
+so rows describe behavior as found in code. A human reviews all Phase 2 inventories in
+H-signoff-2; gaps found there come back as comments on NEWFRONT-37.
+
+How to read this file: one row per capability a user can observe, described in fresh
+words (no copied UI text, code, or styles). `Parity test` stays empty until the oracle
+run (NEWFRONT-38) fills it in. Every row starts as `not started`.
+
+| ID | Capability | Who | Edition | Old entry point | API | Acceptance | Parity test | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| NTF-001 | Open the workspace inbox screen, shown as a two-pane view with a notification list on one side and a detail area on the other | any workspace member | all | notifications route under the workspace | GET list endpoint (see NTF-010) plus GET unread-count endpoint (see NTF-004) on entry | Both panes render for the current workspace; the list pane keeps a fixed share of the width on desktop and yields to the detail pane once an item is selected |  | not started |
+| NTF-002 | Switch between the full stream tab and the mentions-only tab, each showing its own unread badge | any workspace member | all | tab strip above the notification list | same list endpoint with a mentions flag for the mentions tab; unread counts from the unread-count endpoint | Switching tabs discards the current list and loads the matching stream; each tab badge shows its own unread total and hides when zero |  | not started |
+| NTF-003 | See a workspace-level unread badge on the app navigation entry for notifications, giving priority to the mentions count with a distinct marker whenever unread mentions exist, and hiding entirely when nothing is unread | any workspace member | all | app sidebar navigation item for notifications | GET unread-count endpoint per workspace | Badge shows the mentions count with its marker when mentions are unread, otherwise the total unread count; badge disappears at zero |  | not started |
+| NTF-004 | Fetch the unread totals (overall and mentions) for a workspace | any workspace member | all | automatic on inbox entry and on navigation render | GET `/api/workspaces/{workspaceSlug}/users/notifications/unread/` | Returned overall and mention totals drive the tab badges and the navigation badge |  | not started |
+| NTF-005 | Browse the notification list newest-first, where each card summarizes who acted, what changed on the work item (assignment, dates, labels, parent, relations, comments, archiving, attachments, description excerpt, estimates, or a direct assignment), plus the work item reference and title and a relative age | any workspace member | all | notification list in the inbox sidebar | GET `/api/workspaces/{workspaceSlug}/users/notifications` with type/snoozed/archived/read/mentioned flags, page size and cursor | Cards appear newest-first with an actor, a human-readable change summary, the item reference and title, and an age label; cards for items the user can no longer resolve are skipped |  | not started |
+| NTF-006 | Distinguish unread cards at a glance via a marker dot and a tinted background | any workspace member | all | notification list in the inbox sidebar | read state from the list endpoint payload | Unread cards carry the marker and tint; reading a card clears both |  | not started |
+| NTF-007 | Open a notification's detail by selecting its card, which also marks it read on first open | any workspace member | all | clicking a card in the notification list | POST `.../notifications/{id}/read/` on first open of an unread card | Detail opens for the selected card and the card becomes read (badge counts drop); reopening an already-read card issues no write |  | not started |
+| NTF-008 | See triage-queue items embedded with the triage detail view and ordinary work items in the peek overview, with a loading indicator while project access info resolves | any workspace member | all | detail pane of the inbox | project membership lookup plus the existing issue/triage reads | Triage items render the triage view; other items render the peek overview; a spinner shows while access info loads; closing the preview clears the selection |  | not started |
+| NTF-009 | See a neutral placeholder illustration in the detail pane when no notification is selected | any workspace member | all | detail pane of the inbox with no selection | none | Placeholder shows with no selection, including on first entry before any card is picked |  | not started |
+| NTF-010 | Page through long histories with an explicit control that loads the next chunk, showing a loading label while fetching | any workspace member | all | bottom of the notification list when more pages exist | GET list endpoint with the next-page cursor | The control appears only when another page exists; activating it appends older items; a loading label shows mid-fetch |  | not started |
+| NTF-011 | See skeleton placeholder rows while the inbox list loads for the first time | any workspace member | all | inbox sidebar during initial load | GET list endpoint | Skeleton rows show during the initial fetch and are replaced by cards or an empty state |  | not started |
+| NTF-012 | See a tab-specific empty illustration when a stream has no items (one variant for the full stream, one for mentions) | any workspace member | all | inbox sidebar when the current tab's list is empty | GET list endpoint returning no items | The matching empty illustration shows per tab; it clears as soon as items arrive |  | not started |
+| NTF-013 | Manually refresh the current stream, with the control indicating progress and ignoring repeat presses mid-flight | any workspace member | all | header refresh control of the inbox sidebar | GET list endpoint with current-view cursor | One refresh runs at a time; the control shows progress while running; the list reflects the latest server state afterwards |  | not started |
+| NTF-014 | Mark every notification in scope as read at once, with progress shown on the control | any workspace member | all | header mark-all-read control of the inbox sidebar | POST `/api/workspaces/{workspaceSlug}/users/notifications/mark-all-read/` with current filter scope | All listed notifications become read locally, the tab and navigation counts reset for the current tab, and the control shows progress while the request runs |  | not started |
+| NTF-015 | Filter the stream by origin (items assigned to me, created by me, subscribed by me) via multi-select options with checkmarks, with active filters shown as removable chips plus a clear-all chip; any change reloads the stream from scratch | any workspace member | all | filter menu and applied-filter chip row in the inbox sidebar | GET list endpoint with the selected origins joined as the type parameter | Only matching origins listed; each active origin shows a chip that toggles it off; clear-all resets all three; the list restarts from the first page on every change |  | not started |
+| NTF-016 | Toggle show-unread-only, show-archived, and show-snoozed from the overflow menu, where archived and snoozed modes exclude each other; any change reloads the stream from scratch | any workspace member | all | overflow menu in the inbox sidebar header | GET list endpoint with read/archived/snoozed flags | Unread-only shows just unread items; archived mode shows only archived items; snoozed mode shows only snoozed items; enabling one of archived/snoozed disables the other; list restarts from the first page |  | not started |
+| NTF-017 | Archived and snoozed items stay out of the default stream without any action | any workspace member | all | notification list in the inbox sidebar | GET list endpoint with archived/snoozed flags unset | Default stream contains neither archived nor snoozed items; they appear only in their respective modes |  | not started |
+| NTF-018 | Toggle a single card between read and unread, with a confirmation toast | any workspace member | all | hover actions on a notification card | POST `.../notifications/{id}/read/` to mark read; DELETE the same path to mark unread | Card read state flips, unread counts adjust, and a confirmation toast appears; failure leaves state unchanged |  | not started |
+| NTF-019 | Toggle a single card between archived and unarchived, with a confirmation toast | any workspace member | all | hover actions on a notification card | POST `.../notifications/{id}/archive/` to archive; DELETE the same path to unarchive | Card archives (leaving the default stream) or returns to it, with a confirmation toast; failure leaves state unchanged |  | not started |
+| NTF-020 | Snooze a card until a preset delay (one day, three days, five days, one week, two weeks) or remove an existing snooze | any workspace member | all | snooze picker on a notification card | PATCH `.../notifications/{id}/` with the resume timestamp (preset) or a cleared value (unsnooze) | Snoozed card leaves the default stream with a confirmation toast; unsnoozing returns it; failure leaves state unchanged |  | not started |
+| NTF-021 | Pick an exact resume date and time for a snooze, where time slots come in half-hour steps and elapsed times are hidden when the chosen day is today | any workspace member | all | custom option inside the snooze picker | PATCH `.../notifications/{id}/` with the composed resume timestamp | Dialog requires both a date and a time; submitting snoozes to that moment with a confirmation toast; elapsed same-day slots are not offered |  | not started |
+| NTF-022 | See the scheduled resume date and time on a snoozed card instead of its age | any workspace member | all | notification list while snoozed mode is shown | snooze timestamp from the list endpoint payload | Snoozed cards show when they return rather than how old they are |  | not started |
+| NTF-023 | Reach card actions (read, archive, snooze) that stay hidden until the card is hovered | any workspace member | all | notification card in the list | none (presentation of NTF-018..020) | Action controls are not visible at rest and appear on hover of the card |  | not started |
+| NTF-024 | Control email delivery with per-topic toggles (property changes, state changes with a nested completed-only refinement, comments, mentions), each saving instantly with success or failure feedback, behind a loading state while current settings load | any workspace member | all | profile settings notifications page | GET `/api/users/me/notification-preferences/` to load; PATCH the same path per toggle | Each toggle persists on flip with a success toast, or an error toast with the prior value kept; the completed-only refinement sits nested under state changes; a loader shows until settings arrive |  | not started |
+| NTF-025 | Have email preference changes alter which work-item emails get sent (settings that change behavior outside their own screen) | any workspace member | all | downstream email delivery after using the profile settings notifications page | PATCH `/api/users/me/notification-preferences/` (effect consumed by the mailer, not the frontend) | Disabling a topic stops its emails while inbox items still arrive; enabling resumes them |  | not started |
+| NTF-026 | Equal inbox and preference access for every workspace role (no admin-only, member-only, or guest-restricted behavior found in the sources) | every workspace member regardless of role | all | notifications route and profile settings notifications page | same endpoints as above, no role-specific variants | Admins, members, and guests alike can open the inbox, act on cards, and edit their own email preferences |  | not started |
+| NTF-027 | No shareable link to a selected notification: selection lives only in client state, so reloading or sharing the inbox address always lands on the unselected view | any workspace member | all | notifications route address | none | Reloading with a card open returns to the unselected view; the address carries no selection, filter, or tab parameters |  | not started |
+| NTF-028 | No live push of new notifications: the list and badges update only on explicit refresh, tab/filter change, or remount | any workspace member | all | inbox sidebar and navigation badge | GET list and unread-count endpoints on demand only | New arrivals do not appear until the user refreshes, switches tabs/filters, or re-enters; no socket or polling source found in the notification code |  | not started |
+| NTF-029 | No keyboard shortcuts, drag-and-drop, or export/import in the inbox (explicitly absent) | any workspace member | all | inbox sidebar and cards | none | All inbox actions require pointer interaction with the visible controls; no shortcut, drag, export, or import path exists |  | not started |
+| NTF-030 | No desktop-only or edition-only inbox behavior: the same screens, cards, and preferences serve OSS, cloud, and desktop, and the cloud-edition content extension point ships empty | any workspace member | all | same entry points on every build | same endpoints on every build | Inbox behavior is identical across editions and the desktop wrapper; no desktop shell integration (badges, native toasts) was found in the notification code |  | not started |
+| NTF-031 | Failure feedback stays lightweight: preference saves report errors via toast, while list fetch failures have no dedicated inline error or retry UI in the notification sources | any workspace member | all | inbox sidebar and profile settings notifications page | failing endpoint calls | Failed preference save keeps the prior toggle value with an error toast; a failed list fetch surfaces no inline retry control in the notification code |  | not started |
+
+## Coverage checklist
+
+Every route file, top-level component folder, and API endpoint in the scoped sources,
+each mapped to the rows that cover it. Anything with no row is explained instead.
+
+### Route files
+
+| Source | Covered by |
+| --- | --- |
+| `apps/web/app/(all)/[workspaceSlug]/(projects)/notifications/page.tsx` (inbox page, sets the document title from the workspace name and mounts the detail root) | NTF-001, NTF-008, NTF-009 |
+| `apps/web/app/(all)/[workspaceSlug]/(projects)/notifications/layout.tsx` (two-pane shell: list sidebar plus detail outlet) | NTF-001 |
+
+### Top-level component folders and key files
+
+| Source | Covered by |
+| --- | --- |
+| `apps/web/core/components/workspace-notifications/` `root.tsx` (detail root: empty placeholder vs triage embed vs peek overview, access-info loading) | NTF-008, NTF-009 |
+| `apps/web/core/components/workspace-notifications/` `notification-app-sidebar-option.tsx` (navigation unread badge preferring the mentions count) | NTF-003 |
+| `apps/web/core/components/workspace-notifications/sidebar/` `root.tsx` (sidebar shell, tab strip with badges, list vs empty branching, loading branch) | NTF-001, NTF-002, NTF-011, NTF-012 |
+| `apps/web/core/components/workspace-notifications/sidebar/` `empty-state.tsx` (per-tab empty illustrations) | NTF-012 |
+| `apps/web/core/components/workspace-notifications/sidebar/` `loader.tsx` (skeleton rows) | NTF-011 |
+| `apps/web/core/components/workspace-notifications/sidebar/filters/` (origin filter menu, option checkmarks, applied chips, clear-all) | NTF-015 |
+| `apps/web/core/components/workspace-notifications/sidebar/header/` (header bar, mark-all-read, refresh, filter entry, overflow menu with unread/archived/snoozed modes) | NTF-013, NTF-014, NTF-015, NTF-016 |
+| `apps/web/core/components/workspace-notifications/sidebar/notification-card/` (card summary line, read marker, hover actions, read/archive/snooze options, custom snooze dialog) | NTF-005, NTF-006, NTF-007, NTF-018, NTF-019, NTF-020, NTF-021, NTF-022, NTF-023 |
+| `apps/web/core/components/settings/profile/content/pages/notifications/` (email preference page shell, loader, per-topic instant-save toggles with nested completed-only refinement) | NTF-024, NTF-025, NTF-031 |
+| `apps/web/ce/components/workspace-notifications/` (cloud-edition list shell and card list with explicit next-page control; content extension map ships empty, i.e. no visible OSS difference) | NTF-005, NTF-010, NTF-030 |
+| `apps/web/core/hooks/store/notifications/` (workspace notification store access: tabs, selection, filters, pagination, counts) | NTF-002, NTF-004, NTF-007, NTF-010, NTF-015, NTF-016, NTF-017 |
+| `apps/web/core/store/notifications/` (client state, optimistic read/snooze updates with rollback, mark-all-read) | NTF-007, NTF-014, NTF-018, NTF-019, NTF-020, NTF-021 |
+| `apps/web/core/services/workspace-notification.service.ts` (endpoint wiring for list, counts, per-item actions, mark-all-read) | NTF-004, NTF-005, NTF-010, NTF-014, NTF-018, NTF-019, NTF-020, NTF-021 |
+| `apps/web/core/services/user.service.ts` notification-preference methods (load/save email preferences) | NTF-024, NTF-025 |
+| `apps/web/ce/hooks/use-notification-preview.tsx` (detail preview routing to triage embed vs work-item peek overview) | NTF-008 |
+| `packages/constants/src/notification.ts` (tab definitions, origin filter options, snooze presets, time-slot grid) | NTF-002, NTF-015, NTF-020, NTF-021 |
+| `packages/types/src/workspace-notifications.ts`, `packages/types/src/users.ts` email-settings shape (payload shapes only, no user-visible behavior of their own) | NTF-005, NTF-024 (shapes, not behaviors) |
+| `apps/web/core/components/workspace/sidebar/user-menu-item.tsx` (only hosts the badge component; badge behavior itself is inventoried) | NTF-003 |
+
+### API endpoints
+
+| Endpoint | Covered by |
+| --- | --- |
+| GET `/api/workspaces/{workspaceSlug}/users/notifications` (paginated list with type/snoozed/archived/read/mentioned/cursor params) | NTF-001, NTF-002, NTF-005, NTF-010, NTF-012, NTF-013, NTF-015, NTF-016, NTF-017 |
+| GET `/api/workspaces/{workspaceSlug}/users/notifications/unread/` (overall + mention unread totals) | NTF-002, NTF-003, NTF-004 |
+| POST `/api/workspaces/{workspaceSlug}/users/notifications/{id}/read/` (mark one read) | NTF-007, NTF-018 |
+| DELETE `/api/workspaces/{workspaceSlug}/users/notifications/{id}/read/` (mark one unread) | NTF-018 |
+| POST `/api/workspaces/{workspaceSlug}/users/notifications/{id}/archive/` (archive one) | NTF-019 |
+| DELETE `/api/workspaces/{workspaceSlug}/users/notifications/{id}/archive/` (unarchive one) | NTF-019 |
+| PATCH `/api/workspaces/{workspaceSlug}/users/notifications/{id}/` (snooze/unsnooze via resume timestamp; generic per-item update path) | NTF-020, NTF-021 |
+| POST `/api/workspaces/{workspaceSlug}/users/notifications/mark-all-read/` (bulk mark read within filter scope) | NTF-014 |
+| GET `/api/users/me/notification-preferences/` (load email preferences) | NTF-024 |
+| PATCH `/api/users/me/notification-preferences/` (save one email preference) | NTF-024, NTF-025 |
+
+### Cross-cutting rows (no single source file; claimed explicitly, not overlooked)
+
+| Rows | Claim |
+| --- | --- |
+| NTF-026 | Uniform access across roles (no role-gated branch found in any scoped source) |
+| NTF-027 | No deep-link or shareable selection state (route carries no selection/filter/tab params) |
+| NTF-028 | No realtime updates (no socket or polling source in the notification code) |
+| NTF-029 | No keyboard shortcuts, drag-and-drop, or export/import (explicitly absent) |
+| NTF-030 | No desktop-only or edition-only behavior (CE extension map ships empty) |
+| NTF-031 | Lightweight failure feedback (no inline list error/retry UI in the sources) |
+
+No scoped source maps to zero rows: every route file, component folder, and endpoint
+above is covered by at least one row, so there are no missing rows and no dead code to
+explain.
