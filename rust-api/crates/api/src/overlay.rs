@@ -228,7 +228,8 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // PIDASHCONV-336; GitLab OAuth initiate/callback, PIDASHCONV-339;
         // Google OAuth app + space initiate/callback, PIDASHCONV-335;
         // email sessions, PIDASHCONV-422; magic-link generate /
-        // sign-in / sign-up, app + space, PIDASHCONV-431;
+        // sign-in / sign-up, app + space, PIDASHCONV-431; D-16
+        // password/CSRF closure, PIDASHCONV-434;
         // merges keep both sides).
         // Registration is the cutover granularity — sibling `auth/`
         // paths have no Rust route and keep proxying to Django.

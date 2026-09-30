@@ -46,6 +46,7 @@ pub mod email;
 pub mod guards;
 pub mod magic;
 pub mod models;
+pub mod password;
 pub mod queries;
 pub mod shapes;
 pub mod tasks;

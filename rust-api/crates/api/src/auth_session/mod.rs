@@ -19,6 +19,7 @@ pub mod email;
 // [`routes`]; merges keep both sides.
 pub mod magic;
 pub mod middleware;
+pub mod password;
 pub mod render;
 
 pub use magic::{
@@ -37,7 +38,10 @@ pub use render::{
 /// Owned D-16 auth routes (cutover granularity: registered paths
 /// serve Rust, sibling paths keep proxying through the fallback).
 /// Email sessions (PIDASHCONV-422) plus the magic-link family
-/// (PIDASHCONV-431); merges keep both sides.
+/// (PIDASHCONV-431) plus the password/CSRF closure (PIDASHCONV-434);
+/// merges keep both sides.
 pub fn routes() -> axum::Router<crate::state::AppState> {
-    email::routes().merge(magic_routes())
+    email::routes()
+        .merge(magic_routes())
+        .merge(password::password_routes())
 }
