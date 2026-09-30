@@ -14,9 +14,15 @@
 //   pnpm --filter web_new test:e2e
 //
 // Without PIDASH_E2E_BASE_URL every suite skips so CI stays green.
+//
+// NEWFRONT-18 adds a second server for the desktop bundle
+// (PIDASH_TARGET=desktop, port 3011): smoke.desktop-cache exercises the
+// desktop platform (drag region, full cache persistence) through it while
+// the web specs keep using the default server.
 import { defineConfig } from "@playwright/test";
 
 const appUrl = process.env["PIDASH_E2E_APP_URL"] ?? "http://localhost:3010";
+const desktopAppUrl = process.env["PIDASH_E2E_DESKTOP_APP_URL"] ?? "http://localhost:3011";
 const apiOrigin = process.env["PIDASH_E2E_BASE_URL"] ?? "http://localhost:8000";
 
 export default defineConfig({
@@ -28,12 +34,21 @@ export default defineConfig({
   use: {
     baseURL: appUrl,
   },
-  webServer: {
-    command: "pnpm dev",
-    url: appUrl,
-    reuseExistingServer: true,
-    timeout: 60_000,
-    env: { PIDASH_API_ORIGIN: apiOrigin },
-  },
+  webServer: [
+    {
+      command: "pnpm dev",
+      url: appUrl,
+      reuseExistingServer: true,
+      timeout: 60_000,
+      env: { PIDASH_API_ORIGIN: apiOrigin },
+    },
+    {
+      command: "pnpm exec vite --port 3011",
+      url: desktopAppUrl,
+      reuseExistingServer: true,
+      timeout: 60_000,
+      env: { PIDASH_API_ORIGIN: apiOrigin, PIDASH_TARGET: "desktop" },
+    },
+  ],
   projects: [{ name: "smoke", testMatch: /smoke\..*\.spec\.ts/ }],
 });

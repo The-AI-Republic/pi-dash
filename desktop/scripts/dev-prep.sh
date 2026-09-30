@@ -86,7 +86,9 @@ fi
 # missing (a partial clone), the only way `cargo tauri build` can still
 # produce a usable artifact is to reuse whatever dist/ is already on disk.
 # Allow that, but tell the operator what they're getting.
-if [[ ! -d "$OSS_DIR/apps/web" ]]; then
+# NEWFRONT-18 (F-07): the flagged web_new build below does not use apps/web,
+# so this requirement applies to the legacy path only.
+if [[ ! -d "$OSS_DIR/apps/web" && "${PIDASH_DESKTOP_WEB:-}" != "web_new" ]]; then
     if [[ -f "$DIST/index.html" ]] \
         && [[ $(wc -c < "$DIST/index.html" 2>/dev/null || echo 0) -ge 4096 ]] \
         && [[ -d "$DIST/assets" ]] \
@@ -125,6 +127,116 @@ VERIFY_HOOK="${PIDASH_DESKTOP_VERIFY_HOOK:-}"
 if [[ -n "$VERIFY_HOOK" && ! -f "$VERIFY_HOOK" ]]; then
     echo "[dev-prep] ERROR: PIDASH_DESKTOP_VERIFY_HOOK is not a file: $VERIFY_HOOK" >&2
     exit 1
+fi
+
+# NEWFRONT-18 (F-07): flagged desktop build of the new frontend. When
+# PIDASH_DESKTOP_WEB=web_new, the desktop shell bundles apps/web_new built
+# with PIDASH_TARGET=desktop instead of the overlay-merged apps/web tree.
+# Anything else (including unset) falls through to the legacy path below,
+# which this branch leaves untouched. NEWFRONT-92 (M-01) later makes the
+# new frontend the default and removes the legacy path; the duplicated
+# validate-and-swap steps below reunite with it then.
+if [[ "${PIDASH_DESKTOP_WEB:-}" == "web_new" ]]; then
+    if [[ ! -d "$OSS_DIR/apps/web_new" ]]; then
+        echo "[dev-prep] ERROR: PIDASH_DESKTOP_WEB=web_new but $OSS_DIR/apps/web_new is missing" >&2
+        exit 1
+    fi
+
+    echo "[dev-prep] OSS source:  $OSS_DIR"
+    echo "[dev-prep] Dist target: $DIST"
+    echo "[dev-prep] API base:    $API_BASE  (VITE_API_BASE_URL → baked into SPA)"
+    echo "[dev-prep] Web base:    ${WEB_BASE:-<unset>}  (VITE_WEB_BASE_URL → baked into SPA)"
+    echo "[dev-prep] Frontend:    web_new (PIDASH_DESKTOP_WEB=web_new, PIDASH_TARGET=desktop)"
+    echo "[dev-prep] Preparing bundled runner and agent engine"
+    bash "$SCRIPT_DIR/prepare-agent.sh"
+    echo "[dev-prep] Sign-in target: ${PI_DASH_URL:-<unset, main.rs default>}  (PI_DASH_URL → main.rs deep-link)"
+
+    if command -v corepack >/dev/null 2>&1; then
+        corepack enable >/dev/null 2>&1 || true
+        corepack prepare --activate >/dev/null 2>&1 || true
+    fi
+
+    echo "[dev-prep] pnpm install"
+    ( cd "$OSS_DIR" && VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" pnpm install --frozen-lockfile )
+
+    echo "[dev-prep] pnpm --filter web_new build:desktop"
+    ( cd "$OSS_DIR" && VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" PIDASH_TARGET=desktop pnpm --filter web_new build:desktop )
+
+    NEW_CLIENT="$OSS_DIR/apps/web_new/dist/desktop"
+    NEW_INDEX="$NEW_CLIENT/index.html"
+    if [[ ! -f "$NEW_INDEX" ]]; then
+        echo "[dev-prep] ERROR: $NEW_INDEX was not produced by the web_new desktop build" >&2
+        exit 1
+    fi
+
+    # web_new ships a tiny SPA shell (index.html only bootstraps assets/),
+    # so the legacy byte threshold cannot tell a good build from a broken
+    # one. Instead require the shell to reference its asset bundle; the
+    # assets/ and desktop-marker checks below complete the picture.
+    if ! grep -F -q 'assets/' "$NEW_INDEX"; then
+        echo "[dev-prep] ERROR: $NEW_INDEX does not reference its assets/ bundle — looks like a broken build" >&2
+        exit 1
+    fi
+    if [[ ! -d "$NEW_CLIENT/assets" ]] || [[ -z "$(ls -A "$NEW_CLIENT/assets" 2>/dev/null)" ]]; then
+        echo "[dev-prep] ERROR: $NEW_CLIENT/assets is missing or empty" >&2
+        exit 1
+    fi
+    # Unlike the legacy tree, web_new resolves its API origin at runtime
+    # (platform.fetch routes /api/* through the Rust native HTTP layer), so
+    # there is no baked-in base URL to assert. Instead prove the bundle is
+    # the desktop target: only core/platform/tauri.ts can emit this marker,
+    # and the build-time alias excludes it from the web bundle (F-04).
+    if ! grep -R -F -q --include='*.html' --include='*.js' --include='*.mjs' --include='*.css' --include='*.json' "desktop_api_request" "$NEW_CLIENT"; then
+        echo "[dev-prep] ERROR: $NEW_CLIENT has no desktop platform marker" >&2
+        echo "[dev-prep] The bundle was built without PIDASH_TARGET=desktop; refusing to ship a web bundle in the desktop shell." >&2
+        exit 1
+    fi
+    if [[ -n "$VERIFY_HOOK" ]]; then
+        echo "[dev-prep] Running verify hook: $VERIFY_HOOK"
+        if ! bash "$VERIFY_HOOK" "$NEW_CLIENT"; then
+            echo "[dev-prep] ERROR: verify hook rejected the built frontend" >&2
+            exit 1
+        fi
+    fi
+
+    NEW_STAGING="$DIST.new"
+    NEW_BACKUP="$DIST.prev"
+
+    restore_new_dist() {
+        if [[ ! -e "$DIST" && -d "$NEW_BACKUP" ]]; then
+            mv "$NEW_BACKUP" "$DIST" 2>/dev/null || true
+            echo "[dev-prep] Restored the previous dist/ after an interrupted swap." >&2
+        fi
+    }
+    trap restore_new_dist EXIT INT TERM
+
+    echo "[dev-prep] Copying $NEW_CLIENT → $NEW_STAGING"
+    rm -rf "$NEW_STAGING"
+    mkdir -p "$NEW_STAGING"
+    cp -a "$NEW_CLIENT/." "$NEW_STAGING/"
+
+    {
+        echo "frontend=web_new"
+        echo "api_base=$API_BASE"
+        echo "web_base=${WEB_BASE:-<unset>}"
+        echo "pi_dash_url=${PI_DASH_URL:-<unset>}"
+        echo "oss_sha=${PI_DASH_OSS_SHA:-<unset>}"
+        echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$NEW_STAGING/bake-info.txt"
+
+    rm -rf "$NEW_BACKUP"
+    if [[ -e "$DIST" ]]; then
+        mv "$DIST" "$NEW_BACKUP"
+    fi
+    if ! mv "$NEW_STAGING" "$DIST"; then
+        restore_new_dist
+        echo "[dev-prep] ERROR: could not move $NEW_STAGING into $DIST" >&2
+        exit 1
+    fi
+    rm -rf "$NEW_BACKUP"
+
+    echo "[dev-prep] Done. $(ls "$DIST/assets" | wc -l) assets, api_base=$API_BASE, frontend=web_new."
+    exit 0
 fi
 
 echo "[dev-prep] OSS source:  $OSS_DIR"
