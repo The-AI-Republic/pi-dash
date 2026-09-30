@@ -13,6 +13,7 @@ pub mod integrations;
 pub mod license;
 pub mod tasks_cleanup;
 pub mod v1_assets;
+pub mod v1_cycles_modules;
 
 pub use error::Error;
 pub use health::HealthStatus;
