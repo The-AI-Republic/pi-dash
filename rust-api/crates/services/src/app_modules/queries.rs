@@ -404,7 +404,7 @@ pub fn estimate_type_exists_sql() -> String {
 /// archive twins): the asset URL when `avatar_asset` is set, else the raw
 /// `avatar` field, else NULL.
 pub fn avatar_url_case_sql() -> String {
-    "CASE WHEN assignees.avatar_asset IS NOT NULL THEN CONCAT('/api/assets/v2/static/', assignees.avatar_asset, '/') WHEN assignees.avatar_asset IS NULL THEN assignees.avatar ELSE NULL END".to_owned()
+    "CASE WHEN assignees.avatar_asset_id IS NOT NULL THEN CONCAT('/api/assets/v2/static/', assignees.avatar_asset_id, '/') WHEN assignees.avatar_asset_id IS NULL THEN assignees.avatar ELSE NULL END".to_owned()
 }
 
 /// Estimate-distribution sums (`base.py:468-488`, `:503-524`): total plus
@@ -847,6 +847,14 @@ mod tests {
         assert!(gate.contains("workspaces.slug = :slug"));
         assert!(avatar_url_case_sql().contains("CONCAT('/api/assets/v2/static/'"));
         assert!(avatar_url_case_sql().contains("THEN assignees.avatar ELSE NULL END"));
+        // Django FK column is `avatar_asset_id`; bare `avatar_asset` does not exist.
+        assert!(avatar_url_case_sql().contains("assignees.avatar_asset_id"));
+        assert!(
+            !avatar_url_case_sql()
+                .replace("avatar_asset_id", "")
+                .contains("avatar_asset"),
+            "bare avatar_asset column"
+        );
         assert!(
             estimate_sum_sql(None).contains("SUM(CAST(estimate_points.value AS double precision))")
         );
