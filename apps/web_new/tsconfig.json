@@ -22,7 +22,13 @@
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "useDefineForClassFields": true,
-    "types": ["vite/client"]
+    "types": ["vite/client"],
+    "baseUrl": ".",
+    "paths": {
+      "@pidash/edition": ["./src/core/edition/oss.ts"],
+      "@pidash/platform-target": ["./src/core/platform/web.ts"],
+      "@pidash/api-client": ["../../packages/api-client/src/index.ts"]
+    }
   },
   "include": ["src", "vite.config.ts", "vitest.config.ts"]
 }
