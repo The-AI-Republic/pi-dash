@@ -209,7 +209,8 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // workspace advance analytics (PIDASHCONV-414) + analytic
         // handlers-B — saved-analytic-view, export-analytics,
         // default-analytics, project-stats (PIDASHCONV-399; gates:
-        // PIDASHCONV-358) in `app_analytics`; D-30 page favorites +
+        // PIDASHCONV-358) + export-issues GET + POST
+        // (PIDASHCONV-430) in `app_analytics`; D-30 page favorites +
         // description (PIDASHCONV-332) + state ops (PIDASHCONV-328)
         // in `app_pages`; D-36 scheduler definitions (PIDASHCONV-633) +
         // scheduler bindings (PIDASHCONV-634) + occurrences

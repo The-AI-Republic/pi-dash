@@ -12,9 +12,12 @@
 //! handlers-B shell (PIDASHCONV-399): the four owned routes
 //! `saved-analytic-view`, `export-analytics`, `default-analytics` and
 //! `project-stats` — and the handlers-D shell (PIDASHCONV-424): the three
-//! project `advance-analytics*/` GET routes.
+//! project `advance-analytics*/` GET routes. [`export`] serves the
+//! exporter route (`GET` + `POST` `workspaces/<slug>/export-issues/`,
+//! PIDASHCONV-430).
 //! Sibling handler issues extend [`routes`]; merges keep both sides.
 
+pub mod export;
 pub mod gates;
 pub mod handlers_a;
 pub mod render;
@@ -25,9 +28,12 @@ use crate::state::AppState;
 
 /// Merge the app-analytics route groups (handlers-A, PIDASHCONV-389, plus
 /// workspace advance, PIDASHCONV-414, then handlers-B, PIDASHCONV-399,
-/// then project advance, PIDASHCONV-424; sibling handler issues extend
-/// the merge; merges keep both sides). Cutover into the serving router
-/// stays with the domain gate (PIDASHCONV-440), so this is additive only.
+/// then project advance, PIDASHCONV-424, then export-issues,
+/// PIDASHCONV-430; sibling handler issues extend the merge; merges keep
+/// both sides). Cutover into the serving router stays with the domain
+/// gate (PIDASHCONV-440), so this is additive only.
 pub fn routes() -> Router<AppState> {
-    handlers_a::routes().merge(render::routes())
+    handlers_a::routes()
+        .merge(render::routes())
+        .merge(export::routes())
 }
