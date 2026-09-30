@@ -42,6 +42,9 @@ pub mod schedule;
 pub mod scheduler;
 pub mod space;
 pub mod tasks_cleanup;
+/// Issue-export task wire (D-35, PIDASHCONV-381): Celery name, arg
+/// binding, delay constructor, filenames, status + filter SQL.
+pub mod tasks_export;
 pub mod tasks_mail;
 pub mod tasks_ticker;
 pub mod tasks_webhooks;
