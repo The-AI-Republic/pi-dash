@@ -16,7 +16,7 @@ SELECT COUNT(*) FROM <table> WHERE <scope filters>
 --   project not deleted/archived[, pod__project_id__in][, current window])
 --   .aggregate(input=Sum(input_tokens,default=0), output=..., total=...)
 SELECT COALESCE(SUM("input_tokens"),0), COALESCE(SUM("output_tokens"),0),
-  COALESCE(SUM("total_tokens"),0) FROM "agent_runs" <pod/project joins>
+  COALESCE(SUM("total_tokens"),0) FROM "agent_run" <pod/project joins>
  WHERE (...);  -- Seed row: all three {"count": 0}.
 --
 -- (Q-04c) get_overview_data (advance.py:98-124): members from WorkspaceMember

@@ -5,6 +5,8 @@
 //!   `ImporterSerializer` and the porter `IssueExportSerializer`.
 //! * [`queries`] — the workspace base-analytics queries owned by PIDASHCONV-334:
 //!   `AnalyticsEndpoint` validation + plot/detail SQL, the analytic-view
-//!   queryset + lookups, and the export acknowledgement.
+//!   queryset + lookups, and the export acknowledgement — plus the default /
+//!   project / advance / exporter query builders owned by PIDASHCONV-349
+//!   (FX-A-Q-03..Q-06).
 pub mod queries;
 pub mod shape;
