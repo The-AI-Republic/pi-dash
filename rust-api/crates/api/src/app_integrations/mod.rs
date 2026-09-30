@@ -13,6 +13,7 @@
 
 pub mod gates;
 pub mod handlers_github_proj;
+pub mod handlers_github_ws;
 pub mod hmac;
 
 use axum::Router;
@@ -23,5 +24,5 @@ use crate::state::AppState;
 /// paths serve from Rust, everything else keeps proxying). Sibling
 /// handler issues extend this merge; merges keep both sides.
 pub fn routes() -> Router<AppState> {
-    handlers_github_proj::routes()
+    handlers_github_proj::routes().merge(handlers_github_ws::routes())
 }
