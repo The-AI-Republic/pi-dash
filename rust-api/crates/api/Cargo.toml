@@ -67,6 +67,10 @@ idna = "1"
 # `ring`, not the default `aws-lc-rs`: ring is already vendored (reqwest),
 # so no C-build chain enters the lockfile for the SMTP TLS paths.
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+# Device-session mint (`mt_` + `token_urlsafe(32)`, D-17 PIDASHCONV-343):
+# same 0.9 line the auth and jobs crates build on, so the lockfile gains
+# no new downloads.
+rand = "0.9"
 tokio-rustls = "0.26.5"
 webpki-roots = "1.0.9"
 tower = { version = "0.5" }
