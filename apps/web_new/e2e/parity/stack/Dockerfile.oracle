@@ -15,7 +15,18 @@ WORKDIR /app
 COPY . .
 
 RUN pnpm install
-RUN pnpm --filter "web^..." build
+# Build the runtime JS of every workspace package the web dev server resolves.
+# NOTE: this deliberately bypasses each package's own `build` script and skips
+# `.d.ts` generation (`--no-dts`): the `web^...` dependency closure currently
+# fails its DTS rollup at the base (pre-existing `TS2742` in
+# `packages/propel/src/portal/portal-wrapper.tsx` vs `@types/react@19.3.0`;
+# fixing old-frontend code is outside this harness' paths), while the JS bundle
+# step succeeds. The oracle runs `react-router dev`, which only ever reads the
+# emitted `.js`/`.css` in `dist/` — never the declarations — so nothing the
+# parity runs consume is lost. The `test -f` guard skips the two matched
+# packages with no tsdown build (`tailwind-config`, `typescript-config`);
+# `apps/web` itself stays excluded (its build is `react-router build`).
+RUN pnpm --filter "web^..." --filter "!web" exec sh -c 'if [ -f tsdown.config.ts ]; then tsdown --no-dts; else echo "skip: no tsdown build in $PWD"; fi'
 
 EXPOSE 3000
 
