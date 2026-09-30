@@ -48,6 +48,18 @@ jobs:
 
   check:
     runs-on: ubuntu-latest
+    # The db-crate pubsub roundtrip test (PIDASHCONV-267) needs a live server
+    # on 127.0.0.1:6379; same image and health check as the contract jobs.
+    services:
+      redis:
+        image: valkey/valkey:7.2.11-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     defaults:
       run:
         working-directory: rust-api

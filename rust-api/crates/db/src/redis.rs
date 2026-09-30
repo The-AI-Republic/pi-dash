@@ -89,12 +89,45 @@ impl RedisHandle {
     }
 
     /// `SUBSCRIBE channel` (SSE live tail). The returned `PubSub` is already
-    /// subscribed; the caller polls `get_message` / `on_message` and closes
+    /// subscribed; the caller awaits [`RedisHandle::next_payload`] and closes
     /// it when the stream ends.
     pub async fn subscribe(&self, channel: &str) -> Result<redis::aio::PubSub, redis::RedisError> {
         let mut pubsub = self.client.get_async_pubsub().await?;
         pubsub.subscribe(channel).await?;
         Ok(pubsub)
+    }
+
+    /// Await the next publish on an already-subscribed channel (SSE live
+    /// tail, `assistant/views/events.py:77-89`).
+    ///
+    /// The `redis` 1.7.1 async `PubSub` receives only through its
+    /// `on_message` / `into_on_message` stream, which needs
+    /// `futures_util::Stream` / `StreamExt` — neither reachable from
+    /// `pidash-api`'s dependency closure. This crate already depends on
+    /// `futures-util` directly, so the `Stream` polling lives here and the
+    /// handler awaits plain bytes. Subscribe confirmations never surface:
+    /// the crate routes them to the in-flight `SUBSCRIBE` request.
+    ///
+    /// Returns the publish's raw payload verbatim (`Msg::get_payload_bytes`),
+    /// exactly what Python's `msg["data"]` relays into
+    /// `event: chat.event\ndata: <data>\n\n`. A closed transport (`None`
+    /// from the stream) surfaces as an `Io` error so the caller's feeder ends
+    /// the same way Python's `except Exception` ends the generator. The
+    /// keepalive tick (`tokio::time::timeout` around this call) and the
+    /// unsubscribe-on-end stay with the caller. Like every method here, the
+    /// `Result` stays caller-visible and is never swallowed.
+    pub async fn next_payload(
+        &self,
+        pubsub: &mut redis::aio::PubSub,
+    ) -> Result<Vec<u8>, redis::RedisError> {
+        use futures_util::StreamExt;
+        match pubsub.on_message().next().await {
+            Some(msg) => Ok(msg.get_payload_bytes().to_vec()),
+            None => Err(redis::RedisError::from((
+                redis::ErrorKind::Io,
+                "pubsub stream ended",
+            ))),
+        }
     }
 }
 
@@ -158,5 +191,28 @@ mod tests {
             .await
             .is_err());
         assert!(handle.subscribe("assistant:thread:x").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn next_payload_relays_publish_verbatim() {
+        // Live roundtrip for `next_payload` (PIDASHCONV-267): subscribe, then
+        // publish one message and assert the exact bytes come back. Needs a
+        // server on 127.0.0.1:6379 — the `redis` service in the rust-api
+        // workflows, present wherever `cargo test --workspace` runs in CI.
+        let handle = RedisHandle::from_url("redis://127.0.0.1:6379/").expect("url parses");
+        let channel = "assistant:thread:next-payload-test";
+        let mut pubsub = handle.subscribe(channel).await.expect("subscribe");
+        let mut publisher = redis::Client::open("redis://127.0.0.1:6379/")
+            .expect("url parses")
+            .get_multiplexed_async_connection()
+            .await
+            .expect("publisher connects");
+        let payload = br#"{"seq":7,"event":"done"}"#;
+        let _: i32 = publisher.publish(channel, payload).await.expect("publish");
+        let received = handle
+            .next_payload(&mut pubsub)
+            .await
+            .expect("next publish");
+        assert_eq!(received, payload);
     }
 }
