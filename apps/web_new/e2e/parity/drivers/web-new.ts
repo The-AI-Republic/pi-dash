@@ -7,7 +7,13 @@
 // action throws until the matching area lands in apps/web_new. Area issues
 // fill these in method by method; the oracle driver stays untouched.
 import type { Page } from "@playwright/test";
-import type { ParityBrowserCookie, ParityDriver, ParityTarget, WorkspaceOnboardingView } from "./parity-driver";
+import type {
+  ParityBrowserCookie,
+  ParityDriver,
+  ParityTarget,
+  RulesCommentMenuOption,
+  WorkspaceOnboardingView,
+} from "./parity-driver";
 
 function todo(target: string): never {
   throw new Error(`[parity] drivers/web_new has no ${target} yet; the area that owns it has not landed.`);
@@ -361,5 +367,55 @@ export class WebNewDriver implements ParityDriver {
 
   async openPath(_path: string): Promise<void> {
     return todo("openPath");
+  }
+
+  // --- NEWFRONT-113 (rules) stubs: mirror of the oracle driver additions. ---
+
+  async rulesOpenIssueDetail(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
+    return todo("rulesOpenIssueDetail");
+  }
+
+  async rulesOpenIntakeIssue(_workspaceSlug: string, _projectId: string, _inboxIssueId: string): Promise<void> {
+    return todo("rulesOpenIntakeIssue");
+  }
+
+  async rulesCommentBodyText(_commentId: string): Promise<string | null> {
+    return todo("rulesCommentBodyText");
+  }
+
+  async rulesCommentMenuOptions(_commentId: string): Promise<string[]> {
+    return todo("rulesCommentMenuOptions");
+  }
+
+  async rulesChooseCommentMenuOption(_commentId: string, _option: RulesCommentMenuOption): Promise<void> {
+    return todo("rulesChooseCommentMenuOption");
+  }
+
+  async rulesReadClipboard(): Promise<string> {
+    return todo("rulesReadClipboard");
+  }
+
+  async rulesOpenDeepLink(_url: string): Promise<void> {
+    return todo("rulesOpenDeepLink");
+  }
+
+  async rulesCommentHighlighted(_commentId: string): Promise<boolean> {
+    return todo("rulesCommentHighlighted");
+  }
+
+  async rulesCommentAccessBadge(_commentId: string): Promise<"internal" | "public" | "hidden"> {
+    return todo("rulesCommentAccessBadge");
+  }
+
+  async rulesLastToast(): Promise<{ title: string; message: string } | null> {
+    return todo("rulesLastToast");
+  }
+
+  async rulesReload(): Promise<void> {
+    return todo("rulesReload");
+  }
+
+  async rulesEnsureSignedIn(_email: string, _password: string, _workspaceSlug: string): Promise<void> {
+    return todo("rulesEnsureSignedIn");
   }
 }

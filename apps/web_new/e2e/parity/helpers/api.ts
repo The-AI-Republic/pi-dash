@@ -278,6 +278,36 @@ export async function signInSession(
   });
 }
 
+/**
+ * Sign in with retries across transient 429s. The seeded stack throttles
+ * anonymous auth calls (30/minute per IP, shared by every concurrent parity
+ * run), so a first-attempt 429 is infrastructure noise, not a behavior.
+ * Retries only rate-limit responses; any other failure throws immediately.
+ */
+export async function signInSessionRetry(
+  email: string,
+  password: string,
+  apiBase: string = apiBaseFromEnv(),
+  attempts: number = 8
+): Promise<string> {
+  let lastStatus = 0;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await signInSession(email, password, apiBase);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      const match = /HTTP (\d+)/.exec(message);
+      lastStatus = match !== null ? Number(match[1] ?? 0) : 0;
+      // Retry rate limits and cookie-less sign-ins: both are transient on
+      // the loaded scratch stack. Anything else throws immediately.
+      const retryable = lastStatus === 429 || message.includes("no session cookie");
+      if (!retryable || attempt === attempts) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 10_000));
+    }
+  }
+  throw new Error(`[parity] sign-in failed with HTTP ${lastStatus} for ${email}.`);
+}
+
 /** Second workspace member the mention scenarios @-mention (NEWFRONT-115). */
 export interface ParityMentionMember {
   email: string;
@@ -1158,3 +1188,308 @@ export async function slugAvailable(user: FreshUser, slug: string): Promise<bool
 // instanceConfig(apiBase, sessionCookie) above (same endpoint, plus optional
 // session cookie and throttle retries), so the duplicate is removed here
 // instead of forked.
+
+// --- NEWFRONT-113 (rules): comment server-state helpers. Appended
+// additively; existing helpers above are untouched.
+
+/** Comment fields the rules specs assert on. */
+export interface RulesServerComment {
+  id: string;
+  access: string;
+  labels: string[];
+  comment_html: string;
+  is_synced: boolean;
+}
+
+function rulesCommentOf(row: unknown): RulesServerComment {
+  const c = row as Record<string, unknown>;
+  if (typeof c["id"] !== "string") throw new Error("[parity] comment row carried no string id.");
+  return {
+    id: c["id"] as string,
+    access: typeof c["access"] === "string" ? c["access"] : "INTERNAL",
+    labels: Array.isArray(c["labels"]) ? (c["labels"] as string[]) : [],
+    comment_html: typeof c["comment_html"] === "string" ? c["comment_html"] : "",
+    is_synced: c["is_synced"] === true,
+  };
+}
+
+/** One work item's identifiers needed for deep-link assertions. */
+export async function serverIssueDetail(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ id: string; sequence_id: number; project_identifier: string }> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] issue read failed with HTTP ${res.status}.`);
+  const row = (await res.json()) as Record<string, unknown>;
+  const sequenceId = row["sequence_id"];
+  if (typeof sequenceId !== "number") throw new Error("[parity] issue row carried no sequence id.");
+  const projectRes = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!projectRes.ok) throw new Error(`[parity] project read failed with HTTP ${projectRes.status}.`);
+  const project = (await projectRes.json()) as Record<string, unknown>;
+  const identifier = project["identifier"];
+  if (typeof identifier !== "string") throw new Error("[parity] project row carried no identifier.");
+  return { id: issueId, sequence_id: sequenceId, project_identifier: identifier };
+}
+
+/** Comments on one work item as the server reports them. */
+export async function serverComments(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<RulesServerComment[]> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/comments/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] comments read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map(rulesCommentOf);
+}
+
+/** Raw comment creation: resolves with the HTTP status plus parsed body. */
+export async function serverCreateCommentRaw(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  html: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; body: unknown }> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/comments/`,
+    {
+      method: "POST",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify({ comment_html: html, comment_json: {} }),
+    }
+  );
+  return { status: res.status, body: await res.json().catch(() => null) };
+}
+
+/** Create a comment; throws unless the server answers 201. */
+export async function serverCreateComment(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  html: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<RulesServerComment> {
+  const { status, body } = await serverCreateCommentRaw(
+    workspaceSlug,
+    projectId,
+    issueId,
+    sessionCookie,
+    html,
+    apiBase
+  );
+  if (status !== 201) throw new Error(`[parity] comment create failed with HTTP ${status}: ${JSON.stringify(body)}`);
+  return rulesCommentOf(body);
+}
+
+/** Raw comment patch: resolves with the HTTP status plus parsed body. */
+export async function serverPatchCommentRaw(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  commentId: string,
+  sessionCookie: string,
+  data: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; body: unknown }> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/comments/${commentId}/`,
+    {
+      method: "PATCH",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify(data),
+    }
+  );
+  return { status: res.status, body: await res.json().catch(() => null) };
+}
+
+/** Raw comment delete: resolves with the HTTP status (204 carries no body). */
+export async function serverDeleteCommentRaw(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  commentId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; body: unknown }> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/comments/${commentId}/`,
+    { method: "DELETE", headers: { cookie: sessionCookie } }
+  );
+  return { status: res.status, body: res.status === 204 ? null : await res.json().catch(() => null) };
+}
+
+/** Patch project-level flags (e.g. guest_view_all_features); throws unless 2xx. */
+export async function serverPatchProject(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  data: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    method: "PATCH",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(`[parity] project patch failed with HTTP ${res.status}.`);
+}
+
+/** Unbind the project's git repository; throws unless the server accepts. */
+export async function serverUnbindRepository(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/repository/`, {
+    method: "DELETE",
+    headers: { cookie: sessionCookie },
+  });
+  if (res.status !== 200 && res.status !== 204)
+    throw new Error(`[parity] repository unbind failed with HTTP ${res.status}.`);
+}
+
+/** Add an emoji reaction to a comment; throws unless the server answers 201. */
+export async function serverAddCommentReaction(
+  workspaceSlug: string,
+  projectId: string,
+  commentId: string,
+  sessionCookie: string,
+  reaction: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/comments/${commentId}/reactions/`,
+    {
+      method: "POST",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify({ reaction }),
+    }
+  );
+  if (res.status !== 201) throw new Error(`[parity] comment reaction failed with HTTP ${res.status}.`);
+}
+
+/** Projects in a workspace (id, name, identifier, anchor). */
+export async function serverProjects(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ id: string; name: string; identifier: string; anchor: string | null }[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] projects read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const r = row as { id?: unknown; name?: unknown; identifier?: unknown; anchor?: unknown };
+    if (typeof r.id !== "string" || typeof r.name !== "string" || typeof r.identifier !== "string")
+      throw new Error("[parity] project row missed id, name or identifier.");
+    return { id: r.id, name: r.name, identifier: r.identifier, anchor: (r.anchor as string | null) ?? null };
+  });
+}
+
+/** Create a project; returns its UUID. */
+export async function serverCreateProject(
+  workspaceSlug: string,
+  sessionCookie: string,
+  name: string,
+  identifier: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify({ name, identifier }),
+  });
+  const body = (await res.json().catch(() => null)) as { id?: unknown } | null;
+  if (res.status !== 201 || !body || typeof body.id !== "string")
+    throw new Error(`[parity] project create failed with HTTP ${res.status}: ${JSON.stringify(body)}`);
+  return body.id;
+}
+
+/** Delete a project; throws unless the server accepts. */
+export async function serverDeleteProject(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    method: "DELETE",
+    headers: { cookie: sessionCookie },
+  });
+  if (res.status !== 200 && res.status !== 204)
+    throw new Error(`[parity] project delete failed with HTTP ${res.status}.`);
+}
+
+/** Delete a work item; throws unless the server accepts. */
+export async function serverDeleteIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/`, {
+    method: "DELETE",
+    headers: { cookie: sessionCookie },
+  });
+  if (res.status !== 200 && res.status !== 204)
+    throw new Error(`[parity] issue delete failed with HTTP ${res.status}.`);
+}
+
+/** Default (Todo) state UUID of a project. */
+export async function serverDefaultStateId(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/states/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] states read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  const found = rows.find((row) => (row as { default?: unknown }).default === true) ?? rows[0];
+  const id = (found as { id?: unknown } | undefined)?.id;
+  if (typeof id !== "string") throw new Error("[parity] project has no usable state.");
+  return id;
+}
+
+/** Create a work item as the signed-in user; returns its UUID. */
+export async function serverCreateIssue(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  name: string,
+  stateId?: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify(stateId ? { name, state: stateId } : { name }),
+  });
+  const body = (await res.json().catch(() => null)) as { id?: unknown } | null;
+  if (res.status !== 201 || !body || typeof body.id !== "string")
+    throw new Error(`[parity] issue create failed with HTTP ${res.status}: ${JSON.stringify(body)}`);
+  return body.id;
+}

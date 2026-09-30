@@ -9,7 +9,13 @@
 // form, landing in the workspace. Later oracle issues extend this driver
 // (never fork it) as new areas need new actions.
 import type { Locator, Page } from "@playwright/test";
-import type { ParityBrowserCookie, ParityDriver, ParityTarget, WorkspaceOnboardingView } from "./parity-driver";
+import type {
+  ParityBrowserCookie,
+  ParityDriver,
+  ParityTarget,
+  RulesCommentMenuOption,
+  WorkspaceOnboardingView,
+} from "./parity-driver";
 
 export class WebDriver implements ParityDriver {
   readonly target: ParityTarget = "web";
@@ -883,6 +889,187 @@ export class WebDriver implements ParityDriver {
     return null;
   }
 
+  // --- NEWFRONT-113 (rules): comment permissions, visibility, deep links. ---
+  // Selectors observed on the running old app. Comment cards render with
+  // id="comment-<uuid>"; the overflow trigger carries a data-testid hook;
+  // menu items are headless-ui buttons found by their visible titles.
+
+  private rulesCard(commentId: string): Locator {
+    return this.page.locator(`#comment-${commentId}`);
+  }
+
+  private async rulesWaitForFeed(): Promise<void> {
+    // The composer group marks a loaded activity section; the feed itself
+    // may be empty (no cards), so waiting on cards would hang. The dev
+    // server compiles the detail route on first visit, hence the wait.
+    await this.page.getByRole("group", { name: "Add comment" }).first().waitFor({ timeout: 120_000 });
+  }
+
+  async rulesOpenIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues/${issueId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.rulesWaitForFeed();
+  }
+
+  async rulesOpenIntakeIssue(workspaceSlug: string, projectId: string, inboxIssueId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/intake?inboxIssueId=${inboxIssueId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // The intake screen resolves the triage row, redirects onto the linked
+    // issue form, then loads its feed; that chain is slow on the dev server.
+    await this.page.getByRole("group", { name: "Add comment" }).first().waitFor({ timeout: 300_000 });
+  }
+
+  async rulesCommentBodyText(commentId: string): Promise<string | null> {
+    const card = this.rulesCard(commentId);
+    await card.waitFor();
+    // The read-only editor container is unmounted while the card is
+    // folded shut, so its absence is the collapsed signal.
+    const body = card.locator(`#editor-container-${commentId}`);
+    if ((await body.count()) === 0) return null;
+    return (await body.first().innerText()).trim();
+  }
+
+  private async rulesClickCoords(target: Locator): Promise<void> {
+    // The overflow trigger (and its menu items) nest a button inside a
+    // button, so Playwright's hit-test never settles on the right node.
+    // Clicking the coordinates runs the real mouse pipeline instead.
+    const box = await target.boundingBox();
+    if (!box) throw new Error("[parity] rules menu target has no layout box.");
+    await this.page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  }
+
+  private async rulesMenuOpen(card: Locator): Promise<boolean> {
+    // Items mount only while the CustomMenu is open; the headless-ui
+    // expanded flag never flips (its toggle is preventDefaulted), so it
+    // cannot be the signal.
+    return (await card.getByRole("menu").getByRole("menuitem").count()) > 0;
+  }
+
+  private async rulesOpenMenu(commentId: string): Promise<void> {
+    const card = this.rulesCard(commentId);
+    const trigger = card.locator('button[aria-haspopup="menu"] button').first();
+    await trigger.waitFor();
+    // Cards render far down the feed; the trigger must be scrolled under
+    // the viewport before a coordinate click can land on it. The feed
+    // keeps streaming entries while it loads, so a click can land on a
+    // shifted-away point: re-aim from a fresh box until the menu reports
+    // open (each attempt is a genuine pointer click).
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await trigger.scrollIntoViewIfNeeded();
+      await this.rulesClickCoords(trigger);
+      await this.page.waitForTimeout(800);
+      if (await this.rulesMenuOpen(card)) return;
+    }
+    throw new Error(`[parity] comment overflow menu did not open for ${commentId}.`);
+  }
+
+  async rulesCommentMenuOptions(commentId: string): Promise<string[]> {
+    await this.rulesOpenMenu(commentId);
+    // Scope to the card: every CustomMenu mounts its items statically, so
+    // an unscoped query matches permanently hidden menus elsewhere. Wait
+    // on the items, not the container: popper leaves the fixed container
+    // at a zero box while the items themselves render with size.
+    const menu = this.rulesCard(commentId).getByRole("menu");
+    await menu.getByRole("menuitem").first().waitFor();
+    const keys: string[] = [];
+    const titles = await menu.getByRole("menuitem").allTextContents();
+    // Map visible English titles back to stable option keys. Titles are
+    // matched case-insensitively so a copy tweak cannot silently pass.
+    for (const raw of titles) {
+      const title = raw.trim().toLowerCase();
+      if (title === "edit") keys.push("edit");
+      else if (title === "copy link") keys.push("copy_link");
+      else if (title.startsWith("switch to public") || title.startsWith("switch to private"))
+        keys.push("access_switch");
+      else if (title.startsWith("fold comment")) keys.push("fold");
+      else if (title.startsWith("unfold comment")) keys.push("unfold");
+      else if (title === "delete") keys.push("delete");
+    }
+    await this.page.keyboard.press("Escape");
+    return keys;
+  }
+
+  async rulesChooseCommentMenuOption(commentId: string, option: RulesCommentMenuOption): Promise<void> {
+    // Copying writes to the clipboard, which headless Chromium denies
+    // without an explicit grant; arrange it before the pick.
+    if (option === "copy_link") await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.rulesOpenMenu(commentId);
+    const menu = this.rulesCard(commentId).getByRole("menu");
+    await menu.getByRole("menuitem").first().waitFor();
+    const title =
+      option === "edit"
+        ? "Edit"
+        : option === "copy_link"
+          ? "Copy link"
+          : option === "access_switch"
+            ? /Switch to (public|private) comment/
+            : option === "fold"
+              ? "Fold comment"
+              : option === "unfold"
+                ? "Unfold comment"
+                : "Delete";
+    // Same nested-button hit-testing reason as the trigger above.
+    const item = menu.getByRole("menuitem", { name: title });
+    const inner = item.locator("button");
+    if ((await inner.count()) > 0) await this.rulesClickCoords(inner.first());
+    else await this.rulesClickCoords(item);
+  }
+
+  async rulesReadClipboard(): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async rulesOpenDeepLink(url: string): Promise<void> {
+    await this.page.goto(url);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.rulesWaitForFeed();
+  }
+
+  async rulesCommentHighlighted(commentId: string): Promise<boolean> {
+    const card = this.rulesCard(commentId);
+    await card.waitFor();
+    // The anchor highlight swaps the body border to the accent color.
+    return (await card.locator(".border-accent-strong").count()) > 0;
+  }
+
+  async rulesCommentAccessBadge(commentId: string): Promise<"internal" | "public" | "hidden"> {
+    const card = this.rulesCard(commentId);
+    await card.waitFor();
+    // The corner marker renders only while the project is externally
+    // shared. The marker icons carry no text, so read the direction off
+    // the overflow switch label instead: it names the state a pick would
+    // move AWAY from.
+    const marker = card.locator(".absolute.top-2\\.5.right-2\\.5");
+    if ((await marker.count()) === 0) return "hidden";
+    await this.rulesOpenMenu(commentId);
+    const menu = card.getByRole("menu");
+    await menu.getByRole("menuitem").first().waitFor();
+    const titles = await menu.getByRole("menuitem").allTextContents();
+    await this.page.keyboard.press("Escape");
+    const switching = titles.map((t) => t.trim().toLowerCase()).find((t) => t.startsWith("switch to"));
+    if (switching?.includes("private")) return "public";
+    if (switching?.includes("public")) return "internal";
+    throw new Error(`[parity] no visibility switch offered on ${commentId}.`);
+  }
+
+  async rulesLastToast(): Promise<{ title: string; message: string } | null> {
+    // Toasts stack bottom-right and auto-dismiss; only a currently
+    // visible one with text is reported, newest first.
+    const roots = this.page.locator("div.absolute.right-3.bottom-3");
+    const total = await roots.count();
+    for (let i = total - 1; i >= 0; i--) {
+      const text = (await roots.nth(i).innerText()).trim();
+      if (text === "") continue;
+      const lines = text
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+      return { title: lines[0] ?? "", message: lines.slice(1).join(" ") };
+    }
+    return null;
+  }
+
   async gotoJoinByEmailFromCreate(): Promise<void> {
     await this.page.getByRole("button", { name: "Join an existing workspace by admin email", exact: true }).click();
   }
@@ -991,5 +1178,24 @@ export class WebDriver implements ParityDriver {
 
   async isInOnboardingCreationDisabledNoticeVisible(): Promise<boolean> {
     return this.hasVisibleText("your instance admin has restricted creation");
+  }
+
+  async rulesReload(): Promise<void> {
+    await this.page.reload();
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.rulesWaitForFeed();
+  }
+
+  async rulesEnsureSignedIn(email: string, password: string, workspaceSlug: string): Promise<void> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.openEntry();
+      await this.signInWithPassword(email, password);
+      const landed = await this.page
+        .waitForURL(new RegExp(workspaceSlug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), { timeout: 60_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (landed) return;
+    }
+    throw new Error(`[parity] sign-in never landed on ${workspaceSlug}.`);
   }
 }

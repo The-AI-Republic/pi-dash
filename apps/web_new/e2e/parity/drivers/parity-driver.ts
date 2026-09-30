@@ -33,6 +33,11 @@ export interface ParitySeedFacts {
     id: string;
     displayName: string;
   };
+  /** Second seeded identity, a guest on the seeded project (NEWFRONT-113). */
+  guestEmail?: string;
+  guestPassword?: string;
+  /** Pending triage row for the intake-screen variant (NEWFRONT-113). */
+  inboxIssueId?: string;
 }
 
 /** A cookie shaped for a browser context, used to enter the app pre-authenticated. */
@@ -268,4 +273,40 @@ export interface ParityDriver {
   openSetPassword(): Promise<void>;
   /** Open an arbitrary app path (guards and legacy redirects). */
   openPath(path: string): Promise<void>;
+
+  // --- NEWFRONT-113 (rules): comment permissions, visibility, deep links. ---
+  // Appended additively per the NEWFRONT-30 shared driver contract; every
+  // method is mirrored as a throwing stub in drivers/web_new.
+  /** Open one work item's detail screen; waits for the activity section. */
+  rulesOpenIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void>;
+  /** Open the intake-screen variant for one triage row; waits for its feed. */
+  rulesOpenIntakeIssue(workspaceSlug: string, projectId: string, inboxIssueId: string): Promise<void>;
+  /** Rendered body text of one comment card; null while collapsed/hidden. */
+  rulesCommentBodyText(commentId: string): Promise<string | null>;
+  /** Overflow-menu option keys currently offered on one comment card. */
+  rulesCommentMenuOptions(commentId: string): Promise<string[]>;
+  /** Pick one overflow-menu option on one comment card. */
+  rulesChooseCommentMenuOption(commentId: string, option: RulesCommentMenuOption): Promise<void>;
+  /** Current clipboard text (grants clipboard permission first). */
+  rulesReadClipboard(): Promise<string>;
+  /** Open an absolute-or-relative deep link; waits for page load. */
+  rulesOpenDeepLink(url: string): Promise<void>;
+  /** Whether the comment card currently carries the anchor highlight. */
+  rulesCommentHighlighted(commentId: string): Promise<boolean>;
+  /** Corner visibility marker on one comment card. */
+  rulesCommentAccessBadge(commentId: string): Promise<"internal" | "public" | "hidden">;
+  /** Most recently shown toast, if any is still visible. */
+  rulesLastToast(): Promise<{ title: string; message: string } | null>;
+  /** Reload the current page and wait for it to settle. */
+  rulesReload(): Promise<void>;
+  /**
+   * Sign in through the base flow and confirm the workspace landing,
+   * retrying the whole pass when a loaded dev server swallows the submit.
+   * The base sign-in wait resolves on the entry URL itself, so the landing
+   * check lives here instead of touching the shared method.
+   */
+  rulesEnsureSignedIn(email: string, password: string, workspaceSlug: string): Promise<void>;
 }
+
+/** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */
+export type RulesCommentMenuOption = "edit" | "copy_link" | "access_switch" | "fold" | "unfold" | "delete";
