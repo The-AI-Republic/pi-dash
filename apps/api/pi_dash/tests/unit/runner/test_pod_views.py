@@ -291,6 +291,10 @@ def test_admin_can_set_and_clear_pin_wait_budget(db, session_client, project):
         "12.9",
         [600],
         {"secs": 600},
+        # Past the PositiveIntegerField (int4) ceiling: parses as an int, so
+        # only an explicit bound keeps it from becoming a DataError 500.
+        2147483648,
+        "2147483648",
     ],
 )
 def test_pin_wait_budget_rejects_bad_values(db, session_client, project, bad):

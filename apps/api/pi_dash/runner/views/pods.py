@@ -36,6 +36,11 @@ from pi_dash.runner.services.permissions import (
 )
 from pi_dash.runner.services.pod_naming import validate_user_pod_name
 
+#: ``Pod.pin_wait_budget_secs`` is a ``PositiveIntegerField``, i.e. a Postgres
+#: ``integer``. A larger value parses fine and then blows up as a ``DataError``
+#: on save, which surfaces as a 500 for what is plainly a bad request.
+MAX_PIN_WAIT_BUDGET_SECS = 2147483647
+
 
 def _can_manage_pod(user, pod: Pod) -> bool:
     """True if ``user`` may rename / toggle / delete this pod."""
@@ -211,6 +216,16 @@ class PodDetailEndpoint(APIView):
                 if budget < 0:
                     return Response(
                         {"error": "pin_wait_budget_secs cannot be negative"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if budget > MAX_PIN_WAIT_BUDGET_SECS:
+                    return Response(
+                        {
+                            "error": (
+                                "pin_wait_budget_secs must be at most "
+                                f"{MAX_PIN_WAIT_BUDGET_SECS} seconds"
+                            )
+                        },
                         status=status.HTTP_400_BAD_REQUEST,
                     )
                 pod.pin_wait_budget_secs = budget
