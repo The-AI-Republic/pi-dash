@@ -15,6 +15,7 @@
     "check:headers": "node checks/check-headers.mjs",
     "check:deps": "node checks/check-deps.mjs",
     "check:similarity": "node checks/check-similarity.mjs",
+    "check:no-tauri": "node checks/check-no-tauri.mjs",
     "check": "pnpm lint && pnpm check:boundaries && pnpm check:headers && pnpm check:deps && pnpm check:similarity",
     "test": "vitest run",
     "size": "size-limit"

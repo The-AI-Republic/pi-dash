@@ -5,10 +5,34 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { RouterProvider, createRouter } from "@tanstack/react-router";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { createClient } from "@pidash/api-client";
 
 import { routeTree } from "./routeTree.gen";
 import { PIDASH_TARGET } from "./target";
+import { platform, toApiTransport } from "./core/platform/index.js";
+import { edition } from "./core/edition/index.js";
+import {
+  createCachePersistor,
+  createQueryClient,
+  persistEverything,
+  persistReferenceOnly,
+} from "./core/query/index.js";
+import { createSessionMiddleware, setSessionClient } from "./core/session/index.js";
 import "./styles/app.css";
+
+// Bootstrap order (Architecture): platform → edition → queryClient → router.
+const queryClient = createQueryClient();
+const apiClient = createClient({
+  baseUrl: "",
+  transport: toApiTransport(platform),
+  middleware: [...(edition.api ?? []), createSessionMiddleware()],
+});
+setSessionClient(apiClient);
+const persistor = createCachePersistor(queryClient, platform.storage, {
+  shouldPersist: platform.kind === "desktop" ? persistEverything : persistReferenceOnly,
+});
+void persistor.restore();
 
 const router = createRouter({ routeTree });
 
@@ -33,6 +57,8 @@ if (import.meta.env.DEV) {
 
 createRoot(rootElement).render(
   <StrictMode>
-    <RouterProvider router={router} />
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>
   </StrictMode>
 );

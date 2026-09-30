@@ -152,6 +152,8 @@ jobs:
           ls -la "$WEB_DIR" "$DESKTOP_DIR"
           test -f "$WEB_DIR/index.html"
           test -f "$DESKTOP_DIR/index.html"
+      - name: Prove the web bundle contains no Tauri code (F-04)
+        run: pnpm --filter web_new check:no-tauri
 
   size-limit:
     name: size-limit
