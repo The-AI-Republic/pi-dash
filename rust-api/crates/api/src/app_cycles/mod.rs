@@ -24,10 +24,30 @@
 //!
 //! [`gates`] ports the `@allow_permission` role matrix (F-C27-07,
 //! PIDASHCONV-290) over the F-06 kernel for the same handlers.
+//!
+//! [`handlers_archive`] ports `CycleArchiveUnarchiveEndpoint`
+//! (PIDASHCONV-377); [`routes`] merges its routes — sibling handler
+//! issues extend the merge; merges keep both sides.
 
 pub mod gates;
 pub mod handlers_analytics;
+pub mod handlers_archive;
 pub mod handlers_progress;
+
+use axum::Router;
+
+use crate::state::AppState;
+
+/// Merge the app-cycles route groups (archive first, PIDASHCONV-377;
+/// progress + analytics via PIDASHCONV-410; sibling handler issues
+/// extend the merge; merges keep both sides). Cutover into the serving
+/// router stays with the domain gate (PIDASHCONV-388), so this is
+/// additive only.
+pub fn routes() -> Router<AppState> {
+    handlers_archive::routes()
+        .merge(handlers_progress::routes())
+        .merge(handlers_analytics::routes())
+}
 
 pub use pidash_services::app_cycles::queries;
 
@@ -42,14 +62,6 @@ pub const COMPLEX_FILTER_ENDPOINTS: &[&str] = &["cycle-issues"];
 /// Endpoints whose list path runs the legacy `issue_filters(params,
 /// 'GET')` dict compiler first (`issue.py:111`).
 pub const LEGACY_FILTER_ENDPOINTS: &[&str] = &["cycle-issues"];
-
-/// Merge the handler routers owned by this domain (PIDASHCONV-410:
-/// progress + analytics; sibling handler issues extend the merge;
-/// merges keep both sides). Cutover into the serving router stays with
-/// the domain gate (PIDASHCONV-388), so this is additive only.
-pub fn routes() -> axum::Router<crate::state::AppState> {
-    handlers_progress::routes().merge(handlers_analytics::routes())
-}
 
 #[cfg(test)]
 mod tests {
