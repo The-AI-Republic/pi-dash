@@ -19,6 +19,7 @@ rust-api/
   crates/services/      # per-domain logic; depends on types, db, auth
   crates/api/           # axum routers, extractors, serializer + paginator kernel, middleware
   crates/jobs/          # Postgres queue, worker loop, Celery-format publisher
+  crates/storage/       # shared server-side S3 PUT/DELETE (offline SigV4) + avatar mapping (PIDASHCONV-480)
   bin/pidash-api/       # the binary: serve + worker modes, app builder with extension seams
   contract-tests/       # stage-1 pytest suites (+ _harness/)
   fixtures/<domain>/    # recorded Python behaviour
