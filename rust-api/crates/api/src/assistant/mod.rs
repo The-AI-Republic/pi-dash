@@ -16,8 +16,6 @@
 //! handler layer, which owns the only scoped database handle (tenancy rule);
 //! this module decides and renders, exactly like the Python view helpers.
 //!
-//! [`llm_config`] owns the BYOK LLM-config + title-generation HTTP shell
-//! (PIDASHCONV-256) and [`stt_config`] the BYO speech-to-text config shell
 //! (PIDASHCONV-256); [`common`] holds their shared request edge and
 //! [`kms`] the production KMS wire.
 //!
@@ -34,6 +32,14 @@
 //! * [`governor`] — the in-process DRF throttle store the handler layer
 //!   owns (no shared cache handle exists in `AppState`).
 //!
+//! Handlers A (PIDASHCONV-255):
+//!
+//! * [`threads`] — thread list/create/detail (`views/threads.py:1-111`).
+//! * [`messages`] — message list/create + cancel (`views/messages.py:1-128`).
+//! * [`events`] — the SSE event stream (`views/events.py:1-116`).
+//! * [`redis`] — cancel-signal / throttle-cache / live-tail touch points
+//!   (transport via the merged Redis foundation; see that module).
+//!
 //! [`routes`] merges the owned paths; registration stays the cutover
 //! granularity (unowned methods proxy to Django). Sibling handler
 //! issues merge their own routers into [`routes`]; merges keep both
@@ -41,13 +47,17 @@
 
 pub mod agent_profile;
 pub mod common;
+pub mod events;
 pub mod governor;
 pub mod kms;
 pub mod llm_config;
 pub mod mcp_servers;
+pub mod messages;
 pub mod multipart;
 pub mod perm;
+pub mod redis;
 pub mod stt_config;
+pub mod threads;
 pub mod throttles;
 pub mod transcribe;
 
@@ -59,7 +69,10 @@ use crate::state::AppState;
 /// serve from Rust, everything else keeps proxying). Sibling handler
 /// issues extend this merge; merges keep both sides.
 pub fn routes() -> Router<AppState> {
-    llm_config::routes()
+    threads::routes()
+        .merge(messages::routes())
+        .merge(events::routes())
+        .merge(llm_config::routes())
         .merge(stt_config::routes())
         .merge(transcribe::routes())
         .merge(agent_profile::routes())

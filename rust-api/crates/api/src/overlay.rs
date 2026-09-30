@@ -165,11 +165,13 @@ impl Overlay {
 /// section detail PUT/DELETE, compiled, preview) with their owned
 /// methods; every other method on those paths proxies to Django.
 ///
-/// The Assistant group serves the D-06 handlers-C surface
-/// (`assistant`, PIDASHCONV-257): transcribe POST, the desktop
-/// agent-profile GET / agent-token POST pair, and the MCP server
-/// list/create + detail PATCH/DELETE; sibling `ai-assistant/` paths
-/// have no Rust route and keep proxying to Django through the
+/// The Assistant group serves the D-06 thread surface (`assistant`,
+/// PIDASHCONV-255): thread list/create/detail, message list/create,
+/// cancel, and the SSE event stream, with their owned methods — plus
+/// the handlers-C surface (PIDASHCONV-257): transcribe POST, the
+/// desktop agent-profile GET / agent-token POST pair, and the MCP
+/// server list/create + detail PATCH/DELETE; sibling `ai-assistant/`
+/// paths have no Rust route and keep proxying to Django through the
 /// fallback. Sibling handler issues merge their routers in
 /// `assistant::routes`; merges keep both sides.
 fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
@@ -200,8 +202,9 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // Prompting handlers merge their router here (PIDASHCONV-158);
         // sibling handler issues extend the merge; merges keep both sides.
         RouteGroup::Prompting => crate::prompting::routes(),
-        // Assistant handlers merge their router here (PIDASHCONV-256:
-        // LLM/STT config + title; sibling handler issues extend the
+        // Assistant handlers merge their router here (threads/messages/
+        // cancel/SSE: PIDASHCONV-255; LLM/STT config + title:
+        // PIDASHCONV-256; sibling handler issues extend the
         // merge; merges keep both sides).
         RouteGroup::Assistant => crate::assistant::routes(),
         _ => Router::new(),
