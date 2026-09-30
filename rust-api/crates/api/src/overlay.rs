@@ -127,8 +127,10 @@ impl Overlay {
 
 /// OSS routes for one group. Only Web has Rust handlers today (`GET /`
 /// and `GET /robots.txt` behind the web flag; unsafe methods still proxy
-/// so Django's CSRF-failure page is preserved); every other group's
-/// endpoints arrive with their domain ports.
+/// so Django's CSRF-failure page is preserved) plus Auth (Gitea OAuth,
+/// PIDASHCONV-341, and Google OAuth app + space initiate/callback,
+/// PIDASHCONV-335); every other group's endpoints arrive with their
+/// domain ports.
 ///
 /// The App group serves the issue-list family (`app_issues`, pilot 2 of
 /// D-26): exactly the four list GETs — plus the D-33 app-integrations
@@ -217,11 +219,12 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // Auth handlers merge their routers here (D-17 Gitea OAuth
         // initiate/callback, PIDASHCONV-341; GitHub OAuth initiate/callback,
         // PIDASHCONV-336; GitLab OAuth initiate/callback, PIDASHCONV-339;
-        // sibling handler issue 335 extends the merge; merges keep both
-        // sides).
+        // Google OAuth app + space initiate/callback, PIDASHCONV-335;
+        // merges keep both sides).
         RouteGroup::Auth => crate::auth_oauth::oauth_gitea::routes()
             .merge(crate::auth_oauth::oauth_github::routes())
-            .merge(crate::auth_oauth::oauth_gitlab::routes()),
+            .merge(crate::auth_oauth::oauth_gitlab::routes())
+            .merge(crate::auth_oauth::oauth_google::routes()),
         RouteGroup::Runner | RouteGroup::RunnerWeb => Router::new(),
     }
 }

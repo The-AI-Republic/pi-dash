@@ -17,11 +17,15 @@
 //! * [`oauth_github`] — GitHub app + space initiate/callback handlers +
 //!   routes (PIDASHCONV-336, AUTHOAUTH-F10/F11 github rows).
 //! * [`oauth_gitlab`] — GitLab app + space initiate/callback handlers +
-//!   routes (PIDASHCONV-339, AUTHOAUTH-F10/F11). Sibling provider issue
-//!   PIDASHCONV-335 adds its `oauth_*` module here; each provider mounts
-//!   its own router under the Auth group arm.
+//!   routes (PIDASHCONV-339, AUTHOAUTH-F10/F11).
+//! * [`oauth_google`] — Google app + space initiate/callback handlers +
+//!   routes (PIDASHCONV-335, AUTHOAUTH-F10/F11).
+//!
+//! Each provider mounts its own router under the Auth group arm.
 //!
 //! [`routes`] merges both ported device families; merges keep both sides.
+//! Provider families expose their own sub-routers, mounted on the Auth
+//! group arm in `overlay.rs` (PIDASHCONV-341 precedent).
 //!
 //! # Wiring note
 //!
@@ -34,6 +38,7 @@ pub mod guards;
 pub mod oauth_gitea;
 pub mod oauth_github;
 pub mod oauth_gitlab;
+pub mod oauth_google;
 
 pub use guards::{
     device_endpoint_guard, device_start_cache_key, device_start_throttle_rate,
