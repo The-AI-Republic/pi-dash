@@ -113,6 +113,9 @@ pub fn routes() -> Router<AppState> {
 /// Bodies on the detail write paths parse through the same `Json`
 /// extractor the collection routes declare, so rejection bytes are
 /// identical on both.
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn detail_body(state: &AppState, req: axum::extract::Request) -> Result<Value, Response> {
     use axum::extract::FromRequest;
     match axum::Json::<Value>::from_request(req, state).await {

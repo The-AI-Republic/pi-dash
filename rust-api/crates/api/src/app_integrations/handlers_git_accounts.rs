@@ -1187,6 +1187,9 @@ async fn create_account(
 /// `get_object_or_404(GitProviderAccount, id, workspace__slug)`
 /// (`git.py:100,105,120`). A non-UUID `account_id` proxies to Django —
 /// its `<uuid:>` converter 404s there exactly as before the cutover.
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn detail_or_proxy(
     state: &AppState,
     slug: &str,
