@@ -800,6 +800,43 @@ export interface ParityDriver {
   clickCommentAndRun(): Promise<void>;
   /** True while Comment & Run is disabled (the empty-composer short-circuit). */
   commentAndRunDisabled(): Promise<boolean>;
+  // Activity feed (NEWFRONT-114, rows CMT-013..017). Oracle selectors read
+  // the running old app's user-visible structure only: the "Activity"
+  // heading scopes the section, header icon buttons are addressed from the
+  // end (worklog, sort, filter), and entries are the feed container's
+  // children. Appended additively; never modify an existing method.
+  /** Defensive sign-in: repeat the entry-plus-password flow until the workspace URL lands. */
+  activitySignIn(email: string, password: string, workspaceSlug: string): Promise<void>;
+  /** Open a work item detail page; requires an authenticated session. */
+  activityOpenIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void>;
+  /** Feed entry texts in display order (merged property-change entries and comments). */
+  activityEntryTexts(): Promise<string[]>;
+  /** Toggle oldest-first/newest-first ordering. */
+  activityToggleSort(): Promise<void>;
+  /** Open the updates/comments/state/assignee filter menu. */
+  activityOpenFilterMenu(): Promise<void>;
+  /** Visible filter option labels in the open menu. */
+  activityFilterOptionLabels(): Promise<string[]>;
+  /** Toggle one filter option by its visible label. */
+  activityToggleFilterOption(label: string): Promise<void>;
+  /** True while the filter control shows its narrowed marker. */
+  activityFilterNarrowed(): Promise<boolean>;
+  /** Composer position relative to the feed. */
+  activityComposerPosition(): Promise<"above" | "below" | "hidden">;
+  /** Type text into the feed composer editor. */
+  activityComposerType(text: string): Promise<void>;
+  /** Submit the feed composer. */
+  activityComposerSubmit(): Promise<void>;
+  /** Edit the work item title through the detail header (drives a property-change entry). */
+  activityRenameTitle(title: string): Promise<void>;
+  /** True while the feed skeleton loader is visible. */
+  activityLoadingVisible(): Promise<boolean>;
+  /** Stored sort preference from browser-local storage. */
+  activityStoredSort(): Promise<string | null>;
+  /** Stored filter selection from browser-local storage. */
+  activityStoredFilters(): Promise<string | null>;
+  /** Click the first link inside the feed; resolves with the resulting URL. */
+  activityOpenFirstEntryLink(): Promise<string>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */

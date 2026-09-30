@@ -1244,4 +1244,71 @@ export class WebNewDriver implements ParityDriver {
   async commentAndRunDisabled(): Promise<boolean> {
     return todo("commentAndRunDisabled");
   }
+
+  // Activity feed stubs (NEWFRONT-114). Mirror of the interface additions;
+  // each throws until the activity area lands in apps/web_new.
+
+  async activitySignIn(_email: string, _password: string, _workspaceSlug: string): Promise<void> {
+    return todo("activitySignIn");
+  }
+
+  async activityOpenIssueDetail(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
+    return todo("activityOpenIssueDetail");
+  }
+
+  async activityEntryTexts(): Promise<string[]> {
+    return todo("activityEntryTexts");
+  }
+
+  async activityToggleSort(): Promise<void> {
+    return todo("activityToggleSort");
+  }
+
+  async activityOpenFilterMenu(): Promise<void> {
+    return todo("activityOpenFilterMenu");
+  }
+
+  async activityFilterOptionLabels(): Promise<string[]> {
+    return todo("activityFilterOptionLabels");
+  }
+
+  async activityToggleFilterOption(_label: string): Promise<void> {
+    return todo("activityToggleFilterOption");
+  }
+
+  async activityFilterNarrowed(): Promise<boolean> {
+    return todo("activityFilterNarrowed");
+  }
+
+  async activityComposerPosition(): Promise<"above" | "below" | "hidden"> {
+    return todo("activityComposerPosition");
+  }
+
+  async activityComposerType(_text: string): Promise<void> {
+    return todo("activityComposerType");
+  }
+
+  async activityComposerSubmit(): Promise<void> {
+    return todo("activityComposerSubmit");
+  }
+
+  async activityRenameTitle(_title: string): Promise<void> {
+    return todo("activityRenameTitle");
+  }
+
+  async activityLoadingVisible(): Promise<boolean> {
+    return todo("activityLoadingVisible");
+  }
+
+  async activityStoredSort(): Promise<string | null> {
+    return todo("activityStoredSort");
+  }
+
+  async activityStoredFilters(): Promise<string | null> {
+    return todo("activityStoredFilters");
+  }
+
+  async activityOpenFirstEntryLink(): Promise<string> {
+    return todo("activityOpenFirstEntryLink");
+  }
 }
