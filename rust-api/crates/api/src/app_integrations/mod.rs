@@ -17,6 +17,7 @@ pub mod gates;
 pub mod handlers_external;
 pub mod handlers_github_proj;
 pub mod handlers_github_ws;
+pub mod handlers_git_repo;
 pub mod hmac;
 
 use axum::Router;
@@ -30,4 +31,5 @@ pub fn routes() -> Router<AppState> {
     handlers_external::routes()
         .merge(handlers_github_proj::routes())
         .merge(handlers_github_ws::routes())
+        .merge(handlers_git_repo::routes())
 }
