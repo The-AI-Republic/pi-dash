@@ -13,6 +13,7 @@
 //!
 //! * [`middleware`] — D-16 session-cookie semantics + tower wiring over
 //!   the F-08 session layer (reused read-only).
+pub mod email;
 pub mod middleware;
 pub mod render;
 
@@ -24,3 +25,9 @@ pub use render::{
     CSRF_FAILURE_TEMPLATE, JSON_400_STATUS, REDIRECT_302_STATUS, THROTTLE_429_STATUS,
     UNAUTHENTICATED_401_STATUS,
 };
+
+/// Owned D-16 auth routes (cutover granularity: registered paths
+/// serve Rust, sibling paths keep proxying through the fallback).
+pub fn routes() -> axum::Router<crate::state::AppState> {
+    email::routes()
+}

@@ -217,17 +217,19 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // token: PIDASHCONV-342; workspaces/machine-token/revoke:
         // PIDASHCONV-343; D-19 member/invite/user, PIDASHCONV-371, via
         // `v1_projects::routes`; sibling handler issues extend the merge;
-        // merges keep both sides).
+        // merges keep both sides; `auth_oauth::routes` already covers
+        // the device flow).
         RouteGroup::ApiV1 => crate::auth_oauth::routes().merge(crate::v1_projects::routes()),
         // Auth handlers merge their routers here (D-17 Gitea OAuth
         // initiate/callback, PIDASHCONV-341; GitHub OAuth initiate/callback,
         // PIDASHCONV-336; GitLab OAuth initiate/callback, PIDASHCONV-339;
         // Google OAuth app + space initiate/callback, PIDASHCONV-335;
-        // merges keep both sides).
+        // email sessions, PIDASHCONV-422; merges keep both sides).
         RouteGroup::Auth => crate::auth_oauth::oauth_gitea::routes()
             .merge(crate::auth_oauth::oauth_github::routes())
             .merge(crate::auth_oauth::oauth_gitlab::routes())
-            .merge(crate::auth_oauth::oauth_google::routes()),
+            .merge(crate::auth_oauth::oauth_google::routes())
+            .merge(crate::auth_session::routes()),
         RouteGroup::Runner | RouteGroup::RunnerWeb => Router::new(),
     }
 }
