@@ -2744,6 +2744,7 @@ dependencies = [
  "pidash-auth",
  "pidash-db",
  "pidash-types",
+ "rand 0.9.5",
  "regex",
  "scraper",
  "serde",
@@ -2752,6 +2753,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "uuid",
+ "zxcvbn",
 ]
 
 [[package]]

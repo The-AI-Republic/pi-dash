@@ -37,6 +37,12 @@ idna = "1"
 # D-30 page serializers: base64→bytes validation mirrors CPython
 # base64.b64decode (same locked base64 0.22.x as pidash-api, no lock churn).
 base64 = "0.22"
+# D-16 password closure: zxcvbn scoring + token recipe primitives
+# (same locked versions as pidash-api, no lock churn).
+zxcvbn = "3"
+rand = "0.9"
+hmac = "0.13"
+sha2 = "0.11"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
