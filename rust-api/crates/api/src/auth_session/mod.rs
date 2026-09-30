@@ -14,9 +14,19 @@
 //! * [`middleware`] — D-16 session-cookie semantics + tower wiring over
 //!   the F-08 session layer (reused read-only).
 pub mod email;
+//!
+//! Plus the magic-link handler port, named by PIDASHCONV-431:
+//!
+//! * [`magic`] — the six magic-link routes (generate/sign-in/sign-up,
+//!   app + space) with [`routes`]; merges keep both sides.
+pub mod magic;
 pub mod middleware;
 pub mod render;
 
+pub use magic::{
+    routes as magic_routes, APP_GENERATE_PATH, APP_SIGN_IN_PATH, APP_SIGN_UP_PATH,
+    SPACE_GENERATE_PATH, SPACE_SIGN_IN_PATH, SPACE_SIGN_UP_PATH,
+};
 pub use middleware::{
     auth_cookie_name_for_path, auth_session_layer, ADMIN_SESSION_COOKIE_NAME, SESSION_COOKIE_NAME,
 };
@@ -28,6 +38,9 @@ pub use render::{
 
 /// Owned D-16 auth routes (cutover granularity: registered paths
 /// serve Rust, sibling paths keep proxying through the fallback).
+/// Email sessions (PIDASHCONV-422) plus the magic-link family
+/// (PIDASHCONV-431); merges keep both sides.
 pub fn routes() -> axum::Router<crate::state::AppState> {
-    email::routes()
+    email::routes().merge(magic_routes())
+}
 }
