@@ -5,20 +5,25 @@
   loop, workspaces). New home is the route subtree `/god-mode/*` in `apps/web_new` with its own layout
   and its own instance-admin session, **web build only** (not desktop).
 - ID prefix: `ADM-`
-- Editions: oss, cloud — web only. The old admin app is `apps/admin`; cloud overrides live in
-  `private-pi-dash/ee-overlay/apps/admin`.
+- Editions: oss, cloud — web only. The old admin app is `apps/admin`; the cloud override is exactly
+  **one file**, `private-pi-dash/ee-overlay/apps/admin/app/(all)/(home)/page.tsx`, which replaces the
+  OSS admin home/root screen. It was read for this inventory (see the cloud rows ADM-074 … ADM-079);
+  no other `ee-overlay/apps/admin` files exist.
 - Status of this file: draft for human sign-off (H-signoff-3 via NEWFRONT-10)
 - Method: read of the old sources listed in the coverage checklist (the `(home)` and `(dashboard)`
   route trees, `components`, `store`, `hooks`, `helpers`, `providers`, plus the backing instance/auth/
   workspace/loop services in `packages/services`). The old app was **not** run against a seeded stack
   in this pass (no local backend here); every row must still pass the oracle run (NEWFRONT-95) against
-  the live old app before implementation starts. The cloud `private-pi-dash/ee-overlay/apps/admin` tree
-  is **not** in this checkout, so cloud-specific behavior could not be read directly; the OSS admin code
-  contains **no** runtime `edition`/`isCloud`/`pro` branches, and the only edition seam is a shared-axios
-  interceptor hook (`packages/services` `ee/init` + `_axios-setup`, empty in OSS) into which cloud builds
-  inject an auth-refresh interceptor. Rows are therefore written from OSS behavior and marked
-  "cloud n/c" (needs cloud oracle confirmation) where the overlay could add or change behavior.
-  Descriptions are paraphrased; no old strings, code, class names or styles are reused.
+  the live old app before implementation starts. The OSS admin code contains **no** runtime
+  `edition`/`isCloud`/`pro` branches; the only build-time seams are (a) a shared-axios interceptor hook
+  (`packages/services` `ee/init` + `_axios-setup`, empty in OSS) into which cloud builds inject an
+  auth-refresh interceptor, and (b) the single cloud home-page override named above, which fully replaces
+  the OSS root screen for the cloud edition. That override was read directly for this pass, so the
+  home/root, sign-in and first-run-setup behavior now has resolved cloud rows rather than "cloud n/c"
+  placeholders: the OSS-only rows are edition-narrowed to `oss`, and the cloud entry behavior is captured
+  in ADM-074 … ADM-079. Rows outside the home/root gate (the dashboard settings pages) are unaffected by
+  the override and keep their `oss, cloud` cells; where those still need live cloud confirmation the oracle
+  run owns it. Descriptions are paraphrased; no old strings, code, class names or styles are reused.
 - Scope notes:
   - The whole console is gated to a single role, the **signed-in instance admin**, established by
     `GET /api/instances/admins/me/` (a 403 maps to "authentication not done"). There are no member/guest
@@ -35,14 +40,14 @@
 
 | ID | Capability | Who | Edition | Old entry point | API | Acceptance | Parity test | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| ADM-001 | Instance bootstrap gate at the root URL resolves to one of four screens from a single instance-info fetch | unauthenticated visitor | oss, cloud | route `/` (`(home)/page.tsx`) | GET `/api/instances/` (once, `validateStatus:null`, no auto-retry, no revalidate-on-focus) | Exactly one branch renders per the server's reported setup state: a full-screen loader while instance state is unresolved, a fetch-failure screen on error, the first-run setup form when setup is not done, or the admin sign-in form when setup is done | | not started |
+| ADM-001 | Instance bootstrap gate at the root URL resolves to one of four screens from a single instance-info fetch | unauthenticated visitor | oss (cloud replaces this screen — see ADM-074) | route `/` (`(home)/page.tsx`) | GET `/api/instances/` (once, `validateStatus:null`, no auto-retry, no revalidate-on-focus) | Exactly one branch renders per the server's reported setup state: a full-screen loader while instance state is unresolved, a fetch-failure screen on error, the first-run setup form when setup is not done, or the admin sign-in form when setup is done. The cloud overlay swaps this whole page for an authorization-over-OIDC resolver (ADM-074), so the setup-vs-sign-in branching is OSS-only | | not started |
 | ADM-002 | Full-screen brand loader while instance info or auth state is still resolving | unauthenticated visitor | oss, cloud | `(home)/page.tsx`; `(dashboard)/layout.tsx` while login state is undefined | none (waits on ADM-001 / ADM-009 fetches) | A centered pulsing brand spinner shows only while state is genuinely unknown; it never shows alongside a form or the shell, preventing a flash of the wrong screen | | not started |
-| ADM-003 | Instance-info fetch failure screen with manual retry and no automatic retry | unauthenticated visitor | oss, cloud | `components/instance/failure.tsx` when the info fetch errors | GET `/api/instances/` (retry count zero); retry action is a full page reload | A theme-aware illustration explains the instance details could not be fetched and suggests a connectivity cause; a retry control reloads the page, which re-issues the single info fetch; there is no silent auto-retry | | not started |
-| ADM-004 | First-run instance-admin creation form (first user becomes admin) | first user (unauthenticated, un-set-up instance) | oss, cloud | `components/instance/setup-form.tsx` | native full-page form POST to `/api/instances/admins/sign-up/`; hidden CSRF from GET `/auth/get-csrf-token/` | Fields for first name, last name, email, company, password, confirm-password and a telemetry opt-in; server creates the admin and marks the instance set up, then redirects; a hidden telemetry flag rides along on the POST | | not started |
-| ADM-005 | Setup-form validation and input constraints | first user | oss, cloud | `components/instance/setup-form.tsx` | client (pre-submit) | Submit is blocked unless first name, email and password are non-empty, the password meets the strong-strength level, and confirm matches; name fields reject invalid characters and cap length; company caps length; a live strength meter shows while typing and a live mismatch hint appears for confirm; password fields have independent show/hide toggles kept out of tab order | | not started |
-| ADM-006 | Setup-form URL prefill and server-error surfacing via query params | first user | oss, cloud | `components/instance/setup-form.tsx` reading URL params after the server redirect | none (reads redirect params) | First name, last name, company and email prefill from query params; telemetry defaults on unless explicitly disabled; server error codes round-tripped in the URL render inline under the email or password field for invalid-email / invalid-password, and as a top banner for all other codes (not-configured, admin-exists, missing-fields, user-exists) | | not started |
-| ADM-007 | Admin sign-in form on a set-up instance | unauthenticated visitor | oss, cloud | `(home)/sign-in-form.tsx` | native full-page form POST to `/api/instances/admins/sign-in/`; hidden CSRF from GET `/auth/get-csrf-token/` | Email and password fields with a show/hide toggle; submit is disabled until both are non-empty and shows a busy state; email is auto-focused and prefilled from a query param; a successful server round-trip establishes the session cookie and lands on the dashboard | | not started |
-| ADM-008 | Admin sign-in error surfacing: generic banner plus mapped dismissible banner | unauthenticated visitor | oss, cloud | `(home)/sign-in-form.tsx`, `auth-banner.tsx`, `auth-helpers.tsx` | none (reads redirect params) | Known error codes render a top error banner with the server message; recognized admin auth codes additionally map (client-side) to a dismissible info banner with human-readable copy, some carrying a sign-in link back to the console or a support-email reference; unknown codes render no banner | | not started |
+| ADM-003 | Instance-info fetch failure screen with manual retry and no automatic retry | unauthenticated visitor | oss (cloud uses its own retry screen — see ADM-078) | `components/instance/failure.tsx` when the info fetch errors | GET `/api/instances/` (retry count zero); retry action is a full page reload | A theme-aware illustration explains the instance details could not be fetched and suggests a connectivity cause; a retry control reloads the page, which re-issues the single info fetch; there is no silent auto-retry. The cloud overlay never renders this screen on the root (it replaces the page); a transient cloud failure surfaces the ADM-078 retry screen instead | | not started |
+| ADM-004 | First-run instance-admin creation form (first user becomes admin) | first user (unauthenticated, un-set-up instance) | oss (no first-run setup form in cloud — see ADM-074) | `components/instance/setup-form.tsx` | native full-page form POST to `/api/instances/admins/sign-up/`; hidden CSRF from GET `/auth/get-csrf-token/` | Fields for first name, last name, email, company, password, confirm-password and a telemetry opt-in; server creates the admin and marks the instance set up, then redirects; a hidden telemetry flag rides along on the POST | | not started |
+| ADM-005 | Setup-form validation and input constraints | first user | oss (no setup form in cloud — see ADM-074) | `components/instance/setup-form.tsx` | client (pre-submit) | Submit is blocked unless first name, email and password are non-empty, the password meets the strong-strength level, and confirm matches; name fields reject invalid characters and cap length; company caps length; a live strength meter shows while typing and a live mismatch hint appears for confirm; password fields have independent show/hide toggles kept out of tab order | | not started |
+| ADM-006 | Setup-form URL prefill and server-error surfacing via query params | first user | oss (no setup form in cloud — see ADM-074) | `components/instance/setup-form.tsx` reading URL params after the server redirect | none (reads redirect params) | First name, last name, company and email prefill from query params; telemetry defaults on unless explicitly disabled; server error codes round-tripped in the URL render inline under the email or password field for invalid-email / invalid-password, and as a top banner for all other codes (not-configured, admin-exists, missing-fields, user-exists) | | not started |
+| ADM-007 | Admin sign-in form on a set-up instance | unauthenticated visitor | oss (no email/password sign-in form in cloud — see ADM-074, ADM-076) | `(home)/sign-in-form.tsx` | native full-page form POST to `/api/instances/admins/sign-in/`; hidden CSRF from GET `/auth/get-csrf-token/` | Email and password fields with a show/hide toggle; submit is disabled until both are non-empty and shows a busy state; email is auto-focused and prefilled from a query param; a successful server round-trip establishes the session cookie and lands on the dashboard | | not started |
+| ADM-008 | Admin sign-in error surfacing: generic banner plus mapped dismissible banner | unauthenticated visitor | oss (no password sign-in in cloud — see ADM-074) | `(home)/sign-in-form.tsx`, `auth-banner.tsx`, `auth-helpers.tsx` | none (reads redirect params) | Known error codes render a top error banner with the server message; recognized admin auth codes additionally map (client-side) to a dismissible info banner with human-readable copy, some carrying a sign-in link back to the console or a support-email reference; unknown codes render no banner | | not started |
 | ADM-009 | Route guards redirect by auth state with a tri-state to avoid screen flashes | all | oss, cloud | `(home)/layout.tsx` and `(dashboard)/layout.tsx` | GET `/api/instances/admins/me/` (drives logged-in state; retry disabled; 403 → auth-not-done) | An authenticated admin on the home/sign-in tree is replace-navigated to the general settings page; an unauthenticated visitor on any dashboard route is replace-navigated to the root; while auth state is unresolved a loader shows; redirects add no history entry | | not started |
 | ADM-010 | Admin sign-out from the sidebar account menu with client-state reset | instance admin | oss, cloud | `(dashboard)/sidebar-dropdown.tsx` | native form POST to `/api/instances/admins/sign-out/`; hidden CSRF from GET `/auth/get-csrf-token/` | The server clears the session; the client store also resets (theme back to system, fresh stores, current user cleared) so the dashboard guard bounces the user to the root | | not started |
 | ADM-011 | Catch-all 404 screen with a shortcut back into the console | all | oss, cloud | `components/404.tsx` (wildcard route) | none | Any unmatched path renders a not-found illustration with an explanatory message and a single action that navigates to the general settings page | | not started |
@@ -108,6 +113,12 @@
 | ADM-071 | No custom keyboard shortcuts beyond browser/tab-order and form defaults | instance admin | oss, cloud | whole area | none | Navigation and forms rely only on native focus order, Enter-to-submit and show/hide toggles removed from tab order; there are no bespoke keyboard shortcuts to reproduce | | not started |
 | ADM-072 | The console is web-only and absent from the desktop build | instance admin | oss, cloud (web only) | whole area | none | The god-mode console ships only in the web build; the desktop app never mounts it, so no desktop parity rows apply | | not started |
 | ADM-073 | Destructive actions lack confirmation where the old app omits it (loop delete; no workspace delete) | instance admin | oss, cloud | `(dashboard)/loop/detail.tsx`, `(dashboard)/workspace/page.tsx` | DELETE `/api/instances/loop/jobs/{id}/` | Loop-job deletion happens immediately with no confirm step; workspace deletion is not offered at all — the new app must preserve these as-is unless a linked bug row changes them | | not started |
+| ADM-074 | Cloud god-mode entry is an authorization decision layered on OIDC, with no email/password sign-in form and no first-run setup form | visitor | cloud | cloud overlay `(all)/(home)/page.tsx` | GET `/api/instances/admins/me/` (drives an admin-authorization flag; a real 403 and any transient error both read as "not an admin"), disambiguated by a GET `/api/auth/me/` probe | Instead of the OSS setup/sign-in gate (ADM-001/004/007), the cloud root resolves entry from admin authorization on top of AI Republic OIDC: the only auth method is OIDC and there is never a password field or a create-first-admin form; the page resolves to exactly one of four outcomes — authorized-admin spinner (ADM-075), OIDC bounce (ADM-076), a terminal not-authorized screen (ADM-077) or a retryable error screen (ADM-078) — decided by the admin check plus the probe, never by instance setup state | | not started |
+| ADM-075 | Authorized cloud admin sees a spinner while the home layout redirects to general settings | instance admin | cloud | cloud overlay `(all)/(home)/page.tsx`; `(home)/layout.tsx` | GET `/api/instances/admins/me/` (admin-authorization flag true) | When the admin check confirms an allowlisted instance admin, the page shows only a brand spinner while the shared home layout replace-navigates to the general settings page (the redirect is ADM-009); no password form or setup form ever flashes first | | not started |
+| ADM-076 | Unauthenticated cloud visitor is bounced through OIDC with a relative return_to that preserves the deep link | visitor (no session) | cloud | cloud overlay `(all)/(home)/page.tsx` | probe GET `/api/auth/me/` returns 401/403 (no session), then a full-page redirect to `/api/auth/sign-in/` carrying `return_to` | On a genuine 403 from the admin check, a probe decides no-session versus signed-in; a no-session result redirects to the OIDC sign-in entry with a **relative** return_to set to the current path plus query, so a deep link into a specific god-mode URL survives the round trip and lands back on the same URL; the redirect replaces history (adds no back-button entry) | | not started |
+| ADM-077 | Signed-in but non-admin cloud user gets a terminal not-authorized screen with no redirect | signed-in non-admin | cloud | cloud overlay `(all)/(home)/page.tsx` | probe GET `/api/auth/me/` returns 200 (valid session) after a genuine admin-check 403 | A user who is authenticated but not on the instance-admin allowlist sees a terminal screen explaining the account is not authorized to manage the instance, offering only a plain full-navigation link back to the site root; it deliberately performs no redirect and no OIDC bounce and offers no switch-account action, so it cannot become a home → OIDC → 403 → home loop | | not started |
+| ADM-078 | Transient backend failure of the admin check or the probe surfaces a retryable error screen | visitor / admin (during an outage) | cloud | cloud overlay `(all)/(home)/page.tsx` | admin check GET `/api/instances/admins/me/` transient error, or probe GET `/api/auth/me/` 5xx/network | A transient failure of either the admin check or the auth probe renders a retryable error screen with a retry control; retrying re-runs the admin check (success → admin, genuine 403 → re-probe, error → stay); this state is never a deny and never an OIDC bounce, so a backend blip cannot strand a legitimate admin on the not-authorized screen or loop a visitor | | not started |
+| ADM-079 | Inconclusive auth probe resolves to retry, never to a guessed anonymous (loop avoidance) | visitor (during a probe blip) | cloud | cloud overlay `(all)/(home)/page.tsx` | probe GET `/api/auth/me/` inconclusive (5xx/network) | An inconclusive probe result is treated as an error (→ the ADM-078 retry screen), never as anonymous; guessing anonymous on a flaky probe would trigger an OIDC bounce that returns to another failing check, creating the exact home → OIDC → 403 → home loop this gate exists to prevent, so the loop-avoiding classification is load-bearing and must be preserved | | not started |
 
 ## Coverage checklist
 
@@ -118,12 +129,21 @@ that cover it. Anything mapping to no row is flagged as a missing row or explain
 
 | File | Covering rows | Notes |
 | --- | --- | --- |
-| `(home)/page.tsx` | ADM-001, ADM-002, ADM-012 | bootstrap branch selector; also triggers the new-user popup flag |
+| `(home)/page.tsx` | ADM-001, ADM-002, ADM-012 | bootstrap branch selector; also triggers the new-user popup flag. **Fully replaced in the cloud edition** by the one-file overlay — see the Cloud overrides section (ADM-074 … ADM-079) |
 | `(home)/layout.tsx` | ADM-002, ADM-009 | authenticated-visitor redirect + loader |
 | `(home)/sign-in-form.tsx` | ADM-007, ADM-008 | admin sign-in form + error banners |
 | `(home)/auth-banner.tsx` | ADM-008 | dismissible mapped-error banner |
 | `(home)/auth-header.tsx` | ADM-003, ADM-004, ADM-007 | shared logo header on the unauthenticated screens; presentational, no standalone behavior |
 | `(home)/auth-helpers.tsx` | ADM-008 | client mapping of admin auth error codes to copy/CTAs |
+
+### Cloud overrides — `private-pi-dash/ee-overlay/apps/admin`
+
+The entire cloud override of the admin app is one file (confirmed against private-pi-dash; no other
+`ee-overlay/apps/admin` files exist). It replaces the OSS admin root screen for the cloud edition only.
+
+| File | Covering rows | Notes |
+| --- | --- | --- |
+| `app/(all)/(home)/page.tsx` (cloud overlay) | ADM-074, ADM-075, ADM-076, ADM-077, ADM-078, ADM-079 | replaces the OSS bootstrap/sign-in/setup root (ADM-001/004/007) with the authorization-over-OIDC resolver: authorized-admin spinner, OIDC bounce with deep-link-preserving return_to, terminal access-denied, retryable backend-error, and the inconclusive-probe loop-avoidance classification. The shared `(home)/layout.tsx` (ADM-009 redirect) and `logo-spinner.tsx` (ADM-002) are reused, not overridden |
 
 ### Route files — `apps/admin/app/(all)/(dashboard)`
 
@@ -221,7 +241,9 @@ that cover it. Anything mapping to no row is flagged as a missing row or explain
 | GET `/api/instances/` (instance info bootstrap) | ADM-001, ADM-003, ADM-015 |
 | PATCH `/api/instances/` (update instance name/telemetry) | ADM-013, ADM-016, ADM-017 |
 | GET `/api/instances/admins/` (list instance admins) | ADM-014 |
-| GET `/api/instances/admins/me/` (current admin / auth check) | ADM-009 |
+| GET `/api/instances/admins/me/` (current admin / auth check) | ADM-009, ADM-074, ADM-075, ADM-078 |
+| GET `/api/auth/me/` (cloud auth probe: 200 signed-in, 401/403 anonymous) | ADM-076, ADM-077, ADM-078, ADM-079 (cloud only) |
+| `/api/auth/sign-in/` (cloud OIDC sign-in entry, redirected to with a relative `return_to`) | ADM-076 (cloud only) |
 | POST `/api/instances/admins/sign-up/` (first-run admin creation) | ADM-004 |
 | POST `/api/instances/admins/sign-in/` (admin sign-in) | ADM-007 |
 | POST `/api/instances/admins/sign-out/` (admin sign-out) | ADM-010 |
@@ -253,8 +275,12 @@ that cover it. Anything mapping to no row is flagged as a missing row or explain
 - Keyboard shortcuts beyond native focus order / Enter-to-submit / show-hide toggles removed from tab order:
   none. Covered by ADM-071.
 - Desktop build: the console is web-only and is never mounted by the desktop app. Covered by ADM-072.
-- Edition (OSS vs cloud) runtime branches: none in `apps/admin`. The only seam is the shared-axios EE
-  interceptor hook (`packages/services` `ee/init` + `_axios-setup`, empty in OSS) used by cloud builds to
-  add an auth-refresh interceptor; the cloud `private-pi-dash/ee-overlay/apps/admin` tree is not in this
-  checkout, so any cloud-only screens/overrides must be confirmed by the oracle run (NEWFRONT-95) and added
-  here as rows if found.
+- Edition (OSS vs cloud) runtime branches: none *inside* `apps/admin` — there are no `edition`/`isCloud`
+  runtime `if`s in the OSS source. Cloud differs in two build-time ways only: (a) the shared-axios EE
+  interceptor hook (`packages/services` `ee/init` + `_axios-setup`, empty in OSS) into which cloud builds
+  add an auth-refresh interceptor, and (b) the one-file home-page override
+  (`private-pi-dash/ee-overlay/apps/admin/app/(all)/(home)/page.tsx`), which was read for this pass and is
+  rowed as ADM-074 … ADM-079 with the affected OSS-only rows (ADM-001/003/004/005/006/007/008) narrowed to
+  the `oss` edition. No other `ee-overlay/apps/admin` files exist. The oracle run (NEWFRONT-95) still
+  confirms every row on the live cloud app; the dashboard settings rows keep `oss, cloud` cells because the
+  override does not touch them.
