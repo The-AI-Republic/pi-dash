@@ -18,13 +18,12 @@
 //!   honoured (`request.data.get("snoozed_till", None)`); the
 //!   serializer-errors 400 on invalid input.
 //!
-//! Only routes 1-6 are owned here (`GET` the collection,
-//! `GET|PATCH|DELETE` the detail, `POST|DELETE` the read/archive
-//! transitions, `GET` the unread counts); every other method on those
-//! paths proxies to Django, and sibling D-34 routes (mark-all-read/
-//! preferences, PIDASHCONV-303) keep proxying until their own issue
-//! lands — route registration is the cutover granularity, no flag
-//! needed.
+//! All 7 routes are owned here: the viewset-core triplet (`GET` the
+//! collection, `GET|PATCH|DELETE` the detail, PIDASHCONV-301), the
+//! read/archive transitions + unread counts (PIDASHCONV-302), and
+//! mark-all-read + the session-only preferences (PIDASHCONV-303, this
+//! issue). Every other method on those paths proxies to Django —
+//! route registration is the cutover granularity, no flag needed.
 //!
 //! Layering: the permission gates live in [`gate`] (PIDASHCONV-300);
 //! the queryset shapes in `pidash_services::app_notifications::queries`
@@ -64,6 +63,28 @@
 //!   `NOTIFICATION_WIRE_FIELDS` lists the declared block first. The
 //!   local [`NotificationBody`] below emits the live order; the
 //!   foundation order is left untouched (read-only) and noted in the PR.
+//! * QUIRK-mark-body-truthiness (`base.py:235-236`): `snoozed` /
+//!   `archived` come from the JSON *body* (default `False`) but branch
+//!   on Python truthiness — a `"false"` string is truthy while `0` /
+//!   `null` / absent are falsy. Ported via [`data_truthy`].
+//! * QUIRK-mark-type-spelling (`base.py:258-281`): the `type` values are
+//!   the exact strings `watching` / `assigned` / `created` (default
+//!   `"all"` = no filter) — not the list's comma-split `subscribed` /
+//!   `assigned` / `created` — and the `watching` arm is the plain
+//!   subscriber list with no created/assigned exclusion. The
+//!   `role__lt=15` → `.none()` guard is shared with the list.
+//! * QUIRK-preference-no-get-or-create (`base.py:296-308`): get/patch
+//!   are a bare `.get(user=…)` (a miss is the `ObjectDoesNotExist`
+//!   404); patch is partial, unknown keys are silently ignored (DRF
+//!   iterates writable fields only — the FX-NOTIF-05 note saying they
+//!   400 is wrong, verified against DRF 3.16 `to_internal_value`), and
+//!   `save()` stamps `updated_by` through `BaseModel.save` + crum.
+//! * NOTE-single-stamp: Python sets `read_at = timezone.now()` per row
+//!   in a loop, then `bulk_update(["read_at"], batch_size=100)`
+//!   (`updated_at` untouched, signals skipped); this port issues one
+//!   `UPDATE` with a single `now()`. Touched rows share one stamp
+//!   instead of microseconds-apart ones — unobservable through the API
+//!   (the response body is constant).
 //!
 //! # Task delivery
 //!
@@ -369,11 +390,12 @@ pub fn owned(
     router
 }
 
-/// Register the viewset-core routes (routes 1-3,
-/// `app/urls/notification.py:17-31`) plus the state-transition and
-/// unread routes (routes 4-6, `:32-41`, PIDASHCONV-302). Sibling D-34
-/// handler issues extend this router with their own paths; merges keep
-/// both sides.
+/// Register the D-34 routes (all 7, `app/urls/notification.py:16-52`):
+/// the viewset-core triplet (routes 1-3, `:17-31`, PIDASHCONV-301),
+/// the state-transition and unread routes (routes 4-5, `:32-41`,
+/// PIDASHCONV-302), plus mark-all-read (route 6, `:42-46`) and the
+/// session-only preferences (route 7, `:47-51`, this issue,
+/// PIDASHCONV-303). Merges keep both sides.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -411,6 +433,20 @@ pub fn routes() -> Router<AppState> {
             owned(
                 axum::routing::get(unread_get),
                 &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/users/notifications/mark-all-read/",
+            owned(
+                axum::routing::post(mark_all_read_create),
+                &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/users/me/notification-preferences/",
+            owned(
+                axum::routing::get(preference_get).patch(preference_patch),
+                &["POST", "PUT", "DELETE", "OPTIONS"],
             ),
         )
 }
@@ -1429,34 +1465,7 @@ fn parse_body(raw: &[u8]) -> Result<Value, Response> {
 /// UTC) → the instant; anything else → the exact 400 field error
 /// (verified live).
 fn parse_snoozed_till(value: Option<&Value>) -> Result<Option<DateTime<Utc>>, Value> {
-    let invalid = || {
-        Value::Object(
-            [(
-                "snoozed_till".to_owned(),
-                Value::Array(vec![Value::String(INVALID_SNOOZED_MESSAGE.to_owned())]),
-            )]
-            .into_iter()
-            .collect(),
-        )
-    };
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
-    let Value::String(raw) = value else {
-        return Err(invalid());
-    };
-    if let Ok(aware) = DateTime::parse_from_rfc3339(raw) {
-        return Ok(Some(aware.with_timezone(&Utc)));
-    }
-    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
-        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(raw, format) {
-            return Ok(Some(naive.and_utc()));
-        }
-    }
-    Err(invalid())
+    parse_datetime_field(value, "snoozed_till")
 }
 
 /// `partial_update`: the workspace gate (`:151`), then the scoped
@@ -1855,14 +1864,714 @@ async fn save_snoozed(
     .map_err(|_| Denial::ServerError.into_response())
 }
 
+// ---------------------------------------------------------------------------
+// MarkAllReadNotificationViewSet.create (base.py:232-288)
+// ---------------------------------------------------------------------------
+
+/// The exact constant 200 body (`base.py:288`): DRF renders
+/// `{"message": "Successful"}` however many rows were touched —
+/// including zero (an empty `bulk_update([])` is a no-op).
+const MARK_ALL_READ_BODY: &str = r#"{"message": "Successful"}"#;
+
+/// Python truthiness of one `request.data` value (`base.py:235-237`):
+/// absent / `null` / `false` / `0` / `""` / `[]` / `{}` are falsy and
+/// everything else — including the string `"false"` — is truthy
+/// (QUIRK-mark-body-truthiness).
+fn data_truthy(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(flag)) => *flag,
+        Some(Value::Number(number)) => {
+            if let Some(int) = number.as_i64() {
+                int != 0
+            } else if let Some(uint) = number.as_u64() {
+                uint != 0
+            } else {
+                number.as_f64().is_some_and(|float| float != 0.0)
+            }
+        }
+        Some(Value::String(text)) => !text.is_empty(),
+        Some(Value::Array(items)) => !items.is_empty(),
+        Some(Value::Object(fields)) => !fields.is_empty(),
+    }
+}
+
+/// `watching` type arm (mark-all-read, `base.py:258-262`): the plain
+/// subscriber issue list — unlike the list's `subscribed` arm there is
+/// no created/assigned exclusion (QUIRK-mark-type-spelling).
+fn watching_arm(slug_param: &str, user_param: &str) -> String {
+    format!(
+        "n.\"entity_identifier\" IN (SELECT s.\"issue_id\" FROM \"issue_subscribers\" s \
+         INNER JOIN \"workspaces\" ws ON (s.\"workspace_id\" = ws.\"id\") \
+         WHERE (s.\"deleted_at\" IS NULL AND s.\"subscriber_id\" = {user_param} AND ws.\"slug\" = {slug_param}))"
+    )
+}
+
+/// `MarkAllReadNotificationViewSet.create`: session auth, the workspace
+/// gate (`:233`), then one `UPDATE` setting `read_at` over the filtered
+/// slice (receiver + unread + soft-delete-scoped, the snoozed/archived
+/// branches, and the exact-match `type` arm). A `type=created` caller
+/// with a sub-15 active membership updates nothing but still answers
+/// 200 (the shared [`created_member_guard`], `:273-276`). The constant
+/// body answers 200.
+async fn mark_all_read_create(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    let actor = match actor(&state, extension).await {
+        Ok(actor) => actor,
+        Err(denial) => return denial.into_response(),
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    let role = match workspace_role(pool, &actor.id, &slug).await {
+        Ok(role) => role,
+        Err(denial) => return denial.into_response(),
+    };
+    let row = gate_for(
+        "POST",
+        "workspaces/<slug>/users/notifications/mark-all-read/",
+    )
+    .expect("mark-all-read gate row");
+    if let Err(response) = enforce(decide_gate(
+        &row.gate,
+        &tenant_context(&slug),
+        &workspace_facts(&slug, role),
+    )) {
+        return response;
+    }
+    let (_parts, body) = req.into_parts();
+    let raw = match axum::body::to_bytes(body, 1024 * 1024).await {
+        Ok(raw) => raw,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let data = match parse_body(&raw) {
+        Ok(data) => data,
+        Err(response) => return response,
+    };
+    let snoozed = data_truthy(data.get("snoozed"));
+    let archived = data_truthy(data.get("archived"));
+    let type_param = match data.get("type") {
+        Some(Value::String(text)) => text.clone(),
+        _ => "all".to_owned(),
+    };
+    if type_param == "created" {
+        match created_member_guard(pool, &slug, &actor.id).await {
+            Ok(true) => return json_ok(MARK_ALL_READ_BODY.to_owned()),
+            Ok(false) => {}
+            Err(denial) => return denial.into_response(),
+        }
+    }
+    let snoozed_sql = match snoozed_clause(if snoozed { "true" } else { "false" }, "$3") {
+        Ok(clause) => clause,
+        Err(denial) => return denial.into_response(),
+    };
+    let archived_sql = match archived_clause(if archived { "true" } else { "false" }) {
+        Ok(clause) => clause,
+        Err(denial) => return denial.into_response(),
+    };
+    // `$1` slug, `$2` user, `$3` now — the same placeholders the
+    // reused arm builders expect.
+    let mut sql = format!(
+        "UPDATE \"notifications\" n SET \"read_at\" = $3 FROM \"workspaces\" w \
+         WHERE (n.\"workspace_id\" = w.\"id\") AND w.\"slug\" = $1 AND n.\"receiver_id\" = $2 \
+         AND n.\"read_at\" IS NULL AND n.\"deleted_at\" IS NULL \
+         AND {snoozed_sql} AND {archived_sql}"
+    );
+    match type_param.as_str() {
+        "watching" => sql.push_str(&format!(" AND {}", watching_arm("$1", "$2"))),
+        "assigned" => sql.push_str(&format!(" AND {}", assigned_arm("$1", "$2"))),
+        "created" => sql.push_str(&format!(" AND {}", created_arm("$1", "$2"))),
+        _ => {}
+    }
+    let now = Utc::now();
+    if sqlx::query(&sql)
+        .bind(&slug)
+        .bind(actor.id)
+        .bind(now)
+        .execute(pool)
+        .await
+        .is_err()
+    {
+        return Denial::ServerError.into_response();
+    }
+    json_ok(MARK_ALL_READ_BODY.to_owned())
+}
+
+// ---------------------------------------------------------------------------
+// UserNotificationPreferenceEndpoint (base.py:291-308)
+// ---------------------------------------------------------------------------
+
+/// One `user_notification_preferences` row: the audit columns plus the
+/// preference owner and the five flags (`db/models/notification.py:81-108`).
+struct PreferenceRow {
+    id: Uuid,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    deleted_at: Option<DateTime<Utc>>,
+    created_by_id: Option<Uuid>,
+    updated_by_id: Option<Uuid>,
+    user_id: Uuid,
+    workspace_id: Option<Uuid>,
+    project_id: Option<Uuid>,
+    property_change: bool,
+    state_change: bool,
+    comment: bool,
+    mention: bool,
+    issue_completed: bool,
+}
+
+impl PreferenceRow {
+    fn get(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+            deleted_at: row.try_get("deleted_at")?,
+            created_by_id: row.try_get("created_by_id")?,
+            updated_by_id: row.try_get("updated_by_id")?,
+            user_id: row.try_get("user_id")?,
+            workspace_id: row.try_get("workspace_id")?,
+            project_id: row.try_get("project_id")?,
+            property_change: row.try_get("property_change")?,
+            state_change: row.try_get("state_change")?,
+            comment: row.try_get("comment")?,
+            mention: row.try_get("mention")?,
+            issue_completed: row.try_get("issue_completed")?,
+        })
+    }
+}
+
+/// `SELECT` list for preference rows, in [`PreferenceRow`] order.
+const PREFERENCE_SELECT: &str = r#""id", "created_at", "updated_at", "deleted_at", "created_by_id", "updated_by_id", "user_id", "workspace_id", "project_id", "property_change", "state_change", "comment", "mention", "issue_completed""#;
+
+/// Scoped preference lookup: `UserNotificationPreference.objects.get(
+/// user=request.user)` (`base.py:297,303`) — the default manager, so
+/// soft-deleted rows are invisible. Zero rows is `None` (the caller
+/// answers the `ObjectDoesNotExist` 404); two or more rows is a
+/// `MultipleObjectsReturned` 500, like Django.
+async fn fetch_preference(pool: &PgPool, user_id: &Uuid) -> Result<Option<PreferenceRow>, Denial> {
+    let sql = format!(
+        "SELECT {PREFERENCE_SELECT} FROM \"user_notification_preferences\" \
+         WHERE \"user_id\" = $1 AND \"deleted_at\" IS NULL"
+    );
+    let rows = sqlx::query(&sql)
+        .bind(user_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    match rows.len() {
+        0 => Ok(None),
+        1 => PreferenceRow::get(&rows[0])
+            .map(Some)
+            .map_err(|_| Denial::ServerError),
+        _ => Err(Denial::ServerError),
+    }
+}
+
+/// Re-read after a patch write by primary key: patch may have moved
+/// the row to another user, so the owner lookup no longer applies —
+/// Python re-renders the same instance (`base.py:306-307`).
+async fn fetch_preference_by_id(pool: &PgPool, id: &Uuid) -> Result<Option<PreferenceRow>, Denial> {
+    let sql = format!(
+        "SELECT {PREFERENCE_SELECT} FROM \"user_notification_preferences\" WHERE \"id\" = $1"
+    );
+    let row = sqlx::query(&sql)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    match row {
+        Some(row) => PreferenceRow::get(&row)
+            .map(Some)
+            .map_err(|_| Denial::ServerError),
+        None => Ok(None),
+    }
+}
+
+/// `UserNotificationPreferenceSerializer` output (`fields="__all__"`,
+/// `app/serializers/notification.py:25-28`) in the live key order
+/// (FX-NOTIF-05): `id` first (`BaseSerializer`), then the model fields.
+/// Struct order is the byte order.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct PreferenceBody {
+    id: String,
+    created_at: String,
+    updated_at: String,
+    deleted_at: Option<String>,
+    created_by: Option<String>,
+    updated_by: Option<String>,
+    user: String,
+    workspace: Option<String>,
+    project: Option<String>,
+    property_change: bool,
+    state_change: bool,
+    comment: bool,
+    mention: bool,
+    issue_completed: bool,
+}
+
+/// Render one preference row: datetimes in the request's zone
+/// (`TimezoneMixin.initial`), FKs as UUID strings with nulls as
+/// `null`, flags as booleans.
+fn render_preference(row: &PreferenceRow, tz: &Tz) -> PreferenceBody {
+    PreferenceBody {
+        id: row.id.to_string(),
+        created_at: render_datetime_in(&row.created_at, tz),
+        updated_at: render_datetime_in(&row.updated_at, tz),
+        deleted_at: row.deleted_at.as_ref().map(|dt| render_datetime_in(dt, tz)),
+        created_by: row.created_by_id.map(|id| id.to_string()),
+        updated_by: row.updated_by_id.map(|id| id.to_string()),
+        user: row.user_id.to_string(),
+        workspace: row.workspace_id.map(|id| id.to_string()),
+        project: row.project_id.map(|id| id.to_string()),
+        property_change: row.property_change,
+        state_change: row.state_change,
+        comment: row.comment,
+        mention: row.mention,
+        issue_completed: row.issue_completed,
+    }
+}
+
+/// `preference_get` (`base.py:296-299`): no decorator, so session auth
+/// is the only check ([`Gate::Authenticated`]) — any logged-in user
+/// reaches the handler, with no workspace lookup at all.
+async fn preference_get(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+) -> Response {
+    let actor = match actor(&state, extension).await {
+        Ok(actor) => actor,
+        Err(denial) => return denial.into_response(),
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    match fetch_preference(pool, &actor.id).await {
+        Ok(Some(row)) => json_ok(
+            serde_json::to_string(&render_preference(&row, &actor.timezone))
+                .expect("serializable preference"),
+        ),
+        Ok(None) => Denial::ObjectNotFound.into_response(),
+        Err(denial) => denial.into_response(),
+    }
+}
+
+/// DRF `BooleanField` invalid-input message (`fields.py:659-662`).
+const INVALID_BOOLEAN_MESSAGE: &str = "Must be a valid boolean.";
+/// DRF `Field` null-input message (`fields.py:293`).
+const NULL_FIELD_MESSAGE: &str = "This field may not be null.";
+
+/// DRF `BooleanField.to_internal_value` (`fields.py:699-711`): the
+/// case-insensitive true/false sets (note `1`/`1.0` count as true,
+/// `0`/`0.0` as false); `null`/`""` only pass with `allow_null`
+/// (these columns are `null=False`, so the caller rejects them first).
+/// Everything else is invalid.
+fn parse_preference_bool(value: &Value) -> Result<bool, ()> {
+    match value {
+        Value::Bool(flag) => Ok(*flag),
+        Value::Number(number) => {
+            if number.as_i64() == Some(1) || number.as_f64() == Some(1.0) {
+                Ok(true)
+            } else if number.as_i64() == Some(0) || number.as_f64() == Some(0.0) {
+                Ok(false)
+            } else {
+                Err(())
+            }
+        }
+        Value::String(text) => match text.to_lowercase().as_str() {
+            "t" | "y" | "yes" | "true" | "on" | "1" => Ok(true),
+            "f" | "n" | "no" | "false" | "off" | "0" => Ok(false),
+            _ => Err(()),
+        },
+        _ => Err(()),
+    }
+}
+
+/// One `{"field": ["message"]}` entry, the serializer-errors shape
+/// (`base.py:308`).
+fn field_error(message: &str) -> Value {
+    Value::Array(vec![Value::String(message.to_owned())])
+}
+
+/// Validate one preference flag field: absent stays absent (partial,
+/// `base.py:304`); `null` is the null-input error; anything outside
+/// the DRF truth tables is the invalid-boolean error.
+fn check_preference_flag(
+    errors: &mut serde_json::Map<String, Value>,
+    data: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Option<bool> {
+    let value = data.get(key)?;
+    if value.is_null() {
+        errors.insert(key.to_owned(), field_error(NULL_FIELD_MESSAGE));
+        return None;
+    }
+    match parse_preference_bool(value) {
+        Ok(flag) => Some(flag),
+        Err(()) => {
+            errors.insert(key.to_owned(), field_error(INVALID_BOOLEAN_MESSAGE));
+            None
+        }
+    }
+}
+
+/// The JSON type name DRF reports for a non-pk value
+/// (`relations.py:263`, `type(data).__name__`).
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(number) => {
+            if number.is_i64() || number.is_u64() {
+                "int"
+            } else {
+                "float"
+            }
+        }
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+
+/// How a preference PATCH compile ends: field errors answer 400,
+/// an existence-probe failure answers 500.
+enum CompileError {
+    Invalid(Value),
+    Server,
+}
+
+/// Validate one preference FK field (`PrimaryKeyRelatedField`,
+/// `relations.py:256-263`): absent stays absent (partial); `null`
+/// clears when the column allows it, else the null-input error; a
+/// well-formed UUID that names no row is the does-not-exist error; a
+/// malformed UUID string is Django's UUID-input error; anything else
+/// is the incorrect-type error. Returns `Ok(None)` for absent (or
+/// invalid — the caller checks `errors`), `Ok(Some(id-or-null))` to
+/// write, and `Err(CompileError::Server)` only when the existence
+/// probe itself fails.
+async fn check_preference_fk(
+    pool: &PgPool,
+    errors: &mut serde_json::Map<String, Value>,
+    data: &serde_json::Map<String, Value>,
+    key: &str,
+    table: &str,
+    allow_null: bool,
+    soft_scoped: bool,
+) -> Result<Option<Option<Uuid>>, CompileError> {
+    let Some(value) = data.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        if allow_null {
+            return Ok(Some(None));
+        }
+        errors.insert(key.to_owned(), field_error(NULL_FIELD_MESSAGE));
+        return Ok(None);
+    }
+    let Value::String(text) = value else {
+        errors.insert(
+            key.to_owned(),
+            field_error(&format!(
+                "Incorrect type. Expected pk value, received {}.",
+                json_type_name(value)
+            )),
+        );
+        return Ok(None);
+    };
+    let Ok(id) = text.parse::<Uuid>() else {
+        errors.insert(
+            key.to_owned(),
+            field_error(&format!("\u{201c}{text}\u{201d} is not a valid UUID.")),
+        );
+        return Ok(None);
+    };
+    let mut sql = format!("SELECT 1 AS \"one\" FROM \"{table}\" WHERE \"id\" = $1");
+    if soft_scoped {
+        sql.push_str(" AND \"deleted_at\" IS NULL");
+    }
+    let found: Option<(i32,)> = sqlx::query_as(&sql)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| CompileError::Server)?;
+    if found.is_none() {
+        errors.insert(
+            key.to_owned(),
+            field_error(&format!("Invalid pk \"{text}\" - object does not exist.")),
+        );
+        return Ok(None);
+    }
+    Ok(Some(Some(id)))
+}
+
+/// Validated preference PATCH writes: each `Some` replaces its column;
+/// `None` leaves it. Nullable columns use the inner `Option` (`None`
+/// clears the column).
+#[derive(Debug, Default)]
+struct PreferencePatch {
+    deleted_at: Option<Option<DateTime<Utc>>>,
+    created_by: Option<Option<Uuid>>,
+    updated_by: Option<Option<Uuid>>,
+    user: Option<Uuid>,
+    workspace: Option<Option<Uuid>>,
+    project: Option<Option<Uuid>>,
+    property_change: Option<bool>,
+    state_change: Option<bool>,
+    comment: Option<bool>,
+    mention: Option<bool>,
+    issue_completed: Option<bool>,
+}
+
+/// Compile a preference PATCH body (`base.py:302-305`): partial, so
+/// absent keys are skipped; unknown and read-only keys (`id`,
+/// `created_at`, `updated_at`) are silently ignored — DRF iterates
+/// writable fields only (`serializers.py:481`). Errors accumulate in
+/// serializer field order and answer 400 as
+/// `{"field": ["message", …]}` (`base.py:308`).
+async fn compile_preference_patch(
+    pool: &PgPool,
+    data: &serde_json::Map<String, Value>,
+) -> Result<PreferencePatch, CompileError> {
+    let mut errors = serde_json::Map::new();
+    let mut patch = PreferencePatch::default();
+    if let Some(value) = data.get("deleted_at") {
+        match parse_datetime_field(Some(value), "deleted_at") {
+            Ok(stamp) => patch.deleted_at = Some(stamp),
+            Err(invalid) => {
+                if let Value::Object(fields) = invalid {
+                    errors.extend(fields);
+                }
+            }
+        }
+    }
+    if let Some(id) =
+        check_preference_fk(pool, &mut errors, data, "created_by", "users", true, false).await?
+    {
+        patch.created_by = Some(id);
+    }
+    if let Some(id) =
+        check_preference_fk(pool, &mut errors, data, "updated_by", "users", true, false).await?
+    {
+        patch.updated_by = Some(id);
+    }
+    if let Some(Some(id)) =
+        check_preference_fk(pool, &mut errors, data, "user", "users", false, false).await?
+    {
+        patch.user = Some(id);
+    }
+    if let Some(id) = check_preference_fk(
+        pool,
+        &mut errors,
+        data,
+        "workspace",
+        "workspaces",
+        true,
+        true,
+    )
+    .await?
+    {
+        patch.workspace = Some(id);
+    }
+    if let Some(id) =
+        check_preference_fk(pool, &mut errors, data, "project", "projects", true, true).await?
+    {
+        patch.project = Some(id);
+    }
+    // Each flag helper returns `Some` exactly when its key is present
+    // and valid, so plain assignment is exact (absent and invalid both
+    // leave the patch slot untouched; invalid additionally records).
+    patch.property_change = check_preference_flag(&mut errors, data, "property_change");
+    patch.state_change = check_preference_flag(&mut errors, data, "state_change");
+    patch.comment = check_preference_flag(&mut errors, data, "comment");
+    patch.mention = check_preference_flag(&mut errors, data, "mention");
+    patch.issue_completed = check_preference_flag(&mut errors, data, "issue_completed");
+    if errors.is_empty() {
+        Ok(patch)
+    } else {
+        Err(CompileError::Invalid(Value::Object(errors)))
+    }
+}
+
+/// One validated PATCH column write.
+enum PreferenceValue {
+    Stamp(Option<DateTime<Utc>>),
+    Id(Option<Uuid>),
+    Flag(bool),
+}
+
+/// `serializer.save()` (`base.py:306`): write the validated columns
+/// plus `updated_at`/`updated_by` (`BaseModel.save` stamps the updater
+/// through crum on every update — `db/models/base.py:23-44`).
+#[allow(clippy::result_large_err)]
+async fn save_preference(
+    pool: &PgPool,
+    id: &Uuid,
+    patch: &PreferencePatch,
+    user_id: &Uuid,
+    now: &DateTime<Utc>,
+) -> Result<(), Response> {
+    let mut columns: Vec<(&str, PreferenceValue)> = Vec::new();
+    if let Some(stamp) = patch.deleted_at {
+        columns.push(("deleted_at", PreferenceValue::Stamp(stamp)));
+    }
+    if let Some(owner) = patch.created_by {
+        columns.push(("created_by_id", PreferenceValue::Id(owner)));
+    }
+    if let Some(updater) = patch.updated_by {
+        columns.push(("updated_by_id", PreferenceValue::Id(updater)));
+    }
+    if let Some(owner) = patch.user {
+        columns.push(("user_id", PreferenceValue::Id(Some(owner))));
+    }
+    if let Some(workspace) = patch.workspace {
+        columns.push(("workspace_id", PreferenceValue::Id(workspace)));
+    }
+    if let Some(project) = patch.project {
+        columns.push(("project_id", PreferenceValue::Id(project)));
+    }
+    for (key, flag) in [
+        ("property_change", patch.property_change),
+        ("state_change", patch.state_change),
+        ("comment", patch.comment),
+        ("mention", patch.mention),
+        ("issue_completed", patch.issue_completed),
+    ] {
+        if let Some(flag) = flag {
+            columns.push((key, PreferenceValue::Flag(flag)));
+        }
+    }
+    let mut sql = String::from(
+        "UPDATE \"user_notification_preferences\" SET \"updated_at\" = $2, \"updated_by_id\" = $3",
+    );
+    for (index, (column, _)) in columns.iter().enumerate() {
+        sql.push_str(&format!(", \"{column}\" = ${}", index + 4));
+    }
+    sql.push_str(" WHERE \"id\" = $1");
+    let mut query = sqlx::query(&sql).bind(id).bind(now).bind(user_id);
+    for (_, value) in columns {
+        query = match value {
+            PreferenceValue::Stamp(stamp) => query.bind(stamp),
+            PreferenceValue::Id(owner) => query.bind(owner),
+            PreferenceValue::Flag(flag) => query.bind(flag),
+        };
+    }
+    query
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(|_| Denial::ServerError.into_response())
+}
+
+/// `preference_patch` (`base.py:302-308`): the owner lookup runs first
+/// (a miss 404s even with a malformed payload), then the partial
+/// serializer compile (400 on invalid), then `save()` and the
+/// re-rendered row, 200. Like get, session auth is the only gate.
+async fn preference_patch(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    let actor = match actor(&state, extension).await {
+        Ok(actor) => actor,
+        Err(denial) => return denial.into_response(),
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    let current = match fetch_preference(pool, &actor.id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return Denial::ObjectNotFound.into_response(),
+        Err(denial) => return denial.into_response(),
+    };
+    let (_parts, body) = req.into_parts();
+    let raw = match axum::body::to_bytes(body, 1024 * 1024).await {
+        Ok(raw) => raw,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let data = match parse_body(&raw) {
+        Ok(data) => data,
+        Err(response) => return response,
+    };
+    let Value::Object(fields) = data else {
+        return Denial::ServerError.into_response();
+    };
+    let patch = match compile_preference_patch(pool, &fields).await {
+        Ok(patch) => patch,
+        Err(CompileError::Invalid(errors)) => return Denial::BadJson(errors).into_response(),
+        Err(CompileError::Server) => return Denial::ServerError.into_response(),
+    };
+    let now = Utc::now();
+    if let Err(response) = save_preference(pool, &current.id, &patch, &actor.id, &now).await {
+        return response;
+    }
+    match fetch_preference_by_id(pool, &current.id).await {
+        Ok(Some(row)) => json_ok(
+            serde_json::to_string(&render_preference(&row, &actor.timezone))
+                .expect("serializable preference"),
+        ),
+        Ok(None) => Denial::ServerError.into_response(),
+        Err(denial) => return denial.into_response(),
+    }
+}
+
+/// Validate an optional datetime input like DRF's `DateTimeField`
+/// (default `iso-8601` input formats, JSON null clears the column when
+/// the model allows it): null → `None`; RFC 3339 / naive
+/// `YYYY-MM-DD[T ]hh:mm:ss[.f]` (naive read as UTC — `TIME_ZONE` is
+/// UTC) → the instant; anything else → the exact 400 field error keyed
+/// by `field`.
+fn parse_datetime_field(
+    value: Option<&Value>,
+    field: &str,
+) -> Result<Option<DateTime<Utc>>, Value> {
+    let invalid = || {
+        Value::Object(
+            [(
+                field.to_owned(),
+                Value::Array(vec![Value::String(INVALID_SNOOZED_MESSAGE.to_owned())]),
+            )]
+            .into_iter()
+            .collect(),
+        )
+    };
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Value::String(raw) = value else {
+        return Err(invalid());
+    };
+    if let Ok(aware) = DateTime::parse_from_rfc3339(raw) {
+        return Ok(Some(aware.with_timezone(&Utc)));
+    }
+    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(raw, format) {
+            return Ok(Some(naive.and_utc()));
+        }
+    }
+    Err(invalid())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The nine owned method+path rows: list + partial_update + the
-    /// four read/archive transitions + unread carry the workspace
-    /// gate; retrieve + destroy are queryset-scoped (auth-only). Pins
-    /// the [`gate`] wiring this module enforces.
+    /// The twelve owned method+path rows: list + partial_update + the
+    /// four read/archive transitions + unread + mark-all-read carry
+    /// the workspace gate; retrieve + destroy are queryset-scoped
+    /// (auth-only); the two preference rows are session-only
+    /// (`Gate::Authenticated`). Pins the [`gate`] wiring this module
+    /// enforces.
     #[test]
     fn owned_routes_carry_their_gate_rows() {
         let list =
@@ -1892,12 +2601,23 @@ mod tests {
                 "workspaces/<slug>/users/notifications/<uuid>/archive/",
             ),
             ("GET", "workspaces/<slug>/users/notifications/unread/"),
+            (
+                "POST",
+                "workspaces/<slug>/users/notifications/mark-all-read/",
+            ),
         ] {
             let row = gate_for(method, path).expect("transition/unread gate row");
             assert!(
                 matches!(row.gate, Gate::Workspace { .. }),
                 "{method} {path}"
             );
+        }
+        for (method, path) in [
+            ("GET", "users/me/notification-preferences/"),
+            ("PATCH", "users/me/notification-preferences/"),
+        ] {
+            let row = gate_for(method, path).expect("preference gate row");
+            assert_eq!(row.gate, Gate::Authenticated, "{method} {path}");
         }
     }
 
@@ -2172,6 +2892,152 @@ mod tests {
         ];
         let mut last = 0;
         for key in expected {
+            let needle = format!("\"{key}\":");
+            let at = body[last..]
+                .find(needle.as_str())
+                .unwrap_or_else(|| panic!("key {key} missing or out of order"));
+            last += at + needle.len();
+        }
+    }
+
+    /// mark-all-read answers the exact constant body (`base.py:288`).
+    #[test]
+    fn mark_all_read_body_is_constant() {
+        assert_eq!(MARK_ALL_READ_BODY, r#"{"message": "Successful"}"#);
+    }
+
+    /// Body-param truthiness follows Python, not JSON: the string
+    /// `"false"` is truthy, `0` / `null` / absent are falsy
+    /// (`base.py:235-236`).
+    #[test]
+    fn body_truthiness_mirrors_python() {
+        assert!(!data_truthy(None));
+        assert!(!data_truthy(Some(&Value::Null)));
+        assert!(!data_truthy(Some(&Value::Bool(false))));
+        assert!(data_truthy(Some(&Value::Bool(true))));
+        assert!(!data_truthy(Some(&serde_json::json!(0))));
+        assert!(!data_truthy(Some(&serde_json::json!(0.0))));
+        assert!(data_truthy(Some(&serde_json::json!(1))));
+        assert!(!data_truthy(Some(&Value::String(String::new()))));
+        assert!(data_truthy(Some(&Value::String("false".to_owned()))));
+        assert!(!data_truthy(Some(&Value::Array(vec![]))));
+        assert!(data_truthy(Some(&serde_json::json!([false]))));
+        assert!(!data_truthy(Some(&Value::Object(Default::default()))));
+    }
+
+    /// The `watching` arm is the plain subscriber list (no
+    /// created/assigned exclusion, unlike the list's `subscribed` arm)
+    /// over the caller's placeholders (`base.py:258-262`).
+    #[test]
+    fn watching_arm_is_plain_subscribers() {
+        let arm = watching_arm("$1", "$2");
+        assert!(arm.contains("FROM \"issue_subscribers\""));
+        assert!(arm.contains("s.\"subscriber_id\" = $2"));
+        assert!(arm.contains("ws.\"slug\" = $1"));
+        assert!(!arm.contains("created_by"));
+        assert!(!arm.contains("assignee"));
+    }
+
+    /// Preference booleans follow DRF's truth tables, including the
+    /// numeric spellings (`fields.py:665-686`).
+    #[test]
+    fn preference_bools_mirror_drf_tables() {
+        for truthy in [
+            Value::Bool(true),
+            serde_json::json!(1),
+            serde_json::json!(1.0),
+            Value::String("True".to_owned()),
+            Value::String("ON".to_owned()),
+            Value::String("y".to_owned()),
+        ] {
+            assert_eq!(parse_preference_bool(&truthy), Ok(true));
+        }
+        for falsy in [
+            Value::Bool(false),
+            serde_json::json!(0),
+            serde_json::json!(0.0),
+            Value::String("False".to_owned()),
+            Value::String("OFF".to_owned()),
+            Value::String("n".to_owned()),
+        ] {
+            assert_eq!(parse_preference_bool(&falsy), Ok(false));
+        }
+        for bad in [
+            Value::Null,
+            Value::String(String::new()),
+            Value::String("maybe".to_owned()),
+            serde_json::json!(2),
+            serde_json::json!([]),
+        ] {
+            assert_eq!(parse_preference_bool(&bad), Err(()));
+        }
+    }
+
+    /// Flag validation: absent skips, `null` is the null-input error,
+    /// anything outside the DRF tables is the invalid-boolean error
+    /// (the serializer-errors shape, `base.py:308`).
+    #[test]
+    fn preference_flag_errors_match_drf() {
+        let data = serde_json::json!({"mention": "maybe", "comment": null});
+        let fields = data.as_object().expect("object body");
+        let mut errors = serde_json::Map::new();
+        assert_eq!(
+            check_preference_flag(&mut errors, fields, "property_change"),
+            None
+        );
+        assert!(errors.is_empty());
+        assert_eq!(check_preference_flag(&mut errors, fields, "mention"), None);
+        assert_eq!(check_preference_flag(&mut errors, fields, "comment"), None);
+        assert_eq!(
+            errors,
+            serde_json::json!({
+                "mention": ["Must be a valid boolean."],
+                "comment": ["This field may not be null."],
+            })
+            .as_object()
+            .expect("object errors")
+            .clone()
+        );
+    }
+
+    /// The preference body carries the 14 live keys in the live order
+    /// (FX-NOTIF-05).
+    #[test]
+    fn preference_key_order_matches_live_django() {
+        let body = serde_json::to_string(&PreferenceBody {
+            id: "id".to_owned(),
+            created_at: "t".to_owned(),
+            updated_at: "t".to_owned(),
+            deleted_at: None,
+            created_by: None,
+            updated_by: None,
+            user: "u".to_owned(),
+            workspace: None,
+            project: None,
+            property_change: true,
+            state_change: true,
+            comment: true,
+            mention: true,
+            issue_completed: true,
+        })
+        .expect("body serializes");
+        let mut last = 0;
+        for key in [
+            "id",
+            "created_at",
+            "updated_at",
+            "deleted_at",
+            "created_by",
+            "updated_by",
+            "user",
+            "workspace",
+            "project",
+            "property_change",
+            "state_change",
+            "comment",
+            "mention",
+            "issue_completed",
+        ] {
             let needle = format!("\"{key}\":");
             let at = body[last..]
                 .find(needle.as_str())
