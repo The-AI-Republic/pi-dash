@@ -198,7 +198,8 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // project/bulk/check/duplicate/downloads (PIDASHCONV-412) in
         // `app_assets`; D-34 notification viewset core
         // (PIDASHCONV-301) in `app_notifications`; D-27 archived
-        // cycles + archive/unarchive (PIDASHCONV-377) in
+        // cycles + archive/unarchive (PIDASHCONV-377) + date-check +
+        // transfer + user-properties (PIDASHCONV-357) in
         // `app_cycles`; D-28 module CRUD (PIDASHCONV-391) in
         // `app_modules` (siblings 397/407 extend that merge, keeping
         // both sides); D-35 analytics + analytic-view viewset

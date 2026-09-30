@@ -28,12 +28,18 @@
 //! [`handlers_archive`] ports `CycleArchiveUnarchiveEndpoint`
 //! (PIDASHCONV-377); [`routes`] merges its routes — sibling handler
 //! issues extend the merge; merges keep both sides.
+//!
+//! [`handlers_misc`] owns handler units C (PIDASHCONV-357): date-check,
+//! transfer and user-properties, with the request-context plumbing
+//! (`Actor`, `Tenant`, `Membership`, `Denial`) sibling handler issues
+//! reuse through it.
 
 pub mod gates;
 pub mod handlers_analytics;
 pub mod handlers_archive;
 pub mod handlers_cycle_issues;
 pub mod handlers_favorites;
+pub mod handlers_misc;
 pub mod handlers_progress;
 
 use axum::Router;
@@ -42,7 +48,8 @@ use crate::state::AppState;
 
 /// Merge the app-cycles route groups (archive first, PIDASHCONV-377;
 /// cycle-issues + favorites via PIDASHCONV-323; progress + analytics via
-/// PIDASHCONV-410; sibling handler issues extend the merge; merges keep
+/// PIDASHCONV-410; date-check + transfer + user-properties via
+/// PIDASHCONV-357; sibling handler issues extend the merge; merges keep
 /// both sides). Cutover into the serving router stays with the domain
 /// gate (PIDASHCONV-388), so this is additive only.
 pub fn routes() -> Router<AppState> {
@@ -51,6 +58,7 @@ pub fn routes() -> Router<AppState> {
         .merge(handlers_favorites::routes())
         .merge(handlers_progress::routes())
         .merge(handlers_analytics::routes())
+        .merge(handlers_misc::routes())
 }
 
 pub use pidash_services::app_cycles::queries;
