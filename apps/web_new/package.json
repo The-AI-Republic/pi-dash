@@ -22,7 +22,11 @@
     "size": "size-limit",
     "coexistence:generate": "node checks/coexistence-routes.mjs",
     "check:coexistence": "node checks/coexistence-routes.mjs --check",
-    "test:coexistence": "node --test checks/coexistence-routes.test.mjs"
+    "test:coexistence": "node --test checks/coexistence-routes.test.mjs",
+    "test:parity": "playwright test --config e2e/parity/playwright.config.ts",
+    "test:parity:oracle": "playwright test --config e2e/parity/playwright.config.ts --project oracle",
+    "test:parity:new": "playwright test --config e2e/parity/playwright.config.ts --project new",
+    "parity:report": "node e2e/parity/report/generate.mjs"
   },
   "dependencies": {
     "@pidash/api-client": "workspace:*",
@@ -43,6 +47,7 @@
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.3.1",
     "@testing-library/user-event": "^14.5.2",
+    "@types/node": "catalog:",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^4.7.0",

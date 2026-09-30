@@ -1,0 +1,23 @@
+# Parity edge proxy (NEWFRONT-19). Mirrors the production topology from
+# apps/proxy: one origin serves the frontend while /auth, /api and /static
+# go to Django. Same-origin serving is what makes the native credential
+# POST and the session cookie work for parity scenarios.
+{
+	auto_https off
+	admin off
+}
+
+:80 {
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+	handle /auth/* {
+		reverse_proxy api:8000
+	}
+	handle /static/* {
+		reverse_proxy api:8000
+	}
+	handle /* {
+		reverse_proxy oracle:3000
+	}
+}

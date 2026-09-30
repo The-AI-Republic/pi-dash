@@ -1,0 +1,22 @@
+# Oracle frontend image (NEWFRONT-19).
+#
+# Serves apps/web for oracle runs: installs the workspace, builds the
+# workspace packages the dev server resolves, then runs the dev server.
+# Self-contained from a clean checkout; layer caching keeps rebuilds fast.
+FROM node:22-alpine
+
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PNPM_HOME/bin:$PATH"
+
+RUN apk add --no-cache libc6-compat && corepack enable
+
+WORKDIR /app
+
+COPY . .
+
+RUN pnpm install
+RUN pnpm --filter "web^..." build
+
+EXPOSE 3000
+
+CMD ["pnpm", "dev", "--filter=web"]

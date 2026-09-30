@@ -282,7 +282,9 @@ export const IssueBlock = observer(function IssueBlock(props: IssueBlockProps) {
               disabled={isCurrentBlockDragging}
               renderByDefault={false}
             >
-              <p className="cursor-pointer truncate text-body-xs-medium text-primary">{issue.name}</p>
+              <p data-testid="parity-issue-name" className="cursor-pointer truncate text-body-xs-medium text-primary">
+                {issue.name}
+              </p>
             </Tooltip>
             {isEpic && displayProperties && (
               <WithDisplayPropertiesHOC
