@@ -269,6 +269,39 @@ fn truncate_error(message: &str) -> String {
     message.chars().take(2000).collect()
 }
 
+/// Whether a `payload.get(key) or {}` read fails the request
+/// (`github.py:822-823,891-892`): a falsy value reads as `{}` (the
+/// caller continues with no match); a truthy non-dict has no `.get`,
+/// so Python raises and the request fails.
+fn nested_shape_fails(value: &serde_json::Value) -> bool {
+    json_truthy(Some(value)) && !value.is_object()
+}
+
+/// `(request.data.get("workspace_slug") or "").strip()`
+/// (`github.py:670,704`): a missing/null/falsy value reads as `""` (the
+/// `workspace_slug is required` 400); a truthy non-string, or a
+/// non-object JSON body, raises `AttributeError` in Python (the 500
+/// envelope). Unparseable bytes keep the historically answered 400
+/// (DRF's `ParseError` detail is the documented deviation, as is
+/// form-encoded input).
+fn workspace_slug_from_body(body: &[u8]) -> Result<String, Denial> {
+    let payload: Option<serde_json::Value> = serde_json::from_slice(body).ok();
+    let payload = match payload {
+        None => return Ok(String::new()),
+        Some(payload) => payload,
+    };
+    let object = match payload.as_object() {
+        Some(object) => object,
+        None => return Err(Denial::ServerError),
+    };
+    match object.get("workspace_slug") {
+        None | Some(serde_json::Value::Null) => Ok(String::new()),
+        Some(serde_json::Value::String(value)) => Ok(value.trim().to_owned()),
+        Some(value) if !json_truthy(Some(value)) => Ok(String::new()),
+        _ => Err(Denial::ServerError),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // GitHub App config (`utils/github_app_auth.py:33-73`)
 // ---------------------------------------------------------------------------
@@ -675,21 +708,9 @@ async fn install_start(
             );
         }
     };
-    // `(request.data.get("workspace_slug") or "").strip()`
-    // (`github.py:670`): a non-string truthy value raises
-    // `AttributeError` in Python (the 500 envelope); null/missing reads
-    // as `""`.
-    let payload: serde_json::Value = match serde_json::from_slice(&body) {
-        Ok(payload) => payload,
-        Err(_) => serde_json::Value::Null,
-    };
-    let raw_slug = payload
-        .get("workspace_slug")
-        .unwrap_or(&serde_json::Value::Null);
-    let workspace_slug = match raw_slug {
-        serde_json::Value::Null => String::new(),
-        serde_json::Value::String(value) => value.trim().to_owned(),
-        _ => return Denial::ServerError.into_response(),
+    let workspace_slug = match workspace_slug_from_body(&body) {
+        Ok(slug) => slug,
+        Err(denial) => return denial.into_response(),
     };
     if workspace_slug.is_empty() {
         return json_response(
@@ -901,7 +922,7 @@ impl From<GithubTransportError> for RefreshOutcome {
 }
 
 async fn refresh_app_installation(
-    pool: &PgPool,
+    connection: &mut sqlx::PgConnection,
     installation: &pidash_db::integrations::github_models::github_app_installation::GithubAppInstallation,
     config: &GithubAppConfig,
     raise_on_error: bool,
@@ -924,7 +945,7 @@ async fn refresh_app_installation(
             // failure, log, save, and raise only when asked.
             refreshed.last_checked_at = Some(Utc::now());
             refreshed.last_check_error = truncate_error(&error.to_string());
-            save_installation_refresh(pool, &refreshed, extra_update_fields)
+            save_installation_refresh(&mut *connection, &refreshed, extra_update_fields)
                 .await
                 .map_err(|_| RefreshOutcome::StoreFailed)?;
             if raise_on_error {
@@ -935,7 +956,7 @@ async fn refresh_app_installation(
             return Ok(refreshed);
         }
     }
-    save_installation_refresh(pool, &refreshed, extra_update_fields)
+    save_installation_refresh(&mut *connection, &refreshed, extra_update_fields)
         .await
         .map_err(|_| RefreshOutcome::StoreFailed)?;
     Ok(refreshed)
@@ -945,7 +966,7 @@ async fn refresh_app_installation(
 /// last_checked_at, last_check_error, updated_at, ...extra])`
 /// (`github.py:198-206,220,225`).
 async fn save_installation_refresh(
-    pool: &PgPool,
+    connection: &mut sqlx::PgConnection,
     installation: &pidash_db::integrations::github_models::github_app_installation::GithubAppInstallation,
     extra_update_fields: &[&str],
 ) -> Result<(), GithubTransportError> {
@@ -963,7 +984,7 @@ async fn save_installation_refresh(
     .bind(&installation.last_check_error)
     .bind(installation.suspended_at)
     .bind(installation.id)
-    .execute(pool)
+    .execute(&mut *connection)
     .await
     .map(|_| ())
     .map_err(|error| GithubTransportError(error.to_string()))
@@ -992,17 +1013,9 @@ async fn app_refresh(
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
     };
-    let payload: serde_json::Value = match serde_json::from_slice(&body) {
-        Ok(payload) => payload,
-        Err(_) => serde_json::Value::Null,
-    };
-    let raw_slug = payload
-        .get("workspace_slug")
-        .unwrap_or(&serde_json::Value::Null);
-    let workspace_slug = match raw_slug {
-        serde_json::Value::Null => String::new(),
-        serde_json::Value::String(value) => value.trim().to_owned(),
-        _ => return Denial::ServerError.into_response(),
+    let workspace_slug = match workspace_slug_from_body(&body) {
+        Ok(slug) => slug,
+        Err(denial) => return denial.into_response(),
     };
     if workspace_slug.is_empty() {
         return json_response(
@@ -1044,7 +1057,14 @@ async fn app_refresh(
         Ok(config) => config,
         Err(denial) => return denial.into_response(),
     };
-    match refresh_app_installation(pool, &installation, &config, true, &[]).await {
+    // Autocommit here, exactly like Django (the refresh endpoint wraps
+    // nothing in `transaction.atomic`): the verification stamps its row
+    // and answers, with no surrounding transaction to roll back.
+    let mut connection = match pool.acquire().await {
+        Ok(connection) => connection,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    match refresh_app_installation(&mut connection, &installation, &config, true, &[]).await {
         Ok(refreshed) => {
             let body = serialize_app_installation(Some(&refreshed));
             json_response(
@@ -1222,13 +1242,13 @@ async fn get_installation(
 /// the workspace row (created with an inactive `api_tokens` FK shim
 /// when missing).
 async fn get_or_create_workspace_integration(
-    pool: &PgPool,
+    connection: &mut sqlx::PgConnection,
     workspace_id: Uuid,
     actor_id: Uuid,
 ) -> Result<queries::WorkspaceIntegrationRow, GithubTransportError> {
     // `_get_or_create_github_integration` (`github.py:90-99`).
     let integration_id: Uuid = match sqlx::query(&queries::integration_by_provider_sql())
-        .fetch_optional(pool)
+        .fetch_optional(&mut *connection)
         .await
         .map_err(|error| GithubTransportError(error.to_string()))?
         .map(|row| row.try_get::<Uuid, _>("id"))
@@ -1239,18 +1259,19 @@ async fn get_or_create_workspace_integration(
         None => {
             let id = Uuid::new_v4();
             sqlx::query(
-                r#"INSERT INTO "integrations" ("id", "title", "provider", "network", "description", "author", "webhook_url", "webhook_secret", "redirect_url", "metadata", "verified", "created_at", "updated_at") VALUES ($1, 'GitHub', 'github', 2, '{"summary": "Mirror GitHub issues into Pi Dash projects."}', '', '', '', '', '{}', true, now(), now())"#,
+                r#"INSERT INTO "integrations" ("id", "title", "provider", "network", "description", "author", "webhook_url", "webhook_secret", "redirect_url", "metadata", "verified", "created_at", "updated_at") VALUES ($1, 'GitHub', 'github', 1, '{"summary": "Mirror GitHub issues into Pi Dash projects."}', '', '', '', '', '{}', true, now(), now())"#,
             )
             .bind(id)
-            .execute(pool)
+            .execute(&mut *connection)
             .await
             .map_err(|error| GithubTransportError(error.to_string()))?;
             id
         }
     };
-    if let Some(existing) = queries::fetch_workspace_integration(pool, workspace_id, integration_id)
-        .await
-        .map_err(|error| GithubTransportError(error.to_string()))?
+    if let Some(existing) =
+        queries::fetch_workspace_integration(&mut *connection, workspace_id, integration_id)
+            .await
+            .map_err(|error| GithubTransportError(error.to_string()))?
     {
         return Ok(existing);
     }
@@ -1263,7 +1284,7 @@ async fn get_or_create_workspace_integration(
     .bind(format!("github-shim-{}", Uuid::new_v4()))
     .bind(actor_id)
     .bind(workspace_id)
-    .execute(pool)
+    .execute(&mut *connection)
     .await
     .map_err(|error| GithubTransportError(error.to_string()))?;
     let wi_id = Uuid::new_v4();
@@ -1275,7 +1296,7 @@ async fn get_or_create_workspace_integration(
     .bind(token_id)
     .bind(integration_id)
     .bind(workspace_id)
-    .execute(pool)
+    .execute(&mut *connection)
     .await
     .map_err(|error| GithubTransportError(error.to_string()))?;
     Ok(queries::WorkspaceIntegrationRow {
@@ -1290,7 +1311,7 @@ async fn get_or_create_workspace_integration(
 /// `git_provider_accounts` companion row for an installation
 /// (`update_or_create` on workspace/provider/host/auth/external id).
 async fn upsert_git_account_for_app(
-    pool: &PgPool,
+    connection: &mut sqlx::PgConnection,
     installation: &pidash_db::integrations::github_models::github_app_installation::GithubAppInstallation,
 ) -> Result<(), GithubTransportError> {
     let status = if installation.suspended_at.is_some() {
@@ -1311,7 +1332,7 @@ async fn upsert_git_account_for_app(
             r#"SELECT "workspace_id" FROM "workspace_integrations" WHERE "deleted_at" IS NULL AND "id" = $1 LIMIT 1"#,
         )
         .bind(installation.workspace_integration_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *connection)
         .await
         .map_err(|error| GithubTransportError(error.to_string()))?
         .map(|row| row.try_get::<Uuid, _>("workspace_id"))
@@ -1320,7 +1341,7 @@ async fn upsert_git_account_for_app(
         .ok_or_else(|| GithubTransportError("workspace integration missing".to_owned()))?,
     )
     .bind(installation.installation_id.to_string())
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await
     .map_err(|error| GithubTransportError(error.to_string()))?
     .map(|row| row.try_get("id"))
@@ -1365,7 +1386,7 @@ async fn upsert_git_account_for_app(
                 r#"SELECT "workspace_id" FROM "workspace_integrations" WHERE "deleted_at" IS NULL AND "id" = $1 LIMIT 1"#,
             )
             .bind(installation.workspace_integration_id)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *connection)
             .await
             .map_err(|error| GithubTransportError(error.to_string()))?
             .map(|row| row.try_get("workspace_id"))
@@ -1389,7 +1410,7 @@ async fn upsert_git_account_for_app(
             .bind(&metadata)
         }
     }
-    .execute(pool)
+    .execute(&mut *connection)
     .await
     .map(|_| ())
     .map_err(|error| GithubTransportError(error.to_string()))
@@ -1398,6 +1419,10 @@ async fn upsert_git_account_for_app(
 /// `_upsert_app_installation` (`github.py:229-267`): the transactional
 /// workspace-integration + installation upsert, verified refresh, and
 /// git-account companion. `require_verified=True` on the callback path.
+/// Everything runs inside one transaction (`with transaction.atomic()`):
+/// a refresh or account failure rolls the upsert back, exactly like
+/// Django — the callback then redirects `github_verification_failed`
+/// with no installation row left behind.
 async fn upsert_app_installation(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1466,7 +1491,7 @@ async fn upsert_app_installation(
         .begin()
         .await
         .map_err(|error| GithubTransportError(error.to_string()))?;
-    let wi = get_or_create_workspace_integration(pool, workspace_id, actor_id).await?;
+    let wi = get_or_create_workspace_integration(&mut transaction, workspace_id, actor_id).await?;
     // The cross-workspace guard (`github.py:256-260`): the same
     // installation id bound elsewhere raises `GithubAppAuthError`.
     let elsewhere: Option<String> = sqlx::query(
@@ -1509,15 +1534,11 @@ async fn upsert_app_installation(
         row.try_get("id")
             .map_err(|error| GithubTransportError(error.to_string()))
     })?;
-    transaction
-        .commit()
-        .await
-        .map_err(|error| GithubTransportError(error.to_string()))?;
-    let installation = app_installation_by_id(pool, row_id)
+    let installation = app_installation_by_id(&mut transaction, row_id)
         .await
         .map_err(|error| GithubTransportError(error.to_string()))?
         .ok_or_else(|| GithubTransportError("installation row missing".to_owned()))?;
-    let installation = refresh_app_installation(pool, &installation, config, true, &[])
+    let installation = refresh_app_installation(&mut transaction, &installation, config, true, &[])
         .await
         .map_err(|outcome| match outcome {
             RefreshOutcome::VerificationFailed(_) => {
@@ -1527,13 +1548,17 @@ async fn upsert_app_installation(
                 GithubTransportError("installation refresh save failed".to_owned())
             }
         })?;
-    upsert_git_account_for_app(pool, &installation).await?;
+    upsert_git_account_for_app(&mut transaction, &installation).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| GithubTransportError(error.to_string()))?;
     Ok(installation)
 }
 
 /// One `github_app_installations` row by id.
 async fn app_installation_by_id(
-    pool: &PgPool,
+    connection: &mut sqlx::PgConnection,
     id: Uuid,
 ) -> Result<
     Option<pidash_db::integrations::github_models::github_app_installation::GithubAppInstallation>,
@@ -1543,7 +1568,7 @@ async fn app_installation_by_id(
         r#"SELECT "id", "created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at", "workspace_integration_id", "installation_id", "account_login", "account_type", "repository_selection", "repository_count", "permissions", "events", "installed_at", "suspended_at", "verified_at", "last_checked_at", "last_check_error" FROM "github_app_installations" WHERE "deleted_at" IS NULL AND "id" = $1 LIMIT 1"#,
     )
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
     app_installation_row(row)
 }
@@ -1870,16 +1895,32 @@ fn pr_snapshot_from_payload(pull_request: &serde_json::Value) -> PrSnapshot {
 /// the number of matched links (0 when unattached — the caller maps
 /// that to `skipped`). Matched-but-stale rows count as matched; only
 /// the write is skipped, via the PR's `updated_at`.
-async fn refresh_pr_links(pool: &PgPool, payload: &serde_json::Value) -> Result<i64, sqlx::Error> {
+async fn refresh_pr_links(pool: &PgPool, payload: &serde_json::Value) -> Result<i64, String> {
     let empty = serde_json::Map::new();
-    let pull_request = payload
+    // `(payload.get("pull_request") or {}).get(...)` (`github.py:822`):
+    // falsy reads as `{}` (no match); a truthy non-dict has no `.get`
+    // and fails the delivery (the webhook `except` → `failed`).
+    let pull_request_value = payload
         .get("pull_request")
-        .and_then(serde_json::Value::as_object)
-        .unwrap_or(&empty);
-    let repository = payload
+        .unwrap_or(&serde_json::Value::Null);
+    if nested_shape_fails(pull_request_value) {
+        return Err("github pull_request payload is not an object".to_owned());
+    }
+    // Same for `(payload.get("repository") or {})` (`github.py:823`).
+    let repository_value = payload
         .get("repository")
-        .and_then(serde_json::Value::as_object)
-        .unwrap_or(&empty);
+        .unwrap_or(&serde_json::Value::Null);
+    if nested_shape_fails(repository_value) {
+        return Err("github repository payload is not an object".to_owned());
+    }
+    let pull_request = pull_request_value.as_object().unwrap_or(&empty);
+    let repository = repository_value.as_object().unwrap_or(&empty);
+    // A store failure fails the delivery (the webhook `except` branch,
+    // `github.py:950-955`); only the message shape differs from Python's
+    // `str(e)`, which the contract never byte-compares.
+    fn store_error(error: sqlx::Error) -> String {
+        error.to_string()
+    }
     // `pr_number` for the `IntegerField`: Django coerces integral
     // floats (`int(1.0)`); anything else misses (0 matches nothing).
     let number = pull_request.get("number").and_then(|value| match value {
@@ -1919,11 +1960,12 @@ async fn refresh_pr_links(pool: &PgPool, payload: &serde_json::Value) -> Result<
     .bind(&name)
     .bind(number as i32)
     .fetch_all(pool)
-    .await?;
+    .await
+    .map_err(store_error)?;
     for link in &links {
         matched += 1;
-        let link_id: Uuid = link.try_get("id")?;
-        let stored: Option<DateTime<Utc>> = link.try_get("pr_updated_at")?;
+        let link_id: Uuid = link.try_get("id").map_err(store_error)?;
+        let stored: Option<DateTime<Utc>> = link.try_get("pr_updated_at").map_err(store_error)?;
         // Stale / out-of-order delivery — matched but not applied
         // (`github.py:835-836`).
         if let (Some(incoming), Some(current)) = (snapshot.pr_updated_at, stored) {
@@ -1941,7 +1983,8 @@ async fn refresh_pr_links(pool: &PgPool, payload: &serde_json::Value) -> Result<
         .bind(snapshot.pr_updated_at)
         .bind(link_id)
         .execute(pool)
-        .await?;
+        .await
+        .map_err(store_error)?;
     }
     let reviews: Vec<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT "id", "remote_updated_at", "metadata" FROM "git_code_review_links" WHERE "deleted_at" IS NULL AND "provider" = 'github' AND "host_url" = 'https://github.com' AND "namespace" = $1 AND "repo_name" = $2 AND "external_iid" = $3"#,
@@ -1950,11 +1993,13 @@ async fn refresh_pr_links(pool: &PgPool, payload: &serde_json::Value) -> Result<
     .bind(&name)
     .bind(number.to_string())
     .fetch_all(pool)
-    .await?;
+    .await
+    .map_err(store_error)?;
     for review in &reviews {
         matched += 1;
-        let review_id: Uuid = review.try_get("id")?;
-        let stored: Option<DateTime<Utc>> = review.try_get("remote_updated_at")?;
+        let review_id: Uuid = review.try_get("id").map_err(store_error)?;
+        let stored: Option<DateTime<Utc>> =
+            review.try_get("remote_updated_at").map_err(store_error)?;
         if let (Some(incoming), Some(current)) = (snapshot.pr_updated_at, stored) {
             if incoming < current {
                 continue;
@@ -1983,7 +2028,8 @@ async fn refresh_pr_links(pool: &PgPool, payload: &serde_json::Value) -> Result<
         .bind(serde_json::Value::Object(metadata))
         .bind(review_id)
         .execute(pool)
-        .await?;
+        .await
+        .map_err(store_error)?;
     }
     Ok(matched)
 }
@@ -2077,11 +2123,25 @@ async fn app_webhook(
             );
         }
     };
+    // A non-object JSON body (`null`, `[...]`, `"s"`) has no `.get` in
+    // Python (`github.py:891`) — the `AttributeError` escapes to the 500.
+    if !payload.is_object() {
+        return Denial::ServerError.into_response();
+    }
+    // `(payload.get("installation") or {}).get("id")`
+    // (`github.py:891-892`): a falsy `installation` reads as `{}` (no
+    // id); a truthy non-dict has no `.get` (the 500 envelope).
     // `installation.get("id")` for the `BigIntegerField`: Django's
     // `get_prep_value` coerces digit strings (`int("123")`); anything
     // else reads as `None`.
-    let installation_id = payload
+    let installation_value = payload
         .get("installation")
+        .unwrap_or(&serde_json::Value::Null);
+    if nested_shape_fails(installation_value) {
+        return Denial::ServerError.into_response();
+    }
+    let installation_id = installation_value
+        .as_object()
         .and_then(|installation| installation.get("id"))
         .and_then(|value| match value {
             serde_json::Value::Number(number) => number.as_i64(),
@@ -2194,9 +2254,7 @@ async fn route_delivery(
         return Ok(delivery_status::PROCESSED.to_owned());
     }
     if event == "pull_request" {
-        let matched = refresh_pr_links(pool, payload)
-            .await
-            .map_err(|error| error.to_string())?;
+        let matched = refresh_pr_links(pool, payload).await?;
         return Ok(if matched > 0 {
             delivery_status::PROCESSED.to_owned()
         } else {
@@ -2234,17 +2292,28 @@ async fn route_delivery(
             let config = github_app_config(pool, secret_key)
                 .await
                 .map_err(|_| "installation refresh config failed".to_owned())?;
-            refresh_app_installation(pool, &installation, &config, false, &["suspended_at"])
-                .await
-                .map_err(|outcome| match outcome {
-                    RefreshOutcome::VerificationFailed(error) => error,
-                    RefreshOutcome::StoreFailed => "installation refresh save failed".to_owned(),
-                })?;
+            // Autocommit here, exactly like Django (the webhook handler
+            // wraps nothing in `transaction.atomic`).
+            let mut connection = pool.acquire().await.map_err(|error| error.to_string())?;
+            refresh_app_installation(
+                &mut connection,
+                &installation,
+                &config,
+                false,
+                &["suspended_at"],
+            )
+            .await
+            .map_err(|outcome| match outcome {
+                RefreshOutcome::VerificationFailed(error) => error,
+                RefreshOutcome::StoreFailed => "installation refresh save failed".to_owned(),
+            })?;
         } else if event == "installation_repositories" {
             let config = github_app_config(pool, secret_key)
                 .await
                 .map_err(|_| "installation refresh config failed".to_owned())?;
-            refresh_app_installation(pool, &installation, &config, false, &[])
+            // Autocommit here, exactly like Django (see above).
+            let mut connection = pool.acquire().await.map_err(|error| error.to_string())?;
+            refresh_app_installation(&mut connection, &installation, &config, false, &[])
                 .await
                 .map_err(|outcome| match outcome {
                     RefreshOutcome::VerificationFailed(error) => error,
@@ -2507,5 +2576,71 @@ mod tests {
     fn truncate_error_caps_at_2000_chars() {
         assert_eq!(truncate_error(&"e".repeat(3000)).chars().count(), 2000);
         assert_eq!(truncate_error("short"), "short");
+    }
+
+    #[test]
+    fn workspace_slug_mirrors_python_falsy_and_attribute_errors() {
+        // `(request.data.get("workspace_slug") or "").strip()`
+        // (`github.py:670,704`): missing/null/falsy read as `""` (the
+        // required-400); truthy non-strings and non-object bodies raise
+        // `AttributeError` (the 500 envelope); unparseable bytes keep the
+        // historical required-400.
+        let ok = |body: &[u8]| workspace_slug_from_body(body).unwrap();
+        let err = |body: &[u8]| workspace_slug_from_body(body).unwrap_err();
+        assert_eq!(ok(b"{}"), "");
+        assert_eq!(ok(b"{\"workspace_slug\": null}"), "");
+        assert_eq!(ok(b"{\"workspace_slug\": \"\"}"), "");
+        assert_eq!(ok(b"{\"workspace_slug\": \"  \"}"), "");
+        assert_eq!(ok(b"{\"workspace_slug\": false}"), "");
+        assert_eq!(ok(b"{\"workspace_slug\": 0}"), "");
+        assert_eq!(ok(b"{\"workspace_slug\": []}"), "");
+        assert_eq!(ok(b"{\"workspace_slug\": {}}"), "");
+        assert_eq!(ok(b"{\"workspace_slug\": \"  ws-1  \"}"), "ws-1");
+        assert_eq!(ok(b"{not json"), "");
+        assert!(matches!(
+            err(b"{\"workspace_slug\": 1}"),
+            Denial::ServerError
+        ));
+        assert!(matches!(
+            err(b"{\"workspace_slug\": true}"),
+            Denial::ServerError
+        ));
+        assert!(matches!(
+            err(b"{\"workspace_slug\": [1]}"),
+            Denial::ServerError
+        ));
+        assert!(matches!(
+            err(b"{\"workspace_slug\": {\"a\": 1}}"),
+            Denial::ServerError
+        ));
+        assert!(matches!(err(b"null"), Denial::ServerError));
+        assert!(matches!(err(b"[1]"), Denial::ServerError));
+        assert!(matches!(err(b"\"s\""), Denial::ServerError));
+    }
+
+    #[test]
+    fn webhook_shape_guards_reject_truthy_non_objects() {
+        // `payload.get("installation") or {}` / `pull_request` /
+        // `repository` (`github.py:822-823,891`): falsy reads as `{}`,
+        // truthy non-dicts fail the request.
+        for raw in [
+            serde_json::json!(null),
+            serde_json::json!(false),
+            serde_json::json!(0),
+            serde_json::json!(""),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!({"id": 7}),
+        ] {
+            assert!(!nested_shape_fails(&raw), "{raw}");
+        }
+        for raw in [
+            serde_json::json!(true),
+            serde_json::json!(1),
+            serde_json::json!("x"),
+            serde_json::json!([1]),
+        ] {
+            assert!(nested_shape_fails(&raw), "{raw}");
+        }
     }
 }
