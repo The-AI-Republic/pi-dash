@@ -300,7 +300,7 @@ pub fn favorite_list_sql() -> Result<String, FavoriteListError> {
 
 /// `_get_project_permission_filters` (`base.py:142-162`) as a SQL fragment
 /// over the `project_members` alias `pm`, the project alias `p` and the
-/// issue alias `i`: guest with full access sees everything, guest without
+/// issue alias `issue`: guest with full access sees everything, guest without
 /// sees only own-created rows, higher roles see everything — always scoped
 /// to the caller's active membership.
 ///
@@ -310,7 +310,7 @@ pub fn project_permission_filter(user_bind: &str) -> String {
     format!(
         "(((pm.role = {guest} AND p.guest_view_all_features = TRUE) \
          OR (pm.role = {guest} AND p.guest_view_all_features = FALSE \
-             AND i.created_by_id = ({user_bind})) \
+             AND issue.created_by_id = ({user_bind})) \
          OR (pm.role > {guest})) \
          AND pm.member_id = ({user_bind}) \
          AND pm.is_active = TRUE)",
@@ -598,7 +598,7 @@ mod tests {
         assert!(
             frag.contains(
                 "pm.role = 5 AND p.guest_view_all_features = FALSE \
-                 AND i.created_by_id = ($2)"
+                 AND issue.created_by_id = ($2)"
             ),
             "{frag}"
         );
@@ -730,6 +730,22 @@ mod tests {
         );
         assert!(!count.contains("AS cycle_id"), "{count}");
         assert!(!count.contains("ORDER BY"), "{count}");
+    }
+
+    // Regression (PIDASHCONV-462): the permission fragment must qualify
+    // the creator column with the `issue` alias the composers declare.
+    // `i.` has no FROM-clause entry, so Postgres rejects the statement;
+    // the fragment-level substring test shipped green because it never
+    // composed the statement.
+    #[test]
+    fn permission_fragment_uses_declared_issue_alias() {
+        let order = view_issues_order_sql(DEFAULT_ORDER_BY);
+        let list = view_issues_list_sql(None, None, &order.order_by_sql);
+        let count = view_issues_count_sql(None, None);
+        for sql in [&list, &count] {
+            assert!(sql.contains("issue.created_by_id = ($2)"), "{sql}");
+            assert!(!sql.contains("i.created_by_id"), "{sql}");
+        }
     }
 
     // Ordering reuses the D-26 kernel: default passes through, the
