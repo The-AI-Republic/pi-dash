@@ -39,6 +39,7 @@ pub mod serializer;
 pub mod space;
 pub mod sse_body;
 pub mod state;
+pub mod v1_projects;
 pub mod web;
 
 pub use edge::{EdgeFlags, EdgeHandle, Prefix, DEFAULT_UPSTREAM};
