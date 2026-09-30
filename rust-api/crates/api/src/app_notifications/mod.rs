@@ -18,12 +18,13 @@
 //!   honoured (`request.data.get("snoozed_till", None)`); the
 //!   serializer-errors 400 on invalid input.
 //!
-//! Only routes 1-3 are owned here (`GET` the collection,
-//! `GET|PATCH|DELETE` the detail); every other method on those paths
-//! proxies to Django, and sibling D-34 routes (read/archive/unread/
-//! mark-all-read/preferences, PIDASHCONV-302/303) keep proxying until
-//! their own issues land — route registration is the cutover
-//! granularity, no flag needed.
+//! Only routes 1-6 are owned here (`GET` the collection,
+//! `GET|PATCH|DELETE` the detail, `POST|DELETE` the read/archive
+//! transitions, `GET` the unread counts); every other method on those
+//! paths proxies to Django, and sibling D-34 routes (mark-all-read/
+//! preferences, PIDASHCONV-303) keep proxying until their own issue
+//! lands — route registration is the cutover granularity, no flag
+//! needed.
 //!
 //! Layering: the permission gates live in [`gate`] (PIDASHCONV-300);
 //! the queryset shapes in `pidash_services::app_notifications::queries`
@@ -369,8 +370,10 @@ pub fn owned(
 }
 
 /// Register the viewset-core routes (routes 1-3,
-/// `app/urls/notification.py:17-31`). Sibling D-34 handler issues
-/// extend this router with their own paths; merges keep both sides.
+/// `app/urls/notification.py:17-31`) plus the state-transition and
+/// unread routes (routes 4-6, `:32-41`, PIDASHCONV-302). Sibling D-34
+/// handler issues extend this router with their own paths; merges keep
+/// both sides.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -387,6 +390,27 @@ pub fn routes() -> Router<AppState> {
                     .patch(partial_update)
                     .delete(destroy),
                 &["POST", "PUT", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/users/notifications/{pk}/read/",
+            owned(
+                axum::routing::post(mark_read).delete(mark_unread),
+                &["GET", "PUT", "PATCH", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/users/notifications/{pk}/archive/",
+            owned(
+                axum::routing::post(archive).delete(unarchive),
+                &["GET", "PUT", "PATCH", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/users/notifications/unread/",
+            owned(
+                axum::routing::get(unread_get),
+                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
             ),
         )
 }
@@ -1506,6 +1530,307 @@ async fn partial_update(
     }
 }
 
+/// `mark_read` (`base.py:163-169`): the workspace gate, then the
+/// scoped bare `.get()` (a miss is the `ObjectDoesNotExist` 404 like
+/// `partial_update`), then `read_at = timezone.now()` + `save()`
+/// (which stamps `updated_at`/`updated_by`), and the full serializer
+/// over the unannotated instance — the [`DetailBody`] 22-key shape —
+/// 200.
+async fn mark_read(
+    State(state): State<AppState>,
+    Path((slug, pk_raw)): Path<(String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    state_transition(
+        &state,
+        extension,
+        req,
+        slug,
+        pk_raw,
+        Transition {
+            gate_method: "POST",
+            gate_path: "workspaces/<slug>/users/notifications/<uuid>/read/",
+            column: StampColumn::Read,
+            value: Some(Utc::now()),
+        },
+    )
+    .await
+}
+
+/// `mark_unread` (`base.py:171-177`): like [`mark_read`] with
+/// `read_at = None`.
+async fn mark_unread(
+    State(state): State<AppState>,
+    Path((slug, pk_raw)): Path<(String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    state_transition(
+        &state,
+        extension,
+        req,
+        slug,
+        pk_raw,
+        Transition {
+            gate_method: "DELETE",
+            gate_path: "workspaces/<slug>/users/notifications/<uuid>/read/",
+            column: StampColumn::Read,
+            value: None,
+        },
+    )
+    .await
+}
+
+/// `archive` (`base.py:179-185`): like [`mark_read`] with
+/// `archived_at = timezone.now()`.
+async fn archive(
+    State(state): State<AppState>,
+    Path((slug, pk_raw)): Path<(String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    state_transition(
+        &state,
+        extension,
+        req,
+        slug,
+        pk_raw,
+        Transition {
+            gate_method: "POST",
+            gate_path: "workspaces/<slug>/users/notifications/<uuid>/archive/",
+            column: StampColumn::Archived,
+            value: Some(Utc::now()),
+        },
+    )
+    .await
+}
+
+/// `unarchive` (`base.py:187-193`): like [`mark_read`] with
+/// `archived_at = None`.
+async fn unarchive(
+    State(state): State<AppState>,
+    Path((slug, pk_raw)): Path<(String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    state_transition(
+        &state,
+        extension,
+        req,
+        slug,
+        pk_raw,
+        Transition {
+            gate_method: "DELETE",
+            gate_path: "workspaces/<slug>/users/notifications/<uuid>/archive/",
+            column: StampColumn::Archived,
+            value: None,
+        },
+    )
+    .await
+}
+
+/// Which single timestamp column a state transition stamps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StampColumn {
+    Read,
+    Archived,
+}
+
+/// The per-action half of a state transition: its gate row, the
+/// column it stamps, and the value it writes (`Some(now)` for the
+/// `POST` setters, `None` for the `DELETE` clearers).
+#[derive(Debug, Clone, Copy)]
+struct Transition {
+    gate_method: &'static str,
+    gate_path: &'static str,
+    column: StampColumn,
+    value: Option<DateTime<Utc>>,
+}
+
+/// Shared body of the four single-row state transitions
+/// (`mark_read`/`mark_unread`/`archive`/`unarchive`,
+/// `base.py:163-193`): session auth, the decorated workspace gate for
+/// the transition's own method+path row, the receiver+workspace scoped
+/// lookup (miss → the `ObjectDoesNotExist` 404 — these are bare
+/// `.get()` calls, not `get_object`), the timestamp write through
+/// `.save()`, and the re-fetched serializer, 200.
+async fn state_transition(
+    state: &AppState,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+    slug: String,
+    pk_raw: String,
+    transition: Transition,
+) -> Response {
+    let Some(pk) = parse_pk(&pk_raw) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let actor = match actor(state, extension).await {
+        Ok(actor) => actor,
+        Err(denial) => return denial.into_response(),
+    };
+    let pool = match pool_of(state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    let role = match workspace_role(pool, &actor.id, &slug).await {
+        Ok(role) => role,
+        Err(denial) => return denial.into_response(),
+    };
+    let row =
+        gate_for(transition.gate_method, transition.gate_path).expect("state-transition gate row");
+    if let Err(response) = enforce(decide_gate(
+        &row.gate,
+        &tenant_context(&slug),
+        &workspace_facts(&slug, role),
+    )) {
+        return response;
+    }
+    match fetch_one(pool, &slug, &actor.id, &pk).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Denial::ObjectNotFound.into_response(),
+        Err(denial) => return denial.into_response(),
+    }
+    let now = Utc::now();
+    if let Err(response) = save_stamp(
+        pool,
+        &pk,
+        transition.column,
+        &transition.value,
+        &actor.id,
+        &now,
+    )
+    .await
+    {
+        return response;
+    }
+    match fetch_one(pool, &slug, &actor.id, &pk).await {
+        Ok(Some(row)) => json_ok(
+            serde_json::to_string(&render_detail(&row, &actor.timezone)).expect("serializable row"),
+        ),
+        Ok(None) => Denial::ServerError.into_response(),
+        Err(denial) => denial.into_response(),
+    }
+}
+
+/// `notification.save()` for the transitions: write the one timestamp
+/// column (+ `updated_at`/`updated_by` through `save()`).
+#[allow(clippy::result_large_err)]
+async fn save_stamp(
+    pool: &PgPool,
+    pk: &Uuid,
+    column: StampColumn,
+    value: &Option<DateTime<Utc>>,
+    user_id: &Uuid,
+    now: &DateTime<Utc>,
+) -> Result<(), Response> {
+    let sql = match column {
+        StampColumn::Read => {
+            r#"UPDATE notifications SET read_at = $2, updated_at = $3, updated_by_id = $4
+           WHERE id = $1"#
+        }
+        StampColumn::Archived => {
+            r#"UPDATE notifications SET archived_at = $2, updated_at = $3, updated_by_id = $4
+           WHERE id = $1"#
+        }
+    };
+    sqlx::query(sql)
+        .bind(pk)
+        .bind(value)
+        .bind(now)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(|_| Denial::ServerError.into_response())
+}
+
+// ---------------------------------------------------------------------------
+// UnreadNotificationEndpoint.get (base.py:196-229)
+// ---------------------------------------------------------------------------
+
+/// The exact 2-key `UnreadNotificationEndpoint.get` body
+/// (`base.py:223-229`): `total_unread_notifications_count` first,
+/// `mention_unread_notifications_count` second. Struct order is the
+/// byte order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+struct UnreadBody {
+    total_unread_notifications_count: i64,
+    mention_unread_notifications_count: i64,
+}
+
+/// `UnreadNotificationEndpoint.get`: session auth, the workspace gate
+/// (`:199`), then the two counts over the shared base
+/// (receiver + unread + unarchived + unsnoozed, soft-delete-scoped).
+/// The split is only `sender ILIKE '%mentioned%'` — `exclude` for the
+/// total (`:210`), `filter` for the mentions (`:220`); there is no
+/// `entity_name` guard here (unlike `list`), ported as-is. 200.
+async fn unread_get(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    extension: Option<Extension<SessionHandle>>,
+) -> Response {
+    let actor = match actor(&state, extension).await {
+        Ok(actor) => actor,
+        Err(denial) => return denial.into_response(),
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    let role = match workspace_role(pool, &actor.id, &slug).await {
+        Ok(role) => role,
+        Err(denial) => return denial.into_response(),
+    };
+    let row =
+        gate_for("GET", "workspaces/<slug>/users/notifications/unread/").expect("unread gate row");
+    if let Err(response) = enforce(decide_gate(
+        &row.gate,
+        &tenant_context(&slug),
+        &workspace_facts(&slug, role),
+    )) {
+        return response;
+    }
+    let base = r#"FROM "notifications" n
+         INNER JOIN "workspaces" w ON (n."workspace_id" = w."id")
+         WHERE w."slug" = $1
+         AND n."receiver_id" = $2
+         AND n."read_at" IS NULL
+         AND n."archived_at" IS NULL
+         AND n."snoozed_till" IS NULL
+         AND n."deleted_at" IS NULL"#;
+    let total: i64 = match sqlx::query_scalar(&format!(
+        r#"SELECT COUNT(*) {base} AND NOT (n."sender" ILIKE '%mentioned%')"#
+    ))
+    .bind(&slug)
+    .bind(actor.id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(total) => total,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let mentions: i64 = match sqlx::query_scalar(&format!(
+        r#"SELECT COUNT(*) {base} AND n."sender" ILIKE '%mentioned%'"#
+    ))
+    .bind(&slug)
+    .bind(actor.id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(mentions) => mentions,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    json_ok(
+        serde_json::to_string(&UnreadBody {
+            total_unread_notifications_count: total,
+            mention_unread_notifications_count: mentions,
+        })
+        .expect("serializable counts"),
+    )
+}
+
 /// `serializer.save()`: write `snoozed_till` (+ `updated_at` /
 /// `updated_by` through `save()`).
 #[allow(clippy::result_large_err)]
@@ -1534,9 +1859,10 @@ async fn save_snoozed(
 mod tests {
     use super::*;
 
-    /// The four owned method+path rows: list + partial_update carry
-    /// the workspace gate; retrieve + destroy are queryset-scoped
-    /// (auth-only). Pins the [`gate`] wiring this module enforces.
+    /// The nine owned method+path rows: list + partial_update + the
+    /// four read/archive transitions + unread carry the workspace
+    /// gate; retrieve + destroy are queryset-scoped (auth-only). Pins
+    /// the [`gate`] wiring this module enforces.
     #[test]
     fn owned_routes_carry_their_gate_rows() {
         let list =
@@ -1551,6 +1877,42 @@ mod tests {
         let destroy = gate_for("DELETE", "workspaces/<slug>/users/notifications/<uuid>/")
             .expect("destroy gate row");
         assert_eq!(destroy.gate, Gate::QuerysetScoped);
+        for (method, path) in [
+            ("POST", "workspaces/<slug>/users/notifications/<uuid>/read/"),
+            (
+                "DELETE",
+                "workspaces/<slug>/users/notifications/<uuid>/read/",
+            ),
+            (
+                "POST",
+                "workspaces/<slug>/users/notifications/<uuid>/archive/",
+            ),
+            (
+                "DELETE",
+                "workspaces/<slug>/users/notifications/<uuid>/archive/",
+            ),
+            ("GET", "workspaces/<slug>/users/notifications/unread/"),
+        ] {
+            let row = gate_for(method, path).expect("transition/unread gate row");
+            assert!(
+                matches!(row.gate, Gate::Workspace { .. }),
+                "{method} {path}"
+            );
+        }
+    }
+
+    /// The unread body carries exactly the two live keys in the live
+    /// order (`base.py:223-229`).
+    #[test]
+    fn unread_body_matches_live_key_order() {
+        let body = UnreadBody {
+            total_unread_notifications_count: 1,
+            mention_unread_notifications_count: 2,
+        };
+        assert_eq!(
+            serde_json::to_string(&body).expect("serializable counts"),
+            r#"{"total_unread_notifications_count":1,"mention_unread_notifications_count":2}"#,
+        );
     }
 
     /// Facts mirror the gate matrix: ADMIN/MEMBER/GUEST pass the
