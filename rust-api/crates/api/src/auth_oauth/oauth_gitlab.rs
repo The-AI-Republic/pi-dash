@@ -735,6 +735,7 @@ async fn app_callback(
         callback.next_path,
         handle,
         peer_addr,
+        false,
     )
     .await
     {
@@ -784,11 +785,13 @@ impl From<ProviderError> for CallbackOutcome {
 ///
 /// The port resolves the same branch conditions and runs the same
 /// side effects: mismatch / missing-code paths touch nothing and
-/// answer 500; the valid path runs the full success chain first
-/// (`authenticate()` + `user_login()` side effects) and then answers
-/// 500 at the f-string site. A provider `AuthenticationException`
-/// likewise ends in 500 here (Python catches it, then raises
-/// `TypeError` while building the error redirect).
+/// answer 500; the valid path runs the space success chain first
+/// (`authenticate()` + `user_login(is_space=True)` side effects, no
+/// invitation processing since the space view passes no `callback`)
+/// and then answers 500 at the f-string site. A provider
+/// `AuthenticationException` likewise ends in 500 here (Python
+/// catches it, then raises `TypeError` while building the error
+/// redirect).
 async fn space_callback(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -814,6 +817,7 @@ async fn space_callback(
             callback.next_path,
             handle,
             peer_addr,
+            true,
         )
         .await;
     }
@@ -1343,7 +1347,7 @@ async fn insert_user(
            VALUES ($1,$2,NULL,$3,NULL,$4,$5,$6,$7,'',NULL,
                    NULL,NULL,$8,$8,$8,
                    '','',FALSE,FALSE,
-                   FALSE,TRUE,FALSE,FALSE,
+                   FALSE,TRUE,FALSE,TRUE,
                    TRUE,FALSE,'',$8,
                    NULL,NULL,'','',
                    'email','',NULL,FALSE,
@@ -1850,18 +1854,26 @@ async fn process_invitations(
     )
     .await?;
 
+    // Soft-delete (`SoftDeletionQuerySet.delete()`, `db/mixins.py:48-53`):
+    // stamp `deleted_at` instead of removing rows.
     sqlx::query(
-        r#"DELETE FROM "workspace_member_invites" WHERE "email" = $1 AND "accepted" = TRUE"#,
+        r#"UPDATE "workspace_member_invites" SET "deleted_at" = $1
+           WHERE "email" = $2 AND "accepted" = TRUE AND "deleted_at" IS NULL"#,
     )
+    .bind(now)
     .bind(email)
     .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    sqlx::query(r#"DELETE FROM "project_member_invites" WHERE "email" = $1 AND "accepted" = TRUE"#)
-        .bind(email)
-        .execute(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    sqlx::query(
+        r#"UPDATE "project_member_invites" SET "deleted_at" = $1
+           WHERE "email" = $2 AND "accepted" = TRUE AND "deleted_at" IS NULL"#,
+    )
+    .bind(now)
+    .bind(email)
+    .execute(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -2170,6 +2182,7 @@ async fn callback_success(
     session_next_path: Option<String>,
     handle: Option<SessionHandle>,
     peer: Option<std::net::SocketAddr>,
+    is_space: bool,
 ) -> Result<String, CallbackOutcome> {
     let pool = pool_of(state)?;
     let settings = state.settings();
@@ -2348,14 +2361,26 @@ async fn callback_success(
     .await?;
 
     // `callback(user, is_signup, request)` → workspace/project joins.
-    process_invitations(pool, &email, user.id, now).await?;
+    // The space view constructs the provider without `callback`
+    // (`views/space/gitlab.py:88`; `base.py:352-353` guards on
+    // `if self.callback`), so invitations run on the app path only.
+    if !is_space {
+        process_invitations(pool, &email, user.id, now).await?;
+    }
 
     // `create_update_account(user)` (B6: DB errors are swallowed).
     create_update_account(pool, &user.id, &user_data, &token_data, now).await;
 
-    // `user_login(request, user, is_app=True)`.
+    // `user_login(request, user, is_app=True)` on the app path,
+    // `user_login(request, user, is_space=True)` on the space path
+    // (`utils/login.py:21-25` records the matching base as the
+    // `device_info` domain).
     let handle = handle.ok_or(CallbackOutcome::Server)?;
-    let domain = app_base(settings);
+    let domain = if is_space {
+        space_base(settings)
+    } else {
+        app_base(settings)
+    };
     user_login(
         &handle,
         &user,
