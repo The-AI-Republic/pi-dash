@@ -1,9 +1,0 @@
-{
-  "email": "parity-oracle@example.com",
-  "password": "Parity-Seed-1",
-  "workspaceSlug": "parity-ws",
-  "workspaceName": "Parity Workspace",
-  "projectId": "360ad3c3-0975-4583-8936-adc7043705eb",
-  "projectName": "Parity Project",
-  "issueNames": ["Parity first issue", "Parity second issue", "Parity third issue"]
-}

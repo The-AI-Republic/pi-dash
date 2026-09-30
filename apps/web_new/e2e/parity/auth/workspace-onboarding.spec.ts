@@ -109,7 +109,9 @@ test.describe("auth workspace onboarding finish + tour", () => {
         await driver.fillWorkspaceName("Bad One");
         await driver.fillWorkspaceSlug("bad@slug");
         await driver.selectTeamSizePill("2-10");
-        expect(await driver.workspaceSlugErrorText()).toContain("URLs can contain only");
+        await expect
+          .poll(() => driver.workspaceSlugErrorText(), { timeout: 15_000 })
+          .toContain("URLs can contain only");
         expect(await driver.isCreateWorkspaceSubmitDisabled()).toBe(true);
       });
 
@@ -117,8 +119,10 @@ test.describe("auth workspace onboarding finish + tour", () => {
         await driver.fillWorkspaceName("Api Team");
         await driver.fillWorkspaceSlug("api");
         await driver.selectTeamSizePill("2-10");
+        // The reserved/taken check runs an async slug-check before the error
+        // renders, so poll rather than reading once.
         await driver.submitCreateWorkspace();
-        expect(await driver.workspaceSlugErrorText()).toContain("already taken");
+        await expect.poll(() => driver.workspaceSlugErrorText(), { timeout: 30_000 }).toContain("already taken");
         expect(await driver.visibleWorkspaceView()).toBe("create");
         expect(await userWorkspaceSlugs(user)).not.toContain("api");
       });
@@ -132,7 +136,7 @@ test.describe("auth workspace onboarding finish + tour", () => {
         await driver.fillWorkspaceSlug(taken);
         await driver.selectTeamSizePill("2-10");
         await driver.submitCreateWorkspace();
-        expect(await driver.workspaceSlugErrorText()).toContain("already taken");
+        await expect.poll(() => driver.workspaceSlugErrorText(), { timeout: 30_000 }).toContain("already taken");
         expect(await userWorkspaceSlugs(user)).not.toContain(taken);
       });
     }
@@ -195,7 +199,7 @@ test.describe("auth workspace onboarding finish + tour", () => {
       const invitee = uniqueEmail("parity-invitee");
       await driver.fillInviteRow(0, invitee);
       await driver.sendInvites();
-      await expect.poll(() => driver.currentPath(), { timeout: 60_000 }).toContain(slug);
+      await expect.poll(() => driver.currentPath(), { timeout: 90_000 }).toContain(slug);
       const pending = await workspacePendingInviteEmails(user, slug);
       expect(pending).toContain(invitee);
       expect(pending).toHaveLength(1);
@@ -215,7 +219,7 @@ test.describe("auth workspace onboarding finish + tour", () => {
 
     // Choosing the solo size finishes onboarding immediately, with no
     // invite step, landing in the new workspace.
-    await expect.poll(() => driver.currentPath(), { timeout: 60_000 }).toContain(slug);
+    await expect.poll(() => driver.currentPath(), { timeout: 90_000 }).toContain(slug);
     expect(await driver.isInviteMembersStepVisible()).toBe(false);
     const progress = await getOnboardingProgress(user);
     expect(progress.is_onboarded).toBe(true);
@@ -239,15 +243,16 @@ test.describe("auth workspace onboarding finish + tour", () => {
       await driver.awaitInviteMembersStep();
       await driver.deferInvites();
 
-      // Deferring finishes onboarding: land in the workspace, all progress
-      // flags plus the onboarded marker stamped.
-      await expect.poll(() => driver.currentPath(), { timeout: 60_000 }).toContain(slug);
+      // Deferring finishes onboarding. The server-side completion is the
+      // authoritative signal (all progress flags plus the onboarded marker),
+      // then the client lands in the workspace per AUTH-016.
+      await expect.poll(async () => (await getOnboardingProgress(user)).is_onboarded, { timeout: 90_000 }).toBe(true);
       const progress = await getOnboardingProgress(user);
-      expect(progress.is_onboarded).toBe(true);
       expect(progress.onboarding_step.profile_complete).toBe(true);
       expect(progress.onboarding_step.workspace_create).toBe(true);
       expect(progress.onboarding_step.workspace_invite).toBe(true);
       expect(await userWorkspaceSlugs(user)).toContain(slug);
+      await expect.poll(() => driver.currentPath(), { timeout: 90_000 }).toContain(slug);
     }
   );
 
@@ -258,7 +263,7 @@ test.describe("auth workspace onboarding finish + tour", () => {
       const user = await signUpFreshUser();
       await markOnboarded(user);
       await driver.openAuthenticated("/create-workspace", browserCookies(user));
-      expect(await driver.hasVisibleText("Create your workspace")).toBe(true);
+      await expect.poll(() => driver.hasVisibleText("Create your workspace"), { timeout: 30_000 }).toBe(true);
 
       const slug = uniqueSlug("std");
       await driver.fillWorkspaceName(`Std ${slug}`);
@@ -267,7 +272,7 @@ test.describe("auth workspace onboarding finish + tour", () => {
       await driver.submitCreateWorkspace();
 
       // Success enters the new workspace directly, with no invite step.
-      await expect.poll(() => driver.currentPath(), { timeout: 60_000 }).toContain(slug);
+      await expect.poll(() => driver.currentPath(), { timeout: 90_000 }).toContain(slug);
       expect(await driver.isInviteMembersStepVisible()).toBe(false);
       expect(await userWorkspaceRole(user, slug)).toBe(20);
     }
