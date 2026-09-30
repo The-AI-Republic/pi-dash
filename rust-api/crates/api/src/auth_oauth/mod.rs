@@ -8,12 +8,15 @@
 //!
 //! * [`guards`] — constants, throttle spec, URI builder, device matrix,
 //!   OAuth view shape (PIDASHCONV-331, AUTHOAUTH-F9).
+//! * [`device_flow`] — device start / approve / token-poll handlers +
+//!   route registration (PIDASHCONV-342, AUTHOAUTH-F12).
 //!
 //! # Wiring note
 //!
 //! The crate root declares `pub mod auth_oauth;` (one-line wiring in the
 //! port PR, following the PIDASHCONV-284 precedent).
 
+pub mod device_flow;
 pub mod guards;
 
 pub use guards::{
