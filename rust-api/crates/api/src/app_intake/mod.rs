@@ -57,8 +57,6 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `handle_exception`'s `ObjectDoesNotExist` branch
 /// (`app/views/base.py:129-133`).
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// DRF's default `Http404` body (unresolvable project identifier).
-pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Not found."}"#;
 /// `handle_exception`'s generic 500 branch.
 pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `ValidationError` branch
@@ -102,8 +100,6 @@ pub enum Denial {
     Forbidden,
     /// 404, `ObjectDoesNotExist` branch.
     NotFound,
-    /// 404, DRF default `Http404` (unresolvable project identifier).
-    NotFoundDetail,
     /// 404, view-inline `{"error": ...}` (missing intake row).
     NotFoundError(String),
     /// 404, DRF `get_object` miss on intakes: `Http404("No Intake
@@ -138,7 +134,6 @@ impl Denial {
                 r#"{"error":"You don't have the required permissions."}"#.to_owned(),
             ),
             Denial::NotFound => (StatusCode::NOT_FOUND, NOT_FOUND_BODY.to_owned()),
-            Denial::NotFoundDetail => (StatusCode::NOT_FOUND, NOT_FOUND_DETAIL_BODY.to_owned()),
             Denial::NotFoundError(message) => (
                 StatusCode::NOT_FOUND,
                 format!("{{\"error\":{}}}", json_string(message)),
@@ -439,8 +434,9 @@ pub struct Tenant {
 /// `_rewrite_project_kwarg` (`app/views/base.py:49-79`) accepts a UUID
 /// or a workspace-scoped project identifier (upper-cased, like
 /// `Project.save` normalizes it). An unresolvable identifier answers
-/// DRF's default `Http404` body; a missing project row answers the
-/// `ObjectDoesNotExist` branch.
+/// `{"detail":"Project not found"}` (`Project.resolve` raises
+/// `Http404("Project not found")`, message preserved by DRF); a missing
+/// project row answers the `ObjectDoesNotExist` branch.
 pub async fn resolve_tenant(
     pool: &PgPool,
     slug: &str,
@@ -478,7 +474,7 @@ pub async fn resolve_tenant(
             workspace_id,
             project_id,
         }),
-        None => Err(Denial::NotFoundDetail),
+        None => Err(Denial::ProjectNotFound),
     }
 }
 

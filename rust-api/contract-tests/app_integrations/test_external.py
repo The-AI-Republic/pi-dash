@@ -88,3 +88,18 @@ def test_anonymous_rejected(anon, world):
     ):
         assert response.status_code == 401
         assert response.json() == ANON
+
+
+def test_unknown_project_identifier_404(admin, world):
+    # A non-UUID project identifier that resolves to nothing answers 404
+    # {"detail": "Project not found"}: Project.resolve raises
+    # Http404("Project not found") and DRF's exception_handler preserves
+    # the message. (PIDASHCONV-465.)
+    bad = (
+        f"/api/workspaces/{world['workspace']['slug']}"
+        f"/projects/NO-SUCH-PROJECT/ai-assistant/"
+    )
+    response = admin.post(bad, json={"task": "x"})
+    assert response.status_code == 404, response.status_code
+    assert response.json() == {"detail": "Project not found"}, (
+        response.text[:300])
