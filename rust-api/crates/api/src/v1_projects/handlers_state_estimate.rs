@@ -18,8 +18,8 @@
 //!   (`StateDetailAPIEndpoint`, `views/state.py:162-300`).
 //!
 //! Non-owned methods on those paths proxy to Django through the edge fallback
-//! (its 405-after-auth, sibling actions and metadata live there); `HEAD` rides
-//! axum's `get` handling like Django's `GET`-backed `HEAD`; `OPTIONS` proxies so
+//! (sibling actions and metadata live there); `HEAD`/`TRACE` are owned and
+//! answer DRF's JSON 405 after auth (see [`routes`]); `OPTIONS` proxies so
 //! DRF metadata (401 anon / 200 authed) is preserved. Same precedent as
 //! `license::owned`.
 //!
@@ -32,12 +32,14 @@
 //! [`crate::serializer`]. This module owns the HTTP shell (routes, API-key auth,
 //! the state gate, identifier routing), the write SQL, and the row fetching.
 //!
-//! Request edge order (mirrors `BaseAPIView.initial`, `views/base.py:99-104`, plus
-//! `TimezoneMixin`): API-key authentication first (missing → 401, invalid → 403),
-//! then the slug→UUID rewrite (anonymous callers skip it so slugs cannot be probed),
-//! then `check_permissions` (the `ProjectStateEntityPermission` gate → 403), then
-//! the handler body. Timezone activation runs for authenticated callers before the
-//! body, so an unknown stored zone 500s even on permission-denied paths.
+//! Request edge order (mirrors `BaseAPIView.initial`, `views/base.py:107-111`,
+//! plus `TimezoneMixin`): API-key authentication first (missing → 401, invalid →
+//! 403; only the token row's `is_active` is checked, never the user's), then the
+//! slug→UUID rewrite (anonymous callers skip it so slugs cannot be probed), then
+//! `check_permissions` (the `ProjectStateEntityPermission` gate → 403), and only
+//! then timezone activation for survivors (`TimezoneMixin.initial` runs after
+//! `super().initial()`), then the handler body. An unknown stored zone 500s for
+//! survivors only — never ahead of a denial.
 //!
 //! Ported bugs (translate, don't redesign; also listed in the PR):
 //!
@@ -50,7 +52,10 @@
 //! * State create answers 200, not 201 (`views/state.py:113-114`). Ported as-is.
 //! * `StateSerializer.validate` runs the default-flip UPDATE before the triage
 //!   rejection (`serializers/state.py:19-27`, BUG-4a): a rejected triage payload still
-//!   clears its siblings' defaults. The flip runs via
+//!   clears its siblings' defaults — on POST only. PATCH builds the serializer
+//!   with no context (`views/state.py:279`), so `filter(project_id=None)`
+//!   matches zero rows and the flip is a no-op there; the triage rejection
+//!   still applies. The flip runs via
 //!   [`pidash_services::v1_projects::ser_workflow::state_validate`], which returns the
 //!   flip flag alongside the error so callers execute it even on rejection — but only
 //!   when field validation passed (DRF never calls `validate()` after field errors).
@@ -62,12 +67,20 @@
 //!   the code echoes the target. Ported as-is.
 //! * PATCH/DELETE direct gets (`views/state.py:231,278`) skip the archived-project
 //!   guard (no `projects` join) while list/detail scopes hide archived projects' states.
+//!   The DELETE get additionally filters `is_triage=False` (`state.py:231`); the
+//!   PATCH get does not (`state.py:278`) — separate scopes, same missing guard.
 //! * A name-clash 409 whose lookup misses the holder raises through the generic 500
 //!   branch (Python `AttributeError` on `None.id`); a PATCH `save()` unique violation
 //!   answers 400 `{"error": "The payload is not valid"}` (uncaught `IntegrityError` →
 //!   `handle_exception` branch).
 //! * `expand=<unmapped field>` overwrites that field with `null`
 //!   (`getattr(instance, f"{expand}_id", None)`, `serializers/base.py`).
+//! * Non-ASCII names slugify differently: Django `slugify` folds NFKD → ASCII
+//!   (`db/models/state.py`, via `State.save`), while
+//!   [`state_model::slugify_name`] keeps non-ASCII alphanumerics
+//!   (`char::is_alphanumeric`). ASCII names are byte-exact; non-ASCII names
+//!   diverge. The slug helper lives in the models layer (PIDASHCONV-352,
+//!   read-only for port agents), so this stays a documented divergence.
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
@@ -134,6 +147,12 @@ type AssetLookup = Option<(String, Option<Uuid>, Option<Uuid>, Option<Uuid>)>;
 
 /// Register the two owned state paths. Estimate paths are deliberately absent
 /// (BUG-EST-404, see module docs): they proxy to Django, which 404s.
+///
+/// `HEAD` and `TRACE` are owned explicitly (not axum's automatic HEAD-from-GET
+/// or its empty-body 405): DRF checks `http_method_names` only after
+/// `initial()`, so auth/permission denials win and survivors answer the JSON
+/// 405. `OPTIONS` proxies so DRF metadata (401 anon / 200 authed) is
+/// preserved.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -143,7 +162,9 @@ pub fn routes() -> Router<AppState> {
                 .put(crate::edge::proxy)
                 .patch(crate::edge::proxy)
                 .delete(crate::edge::proxy)
-                .options(crate::edge::proxy),
+                .options(crate::edge::proxy)
+                .head(head_state_list)
+                .trace(trace_state_list),
         )
         .route(
             "/api/v1/workspaces/{slug}/projects/{project_id}/states/{state_id}/",
@@ -152,8 +173,104 @@ pub fn routes() -> Router<AppState> {
                 .delete(delete_state)
                 .post(crate::edge::proxy)
                 .put(crate::edge::proxy)
-                .options(crate::edge::proxy),
+                .options(crate::edge::proxy)
+                .head(head_state_detail)
+                .trace(trace_state_detail),
         )
+}
+
+/// Owned-path unowned methods (`HEAD`, `TRACE`): run the full prelude
+/// (auth → rewrite → gate) and answer DRF's `MethodNotAllowed` JSON only
+/// for survivors — denials keep their 401/403/404.
+async fn method_not_allowed(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_raw: &str,
+    route: V1Route,
+    method: &str,
+) -> Response {
+    match authorize(state, headers, slug, project_raw, route, method).await {
+        Ok(_) => Response::builder()
+            .status(StatusCode::METHOD_NOT_ALLOWED)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(method_not_allowed_body(method)))
+            .expect("405 response"),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// DRF `MethodNotAllowed` detail (`APIView.http_method_not_allowed`):
+/// `Method "<METHOD>" not allowed.`, compact-rendered.
+fn method_not_allowed_body(method: &str) -> String {
+    format!(
+        "{{\"detail\":{}}}",
+        json_string(&format!("Method \"{method}\" not allowed."))
+    )
+}
+
+async fn head_state_list(
+    AxumState(state): AxumState<AppState>,
+    Path((slug, project_raw)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    method_not_allowed(
+        &state,
+        &headers,
+        &slug,
+        &project_raw,
+        V1Route::StateList,
+        "HEAD",
+    )
+    .await
+}
+
+async fn trace_state_list(
+    AxumState(state): AxumState<AppState>,
+    Path((slug, project_raw)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    method_not_allowed(
+        &state,
+        &headers,
+        &slug,
+        &project_raw,
+        V1Route::StateList,
+        "TRACE",
+    )
+    .await
+}
+
+async fn head_state_detail(
+    AxumState(state): AxumState<AppState>,
+    Path((slug, project_raw, _)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    method_not_allowed(
+        &state,
+        &headers,
+        &slug,
+        &project_raw,
+        V1Route::StateDetail,
+        "HEAD",
+    )
+    .await
+}
+
+async fn trace_state_detail(
+    AxumState(state): AxumState<AppState>,
+    Path((slug, project_raw, _)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    method_not_allowed(
+        &state,
+        &headers,
+        &slug,
+        &project_raw,
+        V1Route::StateDetail,
+        "TRACE",
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +405,17 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, HandlerError> {
         .ok_or(HandlerError::ServerError)
 }
 
+/// The validated token identity: the user id plus the raw stored timezone.
+/// The timezone string is NOT parsed here — `TimezoneMixin.initial`
+/// (`views/base.py:43-48`) calls `super().initial()` (auth+permissions)
+/// first and only then activates the zone, so a denying gate answers 403
+/// even when the stored zone is unknown (which 500s only for survivors).
+#[derive(Debug, Clone)]
+struct Identity {
+    id: Uuid,
+    timezone: Option<String>,
+}
+
 /// Authenticate `X-Api-Key` (`APIKeyAuthentication.authenticate`): missing/empty →
 /// `None` (later 401s via the permission layer); `mt_`-prefixed → machine-token
 /// path; otherwise the `api_tokens` path. Any validation failure raises
@@ -295,7 +423,7 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, HandlerError> {
 async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
-) -> Result<Option<Actor>, HandlerError> {
+) -> Result<Option<Identity>, HandlerError> {
     let pool = pool_of(state)?;
     let raw = headers
         .get(token_kernel::API_KEY_HEADER)
@@ -312,7 +440,10 @@ async fn authenticate(
 
 /// `validate_api_token`: exact token match, `is_active`, unexpired
 /// (`expired_at__gt=now OR expired_at IS NULL`); stamps `last_used`.
-async fn authenticate_api_token(pool: &sqlx::PgPool, raw: &str) -> Result<Actor, HandlerError> {
+/// Only the TOKEN row's `is_active` is checked — the user row's is not
+/// (`api_authentication.py:32-45` returns `api_token.user` unchecked, and
+/// DRF `IsAuthenticated` passes inactive users on to the permission path).
+async fn authenticate_api_token(pool: &sqlx::PgPool, raw: &str) -> Result<Identity, HandlerError> {
     let row: Option<(Uuid, bool, Option<chrono::DateTime<chrono::Utc>>)> =
         sqlx::query_as(r#"SELECT user_id, is_active, expired_at FROM api_tokens WHERE token = $1"#)
             .bind(raw)
@@ -338,8 +469,7 @@ async fn authenticate_api_token(pool: &sqlx::PgPool, raw: &str) -> Result<Actor,
         .execute(pool)
         .await
         .map_err(|_| HandlerError::ServerError)?;
-    let actor = load_actor(pool, user_id).await?;
-    Ok(actor)
+    load_identity(pool, user_id).await
 }
 
 /// `validate_machine_token`: hash match, unrevoked token, unrevoked dev-machine,
@@ -348,7 +478,7 @@ async fn authenticate_machine_token(
     state: &AppState,
     pool: &sqlx::PgPool,
     raw: &str,
-) -> Result<Actor, HandlerError> {
+) -> Result<Identity, HandlerError> {
     let secret = state.settings().secret_key.clone();
     let presented_hash = token_kernel::hash_token(raw, secret.as_bytes());
     let row: MachineTokenLookup = sqlx::query_as(
@@ -406,33 +536,37 @@ async fn authenticate_machine_token(
         .execute(pool)
         .await
         .map_err(|_| HandlerError::ServerError)?;
-    load_actor(pool, user_id).await
+    load_identity(pool, user_id).await
 }
 
-/// Load the actor row: unknown/inactive users authenticate as nobody (DRF session
-/// semantics — guarded routes then 401). An unknown stored timezone is a 500
-/// (`ZoneInfo(...)` raises; no `try/except` in `TimezoneMixin`).
-async fn load_actor(pool: &sqlx::PgPool, user_id: Uuid) -> Result<Actor, HandlerError> {
-    let row: Option<(bool, Option<String>)> =
-        sqlx::query_as(r#"SELECT is_active, user_timezone FROM users WHERE id = $1"#)
+/// Load the token owner's identity. An unknown user id 401s (unreachable in
+/// practice — both token tables FK to users); an INACTIVE user authenticates
+/// normally (see `authenticate_api_token`). The timezone string is returned
+/// raw; parsing happens after the gate in [`authorize`].
+async fn load_identity(pool: &sqlx::PgPool, user_id: Uuid) -> Result<Identity, HandlerError> {
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as(r#"SELECT user_timezone FROM users WHERE id = $1"#)
             .bind(user_id)
             .fetch_optional(pool)
             .await
             .map_err(|_| HandlerError::ServerError)?;
     match row {
-        Some((true, timezone)) => {
-            let tz: Tz = timezone
-                .as_deref()
-                .unwrap_or("UTC")
-                .parse()
-                .map_err(|_| HandlerError::ServerError)?;
-            Ok(Actor {
-                id: user_id,
-                timezone: tz,
-            })
-        }
-        _ => Err(HandlerError::Unauthorized),
+        Some((timezone,)) => Ok(Identity {
+            id: user_id,
+            timezone,
+        }),
+        None => Err(HandlerError::Unauthorized),
     }
+}
+
+/// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
+/// after `super().initial()`). A missing zone defaults to UTC; an unknown
+/// zone name 500s (`ZoneInfo(...)` raises; no `try/except`).
+fn activate_timezone(timezone: Option<&str>) -> Result<Tz, HandlerError> {
+    timezone
+        .unwrap_or("UTC")
+        .parse()
+        .map_err(|_| HandlerError::ServerError)
 }
 
 // ---------------------------------------------------------------------------
@@ -482,11 +616,11 @@ async fn resolve_state_gate(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: Uuid,
-    actor: Option<Actor>,
+    actor_id: Option<Uuid>,
     route: V1Route,
     method: &str,
-) -> Result<Gate, HandlerError> {
-    let actor = actor.ok_or(HandlerError::Unauthorized)?;
+) -> Result<Uuid, HandlerError> {
+    let actor_id = actor_id.ok_or(HandlerError::Unauthorized)?;
     let scope = TenantScope::new(WorkspaceId::from(slug));
     // Active project membership on this project (soft-deleted rows excluded,
     // like every other `ProjectMember.objects` read). `role` is `smallint`.
@@ -498,7 +632,7 @@ async fn resolve_state_gate(
     )
     .bind(slug)
     .bind(project_id)
-    .bind(actor.id)
+    .bind(actor_id)
     .fetch_optional(pool)
     .await
     .map_err(|_| HandlerError::ServerError)?;
@@ -535,7 +669,7 @@ async fn resolve_state_gate(
         )
         .bind(slug)
         .bind(project_id)
-        .bind(actor.id)
+        .bind(actor_id)
         .fetch_optional(pool)
         .await
         .map_err(|_| HandlerError::ServerError)?;
@@ -550,7 +684,7 @@ async fn resolve_state_gate(
                AND wm.is_active AND wm.deleted_at IS NULL"#,
         )
         .bind(slug)
-        .bind(actor.id)
+        .bind(actor_id)
         .fetch_optional(pool)
         .await
         .map_err(|_| HandlerError::ServerError)?;
@@ -582,7 +716,7 @@ async fn resolve_state_gate(
         &workspace_facts,
         &mutation,
     ) {
-        Ok(Gate { actor, project_id })
+        Ok(actor_id)
     } else {
         Err(HandlerError::Forbidden)
     }
@@ -805,7 +939,10 @@ async fn render_state(
                     };
                     let nested = match user_id {
                         Some(id) => expand_user(pool, &id).await?,
-                        None => Value::Null,
+                        // `expansion[expand](None).data` renders `{}` for a
+                        // null FK (`serializers/base.py:108-113`, probed:
+                        // `UserLiteSerializer(None).data == {}`).
+                        None => Value::Object(serde_json::Map::new()),
                     };
                     map.insert(name.clone(), nested);
                 }
@@ -1050,8 +1187,13 @@ fn read_object_body(body: Bytes) -> Result<serde_json::Map<String, Value>, Handl
     }
 }
 
-/// Python `str()` over a raw JSON scalar, for the PATCH external-id comparison
-/// (`str(request.data.get("external_id"))`, `views/state.py:283`).
+/// Python `str()` over a raw JSON scalar: the ORM filters receive the raw
+/// request value, and psycopg3 adapts numbers so Postgres infers `varchar`
+/// and casts implicitly — the filter behaves exactly as if the value were
+/// stringified (probed: numeric re-post 409s with the holder id, numeric
+/// external values filter as their string form, never a 500). Null is safe
+/// (`IS NULL`); arrays/objects never reach the filters (field validation
+/// 400s first); bools are rejected by the `CharField` shape like DRF.
 fn py_str_of(value: &Value) -> Option<String> {
     match value {
         Value::String(s) => Some(s.clone()),
@@ -1329,11 +1471,43 @@ fn check_optional_group(
     }
 }
 
+/// Python `str()` of a list/dict input for the `ChoiceField`
+/// `"..." is not a valid choice.` message (`ChoiceField.to_internal_value`
+/// fails with `input=data`, formatted via `str()` — probed:
+/// `"['backlog']' is not a valid choice."`). Only arrays/objects reach
+/// here; every scalar is stringified before the choice check.
 fn drf_choice_input(value: &Value) -> String {
+    py_repr_of(value)
+}
+
+/// Python `repr()` over a JSON value (single-quoted strings, `True` /
+/// `False` / `None`, `[...]` / `{...}` nesting), for error messages that
+/// echo the raw input.
+fn py_repr_of(value: &Value) -> String {
     match value {
-        Value::Array(_) => "[]".to_owned(),
-        Value::Object(_) => "{}".to_owned(),
-        _ => String::new(),
+        Value::Null => "None".to_owned(),
+        Value::Bool(true) => "True".to_owned(),
+        Value::Bool(false) => "False".to_owned(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'")),
+        Value::Array(items) => {
+            let inner = items.iter().map(py_repr_of).collect::<Vec<_>>().join(", ");
+            format!("[{inner}]")
+        }
+        Value::Object(map) => {
+            let inner = map
+                .iter()
+                .map(|(key, item)| {
+                    format!(
+                        "{}: {}",
+                        py_repr_of(&Value::String(key.clone())),
+                        py_repr_of(item)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{inner}}}")
+        }
     }
 }
 
@@ -1361,16 +1535,19 @@ fn check_optional_bool(
         }
         Value::Bool(b) => Some(Some(*b)),
         Value::Number(n) => {
-            if n.as_i64() == Some(1) || n.as_u64() == Some(1) {
-                Some(Some(true))
-            } else if n.as_i64() == Some(0) || n.as_u64() == Some(0) {
-                Some(Some(false))
-            } else {
-                errors.push((
-                    field.to_owned(),
-                    vec!["Must be a valid boolean.".to_owned()],
-                ));
-                None
+            // DRF `BooleanField` tests membership with `in` (i.e. `==`), so
+            // `1.0 == 1` and `0.0 == 0` coerce (probed: `{"default": 1.0}`
+            // arms the flip in Python).
+            match n.as_f64() {
+                Some(1.0) => Some(Some(true)),
+                Some(0.0) => Some(Some(false)),
+                _ => {
+                    errors.push((
+                        field.to_owned(),
+                        vec!["Must be a valid boolean.".to_owned()],
+                    ));
+                    None
+                }
             }
         }
         Value::String(s) => {
@@ -1489,7 +1666,9 @@ fn page_denial(error: paginator::PageError) -> HandlerError {
 // ---------------------------------------------------------------------------
 
 /// Authenticate, rewrite the project kwarg (for authenticated callers only),
-/// and enforce the state gate — in `BaseAPIView.initial` order.
+/// and enforce the state gate — in `BaseAPIView.initial` order — and only
+/// then activate the rendering timezone (`TimezoneMixin.initial` runs after
+/// `super().initial()`, so denials win over an unknown stored zone).
 async fn authorize(
     state: &AppState,
     headers: &HeaderMap,
@@ -1499,12 +1678,32 @@ async fn authorize(
     method: &str,
 ) -> Result<(sqlx::PgPool, Gate), HandlerError> {
     let pool = pool_of(state)?.clone();
-    let actor = authenticate(state, headers).await?;
-    let project_id = match &actor {
+    let identity = authenticate(state, headers).await?;
+    let project_id = match &identity {
         Some(_) => resolve_project_id(&pool, slug, project_raw).await?,
         None => Uuid::nil(),
     };
-    let gate = resolve_state_gate(&pool, slug, project_id, actor, route, method).await?;
+    let actor_id = resolve_state_gate(
+        &pool,
+        slug,
+        project_id,
+        identity.as_ref().map(|identity| identity.id),
+        route,
+        method,
+    )
+    .await?;
+    let timezone = activate_timezone(
+        identity
+            .as_ref()
+            .and_then(|identity| identity.timezone.as_deref()),
+    )?;
+    let gate = Gate {
+        actor: Actor {
+            id: actor_id,
+            timezone,
+        },
+        project_id,
+    };
     Ok((pool, gate))
 }
 
@@ -1727,7 +1926,9 @@ async fn create_state_inner(
             // Name clash: echo the surviving row's id; a lookup miss 500s
             // (Python `AttributeError` on `None.id` → generic branch). The lookup
             // uses the RAW input (`request.data.get("name")`, unstripped): a padded
-            // re-post collides at the DB but misses here → 500 (probed).
+            // re-post collides at the DB but misses here → 500 (probed). A
+            // numeric raw name filters as its string form (psycopg3
+            // adaptation, probed: re-post 409s with the holder id).
             let raw_name = raw.get("name").and_then(py_str_of).unwrap_or_default();
             let holder = fetch_state_by_name(&pool, slug, gate.project_id, &raw_name).await?;
             let Some(holder) = holder else {
@@ -1988,21 +2189,21 @@ async fn patch_state_inner(
     )
     .await?;
     let state_id = parse_state_id(state_id_raw)?;
-    // Direct get: default-manager scope but NO archived-project guard
-    // (`views/state.py:278`, ported as-is).
-    let mut row = state_q::fetch_state_direct(&pool, slug, gate.project_id, state_id)
+    // Direct get (`views/state.py:278`): default-manager scope but NO
+    // archived-project guard and NO `is_triage` filter (only DELETE has one) —
+    // the PATCH-specific scope, not the shared direct scope.
+    let mut row = state_q::fetch_state_direct_for_patch(&pool, slug, gate.project_id, state_id)
         .await
         .map_err(|_| HandlerError::ServerError)?
         .ok_or(HandlerError::NotFound)?;
     let raw = read_object_body(body)?;
     let input = validate_state_input(&raw, true)
         .map_err(|errors| HandlerError::FieldErrors(field_errors_body(&errors)))?;
-    // Partial `validate()`: `data.get("default", False)` sees only supplied
-    // fields; the triage check sees the supplied group (or nothing).
-    let (flip_armed, validation_error) = ser::state_validate(input.default, input.group.as_deref());
-    if flip_armed {
-        run_default_flip(&pool, gate.project_id).await?;
-    }
+    // Partial `validate()`: the triage check sees the supplied group (or
+    // nothing). The default-flip NEVER runs here: PATCH builds the serializer
+    // with no context (`views/state.py:279`), so `filter(project_id=None)`
+    // matches zero rows — a no-op in Python (`serializers/state.py:22`).
+    let (_, validation_error) = ser::state_validate(input.default, input.group.as_deref());
     if let Some(error_body) = validation_error {
         return Err(HandlerError::FieldErrors(
             serde_json::to_string(&error_body).expect("error body serializes"),
@@ -2012,17 +2213,21 @@ async fn patch_state_inner(
     // is supplied AND differs from the row's (`str()`-compared), AND a row with
     // the (possibly defaulted) source + id exists. The 409 echoes the TARGET id.
     if py_truthy(raw.get("external_id")) {
-        let supplied = raw
-            .get("external_id")
-            .and_then(py_str_of)
-            .unwrap_or_default();
+        let supplied_raw = raw.get("external_id").expect("truthy external_id");
         let current = row.external_id.clone().unwrap_or_else(|| "None".to_owned());
+        let supplied = py_str_of(supplied_raw).unwrap_or_default();
         if current != supplied {
-            let source = match raw.get("external_source") {
-                Some(value) => py_str_of(value).unwrap_or_default(),
-                None => row.external_source.clone().unwrap_or_default(),
+            // `request.data.get("external_source", state.external_source)`:
+            // absent → the row's own (possibly NULL → `IS NULL`); explicit
+            // null → NULL (`IS NULL`); the columns are nullable.
+            let source: Option<String> = match raw.get("external_source") {
+                None => row.external_source.clone(),
+                Some(Value::Null) => None,
+                Some(value) => py_str_of(value),
             };
-            if state_external_exists(&pool, slug, gate.project_id, &source, &supplied).await? {
+            if state_external_exists(&pool, slug, gate.project_id, source.as_deref(), &supplied)
+                .await?
+            {
                 return Err(HandlerError::Conflict(state_conflict_body(
                     "State with the same external id and external source already exists",
                     &row.id.to_string(),
@@ -2095,29 +2300,48 @@ async fn patch_state_inner(
 }
 
 /// The PATCH-time external clash probe (`views/state.py:284-289`): `State.objects`
-/// scope (soft-deleted and triage rows excluded).
+/// scope (soft-deleted and triage-group rows excluded). The source is
+/// `request.data.get("external_source", state.external_source)` — a NULL
+/// source (absent key on a NULL-source row, or explicit null) filters as
+/// `IS NULL`, exactly like Django's `filter(external_source=None)`.
 async fn state_external_exists(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: Uuid,
-    external_source: &str,
+    external_source: Option<&str>,
     external_id: &str,
 ) -> Result<bool, HandlerError> {
-    let hit: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT states.id FROM states
-           JOIN workspaces ON workspaces.id = states.workspace_id
-           WHERE states.project_id = $1 AND workspaces.slug = $2
-           AND states.external_source = $3 AND states.external_id = $4
-           AND states.deleted_at IS NULL AND NOT (states."group" = 'triage')
-           LIMIT 1"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .bind(external_source)
-    .bind(external_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
+    // The source predicate shape is fixed per call (`IS NULL` vs `=`), so
+    // the statement is built once per shape — no parameter juggling.
+    let sql = match external_source {
+        None => {
+            r#"SELECT states.id FROM states
+               JOIN workspaces ON workspaces.id = states.workspace_id
+               WHERE states.project_id = $1 AND workspaces.slug = $2
+               AND states.external_source IS NULL AND states.external_id = $3
+               AND states.deleted_at IS NULL AND NOT (states."group" = 'triage')
+               LIMIT 1"#
+        }
+        Some(_) => {
+            r#"SELECT states.id FROM states
+               JOIN workspaces ON workspaces.id = states.workspace_id
+               WHERE states.project_id = $1 AND workspaces.slug = $2
+               AND states.external_source = $3 AND states.external_id = $4
+               AND states.deleted_at IS NULL AND NOT (states."group" = 'triage')
+               LIMIT 1"#
+        }
+    };
+    let mut query = sqlx::query_as::<_, (Uuid,)>(sql)
+        .bind(project_id)
+        .bind(slug);
+    query = match external_source {
+        None => query.bind(external_id),
+        Some(source) => query.bind(source).bind(external_id),
+    };
+    let hit: Option<(Uuid,)> = query
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     Ok(hit.is_some())
 }
 
@@ -2379,5 +2603,83 @@ mod tests {
             field_errors_body(&errors),
             r#"{"name":["This field may not be blank."]}"#
         );
+    }
+
+    #[test]
+    fn boolean_field_coerces_unit_floats() {
+        // DRF `BooleanField` tests `in` (i.e. `==`): `1.0 == 1` and
+        // `0.0 == 0` coerce; anything else 400s.
+        let mut errors = FieldErrorList::new();
+        assert_eq!(
+            check_optional_bool(&mut errors, "default", Some(&serde_json::json!(1.0))),
+            Some(Some(true))
+        );
+        assert_eq!(
+            check_optional_bool(&mut errors, "default", Some(&serde_json::json!(0.0))),
+            Some(Some(false))
+        );
+        assert!(errors.is_empty());
+        assert_eq!(
+            check_optional_bool(&mut errors, "default", Some(&serde_json::json!(1.5))),
+            None
+        );
+        assert_eq!(
+            field_errors_body(&errors),
+            r#"{"default":["Must be a valid boolean."]}"#
+        );
+    }
+
+    #[test]
+    fn choice_message_echoes_python_repr() {
+        // Probed: `"['backlog']' is not a valid choice."` — `str(input)`,
+        // not the JSON rendering.
+        assert_eq!(
+            drf_choice_input(&serde_json::json!(["backlog"])),
+            "['backlog']"
+        );
+        assert_eq!(drf_choice_input(&serde_json::json!([])), "[]");
+        assert_eq!(drf_choice_input(&serde_json::json!({"a": 1})), "{'a': 1}");
+        let body: serde_json::Map<String, Value> =
+            serde_json::from_value(serde_json::json!({"group": ["backlog"]})).expect("map");
+        let errors = validate_state_input(&body, true).expect_err("bad choice");
+        assert_eq!(
+            field_errors_body(&errors),
+            r#"{"group":["\"['backlog']\" is not a valid choice."]}"#
+        );
+    }
+
+    #[test]
+    fn method_not_allowed_body_is_drf_bytes() {
+        assert_eq!(
+            method_not_allowed_body("HEAD"),
+            r#"{"detail":"Method \"HEAD\" not allowed."}"#
+        );
+        assert_eq!(
+            method_not_allowed_body("TRACE"),
+            r#"{"detail":"Method \"TRACE\" not allowed."}"#
+        );
+    }
+
+    #[test]
+    fn raw_scalars_filter_as_their_string_form() {
+        // psycopg3 adapts numbers so the ORM filter casts implicitly
+        // (probed live: numeric re-post 409s with the holder id) — the
+        // coercion below is the behavior, not a shortcut.
+        assert_eq!(py_str_of(&serde_json::json!(5)).as_deref(), Some("5"));
+        assert_eq!(py_str_of(&serde_json::json!(5.0)).as_deref(), Some("5.0"));
+        assert_eq!(py_str_of(&serde_json::json!("5")).as_deref(), Some("5"));
+    }
+
+    #[test]
+    fn timezone_parses_after_the_gate() {
+        // Missing zone defaults to UTC; unknown zones fail (500 for
+        // survivors, never ahead of a denial — ordering lives in
+        // `authorize`, this only pins the parse itself).
+        assert!(activate_timezone(None).is_ok());
+        assert!(activate_timezone(Some("UTC")).is_ok());
+        assert!(matches!(
+            activate_timezone(Some("Not/AZone")),
+            Err(HandlerError::ServerError)
+        ));
     }
 }
