@@ -241,36 +241,53 @@ async fn trace_state_list(
     .await
 }
 
-async fn head_state_detail(
-    AxumState(state): AxumState<AppState>,
-    Path((slug, project_raw, _)): Path<(String, String, String)>,
-    headers: HeaderMap,
+/// Detail-path unowned methods: same prelude as the owned handlers
+/// (auth → id parse → 405), so an authed non-UUID `state_id` 404s exactly
+/// like `GET`/`PATCH`/`DELETE` instead of 405ing.
+async fn method_not_allowed_detail(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_raw: &str,
+    state_id_raw: &str,
+    method: &str,
 ) -> Response {
-    method_not_allowed(
-        &state,
-        &headers,
-        &slug,
-        &project_raw,
+    match authorize(
+        state,
+        headers,
+        slug,
+        project_raw,
         V1Route::StateDetail,
-        "HEAD",
+        method,
     )
     .await
+    {
+        Ok(_) => match parse_state_id(state_id_raw) {
+            Ok(_) => Response::builder()
+                .status(StatusCode::METHOD_NOT_ALLOWED)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(method_not_allowed_body(method)))
+                .expect("405 response"),
+            Err(error) => error.into_response(),
+        },
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn head_state_detail(
+    AxumState(state): AxumState<AppState>,
+    Path((slug, project_raw, state_id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    method_not_allowed_detail(&state, &headers, &slug, &project_raw, &state_id, "HEAD").await
 }
 
 async fn trace_state_detail(
     AxumState(state): AxumState<AppState>,
-    Path((slug, project_raw, _)): Path<(String, String, String)>,
+    Path((slug, project_raw, state_id)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    method_not_allowed(
-        &state,
-        &headers,
-        &slug,
-        &project_raw,
-        V1Route::StateDetail,
-        "TRACE",
-    )
-    .await
+    method_not_allowed_detail(&state, &headers, &slug, &project_raw, &state_id, "TRACE").await
 }
 
 // ---------------------------------------------------------------------------
@@ -1380,8 +1397,13 @@ fn check_nullable_text(
     }
 }
 
-/// DRF `FloatField` (`sequence`): missing → `None` (the `65535` default applies
-/// at save); `"A valid number is required."` otherwise.
+/// DRF `FloatField` (`sequence`, `rest_framework/fields.py`): missing → `None`
+/// (the `65535` default applies at save); overlong strings fail
+/// `max_string_length` (`"String value too large."`); anything else unparseable
+/// fails `"A valid number is required."`. Non-finite values (`inf`/`nan`/`1e999`)
+/// are ACCEPTED — probed live against the repo's DRF 3.15.2, whose
+/// `to_internal_value` is just `float(data)` with no `isfinite` gate — so no
+/// finiteness check is mirrored here.
 fn check_optional_float(
     errors: &mut FieldErrorList,
     field: &str,
@@ -1406,16 +1428,25 @@ fn check_optional_float(
                 None
             }
         },
-        Value::String(s) => match s.trim().parse::<f64>() {
-            Ok(f) => Some(Some(f)),
-            Err(_) => {
-                errors.push((
-                    field.to_owned(),
-                    vec!["A valid number is required.".to_owned()],
-                ));
-                None
+        Value::String(s) => {
+            // `FloatField.MAX_STRING_LENGTH = 1000`: the length gate runs
+            // before the float cast (`len(data)` counts chars, hence
+            // `chars().count()` rather than byte `.len()`).
+            if s.chars().count() > 1000 {
+                errors.push((field.to_owned(), vec!["String value too large.".to_owned()]));
+                return None;
             }
-        },
+            match s.trim().parse::<f64>() {
+                Ok(f) => Some(Some(f)),
+                Err(_) => {
+                    errors.push((
+                        field.to_owned(),
+                        vec!["A valid number is required.".to_owned()],
+                    ));
+                    None
+                }
+            }
+        }
         Value::Bool(true) => Some(Some(1.0)),
         Value::Bool(false) => Some(Some(0.0)),
         _ => {
@@ -2146,7 +2177,10 @@ async fn retrieve_state_inner(
 }
 
 /// Parse the `<uuid:state_id>` converter value. Django answers a resolver 404
-/// (HTML) for non-UUIDs; the JSON 404 is the documented assumption here.
+/// (HTML) for non-UUIDs *before* auth; here auth runs first (matching every
+/// handler's `authorize`-then-parse order, including the HEAD/TRACE detail
+/// handlers), so anonymous bad-id answers 401 and only survivors reach this
+/// 404. The JSON (not HTML) shape is the documented assumption here.
 fn parse_state_id(raw: &str) -> Result<Uuid, HandlerError> {
     raw.parse::<Uuid>().map_err(|_| HandlerError::NotFound)
 }
@@ -2646,6 +2680,46 @@ mod tests {
             field_errors_body(&errors),
             r#"{"group":["\"['backlog']\" is not a valid choice."]}"#
         );
+    }
+
+    #[test]
+    fn float_field_rejects_overlong_strings() {
+        // DRF `FloatField.MAX_STRING_LENGTH = 1000` fails before the cast:
+        // probed live (`rest_framework.exceptions.ValidationError:
+        // [ErrorDetail(string='String value too large.',
+        // code='max_string_length')]` for `'x' * 1001`).
+        let mut errors = FieldErrorList::new();
+        let long = "x".repeat(1001);
+        assert_eq!(
+            check_optional_float(&mut errors, "sequence", Some(&Value::String(long))),
+            None
+        );
+        assert_eq!(
+            field_errors_body(&errors),
+            r#"{"sequence":["String value too large."]}"#
+        );
+    }
+
+    #[test]
+    fn float_field_accepts_non_finite_like_drf() {
+        // No `isfinite` gate exists in this stack's DRF (`to_internal_value`
+        // is just `float(data)` in 3.15.2/3.16.1 — probed: `'inf'`, `'nan'`,
+        // `'1e999'` all validate), so these must stay accepted here too.
+        let mut errors = FieldErrorList::new();
+        for raw in ["inf", "-inf", "nan", "1e999"] {
+            let got = check_optional_float(
+                &mut errors,
+                "sequence",
+                Some(&Value::String(raw.to_owned())),
+            );
+            assert!(matches!(got, Some(Some(f)) if !f.is_finite()), "{raw}");
+        }
+        assert!(errors.is_empty());
+        assert_eq!(
+            check_optional_float(&mut errors, "sequence", Some(&serde_json::json!(1e308)),),
+            Some(Some(1e308))
+        );
+        assert!(errors.is_empty());
     }
 
     #[test]
