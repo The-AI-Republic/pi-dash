@@ -277,6 +277,9 @@ fn env_default(name: &str, fallback: Option<&str>) -> Option<String> {
 
 /// `get_llm_config` inputs (`base.py:81-96`): DB rows with the
 /// `os.environ` fallbacks the view passes as defaults.
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
 async fn llm_config(
     pool: &sqlx::PgPool,
     secret_key: &str,
