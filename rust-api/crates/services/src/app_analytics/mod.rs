@@ -8,5 +8,9 @@
 //!   queryset + lookups, and the export acknowledgement — plus the default /
 //!   project / advance / exporter query builders owned by PIDASHCONV-349
 //!   (FX-A-Q-03..Q-06).
+//! * [`export_format`] — the porter + exporter format engines owned by
+//!   PIDASHCONV-381: `DataExporter`, JSON/CSV/XLSX formatters, the
+//!   `utils/exporters` plane and `IssueExportSchema` (FX-A-FMT-01).
+pub mod export_format;
 pub mod queries;
 pub mod shape;
