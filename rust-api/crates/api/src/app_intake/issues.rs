@@ -1047,75 +1047,65 @@ pub async fn validate_issue_fields(
     if let Some(value) = input.get("state_id") {
         if value.is_null() {
             out.state_id = Some(None);
-        } else {
-            if let Some(id) =
-                validate_pk(pool, errors, "state_id", value, state_any_sql(), false).await
-            {
-                out.state_id = Some(Some(id));
-            }
+        } else if let Some(id) =
+            validate_pk(pool, errors, "state_id", value, state_any_sql(), false).await
+        {
+            out.state_id = Some(Some(id));
         }
     }
     if let Some(value) = input.get("parent_id") {
         if value.is_null() {
             out.parent_id = Some(None);
-        } else {
-            if let Some(id) =
-                validate_pk(pool, errors, "parent_id", value, issue_live_sql(), false).await
-            {
-                out.parent_id = Some(Some(id));
-            }
+        } else if let Some(id) =
+            validate_pk(pool, errors, "parent_id", value, issue_live_sql(), false).await
+        {
+            out.parent_id = Some(Some(id));
         }
     }
     if let Some(value) = input.get("estimate_point_id") {
         if value.is_null() {
             out.estimate_point_id = Some(None);
-        } else {
-            if let Some(id) = validate_pk(
-                pool,
-                errors,
-                "estimate_point_id",
-                value,
-                estimate_point_live_sql(),
-                false,
-            )
-            .await
-            {
-                out.estimate_point_id = Some(Some(id));
-            }
+        } else if let Some(id) = validate_pk(
+            pool,
+            errors,
+            "estimate_point_id",
+            value,
+            estimate_point_live_sql(),
+            false,
+        )
+        .await
+        {
+            out.estimate_point_id = Some(Some(id));
         }
     }
     if let Some(value) = input.get("type") {
         if value.is_null() {
             out.type_id = Some(None);
-        } else {
-            if let Some(id) =
-                validate_pk(pool, errors, "type", value, issue_type_live_sql(), false).await
-            {
-                out.type_id = Some(Some(id));
-            }
+        } else if let Some(id) =
+            validate_pk(pool, errors, "type", value, issue_type_live_sql(), false).await
+        {
+            out.type_id = Some(Some(id));
         }
     }
     if let Some(value) = input.get("assigned_pod_id") {
         if value.is_null() {
             out.assigned_pod_id = Some(None);
-        } else {
-            if let Some(id) = validate_uuid_field(errors, "assigned_pod_id", value, false) {
-                // `Pod.all_objects`: tombstoned rows still resolve
-                // here; `validate()` reports them next.
-                let row: Option<(Uuid,)> = sqlx::query_as(r#"SELECT id FROM pod WHERE id = $1"#)
-                    .bind(id)
-                    .fetch_optional(pool)
-                    .await
-                    .unwrap_or(None);
-                if row.is_none() {
-                    push_error(
-                        errors,
-                        "assigned_pod_id",
-                        format!("Invalid pk \"{id}\" - object does not exist."),
-                    );
-                } else {
-                    out.assigned_pod_id = Some(Some(id));
-                }
+        } else if let Some(id) = validate_uuid_field(errors, "assigned_pod_id", value, false) {
+            // `Pod.all_objects`: tombstoned rows still resolve
+            // here; `validate()` reports them next.
+            let row: Option<(Uuid,)> = sqlx::query_as(r#"SELECT id FROM pod WHERE id = $1"#)
+                .bind(id)
+                .fetch_optional(pool)
+                .await
+                .unwrap_or(None);
+            if row.is_none() {
+                push_error(
+                    errors,
+                    "assigned_pod_id",
+                    format!("Invalid pk \"{id}\" - object does not exist."),
+                );
+            } else {
+                out.assigned_pod_id = Some(Some(id));
             }
         }
     }
@@ -1957,19 +1947,17 @@ pub async fn validate_intake_fields(
     if let Some(value) = input.get("duplicate_to") {
         if value.is_null() {
             out.duplicate_to = Some(None);
-        } else {
-            if let Some(id) = validate_pk(
-                pool,
-                errors,
-                "duplicate_to",
-                value,
-                duplicate_to_live_sql(),
-                false,
-            )
-            .await
-            {
-                out.duplicate_to = Some(Some(id));
-            }
+        } else if let Some(id) = validate_pk(
+            pool,
+            errors,
+            "duplicate_to",
+            value,
+            duplicate_to_live_sql(),
+            false,
+        )
+        .await
+        {
+            out.duplicate_to = Some(Some(id));
         }
     }
     if let Some(value) = input.get("snoozed_till") {
