@@ -148,7 +148,10 @@ async fn list_messages(
     for row in &rows {
         bodies.push(envelope(row));
     }
-    Ok(json_response(StatusCode::OK, format!("[{}]", bodies.join(","))))
+    Ok(json_response(
+        StatusCode::OK,
+        format!("[{}]", bodies.join(",")),
+    ))
 }
 
 /// Exact bytes of the message validation denials (`messages.py:72-81`).
@@ -238,19 +241,24 @@ async fn post_message(
         ));
     };
     if active_turn_id.is_some() {
-        return Err(json_response(StatusCode::CONFLICT, TURN_ACTIVE_BODY.to_owned()));
+        return Err(json_response(
+            StatusCode::CONFLICT,
+            TURN_ACTIVE_BODY.to_owned(),
+        ));
     }
     // `AssistantMessage.objects.filter(thread=locked).count() >=
     // MAX_THREAD_MESSAGES` (`errors.py:106`, 200; `messages.py:87-91`).
-    let (message_count,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM \"assistant_message\" WHERE \"thread_id\" = $1",
-    )
-    .bind(thread_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|_| server_error())?;
+    let (message_count,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM \"assistant_message\" WHERE \"thread_id\" = $1")
+            .bind(thread_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|_| server_error())?;
     if message_count >= 200 {
-        return Err(json_response(StatusCode::CONFLICT, THREAD_FULL_BODY.to_owned()));
+        return Err(json_response(
+            StatusCode::CONFLICT,
+            THREAD_FULL_BODY.to_owned(),
+        ));
     }
     // `AssistantTurn.objects.create(thread=locked, status=QUEUED)`
     // (`messages.py:92`): the ORM fills the remaining fields from their
@@ -304,7 +312,11 @@ async fn post_message(
     // verbatim (no re-truncation — `CharField.max_length` is not a database
     // constraint, so a legacy over-long title survives this path in Python
     // too).
-    let title = if title.is_empty() { title_from(&content) } else { title };
+    let title = if title.is_empty() {
+        title_from(&content)
+    } else {
+        title
+    };
     sqlx::query(
         "UPDATE \"assistant_thread\" SET \"active_turn_id\" = $1, \"title\" = $2, \
          \"updated_at\" = now() WHERE \"id\" = $3",
@@ -384,7 +396,10 @@ async fn cancel_turn(
         return Err(thread_not_found());
     };
     let Some(turn_id) = thread.active_turn_id else {
-        return Err(json_response(StatusCode::CONFLICT, NO_ACTIVE_TURN_BODY.to_owned()));
+        return Err(json_response(
+            StatusCode::CONFLICT,
+            NO_ACTIVE_TURN_BODY.to_owned(),
+        ));
     };
     signal_cancel(&state, &turn_id).await;
     Ok(Response::builder()

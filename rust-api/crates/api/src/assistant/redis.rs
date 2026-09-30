@@ -170,7 +170,9 @@ mod tests {
 
     #[test]
     fn cancel_command_pins_key_value_and_expiry() {
-        let turn: Uuid = "db68f428-df63-4de8-b060-2d4038a5b1f4".parse().expect("uuid");
+        let turn: Uuid = "db68f428-df63-4de8-b060-2d4038a5b1f4"
+            .parse()
+            .expect("uuid");
         assert_eq!(
             cancel_set_command(&turn),
             (
@@ -183,7 +185,9 @@ mod tests {
 
     #[test]
     fn throttle_key_uses_drf_cache_format() {
-        let user: Uuid = "a7107351-38ac-4f3d-91d5-ee34c2459bd6".parse().expect("uuid");
+        let user: Uuid = "a7107351-38ac-4f3d-91d5-ee34c2459bd6"
+            .parse()
+            .expect("uuid");
         assert_eq!(
             message_throttle_key(&user),
             "throttle_assistant_message_a7107351-38ac-4f3d-91d5-ee34c2459bd6"
@@ -194,7 +198,10 @@ mod tests {
     fn throttle_trips_at_thirty_per_hour() {
         let now = 1_700_000_000.0;
         let history: Vec<f64> = (0..30).map(|i| now - f64::from(i) * 60.0).collect();
-        assert_eq!(evaluate_message_throttle(&history, now), ThrottleVerdict::Deny);
+        assert_eq!(
+            evaluate_message_throttle(&history, now),
+            ThrottleVerdict::Deny
+        );
         assert_eq!(
             evaluate_message_throttle(&history[1..], now),
             ThrottleVerdict::Allow
@@ -217,7 +224,9 @@ mod tests {
 
     #[test]
     fn live_tail_channel_matches_publish_channel() {
-        let thread: Uuid = "db68f428-df63-4de8-b060-2d4038a5b1f4".parse().expect("uuid");
+        let thread: Uuid = "db68f428-df63-4de8-b060-2d4038a5b1f4"
+            .parse()
+            .expect("uuid");
         assert_eq!(
             live_tail_channel(&thread),
             "assistant:thread:db68f428-df63-4de8-b060-2d4038a5b1f4"

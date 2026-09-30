@@ -102,7 +102,18 @@ async fn list_threads(
     .await
     .map_err(|_| server_error())?;
     let mut bodies = Vec::with_capacity(rows.len());
-    for (id, workspace_id, user_id, title, kind, is_archived, active_turn_id, created_at, updated_at) in rows {
+    for (
+        id,
+        workspace_id,
+        user_id,
+        title,
+        kind,
+        is_archived,
+        active_turn_id,
+        created_at,
+        updated_at,
+    ) in rows
+    {
         bodies.push(thread_json(
             &ThreadRow {
                 id,
@@ -118,7 +129,10 @@ async fn list_threads(
             &actor.timezone,
         ));
     }
-    Ok(json_response(StatusCode::OK, format!("[{}]", bodies.join(","))))
+    Ok(json_response(
+        StatusCode::OK,
+        format!("[{}]", bodies.join(",")),
+    ))
 }
 
 /// Abandoned-empty-thread reaping (`threads.py:27-46`): delete this user's
@@ -171,7 +185,20 @@ async fn create_thread(
     let Some(workspace_id) = workspace_id_for_slug(pool, &slug).await? else {
         return Err(thread_not_found());
     };
-    let row = sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, String, bool, Option<Uuid>, DateTime<Utc>, DateTime<Utc>)>(
+    let row = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            Uuid,
+            String,
+            String,
+            bool,
+            Option<Uuid>,
+            DateTime<Utc>,
+            DateTime<Utc>,
+        ),
+    >(
         "INSERT INTO \"assistant_thread\" \
          (\"id\", \"workspace_id\", \"user_id\", \"title\", \"kind\", \"is_archived\", \
          \"active_turn_id\", \"created_at\", \"updated_at\") \
@@ -185,7 +212,17 @@ async fn create_thread(
     .fetch_one(pool)
     .await
     .map_err(|_| server_error())?;
-    let (id, workspace_id, user_id, title, kind, is_archived, active_turn_id, created_at, updated_at) = row;
+    let (
+        id,
+        workspace_id,
+        user_id,
+        title,
+        kind,
+        is_archived,
+        active_turn_id,
+        created_at,
+        updated_at,
+    ) = row;
     Ok(json_response(
         StatusCode::CREATED,
         thread_json(
@@ -239,7 +276,20 @@ async fn patch_thread(
         Some(value) => py_bool(value),
         None => thread.is_archived,
     };
-    let row = sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, String, bool, Option<Uuid>, DateTime<Utc>, DateTime<Utc>)>(
+    let row = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            Uuid,
+            String,
+            String,
+            bool,
+            Option<Uuid>,
+            DateTime<Utc>,
+            DateTime<Utc>,
+        ),
+    >(
         "UPDATE \"assistant_thread\" SET \"title\" = $1, \"is_archived\" = $2, \
          \"updated_at\" = now() WHERE \"id\" = $3 \
          RETURNING \"id\", \"workspace_id\", \"user_id\", \"title\", \"kind\", \
@@ -251,7 +301,17 @@ async fn patch_thread(
     .fetch_one(pool)
     .await
     .map_err(|_| server_error())?;
-    let (id, workspace_id, user_id, title, kind, is_archived, active_turn_id, created_at, updated_at) = row;
+    let (
+        id,
+        workspace_id,
+        user_id,
+        title,
+        kind,
+        is_archived,
+        active_turn_id,
+        created_at,
+        updated_at,
+    ) = row;
     Ok(json_response(
         StatusCode::OK,
         thread_json(

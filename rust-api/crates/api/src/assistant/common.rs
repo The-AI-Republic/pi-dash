@@ -1410,11 +1410,12 @@ pub async fn owned_thread(
 /// Unreachable once the member gate passes (a role implies the workspace),
 /// ported as written.
 pub async fn workspace_id_for_slug(pool: &PgPool, slug: &str) -> Result<Option<Uuid>, Response> {
-    let row: Option<(Uuid,)> = sqlx::query_as("SELECT \"id\" FROM \"workspaces\" WHERE \"slug\" = $1")
-        .bind(slug)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| server_error())?;
+    let row: Option<(Uuid,)> =
+        sqlx::query_as("SELECT \"id\" FROM \"workspaces\" WHERE \"slug\" = $1")
+            .bind(slug)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| server_error())?;
     Ok(row.map(|(id,)| id))
 }
 
@@ -1565,7 +1566,10 @@ pub fn title_from(content: &str) -> String {
 /// Borrow the Postgres pool from the state (500 when the binary runs without
 /// one — the license `pool_ref` precedent).
 pub fn pool_ref(state: &AppState) -> HandlerResult<&PgPool> {
-    state.pools().map(|pools| pools.primary()).ok_or_else(server_error)
+    state
+        .pools()
+        .map(|pools| pools.primary())
+        .ok_or_else(server_error)
 }
 
 /// Compact-JSON response with the DRF content type.
@@ -1621,9 +1625,11 @@ mod thread_surface_tests {
 
     #[test]
     fn py_iso_renders_python_isoformat_bytes() {
-        let whole =
-            DateTime::parse_from_rfc3339("2026-09-29T13:50:51+00:00").expect("parse");
-        assert_eq!(py_iso(&whole.with_timezone(&Utc)), "2026-09-29T13:50:51+00:00");
+        let whole = DateTime::parse_from_rfc3339("2026-09-29T13:50:51+00:00").expect("parse");
+        assert_eq!(
+            py_iso(&whole.with_timezone(&Utc)),
+            "2026-09-29T13:50:51+00:00"
+        );
         let micros =
             DateTime::parse_from_rfc3339("2026-09-29T13:50:51.378615+00:00").expect("parse");
         assert_eq!(
@@ -1668,10 +1674,7 @@ mod thread_surface_tests {
             or_empty_str(Some(&serde_json::json!("hi"))).expect("str"),
             "hi"
         );
-        assert_eq!(
-            or_empty_str(Some(&serde_json::json!(0))).expect("zero"),
-            ""
-        );
+        assert_eq!(or_empty_str(Some(&serde_json::json!(0))).expect("zero"), "");
         assert_eq!(
             or_empty_str(Some(&serde_json::json!([]))).expect("empty list"),
             ""
@@ -1709,7 +1712,9 @@ mod thread_surface_tests {
     #[test]
     fn thread_json_uses_serializer_field_order_and_z_stamps() {
         let row = ThreadRow {
-            id: "db68f428-df63-4de8-b060-2d4038a5b1f4".parse().expect("uuid"),
+            id: "db68f428-df63-4de8-b060-2d4038a5b1f4"
+                .parse()
+                .expect("uuid"),
             workspace_id: Uuid::nil(),
             user_id: Uuid::nil(),
             title: "Hi".to_owned(),

@@ -121,7 +121,11 @@ fn py_float(number: &serde_json::Number) -> String {
         let leading = frac_part.chars().take_while(|ch| *ch == '0').count();
         if leading == frac_part.len() {
             // Zero (or "0.000"): Python renders `0.0`.
-            return if negative { "-0.0".to_owned() } else { "0.0".to_owned() };
+            return if negative {
+                "-0.0".to_owned()
+            } else {
+                "0.0".to_owned()
+            };
         }
         -(leading as i32 + 1)
     };
@@ -291,15 +295,12 @@ async fn assistant_event_stream(
     };
     let thread_id: Uuid = thread_id.parse().map_err(|_| thread_not_found())?;
     let thread_found = match user_id {
-        Some(id) => {
-            super::common::owned_thread(pool, &thread_id, &id, &slug)
-                .await?
-                .is_some()
-        }
+        Some(id) => super::common::owned_thread(pool, &thread_id, &id, &slug)
+            .await?
+            .is_some(),
         None => false,
     };
-    let decision =
-        crate::assistant::perm::resolve_sse(authenticated, role, thread_found);
+    let decision = crate::assistant::perm::resolve_sse(authenticated, role, thread_found);
     if let Some(rejection) = crate::assistant::perm::sse_rejection(decision) {
         return Ok(rejection);
     }
@@ -380,11 +381,7 @@ async fn assistant_event_stream(
     };
     let (mut sender, body) = crate::sse_body::sse_channel();
     tokio::spawn(async move {
-        if sender
-            .send_data(bytes::Bytes::from(prefix))
-            .await
-            .is_err()
-        {
+        if sender.send_data(bytes::Bytes::from(prefix)).await.is_err() {
             let _ = pubsub.unsubscribe(channel.as_str()).await;
             return;
         }
@@ -410,9 +407,7 @@ async fn assistant_event_stream(
                 }
                 Err(_) => {
                     if sender
-                        .send_data(bytes::Bytes::from_static(
-                            SSE_KEEPALIVE_FRAME.as_bytes(),
-                        ))
+                        .send_data(bytes::Bytes::from_static(SSE_KEEPALIVE_FRAME.as_bytes()))
                         .await
                         .is_err()
                     {
