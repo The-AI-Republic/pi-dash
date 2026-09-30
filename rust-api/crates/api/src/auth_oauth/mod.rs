@@ -10,6 +10,10 @@
 //!   OAuth view shape (PIDASHCONV-331, AUTHOAUTH-F9).
 //! * [`device_flow`] — device start / approve / token-poll handlers +
 //!   route registration (PIDASHCONV-342, AUTHOAUTH-F12).
+//! * [`device_session`] — workspaces list, machine-token exchange, revoke
+//!   handlers + routes (PIDASHCONV-343, AUTHOAUTH-F12).
+//!
+//! [`routes`] merges both ported device families; merges keep both sides.
 //!
 //! # Wiring note
 //!
@@ -17,6 +21,7 @@
 //! port PR, following the PIDASHCONV-284 precedent).
 
 pub mod device_flow;
+pub mod device_session;
 pub mod guards;
 
 pub use guards::{
@@ -28,3 +33,8 @@ pub use guards::{
     OAUTH_SPACE_GITEA_INITIATE_SESSION_KEYS, OAUTH_SPACE_INITIATE_SESSION_KEYS, OAUTH_VIEW_BASE,
     OAUTH_VIEW_METHOD,
 };
+
+/// Routes for the ported device families (PIDASHCONV-342 + PIDASHCONV-343).
+pub fn routes() -> axum::Router<crate::state::AppState> {
+    device_flow::routes().merge(device_session::routes())
+}

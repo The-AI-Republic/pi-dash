@@ -209,9 +209,9 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // merge; merges keep both sides).
         RouteGroup::Assistant => crate::assistant::routes(),
         // ApiV1 handlers merge their routers here (device start/approve/
-        // token: PIDASHCONV-342; sibling device issue PIDASHCONV-343
-        // extends the merge; merges keep both sides).
-        RouteGroup::ApiV1 => crate::auth_oauth::device_flow::routes(),
+        // token: PIDASHCONV-342; workspaces/machine-token/revoke:
+        // PIDASHCONV-343; merges keep both sides).
+        RouteGroup::ApiV1 => crate::auth_oauth::routes(),
         RouteGroup::Runner | RouteGroup::RunnerWeb | RouteGroup::Auth => Router::new(),
     }
 }
