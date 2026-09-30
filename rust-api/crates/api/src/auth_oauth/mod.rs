@@ -14,6 +14,8 @@
 //!   handlers + routes (PIDASHCONV-343, AUTHOAUTH-F12).
 //! * [`oauth_gitea`] — Gitea app + space initiate/callback handlers +
 //!   routes (PIDASHCONV-341, AUTHOAUTH-F10/F11).
+//! * [`oauth_gitlab`] — GitLab app + space initiate/callback handlers +
+//!   routes (PIDASHCONV-339, AUTHOAUTH-F10/F11).
 //!
 //! [`routes`] merges both ported device families; merges keep both sides.
 //!
@@ -26,6 +28,7 @@ pub mod device_flow;
 pub mod device_session;
 pub mod guards;
 pub mod oauth_gitea;
+pub mod oauth_gitlab;
 
 pub use guards::{
     device_endpoint_guard, device_start_cache_key, device_start_throttle_rate,
