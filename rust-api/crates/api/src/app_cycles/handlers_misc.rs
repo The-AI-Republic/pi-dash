@@ -94,8 +94,10 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `handle_exception`'s `ObjectDoesNotExist` branch
 /// (`app/views/base.py:129-133`).
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// DRF's default `Http404` body (unresolvable project identifier).
-pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Not found."}"#;
+/// `Http404("Project not found")` (`db/models/project.py:218`),
+/// propagated by DRF's exception handler as `NotFound(*exc.args)`
+/// (unresolvable project identifier).
+pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Project not found"}"#;
 /// `handle_exception`'s generic 500 branch.
 pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `ValidationError` branch
@@ -147,7 +149,7 @@ pub enum Denial {
     Forbidden,
     /// 404, `ObjectDoesNotExist` branch.
     NotFound,
-    /// 404, DRF default `Http404` (unresolvable project identifier).
+    /// 404, `Http404("Project not found")` (unresolvable identifier).
     NotFoundDetail,
     /// 404, Django prod `custom_404_view` (garbage `<uuid:>` segment).
     PageNotFound,
@@ -313,7 +315,7 @@ pub struct Tenant {
 /// `_rewrite_project_kwarg` (`app/views/base.py:49-79`) accepts a UUID
 /// or a workspace-scoped project identifier (upper-cased, like
 /// `Project.save` normalizes it). An unresolvable identifier answers
-/// DRF's default `Http404` body; a missing project row answers the
+/// `Http404("Project not found")` (`db/models/project.py:218`); a missing project row answers the
 /// `ObjectDoesNotExist` branch (which is what `convert_to_utc`'s
 /// `Project.objects.get` raises on the date-check path).
 pub async fn resolve_tenant(
@@ -517,6 +519,45 @@ pub fn py_truthy(value: Option<&Value>) -> bool {
         Some(Value::Array(items)) => !items.is_empty(),
         Some(Value::Object(map)) => !map.is_empty(),
         Some(Value::Bool(true)) => true,
+    }
+}
+
+/// A `new_cycle_id` body value after the ORM coercion
+/// (`base.py:597-603` + `UUIDField.to_python`, probed live in
+/// `manage.py shell`): ints (and `True == 1`) become
+/// `uuid.UUID(int=v)` and miss the destination lookup (the ported
+/// 500); floats, negative ints, lists, dicts and non-UUID strings
+/// raise `ValidationError` → 400.
+pub enum NewCycleId {
+    /// Falsy (`false`/`0`/`""`/`[]`/`{}`/null/missing): 400 "required".
+    Required,
+    /// A destination id to look up (unknown → the ported 500).
+    Id(Uuid),
+    /// `ValidationError` → 400 InvalidDetail.
+    InvalidDetail,
+}
+
+pub fn classify_new_cycle_id(value: Option<&Value>) -> NewCycleId {
+    if !py_truthy(value) {
+        return NewCycleId::Required;
+    }
+    match value {
+        Some(Value::String(raw)) => match raw.parse::<Uuid>() {
+            Ok(id) => NewCycleId::Id(id),
+            Err(_) => NewCycleId::InvalidDetail,
+        },
+        // `True == 1`: `uuid.UUID(int=True)`.
+        Some(Value::Bool(true)) => NewCycleId::Id(Uuid::from_u128(1)),
+        Some(Value::Number(number)) => {
+            // Only non-negative integer reprs coerce (`uuid.UUID(int=v)`
+            // needs the 128-bit range; floats and negative ints raise).
+            if number.is_u64() {
+                NewCycleId::Id(Uuid::from_u128(u128::from(number.as_u64().expect("u64"))))
+            } else {
+                NewCycleId::InvalidDetail
+            }
+        }
+        _ => NewCycleId::InvalidDetail,
     }
 }
 
@@ -749,28 +790,18 @@ pub async fn transfer_issues(
         Ok(data) => data,
         Err(denial) => return denial.into_response(),
     };
-    // `request.data.get("new_cycle_id", False)` (`base.py:597-603`):
-    // falsy answers 400; a truthy non-UUID fails the pk lookup
-    // (`ValidationError` → 400, like the date-check cycle exclusion).
-    let new_cycle_raw = match data.get("new_cycle_id") {
-        Some(Value::String(raw)) if !raw.is_empty() => raw.clone(),
-        None | Some(Value::Null) => {
+    // `request.data.get("new_cycle_id", False)` + `if not ...`
+    // (`base.py:597-603`): falsy answers 400 "required"; truthy
+    // shapes follow the ORM coercion ([`classify_new_cycle_id`]).
+    let new_cycle_id = match classify_new_cycle_id(data.get("new_cycle_id")) {
+        NewCycleId::Required => {
             return raw_json_status(
                 StatusCode::BAD_REQUEST,
                 pidash_services::app_cycles::queries::NEW_CYCLE_ID_REQUIRED_BODY.to_owned(),
             );
         }
-        Some(Value::String(_)) => {
-            return raw_json_status(
-                StatusCode::BAD_REQUEST,
-                pidash_services::app_cycles::queries::NEW_CYCLE_ID_REQUIRED_BODY.to_owned(),
-            );
-        }
-        Some(_) => return Denial::InvalidDetail.into_response(),
-    };
-    let new_cycle_id = match new_cycle_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return Denial::InvalidDetail.into_response(),
+        NewCycleId::Id(id) => id,
+        NewCycleId::InvalidDetail => return Denial::InvalidDetail.into_response(),
     };
     match run_transfer(
         &state,
@@ -1314,13 +1345,23 @@ pub async fn movable_bridges(
         .collect())
 }
 
+/// Burndown range/today bound (`analytics_plot.py:160-166,246,260`):
+/// `(queryset.start_date + timedelta(days=x)).date()` and
+/// `timezone.now().date()`. The ORM datetimes are UTC-aware
+/// (`USE_TZ=True`) and `now()` is UTC, so both read UTC calendar
+/// dates. Only the `TruncDate("completed_at")` completion buckets are
+/// zone-local (mirrored with `AT TIME ZONE` in the queries below).
+pub fn burndown_utc_day(moment: DateTime<Utc>) -> NaiveDate {
+    moment.date_naive()
+}
+
 /// `burndown_plot(..., plot_type="issues")` (`analytics_plot.py:123-265`)
 /// over the OLD cycle: per-day pending counts from the start/end date
 /// range, future days `None`. `total` is the annotated `total_issues`
 /// (archived/draft-guarded); the per-day completed counts run over the
-/// same live-bridge scope. Dates truncate in the caller's zone
-/// (`TruncDate` honors the active timezone) and "today" is the caller's
-/// today — both UTC in the contract seeds.
+/// same live-bridge scope. Range endpoints and "today" are UTC dates
+/// ([`burndown_utc_day`]); only the completion buckets truncate in the
+/// caller's zone — all UTC in the contract seeds.
 #[allow(clippy::too_many_arguments)]
 pub async fn burndown_issues_value(
     pool: &PgPool,
@@ -1347,15 +1388,15 @@ pub async fn burndown_issues_value(
     .fetch_all(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    let today = Utc::now().with_timezone(timezone).date_naive();
+    let today = burndown_utc_day(Utc::now());
     let completed: Vec<(Option<NaiveDate>, f64)> = rows
         .into_iter()
         .map(|(day, count)| (day, count as f64))
         .collect();
     Ok(Value::Object(burndown_chart(
         total,
-        start.map(|start| start.with_timezone(timezone).date_naive()),
-        end.map(|end| end.with_timezone(timezone).date_naive()),
+        start.map(burndown_utc_day),
+        end.map(burndown_utc_day),
         &completed,
         today,
     )))
@@ -1406,7 +1447,7 @@ pub async fn burndown_points_value(
     .fetch_all(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    let today = Utc::now().with_timezone(timezone).date_naive();
+    let today = burndown_utc_day(Utc::now());
     let total_value = match total {
         Some(sum) => Value::from(sum),
         // `sum([])` is int `0`, not `0.0` — the JSON shape differs.
@@ -1418,8 +1459,8 @@ pub async fn burndown_points_value(
         .collect();
     Ok(Value::Object(burndown_chart_float(
         total_value,
-        start.map(|start| start.with_timezone(timezone).date_naive()),
-        end.map(|end| end.with_timezone(timezone).date_naive()),
+        start.map(burndown_utc_day),
+        end.map(burndown_utc_day),
         &completed,
         today,
     )))
@@ -2333,6 +2374,83 @@ mod tests {
         assert_eq!(chart["2024-06-10"], Value::from(5));
         assert_eq!(chart["2024-06-11"], Value::Null);
         assert_eq!(chart["2024-06-12"], Value::Null);
+    }
+
+    #[test]
+    fn new_cycle_id_classification_matches_orm_coercion() {
+        // `base.py:597-603` + `UUIDField.to_python`, probed live in
+        // `manage.py shell`: falsy → required; ints/`True` coerce to a
+        // `UUID(int=v)` lookup id (unknown → the ported 500); floats,
+        // negative ints, lists, dicts and non-UUID strings →
+        // `ValidationError` → 400.
+        assert!(matches!(classify_new_cycle_id(None), NewCycleId::Required));
+        assert!(matches!(
+            classify_new_cycle_id(Some(&Value::Bool(false))),
+            NewCycleId::Required
+        ));
+        assert!(matches!(
+            classify_new_cycle_id(Some(&serde_json::json!(0))),
+            NewCycleId::Required
+        ));
+        assert!(matches!(
+            classify_new_cycle_id(Some(&serde_json::json!([]))),
+            NewCycleId::Required
+        ));
+        assert!(matches!(
+            classify_new_cycle_id(Some(&serde_json::json!({}))),
+            NewCycleId::Required
+        ));
+        let id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
+        assert!(matches!(
+            classify_new_cycle_id(Some(&Value::String(id.to_string()))),
+            NewCycleId::Id(got) if got == id
+        ));
+        assert!(matches!(
+            classify_new_cycle_id(Some(&serde_json::json!(5))),
+            NewCycleId::Id(got) if got == Uuid::from_u128(5)
+        ));
+        assert!(matches!(
+            classify_new_cycle_id(Some(&Value::Bool(true))),
+            NewCycleId::Id(got) if got == Uuid::from_u128(1)
+        ));
+        assert!(matches!(
+            classify_new_cycle_id(Some(&serde_json::json!(5.0))),
+            NewCycleId::InvalidDetail
+        ));
+        assert!(matches!(
+            classify_new_cycle_id(Some(&serde_json::json!(-5))),
+            NewCycleId::InvalidDetail
+        ));
+        assert!(matches!(
+            classify_new_cycle_id(Some(&serde_json::json!([1]))),
+            NewCycleId::InvalidDetail
+        ));
+        assert!(matches!(
+            classify_new_cycle_id(Some(&serde_json::json!({"a": 1}))),
+            NewCycleId::InvalidDetail
+        ));
+        assert!(matches!(
+            classify_new_cycle_id(Some(&Value::String("not-a-uuid".to_owned()))),
+            NewCycleId::InvalidDetail
+        ));
+    }
+
+    #[test]
+    fn burndown_bounds_use_utc_dates() {
+        // Regression (`analytics_plot.py:160-166`): the range endpoints
+        // and "today" are UTC dates, not caller-zone dates.
+        // 2025-12-31T23:30Z is already 2026-01-01 in Asia/Kolkata, so
+        // the zone-local derivation opens the range a day late.
+        let moment = Utc.with_ymd_and_hms(2025, 12, 31, 23, 30, 0).unwrap();
+        let kolkata: Tz = "Asia/Kolkata".parse().expect("tz");
+        assert_eq!(
+            moment.with_timezone(&kolkata).date_naive(),
+            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()
+        );
+        assert_eq!(
+            burndown_utc_day(moment),
+            NaiveDate::from_ymd_opt(2025, 12, 31).unwrap()
+        );
     }
 
     #[test]
