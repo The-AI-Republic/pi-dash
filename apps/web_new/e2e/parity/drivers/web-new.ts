@@ -70,6 +70,8 @@ export class WebNewDriver implements ParityDriver {
 
   async mentionsEnsureSignedIn(_email: string, _password: string): Promise<void> {
     return todo("mentionsEnsureSignedIn");
+  }
+
   // Workspace onboarding + creation (NEWFRONT-111, AUTH-034..043). Throwing
   // stubs until the onboarding and workspace-creation areas land in
   // apps/web_new; the oracle driver already implements these.

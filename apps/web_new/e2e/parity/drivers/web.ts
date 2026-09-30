@@ -333,6 +333,7 @@ export class WebDriver implements ParityDriver {
     // The edited plain text appearing while the old body disappears proves
     // the save landed.
     await page.getByText(plainText).first().waitFor({ timeout: 60_000 });
+  }
   // -------------------------------------------------------------------------
   // Workspace onboarding + creation (NEWFRONT-111, rows AUTH-034..043).
   // Selectors follow the running old app: onboarding step headings render as

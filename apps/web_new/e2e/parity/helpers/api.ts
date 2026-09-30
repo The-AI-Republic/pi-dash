@@ -361,6 +361,7 @@ export async function serverUsableSeedIssue(
   throw new Error(
     "[parity] every seeded issue currently resolves to intake; re-run the stack seed step to reset triage state."
   );
+}
 // ---------------------------------------------------------------------------
 // Workspace-onboarding parity helpers (NEWFRONT-111, rows AUTH-034..043).
 //
