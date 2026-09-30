@@ -782,10 +782,11 @@ async fn insert_profile(
     now: chrono::DateTime<chrono::Utc>,
     user_id: &uuid::Uuid,
 ) -> Result<(), sqlx::Error> {
-    let color = format!("#{}", django_random_string(6).to_lowercase());
+    // `get_random_color` (`utils/color.py:9`): `#` + six hex digits.
+    let color = format!("#{}", hex_encode(&uuid::Uuid::new_v4().into_bytes()[..3]));
     sqlx::query(
-        "INSERT INTO \"profiles\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \
-         \"updated_by_id\", \"deleted_at\", \"user_id\", \"theme\", \"is_app_rail_docked\", \
+        "INSERT INTO \"profiles\" (\"id\", \"created_at\", \"updated_at\", \
+         \"user_id\", \"theme\", \"is_app_rail_docked\", \
          \"is_tour_completed\", \"onboarding_step\", \"use_case\", \"role\", \"is_onboarded\", \
          \"last_workspace_id\", \"billing_address_country\", \"billing_address\", \
          \"has_billing_address\", \"company_name\", \"notification_view_mode\", \
@@ -793,7 +794,7 @@ async fn insert_profile(
          \"mobile_timezone_auto_set\", \"language\", \"start_of_the_week\", \"goals\", \
          \"background_color\", \"is_navigation_tour_completed\", \"has_marketing_email_consent\", \
          \"is_subscribed_to_changelog\", \"product_tour\", \"settings\") \
-         VALUES ($1, $2, $2, NULL, NULL, NULL, $3, '{}', TRUE, FALSE, \
+         VALUES ($1, $2, $2, $3, '{}', TRUE, FALSE, \
          '{\"profile_complete\": false, \"workspace_create\": false, \
            \"workspace_invite\": false, \"workspace_join\": false}', \
          NULL, NULL, FALSE, NULL, 'INDIA', NULL, FALSE, '', 'full', FALSE, FALSE, \
@@ -874,9 +875,11 @@ async fn get_or_create_profile(
     now: chrono::DateTime<chrono::Utc>,
     user_id: &uuid::Uuid,
 ) -> Result<(bool, Option<uuid::Uuid>), sqlx::Error> {
+    // `Profile` extends `TimeAuditModel` (`user.py:200`), not the full
+    // `BaseModel`: no `deleted_at` soft-delete column, so no filter here.
     let row: Option<(bool, Option<uuid::Uuid>)> = sqlx::query_as(
         "SELECT \"is_onboarded\", \"last_workspace_id\" FROM \"profiles\" \
-         WHERE \"user_id\" = $1 AND \"deleted_at\" IS NULL LIMIT 1",
+         WHERE \"user_id\" = $1 LIMIT 1",
     )
     .bind(user_id)
     .fetch_optional(pool)
