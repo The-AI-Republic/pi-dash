@@ -433,12 +433,19 @@ pub fn distribution_count_sql(completed: Option<bool>) -> String {
 }
 
 /// Estimate-flavoured assignee row keys (`base.py:461-467`).
+///
+/// Live-Django key order, NOT the `.values()` call order: `.values()`
+/// dicts emit concrete (joined-model `F()`) fields first in call order —
+/// `first_name`, `last_name`, `assignee_id`, `display_name` — and `Case`
+/// annotations after (`avatar_url`), so `display_name` precedes
+/// `avatar_url` even though the `.values()` call lists `avatar_url` first.
+/// Verified byte-for-byte against Django during PIDASHCONV-391.
 pub const ASSIGNEE_ESTIMATE_ROW_KEYS: &[&str] = &[
     "first_name",
     "last_name",
     "assignee_id",
-    "avatar_url",
     "display_name",
+    "avatar_url",
     "total_estimates",
     "completed_estimates",
     "pending_estimates",
@@ -455,12 +462,15 @@ pub const LABEL_ESTIMATE_ROW_KEYS: &[&str] = &[
 ];
 
 /// Count-flavoured assignee row keys (`base.py:566`).
+///
+/// Same concrete-first rule as [`ASSIGNEE_ESTIMATE_ROW_KEYS`]: live Django
+/// renders `display_name` before the `avatar_url` `Case` annotation.
 pub const ASSIGNEE_COUNT_ROW_KEYS: &[&str] = &[
     "first_name",
     "last_name",
     "assignee_id",
-    "avatar_url",
     "display_name",
+    "avatar_url",
     "total_issues",
     "completed_issues",
     "pending_issues",
@@ -871,11 +881,24 @@ mod tests {
                 "first_name",
                 "last_name",
                 "assignee_id",
-                "avatar_url",
                 "display_name",
+                "avatar_url",
                 "total_estimates",
                 "completed_estimates",
                 "pending_estimates",
+            ]
+        );
+        assert_eq!(
+            ASSIGNEE_COUNT_ROW_KEYS,
+            &[
+                "first_name",
+                "last_name",
+                "assignee_id",
+                "display_name",
+                "avatar_url",
+                "total_issues",
+                "completed_issues",
+                "pending_issues",
             ]
         );
         assert_eq!(
