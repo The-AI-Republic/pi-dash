@@ -11,6 +11,15 @@
 	handle /api/* {
 		reverse_proxy api:8000
 	}
+	# The device-approval page is a frontend route, but it lives under
+	# /auth/device, which the /auth/* rule below would send to Django
+	# (Django 404s it — it has no page there). The backend itself
+	# advertises this URL as the CLI verification_uri, so the page must
+	# reach the frontend. First match wins: this exception stays ahead.
+	# (NEWFRONT-109: exact /auth/device and anything beneath it.)
+	handle /auth/device* {
+		reverse_proxy oracle:3000
+	}
 	handle /auth/* {
 		reverse_proxy api:8000
 	}

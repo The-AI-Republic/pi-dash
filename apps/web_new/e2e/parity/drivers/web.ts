@@ -6000,4 +6000,155 @@ export class WebDriver implements ParityDriver {
     this.patchFailureRoute = undefined;
     if (current) await this.page.unroute(current.matches, current.handler).catch(() => {});
   }
+
+  private async waitForSignedOut(): Promise<void> {
+    // Every sign-out path lands back on the signed-out entry (sign-in card).
+    await this.page.getByPlaceholder("name@company.com").first().waitFor({ timeout: 60_000 });
+  }
+
+  private async openAccountMenu(): Promise<void> {
+    // The sidebar user menu trigger is the avatar button at the foot of the
+    // sidebar. It can sit outside the test viewport, so open it with a click
+    // dispatched on the element itself rather than a viewport-gated click.
+    const trigger = this.page.locator("aside").getByRole("button").last();
+    await trigger.waitFor();
+    await trigger.evaluate((el) => (el as HTMLElement).click());
+  }
+
+  private async clickAccountMenuItem(name: string): Promise<void> {
+    // The floating menu can render where the test viewport cannot reach it
+    // (the trigger itself lives outside the viewport), so activate the item
+    // on the element itself rather than with a viewport-gated click. The
+    // action handler lives on the inner button, not the menuitem wrapper.
+    const action = this.page.getByRole("menuitem", { name }).getByRole("button");
+    await action.waitFor();
+    await action.evaluate((el) => (el as HTMLElement).click());
+  }
+
+  async signOutViaAccountMenu(): Promise<void> {
+    await this.openAccountMenu();
+    await this.clickAccountMenuItem("Sign out");
+    await this.waitForSignedOut();
+  }
+
+  async signOutViaCommandPalette(): Promise<void> {
+    const page = this.page;
+    await page.keyboard.press("ControlOrMeta+k");
+    const search = page.locator("[cmdk-input]");
+    // The palette chunk compiles on first open on a dev server; allow room.
+    await search.waitFor({ timeout: 120_000 });
+    await search.fill("Sign out");
+    await page
+      .locator("[cmdk-item]")
+      .filter({ hasText: /sign out/i })
+      .first()
+      .click();
+    await this.waitForSignedOut();
+  }
+
+  async isSignedOut(): Promise<boolean> {
+    return this.page.getByPlaceholder("name@company.com").first().isVisible();
+  }
+
+  async openSwitchAccount(): Promise<void> {
+    const page = this.page;
+    // The onboarding header names the signed-in account; its menu carries
+    // the "Wrong e-mail address?" switch-account entry.
+    await page.getByText("Wrong e-mail address?", { exact: true }).waitFor({ state: "attached" });
+    const headerButton = page.locator("header").getByRole("button").first();
+    await headerButton.click();
+    await page.getByText("Wrong e-mail address?", { exact: true }).click();
+    await page.getByRole("heading", { name: "Switch account" }).waitFor();
+  }
+
+  async switchAccountEmail(): Promise<string> {
+    // The dialog names the active account in its explanatory copy.
+    const dialog = this.page.getByRole("dialog");
+    const body = (await dialog.innerText()).trim();
+    const match = /[\w.+-]+@[\w-]+\.[\w.]+/.exec(body);
+    if (!match) throw new Error("[parity] switch-account dialog names no email.");
+    return match[0];
+  }
+
+  async confirmSwitchAccount(): Promise<void> {
+    await this.page.getByRole("dialog").getByRole("button", { name: "Switch account" }).click();
+    await this.waitForSignedOut();
+  }
+
+  async openDeactivateAccount(): Promise<void> {
+    const page = this.page;
+    await this.openAccountMenu();
+    await this.clickAccountMenuItem("Settings");
+    const deactivate = page.getByRole("button", { name: "Deactivate account" });
+    await deactivate.scrollIntoViewIfNeeded();
+    await deactivate.click();
+    await page.getByRole("heading", { name: "Deactivate your account" }).waitFor();
+  }
+
+  async confirmDeactivation(): Promise<void> {
+    await this.page.getByRole("dialog").getByRole("button", { name: "Confirm" }).click();
+    await this.waitForSignedOut();
+  }
+
+  async dropSession(): Promise<void> {
+    // Clear every cookie in the browser context: the next authenticated
+    // request behaves like an expired session.
+    await this.page.context().clearCookies();
+  }
+
+  async visit(path: string): Promise<void> {
+    await this.page.goto(path);
+  }
+
+  async showsText(text: string): Promise<boolean> {
+    return this.page.getByText(text, { exact: false }).first().isVisible();
+  }
+
+  private deviceCodeField(): Locator {
+    // The approval form carries a single code input; it auto-formats XXXX-YYYY.
+    return this.page.locator('form input[type="text"]').first();
+  }
+
+  async typeDeviceCode(code: string): Promise<void> {
+    const field = this.deviceCodeField();
+    await field.waitFor();
+    await field.fill("");
+    await field.pressSequentially(code, { delay: 20 });
+  }
+
+  async deviceCodeFieldValue(): Promise<string> {
+    const field = this.deviceCodeField();
+    await field.waitFor();
+    return field.inputValue();
+  }
+
+  async submitDeviceApproval(): Promise<void> {
+    const form = this.page.locator("form", { has: this.deviceCodeField() });
+    await form.getByRole("button", { name: /approve/i }).click();
+  }
+
+  async pressKey(key: string): Promise<void> {
+    await this.page.keyboard.press(key);
+  }
+
+  async typeText(text: string): Promise<void> {
+    await this.page.keyboard.type(text);
+  }
+
+  async focusedControlName(): Promise<string | null> {
+    return this.page.evaluate(() => {
+      const active = document.activeElement as HTMLElement | null;
+      if (!active) return null;
+      const labelled = active.getAttribute("aria-label") ?? active.getAttribute("placeholder");
+      if (labelled && labelled.trim()) return labelled.trim();
+      const labelledBy = active.getAttribute("aria-labelledby");
+      if (labelledBy) {
+        const label = document.getElementById(labelledBy)?.textContent?.trim();
+        if (label) return label;
+      }
+      if (active.tagName === "BUTTON") return active.textContent?.trim() || "button";
+      if (active.tagName === "BODY") return null;
+      return active.tagName.toLowerCase();
+    });
+  }
 }

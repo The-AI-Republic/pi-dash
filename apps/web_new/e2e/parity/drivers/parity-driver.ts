@@ -1192,6 +1192,41 @@ export interface ParityDriver {
   failNextIssuePatch(status: number, delayMs: number): Promise<void>;
   /** Remove any issue-PATCH failure route. */
   clearIssuePatchFailure(): Promise<void>;
+
+  /** Sign out through the sidebar account menu; ends at the signed-out entry. */
+  signOutViaAccountMenu(): Promise<void>;
+  /** Sign out through the command palette; ends at the signed-out entry. */
+  signOutViaCommandPalette(): Promise<void>;
+  /** Whether the app currently shows the signed-out entry (sign-in card). */
+  isSignedOut(): Promise<boolean>;
+  /** Open the switch-account control on the onboarding header. */
+  openSwitchAccount(): Promise<void>;
+  /** Email named as the active account by the switch-account dialog. */
+  switchAccountEmail(): Promise<string>;
+  /** Confirm account switching; routes through sign-out into a fresh login. */
+  confirmSwitchAccount(): Promise<void>;
+  /** Open the deactivate-account dialog from profile settings. */
+  openDeactivateAccount(): Promise<void>;
+  /** Confirm deactivation; disables the account and signs out. */
+  confirmDeactivation(): Promise<void>;
+  /** Drop the local session cookies (simulates expiry) without using the UI. */
+  dropSession(): Promise<void>;
+  /** Follow a link verbatim (deep links, denial URLs, error landings). */
+  visit(path: string): Promise<void>;
+  /** Whether the given text is visible anywhere on screen. */
+  showsText(text: string): Promise<boolean>;
+  /** Type a device code into the approval form (auto-formats as typed). */
+  typeDeviceCode(code: string): Promise<void>;
+  /** Current value of the device-code field (proves auto-formatting). */
+  deviceCodeFieldValue(): Promise<string>;
+  /** Submit the device-approval form. */
+  submitDeviceApproval(): Promise<void>;
+  /** Press a key for keyboard-only driving. */
+  pressKey(key: string): Promise<void>;
+  /** Type text into the currently focused control. */
+  typeText(text: string): Promise<void>;
+  /** Accessible name of the currently focused control, or null. */
+  focusedControlName(): Promise<string | null>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */
