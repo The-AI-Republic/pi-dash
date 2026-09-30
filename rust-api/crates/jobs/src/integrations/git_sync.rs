@@ -520,12 +520,14 @@ pub fn provider_error_label(error: &GitProviderError) -> &'static str {
     }
 }
 
-/// `f"{TypeName}: {msg}"[:900]` for binding error recording
-/// (`git_sync_task.py:269`).
+/// `f"{TypeName}: {msg[:900]}"` for binding error recording
+/// (`git_sync_task.py:269`): only the message is truncated, the label is
+/// prepended whole.
 pub fn binding_error_text(error: &GitProviderError) -> String {
-    truncate_chars(
-        &format!("{}: {}", provider_error_label(error), error.message()),
-        900,
+    format!(
+        "{}: {}",
+        provider_error_label(error),
+        truncate_chars(error.message(), 900),
     )
 }
 
@@ -534,10 +536,11 @@ pub fn unexpected_error_text(message: &str) -> String {
     truncate_chars(message, 1000)
 }
 
-/// `f"{TypeName}: {msg}"[:500]` / `str(e)[:500]` for the completion path
-/// (`git_sync_task.py:312,317`).
+/// `f"{TypeName}: {msg[:500]}"` / `str(e)[:500]` for the completion path
+/// (`git_sync_task.py:312,317`): only the message is truncated, the label
+/// is prepended whole.
 pub fn completion_error_text(label: &str, message: &str) -> String {
-    truncate_chars(&format!("{label}: {message}"), 500)
+    format!("{label}: {}", truncate_chars(message, 500))
 }
 
 /// Absolute deep-link to an issue in the Pi Dash UI
@@ -2888,10 +2891,30 @@ mod tests {
             "GitProviderNotFoundError: gone"
         );
         assert!(binding_error_text(&GitProviderError::Auth("x".into())).len() < 900);
+        // Message-only truncation (`git_sync_task.py:269`):
+        // a 1000-char message keeps all 900 chars after the label.
+        assert_eq!(
+            binding_error_text(&GitProviderError::Auth("x".repeat(1000))),
+            format!("GitProviderAuthError: {}", "x".repeat(900))
+        );
+        assert_eq!(
+            binding_error_text(&GitProviderError::NotFound("é".repeat(1000))),
+            format!("GitProviderNotFoundError: {}", "é".repeat(900))
+        );
         assert_eq!(truncate_chars(&"é".repeat(1000), 900).chars().count(), 900);
         assert_eq!(
             unexpected_error_text(&"e".repeat(2000)).chars().count(),
             1000
+        );
+        // Message-only truncation (`git_sync_task.py:312`):
+        // a 600-char message keeps all 500 chars after the label.
+        assert_eq!(
+            completion_error_text("GitProviderAuthError", &"y".repeat(600)),
+            format!("GitProviderAuthError: {}", "y".repeat(500))
+        );
+        assert_eq!(
+            completion_error_text("GitProviderPermissionError", &"é".repeat(600)),
+            format!("GitProviderPermissionError: {}", "é".repeat(500))
         );
         assert_eq!(
             completion_error_text("GitProviderAuthError", "denied"),

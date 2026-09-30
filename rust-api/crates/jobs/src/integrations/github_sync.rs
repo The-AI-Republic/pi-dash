@@ -268,9 +268,10 @@ pub fn mirror_comment_stripped(comment_html: &str) -> String {
     strip_html_text(comment_html)
 }
 
-/// `f"{TypeName}: {msg}"[:900]` for scan error recording
+/// `f"{TypeName}: {msg[:900]}"` for scan error recording
 /// (`github_sync_task.py:329`): `GithubAuthError` /
-/// `GithubPermissionError` / `GithubNotFoundError`.
+/// `GithubPermissionError` / `GithubNotFoundError`. Only the message is
+/// truncated, the label is prepended whole.
 pub fn scan_error_label(error: &GithubError) -> &'static str {
     match error {
         GithubError::Auth(_) => "GithubAuthError",
@@ -280,11 +281,12 @@ pub fn scan_error_label(error: &GithubError) -> &'static str {
     }
 }
 
-/// `f"{TypeName}: {msg}"[:900]` (`github_sync_task.py:329`).
+/// `f"{TypeName}: {msg[:900]}"` (`github_sync_task.py:329`).
 pub fn scan_error_text(error: &GithubError) -> String {
-    truncate_chars(
-        &format!("{}: {}", scan_error_label(error), error.message()),
-        900,
+    format!(
+        "{}: {}",
+        scan_error_label(error),
+        truncate_chars(error.message(), 900),
     )
 }
 
@@ -2211,6 +2213,24 @@ mod tests {
             "GithubError: boom"
         );
         assert_eq!(truncate_chars(&"é".repeat(1000), 900).chars().count(), 900);
+        // Message-only truncation (`github_sync_task.py:329`):
+        // a 1000-char message keeps all 900 chars after the label.
+        assert_eq!(
+            scan_error_text(&GithubError::Auth("x".repeat(1000))),
+            format!("GithubAuthError: {}", "x".repeat(900))
+        );
+        assert_eq!(
+            scan_error_text(&GithubError::NotFound("é".repeat(1000))),
+            format!("GithubNotFoundError: {}", "é".repeat(900))
+        );
+        assert_eq!(
+            completion_error_text("GithubAuthError", &"y".repeat(600)),
+            format!("GithubAuthError: {}", "y".repeat(500))
+        );
+        assert_eq!(
+            completion_error_text("GithubPermissionError", &"é".repeat(600)),
+            format!("GithubPermissionError: {}", "é".repeat(500))
+        );
         assert_eq!(
             completion_error_text("GithubAuthError", "denied"),
             "GithubAuthError: denied"
