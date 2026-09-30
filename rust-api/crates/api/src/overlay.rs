@@ -227,7 +227,11 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // initiate/callback, PIDASHCONV-341; GitHub OAuth initiate/callback,
         // PIDASHCONV-336; GitLab OAuth initiate/callback, PIDASHCONV-339;
         // Google OAuth app + space initiate/callback, PIDASHCONV-335;
-        // email sessions, PIDASHCONV-422; merges keep both sides).
+        // email sessions, PIDASHCONV-422; magic-link generate /
+        // sign-in / sign-up, app + space, PIDASHCONV-431;
+        // merges keep both sides).
+        // Registration is the cutover granularity — sibling `auth/`
+        // paths have no Rust route and keep proxying to Django.
         RouteGroup::Auth => crate::auth_oauth::oauth_gitea::routes()
             .merge(crate::auth_oauth::oauth_github::routes())
             .merge(crate::auth_oauth::oauth_gitlab::routes())

@@ -33,11 +33,18 @@
 //!   Celery v2 emit builders (task names, positional arg orders, triggering
 //!   conditions) and the magic redis pre-state builders.
 //!
+//! Plus the magic provider kernel named by PIDASHCONV-431:
+//!
+//! * [`magic`] — `MagicCodeProvider` decisions (`initiate` / `set_user_data`
+//!   branches, `__init__` gates, token mapping) over the [`tasks`] redis
+//!   builders.
+//!
 //! Sibling D-16 issues (handlers, guards, queries, tasks) consume these pieces
 //! read-only.
 
 pub mod email;
 pub mod guards;
+pub mod magic;
 pub mod models;
 pub mod queries;
 pub mod shapes;
