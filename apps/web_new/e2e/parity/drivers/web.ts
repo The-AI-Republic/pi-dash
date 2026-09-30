@@ -27,8 +27,233 @@ export class WebDriver implements ParityDriver {
     await this.waitForCard();
   }
 
+  async currentPath(): Promise<string> {
+    const url = new URL(this.page.url());
+    return `${url.pathname}${url.search}`;
+  }
+
   private submitOf(form: Locator): Locator {
     return form.locator('button[type="submit"]');
+  }
+
+  private emailField(): Locator {
+    return this.page.getByPlaceholder("name@company.com").first();
+  }
+
+  private passwordField(): Locator {
+    return this.page.getByPlaceholder("Enter password").first();
+  }
+
+  private confirmField(): Locator {
+    return this.page.getByPlaceholder("Confirm password").first();
+  }
+
+  private codeField(): Locator {
+    return this.page.getByPlaceholder("123456").first();
+  }
+
+  async openSignUp(params?: { email?: string; nextPath?: string }): Promise<void> {
+    const query = new URLSearchParams();
+    if (params?.email !== undefined) query.set("email", params.email);
+    if (params?.nextPath !== undefined) query.set("next_path", params.nextPath);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    await this.page.goto(`/sign-up${suffix}`);
+    await this.waitForContent("sign-up card", () => this.emailField().waitFor({ timeout: 30_000 }));
+  }
+
+  private async waitForContent(label: string, wait: () => Promise<unknown>): Promise<void> {
+    // A throttled loader minute can serve the route-error shell instead of
+    // the page; one reload recovers the oracle. The anonymous throttle is
+    // wide on the scratch stack, so a short settle suffices here (the
+    // authentication-scope backoff lives in submitAuthEmail).
+    try {
+      await wait();
+    } catch {
+      // eslint-disable-next-line no-console -- oracle runs surface retries in the log.
+      console.log(`[parity] ${label} content missing; settling and reloading once.`);
+      await this.page.waitForTimeout(20_000);
+      await this.page.reload();
+      await wait();
+    }
+  }
+
+  private async nextAuthStepShown(timeoutMs: number): Promise<boolean> {
+    const password = this.passwordField()
+      .waitFor({ state: "visible", timeout: timeoutMs })
+      .then(
+        () => true,
+        () => false
+      );
+    const code = this.codeField()
+      .waitFor({ state: "visible", timeout: timeoutMs })
+      .then(
+        () => true,
+        () => false
+      );
+    const [passwordShown, codeShown] = await Promise.all([password, code]);
+    return passwordShown || codeShown;
+  }
+
+  async submitAuthEmail(email: string): Promise<void> {
+    const field = this.emailField();
+    const form = this.page.locator("form", { has: field });
+    // A saturated throttle minute answers the check with a rate-limit
+    // banner instead of advancing; wait out the window and resubmit.
+    for (let attempt = 1; ; attempt += 1) {
+      await field.fill(email);
+      await this.submitOf(form).click();
+      if (await this.nextAuthStepShown(30_000)) return;
+      const banner = await this.authBanner();
+      if (banner !== null && /rate limit/i.test(banner) && attempt < 3) {
+        // eslint-disable-next-line no-console -- oracle runs surface retries in the log.
+        console.log(`[parity] email-check throttled (attempt ${attempt}/3); waiting out the window.`);
+        await this.page.waitForTimeout(65_000);
+        continue;
+      }
+      if (await this.nextAuthStepShown(60_000)) return;
+      throw new Error("[parity] email submit advanced to neither password nor code step.");
+    }
+  }
+
+  // NOTE (rebase over NEWFRONT-107): the shared authStep keeps the wider
+  // implementation below (it also detects "unavailable"/"unknown" for the
+  // sign-in core). It keys on the same card placeholders this area uses, so
+  // the sign-up/recovery scenarios observe identical steps.
+  async authEmailValue(): Promise<string> {
+    return this.emailField().inputValue();
+  }
+
+  async authNextPathValue(): Promise<string | null> {
+    const hidden = this.page.locator('input[type="hidden"][name="next_path"]');
+    if ((await hidden.count()) === 0) return null;
+    return hidden.first().getAttribute("value");
+  }
+
+  private async clickNativeSubmit(form: Locator): Promise<void> {
+    // The old app posts native forms, so every submit ends in a full page
+    // load; wait for the URL to move (success and failure both redirect).
+    // Bounded: a submit that never navigates (disabled button, missing CSRF
+    // token) is a real failure and must surface instead of eating the test
+    // budget.
+    const before = this.page.url();
+    await Promise.all([
+      this.page.waitForURL((url) => url.href !== before, { timeout: 60_000 }),
+      this.submitOf(form).click(),
+    ]);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async signUpWithPassword(password: string, confirmPassword: string): Promise<void> {
+    await this.passwordField().fill(password);
+    await this.confirmField().fill(confirmPassword);
+    await this.clickNativeSubmit(this.page.locator("form", { has: this.passwordField() }));
+  }
+
+  async submitUniqueCode(code: string): Promise<void> {
+    const field = this.codeField();
+    await field.fill(code);
+    await this.clickNativeSubmit(this.page.locator("form", { has: field }));
+  }
+
+  async codeResendState(): Promise<{ disabled: boolean; label: string }> {
+    const button = this.page.getByRole("button", { name: /resend|requesting new code/i });
+    await button.waitFor({ timeout: 30_000 });
+    const label = ((await button.textContent()) ?? "").trim().replace(/\s+/g, " ");
+    return { disabled: await button.isDisabled(), label };
+  }
+
+  async requestNewCode(): Promise<void> {
+    await this.page.getByRole("button", { name: /resend|requesting new code/i }).click();
+  }
+
+  async passwordSubmitEnabled(): Promise<boolean> {
+    const form = this.page.locator("form", { has: this.passwordField() });
+    return this.submitOf(form).isEnabled();
+  }
+
+  async fillPasswordFields(password: string, confirmPassword: string): Promise<void> {
+    await this.passwordField().fill(password);
+    await this.confirmField().fill(confirmPassword);
+  }
+
+  async clickPasswordSubmit(): Promise<void> {
+    const form = this.page.locator("form", { has: this.passwordField() });
+    await this.submitOf(form).click();
+    await this.page.waitForTimeout(2000);
+  }
+
+  async passwordMismatchError(): Promise<string | null> {
+    const note = this.page.getByText("Passwords don't match");
+    if ((await note.count()) === 0) return null;
+    return ((await note.first().textContent()) ?? "").trim();
+  }
+
+  async authBanner(): Promise<string | null> {
+    const banner = this.page.getByRole("alert");
+    if ((await banner.count()) > 0) return ((await banner.first().textContent()) ?? "").trim();
+    // The sign-up card refuses weak secrets with its own dismissible
+    // notice instead of the shared banner component.
+    const weakNotice = this.page.getByText("Try setting-up a strong password to proceed");
+    if ((await weakNotice.count()) > 0) return ((await weakNotice.first().textContent()) ?? "").trim();
+    return null;
+  }
+
+  async waitForAuthBanner(): Promise<string> {
+    // The banner renders after hydration plus the error-code effect, so
+    // poll instead of reading once. Bounded: a missing banner is a real
+    // failure and must surface instead of eating the test budget.
+    const banner = this.page.getByRole("alert");
+    await banner.first().waitFor({ timeout: 60_000 });
+    return ((await banner.first().textContent()) ?? "").trim();
+  }
+
+  async openForgotPassword(email?: string): Promise<void> {
+    const suffix = email !== undefined ? `?email=${encodeURIComponent(email)}` : "";
+    await this.page.goto(`/accounts/forgot-password${suffix}`);
+    await this.waitForContent("forgot-password form", () =>
+      this.page.getByRole("button", { name: /send reset link|resend in/i }).waitFor({ timeout: 30_000 })
+    );
+  }
+
+  async submitForgotPassword(email: string): Promise<string> {
+    const field = this.emailField();
+    await field.fill(email);
+    const form = this.page.locator("form", { has: field });
+    await this.submitOf(form).click();
+    // Either the inbox-check toast or the failure toast appears; the
+    // button label flips to the countdown on success.
+    const toast = this.page.getByText(/check your inbox|something went wrong|smtp not configured|error!/i).first();
+    await toast.waitFor({ timeout: 30_000 });
+    return ((await toast.textContent()) ?? "").trim();
+  }
+
+  async forgotResendState(): Promise<{ disabled: boolean; label: string }> {
+    const button = this.page.getByRole("button", { name: /send reset link|resend in/i });
+    await button.waitFor({ timeout: 30_000 });
+    const label = ((await button.textContent()) ?? "").trim().replace(/\s+/g, " ");
+    return { disabled: (await button.isDisabled()) || (await button.getAttribute("data-loading")) !== null, label };
+  }
+
+  async openResetPassword(params: { uid: string; token: string; email: string }): Promise<void> {
+    const query = new URLSearchParams({ uidb64: params.uid, token: params.token, email: params.email });
+    await this.page.goto(`/accounts/reset-password?${query.toString()}`);
+    await this.waitForContent("reset-password form", () => this.passwordField().waitFor({ timeout: 30_000 }));
+  }
+
+  async submitNewPassword(password: string, confirmPassword: string): Promise<void> {
+    await this.passwordField().fill(password);
+    await this.confirmField().fill(confirmPassword);
+    await this.clickNativeSubmit(this.page.locator("form", { has: this.passwordField() }));
+  }
+
+  async openSetPassword(): Promise<void> {
+    await this.page.goto("/accounts/set-password");
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async openPath(path: string): Promise<void> {
+    await this.page.goto(path);
+    await this.page.waitForLoadState("domcontentloaded");
   }
 
   async signInWithPassword(email: string, password: string): Promise<void> {
@@ -588,10 +813,9 @@ export class WebDriver implements ParityDriver {
     await this.page.waitForLoadState("domcontentloaded");
   }
 
-  async currentPath(): Promise<string> {
-    return new URL(this.page.url()).pathname;
-  }
-
+  // NOTE (rebase over NEWFRONT-107): a single currentPath keeps the
+  // pathname-plus-search shape above (the guard scenarios assert on
+  // ?next_path=); the other suites only use toContain, which is unaffected.
   async hasVisibleText(text: string): Promise<boolean> {
     return this.isShown(this.page.getByText(text, { exact: false }));
   }

@@ -274,4 +274,92 @@ export class WebNewDriver implements ParityDriver {
   async forgotPasswordPopoverText(): Promise<string | null> {
     return todo("forgotPasswordPopoverText");
   }
+
+  // --- Auth sign-up, recovery, guards, landing (NEWFRONT-108, AUTH-009/016).
+  // --- Throwing stubs per the shared driver contract; that area fills these
+  // --- in when it lands. currentPath/authStep already stubbed above.
+
+  async openSignUp(_params?: { email?: string; nextPath?: string }): Promise<void> {
+    return todo("openSignUp");
+  }
+
+  async submitAuthEmail(_email: string): Promise<void> {
+    return todo("submitAuthEmail");
+  }
+
+  async authEmailValue(): Promise<string> {
+    return todo("authEmailValue");
+  }
+
+  async authNextPathValue(): Promise<string | null> {
+    return todo("authNextPathValue");
+  }
+
+  async signUpWithPassword(_password: string, _confirmPassword: string): Promise<void> {
+    return todo("signUpWithPassword");
+  }
+
+  async submitUniqueCode(_code: string): Promise<void> {
+    return todo("submitUniqueCode");
+  }
+
+  async codeResendState(): Promise<{ disabled: boolean; label: string }> {
+    return todo("codeResendState");
+  }
+
+  async requestNewCode(): Promise<void> {
+    return todo("requestNewCode");
+  }
+
+  async passwordSubmitEnabled(): Promise<boolean> {
+    return todo("passwordSubmitEnabled");
+  }
+
+  async fillPasswordFields(_password: string, _confirmPassword: string): Promise<void> {
+    return todo("fillPasswordFields");
+  }
+
+  async clickPasswordSubmit(): Promise<void> {
+    return todo("clickPasswordSubmit");
+  }
+
+  async passwordMismatchError(): Promise<string | null> {
+    return todo("passwordMismatchError");
+  }
+
+  async authBanner(): Promise<string | null> {
+    return todo("authBanner");
+  }
+
+  async waitForAuthBanner(): Promise<string> {
+    return todo("waitForAuthBanner");
+  }
+
+  async openForgotPassword(_email?: string): Promise<void> {
+    return todo("openForgotPassword");
+  }
+
+  async submitForgotPassword(_email: string): Promise<string> {
+    return todo("submitForgotPassword");
+  }
+
+  async forgotResendState(): Promise<{ disabled: boolean; label: string }> {
+    return todo("forgotResendState");
+  }
+
+  async openResetPassword(_params: { uid: string; token: string; email: string }): Promise<void> {
+    return todo("openResetPassword");
+  }
+
+  async submitNewPassword(_password: string, _confirmPassword: string): Promise<void> {
+    return todo("submitNewPassword");
+  }
+
+  async openSetPassword(): Promise<void> {
+    return todo("openSetPassword");
+  }
+
+  async openPath(_path: string): Promise<void> {
+    return todo("openPath");
+  }
 }

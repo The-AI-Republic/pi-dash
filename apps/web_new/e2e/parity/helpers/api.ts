@@ -7,8 +7,12 @@
 // a redesigned screen cannot pass while saving the wrong thing. It signs
 // in through the same native credential endpoint the old sign-in card
 // posts to, then reads back through the public REST API with that session.
+import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { promisify } from "node:util";
 import type { ParitySeedFacts } from "../drivers/parity-driver";
+
+const execFileAsync = promisify(execFile);
 
 function apiBaseFromEnv(): string {
   const raw = (process.env["PARITY_API_URL"] ?? "http://localhost:18019").trim().replace(/\/+$/, "");
@@ -29,6 +33,164 @@ async function fetchTolerant(input: string, init?: RequestInit, retries = 5): Pr
     if (res.status !== 429 || attempt >= retries) return res;
     await new Promise((resolve) => setTimeout(resolve, backoffMs[Math.min(attempt, backoffMs.length - 1)]));
   }
+}
+// --- Auth sign-up/recovery helpers (NEWFRONT-108). Appended; existing
+// --- helpers above are untouched per the shared harness contract.
+// --- uniqueEmail lives with the base harness (single definition shared by
+// --- all areas); the scenarios below call it with explicit prefixes.
+
+/** Run a Django shell snippet inside the stack's api container; resolves with stdout. */
+export async function apiShell(python: string): Promise<string> {
+  const { stdout } = await execFileAsync(
+    "docker",
+    ["exec", "-i", "parity19-api", "python", "manage.py", "shell", "-c", python],
+    {
+      timeout: 120_000,
+    }
+  );
+  return stdout;
+}
+
+/** Mint a password-reset (uid, token) pair for an existing user without sending mail. */
+export async function mintPasswordResetToken(email: string): Promise<{ uid: string; token: string }> {
+  const out = await apiShell(
+    `from pi_dash.db.models import User\n` +
+      `from pi_dash.authentication.views.app.password_management import generate_password_token\n` +
+      `user = User.objects.get(email=${JSON.stringify(email)})\n` +
+      `uid, token = generate_password_token(user)\n` +
+      `print("PARITY_UID:" + uid)\n` +
+      `print("PARITY_TOKEN:" + token)\n`
+  );
+  const uid = /^PARITY_UID:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  const token = /^PARITY_TOKEN:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (uid === "" || token === "") throw new Error(`[parity] reset-token mint produced no pair for ${email}.`);
+  return { uid, token };
+}
+
+/** Plant a magic-code in Redis for an address, standing in for the emailed code. */
+export async function mintMagicCode(email: string, code?: string): Promise<string> {
+  const value = code ?? String(Math.floor(100000 + Math.random() * 900000));
+  const payload = JSON.stringify({ current_attempt: 0, email, token: value });
+  await execFileAsync(
+    "docker",
+    ["exec", "-i", "parity19-redis", "redis-cli", "SET", `magic_${email}`, payload, "EX", "600"],
+    {
+      timeout: 60_000,
+    }
+  );
+  return value;
+}
+
+/**
+ * Flip the instance mail switch for one scenario. The seeded stack is
+ * mail-less by default (sibling AUTH-008 proves that); scenarios that need
+ * the working mail path set it and restore it in teardown.
+ */
+export async function setSmtpConfigured(on: boolean): Promise<void> {
+  const value = on ? "parity19-scratch-smtp" : "";
+  await apiShell(
+    `from pi_dash.license.models import InstanceConfiguration\n` +
+      `InstanceConfiguration.objects.filter(key="EMAIL_HOST").update(value=${JSON.stringify(value)})\n` +
+      `print("PARITY_SMTP_OK")\n`
+  );
+}
+
+/**
+ * Complete onboarding for a user through the app's own onboard endpoint
+ * (the same write the client performs), then outlast the profile read's
+ * browser cache (max-age 12s) so the next guard read is fresh. Flipping the
+ * flag with direct SQL leaves a stale cached read behind and funnels the
+ * user back to onboarding.
+ */
+export async function completeOnboarding(
+  email: string,
+  password: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await apiShell(
+    `from pi_dash.db.models import User, Profile\n` +
+      `user = User.objects.get(email=${JSON.stringify(email)})\n` +
+      `Profile.objects.get_or_create(user=user)\n` +
+      `print("PARITY_PROFILE_OK")\n`
+  );
+  const session = await signInSession(email, password, apiBase);
+  const csrfMatch = /(?:^|;\s*)csrftoken=([^;]+)/.exec(session);
+  const csrf = csrfMatch?.[1] ?? "";
+  if (csrf === "") throw new Error("[parity] onboard PATCH has no CSRF token.");
+  const res = await fetch(`${apiBase}/api/users/me/onboard/`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", cookie: session, "X-CSRFToken": csrf },
+    body: JSON.stringify({ is_onboarded: true }),
+  });
+  if (!res.ok) throw new Error(`[parity] onboard PATCH failed with HTTP ${res.status}.`);
+  await sleep(13_000);
+}
+
+/** Server facts about a user: existence, password mode, onboarding flag. */
+export async function userFacts(
+  email: string
+): Promise<{ exists: boolean; passwordAutoset: boolean; onboarded: boolean }> {
+  const out = await apiShell(
+    `import json\n` +
+      `from pi_dash.db.models import User, Profile\n` +
+      `user = User.objects.filter(email=${JSON.stringify(email)}).first()\n` +
+      `profile = Profile.objects.filter(user=user).first() if user else None\n` +
+      `print("PARITY_USER:" + json.dumps({\n` +
+      `  "exists": user is not None,\n` +
+      `  "passwordAutoset": bool(user and user.is_password_autoset),\n` +
+      `  "onboarded": bool(profile and profile.is_onboarded),\n` +
+      `}))\n`
+  );
+  const line = /^PARITY_USER:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (line === "") throw new Error(`[parity] user facts produced no row for ${email}.`);
+  return JSON.parse(line) as { exists: boolean; passwordAutoset: boolean; onboarded: boolean };
+}
+
+/**
+ * Create an account through the native sign-up POST without touching the
+ * browser session. Recovery scenarios need a signed-out visitor on the
+ * reset form: the app funnels signed-in unfinished users to onboarding,
+ * so creating through the UI would sign the context in.
+ */
+export async function signUpAccount(
+  email: string,
+  password: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await withThrottleRetry(`sign-up ${email}`, async () => {
+    const tokenRes = await fetch(`${apiBase}/auth/get-csrf-token/`);
+    if (!tokenRes.ok) throw new Error(`[parity] CSRF token fetch failed with HTTP ${tokenRes.status}.`);
+    const tokenPayload = (await tokenRes.json()) as { csrf_token?: unknown };
+    const token = typeof tokenPayload.csrf_token === "string" ? tokenPayload.csrf_token : "";
+    if (token === "") throw new Error("[parity] CSRF token response carried no token.");
+    const preCookies = cookieHeader(setCookieHeaders(tokenRes));
+    const body = new URLSearchParams({ email, password, csrfmiddlewaretoken: token });
+    const res = await fetch(`${apiBase}/auth/sign-up/`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", cookie: preCookies },
+      body,
+      redirect: "manual",
+    });
+    if (res.status !== 200 && res.status !== 302) {
+      throw new Error(`[parity] sign-up failed with HTTP ${res.status} for ${email}.`);
+    }
+  });
+}
+
+/** Raw email-check answer for an address (existing vs new, credential vs code). */
+export async function emailCheckStatus(
+  email: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ existing: boolean; status: string }> {
+  return withThrottleRetry(`email-check ${email}`, async () => {
+    const res = await fetch(`${apiBase}/auth/email-check/`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    if (!res.ok) throw new Error(`[parity] email-check failed with HTTP ${res.status}.`);
+    return (await res.json()) as { existing: boolean; status: string };
+  });
 }
 
 export function seedFactsFromEnv(): ParitySeedFacts {
@@ -52,33 +214,68 @@ function setCookieHeaders(res: Response): string[] {
   return single === null ? [] : [single];
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isThrottleFailure(error: unknown): boolean {
+  return error instanceof Error && /HTTP 429/.test(error.message);
+}
+
+/**
+ * The scratch stack throttles anonymous callers at 30/minute per IP, and
+ * every scenario shares one bucket with the frontend's own loader calls. A
+ * saturated minute answers 429; waiting out the rolling window recovers, so
+ * retry throttled calls instead of failing the oracle.
+ */
+async function withThrottleRetry<T>(label: string, fn: () => Promise<T>, attempts = 3): Promise<T> {
+  let last: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      last = error;
+      if (!isThrottleFailure(error) || attempt === attempts) throw error;
+      // eslint-disable-next-line no-console -- oracle runs surface retries in the log.
+      console.log(`[parity] ${label} throttled (attempt ${attempt}/${attempts}); waiting out the window.`);
+      await sleep(65_000);
+    }
+  }
+  throw last;
+}
+
 /** Sign in with email plus password; resolves with a session cookie header. */
 export async function signInSession(
   email: string,
   password: string,
   apiBase: string = apiBaseFromEnv()
 ): Promise<string> {
-  // The credential endpoint is a native form POST guarded by CSRF, so fetch
-  // a token first exactly like the sign-in card does, then submit the form.
-  const tokenRes = await fetchTolerant(`${apiBase}/auth/get-csrf-token/`);
-  if (!tokenRes.ok) throw new Error(`[parity] CSRF token fetch failed with HTTP ${tokenRes.status}.`);
-  const tokenPayload = (await tokenRes.json()) as { csrf_token?: unknown };
-  const token = typeof tokenPayload.csrf_token === "string" ? tokenPayload.csrf_token : "";
-  if (token === "") throw new Error("[parity] CSRF token response carried no token.");
-  const preCookies = cookieHeader(setCookieHeaders(tokenRes));
-  const body = new URLSearchParams({ email, password, csrfmiddlewaretoken: token });
-  const res = await fetchTolerant(`${apiBase}/auth/sign-in/`, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded", cookie: preCookies },
-    body,
-    redirect: "manual",
+  // Both areas' retry machinery composes: fetchTolerant rides out a 429
+  // minute per request, and withThrottleRetry waits out a saturated window
+  // when the endpoint still answers 429 (thrown as HTTP 429 below).
+  return withThrottleRetry(`sign-in ${email}`, async () => {
+    // The credential endpoint is a native form POST guarded by CSRF, so fetch
+    // a token first exactly like the sign-in card does, then submit the form.
+    const tokenRes = await fetchTolerant(`${apiBase}/auth/get-csrf-token/`);
+    if (!tokenRes.ok) throw new Error(`[parity] CSRF token fetch failed with HTTP ${tokenRes.status}.`);
+    const tokenPayload = (await tokenRes.json()) as { csrf_token?: unknown };
+    const token = typeof tokenPayload.csrf_token === "string" ? tokenPayload.csrf_token : "";
+    if (token === "") throw new Error("[parity] CSRF token response carried no token.");
+    const preCookies = cookieHeader(setCookieHeaders(tokenRes));
+    const body = new URLSearchParams({ email, password, csrfmiddlewaretoken: token });
+    const res = await fetchTolerant(`${apiBase}/auth/sign-in/`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", cookie: preCookies },
+      body,
+      redirect: "manual",
+    });
+    if (res.status !== 200 && res.status !== 302) {
+      throw new Error(`[parity] sign-in failed with HTTP ${res.status} for ${email}.`);
+    }
+    const header = cookieHeader([...setCookieHeaders(tokenRes), ...setCookieHeaders(res)]);
+    if (!header.includes("session-id=")) throw new Error("[parity] sign-in response carried no session cookie.");
+    return header;
   });
-  if (res.status !== 200 && res.status !== 302) {
-    throw new Error(`[parity] sign-in failed with HTTP ${res.status} for ${email}.`);
-  }
-  const header = cookieHeader([...setCookieHeaders(tokenRes), ...setCookieHeaders(res)]);
-  if (!header.includes("session-id=")) throw new Error("[parity] sign-in response carried no session cookie.");
-  return header;
 }
 
 /** Second workspace member the mention scenarios @-mention (NEWFRONT-115). */
