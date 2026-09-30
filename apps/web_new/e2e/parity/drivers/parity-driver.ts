@@ -78,4 +78,10 @@ export interface ParityDriver {
    * `plainText`, and save. Resolves once the feed shows the edited comment.
    */
   mentionsEditRemovingMention(oldBodyText: string, plainText: string): Promise<void>;
+  /**
+   * Sign in through the UI and verify the session landed. Retries the
+   * shared flow because the scratch stack rejects valid credentials
+   * intermittently under parallel parity runs.
+   */
+  mentionsEnsureSignedIn(email: string, password: string): Promise<void>;
 }

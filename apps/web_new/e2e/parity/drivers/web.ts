@@ -121,7 +121,7 @@ export class WebDriver implements ParityDriver {
         );
         return;
       } catch (error) {
-        lastError = String(error).split("\n")[0];
+        lastError = String(error).split("\n")[0] ?? String(error);
       }
     }
     throw new Error(`[parity] sign-in as ${email} did not land (attempts: ${attempts}): ${lastError}`);

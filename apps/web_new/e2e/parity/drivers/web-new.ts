@@ -67,4 +67,8 @@ export class WebNewDriver implements ParityDriver {
   async mentionsEditRemovingMention(_oldBodyText: string, _plainText: string): Promise<void> {
     return todo("mentionsEditRemovingMention");
   }
+
+  async mentionsEnsureSignedIn(_email: string, _password: string): Promise<void> {
+    return todo("mentionsEnsureSignedIn");
+  }
 }
