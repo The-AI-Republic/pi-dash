@@ -15,9 +15,9 @@
 
 pub mod gates;
 pub mod handlers_external;
+pub mod handlers_git_repo;
 pub mod handlers_github_proj;
 pub mod handlers_github_ws;
-pub mod handlers_git_repo;
 pub mod hmac;
 
 use axum::Router;
