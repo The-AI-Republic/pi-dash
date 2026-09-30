@@ -7,11 +7,16 @@
 // (the oracle); the same file must go green on apps/web_new once the auth
 // area lands.
 //
-// Exceptions recorded in the hand-off comment (per the issue flags):
-// AUTH-022's native deep-link exchange and AUTH-023's desktop card render
-// only in the desktop build, which cannot run in this checkout — the
-// scenarios below cover the web-observable seams (error-code landing) and
-// nothing else for those rows.
+// Recorded exceptions (see the hand-off comment; the issue pre-authorizes
+// explicit exceptions for desktop-only steps that cannot run here):
+// AUTH-022 and AUTH-023 have no scenario in this file. Verified against the
+// old tree: the OSS checkout has no OAuth provider flow (no provider buttons
+// in the auth forms, no error landing reading an error param), no
+// desktop-exchange endpoint, and the unavailable card
+// (ce/components/desktop/sign-in-card.tsx) renders only inside the desktop
+// build, which cannot run in this checkout. There is no web-observable seam
+// for either row here, so the parent merge run must cover them against an
+// edition/desktop build instead.
 import { test, expect } from "../fixtures";
 import {
   approveDeviceCode,
@@ -273,23 +278,6 @@ test(
 
     await test.step("the server consumed the code", async () => {
       await expect(approveDeviceCode(session, code)).rejects.toThrow();
-    });
-  }
-);
-
-test(
-  specTitle(["AUTH-022"], "an aborted provider flow lands back on sign-in with an explanation"),
-  {
-    tag: specTags(["AUTH-022"]),
-  },
-  async ({ driver }) => {
-    await test.step("follow the provider-failure landing link", async () => {
-      await driver.visit("/?error_code=5120");
-    });
-
-    await test.step("the sign-in card explains the failure on the fixable step", async () => {
-      await expect.poll(() => driver.showsText("GitHub OAuth provider error"), POLL_60).toBe(true);
-      expect(await driver.isSignedOut()).toBe(true);
     });
   }
 );
