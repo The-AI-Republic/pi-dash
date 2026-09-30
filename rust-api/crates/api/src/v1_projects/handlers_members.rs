@@ -60,6 +60,10 @@
 //!   re-POST fails with `The payload is not valid`.
 //! * Invite `token` is stored as `''`: the model field has no default
 //!   generator and the view never sets one (Django `CharField.get_default`).
+//! * Invite PATCH with a non-dict body 500s: `partial_update()` calls
+//!   `request.data.get("email")` before the serializer runs, so the
+//!   `AttributeError` escapes to `handle_exception`'s generic 500
+//!   (`invite.py:113`).
 //! * The `Provided workspace does not exist` 400 branches sit after the
 //!   gates, whose slug-scoped `exists()` denies first — unreachable through
 //!   the routes, ported in place.
@@ -612,14 +616,78 @@ fn pool(state: &AppState) -> Result<sqlx::PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
-/// Parse a collected body into optional JSON (`None` = empty body).
-fn parse_body(body: &Bytes) -> Result<Option<Value>, Denial> {
-    if body.is_empty() {
-        Ok(None)
-    } else {
-        serde_json::from_slice(body)
-            .map(Some)
-            .map_err(|_| Denial::ServerError)
+/// The owned request parts a gated handler hands back to Django when the
+/// body turns out to be empty or unparseable (bundled so the four body
+/// handlers stay under the argument-count lint).
+struct ProxyRequest {
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+}
+
+/// Parse a collected body (`None` = empty or unparseable).
+///
+/// DRF parses the body inside the handler — after authN, the rewrite and the
+/// permission gate — so an empty body is `JSONParser`'s `ParseError` 400
+/// (`JSON parse error - Expecting value: line 1 column 1 (char 0)`), a
+/// malformed body is the same 400 family with the serde/json message
+/// swapped in, and an unauthenticated caller with a bad body still sees
+/// 401/403 first (`parsers.py:56-68`). Callers hand `None` back to Django
+/// via [`proxy_through`] for those exact bytes.
+fn parse_body_json(body: &Bytes) -> Option<Value> {
+    serde_json::from_slice(body).ok()
+}
+
+/// `type(data).__name__` for the serializer non-dict message
+/// (`serializers.py:485`): DRF names the runtime type, so `null` is
+/// `NoneType`, `true` is `bool`, and `1`/`1.5` are `int`/`float`.
+fn python_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(n) if n.is_i64() || n.is_u64() => "int",
+        Value::Number(_) => "float",
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+
+/// The serializer non-dict 400 (`serializers.py:340,481-485`): any parsed
+/// body that is not an object fails before field validation on every
+/// serializer-driven handler, including PATCH. `null` never reaches the
+/// dict check — `validate_empty_values` fails it with code `null`, which
+/// the serializer `.errors` property rewrites (`serializers.py:574-582`).
+fn non_dict_denial(value: &Value) -> Denial {
+    if value.is_null() {
+        return Denial::BadJson(serde_json::json!({
+            "non_field_errors": ["No data provided"]
+        }));
+    }
+    Denial::BadJson(serde_json::json!({
+        "non_field_errors": [format!(
+            "Invalid data. Expected a dictionary, but got {}.",
+            python_type_name(value)
+        )]
+    }))
+}
+
+/// Python truthiness of a parsed JSON value, for guards written as
+/// `request.data.get("email")` (`invite.py:113`): empty string, null,
+/// false, zero and empty containers skip the guard exactly like `None`.
+fn is_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(n) => {
+            n.as_i64().is_some_and(|i| i != 0)
+                || n.as_u64().is_some_and(|u| u != 0)
+                || n.as_f64().is_some_and(|f| f != 0.0)
+        }
+        Value::String(s) => !s.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
     }
 }
 
@@ -909,7 +977,10 @@ async fn fetch_invite_full(
 // Validation (serializer `validate_*`, byte-identical messages)
 // ---------------------------------------------------------------------------
 
-/// Collect field errors in declaration order (`member`, then `role`).
+/// Collect field errors in serializer declaration order: the member
+/// serializer declares `member` then `role`, the invite serializer `email`
+/// then `role` — emitting `email`, `member`, `role` satisfies both, since
+/// each route only ever fills its own serializer's keys.
 #[derive(Debug, Default)]
 pub struct FieldErrors {
     member: Vec<String>,
@@ -929,14 +1000,14 @@ impl FieldErrors {
     /// Render `serializer.errors` (field order, compact).
     fn body(&self) -> Value {
         let mut map = serde_json::Map::new();
+        if !self.email.is_empty() {
+            map.insert("email".into(), Value::from(self.email.clone()));
+        }
         if !self.member.is_empty() {
             map.insert("member".into(), Value::from(self.member.clone()));
         }
         if !self.role.is_empty() {
             map.insert("role".into(), Value::from(self.role.clone()));
-        }
-        if !self.email.is_empty() {
-            map.insert("email".into(), Value::from(self.email.clone()));
         }
         if !self.non_field.is_empty() {
             map.insert(
@@ -1064,59 +1135,199 @@ fn validate_role_value(value: &Value, errors: &mut FieldErrors) -> Option<i32> {
     }
 }
 
-/// Validate `email` (`serializers/invite.py:41-47`, Django `validate_email`).
+/// Python `str.strip()` with no arguments: Unicode whitespace plus
+/// `\x1c`-`\x1f`, which Rust's `char::is_whitespace` does not cover
+/// (verified against CPython: `'\x1c'.isspace()` is true).
+fn py_strip(value: &str) -> &str {
+    value.trim_matches(|c: char| c.is_whitespace() || ('\x1c'..='\x1f').contains(&c))
+}
+
+/// Validate `email` through DRF's `CharField(max_length=255)` pipeline
+/// (`rest_framework/fields.py`, DRF 3.15). The model field is a plain
+/// `CharField` (`db/models/workspace.py:236`), so the format check is only
+/// the serializer's custom `validate_email` (`serializers/invite.py:41-47`,
+/// Django `validate_email` → `Invalid email address`); everything before it
+/// is `CharField` machinery, in order:
+///
+/// * blank: `data == ''`, or whitespace-only after the trim
+///   (`trim_whitespace=True`) → `This field may not be blank.`
+/// * null → `This field may not be null.`
+/// * bools, arrays, objects (anything but `str`/`int`/`float`) →
+///   `Not a valid string.`; numerics coerce via `str()`.
+/// * `MaxLengthValidator(255)` then `ProhibitNullCharactersValidator`,
+///   in validator order; any failure skips the custom `validate_email`
+///   (`run_validators` collects, `to_internal_value` raises before the
+///   `validate_<field>` hook). `ProhibitSurrogateCharactersValidator`
+///   cannot fire: neither JSON nor Rust strings carry a lone surrogate.
+///
+/// Returns the stripped string Django stores (`to_internal_value` output).
 fn validate_email_value(value: &Value, errors: &mut FieldErrors) -> Option<String> {
-    let raw = match value {
-        Value::String(raw) => raw.clone(),
+    if let Value::String(raw) = value {
+        if py_strip(raw).is_empty() {
+            errors.email.push("This field may not be blank.".into());
+            return None;
+        }
+    }
+    let coerced: String = match value {
+        Value::String(raw) => py_strip(raw).to_string(),
         Value::Null => {
             errors.email.push("This field may not be null.".into());
             return None;
         }
-        _ => {
-            errors.email.push("Invalid email address".into());
+        Value::Bool(_) | Value::Array(_) | Value::Object(_) => {
+            errors.email.push("Not a valid string.".into());
             return None;
         }
+        // Python `str()` of an int matches exactly; a float repr never
+        // contains `@` and is far below every length limit, so the exact
+        // exponent rendering cannot change the message below.
+        Value::Number(n) => n.to_string(),
     };
-    if is_valid_email(&raw) {
-        Some(raw)
+    if coerced.chars().count() > 255 {
+        errors
+            .email
+            .push("Ensure this field has no more than 255 characters.".into());
+    }
+    if coerced.contains('\x00') {
+        errors.email.push("Null characters are not allowed.".into());
+    }
+    if !errors.email.is_empty() {
+        return None;
+    }
+    if is_valid_email(&coerced) {
+        Some(coerced)
     } else {
         errors.email.push("Invalid email address".into());
         None
     }
 }
 
-/// Django `validate_email` main checks: one `@`, non-empty local part,
-/// domain with a dot, valid labels, TLD not all-numeric.
+/// Django's `EmailValidator` (`django/core/validators.py`, Django 4.2):
+/// dot-atom or quoted-string user, ASCII domain labels, IP literals,
+/// `localhost`, IDN via punycode. Every failure maps to the serializer's
+/// `Invalid email address` at the call site. (The 320-char ceiling is dead
+/// behind the field's `max_length=255` but kept, as written.)
 pub fn is_valid_email(value: &str) -> bool {
-    if value.len() > 254 || value.is_empty() {
+    if value.is_empty() || !value.contains('@') || value.chars().count() > 320 {
         return false;
     }
-    let mut parts = value.split('@');
-    let (Some(local), Some(domain), None) = (parts.next(), parts.next(), parts.next()) else {
-        return false;
-    };
-    if local.is_empty() || local.len() > 64 || domain.is_empty() || domain.len() > 255 {
+    let (user, domain) = value.rsplit_once('@').expect("contains @");
+    if !email_user_valid(user) {
         return false;
     }
-    if !domain.contains('.') {
+    // `domain_allowlist = ["localhost"]`: exact match, case-sensitive.
+    if domain == "localhost" {
+        return true;
+    }
+    if email_domain_part_valid(domain) {
+        return true;
+    }
+    // Possible IDN: `punycode()` (`django/utils/encoding.py`) re-checks the
+    // ASCII form (`idna` 1.x is already a crate dependency).
+    match idna::domain_to_ascii(domain) {
+        Ok(ascii) => email_domain_part_valid(&ascii),
+        Err(_) => false,
+    }
+}
+
+/// The user part: dot-atom atoms, or the quoted-string alternative
+/// (`user_regex`, case-insensitive).
+fn email_user_valid(user: &str) -> bool {
+    if user.starts_with('"') {
+        return email_quoted_string_valid(user);
+    }
+    !user.is_empty()
+        && user
+            .split('.')
+            .all(|atom| !atom.is_empty() && atom.bytes().all(email_atom_byte))
+}
+
+/// One dot-atom character (`[-!#$%&'*+/=?^_`{}|~0-9A-Z]`, case-insensitive).
+fn email_atom_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"-!#$%&'*+/=?^_`{}|~".contains(&byte)
+}
+
+/// The quoted-string alternative, over bytes:
+/// `^"([\001-\010\013\014\016-\037!#-\[\]-\177]|\\[\001-\011\013\014\016-\177])*"\Z`.
+fn email_quoted_string_valid(user: &str) -> bool {
+    let bytes = user.as_bytes();
+    if bytes.len() < 2 || !user.starts_with('"') || !user.ends_with('"') {
         return false;
     }
-    let valid_label = |label: &str| {
-        !label.is_empty()
-            && label.len() <= 63
-            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-            && !label.starts_with('-')
-            && !label.ends_with('-')
-    };
+    let mut inner = &bytes[1..bytes.len() - 1];
+    while let Some((&first, rest)) = inner.split_first() {
+        if first == b'\\' {
+            let Some((&escaped, rest)) = rest.split_first() else {
+                return false;
+            };
+            if !matches!(escaped, 0x01..=0x09 | 0x0b | 0x0c | 0x0e..=0x7f) {
+                return false;
+            }
+            inner = rest;
+        } else {
+            if !matches!(
+                first,
+                0x01..=0x08 | 0x0b | 0x0c | 0x0e..=0x1f | 0x21 | 0x23..=0x5b | 0x5d..=0x7f
+            ) {
+                return false;
+            }
+            inner = rest;
+        }
+    }
+    true
+}
+
+/// The domain part: the ASCII `domain_regex` or an IP literal
+/// (`literal_regex` + `validate_ipv46_address`).
+fn email_domain_part_valid(domain: &str) -> bool {
+    if email_domain_valid(domain) {
+        return true;
+    }
+    if domain.len() >= 2 && domain.starts_with('[') && domain.ends_with(']') {
+        let inner = &domain[1..domain.len() - 1];
+        if !inner.is_empty()
+            && inner
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
+            && inner.parse::<std::net::IpAddr>().is_ok()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The ASCII domain alternative, `((?:label\.)+)(TLD)\Z`
+/// (case-insensitive): at least one dotted label, every label 1-63 chars of
+/// alnum/hyphen not starting or ending with `-`, the TLD 2-63 (digits and
+/// hyphens allowed, so `a@b.12` passes and `a@b.c` fails).
+fn email_domain_valid(domain: &str) -> bool {
     let mut labels = domain.split('.');
     let tld = labels.next_back().unwrap_or("");
-    if tld.chars().all(|c| c.is_ascii_digit()) {
+    if !(2..=63).contains(&tld.len())
+        || !tld.bytes().all(email_domain_byte)
+        || tld.starts_with('-')
+        || tld.ends_with('-')
+    {
         return false;
     }
-    domain.split('.').all(valid_label)
-        && local
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "!#$%&'*+-/=?^_`{|}~.".contains(c))
+    let mut any = false;
+    for label in labels {
+        any = true;
+        if !(1..=63).contains(&label.len())
+            || !label.bytes().all(email_domain_byte)
+            || label.starts_with('-')
+            || label.ends_with('-')
+        {
+            return false;
+        }
+    }
+    any
+}
+
+/// One ASCII domain character (`[A-Z0-9-]`, case-insensitive).
+fn email_domain_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-'
 }
 
 // ---------------------------------------------------------------------------
@@ -1319,38 +1530,54 @@ async fn pm_list_inner(
 async fn pm_create(
     State(state): State<AppState>,
     Path((slug, project_raw)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    into_result_response(pm_create_inner(&state, &slug, &project_raw, &headers, &body).await)
+    into_result_response(
+        pm_create_inner(
+            &state,
+            &slug,
+            &project_raw,
+            ProxyRequest {
+                method,
+                uri,
+                headers,
+                body,
+            },
+        )
+        .await,
+    )
 }
 
 async fn pm_create_inner(
     state: &AppState,
     slug: &str,
     project_raw: &str,
-    headers: &HeaderMap,
-    body: &Bytes,
+    req: ProxyRequest,
 ) -> Result<Response, Denial> {
     let pool = pool(state)?;
-    let json = parse_body(body)?;
-    let actor = authenticate(&pool, headers, state.settings().secret_key.as_bytes()).await?;
+    let actor = authenticate(&pool, &req.headers, state.settings().secret_key.as_bytes()).await?;
     let project_id = rewrite_project_id(&pool, slug, actor.id, project_raw).await?;
     let facts = load_facts(&pool, slug, &actor, Some(project_id)).await?;
     check_gate(V1Route::ProjectMembers, "POST", &facts, Some(project_id))?;
+    // The body parses after the gate (`post()`: the serializer is built
+    // from `request.data`); empty/unparseable bodies proxy for the exact
+    // `ParseError` bytes.
+    let Some(json) = parse_body_json(&req.body) else {
+        let ProxyRequest {
+            method,
+            uri,
+            headers,
+            body,
+        } = req;
+        return Ok(proxy_through(state.clone(), method, uri, headers, body).await);
+    };
 
     let data = match json {
-        Some(Value::Object(map)) => map,
-        Some(_) => {
-            return Err(Denial::BadJson(serde_json::json!({
-                "non_field_errors": ["Invalid data. Expected a dictionary, but got list."]
-            })));
-        }
-        None => {
-            return Err(Denial::BadJson(serde_json::json!({
-                "member": ["This field is required."]
-            })));
-        }
+        Value::Object(map) => map,
+        ref other => return Err(non_dict_denial(other)),
     };
     let mut errors = FieldErrors::default();
     let member_id = match data.get("member") {
@@ -1603,7 +1830,19 @@ async fn pm_detail_patch(
         return proxy_through(state, method, uri, headers, body).await;
     };
     into_result_response(
-        pm_detail_patch_inner(&state, &slug, &project_raw, pk, &headers, &body).await,
+        pm_detail_patch_inner(
+            &state,
+            &slug,
+            &project_raw,
+            pk,
+            ProxyRequest {
+                method,
+                uri,
+                headers,
+                body,
+            },
+        )
+        .await,
     )
 }
 
@@ -1612,12 +1851,10 @@ async fn pm_detail_patch_inner(
     slug: &str,
     project_raw: &str,
     pk: uuid::Uuid,
-    headers: &HeaderMap,
-    body: &Bytes,
+    req: ProxyRequest,
 ) -> Result<Response, Denial> {
     let pool = pool(state)?;
-    let json = parse_body(body)?;
-    let actor = authenticate(&pool, headers, state.settings().secret_key.as_bytes()).await?;
+    let actor = authenticate(&pool, &req.headers, state.settings().secret_key.as_bytes()).await?;
     let project_id = rewrite_project_id(&pool, slug, actor.id, project_raw).await?;
     let facts = load_facts(&pool, slug, &actor, Some(project_id)).await?;
     check_gate(
@@ -1634,10 +1871,23 @@ async fn pm_detail_patch_inner(
         .await
         .map_err(|_| Denial::ServerError)?
         .ok_or(Denial::MemberNotFound)?;
+    // The body parses after the row fetch (`patch()`: `objects.get` runs
+    // before the serializer reads `request.data`); empty/unparseable bodies
+    // proxy for the exact `ParseError` bytes, non-dict bodies 400 with no
+    // write.
+    let Some(json) = parse_body_json(&req.body) else {
+        let ProxyRequest {
+            method,
+            uri,
+            headers,
+            body,
+        } = req;
+        return Ok(proxy_through(state.clone(), method, uri, headers, body).await);
+    };
 
     let data = match json {
-        Some(Value::Object(map)) => map,
-        _ => serde_json::Map::new(),
+        Value::Object(map) => map,
+        ref other => return Err(non_dict_denial(other)),
     };
     let mut errors = FieldErrors::default();
     // Partial: absent keys keep their rows; present keys validate. A failed
@@ -1669,7 +1919,7 @@ async fn pm_detail_patch_inner(
     .bind(membership.id)
     .execute(&pool)
     .await
-    .map_err(|_| Denial::ServerError)?;
+    .map_err(|err| integrity_denial(&err))?;
     // `role` is non-nullable in the model; `member` may be null and renders
     // `null` (the `PrimaryKeyRelatedField` null shape).
     let role = role.ok_or(Denial::ServerError)?;
@@ -1783,21 +2033,33 @@ async fn inv_list_inner(
 async fn inv_create(
     State(state): State<AppState>,
     Path((slug,)): Path<(String,)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    into_result_response(inv_create_inner(&state, &slug, &headers, &body).await)
+    into_result_response(
+        inv_create_inner(
+            &state,
+            &slug,
+            ProxyRequest {
+                method,
+                uri,
+                headers,
+                body,
+            },
+        )
+        .await,
+    )
 }
 
 async fn inv_create_inner(
     state: &AppState,
     slug: &str,
-    headers: &HeaderMap,
-    body: &Bytes,
+    req: ProxyRequest,
 ) -> Result<Response, Denial> {
     let pool = pool(state)?;
-    let json = parse_body(body)?;
-    let actor = authenticate(&pool, headers, state.settings().secret_key.as_bytes()).await?;
+    let actor = authenticate(&pool, &req.headers, state.settings().secret_key.as_bytes()).await?;
     let facts = load_facts(&pool, slug, &actor, None).await?;
     check_gate(V1Route::Invites, "POST", &facts, None)?;
 
@@ -1812,15 +2074,22 @@ async fn inv_create_inner(
     let Some((workspace_id,)) = workspace_id else {
         return Err(Denial::InviteNotFound);
     };
+    // The body parses after the workspace fetch (`create()`: `objects.get`
+    // runs before the serializer reads `request.data`); empty/unparseable
+    // bodies proxy for the exact `ParseError` bytes.
+    let Some(json) = parse_body_json(&req.body) else {
+        let ProxyRequest {
+            method,
+            uri,
+            headers,
+            body,
+        } = req;
+        return Ok(proxy_through(state.clone(), method, uri, headers, body).await);
+    };
 
     let data = match json {
-        Some(Value::Object(map)) => map,
-        Some(_) => {
-            return Err(Denial::BadJson(serde_json::json!({
-                "non_field_errors": ["Invalid data. Expected a dictionary, but got list."]
-            })));
-        }
-        None => serde_json::Map::new(),
+        Value::Object(map) => map,
+        ref other => return Err(non_dict_denial(other)),
     };
     let mut errors = FieldErrors::default();
     let email = match data.get("email") {
@@ -1828,17 +2097,9 @@ async fn inv_create_inner(
             errors.email.push("This field is required.".into());
             None
         }
-        Some(value) => {
-            let valid = validate_email_value(value, &mut errors);
-            if let Some(email) = valid.as_deref() {
-                if email.len() > 255 {
-                    errors
-                        .email
-                        .push("Ensure this field has no more than 255 characters.".into());
-                }
-            }
-            valid.filter(|_| errors.email.is_empty())
-        }
+        // The `CharField` pipeline (blank/bool/max-length checks, Django
+        // `EmailValidator`) lives in `validate_email_value`.
+        Some(value) => validate_email_value(value, &mut errors),
     };
     let role = match data.get("role") {
         None => Some(ROLE_GUEST),
@@ -1913,56 +2174,93 @@ async fn inv_detail_get_inner(
     pk_raw: &str,
     headers: &HeaderMap,
 ) -> Result<Response, Denial> {
-    let pk = parse_invite_pk(pk_raw)?;
     let pool = pool(state)?;
     let actor = authenticate(&pool, headers, state.settings().secret_key.as_bytes()).await?;
     let facts = load_facts(&pool, slug, &actor, None).await?;
     check_gate(V1Route::Invites, "GET", &facts, None)?;
+    // The router pk parses after the gate (`initial()` authN/permissions
+    // run before `get_object()`), so gated-out callers see 401/403 first.
+    let pk = parse_invite_pk(pk_raw)?;
     let invite = fetch_invite_full(&pool, slug, pk)
         .await?
         .ok_or(Denial::InviteNotFound)?;
     Ok(ok_json(render_invite(&invite, &actor.timezone)))
 }
 
-/// `PATCH invitations/<pk>/` (`invite.py:112-124`): any `email` key — even
-/// the unchanged address — 400s before validation.
+/// `PATCH invitations/<pk>/` (`invite.py:112-124`): any truthy `email`
+/// value — even the unchanged address — 400s before validation.
 async fn inv_detail_patch(
     State(state): State<AppState>,
     Path((slug, pk_raw)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    into_result_response(inv_detail_patch_inner(&state, &slug, &pk_raw, &headers, &body).await)
+    into_result_response(
+        inv_detail_patch_inner(
+            &state,
+            &slug,
+            &pk_raw,
+            ProxyRequest {
+                method,
+                uri,
+                headers,
+                body,
+            },
+        )
+        .await,
+    )
 }
 
 async fn inv_detail_patch_inner(
     state: &AppState,
     slug: &str,
     pk_raw: &str,
-    headers: &HeaderMap,
-    body: &Bytes,
+    req: ProxyRequest,
 ) -> Result<Response, Denial> {
-    let pk = parse_invite_pk(pk_raw)?;
     let pool = pool(state)?;
-    let json = parse_body(body)?;
-    let actor = authenticate(&pool, headers, state.settings().secret_key.as_bytes()).await?;
+    let actor = authenticate(&pool, &req.headers, state.settings().secret_key.as_bytes()).await?;
     let facts = load_facts(&pool, slug, &actor, None).await?;
     check_gate(V1Route::Invites, "PATCH", &facts, None)?;
+    let pk = parse_invite_pk(pk_raw)?;
     let invite = fetch_invite_full(&pool, slug, pk)
         .await?
         .ok_or(Denial::InviteNotFound)?;
+    // The body parses after the row fetch (`partial_update()`: `get_object`
+    // runs before `request.data`); empty/unparseable bodies proxy for the
+    // exact `ParseError` bytes, non-dict bodies 400 with no write.
+    let Some(json) = parse_body_json(&req.body) else {
+        let ProxyRequest {
+            method,
+            uri,
+            headers,
+            body,
+        } = req;
+        return Ok(proxy_through(state.clone(), method, uri, headers, body).await);
+    };
 
     let data = match json {
-        Some(Value::Object(map)) => map,
-        _ => serde_json::Map::new(),
+        Value::Object(map) => map,
+        // `partial_update()` calls `request.data.get("email")` before the
+        // serializer ever runs, so any non-dict body raises `AttributeError`
+        // and `handle_exception` answers 500 (`invite.py:113`).
+        _ => return Err(Denial::ServerError),
     };
-    if data.contains_key("email") {
+    // `request.data.get("email")` — truthiness, so `""`/`null` skip the
+    // guard and fail field validation downstream instead.
+    if data.get("email").is_some_and(is_truthy) {
         return Err(Denial::BadJson(serde_json::json!({
             "error": "Email cannot be updated after invite is created.",
             "code": "EMAIL_CANNOT_BE_UPDATED",
         })));
     }
     let mut errors = FieldErrors::default();
+    // Present-but-falsy values skip the guard but still validate: partial
+    // serializers validate every present key.
+    if let Some(value) = data.get("email") {
+        validate_email_value(value, &mut errors);
+    }
     let mut role = invite.role;
     if let Some(value) = data.get("role") {
         if let Some(valid) = validate_role_value(value, &mut errors) {
@@ -2005,11 +2303,11 @@ async fn inv_detail_delete_inner(
     pk_raw: &str,
     headers: &HeaderMap,
 ) -> Result<Response, Denial> {
-    let pk = parse_invite_pk(pk_raw)?;
     let pool = pool(state)?;
     let actor = authenticate(&pool, headers, state.settings().secret_key.as_bytes()).await?;
     let facts = load_facts(&pool, slug, &actor, None).await?;
     check_gate(V1Route::Invites, "DELETE", &facts, None)?;
+    let pk = parse_invite_pk(pk_raw)?;
     let invite = fetch_invite_full(&pool, slug, pk)
         .await?
         .ok_or(Denial::InviteNotFound)?;
@@ -2231,11 +2529,165 @@ mod tests {
 
     #[test]
     fn email_validation() {
+        // Django `EmailValidator` fidelity (`django/core/validators.py`).
         assert!(is_valid_email("ct-new@example.com"));
+        assert!(is_valid_email("a@b.12"));
+        assert!(is_valid_email("a@localhost"));
+        assert!(is_valid_email("a@[1.2.3.4]"));
+        assert!(is_valid_email("a@[::1]"));
+        assert!(is_valid_email("a@xn--bcher-kva.example"));
+        assert!(is_valid_email("a@bücher.de"));
+        assert!(is_valid_email("\"ab\"@example.com"));
+        assert!(is_valid_email("Test@Example.COM"));
+        assert!(is_valid_email(&format!("{}@example.com", "a".repeat(65))));
         assert!(!is_valid_email("not-an-email"));
         assert!(!is_valid_email("a@b"));
+        assert!(!is_valid_email("a@b.c"));
         assert!(!is_valid_email("@example.com"));
         assert!(!is_valid_email("a@1.2.3"));
+        assert!(!is_valid_email("a..b@example.com"));
+        assert!(!is_valid_email(".a@example.com"));
+        assert!(!is_valid_email("a.@example.com"));
+        assert!(!is_valid_email("a@LOCALHOST"));
+        assert!(!is_valid_email("\"a b\"@example.com"));
+        assert!(!is_valid_email("a@[999.1.1.1]"));
+        assert!(!is_valid_email("  a@b.com  "));
+    }
+
+    #[test]
+    fn email_field_pipeline_messages() {
+        // DRF `CharField(max_length=255)` order: blank, null, invalid-type,
+        // max-length, null-chars, then the Django email check.
+        let check = |value: serde_json::Value| {
+            let mut errors = FieldErrors::default();
+            let valid = validate_email_value(&value, &mut errors);
+            (valid, errors.body())
+        };
+        assert_eq!(
+            check(serde_json::json!("  ct-new@example.com  ")),
+            (Some("ct-new@example.com".into()), serde_json::json!({}))
+        );
+        assert_eq!(
+            check(serde_json::json!("")),
+            (
+                None,
+                serde_json::json!({"email": ["This field may not be blank."]})
+            )
+        );
+        assert_eq!(
+            check(serde_json::json!("  \u{1c} ")),
+            (
+                None,
+                serde_json::json!({"email": ["This field may not be blank."]})
+            )
+        );
+        assert_eq!(
+            check(serde_json::Value::Null),
+            (
+                None,
+                serde_json::json!({"email": ["This field may not be null."]})
+            )
+        );
+        assert_eq!(
+            check(serde_json::json!(true)),
+            (None, serde_json::json!({"email": ["Not a valid string."]}))
+        );
+        assert_eq!(
+            check(serde_json::json!(["a@b.com"])),
+            (None, serde_json::json!({"email": ["Not a valid string."]}))
+        );
+        assert_eq!(
+            check(serde_json::json!(7)),
+            (
+                None,
+                serde_json::json!({"email": ["Invalid email address"]})
+            )
+        );
+        let long = format!("{}@example.com", "a".repeat(250));
+        assert_eq!(
+            check(serde_json::json!(long)),
+            (
+                None,
+                serde_json::json!({"email": ["Ensure this field has no more than 255 characters."]})
+            )
+        );
+        assert_eq!(
+            check(serde_json::json!("a\x00@example.com")),
+            (
+                None,
+                serde_json::json!({"email": ["Null characters are not allowed."]})
+            )
+        );
+        assert_eq!(
+            check(serde_json::json!("plain")),
+            (
+                None,
+                serde_json::json!({"email": ["Invalid email address"]})
+            )
+        );
+    }
+
+    #[test]
+    fn non_dict_type_names() {
+        // `type(data).__name__` (`serializers.py:485`).
+        let body = |value: serde_json::Value| match non_dict_denial(&value) {
+            Denial::BadJson(body) => body,
+            _ => unreachable!(),
+        };
+        for (value, name) in [
+            (serde_json::json!([1]), "list"),
+            (serde_json::json!("x"), "str"),
+            (serde_json::json!(1), "int"),
+            (serde_json::json!(1.5), "float"),
+            (serde_json::json!(true), "bool"),
+        ] {
+            assert_eq!(
+                body(value),
+                serde_json::json!({
+                    "non_field_errors": [format!("Invalid data. Expected a dictionary, but got {name}.")]
+                })
+            );
+        }
+        // `null` is rewritten by the serializer `.errors` property
+        // (`serializers.py:574-582`), never reaching the dict check.
+        assert_eq!(
+            body(serde_json::Value::Null),
+            serde_json::json!({"non_field_errors": ["No data provided"]})
+        );
+    }
+
+    #[test]
+    fn field_error_key_order() {
+        // Invite declaration order (`email`, then `role`), e.g. a PATCH
+        // carrying a bad email and a bad role together.
+        let mut errors = FieldErrors::default();
+        errors.role.push("\"99\" is not a valid choice.".into());
+        errors.email.push("This field may not be blank.".into());
+        let rendered = errors.body();
+        let keys: Vec<&str> = rendered
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, vec!["email", "role"]);
+    }
+
+    #[test]
+    fn email_guard_truthiness() {
+        // `request.data.get("email")` (`invite.py:113`): only truthy values
+        // trip the guard.
+        assert!(is_truthy(&serde_json::json!("a@b.com")));
+        assert!(is_truthy(&serde_json::json!("  ")));
+        assert!(is_truthy(&serde_json::json!(1)));
+        assert!(is_truthy(&serde_json::json!({"a": 1})));
+        assert!(!is_truthy(&serde_json::json!("")));
+        assert!(!is_truthy(&serde_json::Value::Null));
+        assert!(!is_truthy(&serde_json::json!(false)));
+        assert!(!is_truthy(&serde_json::json!(0)));
+        assert!(!is_truthy(&serde_json::json!(0.0)));
+        assert!(!is_truthy(&serde_json::json!([])));
+        assert!(!is_truthy(&serde_json::json!({})));
     }
 
     #[test]
@@ -2773,7 +3225,7 @@ mod live_tests {
         assert!(json_of(&bytes).get("member").is_some());
         // Happy path via a fresh workspace user.
         let fresh = uuid::Uuid::new_v4().to_string();
-        let email = format!("ct-fresh-{}.{}@example.com", &seed.slug, &fresh[..6]);
+        let email = format!("ct-fresh-{}.{}@example.com", seed.slug, &fresh[..6]);
         sqlx::query(
             "INSERT INTO users (id, password, username, email, first_name, last_name,
                     avatar, date_joined, created_at, updated_at, last_location,
