@@ -158,9 +158,10 @@ pub fn sign_put(
     let payload_hash = sha256_hex(payload);
     let endpoint = resolve_server_endpoint(storage, scheme, host);
     let path = canonical_path(&endpoint, &storage.bucket_name, object_key);
-    let signed_headers = "host;content-type;x-amz-content-sha256;x-amz-date";
+    // SigV4 requires canonical headers sorted by name (botocore sorts too).
+    let signed_headers = "content-type;host;x-amz-content-sha256;x-amz-date";
     let canonical = format!(
-        "PUT\n{path}\n\nhost:{}\ncontent-type:{content_type}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_datetime}\n\n{signed_headers}\n{payload_hash}",
+        "PUT\n{path}\n\ncontent-type:{content_type}\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_datetime}\n\n{signed_headers}\n{payload_hash}",
         endpoint.signed_host,
     );
     let authorization = authorization(
@@ -376,10 +377,11 @@ mod tests {
         );
         assert_eq!(req.content_type.as_deref(), Some("image/png"));
         assert_eq!(req.amz_date, "20260928T120000Z");
-        // Golden canonical request (AWS header-auth shape).
-        let canonical = "PUT\n/examplebucket/ab12cd34-user-avatar.png\n\nhost:s3.us-east-1.amazonaws.com\ncontent-type:image/png\nx-amz-content-sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\nx-amz-date:20260928T120000Z\n\nhost;content-type;x-amz-content-sha256;x-amz-date\n2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        // Golden canonical request (AWS header-auth shape, headers sorted —
+        // botocore emits `content-type` before `host` for the same input).
+        let canonical = "PUT\n/examplebucket/ab12cd34-user-avatar.png\n\ncontent-type:image/png\nhost:s3.us-east-1.amazonaws.com\nx-amz-content-sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\nx-amz-date:20260928T120000Z\n\ncontent-type;host;x-amz-content-sha256;x-amz-date\n2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
         let expected = format!(
-            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260928/us-east-1/s3/aws4_request, SignedHeaders=host;content-type;x-amz-content-sha256;x-amz-date, Signature={}",
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260928/us-east-1/s3/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, Signature={}",
             oracle_signature(canonical, "20260928T120000Z", "20260928")
         );
         assert_eq!(req.authorization, expected);

@@ -25,9 +25,9 @@
 //! * `x-amz-content-sha256` carries the real payload hash. botocore's S3
 //!   signer sends the literal `UNSIGNED-PAYLOAD`; S3 and MinIO accept either,
 //!   and the real hash verifies on stores that reject unsigned payloads.
-//! * The signed-header set is fixed (`host`, `content-type` on PUT,
-//!   `x-amz-content-sha256`, `x-amz-date`). The caller MUST send exactly the
-//!   headers on [`s3::SignedRequest`] with exactly those values.
+//! * The signed-header set is fixed and SigV4-sorted (`content-type`, `host`
+//!   on PUT, `x-amz-content-sha256`, `x-amz-date`). The caller MUST send
+//!   exactly the headers on [`s3::SignedRequest`] with exactly those values.
 //!
 //! Ported bugs (also listed in the PR):
 //!

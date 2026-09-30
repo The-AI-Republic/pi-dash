@@ -60,19 +60,23 @@ pub fn avatar_attributes(provider: &str, extension: &str, content_type: &str, si
 ///
 /// Key order and null-on-missing mirror the Python dict: `response.get(...)`
 /// yields `None` for absent fields, and `LastModified` is already an ISO-8601
-/// string (`.isoformat()`) by the time it reaches this mapper.
+/// string (`.isoformat()`) by the time it reaches this mapper. `metadata`
+/// carries the HEAD `Metadata` map (`response.get("Metadata", {})`); pass
+/// `None` when the caller has none (avatar uploads set no user metadata, so
+/// the avatar flow always records `{}` exactly like Python).
 pub fn head_to_storage_metadata(
     content_type: Option<&str>,
     content_length: Option<i64>,
     last_modified_iso: Option<&str>,
     etag: Option<&str>,
+    metadata: Option<Value>,
 ) -> Value {
     serde_json::json!({
         "ContentType": content_type,
         "ContentLength": content_length,
         "LastModified": last_modified_iso,
         "ETag": etag,
-        "Metadata": {},
+        "Metadata": metadata.unwrap_or(serde_json::json!({})),
     })
 }
 
@@ -80,7 +84,9 @@ pub fn head_to_storage_metadata(
 /// no limit; a present value over `max_bytes` rejects the download.
 ///
 /// Mirrors Python truthiness exactly: the header is only consulted when
-/// present (`if content_length and ...`).
+/// present (`if content_length and ...`). A header that fails to parse as an
+/// integer must be rejected by the caller — Python's `int()` raises into the
+/// URL-fallback branch.
 pub fn content_length_allowed(content_length: Option<i64>, max_bytes: i64) -> bool {
     match content_length {
         None => true,
@@ -148,16 +154,29 @@ mod tests {
             Some(12345),
             Some("2026-09-30T06:00:00+00:00"),
             Some("\"abc123\""),
+            None,
         );
         assert_eq!(
             serde_json::to_string(&meta).expect("meta serialize"),
             r#"{"ContentType":"image/png","ContentLength":12345,"LastModified":"2026-09-30T06:00:00+00:00","ETag":"\"abc123\"","Metadata":{}}"#
         );
         // Missing HEAD fields are null, like `response.get(...)` → None.
-        let empty = head_to_storage_metadata(None, None, None, None);
+        let empty = head_to_storage_metadata(None, None, None, None, None);
         assert_eq!(
             serde_json::to_string(&empty).expect("empty serialize"),
             r#"{"ContentType":null,"ContentLength":null,"LastModified":null,"ETag":null,"Metadata":{}}"#
+        );
+        // A present Metadata map is recorded verbatim (`response.get`).
+        let with_meta = head_to_storage_metadata(
+            None,
+            None,
+            None,
+            None,
+            Some(serde_json::json!({"avatar": "true"})),
+        );
+        assert_eq!(
+            serde_json::to_string(&with_meta).expect("meta serialize"),
+            r#"{"ContentType":null,"ContentLength":null,"LastModified":null,"ETag":null,"Metadata":{"avatar":"true"}}"#
         );
     }
 
