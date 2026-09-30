@@ -290,9 +290,9 @@ pub fn month_dimension_expr(field: &str) -> String {
 
 /// SQL for the `F(x_axis)` dimension (`extract_axis`, `analytics_plot.py:53-61`)
 /// plus the join the dimension needs. The expression is the `GROUP BY` / `SELECT`
-/// target; date axes render through [`month_dimension_expr`] and exclude NULL
-/// dimensions (`analytics_plot.py:85-86`); every other axis annotates NULLs to
-/// `'None'`/`'null'` via `is_null`/`dimension_ex` (`analytics_plot.py:97-104`).
+/// target; date axes render through [`month_dimension_expr`]. NULL dimensions
+/// are excluded for every axis by the caller (`analytics_plot.py:84-86`; the
+/// `is_null`/`dimension_ex` annotations at `:97-104` are dead code).
 /// Returns `None` for an unknown axis (handlers reject those in validation first).
 pub fn dimension_sql(x_axis: &str) -> Option<(String, String)> {
     let direct = |column: &str| Some((format!("\"{ISSUE_TABLE}\".\"{column}\""), String::new()));
@@ -377,8 +377,11 @@ pub fn base_count_sql(filters_sql: &str) -> String {
 }
 
 /// Q-01b issue_count plot (`analytics_plot.py:96-107`): group by `dimension`
-/// (+ `segment`), `COUNT(*)`, ordered by dimension. Date axes exclude NULL
-/// dimensions (`:85-86`); non-date axes map NULL to `'None'`/`'null'` first.
+/// (+ `segment`), `COUNT(*)`, ordered by dimension. NULL dimensions are
+/// excluded for every axis (`analytics_plot.py:84-86`: `extract_axis` always
+/// returns `"dimension"`, so the exclude is unconditional; the `is_null` /
+/// `dimension_ex` annotations at `:97-104` are dead — a later
+/// `.values("dimension")` drops them).
 /// Returns `None` for an unknown `x_axis` or `segment`.
 /// Params: `$1` = workspace slug.
 pub fn base_plot_count_sql(
@@ -403,13 +406,10 @@ pub fn base_plot_count_sql(
         }
         _ => (String::new(), String::new(), String::new()),
     };
-    // Date axes exclude NULL dimensions (`analytics_plot.py:85-86`): the guard repeats the
-    // inlined expression (a SELECT alias is not visible in the same level's WHERE).
-    let null_guard = if is_date_axis(x_axis) {
-        format!(" AND {dim_expr} IS NOT NULL")
-    } else {
-        String::new()
-    };
+    // NULL dimensions are excluded for every axis (`analytics_plot.py:84-86`):
+    // the guard repeats the inlined expression (a SELECT alias is not visible
+    // in the same level's WHERE).
+    let null_guard = format!(" AND {dim_expr} IS NOT NULL");
     Some(format!(
         "SELECT \"dimension\", COUNT(*) AS \"count\" FROM (SELECT {dim_expr} AS \"dimension\"{seg_select} \
          FROM \"{ISSUE_TABLE}\"{dim_join}{seg_join}{scope}{null_guard}) GROUP BY \"dimension\"{seg_group} \
@@ -1890,6 +1890,15 @@ mod tests {
         // Date axes exclude NULL dimensions (analytics_plot.py:85-86).
         let dated = base_plot_count_sql("created_at", None, "TRUE").expect("date axis");
         assert!(dated.contains("EXTRACT(YEAR"));
+        // Every axis excludes NULL dimensions: `extract_axis` always returns
+        // "dimension", so `if x_axis == "dimension"` (analytics_plot.py:85) is
+        // always true and the exclude runs unconditionally (PIDASHCONV-496).
+        // The guard repeats the inlined dimension expression (a SELECT alias is
+        // not visible in the same level's WHERE).
+        let plain = base_plot_count_sql("priority", None, "TRUE").expect("plain axis");
+        assert!(plain.contains("\"issues\".\"priority\" IS NOT NULL"));
+        let nullable = base_plot_count_sql("labels__id", None, "TRUE").expect("nullable axis");
+        assert!(nullable.contains("\"issue_labels\".\"label_id\" IS NOT NULL"));
     }
 
     #[test]
