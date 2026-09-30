@@ -14,14 +14,19 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod handlers_members;
+pub mod handlers_state_estimate;
 pub mod perms;
 
 use axum::Router;
 
 use crate::state::AppState;
 
-/// Domain router: member / invite / user routes (PIDASHCONV-371). Sibling
-/// D-19 handler issues merge their routers here; merges keep both sides.
+/// Domain router: member / invite / user routes (PIDASHCONV-371) plus
+/// state / estimate routes (PIDASHCONV-372). Owned D-19 api-v1 routes serve
+/// from Rust (cutover granularity); everything else keeps proxying to Django
+/// through the edge fallback. Sibling D-19 handler issues merge their routers
+/// here; merges keep both sides.
 pub fn routes() -> Router<AppState> {
-    handlers_members::routes()
+    handlers_members::routes().merge(handlers_state_estimate::routes())
+}
 }
