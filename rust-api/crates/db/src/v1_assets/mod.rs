@@ -45,8 +45,15 @@
 //! add their own layers under sibling modules (PIDASHCONV-409/411
 //! queries); on rebase keep both sides.
 //!
+//! * [`asset_queries`] — user + generic asset lookups (units 1-3,
+//!   PIDASHCONV-409).
+//! * [`sticky_queries`] — sticky list querysets + `icontains` pattern
+//!   (units 4-5, PIDASHCONV-409).
+//!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
+pub mod asset_queries;
 pub mod entities;
 pub mod intake_queries;
 pub mod model;
+pub mod sticky_queries;
