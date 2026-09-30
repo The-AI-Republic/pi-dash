@@ -561,6 +561,38 @@ pub fn classify_new_cycle_id(value: Option<&Value>) -> NewCycleId {
     }
 }
 
+/// A date-check `cycle_id` body value after the ORM coercion
+/// (`base.py:525` + `UUIDField.to_python`, probed live in
+/// `manage.py shell`): unlike `new_cycle_id` there is no `if not`
+/// guard, so falsy ints/bools still coerce — `0`/`False` become
+/// `uuid.UUID(int=0)` and miss every pk (the normal 200), never
+/// "required". Missing/null excludes nothing; floats, negative ints,
+/// lists, dicts and non-UUID strings raise `ValidationError` → 400.
+pub fn classify_date_check_cycle_id(value: Option<&Value>) -> Result<Option<Uuid>, Denial> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(raw)) => match raw.parse::<Uuid>() {
+            Ok(id) => Ok(Some(id)),
+            Err(_) => Err(Denial::InvalidDetail),
+        },
+        // `True == 1`, `False == 0`: `uuid.UUID(int=v)`.
+        Some(Value::Bool(true)) => Ok(Some(Uuid::from_u128(1))),
+        Some(Value::Bool(false)) => Ok(Some(Uuid::from_u128(0))),
+        Some(Value::Number(number)) => {
+            // Only non-negative integer reprs coerce (`uuid.UUID(int=v)`
+            // needs the 128-bit range; floats and negative ints raise).
+            if number.is_u64() {
+                Ok(Some(Uuid::from_u128(u128::from(
+                    number.as_u64().expect("u64"),
+                ))))
+            } else {
+                Err(Denial::InvalidDetail)
+            }
+        }
+        _ => Err(Denial::InvalidDetail),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Date-check (`CycleDateCheckEndpoint.post`, `base.py:520-557`)
 // ---------------------------------------------------------------------------
@@ -616,20 +648,14 @@ pub async fn date_check(
         Ok(end) => end,
         Err(denial) => return denial.into_response(),
     };
-    // `.exclude(pk=cycle_id)`: a missing id excludes nothing
-    // (BUG-date-check-exclude-none); a garbage id fails the UUID lookup
-    // (BUG-date-check-garbage-cycle-400).
-    let exclude: Option<Uuid> = match data.get("cycle_id") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(raw)) => match raw.parse::<Uuid>() {
-            Ok(id) => Some(id),
-            // `exclude(pk=<garbage>)` fails the UUID lookup
-            // (`ValidationError` → 400: BUG-date-check-garbage-cycle-400).
-            Err(_) => return Denial::InvalidDetail.into_response(),
-        },
-        // Non-string ids never match a UUID pk; Django raises the same
-        // `ValidationError` for them.
-        Some(_) => return Denial::InvalidDetail.into_response(),
+    // `.exclude(pk=cycle_id)` (`base.py:547`): a missing id excludes
+    // nothing (BUG-date-check-exclude-none); ints/bools coerce via
+    // `UUID(int=v)` and miss every pk ([`classify_date_check_cycle_id`]);
+    // a garbage id fails the UUID lookup (`ValidationError` → 400:
+    // BUG-date-check-garbage-cycle-400).
+    let exclude: Option<Uuid> = match classify_date_check_cycle_id(data.get("cycle_id")) {
+        Ok(exclude) => exclude,
+        Err(denial) => return denial.into_response(),
     };
     let overlap = match overlap_exists(
         pool,
@@ -2432,6 +2458,63 @@ mod tests {
         assert!(matches!(
             classify_new_cycle_id(Some(&Value::String("not-a-uuid".to_owned()))),
             NewCycleId::InvalidDetail
+        ));
+    }
+
+    #[test]
+    fn date_check_cycle_id_coercion_matches_exclude() {
+        // Regression (`base.py:525` + `UUIDField.to_python`, probed live
+        // in `manage.py shell`): no `if not` guard on `cycle_id`, so
+        // ints/bools — including falsy `0`/`False` — coerce to
+        // `UUID(int=v)` and miss every pk (the normal 200); floats,
+        // negative ints, lists, dicts and non-UUID strings raise
+        // `ValidationError` → 400.
+        assert!(matches!(classify_date_check_cycle_id(None), Ok(None)));
+        assert!(matches!(
+            classify_date_check_cycle_id(Some(&Value::Null)),
+            Ok(None)
+        ));
+        assert!(matches!(
+            classify_date_check_cycle_id(Some(&serde_json::json!(5))),
+            Ok(Some(got)) if got == Uuid::from_u128(5)
+        ));
+        assert!(matches!(
+            classify_date_check_cycle_id(Some(&Value::Bool(true))),
+            Ok(Some(got)) if got == Uuid::from_u128(1)
+        ));
+        // Falsy but unguarded: `0`/`False` still coerce to `UUID(int=0)`.
+        assert!(matches!(
+            classify_date_check_cycle_id(Some(&serde_json::json!(0))),
+            Ok(Some(got)) if got == Uuid::from_u128(0)
+        ));
+        assert!(matches!(
+            classify_date_check_cycle_id(Some(&Value::Bool(false))),
+            Ok(Some(got)) if got == Uuid::from_u128(0)
+        ));
+        let id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
+        assert!(matches!(
+            classify_date_check_cycle_id(Some(&Value::String(id.to_string()))),
+            Ok(Some(got)) if got == id
+        ));
+        assert!(matches!(
+            classify_date_check_cycle_id(Some(&serde_json::json!(5.0))),
+            Err(Denial::InvalidDetail)
+        ));
+        assert!(matches!(
+            classify_date_check_cycle_id(Some(&serde_json::json!(-5))),
+            Err(Denial::InvalidDetail)
+        ));
+        assert!(matches!(
+            classify_date_check_cycle_id(Some(&serde_json::json!([1]))),
+            Err(Denial::InvalidDetail)
+        ));
+        assert!(matches!(
+            classify_date_check_cycle_id(Some(&serde_json::json!({"a": 1}))),
+            Err(Denial::InvalidDetail)
+        ));
+        assert!(matches!(
+            classify_date_check_cycle_id(Some(&Value::String("not-a-uuid".to_owned()))),
+            Err(Denial::InvalidDetail)
         ));
     }
 
