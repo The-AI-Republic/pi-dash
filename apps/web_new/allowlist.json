@@ -10,5 +10,5 @@
     "zustand"
   ],
   "@pidash/kit": [],
-  "@pidash/api-client": []
+  "@pidash/api-client": ["zod"]
 }

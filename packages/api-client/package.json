@@ -15,6 +15,9 @@
     "lint": "oxlint --deny-warnings",
     "test": "vitest run"
   },
+  "dependencies": {
+    "zod": "^4.6.5"
+  },
   "devDependencies": {
     "tsdown": "catalog:",
     "typescript": "catalog:",

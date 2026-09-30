@@ -844,6 +844,10 @@ importers:
         version: 3.2.7(@types/debug@4.1.12)(@types/node@22.12.0)(happy-dom@20.0.2)(jiti@2.7.0)(jsdom@26.1.0)(lightningcss@1.32.0)(terser@5.43.1)(yaml@2.8.3)
 
   packages/api-client:
+    dependencies:
+      zod:
+        specifier: ^4.6.5
+        version: 4.6.5
     devDependencies:
       tsdown:
         specifier: 'catalog:'
