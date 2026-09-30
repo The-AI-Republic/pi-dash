@@ -3830,7 +3830,16 @@ mod tests {
     }
 
     fn test_router() -> Router {
-        crate::routes::with_routes(AppState::new("0.1.0"), routes())
+        // Unreachable upstream (port 1 is never bound): proxied methods
+        // fail closed with 502. `AppState::new` would point at Django's
+        // dev port, where a live server answers with its own statuses.
+        crate::routes::with_routes(
+            AppState::with_edge(
+                "0.1.0",
+                crate::edge::EdgeHandle::for_tests("http://127.0.0.1:1"),
+            ),
+            routes(),
+        )
     }
 
     async fn any_status(app: Router, method: &str, path: &str) -> StatusCode {
