@@ -12,6 +12,9 @@
 //!   and `ModuleMember` (`db/models/module.py:58-151`) as structs +
 //!   column defs, replaying FX-MOD-01. Sibling issue PIDASHCONV-363
 //!   appends models B (`:152-217`) in its own sections.
+//! * [`queries`] — queries (PIDASHCONV-374): the five queryset units +
+//!   `apply_annotations` (`base.py:78-292, :774-802`, `archive.py:45-256`,
+//!   `issue.py:53-94`) as SQL-text builders replaying FX-MOD-03.
 //!
 //! Wiring note: the crate root declares `pub mod app_modules;` (seam for
 //! this issue's new files); every file under this module is new.
@@ -22,6 +25,7 @@
 //! race outside a transaction; `validate` only sees input dates, so a
 //! partial update carrying one date skips the start/target check.
 pub mod models;
+pub mod queries;
 pub mod shape;
 
 pub use shape::{
