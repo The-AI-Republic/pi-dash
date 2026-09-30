@@ -26,6 +26,9 @@
         try_files {path} {path}/ /index.html
         file_server
     }
+    # BEGIN MIGRATED ROUTES (generated from apps/web_new/migrated-routes.json — do not edit; run `pnpm --filter web_new coexistence:generate`)
+    # (none — the list is empty, so every path routes to the old app)
+    # END MIGRATED ROUTES
     handle_path /* {
         root * /app/web
         try_files {path} {path}/ /index.html

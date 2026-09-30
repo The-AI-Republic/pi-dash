@@ -19,7 +19,10 @@
     "check": "pnpm lint && pnpm check:boundaries && pnpm check:headers && pnpm check:deps && pnpm check:similarity",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "size": "size-limit"
+    "size": "size-limit",
+    "coexistence:generate": "node checks/coexistence-routes.mjs",
+    "check:coexistence": "node checks/coexistence-routes.mjs --check",
+    "test:coexistence": "node --test checks/coexistence-routes.test.mjs"
   },
   "dependencies": {
     "@pidash/api-client": "workspace:*",

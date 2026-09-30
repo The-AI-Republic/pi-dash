@@ -34,6 +34,9 @@
 	reverse_proxy /{$BUCKET_NAME}/* pi-dash-minio:9000
 	reverse_proxy /{$BUCKET_NAME} pi-dash-minio:9000
 
+	# BEGIN MIGRATED ROUTES (generated from apps/web_new/migrated-routes.json — do not edit; run `pnpm --filter web_new coexistence:generate`)
+	# (none — the list is empty, so every path routes to the old app)
+	# END MIGRATED ROUTES
 	reverse_proxy /* web:3000
 }
 
