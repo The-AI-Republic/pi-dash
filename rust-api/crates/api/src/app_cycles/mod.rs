@@ -21,6 +21,11 @@
 //! (PIDASHCONV-321/323/357/377/410); this module is the query seam they
 //! wire through, not a stub — it carries the backend-parity consts plus
 //! the re-export, both pinned by the test below.
+//!
+//! [`gates`] ports the `@allow_permission` role matrix (F-C27-07,
+//! PIDASHCONV-290) over the F-06 kernel for the same handlers.
+
+pub mod gates;
 
 pub use pidash_services::app_cycles::queries;
 
