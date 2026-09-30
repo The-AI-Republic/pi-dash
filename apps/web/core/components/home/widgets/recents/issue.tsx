@@ -5,6 +5,7 @@
  */
 
 import { observer } from "mobx-react";
+import { ISSUE_PRIORITIES } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 // pi dash types
 import { PriorityIcon, StateGroupIcon, WorkItemsIcon } from "@pi-dash/propel/icons";
@@ -45,6 +46,8 @@ export const RecentIssue = observer(function RecentIssue(props: BlockProps) {
   if (!issueDetails) return <></>;
 
   const state = getStateById(issueDetails?.state);
+  // the API sends priority as a lowercase enum value, so map it to its display label before translating
+  const priorityTitle = ISSUE_PRIORITIES.find((p) => p.key === issueDetails?.priority)?.title ?? "None";
 
   const workItemLink = generateWorkItemLink({
     workspaceSlug: workspaceSlug?.toString(),
@@ -113,7 +116,7 @@ export const RecentIssue = observer(function RecentIssue(props: BlockProps) {
               />
             </div>
           </Tooltip>
-          <Tooltip tooltipHeading={t("Priority")} tooltipContent={issueDetails?.priority ?? t("Priority")}>
+          <Tooltip tooltipHeading={t("Priority")} tooltipContent={t(priorityTitle)}>
             <div>
               <PriorityIcon priority={issueDetails?.priority} withContainer size={12} />
             </div>
