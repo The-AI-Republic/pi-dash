@@ -68,30 +68,33 @@ test(
       await driver.rulesEnsureSignedIn(seed.guestEmail ?? "", seed.guestPassword ?? "", seed.workspaceSlug);
       // Someone else's item renders the does-not-exist empty state: no feed,
       // no composer, nothing to post through.
-      await driver.page.goto(`/${seed.workspaceSlug}/projects/${seed.projectId}/issues/${issueId}`);
-      await driver.page.waitForLoadState("domcontentloaded");
-      await expect(driver.page.getByText("Work item does not exist")).toBeVisible({ timeout: 60_000 });
-      expect(await driver.page.getByRole("group", { name: "Add comment" }).count()).toBe(0);
+      await driver.rulesOpenIssueDetailRaw(seed.workspaceSlug, seed.projectId, issueId);
+      expect(await driver.rulesIssueMissingVisible()).toBe(true);
+      expect(await driver.rulesCommentComposerVisible()).toBe(false);
     });
 
     await test.step("guest post lands once the project lets guests use everything", async () => {
       await serverPatchProject(seed.workspaceSlug, seed.projectId, owner, { guest_view_all_features: true });
-      const created = await serverCreateComment(
-        seed.workspaceSlug,
-        seed.projectId,
-        issueId,
-        guest,
-        `<p>${MARKER} allowed</p>`
-      );
-      const listed = await serverComments(seed.workspaceSlug, seed.projectId, issueId, owner);
-      expect(listed.map((c) => c.id)).toContain(created.id);
-      // The item opens now, with the composer and the guest's card visible.
-      await driver.rulesOpenIssueDetail(seed.workspaceSlug, seed.projectId, issueId);
-      const body = await driver.rulesCommentBodyText(created.id);
-      expect(body ?? "").toContain(`${MARKER} allowed`);
-      const del = await serverDeleteCommentRaw(seed.workspaceSlug, seed.projectId, issueId, created.id, owner);
-      expect(del.status).toBe(204);
-      await serverPatchProject(seed.workspaceSlug, seed.projectId, owner, { guest_view_all_features: false });
+      try {
+        const created = await serverCreateComment(
+          seed.workspaceSlug,
+          seed.projectId,
+          issueId,
+          guest,
+          `<p>${MARKER} allowed</p>`
+        );
+        const listed = await serverComments(seed.workspaceSlug, seed.projectId, issueId, owner);
+        expect(listed.map((c) => c.id)).toContain(created.id);
+        // The item opens now, with the composer and the guest's card visible.
+        await driver.rulesOpenIssueDetail(seed.workspaceSlug, seed.projectId, issueId);
+        expect(await driver.rulesCommentComposerVisible()).toBe(true);
+        const body = await driver.rulesCommentBodyText(created.id);
+        expect(body ?? "").toContain(`${MARKER} allowed`);
+        const del = await serverDeleteCommentRaw(seed.workspaceSlug, seed.projectId, issueId, created.id, owner);
+        expect(del.status).toBe(204);
+      } finally {
+        await serverPatchProject(seed.workspaceSlug, seed.projectId, owner, { guest_view_all_features: false });
+      }
     });
 
     await test.step("cleanup removes the probe item", async () => {

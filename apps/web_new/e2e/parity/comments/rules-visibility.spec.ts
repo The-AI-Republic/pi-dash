@@ -80,10 +80,22 @@ test(
     });
 
     await test.step("a project without external sharing offers no visibility controls", async () => {
+      // Deleting a project leaves its identifier row behind, so a fixed
+      // identifier collides on the second run against any stack (the create
+      // commits the project, then refuses the duplicate identifier with
+      // 400). Suffix both per run; the sweep below stays prefix-based to
+      // clear crashed runs' projects. Base-36 upper fits the identifier
+      // charset (≤12 chars, no special characters).
+      const runSuffix = Date.now().toString(36).toUpperCase().slice(-6).padStart(6, "0");
       const stale = await serverProjects(seed.workspaceSlug, owner);
-      for (const p of stale.filter((p) => p.identifier === "RLS"))
+      for (const p of stale.filter((p) => p.identifier.startsWith("RLS")))
         await serverDeleteProject(seed.workspaceSlug, p.id, owner);
-      const plainId = await serverCreateProject(seed.workspaceSlug, owner, "Rules scratch", "RLS");
+      const plainId = await serverCreateProject(
+        seed.workspaceSlug,
+        owner,
+        `Rules scratch ${runSuffix}`,
+        `RLS${runSuffix}`
+      );
       const plain = await serverProjects(seed.workspaceSlug, owner);
       expect(plain.find((p) => p.id === plainId)?.anchor).toBe(null);
       const plainState = await serverDefaultStateId(seed.workspaceSlug, plainId, owner);

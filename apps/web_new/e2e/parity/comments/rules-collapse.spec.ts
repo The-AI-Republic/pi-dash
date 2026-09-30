@@ -56,7 +56,7 @@ test(
       expect(options).toContain("fold");
       await driver.rulesChooseCommentMenuOption(comment.id, "fold");
       await expect.poll(() => driver.rulesCommentBodyText(comment.id), { timeout: 30_000 }).toBe(null);
-      const cardText = await driver.page.locator(`#comment-${comment.id}`).innerText();
+      const cardText = await driver.rulesCommentCardText(comment.id);
       expect(cardText).not.toContain(MARKER);
       expect(cardText).not.toContain("🎉");
       await expect
@@ -81,7 +81,7 @@ test(
       await expect.poll(() => driver.rulesCommentBodyText(comment.id), { timeout: 30_000 }).not.toBe(null);
       const body = await driver.rulesCommentBodyText(comment.id);
       expect(body ?? "").toContain(MARKER);
-      const cardText = await driver.page.locator(`#comment-${comment.id}`).innerText();
+      const cardText = await driver.rulesCommentCardText(comment.id);
       expect(cardText).toContain("🎉");
       await expect
         .poll(

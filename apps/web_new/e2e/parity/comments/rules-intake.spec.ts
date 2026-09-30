@@ -44,8 +44,7 @@ test(
     });
 
     await test.step("the intake feed renders the comment without a copy-link option", async () => {
-      const card = driver.page.locator(`#comment-${comment.id}`);
-      await card.waitFor({ timeout: 60_000 });
+      await expect.poll(() => driver.rulesCommentCardVisible(comment.id), { timeout: 60_000 }).toBe(true);
       const body = await driver.rulesCommentBodyText(comment.id);
       expect(body ?? "").toContain(MARKER);
       const options = await driver.rulesCommentMenuOptions(comment.id);
@@ -55,8 +54,7 @@ test(
     await test.step("triage chrome is present and the server agrees", async () => {
       // Accept/Decline prove the intake variant; the activity header itself
       // carries only the sort and filter controls, no creation extras.
-      await expect(driver.page.getByRole("button", { name: "Accept" })).toBeVisible();
-      await expect(driver.page.getByRole("button", { name: "Decline" })).toBeVisible();
+      expect(await driver.rulesIntakeTriageVisible()).toBe(true);
       const listed = await serverComments(seed.workspaceSlug, seed.projectId, first.id, owner);
       expect(listed.map((c) => c.id)).toContain(comment.id);
     });

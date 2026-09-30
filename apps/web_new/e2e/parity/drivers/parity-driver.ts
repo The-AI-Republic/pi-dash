@@ -306,6 +306,22 @@ export interface ParityDriver {
    * check lives here instead of touching the shared method.
    */
   rulesEnsureSignedIn(email: string, password: string, workspaceSlug: string): Promise<void>;
+  /**
+   * Navigate to one work item without waiting for its activity section.
+   * Refused viewers (a guest on someone else's item) never render the
+   * section, so the raw open is their only entry point.
+   */
+  rulesOpenIssueDetailRaw(workspaceSlug: string, projectId: string, issueId: string): Promise<void>;
+  /** Whether the work-item missing empty state is currently shown. */
+  rulesIssueMissingVisible(): Promise<boolean>;
+  /** Whether the comment composer is currently offered on the open item. */
+  rulesCommentComposerVisible(): Promise<boolean>;
+  /** Whether one comment card is present in the DOM (no waiting: callers poll). */
+  rulesCommentCardVisible(commentId: string): Promise<boolean>;
+  /** Full rendered text of one comment card (body plus reactions row). */
+  rulesCommentCardText(commentId: string): Promise<string>;
+  /** Whether the intake triage chrome (Accept/Decline) is currently offered. */
+  rulesIntakeTriageVisible(): Promise<boolean>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */

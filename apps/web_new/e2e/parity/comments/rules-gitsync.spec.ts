@@ -77,8 +77,7 @@ test(
       const listed = await serverComments(seed.workspaceSlug, seed.projectId, issueId, owner);
       expect(listed.map((c) => c.id)).not.toContain(commentId);
       await driver.rulesReload();
-      const gone = await driver.page.locator(`#comment-${commentId}`).count();
-      expect(gone).toBe(0);
+      expect(await driver.rulesCommentCardVisible(commentId)).toBe(false);
     });
   }
 );

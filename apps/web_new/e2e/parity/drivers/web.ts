@@ -1198,4 +1198,48 @@ export class WebDriver implements ParityDriver {
     }
     throw new Error(`[parity] sign-in never landed on ${workspaceSlug}.`);
   }
+
+  async rulesOpenIssueDetailRaw(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    // Same navigation as the full open, minus the feed wait: a refused
+    // viewer never renders the activity section, so waiting would hang.
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues/${issueId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async rulesIssueMissingVisible(): Promise<boolean> {
+    // A refused viewer lands on the does-not-exist empty state instead of
+    // the detail screen; the text is the user-visible signal.
+    const missing = this.page.getByText("Work item does not exist").first();
+    await missing.waitFor({ timeout: 60_000 });
+    return missing.isVisible();
+  }
+
+  async rulesCommentComposerVisible(): Promise<boolean> {
+    // Immediate read, no waiting: several specs assert the composer's
+    // absence, where a wait would only burn the timeout.
+    return (await this.page.getByRole("group", { name: "Add comment" }).count()) > 0;
+  }
+
+  async rulesCommentCardVisible(commentId: string): Promise<boolean> {
+    // Immediate read, no waiting: callers poll for presence and assert
+    // absence directly.
+    return (await this.rulesCard(commentId).count()) > 0;
+  }
+
+  async rulesCommentCardText(commentId: string): Promise<string> {
+    const card = this.rulesCard(commentId);
+    await card.waitFor();
+    return (await card.innerText()).trim();
+  }
+
+  async rulesIntakeTriageVisible(): Promise<boolean> {
+    // Accept/Decline prove the intake variant; each is awaited so a slow
+    // triage chain cannot read as absent, then confirmed visible so a
+    // prerendered-but-hidden control cannot pass.
+    const accept = this.page.getByRole("button", { name: "Accept" }).first();
+    const decline = this.page.getByRole("button", { name: "Decline" }).first();
+    await accept.waitFor({ timeout: 60_000 });
+    await decline.waitFor({ timeout: 60_000 });
+    return (await accept.isVisible()) && (await decline.isVisible());
+  }
 }

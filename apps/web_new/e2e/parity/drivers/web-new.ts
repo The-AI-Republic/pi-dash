@@ -418,4 +418,28 @@ export class WebNewDriver implements ParityDriver {
   async rulesEnsureSignedIn(_email: string, _password: string, _workspaceSlug: string): Promise<void> {
     return todo("rulesEnsureSignedIn");
   }
+
+  async rulesOpenIssueDetailRaw(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
+    return todo("rulesOpenIssueDetailRaw");
+  }
+
+  async rulesIssueMissingVisible(): Promise<boolean> {
+    return todo("rulesIssueMissingVisible");
+  }
+
+  async rulesCommentComposerVisible(): Promise<boolean> {
+    return todo("rulesCommentComposerVisible");
+  }
+
+  async rulesCommentCardVisible(_commentId: string): Promise<boolean> {
+    return todo("rulesCommentCardVisible");
+  }
+
+  async rulesCommentCardText(_commentId: string): Promise<string> {
+    return todo("rulesCommentCardText");
+  }
+
+  async rulesIntakeTriageVisible(): Promise<boolean> {
+    return todo("rulesIntakeTriageVisible");
+  }
 }
