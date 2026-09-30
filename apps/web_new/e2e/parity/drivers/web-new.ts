@@ -7,7 +7,7 @@
 // action throws until the matching area lands in apps/web_new. Area issues
 // fill these in method by method; the oracle driver stays untouched.
 import type { Page } from "@playwright/test";
-import type { ParityDriver, ParityTarget } from "./parity-driver";
+import type { ParityBrowserCookie, ParityDriver, ParityTarget, WorkspaceOnboardingView } from "./parity-driver";
 
 function todo(target: string): never {
   throw new Error(`[parity] drivers/web_new has no ${target} yet; the area that owns it has not landed.`);
@@ -70,5 +70,117 @@ export class WebNewDriver implements ParityDriver {
 
   async mentionsEnsureSignedIn(_email: string, _password: string): Promise<void> {
     return todo("mentionsEnsureSignedIn");
+  }
+
+  // Workspace onboarding + creation (NEWFRONT-111, AUTH-034..043). Throwing
+  // stubs until the onboarding and workspace-creation areas land in
+  // apps/web_new; the oracle driver already implements these.
+  async openAuthenticated(_path: string, _cookies: ParityBrowserCookie[]): Promise<void> {
+    return todo("openAuthenticated");
+  }
+  async currentPath(): Promise<string> {
+    return todo("currentPath");
+  }
+  async hasVisibleText(_text: string): Promise<boolean> {
+    return todo("hasVisibleText");
+  }
+  async awaitWorkspaceStep(): Promise<void> {
+    return todo("awaitWorkspaceStep");
+  }
+  async visibleWorkspaceView(): Promise<WorkspaceOnboardingView> {
+    return todo("visibleWorkspaceView");
+  }
+  async fillWorkspaceName(_name: string): Promise<void> {
+    return todo("fillWorkspaceName");
+  }
+  async fillWorkspaceSlug(_slug: string): Promise<void> {
+    return todo("fillWorkspaceSlug");
+  }
+  async workspaceSlugValue(): Promise<string> {
+    return todo("workspaceSlugValue");
+  }
+  async selectTeamSizePill(_label: string): Promise<void> {
+    return todo("selectTeamSizePill");
+  }
+  async selectTeamSizeDropdown(_label: string): Promise<void> {
+    return todo("selectTeamSizeDropdown");
+  }
+  async submitCreateWorkspace(): Promise<void> {
+    return todo("submitCreateWorkspace");
+  }
+  async isCreateWorkspaceSubmitDisabled(): Promise<boolean> {
+    return todo("isCreateWorkspaceSubmitDisabled");
+  }
+  async workspaceSlugErrorText(): Promise<string | null> {
+    return todo("workspaceSlugErrorText");
+  }
+  async gotoJoinByEmailFromCreate(): Promise<void> {
+    return todo("gotoJoinByEmailFromCreate");
+  }
+  async gotoInvitesFromCreate(): Promise<void> {
+    return todo("gotoInvitesFromCreate");
+  }
+  async fillWorkspaceAdminEmail(_email: string): Promise<void> {
+    return todo("fillWorkspaceAdminEmail");
+  }
+  async submitJoinRequest(): Promise<void> {
+    return todo("submitJoinRequest");
+  }
+  async pendingApprovalNamesEmail(_email: string): Promise<boolean> {
+    return todo("pendingApprovalNamesEmail");
+  }
+  async createInsteadFromPending(): Promise<void> {
+    return todo("createInsteadFromPending");
+  }
+  async selectInviteByWorkspace(_workspaceName: string): Promise<void> {
+    return todo("selectInviteByWorkspace");
+  }
+  async continueWithSelectedInvites(): Promise<void> {
+    return todo("continueWithSelectedInvites");
+  }
+  async awaitInviteMembersStep(): Promise<void> {
+    return todo("awaitInviteMembersStep");
+  }
+  async isInviteMembersStepVisible(): Promise<boolean> {
+    return todo("isInviteMembersStepVisible");
+  }
+  async inviteRowCount(): Promise<number> {
+    return todo("inviteRowCount");
+  }
+  async fillInviteRow(_index: number, _email: string): Promise<void> {
+    return todo("fillInviteRow");
+  }
+  async clickAddAnotherInvite(): Promise<void> {
+    return todo("clickAddAnotherInvite");
+  }
+  async isSendInvitesDisabled(): Promise<boolean> {
+    return todo("isSendInvitesDisabled");
+  }
+  async sendInvites(): Promise<void> {
+    return todo("sendInvites");
+  }
+  async deferInvites(): Promise<void> {
+    return todo("deferInvites");
+  }
+  async isOnboardingBackVisible(): Promise<boolean> {
+    return todo("isOnboardingBackVisible");
+  }
+  async clickOnboardingBack(): Promise<void> {
+    return todo("clickOnboardingBack");
+  }
+  async isTourWelcomeVisible(): Promise<boolean> {
+    return todo("isTourWelcomeVisible");
+  }
+  async declineTour(): Promise<void> {
+    return todo("declineTour");
+  }
+  async isStandaloneCreationDisabledVisible(): Promise<boolean> {
+    return todo("isStandaloneCreationDisabledVisible");
+  }
+  async isRequestInstanceAdminLinkVisible(): Promise<boolean> {
+    return todo("isRequestInstanceAdminLinkVisible");
+  }
+  async isInOnboardingCreationDisabledNoticeVisible(): Promise<boolean> {
+    return todo("isInOnboardingCreationDisabledNoticeVisible");
   }
 }
