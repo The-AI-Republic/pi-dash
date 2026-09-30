@@ -36,4 +36,39 @@ export class WebNewDriver implements ParityDriver {
   async visibleIssueNames(): Promise<string[]> {
     return todo("visibleIssueNames");
   }
+
+  // --- Mention flows (NEWFRONT-115). Throwing stubs per the shared driver
+  // --- contract; the mentions area fills these in when it lands.
+
+  async mentionsOpenIssueDetail(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
+    return todo("mentionsOpenIssueDetail");
+  }
+
+  async mentionsSuggestionsFor(_query: string): Promise<string[]> {
+    return todo("mentionsSuggestionsFor");
+  }
+
+  async mentionsSuggestionsHaveAvatars(): Promise<boolean> {
+    return todo("mentionsSuggestionsHaveAvatars");
+  }
+
+  async mentionsSuggestionSections(): Promise<string[]> {
+    return todo("mentionsSuggestionSections");
+  }
+
+  async mentionsPostComment(_displayName: string, _bodyText: string): Promise<void> {
+    return todo("mentionsPostComment");
+  }
+
+  async mentionsVisibleReferences(): Promise<{ text: string; href: string | null }[]> {
+    return todo("mentionsVisibleReferences");
+  }
+
+  async mentionsEditRemovingMention(_oldBodyText: string, _plainText: string): Promise<void> {
+    return todo("mentionsEditRemovingMention");
+  }
+
+  async mentionsEnsureSignedIn(_email: string, _password: string): Promise<void> {
+    return todo("mentionsEnsureSignedIn");
+  }
 }

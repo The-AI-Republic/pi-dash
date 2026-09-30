@@ -23,6 +23,16 @@ export interface ParitySeedFacts {
   projectName: string;
   /** Issue names in the order the seed created them. */
   issueNames: string[];
+  /**
+   * Second workspace member (optional so older seed files still parse).
+   * Mention scenarios @-mention this user instead of the author.
+   */
+  mentionMember?: {
+    email: string;
+    password: string;
+    id: string;
+    displayName: string;
+  };
 }
 
 /** User-level actions plus reads shared by both frontend drivers. */
@@ -37,4 +47,41 @@ export interface ParityDriver {
   openProjectIssues(workspaceSlug: string, projectId: string): Promise<void>;
   /** Names of the issues currently rendered in the list, in display order. */
   visibleIssueNames(): Promise<string[]>;
+
+  // --- Mention flows (NEWFRONT-115, CMT-019/020/021). Appended; existing
+  // --- methods above are untouched per the shared driver contract.
+
+  /** Open one work-item detail page; requires an authenticated session. */
+  mentionsOpenIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void>;
+  /**
+   * Type the mention trigger plus `query` in the comment composer and read
+   * the suggestion names in display order. Resolves once the list appears.
+   */
+  mentionsSuggestionsFor(query: string): Promise<string[]>;
+  /** Whether the currently open suggestion list renders member imagery. */
+  mentionsSuggestionsHaveAvatars(): Promise<boolean>;
+  /** Section headers grouping the open suggestion list (e.g. users). */
+  mentionsSuggestionSections(): Promise<string[]>;
+  /**
+   * Post a comment that @-mentions `displayName`: types the trigger, picks
+   * the matching suggestion, adds `bodyText`, and submits. Resolves once the
+   * comment appears in the feed.
+   */
+  mentionsPostComment(displayName: string, bodyText: string): Promise<void>;
+  /**
+   * Member references rendered inside saved comments: the chip text plus the
+   * member profile link target (null when the chip links nowhere).
+   */
+  mentionsVisibleReferences(): Promise<{ text: string; href: string | null }[]>;
+  /**
+   * Edit the comment showing `oldBodyText` so its mention becomes plain
+   * `plainText`, and save. Resolves once the feed shows the edited comment.
+   */
+  mentionsEditRemovingMention(oldBodyText: string, plainText: string): Promise<void>;
+  /**
+   * Sign in through the UI and verify the session landed. Retries the
+   * shared flow because the scratch stack rejects valid credentials
+   * intermittently under parallel parity runs.
+   */
+  mentionsEnsureSignedIn(email: string, password: string): Promise<void>;
 }

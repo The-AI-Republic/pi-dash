@@ -22,8 +22,8 @@ echo "[parity] repo root: $REPO_ROOT"
 echo "[parity] building scratch images (parity19-api, parity19-oracle)"
 docker compose -f "$COMPOSE_FILE" build api oracle
 
-echo "[parity] starting pg, redis, mq, api, oracle, proxy"
-docker compose -f "$COMPOSE_FILE" up -d pg redis mq api oracle proxy
+echo "[parity] starting pg, redis, mq, api, worker, oracle, proxy"
+docker compose -f "$COMPOSE_FILE" up -d pg redis mq api worker oracle proxy
 
 echo "[parity] waiting for the API on port $PARITY_API_PORT"
 for _ in $(seq 1 60); do

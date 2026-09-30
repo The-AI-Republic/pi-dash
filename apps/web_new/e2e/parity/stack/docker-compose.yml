@@ -106,6 +106,50 @@ services:
     depends_on:
       - api
 
+  # Background task worker (NEWFRONT-115). The API queues mention
+  # extraction, mention links and notifications as celery tasks; without a
+  # consumer those rows never materialize, so mention/notification oracle
+  # scenarios cannot observe the fan-out. Same image and environment as the
+  # API, default queue only — no beat, no extra surface.
+  worker:
+    build:
+      context: ../../../../../apps/api
+      dockerfile: Dockerfile.dev
+    image: parity19-api:local
+    container_name: parity19-worker
+    command:
+      [
+        "bash",
+        "-c",
+        "python manage.py migrate --no-input > /dev/null 2>&1; exec celery -A pi_dash worker --loglevel=warning --concurrency=1",
+      ]
+    depends_on:
+      pg:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mq:
+        condition: service_started
+      api:
+        condition: service_started
+    environment:
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.local
+      SECRET_KEY: parity19-fixed-local-secret-not-used-outside-scratch
+      ALLOWED_HOSTS: "*"
+      DATABASE_URL: postgresql://parity19:parity19@pg:5432/pidash
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_HOST: mq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: parity19
+      RABBITMQ_PASSWORD: parity19
+      RABBITMQ_VHOST: pidash
+      API_KEY_RATE_LIMIT: 100000/minute
+      ENABLE_MAGIC_LINK_LOGIN: "1"
+      EMAIL_BACKEND: django.core.mail.backends.console.EmailBackend
+      WEB_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
+      APP_BASE_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
+      SPACE_BASE_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
+
   proxy:
     image: caddy:2-alpine
     container_name: parity19-proxy
