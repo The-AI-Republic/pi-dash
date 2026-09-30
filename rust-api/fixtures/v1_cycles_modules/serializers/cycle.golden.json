@@ -1,0 +1,258 @@
+{
+ "_method": "ast walk of api/serializers/cycle.py and api/serializers/module.py: Meta.fields/read_only_fields via literal_eval, declared DRF fields, validate/create/update spans, ValidationError literals; run: python3 /tmp/gen_cycmod_fixtures.py; no DB touched",
+ "behaviour": {
+  "create_date_rule": "both start_date+end_date null OR both set; convert_to_utc normalises each to project day bounds (validate cycle.py:92-101); owned_by defaults to request.user (cycle.py:103-104); project gates: id required / not found / cycle_view off (cycle.py:77-84)",
+  "create_vs_update": "Update extends Create and re-appends owned_by (already in Create.fields 45) \u2014 duplicate entry, harmless (cycle.py:117-122)",
+  "issue_read_only": "CycleIssueSerializer read_only=[workspace, project, cycle] (cycle.py:171); sub_issues_count annotated read_only (cycle.py:166)",
+  "serializer_metrics": "total/cancelled/completed/started/unstarted/backlog_issues + total/completed/started_estimates, all read_only Integer/Float (cycle.py:132-140)",
+  "timezone_choices": "TIMEZONE_CHOICES tuple(zip(pytz.common_timezones...)) at cycle.py:78 (class constant, NOT a column); timezone CharField default UTC (cycle.py:79)"
+ },
+ "fixture": "FX-CYCMOD-02",
+ "serializers": {
+  "CycleCreateSerializer": {
+   "declared_fields": [
+    {
+     "line": 23,
+     "name": "owned_by"
+    }
+   ],
+   "meta": {
+    "fields": [
+     "name",
+     "description",
+     "start_date",
+     "end_date",
+     "owned_by",
+     "external_source",
+     "external_id",
+     "timezone"
+    ],
+    "model": "Name(id='Cycle', ctx=Load())",
+    "read_only_fields": [
+     "id",
+     "workspace",
+     "project",
+     "created_by",
+     "updated_by",
+     "created_at",
+     "updated_at",
+     "deleted_at"
+    ],
+    "span": [
+     38,
+     59
+    ]
+   },
+   "methods": [
+    {
+     "name": "__init__",
+     "span": [
+      30,
+      36
+     ]
+    },
+    {
+     "name": "validate",
+     "span": [
+      61,
+      106
+     ]
+    }
+   ],
+   "raises": [
+    {
+     "line": 78,
+     "message": "Project ID is required"
+    },
+    {
+     "line": 82,
+     "message": "Project not found"
+    },
+    {
+     "line": 84,
+     "message": "Cycles are not enabled for this project"
+    },
+    {
+     "line": 90,
+     "message": "Start date cannot exceed end date"
+    }
+   ],
+   "serializer": "CycleCreateSerializer",
+   "span": [
+    15,
+    106
+   ]
+  },
+  "CycleIssueRequestSerializer": {
+   "declared_fields": [
+    {
+     "line": 195,
+     "name": "issues"
+    }
+   ],
+   "meta": null,
+   "methods": [],
+   "raises": [],
+   "serializer": "CycleIssueRequestSerializer",
+   "span": [
+    187,
+    195
+   ]
+  },
+  "CycleIssueSerializer": {
+   "declared_fields": [
+    {
+     "line": 166,
+     "name": "sub_issues_count"
+    }
+   ],
+   "meta": {
+    "fields": "__all__",
+    "model": "Name(id='CycleIssue', ctx=Load())",
+    "read_only_fields": [
+     "workspace",
+     "project",
+     "cycle"
+    ],
+    "span": [
+     168,
+     171
+    ]
+   },
+   "methods": [],
+   "raises": [],
+   "serializer": "CycleIssueSerializer",
+   "span": [
+    158,
+    171
+   ]
+  },
+  "CycleLiteSerializer": {
+   "declared_fields": [],
+   "meta": {
+    "fields": "__all__",
+    "model": "Name(id='Cycle', ctx=Load())",
+    "span": [
+     182,
+     184
+    ]
+   },
+   "methods": [],
+   "raises": [],
+   "serializer": "CycleLiteSerializer",
+   "span": [
+    174,
+    184
+   ]
+  },
+  "CycleSerializer": {
+   "declared_fields": [
+    {
+     "line": 132,
+     "name": "total_issues"
+    },
+    {
+     "line": 133,
+     "name": "cancelled_issues"
+    },
+    {
+     "line": 134,
+     "name": "completed_issues"
+    },
+    {
+     "line": 135,
+     "name": "started_issues"
+    },
+    {
+     "line": 136,
+     "name": "unstarted_issues"
+    },
+    {
+     "line": 137,
+     "name": "backlog_issues"
+    },
+    {
+     "line": 138,
+     "name": "total_estimates"
+    },
+    {
+     "line": 139,
+     "name": "completed_estimates"
+    },
+    {
+     "line": 140,
+     "name": "started_estimates"
+    }
+   ],
+   "meta": {
+    "fields": "__all__",
+    "model": "Name(id='Cycle', ctx=Load())",
+    "read_only_fields": [
+     "id",
+     "created_at",
+     "updated_at",
+     "created_by",
+     "updated_by",
+     "workspace",
+     "project",
+     "owned_by",
+     "deleted_at"
+    ],
+    "span": [
+     142,
+     155
+    ]
+   },
+   "methods": [],
+   "raises": [],
+   "serializer": "CycleSerializer",
+   "span": [
+    124,
+    155
+   ]
+  },
+  "CycleUpdateSerializer": {
+   "declared_fields": [],
+   "meta": {
+    "fields": "BinOp(left=Attribute(value=Attribute(value=Name(id='CycleCreateSerializer', ctx=Load()), attr='Meta', ctx=Load()), attr='fields', ctx=Load()), op=Add(), right=List(elts=[Constant(value='owned_by')], ctx=Load()))",
+    "model": "Name(id='Cycle', ctx=Load())",
+    "span": [
+     117,
+     121
+    ]
+   },
+   "methods": [],
+   "raises": [],
+   "serializer": "CycleUpdateSerializer",
+   "span": [
+    109,
+    121
+   ]
+  },
+  "TransferCycleIssueRequestSerializer": {
+   "declared_fields": [
+    {
+     "line": 206,
+     "name": "new_cycle_id"
+    }
+   ],
+   "meta": null,
+   "methods": [],
+   "raises": [],
+   "serializer": "TransferCycleIssueRequestSerializer",
+   "span": [
+    198,
+    206
+   ]
+  }
+ },
+ "trace": [
+  "api/serializers/cycle.py:15-106 CycleCreate (Meta 38-59, validate 61-106)",
+  "api/serializers/cycle.py:109-121 CycleUpdate (Meta 117-121, no own methods \u2014 inherits validate)",
+  "api/serializers/cycle.py:124-155 CycleSerializer (metrics 132-140, Meta 142-155)",
+  "api/serializers/cycle.py:158-171 CycleIssueSerializer",
+  "api/serializers/cycle.py:174-184 CycleLiteSerializer",
+  "api/serializers/cycle.py:187-195 CycleIssueRequestSerializer",
+  "api/serializers/cycle.py:198-206 TransferCycleIssueRequestSerializer"
+ ]
+}

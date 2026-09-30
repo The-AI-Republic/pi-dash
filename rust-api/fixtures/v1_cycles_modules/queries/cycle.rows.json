@@ -1,0 +1,182 @@
+{
+ "_method": "get_queryset source text extracted by ast from api/views/cycle.py / module.py (spans recorded); SQL skeletons transcribed from those chains by python3 /tmp/gen_cycmod_fixtures.py and verified token-by-token against the chain text; representative rows use fixed seed UUIDs, no DB touched",
+ "fixture": "FX-CYCMOD-04",
+ "queryset_method_spans": {
+  "CycleArchiveUnarchiveAPIEndpoint": [
+   {
+    "name": "get_queryset",
+    "span": [
+     622,
+     724
+    ]
+   },
+   {
+    "name": "get",
+    "span": [
+     741,
+     751
+    ]
+   },
+   {
+    "name": "post",
+    "span": [
+     763,
+     783
+    ]
+   },
+   {
+    "name": "delete",
+    "span": [
+     794,
+     803
+    ]
+   }
+  ],
+  "CycleDetailAPIEndpoint": [
+   {
+    "name": "get_queryset",
+    "span": [
+     370,
+     448
+    ]
+   },
+   {
+    "name": "get",
+    "span": [
+     462,
+     476
+    ]
+   },
+   {
+    "name": "patch",
+    "span": [
+     494,
+     561
+    ]
+   },
+   {
+    "name": "delete",
+    "span": [
+     571,
+     613
+    ]
+   }
+  ],
+  "CycleIssueDetailAPIEndpoint": [
+   {
+    "name": "get_queryset",
+    "span": [
+     1027,
+     1049
+    ]
+   },
+   {
+    "name": "get",
+    "span": [
+     1063,
+     1076
+    ]
+   },
+   {
+    "name": "delete",
+    "span": [
+     1086,
+     1114
+    ]
+   }
+  ],
+  "CycleIssueListCreateAPIEndpoint": [
+   {
+    "name": "get_queryset",
+    "span": [
+     815,
+     837
+    ]
+   },
+   {
+    "name": "get",
+    "span": [
+     854,
+     901
+    ]
+   },
+   {
+    "name": "post",
+    "span": [
+     920,
+     1010
+    ]
+   }
+  ],
+  "CycleListCreateAPIEndpoint": [
+   {
+    "name": "get_queryset",
+    "span": [
+     89,
+     167
+    ]
+   },
+   {
+    "name": "get",
+    "span": [
+     190,
+     281
+    ]
+   },
+   {
+    "name": "post",
+    "span": [
+     299,
+     356
+    ]
+   }
+  ]
+ },
+ "rows": [
+  {
+   "archived_at": null,
+   "backlog_issues": 0,
+   "cancelled_issues": 0,
+   "completed_issues": 1,
+   "end_date": "2026-12-31T00:00:00Z",
+   "id": "11111111-1111-1111-4111-111111111101",
+   "name": "CT active cycle",
+   "owned_by": "11111111-1111-1111-4111-111111111101",
+   "project": "11111111-1111-1111-4111-111111111101",
+   "sort_order": 65535.0,
+   "start_date": "2026-09-01T00:00:00Z",
+   "started_issues": 1,
+   "timezone": "UTC",
+   "total_issues": 2,
+   "unstarted_issues": 0,
+   "version": 1,
+   "workspace": "11111111-1111-1111-4111-111111111101"
+  },
+  {
+   "archived_at": "2026-09-20T00:00:00Z",
+   "completed_estimates": 3.0,
+   "id": "11111111-1111-1111-4111-111111111102",
+   "name": "CT archived cycle",
+   "started_estimates": 2.0,
+   "total_estimates": 5.0,
+   "total_issues": 1
+  },
+  {
+   "attachment_count": 0,
+   "bridge_id": "11111111-1111-1111-4111-111111111101",
+   "id": "11111111-1111-1111-4111-111111111101",
+   "link_count": 0,
+   "name": "representative cycle-issue GET row (Q4): Issue shape + bridge/link/attachment counts",
+   "sub_issues_count": 0
+  }
+ ],
+ "trace": [
+  "queries/cycle.sql Q1: views/cycle.py:89-167 + :197",
+  "Q2: views/cycle.py:370-448 + :469",
+  "Q3: views/cycle.py:622-724 (estimates :699-721)",
+  "Q4: views/cycle.py:815-837 vs :862-901",
+  "Q5: views/cycle.py:1027-1114 (queryset :1027-1049, get :1063-1076, delete :1086-1114, delay :1100)",
+  "Q6: utils/cycle_transfer_issues.py:36-479 (delay :462-478)"
+ ],
+ "transfer_behaviour": "only issues with state__group in OPEN_STATE_GROUPS move (transfer file :436-459); completed/cancelled stay; progress_snapshot {total/completed/cancelled/started/unstarted/backlog_issues, distribution{labels, assignees, completion_chart}, estimate_distribution} saved on source cycle (:409-434)"
+}

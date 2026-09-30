@@ -1,0 +1,176 @@
+{
+ "_method": "get_queryset source text extracted by ast from api/views/cycle.py / module.py (spans recorded); SQL skeletons transcribed from those chains by python3 /tmp/gen_cycmod_fixtures.py and verified token-by-token against the chain text; representative rows use fixed seed UUIDs, no DB touched",
+ "fixture": "FX-CYCMOD-05",
+ "noted_asymmetries": [
+  "M1 has no project-member filter (cycles Q1 do); guest scoping is permission-only",
+  "M1/M2 omit .distinct() (cycles keep it); M1 uses distinct=True inside each Count",
+  "M3 archived list has no estimate sums (cycles Q3 has total/completed/started_estimates)"
+ ],
+ "queryset_method_spans": {
+  "ModuleArchiveUnarchiveAPIEndpoint": [
+   {
+    "name": "get_queryset",
+    "span": [
+     895,
+     982
+    ]
+   },
+   {
+    "name": "get",
+    "span": [
+     1006,
+     1018
+    ]
+   },
+   {
+    "name": "post",
+    "span": [
+     1034,
+     1054
+    ]
+   },
+   {
+    "name": "delete",
+    "span": [
+     1068,
+     1077
+    ]
+   }
+  ],
+  "ModuleDetailAPIEndpoint": [
+   {
+    "name": "get_queryset",
+    "span": [
+     288,
+     374
+    ]
+   },
+   {
+    "name": "patch",
+    "span": [
+     402,
+     450
+    ]
+   },
+   {
+    "name": "get",
+    "span": [
+     468,
+     475
+    ]
+   },
+   {
+    "name": "delete",
+    "span": [
+     490,
+     533
+    ]
+   }
+  ],
+  "ModuleIssueDetailAPIEndpoint": [
+   {
+    "name": "get_queryset",
+    "span": [
+     751,
+     775
+    ]
+   },
+   {
+    "name": "get",
+    "span": [
+     800,
+     849
+    ]
+   },
+   {
+    "name": "delete",
+    "span": [
+     864,
+     888
+    ]
+   }
+  ],
+  "ModuleIssueListCreateAPIEndpoint": [
+   {
+    "name": "get_queryset",
+    "span": [
+     545,
+     569
+    ]
+   },
+   {
+    "name": "get",
+    "span": [
+     594,
+     639
+    ]
+   },
+   {
+    "name": "post",
+    "span": [
+     662,
+     733
+    ]
+   }
+  ],
+  "ModuleListCreateAPIEndpoint": [
+   {
+    "name": "get_queryset",
+    "span": [
+     85,
+     171
+    ]
+   },
+   {
+    "name": "post",
+    "span": [
+     192,
+     241
+    ]
+   },
+   {
+    "name": "get",
+    "span": [
+     264,
+     276
+    ]
+   }
+  ]
+ },
+ "rows": [
+  {
+   "archived_at": null,
+   "backlog_issues": 0,
+   "cancelled_issues": 0,
+   "completed_issues": 0,
+   "id": "11111111-1111-1111-4111-111111111101",
+   "lead": "11111111-1111-1111-4111-111111111101",
+   "members": [],
+   "name": "CT active module",
+   "project": "11111111-1111-1111-4111-111111111101",
+   "sort_order": 65535.0,
+   "start_date": "2026-09-01",
+   "started_issues": 0,
+   "status": "planned",
+   "target_date": "2026-12-31",
+   "total_issues": 1,
+   "unstarted_issues": 1,
+   "workspace": "11111111-1111-1111-4111-111111111101"
+  },
+  {
+   "attachment_count": 0,
+   "bridge_id": "11111111-1111-1111-4111-111111111102",
+   "id": "11111111-1111-1111-4111-111111111102",
+   "link_count": 0,
+   "name": "representative module-issue GET row (M4)",
+   "sub_issues_count": 0
+  }
+ ],
+ "trace": [
+  "queries/module.sql M1: views/module.py:85-171 + :272",
+  "M2: views/module.py:288-374 + :473",
+  "M3: views/module.py:895-1077 (queryset :895-982, get :1006-1018, post :1034-1054, delete :1068-1077; no estimates \u2014 asymmetry vs Q3)",
+  "M4: views/module.py:545-569 vs :594-639",
+  "M5: views/module.py:751-775, :800-849, :864-888 (delay :879)"
+ ]
+}
