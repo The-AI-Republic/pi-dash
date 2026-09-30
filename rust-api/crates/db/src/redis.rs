@@ -11,13 +11,18 @@
 //! * SSE live tail (`assistant/views/events.py:77-79`): async `SUBSCRIBE
 //!   assistant:thread:<thread_id>` after the replay prefix. Channel builder:
 //!   [`crate::assistant::event_queries::event_channel`].
+//! * Cache invalidation (`pi_dash/utils/cache.py:54-75`,
+//!   `authentication/utils/workspace_project_join.py:39-45`):
+//!   `KEYS *{path}*` + `DEL` with `request=None, user=False, multiple=True`.
+//!   Pattern builder stays with the caller; see
+//!   [`RedisHandle::invalidate_matching`].
 //!
 //! This module owns the transport only: one shared [`redis::Client`] built
 //! from [`Settings`](crate::config::Settings) (`REDIS_URL` from the config
-//! registry) plus the three primitives the call sites need (`SET .. EX`,
-//! `GET`, `SUBSCRIBE`). Command specs (exact keys, values, expiries) stay
-//! with the callers — `pidash-api`'s `assistant::redis` pins them — so this
-//! handle never hardcodes a domain key.
+//! registry) plus the primitives the call sites need (`SET .. EX`, `GET`,
+//! `SUBSCRIBE`, `KEYS` + `DEL`). Command specs (exact keys, values, expiries,
+//! match patterns) stay with the callers — `pidash-api`'s `assistant::redis`
+//! pins them — so this handle never hardcodes a domain key.
 //!
 //! Failure policy is per call site, never here: every method returns the
 //! `redis::RedisError` and the caller decides. Python swallows everything at
@@ -86,6 +91,23 @@ impl RedisHandle {
     pub async fn get_string(&self, key: &str) -> Result<Option<String>, redis::RedisError> {
         let mut connection = self.client.get_multiplexed_async_connection().await?;
         connection.get(key).await
+    }
+
+    /// `KEYS pattern` + `DEL` (cache invalidation,
+    /// `pi_dash/utils/cache.py:54-75` with `multiple=True`).
+    ///
+    /// The caller builds the `*{path}*` pattern (exact key math stays with
+    /// the call site, like every method here); this runs the two commands
+    /// and returns the deleted count. An empty match deletes nothing and
+    /// returns `Ok(0)` (Python's `delete_many([])`). Like every method here,
+    /// the `Result` stays caller-visible and is never swallowed.
+    pub async fn invalidate_matching(&self, pattern: &str) -> Result<usize, redis::RedisError> {
+        let mut connection = self.client.get_multiplexed_async_connection().await?;
+        let keys: Vec<String> = connection.keys(pattern).await?;
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        connection.del(keys).await
     }
 
     /// `SUBSCRIBE channel` (SSE live tail). The returned `PubSub` is already
@@ -191,6 +213,10 @@ mod tests {
             .await
             .is_err());
         assert!(handle.subscribe("assistant:thread:x").await.is_err());
+        assert!(handle
+            .invalidate_matching("*assistant:cancel:*")
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -214,5 +240,57 @@ mod tests {
             .await
             .expect("next publish");
         assert_eq!(received, payload);
+    }
+
+    #[tokio::test]
+    async fn invalidate_matching_deletes_keys_pattern_and_counts() {
+        // Live roundtrip for `invalidate_matching` (PIDASHCONV-479): seed two
+        // matching keys plus one survivor, then assert the KEYS pattern
+        // deletes exactly the match and returns its count. Needs a server on
+        // 127.0.0.1:6379 — the `redis` service in the rust-api workflows,
+        // present wherever `cargo test --workspace` runs in CI.
+        let handle = RedisHandle::from_url("redis://127.0.0.1:6379/").expect("url parses");
+        let prefix = "invalidate-matching-test:/api/workspaces/acme/members/";
+        let first = format!("{prefix}:1");
+        let second = format!("{prefix}:2");
+        let survivor = "invalidate-matching-test:/api/other/".to_owned();
+        handle.set_ex(&first, "1", 600).await.expect("seed first");
+        handle.set_ex(&second, "1", 600).await.expect("seed second");
+        handle
+            .set_ex(&survivor, "1", 600)
+            .await
+            .expect("seed survivor");
+        let deleted = handle
+            .invalidate_matching("invalidate-matching-test:/api/workspaces/acme/members/*")
+            .await
+            .expect("invalidate");
+        assert_eq!(deleted, 2);
+        assert!(handle
+            .get_string(&first)
+            .await
+            .expect("get first")
+            .is_none());
+        assert!(handle
+            .get_string(&second)
+            .await
+            .expect("get second")
+            .is_none());
+        assert_eq!(
+            handle.get_string(&survivor).await.expect("get survivor"),
+            Some("1".to_owned())
+        );
+        // Empty match deletes nothing and reports zero (Python's
+        // `delete_many([])`).
+        assert_eq!(
+            handle
+                .invalidate_matching("invalidate-matching-test:/api/workspaces/missing/*")
+                .await
+                .expect("empty invalidate"),
+            0
+        );
+        handle
+            .invalidate_matching("invalidate-matching-test:*")
+            .await
+            .expect("cleanup");
     }
 }
