@@ -326,6 +326,28 @@ export class WebDriver implements ParityDriver {
     return (await this.page.locator("html").getAttribute("lang")) ?? "";
   }
 
+  // --- palette creation entries (SHELL-086) ---
+
+  async isNonPaletteDialogOpen(): Promise<boolean> {
+    // A creation command closes the palette (closeOnSelect) and opens its own
+    // Headless-UI dialog. Detect a visible dialog that carries no cmdk-root
+    // (which would mark it as the palette itself).
+    const dialogs = this.page.getByRole("dialog");
+    const count = await dialogs.count();
+    for (let i = 0; i < count; i++) {
+      const dialog = dialogs.nth(i);
+      if (!(await dialog.isVisible())) continue;
+      if ((await dialog.locator("[cmdk-root]").count()) === 0) return true;
+    }
+    return false;
+  }
+
+  // --- palette pickers: empty / no-results / no-recents (SHELL-093) ---
+
+  async paletteHasText(text: string): Promise<boolean> {
+    return this.isShown(this.paletteModal().getByText(text, { exact: false }));
+  }
+
   // --- browse route (SHELL-106, negative row) ---
 
   async openBrowseWorkItem(workspaceSlug: string, identifier: string): Promise<void> {

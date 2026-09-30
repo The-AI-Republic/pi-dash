@@ -164,6 +164,14 @@ export class WebNewDriver implements ParityDriver {
     return todo("documentLang");
   }
 
+  async isNonPaletteDialogOpen(): Promise<boolean> {
+    return todo("isNonPaletteDialogOpen");
+  }
+
+  async paletteHasText(_text: string): Promise<boolean> {
+    return todo("paletteHasText");
+  }
+
   async openBrowseWorkItem(_workspaceSlug: string, _identifier: string): Promise<void> {
     return todo("openBrowseWorkItem");
   }

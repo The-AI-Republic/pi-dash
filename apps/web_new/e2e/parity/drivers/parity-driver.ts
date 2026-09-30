@@ -132,6 +132,25 @@ export interface ParityDriver {
   /** The lang attribute of the document root (set when the interface language changes). */
   documentLang(): Promise<string>;
 
+  // --- palette creation entries (SHELL-086) ---
+  //     The "Create" group commands open their own scoped creation surface:
+  //     work-item/page/view/cycle/module/project open a modal dialog (separate
+  //     from the palette's cmdk dialog), while workspace creation routes to a
+  //     dedicated page. Reuses the existing palette readers/activators; this
+  //     one read observes that a non-palette dialog took over after a create
+  //     command fired (the palette closes on select).
+  /** Whether a dialog that is NOT the cmdk palette is currently open. */
+  isNonPaletteDialogOpen(): Promise<boolean>;
+
+  // --- palette pickers: empty / no-results / no-recents (SHELL-093) ---
+  //     Picker sub-pages render a plain empty line (e.g. "No projects found")
+  //     when a filter matches nothing, and a server search with no hits renders
+  //     a no-results row ("No results found — Clear search"); no history/recents
+  //     section ever appears. The empty line is plain text (not a cmdk item), so
+  //     this scoped read finds any visible text inside the palette surface.
+  /** Whether the open palette surface shows this visible text anywhere. */
+  paletteHasText(text: string): Promise<boolean>;
+
   // --- browse route (SHELL-106, negative row) ---
   /** Open the workspace-level browse route for a work-item identifier (e.g. "PROJ-1"). */
   openBrowseWorkItem(workspaceSlug: string, identifier: string): Promise<void>;
