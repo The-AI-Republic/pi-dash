@@ -1013,6 +1013,54 @@ pub const CYCLE_COMPLETED_BODY: &str =
 /// 201 success envelope (`issue.py:297`).
 pub const CYCLE_ISSUE_CREATE_BODY: &str = r#"{"message":"success"}"#;
 
+/// Python truthiness over a decoded JSON value for `if not issues:`
+/// (`issue.py:227`): `null`, `false`, `0`/`0.0`, `""`, `[]` and `{}` are
+/// falsy; every other value — non-empty strings/arrays/objects, non-zero
+/// numbers, `true` — is truthy.
+fn is_falsy_json(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Bool(flag) => !flag,
+        Value::Number(number) => number.as_f64().map(|n| n == 0.0).unwrap_or(false),
+        Value::String(text) => text.is_empty(),
+        Value::Array(items) => items.is_empty(),
+        Value::Object(fields) => fields.is_empty(),
+    }
+}
+
+/// Classify the decoded `issues` member (`issue.py:223-242`).
+///
+/// Falsy values answer 400 `{"error": "Issues are required"}`. Of the
+/// truthy values, arrays yield their string items — a `null` item flows
+/// into the `NOT NULL` `bulk_create` and dies with `IntegrityError` →
+/// 400 `The payload is not valid`, any other non-string item fails the
+/// UUID coercion in the `__in` filter → 400 invalid detail — while a
+/// non-empty string iterates its chars and a non-empty object iterates
+/// its keys through that same `__in` coercion → 400 invalid detail, and
+/// truthy numbers/bools are not iterable → `TypeError` → generic 500.
+fn extract_issue_strings(issues: &Value) -> Result<Vec<String>, Denial> {
+    if is_falsy_json(issues) {
+        return Err(Denial::BadError("Issues are required".to_owned()));
+    }
+    match issues {
+        Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match item.as_str() {
+                    Some(text) => out.push(text.to_owned()),
+                    None if item.is_null() => {
+                        return Err(Denial::BadError("The payload is not valid".to_owned()));
+                    }
+                    None => return Err(Denial::BadError(INVALID_DETAIL_MSG.to_owned())),
+                }
+            }
+            Ok(out)
+        }
+        Value::String(_) | Value::Object(_) => Err(Denial::BadError(INVALID_DETAIL_MSG.to_owned())),
+        _ => Err(Denial::ServerError),
+    }
+}
+
 /// `CycleIssueViewSet.create` (`issue.py:223-297`).
 async fn cycle_issue_create(
     State(state): State<AppState>,
@@ -1023,32 +1071,14 @@ async fn cycle_issue_create(
     let (pool, user_id, project_id) =
         cycle_issue_context(&state, &slug, &project_raw, gate_for_create(), extension).await?;
     let cycle_id = parse_uuid_or_invalid(&cycle_raw)?;
-    // `request.data.get("issues", [])` + `if not issues:` (`:223-228`).
-    // Non-object bodies cannot `.get` (AttributeError → 500); non-array
-    // truthy bodies reach the UUID coercion below (strings 400, other
-    // scalars 500 — the iterable/validation split in `__in`).
+    // `request.data.get("issues", [])` (`:223`): a non-object body has no
+    // `.get` (AttributeError → 500); objects fall through to the
+    // truthiness check below.
     let issues_value = match body.0.as_object() {
         Some(_) => body.0.get("issues").cloned().unwrap_or(Value::Null),
         None => return Err(Denial::ServerError),
     };
-    let issue_strings: Vec<String> = match &issues_value {
-        Value::Array(items) if !items.is_empty() => {
-            let mut out = Vec::with_capacity(items.len());
-            for item in items {
-                match item.as_str() {
-                    Some(text) => out.push(text.to_owned()),
-                    None => return Err(Denial::BadError(INVALID_DETAIL_MSG.to_owned())),
-                }
-            }
-            out
-        }
-        Value::Null => return Err(Denial::BadError("Issues are required".to_owned())),
-        Value::Array(_) => return Err(Denial::BadError("Issues are required".to_owned())),
-        Value::String(_) => {
-            return Err(Denial::BadError(INVALID_DETAIL_MSG.to_owned()));
-        }
-        _ => return Err(Denial::ServerError),
-    };
+    let issue_strings = extract_issue_strings(&issues_value)?;
     // `Cycle.objects.get(workspace__slug, project_id, pk)` (`:230`).
     let cycle: Option<(
         uuid::Uuid,
@@ -1371,6 +1401,87 @@ mod tests {
         );
         assert_eq!(CYCLE_ISSUE_CREATE_BODY, r#"{"message":"success"}"#);
         assert_eq!(INVALID_DETAIL_MSG, "Please provide valid detail");
+    }
+
+    /// Render a classifier outcome as `(status, body)` for exact comparison.
+    fn outcome_strings(result: Result<Vec<String>, Denial>) -> (u16, String) {
+        match result {
+            Ok(strings) => (201, strings.join(",")),
+            Err(Denial::BadError(message)) => {
+                (400, format!("{{\"error\":{}}}", json_string(&message)))
+            }
+            Err(Denial::ServerError) => (500, "server-error".to_owned()),
+            Err(other) => panic!("unexpected denial: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn issues_member_follows_python_truthiness() {
+        // `if not issues:` (issue.py:227): every falsy JSON value answers
+        // 400 `{"error": "Issues are required"}`.
+        for raw in ["null", "false", "0", "0.0", r#""""#, "[]", "{}"] {
+            let value: Value = serde_json::from_str(raw).expect("fixture");
+            assert_eq!(
+                outcome_strings(extract_issue_strings(&value)),
+                (400, ISSUES_REQUIRED_BODY.to_owned()),
+                "falsy input {raw}"
+            );
+        }
+        // Missing member defaults to `[]` (`.get("issues", [])`), also falsy.
+        let missing: Value = serde_json::from_str(r#"{"other": 1}"#).expect("fixture");
+        assert_eq!(
+            outcome_strings(extract_issue_strings(
+                &missing.get("issues").cloned().unwrap_or(Value::Null)
+            )),
+            (400, ISSUES_REQUIRED_BODY.to_owned()),
+            "missing member"
+        );
+        // Truthy non-array iterables reach the `__in` UUID coercion → 400
+        // invalid detail (strings iterate chars, objects iterate keys).
+        for raw in [r#""abc""#, r#"{"a": 1}"#] {
+            let value: Value = serde_json::from_str(raw).expect("fixture");
+            assert!(
+                matches!(extract_issue_strings(&value), Err(Denial::BadError(_))),
+                "truthy iterable {raw}"
+            );
+            let (_, body) = outcome_strings(extract_issue_strings(&value));
+            assert_eq!(
+                body,
+                format!("{{\"error\":{}}}", json_string(INVALID_DETAIL_MSG)),
+                "invalid-detail body for {raw}"
+            );
+        }
+        // Truthy numbers/bools are not iterable → TypeError → generic 500.
+        for raw in ["1", "1.5", "true"] {
+            let value: Value = serde_json::from_str(raw).expect("fixture");
+            assert!(
+                matches!(extract_issue_strings(&value), Err(Denial::ServerError)),
+                "truthy scalar {raw}"
+            );
+        }
+        // A `null` item matches nothing in `__in` then violates the NOT
+        // NULL `bulk_create` → IntegrityError → 400 payload-not-valid;
+        // other non-string items fail the `__in` coercion → 400 detail.
+        let null_item: Value = serde_json::from_str("[null]").expect("fixture");
+        assert_eq!(
+            outcome_strings(extract_issue_strings(&null_item)),
+            (400, r#"{"error":"The payload is not valid"}"#.to_owned()),
+            "[null]"
+        );
+        let num_item: Value = serde_json::from_str("[123]").expect("fixture");
+        let (_, body) = outcome_strings(extract_issue_strings(&num_item));
+        assert_eq!(
+            body,
+            format!("{{\"error\":{}}}", json_string(INVALID_DETAIL_MSG)),
+            "[123]"
+        );
+        // Well-formed arrays pass through as raw strings (UUID coercion
+        // happens later, after the cycle lookup + end-date check).
+        let good: Value = serde_json::from_str(r#"["a", "b"]"#).expect("fixture");
+        assert_eq!(
+            extract_issue_strings(&good).expect("strings"),
+            vec!["a".to_owned(), "b".to_owned()]
+        );
     }
 
     #[test]
