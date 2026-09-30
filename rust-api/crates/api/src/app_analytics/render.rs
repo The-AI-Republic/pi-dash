@@ -159,7 +159,6 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
-
 /// An owned path: listed methods serve from Rust, everything else proxies
 /// to Django. OPTIONS proxies too: DRF answers metadata (401 anon / 200
 /// authed) where axum would 405. HEAD rides axum's `get` handling like
@@ -1847,8 +1846,6 @@ async fn grouped_chart_response(
 // ---------------------------------------------------------------------------
 // Handlers-B shell (PIDASHCONV-399); routes merge into routes() above
 // ---------------------------------------------------------------------------
-
-
 
 /// A GET-owned path: the GET handler owns reads, everything else falls
 /// through to Django. `HEAD` rides axum's `get` handling like Django's
