@@ -41,10 +41,12 @@
 //! * `BUG-SPACE-SHADOW`: the space-callback `base_host` shadowing above —
 //!   500 on every input, including valid code+state (side effects still
 //!   run first on that path, as in Python).
-//! * `BUG-SIGNUP-FLAG` (`adapter/base.py:299`): `is_signup =
-//!   bool(existing_user)` is inverted; passed through to the post-auth
-//!   callback, which ignores it (`workspace_project_join.py` takes only
-//!   `user`), so it is unobservable.
+//! * `BUG-SIGNUP-FLAG` (`adapter/base.py:299,353-354`): `is_signup =
+//!   bool(existing_user)` is inverted, and the sync gate consumes the
+//!   inversion (`check_sync_enabled() and not is_signup`), so IDP sync
+//!   runs for newly created users only — never for existing ones. The
+//!   flag is also passed to the post-auth callback, which ignores it
+//!   (`workspace_project_join.py` takes only `user`).
 //! * `BUG-PROJECT-INVITE-COLUMNS` (`workspace_project_join.py:76-87`):
 //!   the `ProjectMember` bulk insert omits `project_id` (NOT NULL), so any
 //!   signup carrying an accepted project invite raises `IntegrityError`
@@ -1807,8 +1809,9 @@ pub struct AuthedUser {
 
 /// Full success pipeline for one `code`: config (5105), token exchange +
 /// userinfo (5115), sanitize (5005/5035), lookup, signup (profile +
-/// avatar-URL fallback) or IDP sync, stamps, post-auth workflow on the
-/// app side (`with_callback`), account upsert.
+/// avatar-URL fallback, then IDP sync for the new user when enabled —
+/// `not is_signup`, never for existing users), stamps, post-auth
+/// workflow on the app side (`with_callback`), account upsert.
 pub async fn authenticate_google(
     ctx: &RequestContext<'_>,
     secret: &str,
@@ -1841,16 +1844,14 @@ pub async fn authenticate_google(
     let last_name = inner.get("last_name").and_then(Value::as_str).unwrap_or("");
     let avatar_url = inner.get("avatar").and_then(Value::as_str).unwrap_or("");
     let existing = find_user_by_email(&ctx.pool, &email).await?;
-    // `is_signup = bool(user)` — inverted as written (`BUG-SIGNUP-FLAG`);
-    // the value only reaches the post-auth callback, which ignores it.
-    let _is_signup = existing.is_some();
+    // `is_signup = bool(user)` — inverted as written (`BUG-SIGNUP-FLAG`):
+    // true when the user already exists. The sync gate consumes the
+    // inversion (`check_sync_enabled() and not is_signup`,
+    // `adapter/base.py:353-354`), so IDP sync runs for newly created
+    // users only, never for existing ones.
+    let is_signup = existing.is_some();
     let user = match existing {
-        Some(row) => {
-            if google_sync_enabled(&ctx.pool, secret).await? {
-                sync_user_data(&ctx.pool, &row, &email, first_name, last_name, avatar_url).await?;
-            }
-            row
-        }
+        Some(row) => row,
         None => {
             check_signup(&ctx.pool, secret, &email).await?;
             let mut row = create_user(&ctx.pool, &email, first_name, last_name, now).await?;
@@ -1864,6 +1865,9 @@ pub async fn authenticate_google(
                 row.avatar = avatar_url.to_owned();
             }
             get_or_create_profile(&ctx.pool, row.id, now).await?;
+            if !is_signup && google_sync_enabled(&ctx.pool, secret).await? {
+                sync_user_data(&ctx.pool, &row, &email, first_name, last_name, avatar_url).await?;
+            }
             row
         }
     };
