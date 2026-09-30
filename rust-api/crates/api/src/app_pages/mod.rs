@@ -728,10 +728,13 @@ pub fn archived_at_body(second_now: &chrono::NaiveDateTime) -> String {
     )
 }
 
-/// Coerce the `access` request value to the stored integer domain
-/// (`base.py:272,287`): JSON integers pass through; integral floats and
-/// bools match Python's `int()`/`==` semantics (`1.0` and `true` equal
-/// `1`); anything else is not storable.
+/// The guard-domain coercion for the `access` request value
+/// (`base.py:281`): the guard compares the raw value against the stored
+/// integer with Python `!=`, so only values that can numerically equal a
+/// stored integer coerce — JSON integers, integral floats and bools
+/// (`1.0` and `true` equal `1`); strings, non-integral floats, nulls,
+/// lists and dicts never equal an integer (the caller maps them to a
+/// never-equal sentinel).
 pub fn access_int(value: &Value) -> Option<i32> {
     if let Some(int) = value.as_i64() {
         return i32::try_from(int).ok();
@@ -743,6 +746,74 @@ pub fn access_int(value: &Value) -> Option<i32> {
         return None;
     }
     value.as_bool().map(i32::from)
+}
+
+/// The assignment-domain coercion for the `access` request value
+/// (`base.py:272,287`): `page.access = access` runs the
+/// `PositiveSmallIntegerField` prep, i.e. `int(value)`, and `save()`
+/// skips validators — so non-integral floats truncate toward zero
+/// (`1.5` stores `1`), numeric strings parse (`"1"` stores `1`), and
+/// anything `int()` rejects (null, lists, dicts, `"abc"`, `"1.5"`,
+/// out-of-range integers) fails at prep or at the SMALLINT column, both
+/// surfacing as 500. `None` (absent key) defaults to `0`. A `None` return
+/// is the 500 branch; out-of-`i16` integers stay `i32` here so the
+/// database itself rejects them exactly like Django's column does.
+pub fn access_assign(raw: Option<&Value>) -> Option<i32> {
+    let value = match raw {
+        None => return Some(0),
+        Some(value) => value,
+    };
+    if let Some(int) = value.as_i64() {
+        return i32::try_from(int).ok();
+    }
+    if let Some(float) = value.as_f64() {
+        if float >= f64::from(i32::MIN) && float <= f64::from(i32::MAX) {
+            return Some(float as i32);
+        }
+        return None;
+    }
+    if let Some(boolean) = value.as_bool() {
+        return Some(i32::from(boolean));
+    }
+    if let Some(text) = value.as_str() {
+        return access_int_str(text);
+    }
+    None
+}
+
+/// `int(text, 10)` for the assignment path above (ASCII-digit subset —
+/// the API domain): surrounding whitespace stripped, one optional sign,
+/// digits with single separators between them (`"1_0"` is `10`);
+/// anything else (`""`, `"0x1"`, `"1.5"`, `"1__0"`) is not an integer.
+fn access_int_str(raw: &str) -> Option<i32> {
+    let text = raw.trim_matches(|c: char| c.is_whitespace());
+    let digits = text
+        .strip_prefix('+')
+        .or_else(|| text.strip_prefix('-'))
+        .unwrap_or(text);
+    if digits.is_empty()
+        || !digits.bytes().all(|b| b.is_ascii_digit() || b == b'_')
+        || !digits.bytes().next().is_some_and(|b| b.is_ascii_digit())
+        || !digits.bytes().last().is_some_and(|b| b.is_ascii_digit())
+        || digits.as_bytes().windows(2).any(|w| w == b"__")
+    {
+        return None;
+    }
+    let mut magnitude: i64 = 0;
+    for byte in digits.bytes() {
+        if byte == b'_' {
+            continue;
+        }
+        magnitude = magnitude
+            .checked_mul(10)?
+            .checked_add(i64::from(byte - b'0'))?;
+    }
+    let signed = if text.starts_with('-') {
+        -magnitude
+    } else {
+        magnitude
+    };
+    i32::try_from(signed).ok()
 }
 
 /// `Page.save()`'s `description_stripped` recompute
@@ -1138,18 +1209,21 @@ pub async fn access_page(
     {
         return json_response(StatusCode::BAD_REQUEST, ACCESS_OWNER_BODY.to_owned());
     }
-    // Assignment (`:272,287`): `request.data.get("access", 0)`. An owner
-    // storing a non-integer fails at the driver in Django → 500 here.
-    let effective = match (raw, requested) {
-        (None, _) => 0,
-        (Some(_), Some(value)) => value,
-        (Some(_), None) => return Denial::ServerError.into_response(),
+    // Assignment (`:272,287`): `request.data.get("access", 0)` then
+    // `page.access = access` runs the field prep (`int(value)`, verified
+    // against `PositiveSmallIntegerField.get_prep_value`: `1.5` → `1`,
+    // `"1"` → `1`). Anything `int()` rejects fails at prep or at the
+    // SMALLINT column — both 500 here. The value binds as `i32` so an
+    // out-of-range integer is rejected by the column itself, exactly
+    // like Django's save.
+    let Some(effective) = access_assign(raw) else {
+        return Denial::ServerError.into_response();
     };
     if sqlx::query(
         r#"UPDATE pages SET access = $1, description_stripped = $2,
            updated_at = now(), updated_by_id = $3 WHERE id = $4"#,
     )
-    .bind(i16::try_from(effective).unwrap_or(0))
+    .bind(effective)
     .bind(stripped_of(page.description_html.as_str()))
     .bind(gate.user_id)
     .bind(page_id)
@@ -2170,6 +2244,37 @@ mod tests {
             access_int(&serde_json::json!(i64::from(i32::MAX) + 1)),
             None
         );
+    }
+
+    /// The assignment coercion follows `int(value)` (verified against
+    /// `PositiveSmallIntegerField.get_prep_value` on the Django venv:
+    /// `1.5` → `1`, `"1"` → `1`, `True` → `1`, `70000` passes prep and
+    /// fails at the column).
+    #[test]
+    fn access_assign_matches_py_int() {
+        let assign = |v: Option<serde_json::Value>| access_assign(v.as_ref());
+        assert_eq!(assign(None), Some(0));
+        assert_eq!(assign(Some(serde_json::json!(1))), Some(1));
+        assert_eq!(assign(Some(serde_json::json!(1.0))), Some(1));
+        assert_eq!(assign(Some(serde_json::json!(1.5))), Some(1));
+        assert_eq!(assign(Some(serde_json::json!(-1.5))), Some(-1));
+        assert_eq!(assign(Some(serde_json::json!(true))), Some(1));
+        assert_eq!(assign(Some(serde_json::json!("1"))), Some(1));
+        assert_eq!(assign(Some(serde_json::json!("  +1 "))), Some(1));
+        assert_eq!(assign(Some(serde_json::json!("1_0"))), Some(10));
+        assert_eq!(assign(Some(serde_json::json!("-2"))), Some(-2));
+        // Out-of-`i16` integers pass prep; the SMALLINT column rejects
+        // them (bound as `i32` so the database itself says no).
+        assert_eq!(assign(Some(serde_json::json!(70_000))), Some(70_000));
+        assert_eq!(assign(Some(serde_json::json!("abc"))), None);
+        assert_eq!(assign(Some(serde_json::json!("1.5"))), None);
+        assert_eq!(assign(Some(serde_json::json!(""))), None);
+        assert_eq!(assign(Some(serde_json::json!("0x1"))), None);
+        assert_eq!(assign(Some(serde_json::json!("1__0"))), None);
+        assert_eq!(assign(Some(serde_json::json!(null))), None);
+        assert_eq!(assign(Some(serde_json::json!([1]))), None);
+        assert_eq!(assign(Some(serde_json::json!({"a": 1}))), None);
+        assert_eq!(assign(Some(serde_json::json!(1e30))), None);
     }
 
     /// The unarchive detach predicate (F30-08 `:360-362`): only a page
