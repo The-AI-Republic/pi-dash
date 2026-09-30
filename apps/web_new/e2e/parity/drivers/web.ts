@@ -305,8 +305,10 @@ export class WebDriver implements ParityDriver {
     await passwordField.fill(password);
     const passwordForm = page.locator("form", { has: passwordField });
     // The old app posts the native form, so this ends in a full page load.
+    // Wait for the navigation itself: a URL regex also matches the bare
+    // origin ("//host/"), which would return before the sign-in POST lands.
     await Promise.all([
-      page.waitForURL(/\/[^/]+\//, { timeout: WebDriver.WAIT_MS }),
+      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: WebDriver.WAIT_MS }),
       this.submitOf(passwordForm).click(),
     ]);
   }
