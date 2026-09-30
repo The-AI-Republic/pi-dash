@@ -821,7 +821,7 @@ pub fn display_name_for<R: rand::Rng>(email: &str, rng: &mut R) -> String {
 /// Django `BasePasswordHasher.salt()`: 22 alphanumeric characters
 /// (128 bits of entropy).
 pub fn random_salt<R: rand::Rng>(rng: &mut R) -> String {
-    use rand::distr::{Alphanumeric, DistString};
+    use rand::distr::{Alphanumeric, SampleString};
     Alphanumeric.sample_string(rng, 22)
 }
 
