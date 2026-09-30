@@ -308,12 +308,17 @@ pub fn resolve_triage_transition<'a>(
 }
 
 /// `IssueDataSerializer.name` (`intake.py:166`): required `CharField`,
-/// `max_length=255` (`allow_blank=False` default). Counts Unicode scalar
-/// values, as DRF's `MaxLengthValidator` (`len(value)`) does — never slice
-/// the input (UTF-8 boundary panic trap).
-pub fn validate_issue_name(value: Option<&str>) -> Result<&str, &'static str> {
-    let Some(name) = value else {
+/// `max_length=255` (`allow_blank=False`, `allow_null=False` defaults).
+/// Counts Unicode scalar values, as DRF's `MaxLengthValidator`
+/// (`len(value)`) does — never slice the input (UTF-8 boundary panic trap).
+/// `None` = key absent (`required` failure); `Some(None)` = explicit `null`
+/// (`null` failure): the `None`-vs-absent-key trap is load-bearing here.
+pub fn validate_issue_name(value: Option<Option<&str>>) -> Result<&str, &'static str> {
+    let Some(maybe_name) = value else {
         return Err(REQUIRED_MESSAGE);
+    };
+    let Some(name) = maybe_name else {
+        return Err(NULL_MESSAGE);
     };
     if name.is_empty() {
         return Err(BLANK_MESSAGE);
@@ -344,14 +349,17 @@ pub fn validate_description_html(
 
 /// `IssueDataSerializer.priority` (`intake.py:169`): `ChoiceField` over
 /// `Issue.PRIORITY_CHOICES` with `default="none"`. Missing input takes the
-/// default; anything outside the choices fails with DRF's `invalid_choice`
-/// body. (BUG-wire-dead: this never fires on the wire today — the create
-/// view checks priority inline — but the rule is ported for the layer.)
-pub fn validate_priority(value: Option<&str>) -> Result<&str, String> {
+/// default; explicit `null` fails with DRF's `null` body (`allow_null=False`
+/// default — the default only covers an absent key); anything outside the
+/// choices fails with DRF's `invalid_choice` body. (BUG-wire-dead: this
+/// never fires on the wire today — the create view checks priority
+/// inline — but the rule is ported for the layer.)
+pub fn validate_priority(value: Option<Option<&str>>) -> Result<&str, String> {
     match value {
         None => Ok(PRIORITY_DEFAULT),
-        Some(priority) if PRIORITY_CHOICES.contains(&priority) => Ok(priority),
-        Some(priority) => Err(invalid_priority_choice(priority)),
+        Some(None) => Err(NULL_MESSAGE.to_string()),
+        Some(Some(priority)) if PRIORITY_CHOICES.contains(&priority) => Ok(priority),
+        Some(Some(priority)) => Err(invalid_priority_choice(priority)),
     }
 }
 
@@ -655,21 +663,32 @@ mod tests {
 
     #[test]
     fn issue_data_name_rules() {
-        assert_eq!(validate_issue_name(Some("Triage item")), Ok("Triage item"));
+        assert_eq!(
+            validate_issue_name(Some(Some("Triage item"))),
+            Ok("Triage item")
+        );
         assert_eq!(validate_issue_name(None), Err(REQUIRED_MESSAGE));
-        assert_eq!(validate_issue_name(Some("")), Err(BLANK_MESSAGE));
+        // Explicit null is a `null` failure, not `required` (None-vs-absent).
+        assert_eq!(validate_issue_name(Some(None)), Err(NULL_MESSAGE));
+        assert_eq!(validate_issue_name(Some(Some(""))), Err(BLANK_MESSAGE));
         let max = "n".repeat(ISSUE_NAME_MAX_LENGTH);
-        assert_eq!(validate_issue_name(Some(&max)), Ok(max.as_str()));
+        assert_eq!(
+            validate_issue_name(Some(Some(max.as_str()))),
+            Ok(max.as_str())
+        );
         // Length counts code points, never slices (UTF-8 boundary trap).
         let wide = "é".repeat(ISSUE_NAME_MAX_LENGTH);
-        assert_eq!(validate_issue_name(Some(&wide)), Ok(wide.as_str()));
         assert_eq!(
-            validate_issue_name(Some(&format!("{max}x"))),
+            validate_issue_name(Some(Some(wide.as_str()))),
+            Ok(wide.as_str())
+        );
+        assert_eq!(
+            validate_issue_name(Some(Some(&format!("{max}x")))),
             Err(NAME_MAX_LENGTH_MESSAGE)
         );
         // 255 multi-byte chars + 1 ASCII char is 256 code points, still long.
         assert_eq!(
-            validate_issue_name(Some(&format!("{wide}x"))),
+            validate_issue_name(Some(Some(&format!("{wide}x")))),
             Err(NAME_MAX_LENGTH_MESSAGE)
         );
     }
@@ -694,15 +713,17 @@ mod tests {
     fn issue_data_priority_rules() {
         // Default applies when the key is absent.
         assert_eq!(validate_priority(None), Ok(PRIORITY_DEFAULT));
+        // Explicit null is a `null` failure — the default covers absence only.
+        assert_eq!(validate_priority(Some(None)), Err(NULL_MESSAGE.to_string()));
         for choice in PRIORITY_CHOICES {
-            assert_eq!(validate_priority(Some(choice)), Ok(choice));
+            assert_eq!(validate_priority(Some(Some(choice))), Ok(choice));
         }
         assert_eq!(
-            validate_priority(Some("CRITICAL")),
+            validate_priority(Some(Some("CRITICAL"))),
             Err("\"CRITICAL\" is not a valid choice.".to_string())
         );
         assert_eq!(
-            validate_priority(Some("")),
+            validate_priority(Some(Some(""))),
             Err("\"\" is not a valid choice.".to_string())
         );
     }
