@@ -27,6 +27,8 @@ export class WebDriver implements ParityDriver {
 
   /** Every wait below is explicitly bounded: the suite config leaves action and navigation timeouts at Playwright's unbounded defaults, so a bare waitFor would hang to the test timeout instead of failing honestly. */
   private static readonly WAIT_MS = 30_000;
+  /** Tighter bound for menus and dialogs, which render synchronously once open. */
+  private static readonly OPEN_MS = 30_000;
 
   async openEntry(): Promise<void> {
     // The entry render occasionally never arrives under concurrent
@@ -2672,6 +2674,241 @@ export class WebDriver implements ParityDriver {
     const pulsing = this.page.locator(".animate-pulse, [data-testid*='skeleton' i], [aria-busy='true']").first();
     if ((await pulsing.count()) > 0) return true;
     return false;
+  // ---- Issue detail (NEWFRONT-121). ----
+  // Selectors follow the detail behavior observed on the running old app:
+  // the title is a textarea (placeholder "Work item title"), the sidebar
+  // is a "Properties" section of label/value rows, dropdowns render a
+  // listbox of options, and the description is the contenteditable above
+  // the "Last edited by" line (the composer sits below it).
+
+  private static readonly DETAIL_MS = 120_000;
+
+  async signedIn(): Promise<boolean> {
+    return (await this.page.getByPlaceholder("name@company.com").count()) === 0;
+  }
+
+  async openIssueDetail(workspaceSlug: string, issueSeq: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/browse/${issueSeq}`);
+    // Hydration can be slow on the dev-server oracle, but a missing issue
+    // or a lost session must fail fast with a diagnosis, not a timeout.
+    const deadline = Date.now() + WebDriver.DETAIL_MS;
+    for (;;) {
+      if ((await this.titleField().count()) > 0) return;
+      if (await this.seesDetailMissing()) {
+        throw new Error(`[parity] detail shows the missing state for ${issueSeq} (reseeded away?).`);
+      }
+      if ((await this.page.getByPlaceholder("name@company.com").count()) > 0) {
+        throw new Error("[parity] session lost while opening the detail page.");
+      }
+      if (Date.now() > deadline) {
+        await this.titleField().waitFor({ timeout: 5000 });
+        return;
+      }
+      await this.page.waitForTimeout(2000);
+    }
+  }
+
+  private titleField(): Locator {
+    return this.page.getByPlaceholder("Work item title").first();
+  }
+
+  async issueDetailTitle(): Promise<string | null> {
+    if ((await this.titleField().count()) === 0) return null;
+    return await this.titleField().inputValue();
+  }
+
+  async issueDetailIdentifier(): Promise<string | null> {
+    const id = this.page.getByText(/^[A-Z]{2,}-\d+$/).first();
+    if ((await id.count()) === 0) return null;
+    return (await id.innerText()).trim();
+  }
+
+  async editIssueTitle(name: string): Promise<void> {
+    await this.titleField().fill(name, { timeout: WebDriver.OPEN_MS });
+    // Blur out of the title so the debounced autosave fires.
+    const id = this.page.getByText(/^[A-Z]{2,}-\d+$/).first();
+    if ((await id.count()) > 0) await id.click({ timeout: WebDriver.OPEN_MS });
+    else await this.titleField().press("Tab", { timeout: WebDriver.OPEN_MS });
+  }
+
+  async saveIndicator(): Promise<string | null> {
+    const saving = this.page.getByText(/^Saving…$/).first();
+    if ((await saving.count()) > 0) return "Saving…";
+    const saved = this.page.getByText(/^Saved$/).first();
+    if ((await saved.count()) > 0) return "Saved";
+    return null;
+  }
+
+  /** The description editor: contenteditable above the "Last edited by" line. */
+  private async descriptionEditor(): Promise<Locator | null> {
+    const editors = this.page.locator("[contenteditable='true']");
+    const count = await editors.count();
+    if (count === 0) return null;
+    if (count === 1) return editors.first();
+    const marker = this.page.getByText(/Last edited by/).first();
+    if ((await marker.count()) === 0) return editors.first();
+    const markerBox = await marker.boundingBox();
+    if (!markerBox) return editors.first();
+    for (let i = 0; i < count; i++) {
+      const box = await editors.nth(i).boundingBox();
+      if (box && box.y + box.height <= markerBox.y) return editors.nth(i);
+    }
+    return null;
+  }
+
+  async descriptionText(): Promise<string | null> {
+    const editor = await this.descriptionEditor();
+    if (!editor) return null;
+    return ((await editor.innerText()) ?? "").trim();
+  }
+
+  async setDescription(text: string): Promise<void> {
+    const placeholder = this.page.getByText("Click to add description").first();
+    if ((await placeholder.count()) > 0) await placeholder.click({ timeout: WebDriver.OPEN_MS });
+    const editor = await this.descriptionEditor();
+    if (!editor) throw new Error("[parity] no description editor on the detail page.");
+    await editor.fill(text, { timeout: WebDriver.OPEN_MS });
+    const id = this.page.getByText(/^[A-Z]{2,}-\d+$/).first();
+    if ((await id.count()) > 0) await id.click({ timeout: WebDriver.OPEN_MS });
+    else await this.page.keyboard.press("Escape");
+  }
+
+  /** The label/value row for a sidebar property, found by walking up. */
+  private async propertyRow(label: string): Promise<Locator | null> {
+    const labelEl = this.page.getByText(label, { exact: true }).first();
+    if ((await labelEl.count()) === 0) return null;
+    let node = labelEl.locator("xpath=parent::*");
+    for (let i = 0; i < 4; i++) {
+      const text = ((await node.innerText().catch(() => "")) ?? "").trim();
+      if (text.length > label.length + 1 && text.length < 300) return node;
+      node = node.locator("xpath=parent::*");
+    }
+    return null;
+  }
+
+  async sidebarProperty(label: string): Promise<string | null> {
+    const row = await this.propertyRow(label);
+    if (!row) return null;
+    const text = ((await row.innerText()) ?? "").trim();
+    return text.replace(label, "").trim() || null;
+  }
+
+  private async pickFromProperty(label: string, name: string): Promise<void> {
+    const row = await this.propertyRow(label);
+    if (!row) throw new Error(`[parity] no sidebar property ${JSON.stringify(label)}.`);
+    await row.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("option", { name }).click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pickState(name: string): Promise<void> {
+    await this.pickFromProperty("State", name);
+  }
+
+  async pickPriority(name: string): Promise<void> {
+    await this.pickFromProperty("Priority", name);
+  }
+
+  async copyIssueLink(): Promise<void> {
+    await this.page
+      .getByRole("button", { name: /copy link/i })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async lastToast(): Promise<string | null> {
+    const status = this.page.getByRole("status");
+    if ((await status.count()) > 0) {
+      const text = ((await status.first().innerText()) ?? "").trim();
+      if (text !== "") return text;
+    }
+    const alert = this.page.getByRole("alert");
+    if ((await alert.count()) === 0) return null;
+    const text = ((await alert.first().innerText()) ?? "").trim();
+    return text === "" ? null : text;
+  }
+
+  async readClipboard(): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    return await this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async subscribeToggle(): Promise<string | null> {
+    const toggle = this.page.getByRole("button", { name: /^(Subscribe|Unsubscribe)$/ }).first();
+    if ((await toggle.count()) === 0) return null;
+    return ((await toggle.innerText()) ?? "").trim() || null;
+  }
+
+  async clickSubscribeToggle(): Promise<void> {
+    await this.page
+      .getByRole("button", { name: /^(Subscribe|Unsubscribe)$/ })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async quickActionNames(): Promise<string[]> {
+    // The overflow trigger is an icon-only menu button in the detail
+    // header bar (the row holding the breadcrumb and the subscribe
+    // toggle). Walk up from the toggle to that bar, then open the popup
+    // button inside it.
+    let bar = this.page.getByRole("button", { name: /^(Subscribe|Unsubscribe)$/ }).first();
+    for (let i = 0; i < 8; i++) {
+      bar = bar.locator("xpath=parent::*");
+      const triggers = bar.locator('button[aria-haspopup="menu"], button[aria-haspopup="true"]');
+      if ((await triggers.count()) > 0) {
+        await triggers.first().click({ timeout: WebDriver.OPEN_MS });
+        break;
+      }
+    }
+    const items = this.page.getByRole("menuitem");
+    await items.first().waitFor({ timeout: WebDriver.DETAIL_MS });
+    return (await items.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async openDescriptionHistory(): Promise<void> {
+    // The "Last edited by" line is a history menu button; under contention
+    // the first click can be swallowed by a re-render, so retry until the
+    // version items show.
+    const trigger = this.page.getByRole("button", { name: /Last edited by/ }).first();
+    for (let attempt = 0; ; attempt++) {
+      await trigger.click({ timeout: WebDriver.OPEN_MS });
+      try {
+        await this.page.getByRole("menuitem").first().waitFor({ timeout: 5000 });
+        return;
+      } catch {
+        if (attempt >= 2) throw new Error("[parity] description history menu did not open.");
+      }
+    }
+  }
+
+  async historyVersionNames(): Promise<string[]> {
+    const items = this.page.getByRole("menuitem");
+    return (await items.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async restoreHistoryVersion(name: string): Promise<void> {
+    // Post-save re-renders can drop the open menu, so reopen on demand.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.page.getByRole("menuitem", { name }).first().click({ timeout: 10_000 });
+        break;
+      } catch {
+        if (attempt >= 1) throw new Error(`[parity] history version ${JSON.stringify(name)} not clickable.`);
+        await this.openDescriptionHistory();
+      }
+    }
+    const dialog = this.page.getByRole("dialog");
+    await dialog.waitFor({ timeout: WebDriver.OPEN_MS });
+    await dialog.getByRole("button", { name: "Restore" }).click({ timeout: WebDriver.OPEN_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+  }
+
+  async openLegacyIssueRoute(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues/${issueId}`);
+    await this.page.waitForURL(/\/browse\//, { timeout: WebDriver.DETAIL_MS });
+  }
+
+  async seesDetailMissing(): Promise<boolean> {
+    return (await this.page.getByText(/does not exist/i).count()) > 0;
   }
 
   // --- Comment composer and CRUD (NEWFRONT-112). Selectors observed on

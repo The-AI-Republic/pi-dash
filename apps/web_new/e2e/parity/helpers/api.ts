@@ -819,6 +819,358 @@ export async function serverPatchComment(
   );
   if (!res.ok) throw new Error(`[parity] comment patch failed with HTTP ${res.status}.`);
 }
+// ---- Issue detail / peek / widget setup and readback (NEWFRONT-121). ----
+// These helpers create and read back the server state that detail, peek,
+// and widget scenarios assert against: issues, states, labels, and the
+// widget collections. Every call rides out the shared-stack throttle the
+// same way the harness does.
+
+/** Minimal issue identity as the list/retrieve endpoints report it. */
+export interface IssueFacts {
+  id: string;
+  sequence_id: number;
+  name: string;
+}
+
+async function authed(
+  workspaceSlug: string,
+  path: string,
+  sessionCookie: string,
+  init?: RequestInit,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Response> {
+  // The seeded stack throttles anonymous calls per minute per IP (shared by
+  // every parallel run on this machine), so ride out 429s instead of
+  // failing the scenario on a contended stack.
+  const backoffMs = [3000, 6000, 12000, 20000, 30000];
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}${path}`, {
+      ...init,
+      headers: { ...(init?.headers ?? {}), cookie: sessionCookie },
+    });
+    if (res.status !== 429 || attempt >= backoffMs.length) return res;
+    await new Promise((resolve) => setTimeout(resolve, backoffMs[attempt]));
+  }
+}
+
+function requireOk(res: Response, what: string): void {
+  if (!res.ok) throw new Error(`[parity] ${what} failed with HTTP ${res.status}.`);
+}
+
+/** Project identifier (e.g. `PAR`) plus the raw record. */
+export async function projectFacts(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ identifier: string; record: Record<string, unknown> }> {
+  const res = await authed(workspaceSlug, `/projects/${projectId}/`, sessionCookie, undefined, apiBase);
+  requireOk(res, "project read");
+  const record = (await res.json()) as Record<string, unknown>;
+  if (typeof record["identifier"] !== "string") throw new Error("[parity] project row carried no identifier.");
+  return { identifier: record["identifier"] as string, record };
+}
+
+/** Every (non-deleted) issue of the project with id, sequence, and name. */
+export async function issueFacts(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<IssueFacts[]> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/?per_page=100`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  requireOk(res, "issues read");
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const record = row as { id?: unknown; sequence_id?: unknown; name?: unknown };
+    if (typeof record.id !== "string" || typeof record.sequence_id !== "number" || typeof record.name !== "string") {
+      throw new Error("[parity] issue row carried no id/sequence_id/name.");
+    }
+    return { id: record.id, sequence_id: record.sequence_id, name: record.name };
+  });
+}
+
+/** `IDENT-seq` (e.g. `PAR-1`) for the named issue; throws when absent. */
+export async function issueSeqForName(
+  workspaceSlug: string,
+  projectId: string,
+  projectIdentifier: string,
+  name: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ seq: string; id: string }> {
+  const rows = await issueFacts(workspaceSlug, projectId, sessionCookie, apiBase);
+  const row = rows.find((r) => r.name === name);
+  if (!row) throw new Error(`[parity] no issue named ${JSON.stringify(name)}.`);
+  return { seq: `${projectIdentifier}-${row.sequence_id}`, id: row.id };
+}
+
+/** Full retrieve of one issue, as the detail page hydrates from. */
+export async function fetchIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  requireOk(res, "issue retrieve");
+  return (await res.json()) as Record<string, unknown>;
+}
+
+/** Create an issue; resolves with its id and sequence number. */
+export async function createIssue(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  name: string,
+  extra: Record<string, unknown> = {},
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ id: string; sequence_id: number }> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/`,
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, ...extra }) },
+    apiBase
+  );
+  requireOk(res, "issue create");
+  const record = (await res.json()) as { id?: unknown; sequence_id?: unknown };
+  if (typeof record.id !== "string" || typeof record.sequence_id !== "number") {
+    throw new Error("[parity] issue create response carried no id/sequence_id.");
+  }
+  return { id: record.id, sequence_id: record.sequence_id };
+}
+
+/** Patch one issue; resolves with the updated record. */
+export async function patchIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  patch: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/`,
+    sessionCookie,
+    { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(patch) },
+    apiBase
+  );
+  requireOk(res, "issue patch");
+  const raw = await res.text();
+  return (raw === "" ? {} : JSON.parse(raw)) as Record<string, unknown>;
+}
+
+/** Destroy one issue (used to clean up issues a scenario created). */
+export async function deleteIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/`,
+    sessionCookie,
+    { method: "DELETE" },
+    apiBase
+  );
+  if (!res.ok && res.status !== 204) throw new Error(`[parity] issue delete failed with HTTP ${res.status}.`);
+}
+
+/** Project state facts as the state dropdown reports them. */
+export interface StateFacts {
+  id: string;
+  name: string;
+  group: string;
+}
+
+/** Every state of the project. */
+export async function projectStates(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<StateFacts[]> {
+  const res = await authed(workspaceSlug, `/projects/${projectId}/states/`, sessionCookie, undefined, apiBase);
+  requireOk(res, "states read");
+  const rows: unknown = await res.json();
+  const list: unknown[] = Array.isArray(rows) ? rows : [];
+  return list.map((row) => {
+    const record = row as { id?: unknown; name?: unknown; group?: unknown };
+    if (typeof record.id !== "string" || typeof record.name !== "string" || typeof record.group !== "string") {
+      throw new Error("[parity] state row carried no id/name/group.");
+    }
+    return { id: record.id, name: record.name, group: record.group };
+  });
+}
+
+/** Create a project state (e.g. a second state so detail scenarios can switch). */
+export async function createState(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  name: string,
+  group = "started",
+  apiBase: string = apiBaseFromEnv()
+): Promise<StateFacts> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/states/`,
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, group }) },
+    apiBase
+  );
+  requireOk(res, "state create");
+  const record = (await res.json()) as { id?: unknown; name?: unknown; group?: unknown };
+  if (typeof record.id !== "string" || typeof record.name !== "string" || typeof record.group !== "string") {
+    throw new Error("[parity] state create response carried no id/name/group.");
+  }
+  return { id: record.id, name: record.name, group: record.group };
+}
+
+/** Delete a project state created in-spec. */
+export async function deleteState(
+  workspaceSlug: string,
+  projectId: string,
+  stateId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/states/${stateId}/`,
+    sessionCookie,
+    { method: "DELETE" },
+    apiBase
+  );
+  if (!res.ok && res.status !== 204) throw new Error(`[parity] state delete failed with HTTP ${res.status}.`);
+}
+
+/** Project label facts. */
+export interface LabelFacts {
+  id: string;
+  name: string;
+}
+
+/** Every label of the project. */
+export async function projectLabels(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<LabelFacts[]> {
+  const res = await authed(workspaceSlug, `/projects/${projectId}/issue-labels/`, sessionCookie, undefined, apiBase);
+  requireOk(res, "labels read");
+  const rows: unknown = await res.json();
+  const list: unknown[] = Array.isArray(rows) ? rows : [];
+  return list.map((row) => {
+    const record = row as { id?: unknown; name?: unknown };
+    if (typeof record.id !== "string" || typeof record.name !== "string") {
+      throw new Error("[parity] label row carried no id/name.");
+    }
+    return { id: record.id, name: record.name };
+  });
+}
+
+/** Create a project label; resolves with its id. */
+export async function createProjectLabel(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  name: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<LabelFacts> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issue-labels/`,
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) },
+    apiBase
+  );
+  requireOk(res, "label create");
+  const record = (await res.json()) as { id?: unknown; name?: unknown };
+  if (typeof record.id !== "string" || typeof record.name !== "string") {
+    throw new Error("[parity] label create response carried no id/name.");
+  }
+  return { id: record.id, name: record.name };
+}
+
+/** Delete a project label created in-spec. */
+export async function deleteProjectLabel(
+  workspaceSlug: string,
+  projectId: string,
+  labelId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issue-labels/${labelId}/`,
+    sessionCookie,
+    { method: "DELETE" },
+    apiBase
+  );
+  if (!res.ok && res.status !== 204) throw new Error(`[parity] label delete failed with HTTP ${res.status}.`);
+}
+
+/** True when the session user subscribes to the issue's activity. */
+export async function subscriptionStatus(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<boolean> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/subscribe/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  requireOk(res, "subscription read");
+  const payload = (await res.json()) as { subscribed?: unknown };
+  if (typeof payload.subscribed !== "boolean") throw new Error("[parity] subscription row carried no boolean.");
+  return payload.subscribed;
+}
+
+/** Description version rows, oldest first as the server reports them. */
+export async function descriptionVersions(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>[]> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/work-items/${issueId}/description-versions/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  requireOk(res, "description versions read");
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows as Record<string, unknown>[];
+}
 
 /** Names of the project's issues as the server reports them, in API order. */
 export async function serverIssueNames(

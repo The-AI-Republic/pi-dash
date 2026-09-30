@@ -892,6 +892,72 @@ export class WebNewDriver implements ParityDriver {
 
   async homeWaitForWidgets(): Promise<string[]> {
     return todo("homeWaitForWidgets");
+  // ---- Issue detail (NEWFRONT-121): stubs until the area lands. ----
+  async openIssueDetail(_workspaceSlug: string, _issueSeq: string): Promise<void> {
+    return todo("openIssueDetail");
+  }
+  async issueDetailTitle(): Promise<string | null> {
+    return todo("issueDetailTitle");
+  }
+  async issueDetailIdentifier(): Promise<string | null> {
+    return todo("issueDetailIdentifier");
+  }
+  async editIssueTitle(_name: string): Promise<void> {
+    return todo("editIssueTitle");
+  }
+  async saveIndicator(): Promise<string | null> {
+    return todo("saveIndicator");
+  }
+  async descriptionText(): Promise<string | null> {
+    return todo("descriptionText");
+  }
+  async setDescription(_text: string): Promise<void> {
+    return todo("setDescription");
+  }
+  async sidebarProperty(_label: string): Promise<string | null> {
+    return todo("sidebarProperty");
+  }
+  async pickState(_name: string): Promise<void> {
+    return todo("pickState");
+  }
+  async pickPriority(_name: string): Promise<void> {
+    return todo("pickPriority");
+  }
+  async copyIssueLink(): Promise<void> {
+    return todo("copyIssueLink");
+  }
+  async lastToast(): Promise<string | null> {
+    return todo("lastToast");
+  }
+  async readClipboard(): Promise<string> {
+    return todo("readClipboard");
+  }
+  async subscribeToggle(): Promise<string | null> {
+    return todo("subscribeToggle");
+  }
+  async clickSubscribeToggle(): Promise<void> {
+    return todo("clickSubscribeToggle");
+  }
+  async quickActionNames(): Promise<string[]> {
+    return todo("quickActionNames");
+  }
+  async openLegacyIssueRoute(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
+    return todo("openLegacyIssueRoute");
+  }
+  async seesDetailMissing(): Promise<boolean> {
+    return todo("seesDetailMissing");
+  }
+  async signedIn(): Promise<boolean> {
+    return todo("signedIn");
+  }
+  async openDescriptionHistory(): Promise<void> {
+    return todo("openDescriptionHistory");
+  }
+  async historyVersionNames(): Promise<string[]> {
+    return todo("historyVersionNames");
+  }
+  async restoreHistoryVersion(_name: string): Promise<void> {
+    return todo("restoreHistoryVersion");
   }
 
   // --- Comment composer and CRUD (NEWFRONT-112). Stubs mirror the

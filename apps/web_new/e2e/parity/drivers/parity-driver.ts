@@ -621,6 +621,51 @@ export interface ParityDriver {
   composerCommentImageCount(text: string): Promise<number>;
   /** Notices currently visible, oldest first, with their success/error kind. */
   composerVisibleNotices(): Promise<{ message: string; kind: "success" | "error" | "unknown" }[]>;
+  // ---- Issue detail (NEWFRONT-121). ----
+  /** Open the full-page detail of `IDENT-seq` (e.g. `PAR-1`); ends hydrated. */
+  openIssueDetail(workspaceSlug: string, issueSeq: string): Promise<void>;
+  /** Title heading text on the detail page, or null when absent. */
+  issueDetailTitle(): Promise<string | null>;
+  /** Identifier line (e.g. `PAR-1`) on the detail page, or null when absent. */
+  issueDetailIdentifier(): Promise<string | null>;
+  /** Edit the title inline; ends with the save settled. */
+  editIssueTitle(name: string): Promise<void>;
+  /** Current save indicator text (`Saving…`/`Saved`), or null when hidden. */
+  saveIndicator(): Promise<string | null>;
+  /** Plain text of the description body, or null when the editor is absent. */
+  descriptionText(): Promise<string | null>;
+  /** Replace the description through the UI; ends with the save settled. */
+  setDescription(text: string): Promise<void>;
+  /** Value text of a sidebar property row named by its label, or null. */
+  sidebarProperty(label: string): Promise<string | null>;
+  /** Pick a state from the sidebar State dropdown. */
+  pickState(name: string): Promise<void>;
+  /** Pick a priority from the sidebar Priority dropdown. */
+  pickPriority(name: string): Promise<void>;
+  /** Click the header copy-link button. */
+  copyIssueLink(): Promise<void>;
+  /** Text of the most recent toast, or null when none shows. */
+  lastToast(): Promise<string | null>;
+  /** Clipboard text (the copy-link scenarios grant clipboard permission). */
+  readClipboard(): Promise<string>;
+  /** Current subscribe toggle label, or null when the toggle is absent. */
+  subscribeToggle(): Promise<string | null>;
+  /** Click the subscribe toggle; ends with the toggle settled. */
+  clickSubscribeToggle(): Promise<void>;
+  /** Names of the detail header `…` quick-action menu items. */
+  quickActionNames(): Promise<string[]>;
+  /** Open the legacy short-link route that redirects to the detail page. */
+  openLegacyIssueRoute(workspaceSlug: string, projectId: string, issueId: string): Promise<void>;
+  /** True when the detail page shows the does-not-exist empty state. */
+  seesDetailMissing(): Promise<boolean>;
+  /** True when the current page shows authenticated app chrome (not the sign-in card). */
+  signedIn(): Promise<boolean>;
+  /** Open the "Last edited by" description-history menu; ends with versions listed. */
+  openDescriptionHistory(): Promise<void>;
+  /** Names of the description versions in the open history menu. */
+  historyVersionNames(): Promise<string[]>;
+  /** Restore the named history version through the preview modal; ends with the save settled. */
+  restoreHistoryVersion(name: string): Promise<void>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */
