@@ -90,8 +90,16 @@ async fn global_search(
     // param is truthy (`base.py:99-100`); a badly-formed UUID there raises
     // `ValidationError` in the filter → 400.
     let narrow = queries_search::project_narrow(&workspace_search, project_raw.as_deref());
-    if let Some(pid) = narrow {
-        parse_uuid_or_invalid(pid)?;
+    // `filter_workspaces` / `filter_projects` (`base.py:54-84`) never apply
+    // the narrow, so a badly-formed UUID with only those sections requested
+    // stays 200 in Django — validate only when a requested section consumes
+    // it (anything other than `workspace` / `project`).
+    if narrow.is_some()
+        && entities
+            .iter()
+            .any(|e| *e != "workspace" && *e != "project")
+    {
+        parse_uuid_or_invalid(narrow.unwrap_or_default())?;
     }
     let scope = GlobalScope {
         user_id: &user_text,
@@ -246,11 +254,29 @@ async fn entity_search(
         _ => return Err(Denial::ServerError),
     };
     // A truthy `project_id` selects the project branch; falsy (absent or
-    // `""`) the workspace branch. Truthy but badly-formed raises
-    // `ValidationError` in the branch filter → 400.
+    // `""`) the workspace branch. Django only touches `project_id` inside
+    // branches that filter on it — the `project` branch (`base.py:353-370`)
+    // never filters on it and unknown types touch nothing — so a
+    // badly-formed UUID there stays 200. Validate only when an executed
+    // branch consumes it (`user_mention` / `issue` / `cycle` / `module` /
+    // `page`). `response_data` is a dict (`base.py:504`), so duplicate
+    // `query_type` entries collapse to one key — dedupe preserving order.
     let project_raw = query_last(&query, "project_id").filter(|v| !v.is_empty());
-    if let Some(ref pid) = project_raw {
-        parse_uuid_or_invalid(pid)?;
+    let mut query_types: Vec<String> = Vec::new();
+    for qt in queries_search::split_query_types(query_last(&query, "query_type").as_deref()) {
+        if !query_types.contains(&qt) {
+            query_types.push(qt);
+        }
+    }
+    if project_raw.is_some()
+        && query_types.iter().any(|qt| {
+            matches!(
+                qt.as_str(),
+                "user_mention" | "issue" | "cycle" | "module" | "page"
+            )
+        })
+    {
+        parse_uuid_or_invalid(project_raw.as_deref().unwrap_or_default())?;
     }
     let scope = EntityScope {
         user_id: &user_text,
@@ -263,8 +289,7 @@ async fn entity_search(
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false);
 
     let mut branches = Vec::new();
-    for query_type in queries_search::split_query_types(query_last(&query, "query_type").as_deref())
-    {
+    for query_type in &query_types {
         let rows = match query_type.as_str() {
             // Key order follows Django's compiler: the `member__avatar_url`
             // annotation selects last even though `.values()` names it
