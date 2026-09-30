@@ -195,7 +195,9 @@ impl RepoDenial {
                 crate::permissions::PERMISSION_DENIED_BODY.to_owned(),
             ),
             RepoDenial::NotFoundDetail => (StatusCode::NOT_FOUND, NOT_FOUND_DETAIL_BODY.to_owned()),
-            RepoDenial::ProjectNotFound => (StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned()),
+            RepoDenial::ProjectNotFound => {
+                (StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned())
+            }
             RepoDenial::Error(status, message) => (*status, message.clone()),
             RepoDenial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
