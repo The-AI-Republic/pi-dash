@@ -244,7 +244,7 @@ const ESTIMATE_TYPE_SQL: &str = "SELECT EXISTS(SELECT 1 FROM projects p \
 /// deleted, on a live bridge row. The annotation join carries none of
 /// the `IssueManager` excludes (Django never applies a related
 /// model's default manager across a join): no triage predicate, no
-/// project-archive predicate — unlike `DIST_SCOPE_SQL` below, which
+/// project-archive predicate — unlike `DIST_WHERE_SQL` below, which
 /// queries through `issue_objects`. No `deleted_at` predicate on the
 /// cycle itself (plain manager — shared quirk with progress B1).
 const CYCLE_SQL: &str = "SELECT c.id, c.start_date, c.end_date, c.progress_snapshot, \
@@ -259,12 +259,19 @@ const CYCLE_SQL: &str = "SELECT c.id, c.start_date, c.end_date, c.progress_snaps
 /// Base scope shared by the four distribution queries: live bridge row
 /// plus the `IssueManager` excludes (the explicit archived/draft
 /// filters on the completed/pending aggregates layer on top).
-const DIST_SCOPE_SQL: &str = "FROM issues i \
+/// Split in two because SQL joins before it filters: each query adds
+/// its own distribution joins (`estimate_points`, `issue_assignees`,
+/// `issue_labels`) between the FROM and WHERE parts. Concatenating
+/// the extra joins after the WHERE clause is a syntax error (every
+/// analytics request 500s) — Django emits all joins in FROM, so the
+/// port must too.
+const DIST_FROM_SQL: &str = "FROM issues i \
      JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $3 AND ci.deleted_at IS NULL \
      JOIN workspaces w ON w.id = i.workspace_id AND w.slug = $1 \
      JOIN projects p ON p.id = i.project_id AND p.id = $2 AND p.archived_at IS NULL \
-     LEFT JOIN states s ON s.id = i.state_id \
-     WHERE i.deleted_at IS NULL AND i.archived_at IS NULL AND i.is_draft = FALSE \
+     LEFT JOIN states s ON s.id = i.state_id";
+const DIST_WHERE_SQL: &str =
+    "WHERE i.deleted_at IS NULL AND i.archived_at IS NULL AND i.is_draft = FALSE \
      AND NOT (s.group = 'triage')";
 
 /// `avatar_url` Case/Concat (`base.py:951-969`).
@@ -281,10 +288,11 @@ fn points_assignee_sql() -> String {
          SUM(CAST(ep.value AS DOUBLE PRECISION)) AS total_estimates, \
          SUM(CAST(ep.value AS DOUBLE PRECISION)) FILTER (WHERE i.completed_at IS NOT NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS completed_estimates, \
          SUM(CAST(ep.value AS DOUBLE PRECISION)) FILTER (WHERE i.completed_at IS NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS pending_estimates \
-         {DIST_SCOPE_SQL} \
+         {DIST_FROM_SQL} \
          JOIN estimate_points ep ON ep.id = i.estimate_point_id \
          LEFT JOIN issue_assignees ia ON ia.issue_id = i.id \
          LEFT JOIN users u ON u.id = ia.assignee_id \
+         {DIST_WHERE_SQL} \
          GROUP BY u.display_name, u.id, {AVATAR_CASE_SQL} \
          ORDER BY u.display_name"
     )
@@ -297,10 +305,11 @@ fn points_label_sql() -> String {
          SUM(CAST(ep.value AS DOUBLE PRECISION)) AS total_estimates, \
          SUM(CAST(ep.value AS DOUBLE PRECISION)) FILTER (WHERE i.completed_at IS NOT NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS completed_estimates, \
          SUM(CAST(ep.value AS DOUBLE PRECISION)) FILTER (WHERE i.completed_at IS NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS pending_estimates \
-         {DIST_SCOPE_SQL} \
+         {DIST_FROM_SQL} \
          JOIN estimate_points ep ON ep.id = i.estimate_point_id \
          LEFT JOIN issue_labels il ON il.issue_id = i.id \
          LEFT JOIN labels l ON l.id = il.label_id \
+         {DIST_WHERE_SQL} \
          GROUP BY l.name, l.color, l.id \
          ORDER BY l.name"
     )
@@ -314,9 +323,10 @@ fn issues_assignee_sql() -> String {
          COUNT(u.id) FILTER (WHERE i.archived_at IS NULL AND i.is_draft = FALSE) AS total_issues, \
          COUNT(u.id) FILTER (WHERE i.completed_at IS NOT NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS completed_issues, \
          COUNT(u.id) FILTER (WHERE i.completed_at IS NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS pending_issues \
-         {DIST_SCOPE_SQL} \
+         {DIST_FROM_SQL} \
          LEFT JOIN issue_assignees ia ON ia.issue_id = i.id \
          LEFT JOIN users u ON u.id = ia.assignee_id \
+         {DIST_WHERE_SQL} \
          GROUP BY u.display_name, u.id, {AVATAR_CASE_SQL} \
          ORDER BY u.display_name"
     )
@@ -329,9 +339,10 @@ fn issues_label_sql() -> String {
          COUNT(l.id) FILTER (WHERE i.archived_at IS NULL AND i.is_draft = FALSE) AS total_issues, \
          COUNT(l.id) FILTER (WHERE i.completed_at IS NOT NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS completed_issues, \
          COUNT(l.id) FILTER (WHERE i.completed_at IS NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS pending_issues \
-         {DIST_SCOPE_SQL} \
+         {DIST_FROM_SQL} \
          LEFT JOIN issue_labels il ON il.issue_id = i.id \
          LEFT JOIN labels l ON l.id = il.label_id \
+         {DIST_WHERE_SQL} \
          GROUP BY l.name, l.color, l.id \
          ORDER BY l.name"
     )
@@ -1048,11 +1059,37 @@ mod tests {
     }
 
     #[test]
+    fn distribution_sql_joins_before_where() {
+        // PIDASHCONV-490: the four distribution builders once emitted
+        // `... WHERE ... LEFT JOIN ...`, which Postgres rejects — every
+        // analytics request answered 500. SQL joins before it filters,
+        // so the last JOIN must precede WHERE, which must precede
+        // GROUP BY.
+        for sql in [
+            points_assignee_sql(),
+            points_label_sql(),
+            issues_assignee_sql(),
+            issues_label_sql(),
+        ] {
+            // `rfind`: the SELECT list carries `FILTER (WHERE ...)`
+            // aggregates, so the first WHERE is not the main clause —
+            // the main WHERE is the last one, after every join.
+            let last_join = sql.rfind("JOIN").expect("distribution joins");
+            let where_at = sql.rfind("WHERE").expect("distribution filter");
+            let group_at = sql.find("GROUP BY").expect("distribution grouping");
+            assert!(
+                last_join < where_at && where_at < group_at,
+                "distribution SQL must order JOIN ... WHERE ... GROUP BY: {sql}"
+            );
+        }
+    }
+
+    #[test]
     fn cycle_total_annotation_carries_no_manager_excludes() {
         // `base.py:792-804`: the `total_issues` annotation filters only
         // archived/draft/deleted (+ live bridge). The join is not
         // queried through `issue_objects`, so no triage and no
-        // project-archive predicate — unlike DIST_SCOPE_SQL.
+        // project-archive predicate — unlike DIST_WHERE_SQL.
         let (subquery, _) = CYCLE_SQL.split_once("AS total_issues").expect("alias");
         for fragment in [
             "i.deleted_at IS NULL",
