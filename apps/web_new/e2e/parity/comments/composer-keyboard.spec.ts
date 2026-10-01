@@ -6,7 +6,7 @@
 // composer and the inline edit form. Row: CMT-011.
 import { fileURLToPath } from "node:url";
 import { test, expect } from "../fixtures";
-import { serverComments, serverIssueIdByName, signInSession } from "../helpers/api";
+import { composerServerComments, serverIssueIdByName, signInSession } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 
 const ROWS = ["CMT-011"];
@@ -83,7 +83,7 @@ test(
     await test.step("the server stored exactly one comment for the draft", async () => {
       const session = await signInSession(seed.email, seed.password);
       const issueId = await serverIssueIdByName(seed.workspaceSlug, seed.projectId, seed.issueNames[0]!, session);
-      const comments = await serverComments(seed.workspaceSlug, seed.projectId, issueId, session);
+      const comments = await composerServerComments(seed.workspaceSlug, seed.projectId, issueId, session);
       // The edit-form step above replaced the two-line body, so the stored
       // row carries the final text; the two-line post itself was asserted in
       // the feed right after Enter.

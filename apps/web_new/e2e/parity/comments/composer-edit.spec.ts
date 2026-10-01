@@ -6,7 +6,7 @@
 // and discarding. Rows: CMT-003 (inline edit), CMT-012 (edited marker),
 // CMT-010 (success notice for update).
 import { test, expect } from "../fixtures";
-import { serverComments, serverIssueIdByName, serverPatchComment, signInSession } from "../helpers/api";
+import { composerServerComments, serverIssueIdByName, serverPatchComment, signInSession } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 
 const ROWS = ["CMT-003", "CMT-012", "CMT-010"];
@@ -64,12 +64,12 @@ test(
     await test.step("re-saving identical html stamps no edit time", async () => {
       const session = await signInSession(seed.email, seed.password);
       const issueId = await serverIssueIdByName(seed.workspaceSlug, seed.projectId, seed.issueNames[0]!, session);
-      const before = (await serverComments(seed.workspaceSlug, seed.projectId, issueId, session)).find((comment) =>
-        comment.comment_stripped.includes(original)
+      const before = (await composerServerComments(seed.workspaceSlug, seed.projectId, issueId, session)).find(
+        (comment) => comment.comment_stripped.includes(original)
       );
       expect(before).toBeDefined();
       await serverPatchComment(seed.workspaceSlug, seed.projectId, issueId, before!.id, before!.comment_html, session);
-      const after = (await serverComments(seed.workspaceSlug, seed.projectId, issueId, session)).find(
+      const after = (await composerServerComments(seed.workspaceSlug, seed.projectId, issueId, session)).find(
         (comment) => comment.id === before!.id
       );
       expect(after!.edited_at).toBeNull();
@@ -103,7 +103,7 @@ test(
     await test.step("the server stored the edit with an edit stamp", async () => {
       const session = await signInSession(seed.email, seed.password);
       const issueId = await serverIssueIdByName(seed.workspaceSlug, seed.projectId, seed.issueNames[0]!, session);
-      const comments = await serverComments(seed.workspaceSlug, seed.projectId, issueId, session);
+      const comments = await composerServerComments(seed.workspaceSlug, seed.projectId, issueId, session);
       const stored = comments.find((comment) => comment.comment_stripped.includes(updated));
       expect(stored).toBeDefined();
       expect(stored!.edited_at).not.toBeNull();

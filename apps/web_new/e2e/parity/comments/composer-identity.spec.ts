@@ -6,7 +6,12 @@
 // a relative timestamp with exact-time hover detail, an edited marker
 // after edits, and automated-author labeling. Row: CMT-012.
 import { test, expect } from "../fixtures";
-import { serverComments, serverCreateComment, serverIssueIdByName, signInSession } from "../helpers/api";
+import {
+  composerServerComments,
+  composerServerCreateComment,
+  serverIssueIdByName,
+  signInSession,
+} from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 
 const ROWS = ["CMT-012"];
@@ -42,7 +47,7 @@ test(
     await test.step("the hover detail carries the exact date and time behind the relative label", async () => {
       const session = await signInSession(seed.email, seed.password);
       const issueId = await serverIssueIdByName(seed.workspaceSlug, seed.projectId, seed.issueNames[0]!, session);
-      const comments = await serverComments(seed.workspaceSlug, seed.projectId, issueId, session);
+      const comments = await composerServerComments(seed.workspaceSlug, seed.projectId, issueId, session);
       const stored = comments.find((comment) => comment.comment_stripped.includes(marker));
       expect(stored).toBeDefined();
       const meta = await driver.composerCommentMeta(marker);
@@ -53,7 +58,7 @@ test(
     await test.step("a human author renders a plain name with no automated marker", async () => {
       const session = await signInSession(seed.email, seed.password);
       const issueId = await serverIssueIdByName(seed.workspaceSlug, seed.projectId, seed.issueNames[0]!, session);
-      const comments = await serverComments(seed.workspaceSlug, seed.projectId, issueId, session);
+      const comments = await composerServerComments(seed.workspaceSlug, seed.projectId, issueId, session);
       const stored = comments.find((comment) => comment.comment_stripped.includes(marker));
       expect(stored!.actorIsBot).toBe(false);
       const meta = await driver.composerCommentMeta(marker);
@@ -68,9 +73,9 @@ test(
       const botSession = await signInSession(seed.botEmail, seed.botPassword);
       const ownerSession = await signInSession(seed.email, seed.password);
       const issueId = await serverIssueIdByName(seed.workspaceSlug, seed.projectId, seed.issueNames[0]!, ownerSession);
-      await serverCreateComment(seed.workspaceSlug, seed.projectId, issueId, `<p>${botMarker}</p>`, botSession);
-      const stored = (await serverComments(seed.workspaceSlug, seed.projectId, issueId, ownerSession)).find((comment) =>
-        comment.comment_stripped.includes(botMarker)
+      await composerServerCreateComment(seed.workspaceSlug, seed.projectId, issueId, `<p>${botMarker}</p>`, botSession);
+      const stored = (await composerServerComments(seed.workspaceSlug, seed.projectId, issueId, ownerSession)).find(
+        (comment) => comment.comment_stripped.includes(botMarker)
       );
       expect(stored).toBeDefined();
       expect(stored!.actorIsBot).toBe(true);
@@ -96,7 +101,7 @@ test(
       expect(after.author).toBe(before.author);
       const session = await signInSession(seed.email, seed.password);
       const issueId = await serverIssueIdByName(seed.workspaceSlug, seed.projectId, seed.issueNames[0]!, session);
-      const comments = await serverComments(seed.workspaceSlug, seed.projectId, issueId, session);
+      const comments = await composerServerComments(seed.workspaceSlug, seed.projectId, issueId, session);
       expect(comments.find((comment) => comment.comment_stripped.includes(marker))!.edited_at).not.toBeNull();
     });
   }

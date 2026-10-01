@@ -6,7 +6,7 @@
 // rich-text composer, including pasted formatted content. Rows: CMT-001
 // (composer post incl. paste), CMT-010 (success notice for create).
 import { test, expect } from "../fixtures";
-import { serverComments, serverIssueIdByName, signInSession } from "../helpers/api";
+import { composerServerComments, serverIssueIdByName, signInSession } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 
 const ROWS = ["CMT-001", "CMT-010"];
@@ -52,7 +52,7 @@ test(
     await test.step("the server stored the comment with its formatted body", async () => {
       const session = await signInSession(seed.email, seed.password);
       const issueId = await serverIssueIdByName(seed.workspaceSlug, seed.projectId, seed.issueNames[0]!, session);
-      const comments = await serverComments(seed.workspaceSlug, seed.projectId, issueId, session);
+      const comments = await composerServerComments(seed.workspaceSlug, seed.projectId, issueId, session);
       const stored = comments.find((comment) => comment.comment_stripped.includes(marker));
       expect(stored).toBeDefined();
       expect(stored!.comment_html).toContain("bold");

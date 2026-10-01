@@ -686,14 +686,6 @@ export async function adminSignInSession(
   return header;
 }
 
-/** A project issue as the server reports it, with the fields scenarios need. */
-export interface ServerIssue {
-  id: string;
-  name: string;
-  sequenceId: number;
-  projectIdentifier: string;
-}
-
 /** A work-item comment as the server reports it through the history API. */
 export interface ServerComment {
   id: string;
@@ -704,34 +696,6 @@ export interface ServerComment {
   actorIsBot: boolean;
   created_at: string;
   edited_at: string | null;
-}
-
-/** Project issues as the server reports them, in API order. */
-export async function serverIssues(
-  workspaceSlug: string,
-  projectId: string,
-  sessionCookie: string,
-  apiBase: string = apiBaseFromEnv()
-): Promise<ServerIssue[]> {
-  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/`, {
-    headers: { cookie: sessionCookie },
-  });
-  if (!res.ok) throw new Error(`[parity] issues read failed with HTTP ${res.status}.`);
-  const payload: unknown = await res.json();
-  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
-  return rows.map((row) => {
-    const record = row as { id?: unknown; name?: unknown; sequence_id?: unknown; project_detail?: unknown };
-    if (typeof record.id !== "string" || typeof record.name !== "string") {
-      throw new Error("[parity] issue row carried no string id/name.");
-    }
-    const detail = (record.project_detail ?? {}) as { identifier?: unknown };
-    return {
-      id: record.id,
-      name: record.name,
-      sequenceId: typeof record.sequence_id === "number" ? record.sequence_id : 0,
-      projectIdentifier: typeof detail.identifier === "string" ? detail.identifier : "",
-    };
-  });
 }
 
 /** Resolve one issue's server UUID by its display name. */
@@ -749,7 +713,7 @@ export async function serverIssueIdByName(
 }
 
 /** Comments on one issue as the server reports them, oldest first. */
-export async function serverComments(
+export async function composerServerComments(
   workspaceSlug: string,
   projectId: string,
   issueId: string,
@@ -803,7 +767,7 @@ export async function serverComments(
  * session-authenticated write carries the CSRF token from its cookie.
  * Returns the created comment's server id.
  */
-export async function serverCreateComment(
+export async function composerServerCreateComment(
   workspaceSlug: string,
   projectId: string,
   issueId: string,

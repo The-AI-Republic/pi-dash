@@ -5,7 +5,7 @@
 // Oracle scenario (NEWFRONT-112): delete one's own comment from the
 // overflow menu. Rows: CMT-004 (delete), CMT-010 (success notice).
 import { test, expect } from "../fixtures";
-import { serverComments, serverIssueIdByName, signInSession } from "../helpers/api";
+import { composerServerComments, serverIssueIdByName, signInSession } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 
 const ROWS = ["CMT-004", "CMT-010"];
@@ -46,7 +46,7 @@ test(
     await test.step("the server no longer stores the comment", async () => {
       const session = await signInSession(seed.email, seed.password);
       const issueId = await serverIssueIdByName(seed.workspaceSlug, seed.projectId, seed.issueNames[1]!, session);
-      const comments = await serverComments(seed.workspaceSlug, seed.projectId, issueId, session);
+      const comments = await composerServerComments(seed.workspaceSlug, seed.projectId, issueId, session);
       expect(comments.some((comment) => comment.comment_stripped.includes(marker))).toBe(false);
     });
   }

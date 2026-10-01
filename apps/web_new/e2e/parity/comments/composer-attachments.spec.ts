@@ -8,7 +8,7 @@
 // (success notices for the post), CMT-001 (post with files).
 import { fileURLToPath } from "node:url";
 import { test, expect } from "../fixtures";
-import { serverComments, serverIssueIdByName, signInSession } from "../helpers/api";
+import { composerServerComments, serverIssueIdByName, signInSession } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 
 const ROWS = ["CMT-009", "CMT-010"];
@@ -135,7 +135,7 @@ test(
     await test.step("the server stored the post with its embedded image", async () => {
       const session = await signInSession(seed.email, seed.password);
       const issueId = await serverIssueIdByName(seed.workspaceSlug, seed.projectId, seed.issueNames[2]!, session);
-      const comments = await serverComments(seed.workspaceSlug, seed.projectId, issueId, session);
+      const comments = await composerServerComments(seed.workspaceSlug, seed.projectId, issueId, session);
       const stored = comments.find((comment) => comment.comment_stripped.includes(marker));
       expect(stored).toBeDefined();
       expect(stored!.comment_html).toContain("image-component");
@@ -156,7 +156,7 @@ test(
     await test.step("the server stored the text-only edit with an edit stamp", async () => {
       const session = await signInSession(seed.email, seed.password);
       const issueId = await serverIssueIdByName(seed.workspaceSlug, seed.projectId, seed.issueNames[2]!, session);
-      const comments = await serverComments(seed.workspaceSlug, seed.projectId, issueId, session);
+      const comments = await composerServerComments(seed.workspaceSlug, seed.projectId, issueId, session);
       const stored = comments.find((comment) => comment.comment_stripped.includes(marker));
       expect(stored).toBeDefined();
       expect(stored!.comment_stripped).toContain(`${marker} edited`);
