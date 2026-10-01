@@ -153,11 +153,13 @@ async fn favorite_create(
         .and_then(|(max,)| max)
         .map(|max| max + 10000.0)
         .unwrap_or(FAVORITE_SEQUENCE_DEFAULT);
+    // `is_folder` is `boolean NOT NULL` with no DB default; Django supplies
+    // it Python-side (`db/models/favorite.py:23`: `default=False`).
     sqlx::query(
         r#"INSERT INTO user_favorites
            (id, workspace_id, project_id, user_id, entity_type, entity_identifier,
-            sequence, created_by_id, updated_by_id, created_at, updated_at)
-           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, NULL, now(), now())"#,
+            is_folder, sequence, created_by_id, updated_by_id, created_at, updated_at)
+           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, FALSE, $6, $7, NULL, now(), now())"#,
     )
     .bind(workspace_id)
     .bind(project_id)
