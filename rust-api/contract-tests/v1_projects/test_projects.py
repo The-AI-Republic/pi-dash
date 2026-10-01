@@ -219,3 +219,56 @@ def test_isolation_other_workspace(seed):
     http.get(seed["keys"][KEY],
              f"/api/v1/workspaces/{seed['ws_b']['slug']}/projects/{seed['project']['id']}/",
              expect=403)
+
+
+def test_expand_user_null_email(seed, conn):
+    # users.email is nullable (db/models/user.py:61); expanding a NULL-email
+    # user on any project user FK must render "email": null, not 500
+    # (PIDASHCONV-514).
+    tag = db.new_tag()
+    user = db.create_user(conn, tag, first_name="CtNull", email=None)
+    assert user["email"] is None
+    pid = db.create_project(conn, seed["ws_a"]["id"], tag + "e",
+                            created_by_id=user["id"])["id"]
+    db.add_project_member(conn, seed["ws_a"]["id"], pid, seed["owner"]["id"], db.ADMIN)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET default_assignee_id = %s, project_lead_id = %s,"
+            " updated_by_id = %s WHERE id = %s",
+            (user["id"], user["id"], user["id"], pid),
+        )
+    conn.commit()
+    key = seed["keys"][KEY]
+    expands = ("default_assignee", "project_lead", "created_by", "updated_by")
+    for expand in expands:
+        body = http.get(key, f"{base(seed)}/{pid}/", params={"expand": expand}).json()
+        assert body[expand]["id"] == user["id"]
+        assert body[expand]["email"] is None
+    body = http.get(key, base(seed) + "/",
+                    params={"expand": ",".join(expands)}).json()
+    row = next(p for p in body["results"] if p["id"] == pid)
+    for expand in expands:
+        assert row[expand]["id"] == user["id"]
+        assert row[expand]["email"] is None
+
+
+def test_expand_user_avatar_asset_unresolvable_renders_null(seed, conn):
+    # avatar_url returns the asset URL as-is when an asset is set
+    # (db/models/user.py:142-151): an unmapped entity type renders null even
+    # with non-empty avatar text — no fall-through (PIDASHCONV-514).
+    tag = db.new_tag()
+    user = db.create_user(conn, tag, first_name="CtAv")
+    aid = db.create_file_asset(conn, "DRAFT_ISSUE_ATTACHMENT")
+    db.set_user_avatar(conn, user["id"], asset_id=aid, avatar="https://cdn.example/legacy.png")
+    pid = db.create_project(conn, seed["ws_a"]["id"], tag + "v",
+                            created_by_id=user["id"])["id"]
+    db.add_project_member(conn, seed["ws_a"]["id"], pid, seed["owner"]["id"], db.ADMIN)
+    key = seed["keys"][KEY]
+    body = http.get(key, f"{base(seed)}/{pid}/", params={"expand": "created_by"}).json()
+    assert body["created_by"]["avatar"] == "https://cdn.example/legacy.png"
+    assert body["created_by"]["avatar_url"] is None
+    # Sanity: a mapped type on the same row resolves, proving the seed shape.
+    aid2 = db.create_file_asset(conn, "USER_AVATAR")
+    db.set_user_avatar(conn, user["id"], asset_id=aid2, avatar="https://cdn.example/legacy.png")
+    body = http.get(key, f"{base(seed)}/{pid}/", params={"expand": "created_by"}).json()
+    assert body["created_by"]["avatar_url"] == f"/api/assets/v2/static/{aid2}/"
