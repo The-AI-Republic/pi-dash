@@ -278,36 +278,6 @@ export async function signInSession(
   });
 }
 
-/**
- * Sign in with retries across transient 429s. The seeded stack throttles
- * anonymous auth calls (30/minute per IP, shared by every concurrent parity
- * run), so a first-attempt 429 is infrastructure noise, not a behavior.
- * Retries only rate-limit responses; any other failure throws immediately.
- */
-export async function signInSessionRetry(
-  email: string,
-  password: string,
-  apiBase: string = apiBaseFromEnv(),
-  attempts: number = 8
-): Promise<string> {
-  let lastStatus = 0;
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      return await signInSession(email, password, apiBase);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "";
-      const match = /HTTP (\d+)/.exec(message);
-      lastStatus = match !== null ? Number(match[1] ?? 0) : 0;
-      // Retry rate limits and cookie-less sign-ins: both are transient on
-      // the loaded scratch stack. Anything else throws immediately.
-      const retryable = lastStatus === 429 || message.includes("no session cookie");
-      if (!retryable || attempt === attempts) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 10_000));
-    }
-  }
-  throw new Error(`[parity] sign-in failed with HTTP ${lastStatus} for ${email}.`);
-}
-
 /** Second workspace member the mention scenarios @-mention (NEWFRONT-115). */
 export interface ParityMentionMember {
   email: string;
@@ -1492,4 +1462,375 @@ export async function serverCreateIssue(
   if (res.status !== 201 || !body || typeof body.id !== "string")
     throw new Error(`[parity] issue create failed with HTTP ${res.status}: ${JSON.stringify(body)}`);
   return body.id;
+}
+
+// --- NEWFRONT-123 (home): server reads for dashboard assertions. ---
+// Same session-cookie style as the base helpers above; every function
+// proves what the server stored while the driver proves the screen.
+
+function homeTransient(message: string): boolean {
+  return /429|500|502|503|504|fetch failed|ECONNREFUSED|Failed to fetch|CSRF token fetch failed|no session cookie|timed out|TimeoutError|aborted/.test(
+    message
+  );
+}
+
+async function homeAttempt(label: string, run: (signal: AbortSignal) => Promise<Response>): Promise<Response> {
+  // One retry pass lives here so every helper tolerates scratch-stack
+  // hiccups (restarts, throttling) without each scenario hand-rolling it.
+  // Each attempt carries its own timeout: without one, a request the
+  // stack accepts but never answers hangs the helper until the test
+  // budget dies with no diagnostic.
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    try {
+      const res = await run(AbortSignal.timeout(30_000));
+      if ((res.status === 429 || res.status >= 500) && attempt < 4) {
+        await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+        continue;
+      }
+      return res;
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : "";
+      if (!homeTransient(message) || attempt === 4) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+    }
+  }
+  throw lastError;
+}
+
+async function homeGet<T>(path: string, sessionCookie: string, apiBase: string): Promise<T> {
+  const res = await homeAttempt("GET", (signal) =>
+    fetch(`${apiBase}${path}`, { headers: { cookie: sessionCookie }, signal })
+  );
+  if (!res.ok) throw new Error(`[parity] home GET ${path} failed with HTTP ${res.status}.`);
+  return (await res.json()) as T;
+}
+
+async function homeWrite<T>(
+  method: string,
+  path: string,
+  sessionCookie: string,
+  apiBase: string,
+  body?: unknown
+): Promise<T> {
+  const res = await homeAttempt(method, (signal) =>
+    fetch(`${apiBase}${path}`, {
+      method,
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
+    })
+  );
+  if (!res.ok) throw new Error(`[parity] home ${method} ${path} failed with HTTP ${res.status}.`);
+  if (res.status === 204) return undefined as T;
+  const text = await res.text();
+  return (text === "" ? undefined : JSON.parse(text)) as T;
+}
+
+/**
+ * Sign in, retrying transient infrastructure failures. The scratch stack
+ * is shared by concurrent parity runs: anonymous auth calls are throttled
+ * per IP and the API container restarts between runs, so a refused
+ * connection, a 429 or a 5xx is noise, not a behavior. Any other failure
+ * throws immediately.
+ */
+export async function signInSessionRetry(
+  email: string,
+  password: string,
+  apiBase: string = apiBaseFromEnv(),
+  attempts: number = 8
+): Promise<string> {
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      // The two-step form dance has no timeout of its own; bound it so a
+      // stalled stack retries here instead of burning the test budget.
+      return await Promise.race([
+        signInSession(email, password, apiBase),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("[parity] sign-in timed out after 60s.")), 60_000)
+        ),
+      ]);
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : "";
+      const transient = homeTransient(message);
+      if (!transient || attempt === attempts) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+    }
+  }
+  throw lastError;
+}
+
+/** Signed-in user's display name parts plus timezone, as the server knows them. */
+export async function serverHomeMe(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ first_name: string; last_name: string; user_timezone: string }> {
+  return homeGet("/api/users/me/", sessionCookie, apiBase);
+}
+
+/** Signed-in user's profile language and account timezone, as the server knows them. */
+export async function serverHomeUser(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ language?: string; user_timezone?: string }> {
+  const [profile, account] = await Promise.all([
+    homeGet<{ language?: unknown }>("/api/users/me/profile/", sessionCookie, apiBase),
+    homeGet<{ user_timezone?: unknown }>("/api/users/me/", sessionCookie, apiBase),
+  ]);
+  return {
+    language: typeof profile.language === "string" ? profile.language : undefined,
+    user_timezone: typeof account.user_timezone === "string" ? account.user_timezone : undefined,
+  };
+}
+
+/** PATCH the signed-in user's record; resolves with the outcome instead of throwing on 4xx. */
+export async function serverPatchUser(
+  sessionCookie: string,
+  data: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ ok: boolean; status: number }> {
+  return serverPatchPath(sessionCookie, "/api/users/me/", data, apiBase);
+}
+
+/** PATCH the signed-in user's profile (theme, language, tour flags live here). */
+export async function serverPatchProfile(
+  sessionCookie: string,
+  data: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ ok: boolean; status: number }> {
+  return serverPatchPath(sessionCookie, "/api/users/me/profile/", data, apiBase);
+}
+
+async function serverPatchPath(
+  sessionCookie: string,
+  path: string,
+  data: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ ok: boolean; status: number }> {
+  const res = await homeAttempt("PATCH", (signal) =>
+    fetch(`${apiBase}${path}`, {
+      method: "PATCH",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify(data),
+      signal,
+    })
+  );
+  return { ok: res.ok, status: res.status };
+}
+
+/** Whether the seeded user already finished the first-run tour. */
+export async function serverTourCompleted(sessionCookie: string, apiBase: string = apiBaseFromEnv()): Promise<boolean> {
+  const profile = await homeGet<{ is_tour_completed?: unknown }>("/api/users/me/profile/", sessionCookie, apiBase);
+  return profile.is_tour_completed === true;
+}
+
+/** Flip the tour flag (used to reset the tour state between scenarios). */
+export async function serverSetTourCompleted(
+  sessionCookie: string,
+  value: boolean,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await homeWrite("PATCH", "/api/users/me/tour-completed/", sessionCookie, apiBase, { is_tour_completed: value });
+}
+
+export interface HomeQuickLink {
+  id: string;
+  title?: string;
+  url?: string;
+  name?: string;
+  link?: string;
+}
+
+/** Saved reference links for the workspace, in API order. */
+export async function serverQuickLinks(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<HomeQuickLink[]> {
+  const payload = await homeGet<unknown>(`/api/workspaces/${workspaceSlug}/quick-links/`, sessionCookie, apiBase);
+  if (Array.isArray(payload)) return payload as HomeQuickLink[];
+  const results = (payload as { results?: unknown }).results;
+  return Array.isArray(results) ? (results as HomeQuickLink[]) : [];
+}
+
+/** Create one reference link; resolves with the stored row. */
+export async function serverCreateQuickLink(
+  workspaceSlug: string,
+  sessionCookie: string,
+  title: string,
+  url: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<HomeQuickLink> {
+  return homeWrite("POST", `/api/workspaces/${workspaceSlug}/quick-links/`, sessionCookie, apiBase, {
+    title,
+    url,
+  });
+}
+
+/** Delete one reference link by id. */
+export async function serverDeleteQuickLink(
+  workspaceSlug: string,
+  sessionCookie: string,
+  linkId: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await homeWrite("DELETE", `/api/workspaces/${workspaceSlug}/quick-links/${linkId}/`, sessionCookie, apiBase);
+}
+
+export interface HomeRecentVisit {
+  id: string;
+  entity_name?: string;
+  entity_data?: { name?: string; id?: string } | null;
+}
+
+/** Recent-visit rows for the workspace, optionally narrowed by entity. */
+export async function serverRecents(
+  workspaceSlug: string,
+  sessionCookie: string,
+  entity?: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<HomeRecentVisit[]> {
+  const query = entity === undefined ? "" : `?entity_name=${encodeURIComponent(entity)}`;
+  const payload = await homeGet<unknown>(
+    `/api/workspaces/${workspaceSlug}/recent-visits/${query}`,
+    sessionCookie,
+    apiBase
+  );
+  if (Array.isArray(payload)) return payload as HomeRecentVisit[];
+  const results = (payload as { results?: unknown }).results;
+  return Array.isArray(results) ? (results as HomeRecentVisit[]) : [];
+}
+
+export interface HomeWidgetPref {
+  key: string;
+  is_enabled?: boolean;
+  sort_order?: number;
+}
+
+/** Dashboard widget preferences for the workspace. */
+export async function serverWidgets(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<HomeWidgetPref[]> {
+  const payload = await homeGet<unknown>(`/api/workspaces/${workspaceSlug}/home-preferences/`, sessionCookie, apiBase);
+  if (Array.isArray(payload)) return payload as HomeWidgetPref[];
+  const results = (payload as { results?: unknown }).results;
+  return Array.isArray(results) ? (results as HomeWidgetPref[]) : [];
+}
+
+/**
+ * Ensure the named widgets are enabled. Crashed runs and sibling runs
+ * leave toggles behind, so every scenario that needs a widget normalizes
+ * it up front instead of assuming the default state.
+ */
+export async function serverEnsureWidgets(
+  workspaceSlug: string,
+  sessionCookie: string,
+  widgetKeys: string[],
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  for (const key of widgetKeys) {
+    await serverSetWidget(workspaceSlug, sessionCookie, key, { is_enabled: true }, apiBase);
+  }
+}
+
+/** Patch one widget preference (toggle or reorder payloads). */
+export async function serverSetWidget(
+  workspaceSlug: string,
+  sessionCookie: string,
+  widgetKey: string,
+  data: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await homeWrite(
+    "PATCH",
+    `/api/workspaces/${workspaceSlug}/home-preferences/${widgetKey}/`,
+    sessionCookie,
+    apiBase,
+    data
+  );
+}
+
+/** Create a fresh workspace; resolves with its slug (setup for onboarding scenarios). */
+export async function serverCreateWorkspace(
+  sessionCookie: string,
+  name: string,
+  slug: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const created = await homeWrite<{ slug?: unknown }>("POST", "/api/workspaces/", sessionCookie, apiBase, {
+    name,
+    slug,
+  });
+  if (typeof created?.slug !== "string") throw new Error("[parity] workspace create carried no slug.");
+  return created.slug;
+}
+
+/** Create a project in a workspace; resolves with its id. */
+export async function serverCreateHomeProject(
+  workspaceSlug: string,
+  sessionCookie: string,
+  name: string,
+  identifier: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const created = await homeWrite<{ id?: unknown }>(
+    "POST",
+    `/api/workspaces/${workspaceSlug}/projects/`,
+    sessionCookie,
+    apiBase,
+    { name, identifier }
+  );
+  if (typeof created?.id !== "string") throw new Error("[parity] project create carried no id.");
+  return created.id;
+}
+
+/**
+ * Resolve the seeded project dynamically. Sibling runs reseed the shared
+ * scratch stack mid-flight, which rotates the project id, so scenarios
+ * pin the project by name instead of trusting a stale seed file.
+ */
+export async function serverSeedProject(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ id: string; name: string }> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/details/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project list failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  for (const row of rows) {
+    const record = row as { id?: unknown; name?: unknown };
+    if (record.name === "Parity Project" && typeof record.id === "string") {
+      return { id: record.id, name: record.name };
+    }
+  }
+  throw new Error("[parity] seeded Parity Project is missing (stack reseeded without it?).");
+}
+
+/** Issue ids plus names for the seeded project (to drive recent visits). */
+export async function serverHomeIssues(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ id: string; name: string }[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] home issues read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const record = row as { id?: unknown; name?: unknown };
+    if (typeof record.id !== "string" || typeof record.name !== "string")
+      throw new Error("[parity] home issue row carried no id/name pair.");
+    return { id: record.id, name: record.name };
+  });
 }

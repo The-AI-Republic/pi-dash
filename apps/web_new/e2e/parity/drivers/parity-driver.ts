@@ -322,6 +322,102 @@ export interface ParityDriver {
   rulesCommentCardText(commentId: string): Promise<string>;
   /** Whether the intake triage chrome (Accept/Decline) is currently offered. */
   rulesIntakeTriageVisible(): Promise<boolean>;
+  // --- NEWFRONT-123 (home): home dashboard reads and actions. ---
+  // Added additively per the NEWFRONT-26 shared driver contract; every
+  // method is mirrored as a throwing stub in drivers/web_new.
+  /** Open the workspace home dashboard; waits until greeting or tour settles. */
+  homeOpen(workspaceSlug: string): Promise<void>;
+  /** Greeting heading text (salutation plus user name), if rendered. */
+  homeGreetingHeading(): Promise<string | null>;
+  /** Date-and-clock sub-line text under the greeting, if rendered. */
+  homeDateLine(): Promise<string | null>;
+  /** Whether the first-run tour overlay currently covers the dashboard. */
+  homeTourVisible(): Promise<boolean>;
+  /** Advance the tour one step with its primary forward control. */
+  homeTourAdvance(): Promise<void>;
+  /** Leave the tour with its skip/close control when one is offered. */
+  homeTourDismiss(): Promise<void>;
+  /** Assistant card state: hidden for guests, setup reminder without a model key, ready otherwise. */
+  homeAssistantState(): Promise<"hidden" | "setup" | "ready">;
+  /** Suggested-prompt texts offered by the assistant card (empty when hidden). */
+  homeAssistantSuggestions(): Promise<string[]>;
+  /** Whether the quickstart onboarding panel is currently shown. */
+  homeQuickstartVisible(): Promise<boolean>;
+  /** Titles of the quickstart cards currently rendered. */
+  homeQuickstartTitles(): Promise<string[]>;
+  /** Whether the quickstart panel offers an enabled project-creation action. */
+  homeQuickstartCreateEnabled(): Promise<boolean>;
+  /** Dismiss the quickstart panel for this workspace. */
+  homeQuickstartDismiss(): Promise<void>;
+  /** Whether the named quickstart card shows its completed state. */
+  homeQuickstartCardDone(title: string): Promise<boolean>;
+  /** Action texts currently offered inside the quickstart panel. */
+  homeQuickstartActionTexts(): Promise<string[]>;
+  /** Titles of the widgets currently rendered in the dashboard stack. */
+  homeWidgetTitles(): Promise<string[]>;
+  /** Open the manage-widgets dialog from the header control. */
+  homeOpenManageWidgets(): Promise<void>;
+  /** Close the manage-widgets dialog. */
+  homeCloseManageWidgets(): Promise<void>;
+  /** Widget names listed in the manage dialog, in display order. */
+  homeManageWidgetNames(): Promise<string[]>;
+  /** Whether the named widget's toggle is on in the manage dialog. */
+  homeManageWidgetEnabled(name: string): Promise<boolean>;
+  /** Flip the named widget's toggle in the manage dialog. */
+  homeToggleManageWidget(name: string): Promise<void>;
+  /** Drag the source widget row onto the target row in the manage dialog. */
+  homeDragWidget(sourceName: string, targetName: string): Promise<void>;
+  /** Whether the all-widgets-off guidance illustration is shown. */
+  homeAllOffVisible(): Promise<boolean>;
+  /** Display names of the saved reference links, in render order. */
+  homeQuickLinkNames(): Promise<string[]>;
+  /** Expand the collapsed reference-link list. */
+  homeExpandQuickLinks(): Promise<void>;
+  /** Whether the reference-link list currently offers a collapse expander. */
+  homeQuickLinksCollapsed(): Promise<boolean>;
+  /** Create a reference link through the dashboard dialog. */
+  homeAddQuickLink(title: string, url: string): Promise<void>;
+  /** Rename/retarget a reference link through the dashboard dialog. */
+  homeEditQuickLink(currentTitle: string, nextTitle: string, nextUrl: string): Promise<void>;
+  /** Delete a reference link from its row control. */
+  homeDeleteQuickLink(title: string): Promise<void>;
+  /** Inline validation text currently shown in the link dialog, if any. */
+  homeLinkDialogError(): Promise<string | null>;
+  /** Copy a reference link's address through its row control. */
+  homeCopyQuickLink(title: string): Promise<void>;
+  /** Current clipboard text (grants clipboard permission first). */
+  homeReadClipboard(): Promise<string>;
+  /** Open a reference link in a new tab; resolves with the popup URL. */
+  homeOpenQuickLinkPopup(title: string): Promise<string | null>;
+  /** Whether the link add/edit dialog is currently open. */
+  homeLinkDialogOpen(): Promise<boolean>;
+  /** Discard the link dialog through its cancel control. */
+  homeCancelLinkDialog(): Promise<void>;
+  /** Switch the recents feed to the named activity filter. */
+  homeSetRecentsFilter(name: "all" | "issue" | "page" | "project"): Promise<void>;
+  /** Full text of every recent-activity row currently rendered. */
+  homeRecentRowTexts(): Promise<string[]>;
+  /** Click a recent row identified by contained text. */
+  homeOpenRecentRow(text: string): Promise<void>;
+  /** Whether a work-item preview overlay is shown (in-place side panel). */
+  homeIssuePreviewVisible(): Promise<boolean>;
+  /** Combined preview text, including editable field values. */
+  homeIssuePreviewText(): Promise<string>;
+  /** Breadcrumb label identifying the dashboard screen, if rendered. */
+  homeBreadcrumb(): Promise<string | null>;
+  /** Most recently shown toast, if any is still visible. */
+  homeLastToast(): Promise<{ title: string; message: string } | null>;
+  /** Reload the current page and wait for it to settle. */
+  homeReload(): Promise<void>;
+  /** Open one work item's detail screen (also records a recent visit). */
+  homeOpenIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void>;
+  /** Whether any widget loading skeleton is currently shown. */
+  homeSkeletonVisible(): Promise<boolean>;
+  /**
+   * Widget titles once the stack renders, reloading once when a transient
+   * fetch failure leaves the loader stuck. Callers assert on the result.
+   */
+  homeWaitForWidgets(): Promise<string[]>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */
