@@ -59,6 +59,18 @@
 //!   cross-project moves keep the bridge's old `project_id`
 //!   (`views/cycle.py:946-987`).
 //!
+//! KNOWN GAPS (one root cause: serde's acceptance envelope is smaller
+//! than CPython `json`'s, so these need a custom JSON parser — tracked
+//! in PIDASHCONV-626, not fixable in a message table):
+//!
+//! * Bodies carrying `NaN`/`Infinity`/`-Infinity` or lone `\uD800-\uDFFF`
+//!   surrogates: CPython accepts them (the views proceed), serde rejects
+//!   them (this port 400s, keeping serde's text via the fallback).
+//! * Nesting past serde's 128-deep cap: balanced deep input 500s (CPython
+//!   accepts it); a mismatched closer past the cap keeps the 400 status
+//!   but its text may differ (truncated deep input still recovers its
+//!   exact EOF error).
+//!
 //! Fixture: `FX-CYCMOD-08`
 //! (`rust-api/fixtures/v1_cycles_modules/handlers/cycle.golden.json`).
 //!
@@ -1436,9 +1448,22 @@ pub async fn expand_issue_full(
     let detail = IssueDetail::decode(&row, "bridge-expand-issue")?;
     let assignees = fetch_assignees(pool, issue_id).await?;
     let labels = fetch_issue_labels(pool, issue_id).await?;
-    let project = fetch_project(pool, &detail.project_id, &detail.workspace_id).await?;
+    // The `url` identifier resolves through the unfiltered descriptor
+    // (`_base_manager`, PK-only): a soft-deleted project still renders its
+    // url (Django 200 — F-N6). Only a hard-missing row 404s (unreachable
+    // via the FK; preserves the previous 404).
+    let identifier: Option<String> =
+        sqlx::query_scalar(r#"SELECT "identifier" FROM "projects" WHERE "id" = $1"#)
+            .bind(detail.project_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| db_error(error, "bridge-expand-identifier"))?
+            .flatten();
+    let Some(identifier) = identifier else {
+        return Err(Denial::NotFound);
+    };
     let slug = workspace_slug(pool, &detail.workspace_id).await?;
-    let url = issue_url(state, &slug, &project.identifier, detail.sequence_id);
+    let url = issue_url(state, &slug, &identifier, detail.sequence_id);
     let mut rendered = render_issue(
         pool, &detail, &assignees, &labels, url, timezone, None, None,
     )
@@ -2525,21 +2550,46 @@ pub async fn expand_labels(
 // Request bodies + DRF field coercion
 // ---------------------------------------------------------------------------
 
-/// Parse the request body (`is_valid()` input stage): an empty body is `{}`,
-/// malformed JSON is the DRF `ParseError` (with its `JSON parse error - `
-/// prefix), and any non-object JSON value is the serializer
-/// `non_field_errors` — with DRF's per-type names (`int`/`float`/`bool`/
-/// `str`/`list`) and `null` answering `No data provided` (all verified live).
-pub fn parse_body(raw: &[u8]) -> Result<serde_json::Map<String, Value>, Denial> {
+/// Parse the request body into `request.data`: an empty body is `{}`
+/// (DRF's empty-stream default); malformed JSON is the DRF `ParseError`
+/// whose suffix is CPython's `json` error text ([`json_parse_denial`]).
+pub fn parse_body_value(raw: &[u8]) -> Result<Value, Denial> {
     if raw.is_empty() {
-        return Ok(serde_json::Map::new());
+        return Ok(Value::Object(serde_json::Map::new()));
     }
-    match serde_json::from_slice::<Value>(raw) {
-        Ok(Value::Object(map)) => Ok(map),
-        Ok(Value::Null) => Err(Denial::FieldErrors(
+    serde_json::from_slice::<Value>(raw).map_err(|error| json_parse_denial(raw, &error))
+}
+
+/// Raw `request.data` object for the serializer-free views (create/add/
+/// transfer): empty is `{}`, unparseable is the DRF `ParseError`, and a
+/// non-object body 500s on `.get` (`AttributeError` — verified live for
+/// `[]`/`null`/`"x"`/`5`/`true` on all three paths).
+pub fn parse_object_or_500(raw: &[u8]) -> Result<serde_json::Map<String, Value>, Denial> {
+    match parse_body_value(raw)? {
+        Value::Object(map) => Ok(map),
+        _ => Err(Denial::ServerError),
+    }
+}
+
+/// Parse the request body (`is_valid()` input stage): [`parse_body_value`]
+/// plus the serializer `non_field_errors` for non-object JSON values —
+/// with DRF's per-type names (`int`/`float`/`bool`/`str`/`list`) and
+/// `null` answering `No data provided` (all verified live).
+pub fn parse_body(raw: &[u8]) -> Result<serde_json::Map<String, Value>, Denial> {
+    coerce_body_object(parse_body_value(raw)?)
+}
+
+/// The serializer input stage over an already-parsed value: objects pass
+/// through, every other JSON type is its DRF `non_field_errors` shape.
+/// (Split from [`parse_body`] so PATCH can run the completed gate on the
+/// raw value first — `views/cycle.py:512-520`.)
+pub fn coerce_body_object(value: Value) -> Result<serde_json::Map<String, Value>, Denial> {
+    match value {
+        Value::Object(map) => Ok(map),
+        Value::Null => Err(Denial::FieldErrors(
             r#"{"non_field_errors":["No data provided"]}"#.to_owned(),
         )),
-        Ok(other) => {
+        other => {
             let kind = match &other {
                 Value::Array(_) => "list",
                 Value::String(_) => "str",
@@ -2559,7 +2609,593 @@ pub fn parse_body(raw: &[u8]) -> Result<serde_json::Map<String, Value>, Denial> 
                 r#"{{"non_field_errors":["Invalid data. Expected a dictionary, but got {kind}."]}}"#
             )))
         }
-        Err(error) => Err(Denial::BadDetail(format!("JSON parse error - {error}"))),
+    }
+}
+
+/// Prefix of every DRF `ParseError` detail (`rest_framework/parsers.py`).
+const JSON_PARSE_PREFIX: &str = "JSON parse error - ";
+
+/// Map a body-parse failure to DRF's `ParseError` shape. The suffix is
+/// CPython's `json` error text, not serde's: Django answers e.g.
+/// `Expecting property name enclosed in double quotes: line 1 column 2
+/// (char 1)` where serde says `key must be a string at line 1 column 2`.
+/// Positions are recomputed as char (not byte) offsets, since serde
+/// columns count bytes. Past serde's 128-deep recursion cap a truncated
+/// input still recovers its plain EOF error; a balanced deep input takes
+/// the generic 500 (CPython accepts it, or `RecursionError`s — not a
+/// `ValueError`, so DRF does not catch it — at extreme depths).
+/// (Fuzzed against CPython 3.12 over structured mutations + random bytes;
+/// see `json_parse_cpython_parity`. serde_json 1.0.151 message texts —
+/// the battery pins them.)
+pub fn json_parse_denial(raw: &[u8], error: &serde_json::Error) -> Denial {
+    // DRF decodes the stream before parsing, so a codec failure wins over
+    // any syntax error.
+    if std::str::from_utf8(raw).is_err() {
+        return Denial::BadDetail(format!("{JSON_PARSE_PREFIX}{}", utf8_decode_detail(raw)));
+    }
+    let text = std::str::from_utf8(raw).expect("UTF-8 checked");
+    let message = error.to_string();
+    if message.starts_with("recursion limit exceeded") {
+        // Serde caps nesting at 128; CPython goes far deeper. Past the cap
+        // a TRUNCATED input is still a plain EOF error (recover it); a
+        // balanced deep input is beyond serde (CPython accepts it, or
+        // RecursionErrors to Django's 500 at extreme depths — the generic
+        // 500 is the closest single answer).
+        if bracket_depth(text) > 0 {
+            let (template, pos) = eof_detail(text);
+            let (line, column, char) = cpython_pos(text, pos);
+            return Denial::BadDetail(format!(
+                "{JSON_PARSE_PREFIX}{template}: line {line} column {column} (char {char})"
+            ));
+        }
+        return Denial::ServerError;
+    }
+    match cpython_json_detail(text, &message, error.line(), error.column()) {
+        Some(detail) => Denial::BadDetail(format!("{JSON_PARSE_PREFIX}{detail}")),
+        // Unmapped arm (lone-surrogate / NaN accept-divergences, future
+        // serde codes): serde text. CPython ACCEPTS those inputs, so no
+        // 400 text is right; see KNOWN GAPS in the module docs.
+        None => Denial::BadDetail(format!("{JSON_PARSE_PREFIX}{message}")),
+    }
+}
+
+/// CPython's `UnicodeDecodeError` text for the first bad sequence
+/// (`codecs.getreader("utf-8")`, strict): the lead byte selects the
+/// reason, the valid-continuation run selects the byte/bytes form.
+fn utf8_decode_detail(raw: &[u8]) -> String {
+    let start = std::str::from_utf8(raw)
+        .expect_err("invalid UTF-8 checked")
+        .valid_up_to();
+    let lead = raw[start];
+    let expected: Option<usize> = match lead {
+        0xC2..=0xDF => Some(2),
+        0xE0..=0xEF => Some(3),
+        0xF0..=0xF4 => Some(4),
+        _ => None,
+    };
+    let Some(expected) = expected else {
+        // Stray continuation, overlong C0/C1, or F5-FF lead.
+        return format!(
+            "'utf-8' codec can't decode byte 0x{lead:02x} in position {start}: invalid start byte"
+        );
+    };
+    let mut run = 1;
+    while run < expected && start + run < raw.len() && (0x80..=0xBF).contains(&raw[start + run]) {
+        run += 1;
+    }
+    // The second byte has range checks (overlong E0/F0, surrogate ED,
+    // above-maximum F4): out of range fails at the lead even when
+    // truncated (`\xed\xa0` + EOF → invalid continuation, not end of
+    // data).
+    if run >= 2 {
+        let second = raw[start + 1];
+        let in_range = match lead {
+            0xE0 => (0xA0..=0xBF).contains(&second),
+            0xED => (0x80..=0x9F).contains(&second),
+            0xF0 => (0x90..=0xBF).contains(&second),
+            0xF4 => (0x80..=0x8F).contains(&second),
+            _ => true,
+        };
+        if !in_range {
+            return format!("'utf-8' codec can't decode byte 0x{lead:02x} in position {start}: invalid continuation byte");
+        }
+    }
+    if run == expected {
+        // Full-length but range-invalid (overlong E0/F0, surrogate ED,
+        // above-maximum F4): reported at the lead byte.
+        return format!("'utf-8' codec can't decode byte 0x{lead:02x} in position {start}: invalid continuation byte");
+    }
+    if start + run == raw.len() {
+        if run == 1 {
+            return format!("'utf-8' codec can't decode byte 0x{lead:02x} in position {start}: unexpected end of data");
+        }
+        return format!(
+            "'utf-8' codec can't decode bytes in position {start}-{}: unexpected end of data",
+            start + run - 1
+        );
+    }
+    if run == 1 {
+        return format!("'utf-8' codec can't decode byte 0x{lead:02x} in position {start}: invalid continuation byte");
+    }
+    format!(
+        "'utf-8' codec can't decode bytes in position {start}-{}: invalid continuation byte",
+        start + run - 1
+    )
+}
+
+/// CPython `json` error text for a serde failure: the template plus the
+/// char-based `(line, column, char)` triple. `None` marks an arm with no
+/// CPython error (lone surrogates, NaN/Infinity — all accepted) or an
+/// unknown serde code.
+fn cpython_json_detail(text: &str, message: &str, line: usize, column: usize) -> Option<String> {
+    // A leading BOM is CPython's one special case (anywhere else it is an
+    // ordinary char, and inside strings a literal).
+    if text.starts_with('\u{FEFF}') {
+        return Some(
+            "Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)".to_owned(),
+        );
+    }
+    let offset = json_byte_offset(text, line, column);
+    let prefix = message.split(" at line ").next().unwrap_or(message);
+    let (template, pos) = match prefix {
+        "key must be a string" => ("Expecting property name enclosed in double quotes", offset),
+        "expected `:`" => ("Expecting ':' delimiter", offset),
+        "expected `,` or `]`" | "expected `,` or `}`" => ("Expecting ',' delimiter", offset),
+        "trailing characters" => ("Extra data", offset),
+        "expected value" => ("Expecting value", offset),
+        "trailing comma" => match innermost_bracket(text, offset) {
+            Some(b'[') => ("Expecting value", offset),
+            Some(b'{') => ("Expecting property name enclosed in double quotes", offset),
+            _ => ("Extra data", offset),
+        },
+        "expected ident" => ("Expecting value", json_token_start(text, offset)),
+        "invalid number" => invalid_number_detail(text, offset),
+        "control character (\\u0000-\\u001F) found while parsing a string" => {
+            ("Invalid control character at", offset)
+        }
+        "invalid escape" => invalid_escape_detail(text, offset)?,
+        "EOF while parsing a string" => eof_string_detail(text)?,
+        "EOF while parsing a value"
+        | "EOF while parsing a list"
+        | "EOF while parsing an object" => eof_detail(text),
+        // Surrogate escapes: terminated ones CPython accepts (known gap),
+        // but an UNCLOSED string after them is still an unterminated (or
+        // truncated-escape) error, handled like EOF-in-string.
+        "unexpected end of hex escape"
+        | "lone leading surrogate in hex escape"
+        | "invalid unicode code point" => {
+            if string_closed_after(text, offset) {
+                return None;
+            }
+            eof_string_detail(text)?
+        }
+        _ => return None,
+    };
+    let (line, column, char) = cpython_pos(text, pos);
+    Some(format!(
+        "{template}: line {line} column {column} (char {char})"
+    ))
+}
+
+/// Byte offset of serde's 1-based `(line, column)` (columns count bytes).
+/// Column 0 reports the `\n` itself (serde advances the line before
+/// resetting the column), so it maps to the previous byte.
+fn json_byte_offset(text: &str, line: usize, column: usize) -> usize {
+    let mut start = 0;
+    for _ in 1..line.max(1) {
+        match text[start..].find('\n') {
+            Some(index) => start += index + 1,
+            None => return text.len(),
+        }
+    }
+    if column == 0 {
+        return start.saturating_sub(1);
+    }
+    start.saturating_add(column - 1).min(text.len())
+}
+
+/// CPython's 1-based `(line, column)` + 0-based char index for a byte
+/// offset (chars, not bytes, past any multibyte text).
+fn cpython_pos(text: &str, pos: usize) -> (usize, usize, usize) {
+    let pos = pos.min(text.len());
+    let prefix = &text[..pos];
+    let line = prefix.bytes().filter(|b| *b == b'\n').count() + 1;
+    let column = prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+    (line, column, prefix.chars().count())
+}
+
+/// Whether a byte continues a broken token when scanning back from a
+/// serde offset: anything but structure, quotes and whitespace.
+fn is_token_byte(byte: u8) -> bool {
+    !matches!(byte, b'[' | b']' | b'{' | b'}' | b',' | b':' | b'"')
+        && !matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// Start of the broken token containing `offset` (partial idents,
+/// broken numbers): scan back over token bytes.
+fn json_token_start(text: &str, offset: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut start = offset.min(bytes.len());
+    while start > 0 && is_token_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    start
+}
+
+/// Net unclosed-bracket depth (string-aware; closers saturate at zero):
+/// tells truncated deep input (plain EOF error) from balanced deep input
+/// (past serde's recursion cap).
+fn bracket_depth(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut depth: usize = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'"' {
+                    if bytes[index] == b'\\' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                index += 1;
+            }
+            b'{' | b'[' => {
+                depth += 1;
+                index += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    depth
+}
+
+/// Innermost unclosed bracket before `offset` (string-aware): the
+/// trailing-comma context and the top-level test.
+fn innermost_bracket(text: &str, offset: usize) -> Option<u8> {
+    let bytes = text.as_bytes();
+    let end = offset.min(bytes.len());
+    let mut stack: Vec<u8> = Vec::new();
+    let mut index = 0;
+    while index < end {
+        match bytes[index] {
+            b'"' => {
+                index += 1;
+                while index < end && bytes[index] != b'"' {
+                    if bytes[index] == b'\\' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                index += 1;
+            }
+            b'{' | b'[' => {
+                stack.push(bytes[index]);
+                index += 1;
+            }
+            b'}' | b']' => {
+                stack.pop();
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    stack.pop()
+}
+
+/// Match CPython's `number_re` at `start`: the valid-prefix end, if any
+/// (`-?(0|[1-9]\d*)(\.\d+)?([eE][-+]?\d+)?`).
+fn number_prefix_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut index = start;
+    if bytes.get(index) == Some(&b'-') {
+        index += 1;
+    }
+    match bytes.get(index) {
+        Some(b'0') => index += 1,
+        Some(b'1'..=b'9') => {
+            while matches!(bytes.get(index), Some(b'0'..=b'9')) {
+                index += 1;
+            }
+        }
+        _ => return None,
+    }
+    if bytes.get(index) == Some(&b'.') && matches!(bytes.get(index + 1), Some(b'0'..=b'9')) {
+        index += 2;
+        while matches!(bytes.get(index), Some(b'0'..=b'9')) {
+            index += 1;
+        }
+    }
+    if matches!(bytes.get(index), Some(b'e' | b'E')) {
+        let mut end = index + 1;
+        if matches!(bytes.get(end), Some(b'+' | b'-')) {
+            end += 1;
+        }
+        if matches!(bytes.get(end), Some(b'0'..=b'9')) {
+            end += 1;
+            while matches!(bytes.get(end), Some(b'0'..=b'9')) {
+                end += 1;
+            }
+            index = end;
+        }
+    }
+    Some(index)
+}
+
+/// CPython text for serde's `invalid number`: with no valid prefix the
+/// token start wants a value (`-x`); else CPython consumed the prefix
+/// and wants a delimiter — `Extra data` at top level, `Expecting ','`
+/// inside (CPython says `,` even in objects).
+fn invalid_number_detail(text: &str, offset: usize) -> (&'static str, usize) {
+    let start = json_token_start(text, offset);
+    match number_prefix_end(text.as_bytes(), start) {
+        Some(end) if end > start => {
+            if innermost_bracket(text, start).is_none() {
+                ("Extra data", end)
+            } else {
+                ("Expecting ',' delimiter", end)
+            }
+        }
+        _ => ("Expecting value", start),
+    }
+}
+
+/// `Invalid \escape` vs `Invalid \uXXXX escape`: the culprit backslash is
+/// the nearest `\` before the offset; `\u` reports the `u` index.
+fn invalid_escape_detail(text: &str, offset: usize) -> Option<(&'static str, usize)> {
+    let bytes = text.as_bytes();
+    let mut index = offset.min(bytes.len());
+    for _ in 0..16 {
+        if index == 0 {
+            return None;
+        }
+        index -= 1;
+        if bytes[index] == b'\\' {
+            if bytes.get(index + 1) == Some(&b'u') {
+                return Some(("Invalid \\uXXXX escape", index + 1));
+            }
+            return Some(("Invalid \\escape", index));
+        }
+    }
+    None
+}
+
+/// Opening quote of the string unterminated at `offset`: the nearest `"`
+/// with an even run of preceding backslashes.
+fn json_opening_quote(text: &str, offset: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut index = offset.min(bytes.len());
+    while index > 0 {
+        index -= 1;
+        if bytes[index] == b'"' {
+            let mut slashes = 0;
+            let mut cursor = index;
+            while cursor > 0 && bytes[cursor - 1] == b'\\' {
+                slashes += 1;
+                cursor -= 1;
+            }
+            if slashes % 2 == 0 {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
+/// Whether an unescaped `"` follows `offset` (escape-aware): tells a
+/// terminated lone surrogate (CPython accepts) from an unterminated
+/// string (CPython reports it).
+fn string_closed_after(text: &str, offset: usize) -> bool {
+    let bytes = text.as_bytes();
+    let mut index = offset.min(bytes.len());
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            index += 2;
+        } else if bytes[index] == b'"' {
+            return true;
+        } else {
+            index += 1;
+        }
+    }
+    false
+}
+
+/// `Unterminated string starting at` the opening quote — unless the tail
+/// holds a truncated `\u` escape, which CPython reports instead. (Serde
+/// misreports a bad `\u` escape in a CLOSED string as EOF-in-string —
+/// `"\ud800\u12"` — so a quote at the very end is content-checked as a
+/// closer first: with no bad escape it is a genuine opener, `"a""`.)
+fn eof_string_detail(text: &str) -> Option<(&'static str, usize)> {
+    let bytes = text.as_bytes();
+    let open = json_opening_quote(text, bytes.len())?;
+    if open + 1 == bytes.len() {
+        if let Some(inner) = json_opening_quote(text, open) {
+            if let Some(pos) = truncated_hex_escape(text, inner, open) {
+                return Some(("Invalid \\uXXXX escape", pos));
+            }
+        }
+        return Some(("Unterminated string starting at", open));
+    }
+    if let Some(pos) = truncated_hex_escape(text, open, bytes.len()) {
+        return Some(("Invalid \\uXXXX escape", pos));
+    }
+    Some(("Unterminated string starting at", open))
+}
+
+/// Index of the `u` when the string content's last `\u` escape is
+/// truncated: fewer than 4 hex digits — or a complete escape ending
+/// exactly at `end` (the C scanner reads past it: `"\u0041` →
+/// `Invalid \uXXXX escape`).
+fn truncated_hex_escape(text: &str, open: usize, end: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    // Last unescaped `\u` in the string content.
+    let mut last_u: Option<usize> = None;
+    let mut index = open + 1;
+    while index < end {
+        if bytes[index] == b'\\' {
+            if bytes.get(index + 1) == Some(&b'u') {
+                last_u = Some(index + 1);
+            }
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    let u = last_u?;
+    let mut hex = 0;
+    while hex < 4 && bytes.get(u + 1 + hex).is_some_and(u8::is_ascii_hexdigit) {
+        hex += 1;
+    }
+    if hex < 4 || u + 5 == end {
+        return Some(u);
+    }
+    None
+}
+
+/// JSON whitespace for the EOF region scan (`\x0c` is not JSON
+/// whitespace — neither engine skips it).
+fn is_json_ws(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// Whether the string ending at `end` (exclusive) is an object key: its
+/// opening quote follows `{` or `,` (else it is a value). The scan
+/// excludes the closing quote itself, which is the nearest quote back.
+fn is_key_string(text: &str, end: usize) -> bool {
+    let bytes = text.as_bytes();
+    if end == 0 {
+        return false;
+    }
+    let Some(open) = json_opening_quote(text, end - 1) else {
+        return false;
+    };
+    let mut index = open;
+    while index > 0 && is_json_ws(bytes[index - 1]) {
+        index -= 1;
+    }
+    index > 0 && matches!(bytes[index - 1], b'{' | b',')
+}
+
+/// End-of-input failures: CPython reports what it wanted next (a value,
+/// a key, a colon, a delimiter) at the token start or the end.
+fn eof_detail(text: &str) -> (&'static str, usize) {
+    let bytes = text.as_bytes();
+    let end = bytes.len();
+    let mut start = end;
+    while start > 0 && (is_token_byte(bytes[start - 1]) || is_json_ws(bytes[start - 1])) {
+        start -= 1;
+    }
+    let first = bytes[start..end]
+        .iter()
+        .position(|byte| !is_json_ws(*byte))
+        .map_or(end, |offset| start + offset);
+    if first == end {
+        return eof_after_char(text, start, end);
+    }
+    // A token trails: the context before it decides.
+    if start == 0 {
+        return eof_value_token(text, first, end, true);
+    }
+    match bytes[start - 1] {
+        b'[' | b':' => eof_value_token(text, first, end, false),
+        b'{' => ("Expecting property name enclosed in double quotes", first),
+        b',' => match innermost_bracket(text, start - 1) {
+            Some(b'[') => eof_value_token(text, first, end, false),
+            _ => ("Expecting property name enclosed in double quotes", first),
+        },
+        b'"' => {
+            // A complete string precedes the token (an opening quote here
+            // would be an EOF-string error instead): after a key CPython
+            // wants the colon, after a value the delimiter.
+            if is_key_string(text, start) {
+                ("Expecting ':' delimiter", first)
+            } else {
+                ("Expecting ',' delimiter", first)
+            }
+        }
+        _ => ("Expecting ',' delimiter", first),
+    }
+}
+
+/// Nothing but whitespace trails: the last structural char (or the whole
+/// input) decides what CPython wanted at the end.
+fn eof_after_char(text: &str, start: usize, end: usize) -> (&'static str, usize) {
+    if start == 0 {
+        return ("Expecting value", end);
+    }
+    let bytes = text.as_bytes();
+    match bytes[start - 1] {
+        b'[' => ("Expecting value", end),
+        b'{' => ("Expecting property name enclosed in double quotes", end),
+        b',' => match innermost_bracket(text, start - 1) {
+            Some(b'[') => ("Expecting value", end),
+            _ => ("Expecting property name enclosed in double quotes", end),
+        },
+        b':' => {
+            if colon_after_key(text, start - 1) {
+                ("Expecting value", end)
+            } else {
+                // A stray colon after a value: CPython wants the
+                // delimiter at the colon itself.
+                ("Expecting ',' delimiter", start - 1)
+            }
+        }
+        b'"' => {
+            if is_key_string(text, start) {
+                ("Expecting ':' delimiter", end)
+            } else {
+                ("Expecting ',' delimiter", end)
+            }
+        }
+        _ => ("Expecting ',' delimiter", end),
+    }
+}
+
+/// Whether the colon at `pos` follows an object key (else it is stray).
+fn colon_after_key(text: &str, pos: usize) -> bool {
+    let bytes = text.as_bytes();
+    let mut index = pos;
+    while index > 0 && is_json_ws(bytes[index - 1]) {
+        index -= 1;
+    }
+    index > 0 && bytes[index - 1] == b'"' && is_key_string(text, index)
+}
+
+/// A value-position token at end of input: a valid number prefix plus
+/// trailing garbage wants the delimiter at the prefix end (`Extra data`
+/// at top level); a complete value wants the delimiter at the end; a
+/// partial token wants a value at its start.
+fn eof_value_token(text: &str, first: usize, end: usize, top: bool) -> (&'static str, usize) {
+    let bytes = text.as_bytes();
+    // Complete literals (`true`/`false`/`null`) behave like complete
+    // numbers; a literal plus trailing garbage delimits after it.
+    for literal in [b"true".as_slice(), b"false".as_slice(), b"null".as_slice()] {
+        if bytes[first..end].starts_with(literal) {
+            let after = first + literal.len();
+            if bytes[after..end].iter().all(|b| is_json_ws(*b)) {
+                return ("Expecting ',' delimiter", end);
+            }
+            if top {
+                return ("Extra data", after);
+            }
+            return ("Expecting ',' delimiter", after);
+        }
+    }
+    match number_prefix_end(bytes, first) {
+        Some(prefix_end) if prefix_end > first => {
+            if bytes[prefix_end..end].iter().all(|b| is_json_ws(*b)) {
+                ("Expecting ',' delimiter", end)
+            } else if top {
+                ("Extra data", prefix_end)
+            } else {
+                ("Expecting ',' delimiter", prefix_end)
+            }
+        }
+        _ => ("Expecting value", first),
     }
 }
 
@@ -3973,33 +4609,34 @@ pub fn enforce_user_timezone(
             LocalResult::None => {
                 // Imaginary gap time: Python's `replace(tzinfo=zone)`
                 // keeps fold 0 (the pre-transition offset) and
-                // `valid_datetime` accepts it. Walk back for the nearest
-                // valid wall (real gaps run ≤ 24h; 72h is plenty) and
-                // apply its earliest offset.
-                let mut probe = parsed.naive;
-                for _ in 0..144 {
-                    probe = match probe.checked_sub_signed(chrono::Duration::minutes(30)) {
-                        Some(earlier) => earlier,
-                        None => return Err(EnforceFail::Ambiguous),
-                    };
-                    match user_tz.from_local_datetime(&probe) {
-                        LocalResult::Single(local) => {
-                            let offset_secs =
-                                (local.naive_local() - local.naive_utc()).num_seconds();
-                            return shift_wall_to_utc(&parsed.naive, offset_secs);
-                        }
-                        LocalResult::Ambiguous(early, _) => {
-                            let offset_secs =
-                                (early.naive_local() - early.naive_utc()).num_seconds();
-                            return shift_wall_to_utc(&parsed.naive, offset_secs);
-                        }
-                        LocalResult::None => {}
-                    }
+                // `valid_datetime` accepts it.
+                match pre_transition_offset(user_tz, &parsed.naive) {
+                    Some(offset_secs) => shift_wall_to_utc(&parsed.naive, offset_secs),
+                    None => Err(EnforceFail::Ambiguous),
                 }
-                Err(EnforceFail::Ambiguous)
             }
         },
     }
+}
+
+/// The offset a gap wall takes: the pre-transition side. Walk back for
+/// the nearest valid wall (real gaps run ≤ 24h; 72h is plenty) and take
+/// its earliest offset.
+fn pre_transition_offset(tz: &Tz, naive: &chrono::NaiveDateTime) -> Option<i64> {
+    let mut probe = *naive;
+    for _ in 0..144 {
+        probe = probe.checked_sub_signed(chrono::Duration::minutes(30))?;
+        match tz.from_local_datetime(&probe) {
+            LocalResult::Single(local) => {
+                return Some((local.naive_local() - local.naive_utc()).num_seconds());
+            }
+            LocalResult::Ambiguous(early, _) => {
+                return Some((early.naive_local() - early.naive_utc()).num_seconds());
+            }
+            LocalResult::None => {}
+        }
+    }
+    None
 }
 
 /// Shift a wall time into UTC by a whole-second zone offset (the fold-0
@@ -4352,12 +4989,19 @@ pub fn resolve_cycle_issue_order(raw: Option<&str>) -> Result<String, Denial> {
 }
 
 /// One `ORDER BY` term: `"<table>"."<column>" ASC|DESC`, or the bare
-/// quoted alias for select-list annotations.
+/// quoted alias for select-list annotations. Both parts are `"`-escaped:
+/// the column (and traversal tail) is raw user input, and an unescaped
+/// quote breaks out of the identifier into arbitrary SQL (F-N1: a
+/// `pg_sleep` payload timed 2.04s at 200). Escaped garbage 500s on the
+/// unknown column, exactly like Django's `FieldError`-at-evaluation.
 fn order_term(table: Option<&str>, column: &str, descending: bool) -> String {
+    fn escape(part: &str) -> String {
+        part.replace('"', "\"\"")
+    }
     let direction = if descending { "DESC" } else { "ASC" };
     match table {
-        Some(table) => format!(r#""{table}"."{column}" {direction}"#),
-        None => format!(r#""{column}" {direction}"#),
+        Some(table) => format!(r#""{}"."{}" {direction}"#, escape(table), escape(column)),
+        None => format!(r#""{}" {direction}"#, escape(column)),
     }
 }
 
@@ -4856,16 +5500,27 @@ pub fn run_validate(
 }
 
 /// One project-zone midnight as UTC (`convert_to_utc`'s
-/// `local_tz.localize(midnight)`): a fold or gap midnight raises in pytz
-/// (`is_dst=None`) → generic 500.
-fn project_midnight_utc(
+/// `local_tz.localize(midnight)`, whose `is_dst` defaults to `False`):
+/// folds take the late (standard) side, gaps the pre-transition offset —
+/// pytz never raises here (fuzzed against every pytz fold/gap midnight,
+/// 1990-2035, across `pytz.common_timezones`; see
+/// `project_midnight_pytz_parity`).
+pub fn project_midnight_utc(
     project_tz: &Tz,
     day: &chrono::NaiveDate,
 ) -> Result<chrono::DateTime<chrono::Utc>, Denial> {
     let midnight = day.and_hms_opt(0, 0, 0).ok_or(Denial::ServerError)?;
     match project_tz.from_local_datetime(&midnight) {
         LocalResult::Single(local) => Ok(local.with_timezone(&chrono::Utc)),
-        LocalResult::Ambiguous(_, _) | LocalResult::None => Err(Denial::ServerError),
+        LocalResult::Ambiguous(_, late) => Ok(late.with_timezone(&chrono::Utc)),
+        LocalResult::None => {
+            let offset_secs =
+                pre_transition_offset(project_tz, &midnight).ok_or(Denial::ServerError)?;
+            midnight
+                .checked_sub_signed(chrono::Duration::seconds(offset_secs))
+                .map(|shifted| chrono::DateTime::from_naive_utc_and_offset(shifted, chrono::Utc))
+                .ok_or(Denial::ServerError)
+        }
     }
 }
 
@@ -4893,7 +5548,10 @@ pub async fn create_cycle_inner(
         PATH_CYCLES,
     )
     .await?;
-    let raw = parse_body(body)?;
+    // The both-or-neither gate runs on `request.data` BEFORE any
+    // serializer (`views/cycle.py:305`), so a non-object body 500s on
+    // `.get` instead of answering serializer errors.
+    let raw = parse_object_or_500(body)?;
     // Both-or-neither shape gate on the RAW body (`views/cycle.py:305-356`):
     // present means the key exists with a non-null value.
     let start_present = raw.get("start_date").is_some_and(|v| !v.is_null());
@@ -5052,6 +5710,44 @@ pub async fn create_cycle_inner(
 /// serializer, the dup check and the save all read the FULL `request.data`
 /// — so a completed-cycle PATCH carrying `sort_order` proceeds, and one
 /// carrying `name`+`sort_order` edits the name (ported bugs).
+///
+/// The gate itself runs Python `in` on the RAW value (`views/cycle.py:513`):
+/// dicts test the key, lists test membership (`==`), strings test
+/// substring — and a hit on a list/str 500s on the narrowing `.get`
+/// (neither type has one). `in` on null/number/bool raises `TypeError` →
+/// 500. (All six non-dict shapes verified live against Django.)
+pub fn completed_gate(value: &Value) -> Result<(), Denial> {
+    const MESSAGE: &str = "The Cycle has already been completed so it cannot be edited";
+    let reject = || Denial::BadError(MESSAGE.to_owned());
+    match value {
+        Value::Object(map) => {
+            if map.contains_key("sort_order") {
+                Ok(())
+            } else {
+                Err(reject())
+            }
+        }
+        Value::Array(items) => {
+            if items
+                .iter()
+                .any(|item| item == &Value::String("sort_order".to_owned()))
+            {
+                Err(Denial::ServerError)
+            } else {
+                Err(reject())
+            }
+        }
+        Value::String(text) => {
+            if text.contains("sort_order") {
+                Err(Denial::ServerError)
+            } else {
+                Err(reject())
+            }
+        }
+        Value::Null | Value::Number(_) | Value::Bool(_) => Err(Denial::ServerError),
+    }
+}
+
 pub async fn patch_cycle_inner(
     state: &AppState,
     headers: &HeaderMap,
@@ -5101,17 +5797,16 @@ pub async fn patch_cycle_inner(
             "Archived cycle cannot be edited".to_owned(),
         ));
     }
-    let raw = parse_body(body)?;
-    // Completed gate (`views/cycle.py:512-520`): without `sort_order` in
-    // the RAW body the edit is rejected; with it the (dead) narrowing runs
-    // and the FULL body proceeds below.
+    let value = parse_body_value(body)?;
+    // Completed gate (`views/cycle.py:512-520`) on the RAW value, before
+    // the serializer: without `sort_order` in it the edit is rejected;
+    // with it the (dead) narrowing runs and the FULL body proceeds below.
     if let Some(end_date) = before.end_date {
-        if end_date < micros_now() && !raw.contains_key("sort_order") {
-            return Err(Denial::BadError(
-                "The Cycle has already been completed so it cannot be edited".to_owned(),
-            ));
+        if end_date < micros_now() {
+            completed_gate(&value)?;
         }
     }
+    let raw = coerce_body_object(value)?;
     let write = coerce_write(&pre.pool, &raw, true, &pre.actor.timezone).await?;
     // `validate()`: the project row comes from `filter().first()`; the
     // instance arm carries the cycle's own project id (same value here).
@@ -5429,15 +6124,19 @@ pub async fn delete_cycle_inner(
     .await
     .map_err(|error| db_write_error(error, "cycle-delete-soft"))?;
     enqueue_soft_delete(&pre.pool, "cycle", pk).await;
-    // Queryset deletes (`views/cycle.py:609-612`): `deleted_at` only
-    // (`QuerySet.update` does not auto-stamp), each sampling `now()` fresh,
-    // no fan-out tasks.
+    // The eager `soft_delete_related_objects` cascade (`cycle.delete()`
+    // at `views/cycle.py:610` → `bgtasks/deletion_task.py:18-97`): the
+    // reverse-FK manager filters by `cycle_id` only, so moved bridges
+    // keeping an old `project_id` die too — no project scope. The cascade
+    // `.save()` would re-stamp `updated_at`, but no read observes a
+    // soft-deleted bridge (all filter `deleted_at IS NULL`), so a
+    // `deleted_at`-only stamp is equivalent. (The `UserFavorite` cleanup
+    // below IS project-scoped, per `views/cycle.py:612`.)
     sqlx::query(
-        r#"UPDATE "cycle_issues" SET "deleted_at" = $1 WHERE "cycle_id" = $2 AND "project_id" = $3 AND "deleted_at" IS NULL"#,
+        r#"UPDATE "cycle_issues" SET "deleted_at" = $1 WHERE "cycle_id" = $2 AND "deleted_at" IS NULL"#,
     )
     .bind(micros_now())
     .bind(pk)
-    .bind(project_id)
     .execute(&pre.pool)
     .await
     .map_err(|error| db_write_error(error, "cycle-delete-bridges"))?;
@@ -5704,16 +6403,7 @@ pub async fn add_cycle_issues_inner(
     .await?;
     // Raw `request.data` (no serializer): empty is `{}`, unparseable is the
     // DRF `ParseError`, a non-object 500s on `.get`.
-    let raw: serde_json::Map<String, Value> = if body.is_empty() {
-        serde_json::Map::new()
-    } else {
-        let value: Value = serde_json::from_slice(body)
-            .map_err(|error| Denial::BadDetail(format!("JSON parse error - {error}")))?;
-        match value {
-            Value::Object(map) => map,
-            _ => return Err(Denial::ServerError),
-        }
-    };
+    let raw = parse_object_or_500(body)?;
     // `if not issues:` — truthiness, not length: missing/empty/null/0/false
     // share the two-key 400 (`views/cycle.py:928-932`).
     let issues_value = raw.get("issues");
@@ -6524,16 +7214,7 @@ pub async fn transfer_cycle_issues_inner(
     .await?;
     // Raw `request.data` (no serializer): `.get("new_cycle_id", False)`
     // 500s on a non-object body; falsy answers the 400.
-    let raw: serde_json::Map<String, Value> = if body.is_empty() {
-        serde_json::Map::new()
-    } else {
-        let value: Value = serde_json::from_slice(body)
-            .map_err(|error| Denial::BadDetail(format!("JSON parse error - {error}")))?;
-        match value {
-            Value::Object(map) => map,
-            _ => return Err(Denial::ServerError),
-        }
-    };
+    let raw = parse_object_or_500(body)?;
     let new_raw = raw.get("new_cycle_id");
     if !new_raw.is_some_and(py_truthy) {
         return Err(Denial::BadError("New Cycle Id is required".to_owned()));
@@ -7445,6 +8126,367 @@ mod tests {
             message.starts_with("JSON parse error - "),
             "missing prefix: {message}"
         );
+    }
+
+    /// F-N1: quote-breakout payloads stay inside the identifier — the
+    /// `pg_sleep` timing probe (200/2.04s) now 500s on the unknown column.
+    #[test]
+    fn order_by_injection_escaped() {
+        assert_eq!(
+            resolve_cycle_issue_order(Some("created_at")).expect("plain"),
+            r#""issues"."created_at" ASC"#
+        );
+        assert_eq!(
+            resolve_cycle_issue_order(Some("-created_at")).expect("desc"),
+            r#""issues"."created_at" DESC"#
+        );
+        assert_eq!(
+            resolve_cycle_issue_order(Some("created_at\", \"created_at")).expect("breakout"),
+            r#""issues"."created_at"", ""created_at" ASC"#
+        );
+        assert_eq!(
+            resolve_cycle_issue_order(Some("state__sequence\", \"sequence")).expect("traversal"),
+            r#""states"."sequence"", ""sequence" ASC"#
+        );
+        assert_eq!(
+            resolve_cycle_issue_order(Some("created_at\", (SELECT pg_sleep(2))::text--"))
+                .expect("sleep"),
+            r#""issues"."created_at"", (SELECT pg_sleep(2))::text--" ASC"#
+        );
+    }
+
+    /// F-N2: the serializer-free create path 500s on non-object bodies
+    /// (`.get` on `request.data`); malformed JSON stays the DRF ParseError.
+    #[test]
+    fn raw_object_parse_shapes() {
+        assert!(parse_object_or_500(b"").expect("empty").is_empty());
+        for raw in [b"[]".as_slice(), b"null", b"\"x\"", b"5", b"true"] {
+            match parse_object_or_500(raw).expect_err("non-object 500s") {
+                Denial::ServerError => {}
+                denial => panic!("{raw:?}: expected 500, got {denial:?}"),
+            }
+        }
+        match parse_object_or_500(b"{bad").expect_err("malformed") {
+            Denial::BadDetail(message) => assert_eq!(
+                message,
+                "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
+            ),
+            denial => panic!("expected BadDetail, got {denial:?}"),
+        }
+    }
+
+    /// F-N3: the completed gate runs Python `in` on the raw JSON value —
+    /// dict keys, list membership, string substring (a hit 500s on the
+    /// narrowing `.get`); `in` on null/number/bool raises → 500.
+    #[test]
+    fn completed_gate_shapes() {
+        const GATE: &str = "The Cycle has already been completed so it cannot be edited";
+        assert!(completed_gate(&serde_json::json!({"sort_order": 1})).is_ok());
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"name": "x"}),
+            serde_json::json!(["x"]),
+            serde_json::json!([["sort_order"]]),
+        ] {
+            match completed_gate(&value).expect_err("gate rejects") {
+                Denial::BadError(message) => assert_eq!(message, GATE),
+                denial => panic!("{value}: expected gate 400, got {denial:?}"),
+            }
+        }
+        for value in [
+            serde_json::json!(["sort_order"]),
+            serde_json::json!(["sort_order", 0]),
+            serde_json::json!("sort_order"),
+            serde_json::json!("xxsort_orderxx"),
+            serde_json::Value::Null,
+            serde_json::json!(5),
+            serde_json::json!(5.5),
+            serde_json::json!(true),
+        ] {
+            assert!(
+                matches!(completed_gate(&value), Err(Denial::ServerError)),
+                "{value}: expected 500"
+            );
+        }
+        match completed_gate(&serde_json::json!("x")).expect_err("miss rejects") {
+            Denial::BadError(message) => assert_eq!(message, GATE),
+            denial => panic!("expected gate 400, got {denial:?}"),
+        }
+    }
+
+    /// F-N5: project-midnight UTC parity with pytz `localize(midnight)`
+    /// (`is_dst=False` default): folds take the late side, gaps the
+    /// pre-transition offset, pytz never raises. Oracle pytz 2026.4 over
+    /// every fold/gap midnight 1990-2035 across `common_timezones` (1126
+    /// rows, 0 mismatches); this table pins the review cases plus a
+    /// stratified sample (the scratch-oracle pytz 2024.1 disagrees on 20
+    /// rows where its tzdata predates IANA revisions — Asuncion permanent
+    /// -03, Mongolia 1990s — current pytz agrees with the port on all).
+    #[test]
+    fn project_midnight_pytz_parity() {
+        for (zone, day, expected) in [
+            (
+                "America/Santiago",
+                "2023-09-03",
+                "2023-09-03T04:00:00+00:00",
+            ), // gap
+            (
+                "America/Scoresbysund",
+                "2023-10-29",
+                "2023-10-29T01:00:00+00:00",
+            ), // fold
+            ("Africa/Tunis", "1990-09-30", "1990-09-29T23:00:00+00:00"), // fold
+            (
+                "America/Goose_Bay",
+                "1990-10-28",
+                "1990-10-28T04:00:00+00:00",
+            ), // fold
+            (
+                "America/Goose_Bay",
+                "1991-10-27",
+                "1991-10-27T04:00:00+00:00",
+            ), // fold
+            (
+                "America/Goose_Bay",
+                "1992-10-25",
+                "1992-10-25T04:00:00+00:00",
+            ), // fold
+            (
+                "America/Goose_Bay",
+                "1993-10-31",
+                "1993-10-31T04:00:00+00:00",
+            ), // fold
+            (
+                "America/Goose_Bay",
+                "1994-10-30",
+                "1994-10-30T04:00:00+00:00",
+            ), // fold
+            (
+                "America/Goose_Bay",
+                "1995-10-29",
+                "1995-10-29T04:00:00+00:00",
+            ), // fold
+            (
+                "America/Goose_Bay",
+                "1996-10-27",
+                "1996-10-27T04:00:00+00:00",
+            ), // fold
+            (
+                "America/Goose_Bay",
+                "1997-10-26",
+                "1997-10-26T04:00:00+00:00",
+            ), // fold
+            ("Africa/Cairo", "1995-04-28", "1995-04-27T22:00:00+00:00"), // gap
+            ("Africa/Cairo", "1996-04-26", "1996-04-25T22:00:00+00:00"), // gap
+            ("Africa/Cairo", "1997-04-25", "1997-04-24T22:00:00+00:00"), // gap
+            ("Africa/Cairo", "1998-04-24", "1998-04-23T22:00:00+00:00"), // gap
+            ("Africa/Cairo", "1999-04-30", "1999-04-29T22:00:00+00:00"), // gap
+            ("Africa/Cairo", "2000-04-28", "2000-04-27T22:00:00+00:00"), // gap
+            ("Africa/Cairo", "2001-04-27", "2001-04-26T22:00:00+00:00"), // gap
+            ("Africa/Cairo", "2002-04-26", "2002-04-25T22:00:00+00:00"), // gap
+            ("Africa/Cairo", "2003-04-25", "2003-04-24T22:00:00+00:00"), // gap
+            ("Pacific/Apia", "2010-09-26", "2010-09-26T11:00:00+00:00"), // gap
+            ("Asia/Gaza", "1990-03-25", "1990-03-24T22:00:00+00:00"),    // gap
+            ("America/Havana", "1990-04-01", "1990-04-01T05:00:00+00:00"), // gap
+            ("Atlantic/Azores", "1990-03-25", "1990-03-25T01:00:00+00:00"), // gap
+            ("Africa/Cairo", "2004-04-30", "2004-04-29T22:00:00+00:00"), // gap
+            (
+                "America/Asuncion",
+                "1990-10-01",
+                "1990-10-01T04:00:00+00:00",
+            ), // gap
+            ("Asia/Beirut", "1990-05-01", "1990-04-30T22:00:00+00:00"),  // gap
+            ("Asia/Choibalsan", "1990-03-25", "1990-03-24T16:00:00+00:00"), // gap (tzdata-revised Mongolia; new-pytz-verified)
+        ] {
+            let tz: chrono_tz::Tz = zone.parse().expect("zone");
+            let date: chrono::NaiveDate = day.parse().expect("day");
+            let got = project_midnight_utc(&tz, &date).expect("never raises");
+            assert_eq!(
+                got.to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+                expected,
+                "{zone} {day}"
+            );
+        }
+    }
+
+    /// F-N7: malformed bodies answer CPython's `json` error texts, not
+    /// serde's (fuzzed: 3674 structured/random/UTF-8 cases, 0 mismatches,
+    /// 0 reverse-divergences; serde_json 1.0.151 texts — this battery pins
+    /// them, so a serde upgrade that rewords errors fails loudly).
+    #[test]
+    fn json_parse_cpython_parity() {
+        for (raw, want) in [
+            (b"{bad" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
+            (b"{]" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
+            (b"{{}}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
+            (b"{'a':1}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
+            (b"{\"a\" 1}" as &[u8], "JSON parse error - Expecting ':' delimiter: line 1 column 6 (char 5)"),
+            (b"{\"a\":}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
+            (b"{\"a\":1} trailing" as &[u8], "JSON parse error - Extra data: line 1 column 9 (char 8)"),
+            (b"truex" as &[u8], "JSON parse error - Extra data: line 1 column 5 (char 4)"),
+            (b"\"a\"b" as &[u8], "JSON parse error - Extra data: line 1 column 4 (char 3)"),
+            (b"\"\"x" as &[u8], "JSON parse error - Extra data: line 1 column 3 (char 2)"),
+            (b"1 2" as &[u8], "JSON parse error - Extra data: line 1 column 3 (char 2)"),
+            (b"{\"a\":1}{\"b\":2}" as &[u8], "JSON parse error - Extra data: line 1 column 8 (char 7)"),
+            (b"[1][2]" as &[u8], "JSON parse error - Extra data: line 1 column 4 (char 3)"),
+            (b"01 2" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
+            (b"[01]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 3 (char 2)"),
+            (b"{\"a\":01}" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 7 (char 6)"),
+            (b"01" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
+            (b"0x1" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
+            (b"{\"a\":0x1}" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 7 (char 6)"),
+            (b"-x" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
+            (b"[1e]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 3 (char 2)"),
+            (b"12e" as &[u8], "JSON parse error - Extra data: line 1 column 3 (char 2)"),
+            (b"12e+" as &[u8], "JSON parse error - Extra data: line 1 column 3 (char 2)"),
+            (b"1e" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
+            (b"{\"a\": 1e}" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 8 (char 7)"),
+            (b"[12e+]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 4 (char 3)"),
+            (b"[-12e" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 5 (char 4)"),
+            (b"[0.5." as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 5 (char 4)"),
+            (b"[0.5.5]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 5 (char 4)"),
+            (b"[-.5]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
+            (b"{\"a\":-.5}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
+            (b"[.5]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
+            (b"{\"a\":.5}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
+            (b"." as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
+            (b"{\"a\":.}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
+            (b"+" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
+            (b"{\"a\": +}" as &[u8], "JSON parse error - Expecting value: line 1 column 7 (char 6)"),
+            (b"[--1]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
+            (b"nul" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
+            (b"tru" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
+            (b"nulx" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
+            (b"nullx" as &[u8], "JSON parse error - Extra data: line 1 column 5 (char 4)"),
+            (b"[nulx]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
+            (b"{\"a\":nulx}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
+            (b"[truex]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 6 (char 5)"),
+            (b"falsey" as &[u8], "JSON parse error - Extra data: line 1 column 6 (char 5)"),
+            (b"[falsey]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 7 (char 6)"),
+            (b"nulL" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
+            (b"True" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
+            (b"None" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
+            (b"nulll" as &[u8], "JSON parse error - Extra data: line 1 column 5 (char 4)"),
+            (b"true2" as &[u8], "JSON parse error - Extra data: line 1 column 5 (char 4)"),
+            (b"[true2]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 6 (char 5)"),
+            (b"{" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
+            (b"{\"a\"" as &[u8], "JSON parse error - Expecting ':' delimiter: line 1 column 5 (char 4)"),
+            (b"{\"a\":" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
+            (b"[1" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 3 (char 2)"),
+            (b"{\"a\": \"abc" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 7 (char 6)"),
+            (b"{\"a\": tru" as &[u8], "JSON parse error - Expecting value: line 1 column 7 (char 6)"),
+            (b"-" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
+            (b"{\"a\": 12" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 9 (char 8)"),
+            (b"{\"a\": -" as &[u8], "JSON parse error - Expecting value: line 1 column 7 (char 6)"),
+            (b"[ 2" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 4 (char 3)"),
+            (b"[-2" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 4 (char 3)"),
+            (b"[1,2" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 5 (char 4)"),
+            (b"{\"a\":1," as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 8 (char 7)"),
+            (b"{\"a\" :" as &[u8], "JSON parse error - Expecting value: line 1 column 7 (char 6)"),
+            (b"[1," as &[u8], "JSON parse error - Expecting value: line 1 column 4 (char 3)"),
+            (b"{\"a\":1 " as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 8 (char 7)"),
+            (b"[1 " as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 4 (char 3)"),
+            (b"{\"a\":\"b\"" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 9 (char 8)"),
+            (b"{\"a\":true" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 10 (char 9)"),
+            (b"{\"a\":1.5" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 9 (char 8)"),
+            (b"{\"a\":[1]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 9 (char 8)"),
+            (b"{\"a\":1,\"b\":2" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 13 (char 12)"),
+            (b"[tru" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
+            (b"{\"a\":1 :" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 8 (char 7)"),
+            (b"{\"a\":\"b\" " as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 10 (char 9)"),
+            (b"[[[" as &[u8], "JSON parse error - Expecting value: line 1 column 4 (char 3)"),
+            (b"{\"a\":{\"b\":}" as &[u8], "JSON parse error - Expecting value: line 1 column 11 (char 10)"),
+            (b"{\"a\": 1e5x}" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 10 (char 9)"),
+            (b"\"abc" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
+            (b"\"" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
+            (b"\"\\" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
+            (b"\"\\u" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 3 (char 2)"),
+            (b"\"\\u12" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 3 (char 2)"),
+            (b"\"\\ud800" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 3 (char 2)"),
+            (b"\"\\u0041" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 3 (char 2)"),
+            (b"\"\\ud800\\u12\"" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 9 (char 8)"),
+            (b"{\"a\": \"\\q\"}" as &[u8], "JSON parse error - Invalid \\escape: line 1 column 8 (char 7)"),
+            (b"{\"a\": \"\\u12\"}" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 9 (char 8)"),
+            (b"\"a" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
+            (b"\"ab" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
+            (b"\"\\u12345" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
+            (b"{\"a\": \"x\x01y\"}" as &[u8], "JSON parse error - Invalid control character at: line 1 column 9 (char 8)"),
+            (b"\"a\nb\"" as &[u8], "JSON parse error - Invalid control character at: line 1 column 3 (char 2)"),
+            (b"\"a\tb\"" as &[u8], "JSON parse error - Invalid control character at: line 1 column 3 (char 2)"),
+            (b"[{\"a\":1},]" as &[u8], "JSON parse error - Expecting value: line 1 column 10 (char 9)"),
+            (b"{\"a\":1,}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 8 (char 7)"),
+            (b"{\"a\":[1,}" as &[u8], "JSON parse error - Expecting value: line 1 column 9 (char 8)"),
+            (b"[[1,]]" as &[u8], "JSON parse error - Expecting value: line 1 column 5 (char 4)"),
+            (b"{\"a\":{\"b\":1,}}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 13 (char 12)"),
+            (b"[1,]" as &[u8], "JSON parse error - Expecting value: line 1 column 4 (char 3)"),
+            (b"{\"a\":,}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
+            (b"{,}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
+            (b"{\n\"a\"\n1\n}" as &[u8], "JSON parse error - Expecting ':' delimiter: line 3 column 1 (char 6)"),
+            (b"[\n1\n2\n]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 3 column 1 (char 4)"),
+            (b"{\"\xc3\xa9\":}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
+            (b"\"\xc3\xa9" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
+            (b"\xef\xbb\xbf{\"a\":1}" as &[u8], "JSON parse error - Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)"),
+            (b"\xef\xbb\xbf" as &[u8], "JSON parse error - Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)"),
+            (b"[\xef\xbb\xbf]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
+            (b"{\xef\xbb\xbf\"a\":1}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
+            (b"1\xef\xbb\xbf" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
+            (b"\xff\xfe" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"),
+            (b"\xc3" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc3 in position 0: unexpected end of data"),
+            (b"\xc3(" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc3 in position 0: invalid continuation byte"),
+            (b"\xe2(\xa1" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xe2 in position 0: invalid continuation byte"),
+            (b"\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0x80 in position 0: invalid start byte"),
+            (b"\xed\xa0\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 0: invalid continuation byte"),
+            (b"\xf0\x9f\x98" as &[u8], "JSON parse error - 'utf-8' codec can't decode bytes in position 0-2: unexpected end of data"),
+            (b"\xe2\x82(" as &[u8], "JSON parse error - 'utf-8' codec can't decode bytes in position 0-1: invalid continuation byte"),
+            (b"\xe2\x82" as &[u8], "JSON parse error - 'utf-8' codec can't decode bytes in position 0-1: unexpected end of data"),
+            (b"\xc0\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc0 in position 0: invalid start byte"),
+            (b"\xed\xbf\xbf" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 0: invalid continuation byte"),
+            (b"\xf4\x90\x80\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xf4 in position 0: invalid continuation byte"),
+            (b"\xdf" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xdf in position 0: unexpected end of data"),
+            (b"\xef\xbf" as &[u8], "JSON parse error - 'utf-8' codec can't decode bytes in position 0-1: unexpected end of data"),
+            (b"{\"a\": \"\xed\xa0\x80\"}" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 7: invalid continuation byte"),
+            (b"\xe0\x80\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xe0 in position 0: invalid continuation byte"),
+            (b"a\x80b" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0x80 in position 1: invalid start byte"),
+            (b"\xc2\xc2" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc2 in position 0: invalid continuation byte"),
+        ] {
+            let raw: &[u8] = raw;
+            let error = serde_json::from_slice::<Value>(raw).expect_err("battery is errors-only");
+            match json_parse_denial(raw, &error) {
+                Denial::BadDetail(message) => assert_eq!(message, want, "{raw:?}"),
+                denial => panic!("{raw:?}: expected BadDetail, got {denial:?}"),
+            }
+        }
+        // Past serde's 128-deep cap a truncated input still recovers its
+        // plain EOF error; a balanced deep input takes the generic 500
+        // (CPython accepts it — PIDASHCONV-626, same as surrogates).
+        let deep_open = "[".repeat(129);
+        let error =
+            serde_json::from_slice::<Value>(deep_open.as_bytes()).expect_err("truncated deep");
+        match json_parse_denial(deep_open.as_bytes(), &error) {
+            Denial::BadDetail(message) => assert_eq!(
+                message,
+                "JSON parse error - Expecting value: line 1 column 130 (char 129)"
+            ),
+            denial => panic!("expected EOF recovery, got {denial:?}"),
+        }
+        let deep_shut = format!("{}1{}", "[".repeat(200), "]".repeat(200));
+        let error =
+            serde_json::from_slice::<Value>(deep_shut.as_bytes()).expect_err("balanced deep");
+        assert!(matches!(
+            json_parse_denial(deep_shut.as_bytes(), &error),
+            Denial::ServerError
+        ));
+        // Terminated lone surrogates: CPython ACCEPTS them, so no 400 text
+        // is right — the fallback keeps serde text (known gap, pinned).
+        let error =
+            serde_json::from_slice::<Value>(br#"{"a": "\ud800"}"#).expect_err("lone surrogate");
+        match json_parse_denial(br#"{"a": "\ud800"}"#, &error) {
+            Denial::BadDetail(message) => assert_eq!(
+                message,
+                "JSON parse error - unexpected end of hex escape at line 1 column 14"
+            ),
+            denial => panic!("expected fallback, got {denial:?}"),
+        }
     }
 
     #[test]
