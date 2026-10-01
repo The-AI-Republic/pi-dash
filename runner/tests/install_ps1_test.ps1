@@ -9,7 +9,7 @@
 #
 # Each case runs in a fresh child shell against a fake cargo-dist installer
 # (via the PIDASH_INSTALLER_URL seam) and a fake pidash.exe, with
-# USERPROFILE pointed at a temp directory. Nothing is downloaded or
+# PowerShell's home variables pointed at a temp directory. Nothing is downloaded or
 # installed for real.
 #
 # Usage (Windows only):
@@ -29,7 +29,12 @@ $ErrorActionPreference = 'Stop'
 if (-not $InstallScript) { $InstallScript = Join-Path $PSScriptRoot '..\install.ps1' }
 $installPs1 = (Resolve-Path $InstallScript).Path
 $originalUserProfile = $env:USERPROFILE
+$originalHomeDrive = $env:HOMEDRIVE
+$originalHomePath = $env:HOMEPATH
+$originalEnvHome = $env:HOME
 $originalPath = $env:Path
+$hadOriginalInstallerScript = Test-Path Env:\PIDASH_INSTALLER_SCRIPT
+$originalInstallerScript = $env:PIDASH_INSTALLER_SCRIPT
 $work = Join-Path ([System.IO.Path]::GetTempPath()) "pidash-install-test-$([guid]::NewGuid())"
 New-Item -ItemType Directory -Path $work | Out-Null
 try {
@@ -66,10 +71,11 @@ function New-FakeInstaller([string] $name, [string] $body) {
 }
 
 # Mirrors cargo-dist's generated installer: on success it places the binary
-# (in PIDASH_INSTALL_DIR when set, else the profile's .local\bin), on failure
+# (in PIDASH_INSTALL_DIR when set, else PowerShell's $HOME/.local/bin), on failure
 # it prints the error and calls `exit 1`.
 $installerOk = New-FakeInstaller 'installer-ok' @"
-`$dest = if (`$env:PIDASH_INSTALL_DIR) { `$env:PIDASH_INSTALL_DIR } else { Join-Path `$env:USERPROFILE '.local\bin' }
+if (`$env:PIDASH_TEST_HOME) { Set-Variable -Name HOME -Value `$env:PIDASH_TEST_HOME -Force }
+`$dest = if (`$env:PIDASH_INSTALL_DIR) { `$env:PIDASH_INSTALL_DIR } else { Join-Path `$HOME '.local\bin' }
 New-Item -ItemType Directory -Force -Path `$dest | Out-Null
 Copy-Item -LiteralPath '$fakeExe' -Destination (Join-Path `$dest 'pidash.exe')
 Write-Host 'fake-installer: installed'
@@ -105,10 +111,24 @@ function Invoke-Child([string] $shell, [string] $command) {
 # older copy on PATH, the way the MSI adds Program Files\pidash\bin to it.
 # (Program Files itself can't be faked: Windows resets ProgramFiles in every
 # new process, which is also why install.ps1 searches PATH instead.)
-function Set-CaseEnv([string] $installer, [int] $pidashExit, [string] $installDir, [switch] $MsiCopy) {
+function Set-CaseEnv([string] $installer, [int] $pidashExit, [string] $installDir,
+                     [switch] $MsiCopy, [switch] $DifferentUserProfile) {
     $home_ = Join-Path $work "home-$([guid]::NewGuid())"
     New-Item -ItemType Directory -Path $home_ | Out-Null
-    $env:USERPROFILE = $home_
+    $homeDrive = Split-Path -Qualifier $home_
+    if (-not $homeDrive) { throw "test home must have a drive qualifier: $home_" }
+    $env:HOMEDRIVE = $homeDrive
+    $env:HOMEPATH = $home_.Substring($homeDrive.Length)
+    $env:USERPROFILE = if ($DifferentUserProfile) {
+        $differentProfile = Join-Path $work "profile-$([guid]::NewGuid())"
+        New-Item -ItemType Directory -Path $differentProfile | Out-Null
+        $differentProfile
+    } else {
+        $home_
+    }
+    # cargo-dist's former `$env:HOME` rendering failed on normal Windows
+    # machines because this environment variable is ordinarily absent.
+    Remove-Item Env:\HOME -ErrorAction SilentlyContinue
     $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
     if ($MsiCopy) {
         $msiBin = Join-Path $work "msi-$([guid]::NewGuid())\pidash\bin"
@@ -118,7 +138,11 @@ function Set-CaseEnv([string] $installer, [int] $pidashExit, [string] $installDi
     }
     $env:PIDASH_INSTALLER_URL = $installer
     $env:FAKE_PIDASH_EXIT = "$pidashExit"
+    $script:caseInstallerScript = "existing-$([guid]::NewGuid())"
+    $env:PIDASH_INSTALLER_SCRIPT = $script:caseInstallerScript
+    if ($DifferentUserProfile) { $env:PIDASH_TEST_HOME = $home_ } else { Remove-Item Env:\PIDASH_TEST_HOME -ErrorAction SilentlyContinue }
     if ($installDir) { $env:PIDASH_INSTALL_DIR = $installDir } else { Remove-Item Env:\PIDASH_INSTALL_DIR -ErrorAction SilentlyContinue }
+    $script:caseHome = $home_
 }
 
 # Runs install.ps1 exactly like `irm | iex`, then proves the session is still
@@ -127,8 +151,11 @@ function Set-CaseEnv([string] $installer, [int] $pidashExit, [string] $installDi
 # session carries on — only `exit` actually ends it.
 function Invoke-ViaIex([string] $shell) {
     $cmd = @"
+if (`$env:PIDASH_TEST_HOME) { Set-Variable -Name HOME -Value `$env:PIDASH_TEST_HOME -Force }
 try { Get-Content -Raw -LiteralPath '$installPs1' | Invoke-Expression } catch { Write-Host "UNCAUGHT: `$_" }
-Write-Host "SESSION-ALIVE exit=`$LASTEXITCODE eap=`$ErrorActionPreference interactive=`$([Environment]::UserInteractive) firstpath=`$((`$env:Path -split ';')[0])"
+Write-Host "SESSION-ALIVE exit=`$LASTEXITCODE eap=`$ErrorActionPreference interactive=`$([Environment]::UserInteractive)"
+Write-Host "SESSION-PATH home=<`$HOME> profile=<`$env:USERPROFILE> firstpath=<`$((`$env:Path -split ';')[0])>"
+Write-Host "SESSION-INSTALLER-SCRIPT <`$env:PIDASH_INSTALLER_SCRIPT>"
 "@
     return Invoke-Child $shell $cmd
 }
@@ -143,22 +170,61 @@ function Assert-Case([string] $name, [bool] $condition, [string] $detail) {
     }
 }
 
+# Execute the wrapper's actual session-PATH block in isolation. Installing a
+# fake executable at C:\ would require administrator access, but path handling
+# itself does not: the old TrimEnd implementation turned C:\ into drive-relative
+# C:, and this check catches that regression directly.
+function Test-DriveRootPathUpdate {
+    $source = Get-Content -Raw -LiteralPath $installPs1
+    $match = [regex]::Match(
+        $source,
+        '(?s)# pidash-install-test:begin-session-path\r?\n(?<body>.*?)\r?\n\s*# pidash-install-test:end-session-path'
+    )
+    if (-not $match.Success) { throw 'could not find install.ps1 session-PATH test block' }
+
+    $savedPath = $env:Path
+    try {
+        $installDir = [System.IO.Path]::GetPathRoot($work)
+        $env:Path = "$installDir;$env:SystemRoot\System32"
+        & ([scriptblock]::Create($match.Groups['body'].Value))
+        $pathEntries = @($env:Path -split ';')
+        Assert-Case 'drive-root install dir / root remains absolute' ($pathEntries[0] -eq $installDir) $env:Path
+        Assert-Case 'drive-root install dir / duplicate removed' `
+            (@($pathEntries | Where-Object { $_ -eq $installDir }).Count -eq 1) $env:Path
+    } finally {
+        $env:Path = $savedPath
+    }
+}
+
 function Test-IexCase([string] $shell, [string] $name, [string] $installer, [int] $pidashExit,
                       [int] $expectExit, [string[]] $expectText, [switch] $NeedsInteractive,
                       [string] $InstallDir, [switch] $MsiCopy, [switch] $ExpectOnPath,
-                      [string[]] $RejectText) {
-    Set-CaseEnv $installer $pidashExit $InstallDir -MsiCopy:$MsiCopy
-    $expectedDir = if ($InstallDir) { $InstallDir } else { Join-Path $env:USERPROFILE '.local\bin' }
+                      [string[]] $RejectText, [switch] $DifferentUserProfile) {
+    Set-CaseEnv $installer $pidashExit $InstallDir -MsiCopy:$MsiCopy -DifferentUserProfile:$DifferentUserProfile
+    $expectedDir = if ($InstallDir) { $InstallDir } else { Join-Path $script:caseHome '.local\bin' }
     $r = Invoke-ViaIex $shell
-    $alive = $r.Output -match 'SESSION-ALIVE exit=(-?\d+) eap=(\w+) interactive=(\w+) firstpath=(.*)'
+    $alive = $r.Output -match 'SESSION-ALIVE exit=(-?\d+) eap=(\w+) interactive=(\w+)'
     if (-not $alive) {
         Assert-Case "$name / session survives" $false $r.Output
         return
     }
-    $exit, $eap, $interactive, $firstPath = [int]$Matches[1], $Matches[2], ($Matches[3] -eq 'True'), $Matches[4].Trim()
+    $exit, $eap, $interactive = [int]$Matches[1], $Matches[2], ($Matches[3] -eq 'True')
+    $pathReported = $r.Output -match 'SESSION-PATH home=<(.*)> profile=<(.*)> firstpath=<(.*)>'
+    if ($pathReported) {
+        $reportedHome, $reportedProfile, $firstPath = $Matches[1], $Matches[2], $Matches[3]
+    } else {
+        $reportedHome, $reportedProfile, $firstPath = $null, $null, $null
+    }
     Assert-Case "$name / session survives" $true ''
+    Assert-Case "$name / session paths reported" $pathReported $r.Output
     Assert-Case "$name / no uncaught error" ($r.Output -notmatch 'UNCAUGHT:') $r.Output
     Assert-Case "$name / ErrorActionPreference not leaked" ($eap -eq 'Continue') $r.Output
+    Assert-Case "$name / existing installer variable restored" `
+        ($r.Output -match "SESSION-INSTALLER-SCRIPT <$([regex]::Escape($script:caseInstallerScript))>") $r.Output
+    if ($DifferentUserProfile) {
+        Assert-Case "$name / HOME differs from USERPROFILE" ($reportedHome -ne $reportedProfile) $r.Output
+        Assert-Case "$name / wrapper follows HOME" ($reportedHome -eq $script:caseHome) $r.Output
+    }
     if ($ExpectOnPath) {
         # Checked before the interactive split: the PATH fix happens either way.
         Assert-Case "$name / install dir is first on this window's PATH" ($firstPath -eq $expectedDir) "$firstPath`n$($r.Output)"
@@ -180,6 +246,8 @@ function Test-IexCase([string] $shell, [string] $name, [string] $installer, [int
 
 # ---------------------------------------------------------------- cases
 
+    Test-DriveRootPathUpdate
+
     foreach ($shell in $Shells) {
         Write-Host ''
         Write-Host "== $shell"
@@ -193,6 +261,13 @@ function Test-IexCase([string] $shell, [string] $name, [string] $installer, [int
         # The wrapper must look where cargo-dist installed, not a fixed path.
         Test-IexCase $shell 'PIDASH_INSTALL_DIR override' $installerOk 0 0 @('fake-pidash: auth login') -NeedsInteractive `
             -InstallDir (Join-Path $work "custom-dir-$([guid]::NewGuid())") -ExpectOnPath
+        # Windows PowerShell 5.1 can derive $HOME separately from USERPROFILE.
+        # Keep them deliberately different so the fake installer and wrapper
+        # must agree on cargo-dist's actual $HOME destination.
+        if ([System.IO.Path]::GetFileName($shell) -ieq 'powershell.exe') {
+            Test-IexCase $shell 'HOME differs from USERPROFILE' $installerOk 0 0 @('fake-installer: installed') `
+                -DifferentUserProfile -ExpectOnPath
+        }
         # An MSI copy on the system PATH would shadow the new install: warn.
         Test-IexCase $shell 'older MSI copy present' $installerOk 0 0 @('another copy of pidash', 'pidash\bin\pidash.exe', 'Installed apps') -NeedsInteractive `
             -MsiCopy -ExpectOnPath
@@ -214,8 +289,16 @@ Write-Host "CALLER-CONTINUED exit=`$LASTEXITCODE"
     }
 } finally {
     $env:USERPROFILE = $originalUserProfile
+    $env:HOMEDRIVE = $originalHomeDrive
+    $env:HOMEPATH = $originalHomePath
+    if ($null -eq $originalEnvHome) { Remove-Item Env:\HOME -ErrorAction SilentlyContinue } else { $env:HOME = $originalEnvHome }
     $env:Path = $originalPath
-    Remove-Item Env:\PIDASH_INSTALLER_URL, Env:\FAKE_PIDASH_EXIT, Env:\PIDASH_INSTALL_DIR -ErrorAction SilentlyContinue
+    if ($hadOriginalInstallerScript) {
+        $env:PIDASH_INSTALLER_SCRIPT = $originalInstallerScript
+    } else {
+        Remove-Item Env:\PIDASH_INSTALLER_SCRIPT -ErrorAction SilentlyContinue
+    }
+    Remove-Item Env:\PIDASH_INSTALLER_URL, Env:\FAKE_PIDASH_EXIT, Env:\PIDASH_INSTALL_DIR, Env:\PIDASH_TEST_HOME -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force -LiteralPath $work -ErrorAction SilentlyContinue
 }
 
@@ -226,3 +309,4 @@ if ($failures.Count -gt 0) {
     exit 1
 }
 Write-Host "all $passed checks passed"
+exit 0

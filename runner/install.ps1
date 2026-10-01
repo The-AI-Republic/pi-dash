@@ -57,13 +57,19 @@
     $shell = Join-Path $PSHOME $shellExe
     $scriptPath = Join-Path ([System.IO.Path]::GetTempPath()) "pidash-installer-$([guid]::NewGuid()).ps1"
     Set-Content -LiteralPath $scriptPath -Value $installerScript -Encoding UTF8
+    $hadInstallerScript = Test-Path Env:\PIDASH_INSTALLER_SCRIPT
+    $originalInstallerScript = $env:PIDASH_INSTALLER_SCRIPT
     $env:PIDASH_INSTALLER_SCRIPT = $scriptPath
     try {
         & $shell -NoProfile -Command 'Invoke-Expression (Get-Content -Raw -LiteralPath $env:PIDASH_INSTALLER_SCRIPT)'
         $installerExit = $LASTEXITCODE
     } finally {
         Remove-Item -LiteralPath $scriptPath -ErrorAction SilentlyContinue
-        Remove-Item Env:\PIDASH_INSTALLER_SCRIPT -ErrorAction SilentlyContinue
+        if ($hadInstallerScript) {
+            $env:PIDASH_INSTALLER_SCRIPT = $originalInstallerScript
+        } else {
+            Remove-Item Env:\PIDASH_INSTALLER_SCRIPT -ErrorAction SilentlyContinue
+        }
     }
     if ($installerExit -ne 0) {
         Write-Host ''
@@ -74,11 +80,11 @@
         return
     }
 
-    # cargo-dist drops pidash.exe into the user profile's .local\bin
+    # cargo-dist drops pidash.exe into PowerShell's home directory under .local\bin
     # (install-path = "~/.local/bin" in dist-workspace.toml), or into
     # PIDASH_INSTALL_DIR when the user overrides it. If a future release
     # moves it, surface a clear error instead of silently continuing.
-    $installDir = if ($env:PIDASH_INSTALL_DIR) { $env:PIDASH_INSTALL_DIR } else { Join-Path $env:USERPROFILE '.local\bin' }
+    $installDir = if ($env:PIDASH_INSTALL_DIR) { $env:PIDASH_INSTALL_DIR } else { Join-Path $HOME '.local\bin' }
     $pidashBin = Join-Path $installDir 'pidash.exe'
     if (-not (Test-Path -PathType Leaf -LiteralPath $pidashBin)) {
         Write-Host ''
@@ -117,9 +123,20 @@
     # (`pidash runner add`) failed with "not recognized". Putting the install
     # dir first also beats an older copy for this window. Under `irm | iex`
     # this is the one deliberate change to the caller's session.
-    $installDirFull = [System.IO.Path]::GetFullPath($installDir).TrimEnd('\')
-    $otherEntries = @($env:Path -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ne $installDirFull })
+    # pidash-install-test:begin-session-path
+    $installDirFull = [System.IO.Path]::GetFullPath($installDir)
+    $installDirRoot = [System.IO.Path]::GetPathRoot($installDirFull)
+    $installDirIsRoot = $installDirFull -eq $installDirRoot
+    if (-not $installDirIsRoot) { $installDirFull = $installDirFull.TrimEnd('\') }
+    $otherEntries = @($env:Path -split ';' | Where-Object {
+        if ($installDirIsRoot) {
+            $_ -and $_ -ne $installDirFull
+        } else {
+            $_ -and $_.TrimEnd('\') -ne $installDirFull
+        }
+    })
     $env:Path = (@($installDirFull) + $otherEntries) -join ';'
+    # pidash-install-test:end-session-path
 
     Write-Host ''
     Write-Host '==> Starting authentication...'
