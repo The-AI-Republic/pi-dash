@@ -16,6 +16,13 @@
 //!   kwargs vs GET order defaults, acting-user requirement, wire shape
 //!   per method). The SQL lives in the db sibling
 //!   (`pidash_db::v1_cycles_modules::module_queries`).
+//! * [`cycle_queries`] — the read-choice logic around the five cycle
+//!   querysets Q1-Q5 plus the transfer flow Q6 (PIDASHCONV-307:
+//!   archived filter per endpoint, kwargs vs GET order defaults,
+//!   `cycle_view` parse, acting-user requirement, wire shape per
+//!   method, transfer guards, estimate branch, snapshot assembly). The
+//!   SQL lives in the db sibling
+//!   (`pidash_db::v1_cycles_modules::cycle_queries`).
 //!
 //! Wiring note: the crate root declares `pub mod v1_cycles_modules;` (seam
 //! for this issue's new files); every file under this module is new.
@@ -24,6 +31,7 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
+pub mod cycle_queries;
 pub mod cycle_shapes;
 pub mod module_queries;
 pub mod module_shapes;

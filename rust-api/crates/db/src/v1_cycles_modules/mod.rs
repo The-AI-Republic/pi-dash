@@ -17,6 +17,10 @@
 //! * [`cycle`] — `Cycle`, `CycleIssue`, `CycleUserProperties`
 //!   (PIDASHCONV-291: column lists, manager exclusion filters,
 //!   `archived_at` guards, `CycleUserProperties` scoping, save rules).
+//! * [`cycle_queries`] — the five cycle read querysets Q1-Q5 plus the
+//!   transfer reads Q6 (PIDASHCONV-307: tenant/member scopes, archived
+//!   filters, issue-count annotations, estimate sums, `cycle_view`
+//!   predicates, distributions, move selection).
 //!   Serializers, guards, tasks and handlers belong to the sibling D-20
 //!   issues; the domain gate is PIDASHCONV-425.
 //!
@@ -29,5 +33,6 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod cycle;
+pub mod cycle_queries;
 pub mod module;
 pub mod module_queries;
