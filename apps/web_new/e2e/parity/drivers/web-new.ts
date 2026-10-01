@@ -946,4 +946,8 @@ export class WebNewDriver implements ParityDriver {
   async layoutsGroupHeaderAddChoose(_groupTitle: string, _item: string | null): Promise<void> {
     return todo("layoutsGroupHeaderAddChoose");
   }
+
+  async layoutsSheetToggleSubIssues(_issueName: string): Promise<void> {
+    return todo("layoutsSheetToggleSubIssues");
+  }
 }

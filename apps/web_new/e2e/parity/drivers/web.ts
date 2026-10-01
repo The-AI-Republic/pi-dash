@@ -816,8 +816,10 @@ export class WebDriver implements ParityDriver {
 
   async openAuthenticated(path: string, cookies: ParityBrowserCookie[]): Promise<void> {
     await this.page.context().addCookies(cookies);
-    await this.page.goto(path);
-    await this.page.waitForLoadState("domcontentloaded");
+    // domcontentloaded, not load: the dev oracle serves hundreds of
+    // unbundled modules, so the load event lands minutes after the app
+    // is interactive; every scenario waits explicitly for its own chrome.
+    await this.page.goto(path, { waitUntil: "domcontentloaded" });
   }
 
   // NOTE (rebase over NEWFRONT-107): a single currentPath keeps the
@@ -1358,8 +1360,9 @@ export class WebDriver implements ParityDriver {
   }
 
   async layoutsReloadIssues(): Promise<void> {
-    await this.page.reload();
-    await this.page.waitForLoadState("domcontentloaded");
+    // domcontentloaded (see openAuthenticated): the load event is minutes
+    // out on the dev oracle; the switcher wait below is the real gate.
+    await this.page.reload({ waitUntil: "domcontentloaded" });
     await this.layoutsSwitcherButtons().first().waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
   }
 
@@ -2117,5 +2120,9 @@ export class WebDriver implements ParityDriver {
 
   async layoutsGroupHeaderAddChoose(_groupTitle: string, _item: string | null): Promise<void> {
     return this.layoutsTodo("layoutsGroupHeaderAddChoose");
+  }
+
+  async layoutsSheetToggleSubIssues(_issueName: string): Promise<void> {
+    return this.layoutsTodo("layoutsSheetToggleSubIssues");
   }
 }

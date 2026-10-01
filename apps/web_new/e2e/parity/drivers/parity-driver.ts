@@ -447,6 +447,8 @@ export interface ParityDriver {
   layoutsSheetHasSubIssueToggle(issueName: string): Promise<boolean>;
   /** Expand a sheet row's sub-issues; resolves once children render. */
   layoutsSheetExpandSubIssues(issueName: string): Promise<void>;
+  /** Activate a sheet row's sub-issue toggle once (no child wait). */
+  layoutsSheetToggleSubIssues(issueName: string): Promise<void>;
   /** Names of the expanded sub-issues under a sheet row. */
   layoutsSheetSubIssueNames(issueName: string): Promise<string[]>;
   /** Activate the sub-issue-count cell (navigates to the sub-issues view). */

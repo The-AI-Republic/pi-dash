@@ -132,7 +132,13 @@ test(
       expect(await driver.layoutsSheetSubIssueNames(names[1] ?? "")).toContain(names[2]);
       await driver.layoutsSheetExpandSubIssues(names[2] ?? "");
       expect(await driver.layoutsSheetSubIssueNames(names[2] ?? "")).toContain(names[3]);
-      expect(await driver.layoutsSheetHasSubIssueToggle(names[3] ?? "")).toEqual(false);
+      // Depth 3 keeps its toggle, but activating it opens peek instead of
+      // expanding: deeper nesting never renders inline.
+      expect(await driver.layoutsSheetHasSubIssueToggle(names[3] ?? "")).toEqual(true);
+      await driver.layoutsSheetToggleSubIssues(names[3] ?? "");
+      expect(await driver.layoutsPeekVisible()).toEqual(true);
+      expect(await driver.layoutsPeekTitle()).toEqual(names[3]);
+      await driver.layoutsPeekClose();
     } finally {
       for (const id of [...ids].reverse()) await serverDeleteIssue(seed.workspaceSlug, seed.projectId, id, session);
       await resetPrefs(seed.workspaceSlug, seed.projectId, session);
