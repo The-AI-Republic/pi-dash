@@ -334,6 +334,10 @@ type FileAssetLookup = (
     Option<uuid::Uuid>,
 );
 
+/// Decoded user row for [`expand_user`]: names, nullable `email`
+/// (`db/models/user.py:61`), `avatar` text, avatar-asset FK.
+type ExpandUserLookup = (String, String, Option<String>, String, Option<uuid::Uuid>);
+
 /// Map a database/driver failure to the generic 500 while logging the site
 /// and error for operators (no secrets: messages never include tokens).
 fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
@@ -1135,9 +1139,10 @@ async fn expand_workspace(pool: &PgPool, workspace_id: &uuid::Uuid) -> Result<Va
 
 /// `expand=<user fk>`: `UserLiteSerializer` via the ported
 /// `user_lite_to_representation` kernel (FX-COLLAB-SER); a missing user
-/// row renders null like `getattr` on a dead FK.
+/// row renders null like `getattr` on a dead FK. `email` is nullable
+/// (`CharField(null=True)`, `db/models/user.py:61`); `None` renders null.
 async fn expand_user(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Value, Denial> {
-    let row: Option<(String, String, String, String, Option<uuid::Uuid>)> = sqlx::query_as(
+    let row: Option<ExpandUserLookup> = sqlx::query_as(
         r#"SELECT "first_name", "last_name", "email", COALESCE("avatar", ''), "avatar_asset_id" FROM "users" WHERE "id" = $1"#,
     )
     .bind(user_id)
@@ -1152,6 +1157,7 @@ async fn expand_user(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Value, Denia
         None => None,
     };
     let avatar_url = pidash_services::v1_projects::ser_collab::resolve_avatar_url(
+        avatar_asset.is_some(),
         avatar_url.as_deref(),
         &avatar,
     );
@@ -1168,7 +1174,7 @@ async fn expand_user(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Value, Denia
         id: &id,
         first_name: &first_name,
         last_name: &last_name,
-        email: &email,
+        email: email.as_deref(),
         avatar: &avatar,
         avatar_url,
         display_name: display_name.as_deref().unwrap_or(""),

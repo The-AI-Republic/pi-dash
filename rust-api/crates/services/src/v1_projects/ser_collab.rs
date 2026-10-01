@@ -515,15 +515,18 @@ pub const USER_LITE_WIRE_FIELDS: [&str; 7] = [
 ];
 
 /// Port of `User.avatar_url` (`db/models/user.py:142-151`): the avatar
-/// asset URL when an asset is attached, else the `avatar` text, else `None`.
-/// The caller resolves the asset URL; this kernel only encodes the
-/// precedence.
+/// asset URL as-is when an asset is attached (even when the asset type
+/// maps to no URL — no fall-through to the `avatar` text), else the
+/// `avatar` text when non-empty, else `None`. The caller resolves the
+/// asset URL and reports whether an asset is attached; this kernel only
+/// encodes the precedence.
 pub fn resolve_avatar_url<'a>(
+    avatar_asset_attached: bool,
     avatar_asset_url: Option<&'a str>,
     avatar: &'a str,
 ) -> Option<&'a str> {
-    if let Some(url) = avatar_asset_url {
-        return Some(url);
+    if avatar_asset_attached {
+        return avatar_asset_url;
     }
     if !avatar.is_empty() {
         return Some(avatar);
@@ -531,14 +534,15 @@ pub fn resolve_avatar_url<'a>(
     None
 }
 
-/// A `User` row for lite rendering: `id` UUID string, names, `email`,
-/// `avatar` text, and the resolved [`resolve_avatar_url`] value.
+/// A `User` row for lite rendering: `id` UUID string, names, nullable
+/// `email` (`CharField(null=True)`, `db/models/user.py:61`), `avatar`
+/// text, and the resolved [`resolve_avatar_url`] value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserLiteRow<'a> {
     pub id: &'a str,
     pub first_name: &'a str,
     pub last_name: &'a str,
-    pub email: &'a str,
+    pub email: Option<&'a str>,
     pub avatar: &'a str,
     pub avatar_url: Option<&'a str>,
     pub display_name: &'a str,
@@ -546,13 +550,13 @@ pub struct UserLiteRow<'a> {
 
 /// `UserLiteSerializer.to_representation` output (`user.py:13-38`), in wire
 /// order. `avatar_url` is read-only (`user.py:21-25`); `None` renders
-/// `null`.
+/// `null`, as does a NULL `email`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UserLiteView<'a> {
     pub id: &'a str,
     pub first_name: &'a str,
     pub last_name: &'a str,
-    pub email: &'a str,
+    pub email: Option<&'a str>,
     pub avatar: &'a str,
     pub avatar_url: Option<&'a str>,
     pub display_name: &'a str,
@@ -958,7 +962,7 @@ mod tests {
             id: "33333333-3333-3333-3333-333333333333",
             first_name: "Ct",
             last_name: "Owner",
-            email: "ct-owner@example.com",
+            email: Some("ct-owner@example.com"),
             avatar: "",
             avatar_url: None,
             display_name: "ct-owner",
@@ -1010,17 +1014,61 @@ mod tests {
     }
 
     #[test]
-    fn avatar_url_precedence_matches_model_property() {
-        // db/models/user.py:142-151: asset URL, else avatar text, else None.
+    fn user_null_email_renders_null_with_wire_order() {
+        // users.email is nullable (db/models/user.py:61); the serializer
+        // renders null with the key present, in wire order (PIDASHCONV-514).
+        let row = UserLiteRow {
+            id: "44444444-4444-4444-4444-444444444444",
+            first_name: "Ct",
+            last_name: "Null",
+            email: None,
+            avatar: "",
+            avatar_url: None,
+            display_name: "ct-null",
+        };
+        let view = user_lite_to_representation(&row);
         assert_eq!(
-            resolve_avatar_url(Some("https://cdn.example/a.png"), "legacy"),
+            serialized_keys(&view),
+            USER_LITE_WIRE_FIELDS
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>(),
+            "output keys follow the wire order"
+        );
+        let produced = serde_json::to_value(&view).expect("serializes");
+        assert_eq!(produced["email"], Value::Null);
+        assert_replay(
+            &produced,
+            &serde_json::json!({
+                "id": row.id,
+                "first_name": row.first_name,
+                "last_name": row.last_name,
+                "email": Value::Null,
+                "avatar": row.avatar,
+                "avatar_url": Value::Null,
+                "display_name": row.display_name,
+            }),
+        );
+    }
+
+    #[test]
+    fn avatar_url_precedence_matches_model_property() {
+        // db/models/user.py:142-151: asset URL as-is when attached (even
+        // unresolvable), else avatar text, else None.
+        assert_eq!(
+            resolve_avatar_url(true, Some("https://cdn.example/a.png"), "legacy"),
             Some("https://cdn.example/a.png")
         );
+        // Attached but unresolvable: null, NOT the avatar text (PIDASHCONV-514).
         assert_eq!(
-            resolve_avatar_url(None, "https://cdn.example/b.png"),
+            resolve_avatar_url(true, None, "https://cdn.example/legacy.png"),
+            None
+        );
+        assert_eq!(
+            resolve_avatar_url(false, None, "https://cdn.example/b.png"),
             Some("https://cdn.example/b.png")
         );
-        assert_eq!(resolve_avatar_url(None, ""), None);
+        assert_eq!(resolve_avatar_url(false, None, ""), None);
     }
 
     #[test]
