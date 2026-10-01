@@ -226,3 +226,4 @@ if ($failures.Count -gt 0) {
     exit 1
 }
 Write-Host "all $passed checks passed"
+exit 0
