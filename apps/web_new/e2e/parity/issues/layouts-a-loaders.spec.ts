@@ -47,12 +47,12 @@ test(
     await driver.layoutsStallIssuesGet(15_000);
     try {
       await driver.openAuthenticated(projectIssuesPath(seed), sessionBrowserCookies(session));
-      await expect.poll(async () => driver.layoutsSkeletonVisible(), { timeout: 120_000 }).toEqual(true);
+      await expect.poll(async () => driver.layoutsSkeletonVisible(), { timeout: 300_000 }).toEqual(true);
     } finally {
       await driver.layoutsReleaseStalls();
     }
     await expect
-      .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 120_000 })
+      .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 300_000 })
       .toEqual(expect.arrayContaining([...seed.issueNames]));
     await resetPrefs(seed.workspaceSlug, seed.projectId, session);
   }
@@ -76,7 +76,7 @@ test(
         display_filters: { layout: "list", group_by: null, order_by: "sort_order" },
       });
       await driver.openAuthenticated(freshPath, sessionBrowserCookies(session));
-      await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 120_000 }).not.toBeNull();
+      await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 300_000 }).not.toBeNull();
       expect(await driver.layoutsListVisible()).toEqual(false);
 
       await serverPatchProjectUserProperties(seed.workspaceSlug, projectId, session, {
@@ -101,13 +101,13 @@ test(
     await driver.openAuthenticated(projectIssuesPath(seed), sessionBrowserCookies(session));
     const first = seed.issueNames[0] ?? "";
     await expect
-      .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 120_000 })
+      .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 300_000 })
       .toContain(first);
 
     await driver.layoutsStallIssueMutation(15_000);
     try {
       const settled = driver.layoutsRowSetPriority(first, "High");
-      await expect.poll(async () => driver.layoutsMutationSpinnerVisible(), { timeout: 120_000 }).toEqual(true);
+      await expect.poll(async () => driver.layoutsMutationSpinnerVisible(), { timeout: 300_000 }).toEqual(true);
       await settled;
     } finally {
       await driver.layoutsReleaseStalls();
@@ -139,12 +139,12 @@ test(
         display_filters: { layout: "list", group_by: "state", order_by: "sort_order", show_empty_groups: false },
       });
       await driver.openAuthenticated(projectIssuesPath(seed), sessionBrowserCookies(session));
-      await expect.poll(async () => driver.layoutsListGroupHasLoadMore("Todo"), { timeout: 120_000 }).toEqual(true);
+      await expect.poll(async () => driver.layoutsListGroupHasLoadMore("Todo"), { timeout: 300_000 }).toEqual(true);
 
       await driver.layoutsStallIssuesGet(15_000);
       try {
         const settled = driver.layoutsListGroupLoadMore("Todo");
-        await expect.poll(async () => driver.layoutsSkeletonVisible(), { timeout: 120_000 }).toEqual(true);
+        await expect.poll(async () => driver.layoutsSkeletonVisible(), { timeout: 300_000 }).toEqual(true);
         await settled;
       } finally {
         await driver.layoutsReleaseStalls();
@@ -171,7 +171,7 @@ test(
     await resetPrefs(seed.workspaceSlug, seed.projectId, session);
     await driver.openAuthenticated(projectIssuesPath(seed), sessionBrowserCookies(session));
     await expect
-      .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 120_000 })
+      .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 300_000 })
       .toEqual(expect.arrayContaining([...seed.issueNames]));
 
     const title = `Parity optimistic ${uniqueSuffix()}`;
@@ -179,7 +179,7 @@ test(
     let createdId = "";
     try {
       const settled = driver.layoutsListQuickAdd(title, "All work items");
-      await expect.poll(async () => driver.layoutsTempRowVisible(), { timeout: 120_000 }).toEqual(true);
+      await expect.poll(async () => driver.layoutsTempRowVisible(), { timeout: 300_000 }).toEqual(true);
       await settled;
     } finally {
       await driver.layoutsReleaseStalls();

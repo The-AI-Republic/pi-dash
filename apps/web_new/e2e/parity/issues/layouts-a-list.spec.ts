@@ -93,7 +93,7 @@ test(
       sessionBrowserCookies(session)
     );
     await expect
-      .poll(async () => driver.layoutsListGroups(), { timeout: 120_000 })
+      .poll(async () => driver.layoutsListGroups(), { timeout: 300_000 })
       .toEqual(expect.arrayContaining(["Todo", stateName]));
 
     const title = `Parity sectionadd ${uniqueSuffix()}`;
@@ -123,7 +123,7 @@ test(
       `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
       sessionBrowserCookies(session)
     );
-    await expect.poll(async () => driver.layoutsListGroups(), { timeout: 120_000 }).toEqual(["Todo"]);
+    await expect.poll(async () => driver.layoutsListGroups(), { timeout: 300_000 }).toEqual(["Todo"]);
 
     await test.step("collapse hides the rows", async () => {
       expect(await driver.layoutsListGroupExpanded("Todo")).toEqual(true);
@@ -136,7 +136,7 @@ test(
       await driver.layoutsListToggleGroup("Todo");
       expect(await driver.layoutsListGroupExpanded("Todo")).toEqual(true);
       await expect
-        .poll(async () => driver.layoutsListGroupIssueNames("Todo"), { timeout: 120_000 })
+        .poll(async () => driver.layoutsListGroupIssueNames("Todo"), { timeout: 300_000 })
         .toEqual(expect.arrayContaining([...seed.issueNames]));
     });
 
@@ -169,15 +169,15 @@ test(specTitle(["ISS-009"], "hide and show empty groups"), { tag: specTags(["ISS
       `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
       sessionBrowserCookies(session)
     );
-    await expect.poll(async () => driver.layoutsListGroups(), { timeout: 120_000 }).toEqual(["Todo"]);
+    await expect.poll(async () => driver.layoutsListGroups(), { timeout: 300_000 }).toEqual(["Todo"]);
 
     await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
       display_filters: { layout: "list", group_by: "state", order_by: "sort_order", show_empty_groups: true },
     });
     await driver.layoutsReloadIssues();
-    await expect.poll(async () => driver.layoutsListGroups(), { timeout: 120_000 }).toHaveLength(2);
+    await expect.poll(async () => driver.layoutsListGroups(), { timeout: 300_000 }).toHaveLength(2);
     await expect
-      .poll(async () => driver.layoutsListGroups(), { timeout: 120_000 })
+      .poll(async () => driver.layoutsListGroups(), { timeout: 300_000 })
       .toEqual(expect.arrayContaining(["Todo", stateName]));
   } finally {
     await serverDeleteState(seed.workspaceSlug, seed.projectId, stateId, session);
@@ -218,13 +218,13 @@ test(
           `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
           sessionBrowserCookies(session)
         );
-        await expect.poll(async () => driver.layoutsListGroupHasLoadMore("Todo"), { timeout: 120_000 }).toEqual(true);
+        await expect.poll(async () => driver.layoutsListGroupHasLoadMore("Todo"), { timeout: 300_000 }).toEqual(true);
         await driver.layoutsListGroupLoadMore("Todo");
         expect(await driver.layoutsListGroupHasLoadMore("Todo")).toEqual(true);
         await driver.layoutsListGroupLoadMore("Todo");
         expect(await driver.layoutsListGroupHasLoadMore("Todo")).toEqual(false);
         await expect
-          .poll(async () => driver.layoutsListGroupIssueNames("Todo"), { timeout: 120_000 })
+          .poll(async () => driver.layoutsListGroupIssueNames("Todo"), { timeout: 300_000 })
           .toContain(tailName);
       });
 
@@ -235,7 +235,7 @@ test(
         await driver.layoutsReloadIssues();
         // Rows first: the no-row read below must not pass on a slow load.
         await expect
-          .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 120_000 })
+          .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 300_000 })
           .not.toHaveLength(0);
         expect(await driver.layoutsListGroupHasLoadMore("All work items")).toEqual(false);
         for (let scroll = 0; scroll < 4; scroll++) {
@@ -243,7 +243,7 @@ test(
           await driver.layoutsListScrollEnd();
         }
         await expect
-          .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 120_000 })
+          .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 300_000 })
           .toContain(tailName);
       });
     } finally {

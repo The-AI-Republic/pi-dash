@@ -191,10 +191,10 @@ test(
       expect(await driver.layoutsMoveModalVisible()).toEqual(false);
 
       await expect
-        .poll(async () => serverIssues(seed.workspaceSlug, projectB, session), { timeout: 120_000 })
+        .poll(async () => serverIssues(seed.workspaceSlug, projectB, session), { timeout: 300_000 })
         .toEqual(expect.arrayContaining([expect.objectContaining({ id })]));
       await expect
-        .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 120_000 })
+        .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 300_000 })
         .not.toContain(title);
 
       await serverMoveIssue(seed.workspaceSlug, seed.projectId, id, projectB, session);
@@ -226,10 +226,10 @@ test(
       expect(await driver.layoutsDeleteModalVisible()).toEqual(false);
 
       await expect
-        .poll(async () => serverIssues(seed.workspaceSlug, seed.projectId, session), { timeout: 120_000 })
+        .poll(async () => serverIssues(seed.workspaceSlug, seed.projectId, session), { timeout: 300_000 })
         .not.toEqual(expect.arrayContaining([expect.objectContaining({ id })]));
       await expect
-        .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 120_000 })
+        .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 300_000 })
         .not.toContain(title);
     } finally {
       await serverDeleteIssue(seed.workspaceSlug, seed.projectId, id, session).catch(() => {});
@@ -261,10 +261,10 @@ test(
       expect(await driver.layoutsArchiveModalVisible()).toEqual(false);
 
       await expect
-        .poll(async () => serverArchivedIssues(seed.workspaceSlug, seed.projectId, session), { timeout: 120_000 })
+        .poll(async () => serverArchivedIssues(seed.workspaceSlug, seed.projectId, session), { timeout: 300_000 })
         .toEqual(expect.arrayContaining([expect.objectContaining({ id })]));
       await expect
-        .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 120_000 })
+        .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 300_000 })
         .not.toContain(title);
 
       await serverRestoreIssue(seed.workspaceSlug, seed.projectId, id, session);
@@ -332,7 +332,7 @@ test(
       await driver.layoutsRowMenuChoose(title, "Remove from cycle");
       await expect
         .poll(async () => serverCycleIssueIds(seed.workspaceSlug, seed.projectId, cycle.id, session), {
-          timeout: 120_000,
+          timeout: 300_000,
         })
         .not.toContain(id);
     } finally {
@@ -375,7 +375,7 @@ test(
       await driver.layoutsRowMenuChoose(title, "Remove from module");
       await expect
         .poll(async () => serverModuleIssueIds(seed.workspaceSlug, seed.projectId, module.id, session), {
-          timeout: 120_000,
+          timeout: 300_000,
         })
         .not.toContain(id);
     } finally {
@@ -401,7 +401,7 @@ test(
     await driver.layoutsRowMenuChoose(title, "Archive");
     await driver.layoutsArchiveModalConfirm();
     await expect
-      .poll(async () => serverArchivedIssues(seed.workspaceSlug, seed.projectId, session), { timeout: 120_000 })
+      .poll(async () => serverArchivedIssues(seed.workspaceSlug, seed.projectId, session), { timeout: 300_000 })
       .toEqual(expect.arrayContaining([expect.objectContaining({ id })]));
     const archivedPath = `/${seed.workspaceSlug}/projects/${seed.projectId}/archives/issues`;
     try {
@@ -412,12 +412,12 @@ test(
       const toast = await driver.rulesLastToast();
       expect(toast?.title).toContain("Restore");
       await expect
-        .poll(async () => serverArchivedIssues(seed.workspaceSlug, seed.projectId, session), { timeout: 120_000 })
+        .poll(async () => serverArchivedIssues(seed.workspaceSlug, seed.projectId, session), { timeout: 300_000 })
         .not.toEqual(expect.arrayContaining([expect.objectContaining({ id })]));
 
       await openPath(driver, projectIssuesPath(seed), session);
       await expect
-        .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 120_000 })
+        .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 300_000 })
         .toContain(title);
     } finally {
       await serverRestoreIssue(seed.workspaceSlug, seed.projectId, id, session).catch(() => {});
@@ -537,7 +537,7 @@ test(
       await driver.layoutsAddExistingModalChoose(plainName);
       await expect
         .poll(async () => serverCycleIssueIds(seed.workspaceSlug, seed.projectId, cycle.id, session), {
-          timeout: 120_000,
+          timeout: 300_000,
         })
         .toContain(plainId);
     } finally {

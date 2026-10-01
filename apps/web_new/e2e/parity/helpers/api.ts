@@ -1848,7 +1848,12 @@ export async function serverCreateCycle(
     body: JSON.stringify({ name, start_date: startDate, end_date: endDate }),
   });
   const body = (await res.json().catch(() => null)) as { id?: unknown; name?: unknown } | null;
-  if ((res.status !== 201 && res.status !== 200) || !body || typeof body.id !== "string" || typeof body.name !== "string") {
+  if (
+    (res.status !== 201 && res.status !== 200) ||
+    !body ||
+    typeof body.id !== "string" ||
+    typeof body.name !== "string"
+  ) {
     throw new Error(`[parity] cycle create failed with HTTP ${res.status}: ${JSON.stringify(body)}`);
   }
   return { id: body.id, name: body.name };
@@ -1914,7 +1919,12 @@ export async function serverCreateModule(
     body: JSON.stringify({ name }),
   });
   const body = (await res.json().catch(() => null)) as { id?: unknown; name?: unknown } | null;
-  if ((res.status !== 201 && res.status !== 200) || !body || typeof body.id !== "string" || typeof body.name !== "string") {
+  if (
+    (res.status !== 201 && res.status !== 200) ||
+    !body ||
+    typeof body.id !== "string" ||
+    typeof body.name !== "string"
+  ) {
     throw new Error(`[parity] module create failed with HTTP ${res.status}: ${JSON.stringify(body)}`);
   }
   return { id: body.id, name: body.name };
@@ -1980,14 +1990,13 @@ export async function serverWorkspaceUserId(
     const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
     lastCount = rows.length;
     for (const row of rows) {
-      const record = row as { member?: unknown; email?: unknown; member_email?: unknown };
-      const candidate =
-        typeof record.email === "string"
-          ? record.email
-          : typeof record.member_email === "string"
-            ? record.member_email
-            : null;
-      if (candidate === email && typeof record.member === "string") return record.member;
+      // Rows nest the user record: { id: <membership>, member: { id: <user>, email } }.
+      const record = row as { member?: unknown };
+      const member =
+        typeof record.member === "object" && record.member !== null
+          ? (record.member as { id?: unknown; email?: unknown })
+          : null;
+      if (member?.email === email && typeof member.id === "string") return member.id;
     }
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }

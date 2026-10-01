@@ -101,7 +101,7 @@ test(
     try {
       await openPath(driver, freshPath, session);
       await expect
-        .poll(async () => driver.layoutsEmptyTitle(), { timeout: 120_000 })
+        .poll(async () => driver.layoutsEmptyTitle(), { timeout: 300_000 })
         .toEqual("Start with your first work item.");
       expect(await driver.layoutsEmptyActions()).toEqual([{ label: "Create your first work item", disabled: false }]);
 
@@ -120,12 +120,12 @@ test(
           });
           await openPath(driver, freshPath, session);
           await expect
-            .poll(async () => driver.layoutsEmptyTitle(), { timeout: 120_000 })
+            .poll(async () => driver.layoutsEmptyTitle(), { timeout: 300_000 })
             .toEqual("No matching results.");
           expect(await driver.layoutsEmptyActions()).toEqual([{ label: "Clear all filters", disabled: false }]);
           await driver.layoutsEmptyChoose("Clear all filters");
           await expect
-            .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 120_000 })
+            .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 300_000 })
             .toContain(title);
         } finally {
           await serverDeleteIssue(seed.workspaceSlug, projectId, id, session);
@@ -150,7 +150,7 @@ test(
     const guestSession = await signInSession(seed.guestEmail, seed.guestPassword);
     await openPath(driver, projectIssuesPath(seed), guestSession);
     await expect
-      .poll(async () => driver.layoutsEmptyTitle(), { timeout: 120_000 })
+      .poll(async () => driver.layoutsEmptyTitle(), { timeout: 300_000 })
       .toEqual("Start with your first work item.");
     expect(await driver.layoutsEmptyActions()).toEqual([{ label: "Create your first work item", disabled: true }]);
   }
@@ -184,7 +184,7 @@ test(
     try {
       await openPath(driver, cyclePath, session);
       await expect
-        .poll(async () => driver.layoutsEmptyTitle(), { timeout: 120_000 })
+        .poll(async () => driver.layoutsEmptyTitle(), { timeout: 300_000 })
         .toEqual("No work items to show in this cycle");
       expect(await driver.layoutsEmptyActions()).toEqual([
         { label: "Create work item", disabled: false },
@@ -200,7 +200,7 @@ test(
         await driver.layoutsAddExistingModalChoose(plainName);
         await expect
           .poll(async () => serverCycleIssueIds(seed.workspaceSlug, seed.projectId, cycle.id, session), {
-            timeout: 120_000,
+            timeout: 300_000,
           })
           .toContain(plainId);
       });
@@ -210,10 +210,10 @@ test(
           filters: { ...seedIssueFilters(), assignees: [member.id] },
         });
         await openPath(driver, cyclePath, session);
-        await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 120_000 }).toEqual("No matching results.");
+        await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 300_000 }).toEqual("No matching results.");
         expect(await driver.layoutsEmptyActions()).toEqual([{ label: "Clear filters", disabled: false }]);
         await driver.layoutsEmptyChoose("Clear filters");
-        await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 120_000 }).toBeNull();
+        await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 300_000 }).toBeNull();
       });
     } finally {
       await serverDeleteIssue(seed.workspaceSlug, seed.projectId, plainId, session).catch(() => {});
@@ -247,7 +247,7 @@ test(
     try {
       await openPath(driver, `/${seed.workspaceSlug}/projects/${seed.projectId}/cycles/${cycle.id}`, session);
       await expect
-        .poll(async () => driver.layoutsEmptyTitle(), { timeout: 120_000 })
+        .poll(async () => driver.layoutsEmptyTitle(), { timeout: 300_000 })
         .toEqual("No work items in the cycle");
       expect(await driver.layoutsEmptyActions()).toEqual([]);
     } finally {
@@ -271,7 +271,7 @@ test(
     try {
       await openPath(driver, modulePath, session);
       await expect
-        .poll(async () => driver.layoutsEmptyTitle(), { timeout: 120_000 })
+        .poll(async () => driver.layoutsEmptyTitle(), { timeout: 300_000 })
         .toEqual("No work items to show in this Module");
       expect(await driver.layoutsEmptyActions()).toEqual([
         { label: "Create work item", disabled: false },
@@ -283,7 +283,7 @@ test(
       await driver.layoutsAddExistingModalChoose(plainName);
       await expect
         .poll(async () => serverModuleIssueIds(seed.workspaceSlug, seed.projectId, module.id, session), {
-          timeout: 120_000,
+          timeout: 300_000,
         })
         .toContain(plainId);
 
@@ -291,10 +291,10 @@ test(
         filters: { ...seedIssueFilters(), assignees: [member.id] },
       });
       await openPath(driver, modulePath, session);
-      await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 120_000 }).toEqual("No matching results.");
+      await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 300_000 }).toEqual("No matching results.");
       expect(await driver.layoutsEmptyActions()).toEqual([{ label: "Clear filters", disabled: false }]);
       await driver.layoutsEmptyChoose("Clear filters");
-      await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 120_000 }).toBeNull();
+      await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 300_000 }).toBeNull();
     } finally {
       await serverDeleteIssue(seed.workspaceSlug, seed.projectId, plainId, session).catch(() => {});
       await serverDeleteModule(seed.workspaceSlug, seed.projectId, module.id, session);
@@ -312,12 +312,12 @@ test(
     const archivedPath = `/${seed.workspaceSlug}/projects/${seed.projectId}/archives/issues`;
     await openPath(driver, archivedPath, session);
     await expect
-      .poll(async () => driver.layoutsEmptyTitle(), { timeout: 120_000 })
+      .poll(async () => driver.layoutsEmptyTitle(), { timeout: 300_000 })
       .toEqual("No archived work items yet");
     expect(await driver.layoutsEmptyActions()).toEqual([{ label: "Set automation", disabled: false }]);
 
     await driver.layoutsEmptyChoose("Set automation");
-    await expect.poll(async () => driver.layoutsCurrentUrl(), { timeout: 120_000 }).toContain("/settings/automation");
+    await expect.poll(async () => driver.layoutsCurrentUrl(), { timeout: 300_000 }).toContain("/settings/automation");
 
     // Filtered-empty needs a non-empty base: archive one issue first.
     const states = await serverListStates(seed.workspaceSlug, seed.projectId, session);
@@ -342,7 +342,7 @@ test(
         filters: { ...seedIssueFilters(), assignees: [member.id] },
       });
       await openPath(driver, archivedPath, session);
-      await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 120_000 }).toEqual("No matching results.");
+      await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 300_000 }).toEqual("No matching results.");
       expect(await driver.layoutsEmptyActions()).toEqual([{ label: "Clear filters", disabled: false }]);
       await driver.layoutsEmptyChoose("Clear filters");
       // Positive read: the archived row renders again.
@@ -375,7 +375,7 @@ test(
     try {
       await openPath(driver, `/${seed.workspaceSlug}/projects/${seed.projectId}/views/${viewId}`, session);
       await expect
-        .poll(async () => driver.layoutsEmptyTitle(), { timeout: 120_000 })
+        .poll(async () => driver.layoutsEmptyTitle(), { timeout: 300_000 })
         .toEqual("View work items will appear here");
       expect(await driver.layoutsEmptyActions()).toEqual([{ label: "New work item", disabled: false }]);
       await driver.layoutsEmptyChoose("New work item");
@@ -395,7 +395,7 @@ test(
     await test.step("zero projects prompts starting the first", async () => {
       const fresh = await freshEmptyWorkspace();
       await driver.openAuthenticated(`/${fresh.slug}/workspace-views/all-issues`, browserCookies(fresh.user));
-      await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 120_000 }).toEqual("No project");
+      await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 300_000 }).toEqual("No project");
       expect(await driver.layoutsEmptyActions()).toEqual([{ label: "Start your first project", disabled: false }]);
     });
 
@@ -412,7 +412,7 @@ test(
         await serverPatchIssue(seed.workspaceSlug, seed.projectId, row.id, { assignee_ids: [] }, ownerSession);
       }
       await openPath(driver, `/${seed.workspaceSlug}/workspace-views/all-issues`, guestSession);
-      await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 120_000 }).toEqual("No Views yet");
+      await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 300_000 }).toEqual("No Views yet");
       expect(await driver.layoutsEmptyActions()).toEqual([{ label: "Add work item", disabled: true }]);
     });
   }
@@ -434,10 +434,10 @@ test(
     ];
     for (const [tab, title] of cases) {
       await driver.openAuthenticated(`${base}/${tab}`, browserCookies(fresh.user));
-      await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 120_000 }).toEqual(title);
+      await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 300_000 }).toEqual(title);
       expect(await driver.layoutsEmptyActions()).toEqual([]);
     }
     await driver.openAuthenticated(`${base}/zzz-unknown`, browserCookies(fresh.user));
-    await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 120_000 }).toBeNull();
+    await expect.poll(async () => driver.layoutsEmptyTitle(), { timeout: 300_000 }).toBeNull();
   }
 );

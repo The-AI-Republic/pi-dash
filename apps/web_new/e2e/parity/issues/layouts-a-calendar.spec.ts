@@ -101,8 +101,8 @@ test(
       expect(await driver.layoutsCalColumnCount()).toEqual(7);
 
       await test.step("each dated issue lands on its day", async () => {
-        await expect.poll(async () => driver.layoutsCalDayIssueNames(dayA.day), { timeout: 120_000 }).toContain(nameA);
-        await expect.poll(async () => driver.layoutsCalDayIssueNames(dayB.day), { timeout: 120_000 }).toContain(nameB);
+        await expect.poll(async () => driver.layoutsCalDayIssueNames(dayA.day), { timeout: 300_000 }).toContain(nameA);
+        await expect.poll(async () => driver.layoutsCalDayIssueNames(dayB.day), { timeout: 300_000 }).toContain(nameB);
       });
 
       await test.step("today is badged and undated issues never appear", async () => {
@@ -138,10 +138,10 @@ test(
         ids.push(id);
       }
       await openCal(driver, seed, session);
-      await expect.poll(async () => driver.layoutsCalDayHasLoadMore(crowded.day), { timeout: 120_000 }).toEqual(true);
+      await expect.poll(async () => driver.layoutsCalDayHasLoadMore(crowded.day), { timeout: 300_000 }).toEqual(true);
       await driver.layoutsCalDayLoadMore(crowded.day);
       await expect
-        .poll(async () => driver.layoutsCalDayIssueNames(crowded.day), { timeout: 120_000 })
+        .poll(async () => driver.layoutsCalDayIssueNames(crowded.day), { timeout: 300_000 })
         .toEqual(expect.arrayContaining(names));
     } finally {
       for (const id of ids) await serverDeleteIssue(seed.workspaceSlug, seed.projectId, id, session);
@@ -165,7 +165,7 @@ test(
     try {
       await openCal(driver, seed, session);
       const title = await driver.layoutsCalTitle();
-      await expect.poll(async () => driver.layoutsCalDayIssueNames(home.day), { timeout: 120_000 }).toContain(name);
+      await expect.poll(async () => driver.layoutsCalDayIssueNames(home.day), { timeout: 300_000 }).toContain(name);
 
       await test.step("prev/next move one month and refetch the window", async () => {
         await driver.layoutsCalPrev();
@@ -173,34 +173,37 @@ test(
         expect(prevTitle).not.toEqual(title);
         expect(await driver.layoutsCalDayIssueNames(home.day)).not.toContain(name);
         await driver.layoutsCalNext();
-        await expect.poll(async () => driver.layoutsCalTitle(), { timeout: 120_000 }).toEqual(title);
-        await expect.poll(async () => driver.layoutsCalDayIssueNames(home.day), { timeout: 120_000 }).toContain(name);
+        await expect.poll(async () => driver.layoutsCalTitle(), { timeout: 300_000 }).toEqual(title);
+        await expect.poll(async () => driver.layoutsCalDayIssueNames(home.day), { timeout: 300_000 }).toContain(name);
       });
 
       await test.step("today jumps back to the current month", async () => {
         await driver.layoutsCalNext();
         expect(await driver.layoutsCalTitle()).not.toEqual(title);
         await driver.layoutsCalToday();
-        await expect.poll(async () => driver.layoutsCalTitle(), { timeout: 120_000 }).toEqual(title);
+        await expect.poll(async () => driver.layoutsCalTitle(), { timeout: 300_000 }).toEqual(title);
         expect(await driver.layoutsCalDayIsToday(today.day)).toEqual(true);
       });
 
       await test.step("the title picker offers months with year stepping", async () => {
         expect(await driver.layoutsCalMonthPickerEnabled()).toEqual(true);
+        // The picker grid shows short titles ("Jan"); the title bar shows
+        // the full month name.
         const months = await driver.layoutsCalMonthPickerMonths();
         expect(months).toHaveLength(12);
-        expect(months).toEqual(expect.arrayContaining(["January", "December"]));
+        expect(months).toEqual(expect.arrayContaining(["Jan", "Dec"]));
         const year = new Date().getFullYear();
         expect(await driver.layoutsCalMonthPickerYear()).toEqual(year);
         await driver.layoutsCalMonthPickerYearStep("next");
         expect(await driver.layoutsCalMonthPickerYear()).toEqual(year + 1);
         await driver.layoutsCalMonthPickerYearStep("prev");
         expect(await driver.layoutsCalMonthPickerYear()).toEqual(year);
-        const other = months.find((m) => !title.includes(m)) ?? months[0] ?? "";
+        const currentShort = months[new Date().getMonth()] ?? "";
+        const other = months.find((m) => m !== currentShort && m !== "") ?? "";
         await driver.layoutsCalMonthPickerChoose(other);
-        await expect.poll(async () => driver.layoutsCalTitle(), { timeout: 120_000 }).not.toEqual(title);
+        await expect.poll(async () => driver.layoutsCalTitle(), { timeout: 300_000 }).not.toEqual(title);
         await driver.layoutsCalToday();
-        await expect.poll(async () => driver.layoutsCalTitle(), { timeout: 120_000 }).toEqual(title);
+        await expect.poll(async () => driver.layoutsCalTitle(), { timeout: 300_000 }).toEqual(title);
       });
     } finally {
       await serverDeleteIssue(seed.workspaceSlug, seed.projectId, id, session);
@@ -217,17 +220,22 @@ test(
     const session = await signInSession(seed.email, seed.password);
     try {
       await openCal(driver, seed, session);
-      const monthTitle = await driver.layoutsCalTitle();
       await driver.layoutsCalSetMode("week");
       expect(await driver.layoutsCalMode()).toEqual("week");
       const weekTitle = await driver.layoutsCalTitle();
-      expect(weekTitle).not.toEqual(monthTitle);
+      // A same-month week shares the month title ("October 2026"), so the
+      // inequality below cannot assume they differ; the picker being
+      // disabled plus the prev/today round-trip proves week mode instead.
       expect(weekTitle).toContain(String(new Date().getFullYear()));
       expect(await driver.layoutsCalMonthPickerEnabled()).toEqual(false);
-      await driver.layoutsCalPrev();
-      expect(await driver.layoutsCalTitle()).not.toEqual(weekTitle);
+      let stepped = weekTitle;
+      for (let k = 0; k < 6 && stepped === weekTitle; k++) {
+        await driver.layoutsCalPrev();
+        stepped = await driver.layoutsCalTitle();
+      }
+      expect(stepped).not.toEqual(weekTitle);
       await driver.layoutsCalToday();
-      await expect.poll(async () => driver.layoutsCalTitle(), { timeout: 120_000 }).toEqual(weekTitle);
+      await expect.poll(async () => driver.layoutsCalTitle(), { timeout: 300_000 }).toEqual(weekTitle);
     } finally {
       await resetPrefs(seed.workspaceSlug, seed.projectId, session);
     }
@@ -281,10 +289,10 @@ test(
     await serverPatchIssue(seed.workspaceSlug, seed.projectId, id, { target_date: from.iso }, session);
     try {
       await openCal(driver, seed, session);
-      await expect.poll(async () => driver.layoutsCalDayIssueNames(from.day), { timeout: 120_000 }).toContain(name);
+      await expect.poll(async () => driver.layoutsCalDayIssueNames(from.day), { timeout: 300_000 }).toContain(name);
 
       await driver.layoutsCalDragBlock(name, to.day);
-      await expect.poll(async () => driver.layoutsCalDayIssueNames(to.day), { timeout: 120_000 }).toContain(name);
+      await expect.poll(async () => driver.layoutsCalDayIssueNames(to.day), { timeout: 300_000 }).toContain(name);
       expect(await driver.layoutsCalDayIssueNames(from.day)).not.toContain(name);
       expect((await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, session)).targetDate).toEqual(to.iso);
       expect(await driver.layoutsRowHighlighted(name)).toEqual(true);
@@ -323,12 +331,12 @@ test(
     );
     try {
       await openCal(driver, seed, session);
-      await expect.poll(async () => driver.layoutsCalDayIssueNames(late.day), { timeout: 120_000 }).toContain(name);
+      await expect.poll(async () => driver.layoutsCalDayIssueNames(late.day), { timeout: 300_000 }).toContain(name);
       await driver.layoutsCalDragBlock(name, early.day);
       const toast = await driver.rulesLastToast();
       expect(toast).not.toBeNull();
       expect((await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, session)).targetDate).toEqual(late.iso);
-      await expect.poll(async () => driver.layoutsCalDayIssueNames(late.day), { timeout: 120_000 }).toContain(name);
+      await expect.poll(async () => driver.layoutsCalDayIssueNames(late.day), { timeout: 300_000 }).toContain(name);
     } finally {
       await serverDeleteIssue(seed.workspaceSlug, seed.projectId, id, session);
       await resetPrefs(seed.workspaceSlug, seed.projectId, session);
@@ -350,7 +358,7 @@ test(
     await serverPatchIssue(seed.workspaceSlug, seed.projectId, id, { target_date: home.iso }, session);
     try {
       await openCal(driver, seed, session);
-      await expect.poll(async () => driver.layoutsCalDayIssueNames(home.day), { timeout: 120_000 }).toContain(name);
+      await expect.poll(async () => driver.layoutsCalDayIssueNames(home.day), { timeout: 300_000 }).toContain(name);
 
       const text = await driver.layoutsCalBlockText(name);
       expect(text).toContain(name);
@@ -387,7 +395,7 @@ test(
 
       const title = `Parity caladd ${uniqueSuffix()}`;
       await driver.layoutsCalDayQuickAdd(home.day, title);
-      await expect.poll(async () => driver.layoutsCalDayIssueNames(home.day), { timeout: 120_000 }).toContain(title);
+      await expect.poll(async () => driver.layoutsCalDayIssueNames(home.day), { timeout: 300_000 }).toContain(title);
       const rows = await serverIssueDetailsForName(seed, session, title);
       expect(rows.targetDate).toEqual(home.iso);
       await serverDeleteIssue(seed.workspaceSlug, seed.projectId, rows.id, session);
@@ -425,13 +433,13 @@ test(
       await driver.layoutsCalDayAddExisting(home.day);
       expect(await driver.layoutsAddExistingModalVisible()).toEqual(true);
       await expect
-        .poll(async () => driver.layoutsAddExistingModalIssueNames(), { timeout: 120_000 })
+        .poll(async () => driver.layoutsAddExistingModalIssueNames(), { timeout: 300_000 })
         .toEqual(expect.arrayContaining([plainName]));
       expect(await driver.layoutsAddExistingModalIssueNames()).not.toContain(lateName);
       await driver.layoutsAddExistingModalChoose(plainName);
       expect(await driver.layoutsAddExistingModalVisible()).toEqual(false);
       await expect
-        .poll(async () => driver.layoutsCalDayIssueNames(home.day), { timeout: 120_000 })
+        .poll(async () => driver.layoutsCalDayIssueNames(home.day), { timeout: 300_000 })
         .toContain(plainName);
       expect((await serverIssueDetails(seed.workspaceSlug, seed.projectId, plainId, session)).targetDate).toEqual(
         home.iso

@@ -60,7 +60,7 @@ test(
     try {
       await openIssues(driver, seed, session, "list");
       await expect
-        .poll(async () => driver.layoutsMobileOfferedLayouts(), { timeout: 120_000 })
+        .poll(async () => driver.layoutsMobileOfferedLayouts(), { timeout: 300_000 })
         .toEqual(["list", "kanban", "calendar"]);
       expect(await driver.layoutsMobileDisplayVisible()).toEqual(true);
       expect(await driver.layoutsMobileAnalyticsVisible()).toEqual(true);
@@ -92,7 +92,7 @@ test(
     try {
       await openIssues(driver, seed, session, "list");
       await expect
-        .poll(async () => driver.layoutsMobileOfferedLayouts(), { timeout: 120_000 })
+        .poll(async () => driver.layoutsMobileOfferedLayouts(), { timeout: 300_000 })
         .toEqual(["list", "kanban", "calendar"]);
       expect(await driver.layoutsMobileDisplayCycleModuleDisabled()).toEqual({
         cycleDisabled: false,
@@ -102,7 +102,7 @@ test(
       await serverPatchProject(seed.workspaceSlug, seed.projectId, session, { cycle_view: false, module_view: false });
       await driver.layoutsReloadIssues();
       await expect
-        .poll(async () => driver.layoutsMobileDisplayCycleModuleDisabled(), { timeout: 120_000 })
+        .poll(async () => driver.layoutsMobileDisplayCycleModuleDisabled(), { timeout: 300_000 })
         .toEqual({ cycleDisabled: true, moduleDisabled: true });
     } finally {
       await serverPatchProject(seed.workspaceSlug, seed.projectId, session, { cycle_view: true, module_view: true });
@@ -143,7 +143,7 @@ test(
       expect(await driver.layoutsCalMode()).toEqual("month");
 
       await driver.layoutsCalTapDay(today.getDate());
-      await expect.poll(async () => driver.layoutsCalDayDetailNames(), { timeout: 120_000 }).toContain(name);
+      await expect.poll(async () => driver.layoutsCalDayDetailNames(), { timeout: 300_000 }).toContain(name);
     } finally {
       await serverDeleteIssue(seed.workspaceSlug, seed.projectId, id, session).catch(() => {});
       await resetPrefs(seed.workspaceSlug, seed.projectId, session);
@@ -179,7 +179,7 @@ test(
         `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
         sessionBrowserCookies(session)
       );
-      await expect.poll(async () => driver.layoutsCalDayIssueNames(fromDay), { timeout: 120_000 }).toContain(name);
+      await expect.poll(async () => driver.layoutsCalDayIssueNames(fromDay), { timeout: 300_000 }).toContain(name);
       await driver.layoutsCalDragBlock(name, toDay);
       expect((await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, session)).targetDate).toEqual(
         iso(fromDay)

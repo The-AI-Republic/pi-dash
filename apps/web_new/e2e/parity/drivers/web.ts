@@ -1270,6 +1270,11 @@ export class WebDriver implements ParityDriver {
   // both settle. Sized for failure latency, not pass time: passes resolve
   // as soon as the chrome renders.
   private static readonly LAYOUTS_FIRST_WAIT_MS = 300_000;
+  // Body reads (rows, group headers, tiles) share the same budget: the
+  // chrome the first wait settles on can precede the body paint by ~150s
+  // on the loaded host (blank page, then chrome, then rows), so a 120s
+  // body wait expires just as content arrives.
+  private static readonly LAYOUTS_BODY_WAIT_MS = 300_000;
 
   private layoutsSwitcherButtons(): Locator {
     return this.page.locator("div.flex.items-center.gap-1.rounded-md.bg-layer-3.p-1 > button");
@@ -1310,7 +1315,7 @@ export class WebDriver implements ParityDriver {
     await buttons.first().waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
     // The buttons render before the stored selection applies (filters
     // still fetching), so the marker scan polls instead of reading once.
-    const deadline = Date.now() + 120_000;
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
     for (;;) {
       const count = await buttons.count();
       for (let i = 0; i < count; i++) {
@@ -1352,7 +1357,7 @@ export class WebDriver implements ParityDriver {
     const index = WebDriver.LAYOUTS_ORDER.indexOf(layout);
     const buttons = this.layoutsSwitcherButtons();
     await buttons.nth(index).waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
-    await buttons.nth(index).scrollIntoViewIfNeeded();
+    await buttons.nth(index).scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
     await buttons.nth(index).click();
     // Clicking the active layout is a specified no-op; the marker is
     // already visible then, so this wait resolves immediately.
@@ -1428,11 +1433,19 @@ export class WebDriver implements ParityDriver {
   private async layoutsGroupSection(title: string): Promise<Locator> {
     // The list body (sections) renders after the header chrome the page
     // waits settle on, so a fresh open/reload needs a bounded wait here
-    // instead of an immediate throw.
-    const deadline = Date.now() + 120_000;
+    // instead of an immediate throw. The returned locator is anchored to
+    // the header text, not a section index: the list re-renders (and
+    // reorders sections) as groups fetch, so a positional nth() goes stale
+    // between discovery and use. State names in parity specs are distinct
+    // non-substrings, so the substring filter is unambiguous in practice.
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
     for (;;) {
       const found = await this.layoutsGroupSectionFast(title);
-      if (found) return found;
+      if (found) {
+        return this.page.locator('div[data-drop-target-for-element="true"]').filter({
+          has: this.page.locator('div[class*="group/list-header"]', { hasText: title }),
+        });
+      }
       if (Date.now() >= deadline) throw new Error(`[parity] list group "${title}" not found.`);
       await this.page.waitForTimeout(500);
     }
@@ -1495,13 +1508,13 @@ export class WebDriver implements ParityDriver {
     const rows = this.page.locator('a[id^="issue-"]');
     const count = await rows.count();
     if (count === 0) throw new Error("[parity] no list rows to scroll to.");
-    await rows.nth(count - 1).scrollIntoViewIfNeeded();
+    await rows.nth(count - 1).scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
   }
 
   async layoutsListQuickAdd(title: string, groupTitle?: string): Promise<void> {
     const scope = groupTitle === undefined ? this.page : await this.layoutsGroupSection(groupTitle);
     const trigger = scope.locator("div.sticky.bottom-0", { hasText: "New work item" }).first();
-    await trigger.scrollIntoViewIfNeeded();
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
     await trigger.click();
     const field = this.page.getByPlaceholder("Work item title");
     await field.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
@@ -1509,7 +1522,10 @@ export class WebDriver implements ParityDriver {
     await field.press("Enter");
     // The row appearing proves the save landed; the title is unique per
     // scenario run, so this cannot match a stale row.
-    await this.page.locator('a[id^="issue-"]', { hasText: title }).first().waitFor({ timeout: 120_000 });
+    await this.page
+      .locator('a[id^="issue-"]', { hasText: title })
+      .first()
+      .waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
   }
 
   async layoutsRowCanEditState(issueName: string): Promise<boolean> {
@@ -1520,7 +1536,7 @@ export class WebDriver implements ParityDriver {
     const search = this.page.getByPlaceholder("Search", { exact: true });
     const before = await search.count();
     const chip = this.layoutsRowStateButton(issueName);
-    await chip.scrollIntoViewIfNeeded();
+    await chip.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
     await chip.click();
     const deadline = Date.now() + 5_000;
     let opened = false;
@@ -1538,15 +1554,15 @@ export class WebDriver implements ParityDriver {
 
   async layoutsRowHref(issueName: string): Promise<string | null> {
     const row = this.layoutsIssueRow(issueName);
-    await row.waitFor({ timeout: 120_000 });
+    await row.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
     return row.getAttribute("href");
   }
 
   async layoutsRowOpenPeek(issueName: string): Promise<void> {
     const row = this.layoutsIssueRow(issueName);
     await row.locator("p").first().click();
-    await this.page.waitForURL((url) => url.href.includes("peekIssueId"), { timeout: 120_000 });
-    await this.layoutsPeekPanel().waitFor({ timeout: 120_000 });
+    await this.page.waitForURL((url) => url.href.includes("peekIssueId"), { timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await this.layoutsPeekPanel().waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
   }
 
   async layoutsPeekVisible(): Promise<boolean> {
@@ -1587,7 +1603,7 @@ export class WebDriver implements ParityDriver {
     // The leading cell is an empty grid slot without children and carries
     // the expander button once sub-issues exist.
     const row = this.layoutsIssueRow(issueName);
-    await row.waitFor({ timeout: 120_000 });
+    await row.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
     const slot = row.locator("div.grid.size-4").first();
     if ((await slot.count()) === 0) return false;
     return (await slot.locator("button").count()) > 0;
@@ -1610,7 +1626,7 @@ export class WebDriver implements ParityDriver {
     // Expanded children render as nested rows inside the parent's block,
     // after the parent's own link.
     const row = this.layoutsIssueRow(issueName);
-    await row.waitFor({ timeout: 120_000 });
+    await row.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
     const block = row.locator("xpath=..");
     const nested = block.locator('a[id^="issue-"]');
     const count = await nested.count();
@@ -1635,7 +1651,7 @@ export class WebDriver implements ParityDriver {
 
   async layoutsRowSetState(issueName: string, stateName: string): Promise<void> {
     const chip = this.layoutsRowStateButton(issueName);
-    await chip.scrollIntoViewIfNeeded();
+    await chip.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
     await chip.click();
     // The option portal renders at the end of the document, after the
     // row chips with the same text, so the last match is the option.
@@ -1656,7 +1672,7 @@ export class WebDriver implements ParityDriver {
     // triggers carry the toggle name, and the mobile trigger is hidden on
     // desktop, so what remains first is the priority control.
     const row = this.layoutsIssueRow(issueName);
-    await row.waitFor({ timeout: 120_000 });
+    await row.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
     const candidates = row.locator("button:not([disabled])").filter({ hasNot: row.locator("span") });
     const count = await candidates.count();
     for (let i = 0; i < count; i++) {
@@ -1677,7 +1693,7 @@ export class WebDriver implements ParityDriver {
 
   async layoutsRowSetPriority(issueName: string, priorityName: string): Promise<void> {
     const control = await this.layoutsRowPriorityControl(issueName);
-    await control.scrollIntoViewIfNeeded();
+    await control.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
     await control.click();
     const option = this.page.getByRole("button", { name: priorityName, exact: true }).last();
     await option.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
@@ -2053,7 +2069,7 @@ export class WebDriver implements ParityDriver {
     const table = this.layoutsSheetTable();
     await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
     const cells = table.locator("thead th");
-    const deadline = Date.now() + 120_000;
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
     for (;;) {
       if ((await cells.count()) > 0) return cells;
       if (Date.now() >= deadline) throw new Error("[parity] sheet header never rendered.");
@@ -2075,7 +2091,7 @@ export class WebDriver implements ParityDriver {
   private async layoutsSheetCell(issueName: string, column: string): Promise<Locator> {
     const index = await this.layoutsSheetHeaderIndex(column);
     const first = this.layoutsSheetFirstCell(issueName);
-    await first.waitFor({ timeout: 120_000 });
+    await first.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
     return first.locator("xpath=ancestor::tr[1]").locator(":scope > td").nth(index);
   }
 
@@ -2106,7 +2122,7 @@ export class WebDriver implements ParityDriver {
     const table = this.layoutsSheetTable();
     await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
     const cells = table.locator('td[id^="issue-"]');
-    const deadline = Date.now() + 120_000;
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
     for (;;) {
       if ((await cells.count()) > 0) break;
       if (Date.now() >= deadline) throw new Error("[parity] sheet rows never rendered.");
@@ -2144,7 +2160,7 @@ export class WebDriver implements ParityDriver {
     const table = this.layoutsSheetTable();
     await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
     const first = table.locator('tbody td[id^="issue-"]').first();
-    await first.waitFor({ timeout: 120_000 });
+    await first.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
     const shadow = await first.evaluate((node) => (node as HTMLElement).style.boxShadow);
     return shadow !== "" && shadow !== "none";
   }
@@ -2160,7 +2176,7 @@ export class WebDriver implements ParityDriver {
   }
 
   private async layoutsSheetPickOption(trigger: Locator, optionName: string, _issueName: string): Promise<void> {
-    await trigger.scrollIntoViewIfNeeded();
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
     await trigger.click();
     // Dropdown portals render at the end of the document, after any row
     // control carrying the same text, so the last match is the option.
@@ -2173,7 +2189,7 @@ export class WebDriver implements ParityDriver {
     const cell = await this.layoutsSheetCell(issueName, "State");
     const trigger = cell.locator("button:not([disabled])").first();
     await this.layoutsSheetPickOption(trigger, stateName, issueName);
-    const deadline = Date.now() + 120_000;
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
     for (;;) {
       if ((await this.layoutsSheetCellText(issueName, "State")) === stateName) return;
       if (Date.now() >= deadline) throw new Error(`[parity] sheet cell never showed state "${stateName}".`);
@@ -2185,7 +2201,7 @@ export class WebDriver implements ParityDriver {
     const cell = await this.layoutsSheetCell(issueName, "Priority");
     const trigger = cell.locator("button:not([disabled])").first();
     await this.layoutsSheetPickOption(trigger, priorityName, issueName);
-    const deadline = Date.now() + 120_000;
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
     for (;;) {
       if ((await this.layoutsSheetCellText(issueName, "Priority")) === priorityName) return;
       if (Date.now() >= deadline) throw new Error(`[parity] sheet cell never showed priority "${priorityName}".`);
@@ -2226,10 +2242,10 @@ export class WebDriver implements ParityDriver {
     const index = await this.layoutsSheetHeaderIndex(column);
     const cells = await this.layoutsSheetHeaderCells();
     const header = cells.nth(index);
-    await header.scrollIntoViewIfNeeded();
+    await header.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
     await header.click();
     const menu = this.page.getByRole("menuitem");
-    const deadline = Date.now() + 120_000;
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
     for (;;) {
       if ((await menu.count()) > 0) return menu;
       if (Date.now() >= deadline) throw new Error(`[parity] sort menu for "${column}" never opened.`);
@@ -2261,7 +2277,7 @@ export class WebDriver implements ParityDriver {
   async layoutsSheetSort(column: string, direction: "ascending" | "descending"): Promise<void> {
     const menu = await this.layoutsSheetOpenSortMenu(column);
     await menu.nth(direction === "ascending" ? 0 : 1).click();
-    const deadline = Date.now() + 120_000;
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
     for (;;) {
       if ((await this.layoutsSheetSortMarker(column)) !== "none") return;
       if (Date.now() >= deadline) throw new Error(`[parity] sort marker never appeared on "${column}".`);
@@ -2273,10 +2289,10 @@ export class WebDriver implements ParityDriver {
     const menu = await this.layoutsSheetOpenSortMenu(column);
     const count = await menu.count();
     for (let i = 0; i < count; i++) {
-      const text = ((((await menu.nth(i).innerText()) ?? "") as string).trim());
+      const text = (((await menu.nth(i).innerText()) ?? "") as string).trim();
       if (text.includes("Clear sorting")) {
         await menu.nth(i).click();
-        const deadline = Date.now() + 120_000;
+        const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
         for (;;) {
           if ((await this.layoutsSheetSortMarker(column)) === "none") return;
           if (Date.now() >= deadline) throw new Error(`[parity] sort marker never cleared on "${column}".`);
@@ -2344,5 +2360,5 @@ export class WebDriver implements ParityDriver {
 
   async layoutsReleaseStalls(): Promise<void> {
     await this.page.unrouteAll({ behavior: "wait" });
-}
+  }
 }
