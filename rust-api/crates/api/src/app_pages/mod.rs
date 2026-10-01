@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 
-//! App page favorites + description + state-op + write handlers (D-30,
-//! stage 5, PIDASHCONV-332, PIDASHCONV-328 and PIDASHCONV-322).
+//! App page favorites + description + state-op + write + versions +
+//! duplicate + read handlers (D-30, stage 5, PIDASHCONV-332,
+//! PIDASHCONV-328, PIDASHCONV-322, PIDASHCONV-338 and PIDASHCONV-320).
 //!
 //! Ports twelve endpoints from `apps/api/pi_dash/app/views/page/base.py`
 //! (routes in `apps/api/pi_dash/app/urls/page.py`):
@@ -128,15 +129,17 @@
 pub mod gate;
 pub mod handlers_versions;
 
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Router};
 use bytes::Bytes;
+use chrono_tz::Tz;
 use http_body_util::channel::Channel;
 use http_body_util::BodyExt;
 use serde_json::{Map, Value};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use std::convert::Infallible;
 
 use crate::middleware::SessionHandle;
@@ -330,7 +333,7 @@ fn owned(
 }
 
 /// Register the favorites + description + state-op + write + versions +
-/// duplicate routes
+/// duplicate + read routes
 /// (`app/urls/page.py`). Sibling D-30 handler issues extend this router
 /// with their own paths; merges keep both sides.
 pub fn routes() -> Router<AppState> {
@@ -373,15 +376,17 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/pages/",
             owned(
-                axum::routing::post(page_create),
-                &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                axum::routing::post(page_create).get(list_pages),
+                &["PUT", "PATCH", "DELETE", "OPTIONS"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/",
             owned(
-                axum::routing::patch(page_partial_update).delete(page_destroy),
-                &["GET", "PUT", "POST", "OPTIONS"],
+                axum::routing::get(retrieve_page)
+                    .patch(page_partial_update)
+                    .delete(page_destroy),
+                &["PUT", "POST", "OPTIONS"],
             ),
         )
         .route(
@@ -403,6 +408,13 @@ pub fn routes() -> Router<AppState> {
             owned(
                 axum::routing::post(handlers_versions::duplicate),
                 &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/pages-summary/",
+            owned(
+                axum::routing::get(pages_summary),
+                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
             ),
         )
 }
@@ -557,6 +569,604 @@ async fn enqueue_best_effort(pool: &PgPool, job: &pidash_jobs::queue::NewJob) {
 /// (routing precedes auth — the `app_cycles` precedent).
 fn parse_page_id(raw: &str) -> Result<uuid::Uuid, ()> {
     raw.parse::<uuid::Uuid>().map_err(|_| ())
+}
+
+// ---------------------------------------------------------------------------
+// Page reads: list / retrieve / summary (D-30, stage 5, PIDASHCONV-320)
+// ---------------------------------------------------------------------------
+
+/// `PageSerializer` output order: `Meta.fields` minus the write-only
+/// `labels` input (`app/serializers/page.py:27-31,38-58`). The unit tests
+/// pin this against `shape::PAGE_SERIALIZER_FIELDS` so serializer drift
+/// fails the build.
+pub const LIST_ROW_ORDER: &[&str] = &[
+    "id",
+    "name",
+    "owned_by",
+    "access",
+    "color",
+    "parent",
+    "is_favorite",
+    "is_locked",
+    "archived_at",
+    "workspace",
+    "created_at",
+    "updated_at",
+    "created_by",
+    "updated_by",
+    "view_props",
+    "logo_props",
+    "label_ids",
+    "project_ids",
+];
+
+/// `PageDetailSerializer` output order: list order plus `description_html`
+/// (`app/serializers/page.py:129-133`).
+pub const DETAIL_ROW_ORDER: &[&str] = &[
+    "id",
+    "name",
+    "owned_by",
+    "access",
+    "color",
+    "parent",
+    "is_favorite",
+    "is_locked",
+    "archived_at",
+    "workspace",
+    "created_at",
+    "updated_at",
+    "created_by",
+    "updated_by",
+    "view_props",
+    "logo_props",
+    "label_ids",
+    "project_ids",
+    "description_html",
+];
+
+/// Retrieve appends `issue_ids` after the detail keys (`base.py:234-235`:
+/// `data["issue_ids"] = issue_ids` on the serializer dict).
+pub const ISSUE_IDS_FIELD: &str = "issue_ids";
+
+/// What `~Q(projects__id=True)` compiles to: `UUIDField` coerces Python
+/// `True` to `uuid.UUID(int=1)`, i.e. `00000000-0000-0000-0000-000000000001`
+/// (verified `str(qs.query)` on the real `get_queryset` chain — the
+/// annotation FILTER is `NOT (project_id = 00000000-...-000000000001)`).
+/// SQL `TRUE` is NOT what Django emits, and `uuid = boolean` is a Postgres
+/// error, so the queries-layer representative notation
+/// (`queries::project_ids_sql`) is not executable; the handler spells the
+/// observed predicate.
+pub const PROJECT_IDS_NIL_PLUS_ONE: &str = "00000000-0000-0000-0000-000000000001";
+
+/// The `is_favorite` annotation (`base.py:82-87,102`): caller,
+/// `entity_type='page'`, bridge to this page, workspace slug — plus the
+/// `user_favorites.deleted_at IS NULL` the direct `UserFavorite.objects`
+/// subquery carries (same shape as the printed Django SQL).
+/// Binds: `$user`, `$slug`.
+fn favorite_annotation(user: &str, slug: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM user_favorites WHERE user_favorites.user_id = {user} \
+         AND user_favorites.entity_type = 'page' \
+         AND user_favorites.entity_identifier = pages.id \
+         AND user_favorites.workspace_id = (SELECT id FROM workspaces WHERE slug = {slug}) \
+         AND user_favorites.deleted_at IS NULL)"
+    )
+}
+
+/// The `project` annotation (`base.py:107-110`): bridge to this page for
+/// the URL project — plus the `project_pages.deleted_at IS NULL` the
+/// direct `ProjectPage.objects` subquery carries.
+/// Binds: `$project`.
+fn project_annotation(project: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM project_pages WHERE project_pages.page_id = pages.id \
+         AND project_pages.project_id = {project} AND project_pages.deleted_at IS NULL)"
+    )
+}
+
+/// The `label_ids` annotation (`base.py:112-119`): distinct label ids over
+/// the traversal join, NULLs excluded — no soft-delete predicate on a
+/// traversal join (matches the printed Django SQL).
+fn label_ids_annotation() -> &'static str {
+    "COALESCE((SELECT ARRAY_AGG(DISTINCT page_labels.label_id) FROM page_labels \
+     WHERE page_labels.page_id = pages.id AND page_labels.label_id IS NOT NULL), '{}')"
+}
+
+/// The `project_ids` annotation (`base.py:120-123`): distinct project ids
+/// over the traversal join with the observed nil-plus-one predicate and no
+/// soft-delete predicate (matches the printed Django SQL).
+fn project_ids_annotation() -> String {
+    format!(
+        "COALESCE((SELECT ARRAY_AGG(DISTINCT pp2.project_id) FROM project_pages pp2 \
+         WHERE pp2.page_id = pages.id \
+         AND NOT (pp2.project_id = '{PROJECT_IDS_NIL_PLUS_ONE}')), '{{}}')"
+    )
+}
+
+/// The `get_queryset` scope (`base.py:88-98`): workspace slug, active
+/// membership of a live project via the projects M2M, top-level only,
+/// owner-or-public — plus the `pages.deleted_at IS NULL` the base manager
+/// carries. Traversal joins carry no soft-delete predicate (matches the
+/// printed Django SQL).
+/// Binds: `$slug`, `$user`.
+fn read_scope_where(slug: &str, user: &str) -> String {
+    format!(
+        "pages.deleted_at IS NULL \
+         AND pages.workspace_id = (SELECT id FROM workspaces WHERE slug = {slug}) \
+         AND EXISTS (SELECT 1 FROM project_pages pp_scope JOIN projects ON projects.id = pp_scope.project_id \
+         JOIN project_members pm ON pm.project_id = projects.id AND pm.member_id = {user} AND pm.is_active = TRUE \
+         WHERE pp_scope.page_id = pages.id AND projects.archived_at IS NULL) \
+         AND pages.parent_id IS NULL AND (pages.owned_by_id = {user} OR pages.access = 0)"
+    )
+}
+
+/// The `summary` scope (`base.py:422-438`): the list scope shape WITH
+/// `parent__isnull` (`:429` — top-level only, like the list) plus
+/// `pages.deleted_at IS NULL`.
+/// Binds: `$slug`, `$user`.
+fn summary_scope_where(slug: &str, user: &str) -> String {
+    format!(
+        "pages.deleted_at IS NULL \
+         AND pages.workspace_id = (SELECT id FROM workspaces WHERE slug = {slug}) \
+         AND EXISTS (SELECT 1 FROM project_pages pp_scope JOIN projects ON projects.id = pp_scope.project_id \
+         JOIN project_members pm ON pm.project_id = projects.id AND pm.member_id = {user} AND pm.is_active = TRUE \
+         WHERE pp_scope.page_id = pages.id AND projects.archived_at IS NULL) \
+         AND pages.parent_id IS NULL AND (pages.owned_by_id = {user} OR pages.access = 0)"
+    )
+}
+
+/// Guest scoping predicate (`base.py:304` list, `:451` summary): restricted
+/// guests see only their own rows. Binds: `$user`.
+fn guest_owned_only(user: &str) -> String {
+    format!("pages.owned_by_id = {user}")
+}
+
+/// Base page columns selected on every annotated read, aliased to the
+/// serializer field names (DRF renders FKs as PK strings under the field
+/// name: `owned_by`, `workspace`, `created_by`, `updated_by`, `parent`).
+const READ_BASE_COLUMNS: &str =
+    "pages.id, pages.name, pages.owned_by_id AS owned_by, pages.access, \
+    pages.color, pages.parent_id AS parent, pages.is_locked, pages.archived_at, \
+    pages.workspace_id AS workspace, pages.created_at, pages.updated_at, \
+    pages.created_by_id AS created_by, pages.updated_by_id AS updated_by, \
+    pages.view_props, pages.logo_props, pages.description_html";
+
+/// `?search=` terms (DRF `SearchFilter.get_search_terms` over
+/// `search_fields = ["name"]`, `base.py:79` + `BaseViewSet.filter_queryset`,
+/// `app/views/base.py:206-208`): commas read as spaces, split on
+/// whitespace; an absent or blank value filters nothing. Each term is an
+/// ANDed `name__icontains`.
+fn search_terms(raw: Option<&str>) -> Vec<String> {
+    match raw {
+        Some(value) => value
+            .replace(',', " ")
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Escape one term for `name__icontains`: Django escapes the LIKE
+/// metacharacters (`\`, `%`, `_`) with a backslash (no explicit `ESCAPE`
+/// clause — Postgres `LIKE` treats backslash as the default escape) and
+/// wraps the term in `%...%`; case folding happens in SQL via
+/// `UPPER(name::text) LIKE UPPER($N)` (the license-workspace precedent).
+fn icontains_param(term: &str) -> String {
+    let mut escaped = String::with_capacity(term.len() + 2);
+    for ch in term.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    format!("%{escaped}%")
+}
+
+/// The `?search=` predicate over the annotated rows: one
+/// `UPPER(pages.name::text) LIKE UPPER($N)` per term, ANDed.
+/// Binds start at `first_bind` (after slug/user/project/page).
+fn search_sql(first_bind: u32, terms: &[String]) -> String {
+    if terms.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(" AND (");
+    for (index, _) in terms.iter().enumerate() {
+        if index > 0 {
+            out.push_str(" AND ");
+        }
+        out.push_str(&format!(
+            "UPPER(pages.name::text) LIKE UPPER(${})",
+            first_bind + index as u32
+        ));
+    }
+    out.push(')');
+    out
+}
+
+/// Fetch annotated page rows via `row_to_json` (the `app_modules` precedent):
+/// Postgres renders every column and the caller re-renders only the datetime
+/// keys, so key order and scalar bytes stay under handler control.
+/// Binds: `$1` slug, `$2` user, `$3` project, `$4` page (retrieve only),
+/// then one bind per `?search=` term.
+/// `guest_only` appends the `:304` owned-by predicate (list); `page_id`
+/// restricts to one row (retrieve); `search` applies the `filter_queryset`
+/// `?search=` name filter `get_queryset` carries (`base.py:88`) on both
+/// paths. `?order_by=` stays ignored: the `:105` `order_by` replaces the
+/// `:103` request one in Django (ported bug, fixture F30-06).
+fn read_rows_sql(guest_only: bool, by_page: bool, search: &[String]) -> String {
+    let annotations = format!(
+        "{}, {} AS is_favorite, {} AS project, {} AS label_ids, {} AS project_ids",
+        READ_BASE_COLUMNS,
+        favorite_annotation("$2", "$1"),
+        project_annotation("$3"),
+        label_ids_annotation(),
+        project_ids_annotation(),
+    );
+    let mut sql = format!(
+        "SELECT row_to_json(__r)::text AS __row FROM (SELECT {annotations} FROM pages \
+         WHERE {} AND ({}) = TRUE",
+        read_scope_where("$1", "$2"),
+        project_annotation("$3"),
+    );
+    if guest_only {
+        sql.push_str(" AND ");
+        sql.push_str(&guest_owned_only("$2"));
+    }
+    if by_page {
+        sql.push_str(" AND pages.id = $4");
+    }
+    let first_bind = if by_page { 5 } else { 4 };
+    sql.push_str(&search_sql(first_bind, search));
+    sql.push_str(" ORDER BY is_favorite DESC, pages.created_at DESC) AS __r");
+    sql
+}
+
+/// The `summary` aggregate (`base.py:453-467`): conditional counts over the
+/// scoped set. Overlap ported as observed: archived public/private pages
+/// are ALSO counted in `archived_pages`; a non-archived page lands in
+/// exactly one of public/private by its access value.
+/// Binds: `$1` slug, `$2` user, `$3` project.
+fn summary_sql(guest_only: bool) -> String {
+    let mut scope = format!(
+        "{} AND ({}) = TRUE",
+        summary_scope_where("$1", "$2"),
+        project_annotation("$3"),
+    );
+    if guest_only {
+        scope.push_str(" AND ");
+        scope.push_str(&guest_owned_only("$2"));
+    }
+    format!(
+        "SELECT COUNT(CASE WHEN __r.access = 0 AND __r.archived_at IS NULL THEN 1 END) AS public_pages, \
+         COUNT(CASE WHEN __r.access = 1 AND __r.archived_at IS NULL THEN 1 END) AS private_pages, \
+         COUNT(CASE WHEN __r.archived_at IS NOT NULL THEN 1 END) AS archived_pages \
+         FROM (SELECT DISTINCT pages.id, pages.access, pages.archived_at FROM pages WHERE {scope}) AS __r"
+    )
+}
+
+/// The `PageLog` `issue_ids` lookup (`base.py:231-233`): flat id array for
+/// `entity_name='issue'`, newest first (`PageLog.Meta.ordering =
+/// ("-created_at",)`, which `values_list` inherits). The direct manager
+/// carries `deleted_at IS NULL`.
+/// Binds: `$1` page.
+fn issue_ids_sql() -> &'static str {
+    "SELECT entity_identifier FROM page_logs WHERE page_id = $1 AND entity_name = 'issue' \
+     AND page_logs.deleted_at IS NULL ORDER BY created_at DESC"
+}
+
+/// `request.user.user_timezone` (`TimezoneMixin`, `app/views/base.py:36-46`):
+/// unknown zones 500 through the same branch Django's `zoneinfo` activation
+/// raises into (the `app_modules` precedent).
+async fn read_timezone(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Tz, Denial> {
+    let row: Option<(String,)> =
+        sqlx::query_as(r#"SELECT u.user_timezone FROM users u WHERE u.id = $1"#)
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    let (name,) = row.ok_or(Denial::ServerError)?;
+    name.parse().map_err(|_| Denial::ServerError)
+}
+
+/// DRF `DateTimeField` rendering for one value: aware datetimes render in
+/// the requester's zone (`TimezoneMixin.initial`), `+00:00` rewritten to
+/// `Z`; anything else passes through byte-identical.
+fn shift_datetime(value: &Value, timezone: &Tz) -> String {
+    let text = match value {
+        Value::String(text) => text,
+        _ => return serde_json::to_string(value).unwrap_or("null".to_owned()),
+    };
+    match chrono::DateTime::parse_from_rfc3339(text) {
+        Ok(aware) => crate::serializer::render_datetime_in(&aware, timezone),
+        Err(_) => serde_json::to_string(value).unwrap_or("null".to_owned()),
+    }
+    .pipe_quote()
+}
+
+/// Render one annotated row's keys in serializer field order as a compact
+/// JSON object. Only `created_at`/`updated_at` shift zones (`archived_at`
+/// is a `DateField`, rendered `YYYY-MM-DD` by Postgres already).
+fn shape_row(row: &Map<String, Value>, fields: &[&str], timezone: &Tz) -> String {
+    let mut out = String::from("{");
+    for (index, field) in fields.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        out.push_str(field);
+        out.push_str("\":");
+        let rendered = match *field {
+            "created_at" | "updated_at" => {
+                shift_datetime(row.get(*field).unwrap_or(&Value::Null), timezone)
+            }
+            _ => serde_json::to_string(row.get(*field).unwrap_or(&Value::Null))
+                .unwrap_or("null".to_owned()),
+        };
+        out.push_str(&rendered);
+    }
+    out.push('}');
+    out
+}
+
+trait PipeQuote: Sized {
+    fn pipe_quote(self) -> String;
+}
+
+impl PipeQuote for String {
+    fn pipe_quote(self) -> String {
+        serde_json::to_string(&self).unwrap_or("null".to_owned())
+    }
+}
+
+/// Fetch annotated rows through `read_rows_sql`, returning each row's map.
+async fn fetch_read_rows(
+    pool: &PgPool,
+    slug: &str,
+    user_id: &uuid::Uuid,
+    project_id: &uuid::Uuid,
+    page_id: Option<&uuid::Uuid>,
+    guest_only: bool,
+    search: &[String],
+) -> Result<Vec<Map<String, Value>>, Denial> {
+    use sqlx::Row as _;
+    let sql = read_rows_sql(guest_only, page_id.is_some(), search);
+    let mut query = sqlx::query(&sql).bind(slug).bind(user_id).bind(project_id);
+    if let Some(id) = page_id {
+        query = query.bind(id);
+    }
+    for term in search {
+        query = query.bind(icontains_param(term));
+    }
+    let rows = query
+        .fetch_all(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let text: String = row.try_get("__row").map_err(|_| Denial::ServerError)?;
+        let value: Value = serde_json::from_str(&text).map_err(|_| Denial::ServerError)?;
+        match value {
+            Value::Object(map) => out.push(map),
+            _ => return Err(Denial::ServerError),
+        }
+    }
+    Ok(out)
+}
+
+/// `GET .../pages/` (`PageViewSet.list`, `base.py:291-306`): the annotated
+/// queryset (guest-scoped to owned rows for restricted guests), rendered
+/// through `PageSerializer` many, 200.
+pub async fn list_pages(
+    State(state): State<AppState>,
+    Path((slug, project_raw)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+    extension: Option<Extension<SessionHandle>>,
+) -> Response {
+    let search = search_terms(query.get("search").map(String::as_str));
+    let user_id = match actor_user_id(extension.clone()) {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    let project_id = match resolve_project_id(pool, &slug, &project_raw).await {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    let gate = match gate::resolve_gate(&state, "GET", &slug, &project_id, None, extension).await {
+        Ok(gate) => gate,
+        Err(denial) => return denial.into_response(),
+    };
+    let timezone = match read_timezone(pool, &user_id).await {
+        Ok(timezone) => timezone,
+        Err(denial) => return denial.into_response(),
+    };
+    let rows = match fetch_read_rows(
+        pool,
+        &slug,
+        &user_id,
+        &project_id,
+        None,
+        gate.guest_scoped,
+        &search,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(denial) => return denial.into_response(),
+    };
+    let mut out = String::from("[");
+    for (index, row) in rows.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&shape_row(row, LIST_ROW_ORDER, &timezone));
+    }
+    out.push(']');
+    json_response(StatusCode::OK, out)
+}
+
+/// `GET .../pages/<page_id>/` (`PageViewSet.retrieve`, `base.py:202-244`):
+/// queryset-first fetch, then the guest rule (which runs BEFORE the
+/// page-None check and dereferences the row — ported via
+/// [`gate::check_retrieve_guest`], including the missing-page-with-guest
+/// 500 quirk), then 404 `"Page not found"`, else `PageDetail` plus
+/// `issue_ids` from `PageLog`, with the `track_visit` visit publish.
+pub async fn retrieve_page(
+    State(state): State<AppState>,
+    Path((slug, project_raw, page_raw)): Path<(String, String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    let Ok(page_id) = parse_page_id(&page_raw) else {
+        return crate::edge::proxy(State(state), req).await;
+    };
+    let user_id = match actor_user_id(extension.clone()) {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    let project_id = match resolve_project_id(pool, &slug, &project_raw).await {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    let gate = match gate::resolve_gate(&state, "GET", &slug, &project_id, Some(page_id), extension)
+        .await
+    {
+        Ok(gate) => gate,
+        Err(denial) => return denial.into_response(),
+    };
+    let timezone = match read_timezone(pool, &user_id).await {
+        Ok(timezone) => timezone,
+        Err(denial) => return denial.into_response(),
+    };
+    // `?search=` rides `get_queryset` (`base.py:88`) before the pk filter,
+    // so it applies here exactly as on the list.
+    let search = search_terms(query.get("search").map(String::as_str));
+    let rows = match fetch_read_rows(
+        pool,
+        &slug,
+        &user_id,
+        &project_id,
+        Some(&page_id),
+        false,
+        &search,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(denial) => return denial.into_response(),
+    };
+    let row = rows.into_iter().next();
+    // Guest rule before the None check (`base.py:212-229`): a missing page
+    // with a restricted guest is the 500 quirk, not the 404.
+    let owner = row.as_ref().and_then(|row| {
+        row.get("owned_by")
+            .and_then(Value::as_str)
+            .map(|owned| owned == user_id.to_string())
+    });
+    match gate::check_retrieve_guest(gate.guest_scoped, owner) {
+        gate::RetrieveOutcome::Allow => {}
+        gate::RetrieveOutcome::GuestDenied => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                gate::RETRIEVE_GUEST_BODY.to_owned(),
+            );
+        }
+        gate::RetrieveOutcome::NotFound => {}
+        gate::RetrieveOutcome::ServerError => {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                gate::SERVER_ERROR_BODY.to_owned(),
+            );
+        }
+    }
+    let Some(row) = row else {
+        return json_response(StatusCode::NOT_FOUND, gate::PAGE_NOT_FOUND_BODY.to_owned());
+    };
+    let issue_ids: Vec<(Option<uuid::Uuid>,)> = match sqlx::query_as(issue_ids_sql())
+        .bind(page_id)
+        .fetch_all(pool)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let mut out = shape_row(&row, DETAIL_ROW_ORDER, &timezone);
+    out.pop();
+    out.push_str(",\"issue_ids\":[");
+    for (index, (id,)) in issue_ids.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        match id {
+            Some(id) => out.push_str(&json_string(&id.to_string())),
+            None => out.push_str("null"),
+        }
+    }
+    out.push_str("]}");
+    // `track_visit` (`base.py:205,236-243`): default `"true"`, best-effort
+    // post-fetch enqueue — the response stands when the queue is missing.
+    if let Some(job) = pidash_jobs::app_pages::recent_visited_job(
+        query.get("track_visit").map(String::as_str),
+        &slug,
+        &page_id.to_string(),
+        &user_id.to_string(),
+        Some(&project_id.to_string()),
+    ) {
+        enqueue_best_effort(pool, &job).await;
+    }
+    json_response(StatusCode::OK, out)
+}
+
+/// `GET .../pages-summary/` (`PageViewSet.summary`, `base.py:421-469`):
+/// the aggregate triple over the scoped set (guest-scoped for restricted
+/// guests), 200.
+pub async fn pages_summary(
+    State(state): State<AppState>,
+    Path((slug, project_raw)): Path<(String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+) -> Response {
+    let user_id = match actor_user_id(extension.clone()) {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    let project_id = match resolve_project_id(pool, &slug, &project_raw).await {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    let gate = match gate::resolve_gate(&state, "GET", &slug, &project_id, None, extension).await {
+        Ok(gate) => gate,
+        Err(denial) => return denial.into_response(),
+    };
+    let row: (i64, i64, i64) = match sqlx::query_as(&summary_sql(gate.guest_scoped))
+        .bind(slug.as_str())
+        .bind(user_id)
+        .bind(project_id)
+        .fetch_one(pool)
+        .await
+    {
+        Ok(row) => row,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    json_response(
+        StatusCode::OK,
+        format!(
+            "{{\"public_pages\":{},\"private_pages\":{},\"archived_pages\":{}}}",
+            row.0, row.1, row.2
+        ),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -4576,5 +5186,215 @@ mod tests {
             DESCRIPTION_CONTENT_DISPOSITION,
             r#"attachment; filename="page_description.bin""#
         );
+    }
+}
+
+#[cfg(test)]
+mod read_tests {
+    use super::*;
+    use chrono_tz::Tz;
+
+    fn utc() -> Tz {
+        "UTC".parse().expect("UTC parses")
+    }
+
+    /// List order is `PageSerializer.Meta.fields` minus the write-only
+    /// `labels` (`serializers/page.py:27-31,38-58`).
+    #[test]
+    fn list_row_order_matches_serializer_fields() {
+        use pidash_services::app_pages::shape::PAGE_SERIALIZER_FIELDS;
+        let expected: Vec<&str> = PAGE_SERIALIZER_FIELDS
+            .iter()
+            .filter(|field| **field != "labels")
+            .copied()
+            .collect();
+        assert_eq!(LIST_ROW_ORDER, expected.as_slice());
+    }
+
+    /// Detail order is list order plus `description_html`
+    /// (`serializers/page.py:129-133`).
+    #[test]
+    fn detail_row_order_extends_list() {
+        use pidash_services::app_pages::shape::page_detail_fields;
+        use pidash_services::app_pages::shape::PAGE_SERIALIZER_FIELDS;
+        let mut expected = LIST_ROW_ORDER.to_vec();
+        expected.push("description_html");
+        assert_eq!(DETAIL_ROW_ORDER, expected.as_slice());
+        // The shape layer keeps the write-only `labels` in `Meta.fields`;
+        // the rendered detail order is that list minus `labels`.
+        let without_labels: Vec<&str> = page_detail_fields()
+            .into_iter()
+            .filter(|field| *field != "labels")
+            .collect();
+        assert_eq!(without_labels, expected);
+        assert!(PAGE_SERIALIZER_FIELDS.contains(&"labels"));
+        assert_eq!(ISSUE_IDS_FIELD, "issue_ids");
+    }
+
+    /// Summary keys follow the queries-layer response order
+    /// (`base.py:453-467`).
+    #[test]
+    fn summary_keys_match_queries_layer() {
+        assert_eq!(
+            pidash_services::app_pages::queries::SUMMARY_RESPONSE_KEYS,
+            &["public_pages", "private_pages", "archived_pages"]
+        );
+    }
+
+    /// Executable-SQL predicates: soft-delete scoping on the base table
+    /// and every direct-manager subquery, the observed nil-plus-one
+    /// `project_ids` predicate, and no unexecutable `uuid = boolean`.
+    #[test]
+    fn read_sql_carries_executable_predicates() {
+        let list = read_rows_sql(false, false, &[]);
+        assert!(list.contains("pages.deleted_at IS NULL"), "{list}");
+        assert!(list.contains("user_favorites.deleted_at IS NULL"), "{list}");
+        assert!(list.contains("project_pages.deleted_at IS NULL"), "{list}");
+        assert!(
+            list.contains(&format!(
+                "NOT (pp2.project_id = '{PROJECT_IDS_NIL_PLUS_ONE}')"
+            )),
+            "{list}"
+        );
+        assert!(!list.contains("project_id = TRUE"), "{list}");
+        assert!(
+            list.contains("ORDER BY is_favorite DESC, pages.created_at DESC"),
+            "{list}"
+        );
+        // No search terms: no LIKE predicate, no extra binds.
+        assert!(!list.contains("LIKE"), "{list}");
+        let scoped = read_rows_sql(true, false, &[]);
+        assert!(scoped.contains("pages.owned_by_id = $2"), "{scoped}");
+        let one = read_rows_sql(false, true, &[]);
+        assert!(one.contains("pages.id = $4"), "{one}");
+        let summary = summary_sql(false);
+        assert!(summary.contains("pages.deleted_at IS NULL"), "{summary}");
+        // Summary counts top-level pages only (`base.py:429`).
+        assert!(summary.contains("pages.parent_id IS NULL"), "{summary}");
+        assert!(
+            summary.contains("COUNT(CASE WHEN __r.access = 0"),
+            "{summary}"
+        );
+        assert!(
+            summary_sql(true).contains("pages.owned_by_id = $2"),
+            "guest summary scopes to owned"
+        );
+        assert!(
+            issue_ids_sql().contains("page_logs.deleted_at IS NULL")
+                && issue_ids_sql().contains("ORDER BY created_at DESC"),
+            "{}",
+            issue_ids_sql()
+        );
+    }
+
+    /// Retrieve guest-outcome mapping: 400 guest rule, 404 queryset miss,
+    /// 500 missing-page-with-guest quirk (`base.py:212-229`).
+    #[test]
+    fn retrieve_guest_outcomes_map_to_bodies() {
+        use crate::app_pages::gate::{check_retrieve_guest, RetrieveOutcome};
+        assert_eq!(
+            check_retrieve_guest(true, Some(true)),
+            RetrieveOutcome::Allow
+        );
+        assert_eq!(
+            check_retrieve_guest(true, Some(false)),
+            RetrieveOutcome::GuestDenied
+        );
+        assert_eq!(
+            check_retrieve_guest(true, None),
+            RetrieveOutcome::ServerError
+        );
+        assert_eq!(
+            check_retrieve_guest(false, Some(false)),
+            RetrieveOutcome::Allow
+        );
+        assert_eq!(check_retrieve_guest(false, None), RetrieveOutcome::NotFound);
+        assert_eq!(
+            gate::RETRIEVE_GUEST_BODY,
+            r#"{"error":"You are not allowed to view this page"}"#
+        );
+        assert_eq!(gate::PAGE_NOT_FOUND_BODY, r#"{"error":"Page not found"}"#);
+    }
+
+    /// `?search=` term splitting (DRF `SearchFilter.get_search_terms`):
+    /// commas read as spaces, split on whitespace, absent/blank filters
+    /// nothing.
+    #[test]
+    fn search_terms_split_like_drf() {
+        assert!(search_terms(None).is_empty());
+        assert!(search_terms(Some("")).is_empty());
+        assert!(search_terms(Some("   ")).is_empty());
+        assert_eq!(search_terms(Some("home")), vec!["home".to_owned()]);
+        assert_eq!(
+            search_terms(Some("  home   page ")),
+            vec!["home".to_owned(), "page".to_owned()]
+        );
+        assert_eq!(
+            search_terms(Some("home,page")),
+            vec!["home".to_owned(), "page".to_owned()]
+        );
+    }
+
+    /// `icontains` escaping matches the license-workspace vectors: LIKE
+    /// metacharacters backslashed, wrapped in `%...%`.
+    #[test]
+    fn icontains_param_escapes_like_metacharacters() {
+        assert_eq!(icontains_param("home"), "%home%");
+        assert_eq!(icontains_param("a%b_c\\d"), "%a\\%b\\_c\\\\d%");
+    }
+
+    /// Search binds continue the positional sequence (list `$4`, retrieve
+    /// `$5` after the page id) with one ANDed predicate per term.
+    #[test]
+    fn search_sql_binds_follow_positionals() {
+        let terms = vec!["home".to_owned(), "page".to_owned()];
+        let list = read_rows_sql(false, false, &terms);
+        assert!(
+            list.contains(
+                "UPPER(pages.name::text) LIKE UPPER($4) AND UPPER(pages.name::text) LIKE UPPER($5)"
+            ),
+            "{list}"
+        );
+        let one = read_rows_sql(false, true, &terms);
+        assert!(
+            one.contains(
+                "UPPER(pages.name::text) LIKE UPPER($5) AND UPPER(pages.name::text) LIKE UPPER($6)"
+            ),
+            "{one}"
+        );
+        assert!(one.contains("pages.id = $4"), "{one}");
+    }
+
+    /// Datetime shaping: aware values render in the request zone with the
+    /// `Z` rewrite; nulls and dates pass through untouched.
+    #[test]
+    fn shape_row_shifts_datetimes_only() {
+        let row: Map<String, Value> = serde_json::from_str(
+            r#"{"id":"a8098c1a-f86e-11da-bd1a-00112444be1e",
+                "created_at":"2026-09-30T19:00:00+00:00",
+                "updated_at":null,
+                "archived_at":"2026-09-30",
+                "is_favorite":false,"access":0}"#,
+        )
+        .expect("row parses");
+        let rendered = shape_row(
+            &row,
+            &[
+                "id",
+                "created_at",
+                "updated_at",
+                "archived_at",
+                "is_favorite",
+                "access",
+            ],
+            &utc(),
+        );
+        assert_eq!(
+            rendered,
+            r#"{"id":"a8098c1a-f86e-11da-bd1a-00112444be1e","created_at":"2026-09-30T19:00:00Z","updated_at":null,"archived_at":"2026-09-30","is_favorite":false,"access":0}"#
+        );
+        // Missing keys render null (annotation-backed keys on plain rows).
+        let empty = shape_row(&Map::new(), &["label_ids"], &utc());
+        assert_eq!(empty, r#"{"label_ids":null}"#);
     }
 }
