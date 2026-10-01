@@ -7,7 +7,24 @@
 // specs run on apps/web (oracle) and apps/web_new (parity target).
 import { expect } from "../fixtures";
 import type { ParityDriver, ParitySeedFacts } from "../drivers/parity-driver";
-import { createIssue, deleteIssue, issueFacts, projectFacts } from "../helpers/api";
+import {
+  PROJECT_ROLE_GUEST,
+  addProjectMembers,
+  createIssue,
+  deactivateUser,
+  deleteIssue,
+  fetchMe,
+  inviteWorkspaceMember,
+  issueFacts,
+  joinWorkspace,
+  listWorkspaceInvites,
+  listWorkspaceMembers,
+  projectFacts,
+  removeWorkspaceMember,
+  setOnboarded,
+  signInSession,
+  signUpUser,
+} from "../helpers/api";
 
 /**
  * Sign in and gate on the authenticated session. The shared scratch stack
@@ -77,4 +94,56 @@ export async function dropIssue(
   projectId: string = seed.projectId
 ): Promise<void> {
   await deleteIssue(seed.workspaceSlug, projectId, id, session);
+}
+
+/** A scenario-owned second user: credentials, session, and workspace identity. */
+export interface GuestUser {
+  email: string;
+  password: string;
+  session: string;
+  userId: string;
+}
+
+/**
+ * Sign up a throwaway guest, join it to the workspace, and add it to the
+ * project. Guests need `guest_view_all_features` on the project to read
+ * issues at all, so callers pass a scratch project they flipped (the seed
+ * project is never touched). Pair with `teardownGuest`.
+ */
+export async function setupGuest(seed: ParitySeedFacts, ownerSession: string, projectId: string): Promise<GuestUser> {
+  const email = `parity-guest-${Date.now()}@example.com`;
+  const password = "Parity-Guest-1";
+  await signUpUser(email, password);
+  const session = await signInSession(email, password);
+  await setOnboarded(session);
+  await inviteWorkspaceMember(seed.workspaceSlug, ownerSession, email, PROJECT_ROLE_GUEST);
+  const invites = await listWorkspaceInvites(seed.workspaceSlug, ownerSession);
+  const invite = invites.find((row) => row.email === email);
+  if (!invite) throw new Error("[parity] workspace invite for the guest is missing.");
+  await joinWorkspace(seed.workspaceSlug, invite.id, invite.token, session);
+  const me = await fetchMe(session);
+  await addProjectMembers(seed.workspaceSlug, projectId, ownerSession, [
+    { member_id: me.id, role: PROJECT_ROLE_GUEST },
+  ]);
+  return { email, password, session, userId: me.id };
+}
+
+/**
+ * Remove the guest's workspace membership and deactivate the user. The
+ * scratch project (with its project membership) is deleted by the caller.
+ * Best effort throughout: teardown must not fail a passing scenario.
+ */
+export async function teardownGuest(seed: ParitySeedFacts, ownerSession: string, guest: GuestUser): Promise<void> {
+  try {
+    const members = await listWorkspaceMembers(seed.workspaceSlug, ownerSession);
+    const row = members.find((member) => member.email === guest.email);
+    if (row) await removeWorkspaceMember(seed.workspaceSlug, row.id, ownerSession);
+  } catch {
+    // Best effort: a contended stack must not fail teardown.
+  }
+  try {
+    await deactivateUser(guest.session);
+  } catch {
+    // Best effort: see above.
+  }
 }

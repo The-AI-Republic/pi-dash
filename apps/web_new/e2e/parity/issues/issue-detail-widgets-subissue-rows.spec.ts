@@ -58,9 +58,7 @@ test(
       await expect.poll(() => driver.issueDetailTitle(), { timeout: 120_000 }).toBe(parent.name);
       await expect.poll(() => driver.widgetProgress("Sub-work items"), { timeout: 30_000 }).toBe("0/1 Done");
       await test.step("the header offers filter and display controls", async () => {
-        const header = driver.page.locator("button.w-full").filter({ hasText: "Sub-work items" }).first();
-        const controls = header.locator("button");
-        expect(await controls.count()).toBeGreaterThan(0);
+        expect(await driver.widgetHeaderControlCount("Sub-work items")).toBeGreaterThan(0);
       });
       await test.step("bug: filtering has no visible list to act on", async () => {
         // Intended: the Filters dropdown (priority, state group, state,

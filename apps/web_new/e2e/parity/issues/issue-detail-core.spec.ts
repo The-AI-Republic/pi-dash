@@ -11,15 +11,33 @@
 // ISS-160, ISS-161, ISS-162, ISS-163, ISS-164.
 import { test, expect } from "../fixtures";
 import {
+  archivedIssueStatus,
+  createProject,
+  createState,
+  deleteIssueStatus,
+  deleteProject,
+  deleteState,
   descriptionVersionDetail,
   descriptionVersions,
   fetchIssue,
+  issueStatus,
   patchIssue,
+  patchIssueStatus,
+  patchProject,
+  restoreArchivedIssue,
   signInSession,
   subscriptionStatus,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
-import { dropIssue, ownIssue, signIn } from "./detail-support";
+import {
+  dropIssue,
+  ownIssue,
+  setupGuest,
+  signIn,
+  teardownGuest,
+  type GuestUser,
+  type SeedIssue,
+} from "./detail-support";
 
 test(specTitle(["ISS-142"], "open a work item full page"), { tag: specTags(["ISS-142"]) }, async ({ driver, seed }) => {
   await signIn(driver, seed);
@@ -290,11 +308,165 @@ test(specTitle(["ISS-162"], "detail quick-actions menu"), { tag: specTags(["ISS-
     const names = await driver.quickActionNames();
     expect(names).toContain("Delete");
     expect(names.some((name) => name.includes("Archive"))).toBe(true);
+    expect(names).toContain("Make a copy");
+    expect(names).toContain("Open in new tab");
+    expect(names).toContain("Move to project");
     await driver.page.keyboard.press("Escape");
   } finally {
     await dropIssue(seed, session, issue.id);
   }
 });
+
+test(
+  specTitle(["ISS-162"], "detail quick-actions delete flow"),
+  { tag: specTags(["ISS-162"]) },
+  async ({ driver, seed }) => {
+    await signIn(driver, seed);
+    const session = await signInSession(seed.email, seed.password);
+    const issue = await ownIssue(seed, session, `Oracle del flow ${Date.now()}`);
+    try {
+      await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
+      await expect.poll(() => driver.issueDetailTitle(), { timeout: 120_000 }).toBe(issue.name);
+      await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
+      await test.step("delete asks for confirmation naming the work item", async () => {
+        await driver.clickQuickAction("Delete");
+        // The modal mounts asynchronously after the menu closes.
+        await expect.poll(() => driver.confirmModalText(), { timeout: 30_000 }).toContain("Delete Work item");
+        await expect.poll(() => driver.confirmModalText(), { timeout: 30_000 }).toContain(issue.seq);
+      });
+      await test.step("confirming toasts and redirects to the issues list", async () => {
+        await driver.confirmModal("Delete");
+        await expect.poll(() => driver.lastToast(), { timeout: 30_000 }).toContain("deleted successfully");
+        await expect.poll(() => driver.page.url(), { timeout: 60_000 }).toContain(`/projects/${seed.projectId}/issues`);
+      });
+      await test.step("the server no longer has the issue", async () => {
+        await expect
+          .poll(() => issueStatus(seed.workspaceSlug, seed.projectId, issue.id, session), { timeout: 30_000 })
+          .toMatchObject({ status: 404 });
+      });
+    } finally {
+      await dropIssue(seed, session, issue.id);
+    }
+  }
+);
+
+test(
+  specTitle(["ISS-162"], "detail quick-actions archive and restore flows"),
+  { tag: specTags(["ISS-162"]) },
+  async ({ driver, seed }) => {
+    await signIn(driver, seed);
+    const session = await signInSession(seed.email, seed.password);
+    // The seed project ships only an unstarted state, and archiving needs
+    // a completed/cancelled one, so the scenario owns its Done state.
+    const done = await createState(
+      seed.workspaceSlug,
+      seed.projectId,
+      session,
+      `Oracle Done ${Date.now()}`,
+      "completed"
+    );
+    const issue = await ownIssue(seed, session, `Oracle arc flow ${Date.now()}`);
+    try {
+      await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
+      await expect.poll(() => driver.issueDetailTitle(), { timeout: 120_000 }).toBe(issue.name);
+      await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
+      await test.step("archive stays disabled until the work item is done", async () => {
+        expect(await driver.quickActionDisabled("Archive")).toBe(true);
+        await patchIssue(seed.workspaceSlug, seed.projectId, issue.id, session, { state_id: done.id });
+        await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
+        await expect.poll(() => driver.issueDetailTitle(), { timeout: 120_000 }).toBe(issue.name);
+        expect(await driver.quickActionDisabled("Archive")).toBe(false);
+      });
+      await test.step("archiving toasts and redirects to the issues list", async () => {
+        await driver.clickQuickAction("Archive");
+        // The modal mounts asynchronously after the menu closes, and it
+        // renders the identifier and sequence as separate runs ("PAR 565").
+        const [ident, num] = issue.seq.split("-");
+        await expect.poll(() => driver.confirmModalText(), { timeout: 30_000 }).toContain("Archive Work item");
+        await expect.poll(() => driver.confirmModalText(), { timeout: 30_000 }).toContain(`${ident} ${num}`);
+        await driver.confirmModal("Archive");
+        await expect.poll(() => driver.lastToast(), { timeout: 30_000 }).toContain("Archive success");
+        await expect.poll(() => driver.page.url(), { timeout: 60_000 }).toContain(`/projects/${seed.projectId}/issues`);
+        const archived = await archivedIssueStatus(seed.workspaceSlug, seed.projectId, issue.id, session);
+        expect(archived.status).toBe(200);
+        expect(archived.record?.["archived_at"]).toBeTruthy();
+      });
+      await test.step("the archived detail offers restore instead of archive", async () => {
+        await driver.openReadOnlyIssueDetail(seed.workspaceSlug, issue.seq);
+        const names = await driver.quickActionNames();
+        expect(names).toContain("Restore");
+        expect(names.some((name) => name.includes("Archive"))).toBe(false);
+        await driver.page.keyboard.press("Escape");
+      });
+      await test.step("restoring toasts and navigates back to the item", async () => {
+        await driver.clickQuickAction("Restore");
+        await expect.poll(() => driver.lastToast(), { timeout: 30_000 }).toContain("Restore success");
+        await expect.poll(() => driver.page.url(), { timeout: 60_000 }).toContain(`/browse/${issue.seq}`);
+        const back = await fetchIssue(seed.workspaceSlug, seed.projectId, issue.id, session);
+        expect(back["archived_at"]).toBeNull();
+      });
+    } finally {
+      await restoreArchivedIssue(seed.workspaceSlug, seed.projectId, issue.id, session).catch(() => {});
+      await dropIssue(seed, session, issue.id);
+      await deleteState(seed.workspaceSlug, seed.projectId, done.id, session).catch(() => {});
+    }
+  }
+);
+
+test(
+  specTitle(["ISS-162"], "detail quick-actions gated by role"),
+  { tag: specTags(["ISS-162"]) },
+  async ({ driver, seed }) => {
+    await signIn(driver, seed);
+    const ownerSession = await signInSession(seed.email, seed.password);
+    // Guests read issues only on projects that opt into guest-wide
+    // visibility, so the scenario owns a scratch project (the seed
+    // project is never touched).
+    // Setup lives inside the try so a mid-setup failure still tears
+    // down whatever it created (guest users are invisible to issue
+    // sweepers, so they must not leak).
+    let project: { id: string } | null = null;
+    let guest: GuestUser | null = null;
+    let issue: SeedIssue | null = null;
+    try {
+      const stamp = Date.now();
+      project = await createProject(
+        seed.workspaceSlug,
+        ownerSession,
+        `Oracle guestproj ${stamp}`,
+        `OG${String(stamp).slice(-6)}`
+      );
+      await patchProject(seed.workspaceSlug, project.id, ownerSession, { guest_view_all_features: true });
+      guest = await setupGuest(seed, ownerSession, project.id);
+      issue = await ownIssue(seed, ownerSession, `Oracle guestmenu ${stamp}`, {}, project.id);
+      const projectId = project.id;
+      const guestEmail = guest.email;
+      const guestPassword = guest.password;
+      const guestSession = guest.session;
+      const issueId = issue.id;
+      const issueSeq = issue.seq;
+      const issueName = issue.name;
+      await test.step("a guest sees only the navigation item", async () => {
+        await driver.page.context().clearCookies();
+        await signIn(driver, { ...seed, email: guestEmail, password: guestPassword });
+        await driver.openReadOnlyIssueDetail(seed.workspaceSlug, issueSeq);
+        expect(await driver.quickActionNames()).toEqual(["Open in new tab"]);
+      });
+      await test.step("the server rejects guest writes", async () => {
+        expect(
+          await patchIssueStatus(seed.workspaceSlug, projectId, issueId, guestSession, { name: "guest rename" })
+        ).toBe(403);
+        expect(await deleteIssueStatus(seed.workspaceSlug, projectId, issueId, guestSession)).toBe(403);
+        const intact = await fetchIssue(seed.workspaceSlug, projectId, issueId, ownerSession);
+        expect(intact["name"]).toBe(issueName);
+      });
+    } finally {
+      if (project && issue) await dropIssue(seed, ownerSession, issue.id, project.id);
+      if (project) await deleteProject(seed.workspaceSlug, project.id, ownerSession).catch(() => {});
+      if (guest) await teardownGuest(seed, ownerSession, guest);
+    }
+  }
+);
 
 test(
   specTitle(["ISS-164"], "agent status panel is absent without runs"),

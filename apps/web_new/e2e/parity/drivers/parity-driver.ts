@@ -624,6 +624,8 @@ export interface ParityDriver {
   // ---- Issue detail (NEWFRONT-121). ----
   /** Open the full-page detail of `IDENT-seq` (e.g. `PAR-1`); ends hydrated. */
   openIssueDetail(workspaceSlug: string, issueSeq: string): Promise<void>;
+  /** Open a read-only detail of `IDENT-seq` (archived, or viewed without edit rights); ends with the sidebar hydrated. */
+  openReadOnlyIssueDetail(workspaceSlug: string, issueSeq: string): Promise<void>;
   /** Title heading text on the detail page, or null when absent. */
   issueDetailTitle(): Promise<string | null>;
   /** Identifier line (e.g. `PAR-1`) on the detail page, or null when absent. */
@@ -658,6 +660,10 @@ export interface ParityDriver {
   clickSubscribeToggle(): Promise<void>;
   /** Names of the detail header `…` quick-action menu items. */
   quickActionNames(): Promise<string[]>;
+  /** Click the named detail header `…` quick-action menu item. */
+  clickQuickAction(name: string): Promise<void>;
+  /** True when the named `…` quick-action menu item is disabled; ends with the menu closed. */
+  quickActionDisabled(name: string): Promise<boolean>;
   /** Open the legacy short-link route that redirects to the detail page. */
   openLegacyIssueRoute(workspaceSlug: string, projectId: string, issueId: string): Promise<void>;
   /** True when the detail page shows the does-not-exist empty state. */
@@ -674,6 +680,8 @@ export interface ParityDriver {
   pickAssignee(displayName: string): Promise<void>;
   /** Names of the Runs-on execution-target options; ends with the dropdown closed. */
   runsOnOptions(): Promise<string[]>;
+  /** Pick the named execution target from the sidebar Runs-on dropdown. */
+  pickRunsOn(name: string): Promise<void>;
   /** Pick a day of the month in the sidebar date picker for the named row. */
   pickDate(label: string, day: string): Promise<void>;
   /** True when the named day cell is disabled in the currently open date picker. */
@@ -712,6 +720,8 @@ export interface ParityDriver {
   peekIdentifier(): Promise<string | null>;
   /** Close the peek through its header close control; ends with the panel gone. */
   closePeek(): Promise<void>;
+  /** True when the peek header close control is rendered (even while loading). */
+  peekCloseVisible(): Promise<boolean>;
   /** Click the named issue row in the list; ends once the URL or peek settles. */
   clickListRow(name: string): Promise<void>;
   /** Switch the peek display mode (`Side Peek` | `Modal` | `Full Screen`); ends applied. */
@@ -740,6 +750,8 @@ export interface ParityDriver {
   openWidgetSection(widget: string): Promise<void>;
   /** True when the named widget section is currently expanded. */
   widgetExpanded(widget: string): Promise<boolean>;
+  /** Number of control buttons nested in the named widget's header row. */
+  widgetHeaderControlCount(widget: string): Promise<number>;
   /** Toggle the named widget section open/closed; ends settled. */
   toggleWidgetSection(widget: string): Promise<void>;
   /** Option names of the named widget's add (`+`) menu. */

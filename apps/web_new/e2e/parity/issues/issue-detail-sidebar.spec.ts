@@ -12,11 +12,13 @@ import { test, expect } from "../fixtures";
 import {
   createCycle,
   createModule,
+  createPod,
   createProject,
   createProjectLabel,
   createState,
   deleteCycle,
   deleteModule,
+  deletePod,
   deleteProject,
   deleteProjectLabel,
   deleteState,
@@ -25,11 +27,13 @@ import {
   patchProject,
   projectFacts,
   projectLabels,
+  projectPods,
   projectStates,
   signInSession,
+  type PodFacts,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
-import { dropIssue, ownIssue, signIn } from "./detail-support";
+import { dropIssue, ownIssue, signIn, type SeedIssue } from "./detail-support";
 
 test(specTitle(["ISS-148"], "sidebar state property"), { tag: specTags(["ISS-148"]) }, async ({ driver, seed }) => {
   await signIn(driver, seed);
@@ -95,17 +99,54 @@ test(specTitle(["ISS-149"], "sidebar assignees property"), { tag: specTags(["ISS
 test(specTitle(["ISS-150"], "sidebar runs-on property"), { tag: specTags(["ISS-150"]) }, async ({ driver, seed }) => {
   await signIn(driver, seed);
   const session = await signInSession(seed.email, seed.password);
-  const issue = await ownIssue(seed, session, `Oracle runson ${Date.now()}`);
+  // The seed project ships a single pod, so switching targets needs a
+  // scenario-owned second one (pod suffixes allow no spaces).
+  let pod2: PodFacts | null = null;
+  let issue: SeedIssue | null = null;
   try {
-    await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
-    await expect.poll(() => driver.issueDetailTitle(), { timeout: 120_000 }).toBe(issue.name);
-    await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
-    expect(await driver.sidebarProperty("Runs on")).toContain("PAR_pod_1");
-    const options = await driver.runsOnOptions();
-    expect(options.some((name) => name.includes("PAR_pod_1"))).toBe(true);
-    expect(options.some((name) => /unavailable|not enabled/i.test(name))).toBe(true);
+    pod2 = await createPod(seed.projectId, session, `oracle-${Date.now()}`);
+    issue = await ownIssue(seed, session, `Oracle runson ${Date.now()}`);
+    const issueId = issue.id;
+    const issueSeq = issue.seq;
+    const pod2Id = pod2.id;
+    const pod2Name = pod2.name;
+    const before = await fetchIssue(seed.workspaceSlug, seed.projectId, issueId, session);
+    await test.step("the displayed target matches the server execution target", async () => {
+      const pods = await projectPods(seed.projectId, session);
+      const pod1 = pods.find((pod) => pod.name === "PAR_pod_1");
+      expect(pod1).toBeTruthy();
+      expect(before["assigned_pod_id"]).toBe(pod1?.id);
+      await driver.openIssueDetail(seed.workspaceSlug, issueSeq);
+      await expect.poll(() => driver.issueDetailTitle(), { timeout: 120_000 }).toBe(issue?.name ?? "");
+      await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
+      expect(await driver.sidebarProperty("Runs on")).toContain("PAR_pod_1");
+      const options = await driver.runsOnOptions();
+      expect(options.some((name) => name.includes("PAR_pod_1"))).toBe(true);
+      expect(options.some((name) => /unavailable|not enabled/i.test(name))).toBe(true);
+    });
+    await test.step("picking another target patches the issue", async () => {
+      await driver.pickRunsOn(pod2Name);
+      await expect.poll(() => driver.sidebarProperty("Runs on"), { timeout: 30_000 }).toContain(pod2Name);
+      await expect
+        .poll(async () => (await fetchIssue(seed.workspaceSlug, seed.projectId, issueId, session))["assigned_pod_id"], {
+          timeout: 30_000,
+        })
+        .toBe(pod2Id);
+      const after = await fetchIssue(seed.workspaceSlug, seed.projectId, issueId, session);
+      expect(after["agent_executor"]).toBe("local_runner");
+    });
+    await test.step("restore the original target", async () => {
+      await patchIssue(seed.workspaceSlug, seed.projectId, issueId, session, {
+        assigned_pod_id: before["assigned_pod_id"],
+        agent_executor: before["agent_executor"],
+      });
+      const restored = await fetchIssue(seed.workspaceSlug, seed.projectId, issueId, session);
+      expect(restored["assigned_pod_id"]).toBe(before["assigned_pod_id"]);
+      expect(restored["agent_executor"]).toBe(before["agent_executor"]);
+    });
   } finally {
-    await dropIssue(seed, session, issue.id);
+    if (issue) await dropIssue(seed, session, issue.id);
+    if (pod2) await deletePod(pod2.id, session);
   }
 });
 

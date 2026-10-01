@@ -273,8 +273,7 @@ test(
         // neither the title nor the error shows yet.
         expect(await driver.peekTitle()).toBeNull();
         expect(await driver.peekErrorTitle()).toBeNull();
-        const close = driver.page.locator("#full-screen-portal button:has(svg.lucide-move-right)");
-        expect(await close.count()).toBe(1);
+        expect(await driver.peekCloseVisible()).toBe(true);
       });
       await test.step("the peek still hydrates after the release", async () => {
         release();

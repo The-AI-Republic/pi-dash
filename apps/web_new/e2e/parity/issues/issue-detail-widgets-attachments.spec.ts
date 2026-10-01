@@ -135,7 +135,7 @@ test(
     const ts = Date.now();
     const issue = await ownIssue(seed, session, `Oracle attach big ${ts}`);
     try {
-      const config = await instanceConfig(session);
+      const config = await instanceConfig(undefined, session);
       const limit = Number(config["file_size_limit"] ?? 0);
       expect(limit, "instance file_size_limit").toBeGreaterThan(0);
       await driver.openIssueDetail(seed.workspaceSlug, issue.seq);

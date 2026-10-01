@@ -1013,6 +1013,140 @@ export async function deleteIssue(
     throw new Error(`[parity] issue delete failed with HTTP ${res.status}.`);
 }
 
+/** Retrieve one issue without throwing: resolves with the HTTP status plus the record when present. */
+export async function issueStatus(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; record: Record<string, unknown> | null }> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (!res.ok) return { status: res.status, record: null };
+  return { status: res.status, record: (await res.json()) as Record<string, unknown> };
+}
+
+/** Archive one issue; resolves with the archived_at stamp the server reports. */
+export async function archiveIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ archived_at: string }> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/archive/`,
+    sessionCookie,
+    { method: "POST" },
+    apiBase
+  );
+  requireOk(res, "issue archive");
+  return (await res.json()) as { archived_at: string };
+}
+
+/** Restore one archived issue. */
+export async function restoreArchivedIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/archive/`,
+    sessionCookie,
+    { method: "DELETE" },
+    apiBase
+  );
+  requireOk(res, "issue restore");
+}
+
+/** Retrieve one archived issue without throwing: status plus the record when present. */
+export async function archivedIssueStatus(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; record: Record<string, unknown> | null }> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/archive/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (!res.ok) return { status: res.status, record: null };
+  return { status: res.status, record: (await res.json()) as Record<string, unknown> };
+}
+
+/** Minimal pod identity as the runners pod list reports it. */
+export interface PodFacts {
+  id: string;
+  name: string;
+  is_default: boolean;
+}
+
+/** Every pod of the project. */
+export async function projectPods(
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<PodFacts[]> {
+  const res = await authedApi(`/runners/pods/?project=${projectId}`, sessionCookie, undefined, apiBase);
+  requireOk(res, "pod list");
+  const rows = (await res.json()) as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    id: row["id"] as string,
+    name: row["name"] as string,
+    is_default: row["is_default"] === true,
+  }));
+}
+
+/** Create a pod on the project; resolves with its id and name. */
+export async function createPod(
+  projectId: string,
+  sessionCookie: string,
+  name: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<PodFacts> {
+  const res = await authedApi(
+    `/runners/pods/`,
+    sessionCookie,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ project: projectId, name }),
+    },
+    apiBase
+  );
+  requireOk(res, "pod create");
+  const row = (await res.json()) as Record<string, unknown>;
+  if (typeof row["id"] !== "string" || typeof row["name"] !== "string") {
+    throw new Error("[parity] pod create response carried no id/name.");
+  }
+  return { id: row["id"] as string, name: row["name"] as string, is_default: row["is_default"] === true };
+}
+
+/** Delete a pod (best effort: 404 means a sibling already removed it). */
+export async function deletePod(
+  podId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await authedApi(`/runners/pods/${podId}/`, sessionCookie, { method: "DELETE" }, apiBase);
+  if (!res.ok && res.status !== 204 && res.status !== 404)
+    throw new Error(`[parity] pod delete failed with HTTP ${res.status}.`);
+}
+
 /** Project state facts as the state dropdown reports them. */
 export interface StateFacts {
   id: string;
@@ -1442,17 +1576,6 @@ export async function recentRuns(
 ): Promise<Record<string, unknown>[]> {
   const res = await authedApi("/runners/runs/?per_page=100", sessionCookie, undefined, apiBase);
   return collectionRows(res, "runs read");
-}
-
-/** Instance config object (carries the upload `file_size_limit`). */
-export async function instanceConfig(
-  sessionCookie: string,
-  apiBase: string = apiBaseFromEnv()
-): Promise<Record<string, unknown>> {
-  const res = await authedApi("/instances/", sessionCookie, undefined, apiBase);
-  requireOk(res, "instance config read");
-  const body = (await res.json()) as Record<string, unknown>;
-  return (body["config"] ?? body) as Record<string, unknown>;
 }
 
 export async function serverIssueNames(
@@ -2600,7 +2723,10 @@ export async function serverHomeIssues(
     if (typeof record.id !== "string" || typeof record.name !== "string")
       throw new Error("[parity] home issue row carried no id/name pair.");
     return { id: record.id, name: record.name };
-  });/** Module facts for sidebar-module scenarios. */
+  });
+}
+
+/** Module facts for sidebar-module scenarios. */
 export interface ModuleFacts {
   id: string;
   name: string;
@@ -3147,4 +3273,238 @@ export async function deleteServerModule(
     3
   );
   if (!res.ok) throw new Error(`[parity] module delete failed with HTTP ${res.status}.`);
+}
+
+// ---- Scenario-owned second users (NEWFRONT-121). ----
+// Role-gating scenarios sign up a throwaway user, join it to the
+// workspace, add it to a scratch project, and tear it all down at the
+// end. Every call rides out the shared-stack throttle.
+
+/** Project roles as the member endpoints spell them. */
+export const PROJECT_ROLE_GUEST = 5;
+
+/** Register a new user with email plus password (same form POST as the sign-up card). */
+export async function signUpUser(email: string, password: string, apiBase: string = apiBaseFromEnv()): Promise<void> {
+  const backoffMs = [3000, 6000, 12000, 20000, 30000];
+  for (let attempt = 0; ; attempt++) {
+    const tokenRes = await fetch(`${apiBase}/auth/get-csrf-token/`);
+    if (tokenRes.status === 429 && attempt < backoffMs.length) {
+      await new Promise((resolve) => setTimeout(resolve, backoffMs[attempt]));
+      continue;
+    }
+    if (!tokenRes.ok) throw new Error(`[parity] CSRF token fetch failed with HTTP ${tokenRes.status}.`);
+    const tokenPayload = (await tokenRes.json()) as { csrf_token?: unknown };
+    const token = typeof tokenPayload.csrf_token === "string" ? tokenPayload.csrf_token : "";
+    if (token === "") throw new Error("[parity] CSRF token response carried no token.");
+    const preCookies = cookieHeader(setCookieHeaders(tokenRes));
+    const body = new URLSearchParams({ email, password, csrfmiddlewaretoken: token });
+    const res = await fetch(`${apiBase}/auth/sign-up/`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", cookie: preCookies },
+      body,
+      redirect: "manual",
+    });
+    if (res.status === 429 && attempt < backoffMs.length) {
+      await new Promise((resolve) => setTimeout(resolve, backoffMs[attempt]));
+      continue;
+    }
+    if (res.status !== 200 && res.status !== 302) {
+      throw new Error(`[parity] sign-up failed with HTTP ${res.status} for ${email}.`);
+    }
+    return;
+  }
+}
+
+/** Minimal identity of the session user. */
+export interface MeFacts {
+  id: string;
+  email: string;
+}
+
+/** The session user as `/users/me/` reports it. */
+export async function fetchMe(sessionCookie: string, apiBase: string = apiBaseFromEnv()): Promise<MeFacts> {
+  const res = await authedApi(`/users/me/`, sessionCookie, undefined, apiBase);
+  requireOk(res, "user read");
+  const record = (await res.json()) as { id?: unknown; email?: unknown };
+  if (typeof record.id !== "string" || typeof record.email !== "string") {
+    throw new Error("[parity] user read carried no id/email.");
+  }
+  return { id: record.id, email: record.email };
+}
+
+/** Mark the session user's onboarding complete so the app shell renders. */
+export async function setOnboarded(sessionCookie: string, apiBase: string = apiBaseFromEnv()): Promise<void> {
+  const res = await authedApi(
+    `/users/me/onboard/`,
+    sessionCookie,
+    { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ is_onboarded: true }) },
+    apiBase
+  );
+  requireOk(res, "user onboard");
+}
+
+/** Deactivate the session user (best effort: 404 means already gone). */
+export async function deactivateUser(sessionCookie: string, apiBase: string = apiBaseFromEnv()): Promise<void> {
+  const res = await authedApi(`/users/me/`, sessionCookie, { method: "DELETE" }, apiBase);
+  if (!res.ok && res.status !== 204 && res.status !== 404)
+    throw new Error(`[parity] user deactivate failed with HTTP ${res.status}.`);
+}
+
+/** Invite one email to the workspace with the given role. */
+export async function inviteWorkspaceMember(
+  workspaceSlug: string,
+  sessionCookie: string,
+  email: string,
+  role: number,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await authed(
+    workspaceSlug,
+    `/invitations/`,
+    sessionCookie,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ emails: [{ email, role }] }),
+    },
+    apiBase
+  );
+  requireOk(res, "workspace invite");
+}
+
+/** Minimal workspace-invite identity (the join token rides along for the owner). */
+export interface InviteFacts {
+  id: string;
+  email: string;
+  token: string;
+}
+
+/** Every pending workspace invite. */
+export async function listWorkspaceInvites(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<InviteFacts[]> {
+  const res = await authed(workspaceSlug, `/invitations/`, sessionCookie, undefined, apiBase);
+  requireOk(res, "workspace invite list");
+  const rows = (await res.json()) as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    id: row["id"] as string,
+    email: row["email"] as string,
+    token: row["token"] as string,
+  }));
+}
+
+/** Accept a workspace invite as the invited user. */
+export async function joinWorkspace(
+  workspaceSlug: string,
+  inviteId: string,
+  token: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await authed(
+    workspaceSlug,
+    `/invitations/${inviteId}/join/`,
+    sessionCookie,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token, accepted: true }),
+    },
+    apiBase
+  );
+  requireOk(res, "workspace join");
+}
+
+/** Minimal workspace-member identity. */
+export interface WorkspaceMemberFacts {
+  id: string;
+  email: string;
+}
+
+/** Every workspace member. */
+export async function listWorkspaceMembers(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<WorkspaceMemberFacts[]> {
+  const res = await authed(workspaceSlug, `/members/`, sessionCookie, undefined, apiBase);
+  requireOk(res, "workspace member list");
+  const rows = (await res.json()) as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    id: row["id"] as string,
+    email: ((row["member"] as Record<string, unknown> | undefined)?.["email"] ?? row["email"]) as string,
+  }));
+}
+
+/** Remove one workspace member (best effort: 404 means already gone). */
+export async function removeWorkspaceMember(
+  workspaceSlug: string,
+  memberRowId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await authed(workspaceSlug, `/members/${memberRowId}/`, sessionCookie, { method: "DELETE" }, apiBase);
+  if (!res.ok && res.status !== 204 && res.status !== 404)
+    throw new Error(`[parity] workspace member delete failed with HTTP ${res.status}.`);
+}
+
+/** Add members to a project with their roles. */
+export async function addProjectMembers(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  members: Array<{ member_id: string; role: number }>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/members/`,
+    sessionCookie,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ members }),
+    },
+    apiBase
+  );
+  requireOk(res, "project member add");
+}
+
+/** Patch one issue without throwing: resolves with the HTTP status (for 403 probes). */
+export async function patchIssueStatus(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  patch: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/`,
+    sessionCookie,
+    { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(patch) },
+    apiBase
+  );
+  return res.status;
+}
+
+/** Delete one issue without throwing: resolves with the HTTP status (for 403 probes). */
+export async function deleteIssueStatus(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/`,
+    sessionCookie,
+    { method: "DELETE" },
+    apiBase
+  );
+  return res.status;
 }

@@ -325,9 +325,11 @@ export class WebDriver implements ParityDriver {
     const deadline = Date.now() + WebDriver.DETAIL_MS;
     let loops = 0;
     for (;;) {
+      // Bounded: a blank boot renders no <main> at all, and an unbounded
+      // read would hang past the deadline instead of iterating to it.
       const text = await this.page
         .getByRole("main")
-        .innerText()
+        .innerText({ timeout: 5000 })
         .catch(() => "");
       if (text.trim().length > 50) return;
       if ((await this.page.getByPlaceholder("name@company.com").count()) > 0) {
@@ -564,7 +566,8 @@ export class WebDriver implements ParityDriver {
     const panel = page.getByText(/smtp/i);
     if ((await panel.count()) === 0) return null;
     const text = (await panel.first().innerText()).trim();
-    return text === "" ? null : text;  }
+    return text === "" ? null : text;
+  }
 
   /**
    * User-visible read of the issues list. Observed on the running old app:
@@ -2692,6 +2695,8 @@ export class WebDriver implements ParityDriver {
     const pulsing = this.page.locator(".animate-pulse, [data-testid*='skeleton' i], [aria-busy='true']").first();
     if ((await pulsing.count()) > 0) return true;
     return false;
+  }
+
   // ---- Issue detail (NEWFRONT-121). ----
   // Selectors follow the detail behavior observed on the running old app:
   // the title is a textarea (placeholder "Work item title"), the sidebar
@@ -2731,6 +2736,27 @@ export class WebDriver implements ParityDriver {
     }
   }
 
+  async openReadOnlyIssueDetail(workspaceSlug: string, issueSeq: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/browse/${issueSeq}`);
+    // No title field renders on read-only detail (static title instead),
+    // so the identifier plus a hydrated sidebar row decide. Reload
+    // through blank dev-server boots like the opener.
+    const deadline = Date.now() + WebDriver.DETAIL_MS;
+    let loops = 0;
+    for (;;) {
+      if ((await this.issueDetailIdentifier()) === issueSeq) {
+        if ((await this.sidebarProperty("State")) !== null) return;
+      }
+      if ((await this.page.getByPlaceholder("name@company.com").count()) > 0) {
+        throw new Error("[parity] session lost while opening the read-only detail page.");
+      }
+      loops++;
+      if (Date.now() > deadline) throw new Error(`[parity] read-only detail did not hydrate for ${issueSeq}.`);
+      if (loops % 15 === 0) await this.page.reload().catch(() => {});
+      else await this.page.waitForTimeout(2000);
+    }
+  }
+
   private titleField(): Locator {
     return this.page.getByPlaceholder("Work item title").first();
   }
@@ -2741,7 +2767,7 @@ export class WebDriver implements ParityDriver {
   }
 
   async issueDetailIdentifier(): Promise<string | null> {
-    const id = this.page.getByText(/^[A-Z]{2,}-\d+$/).first();
+    const id = this.page.getByText(/^[A-Z0-9]{2,}-\d+$/).first();
     if ((await id.count()) === 0) return null;
     return (await id.innerText()).trim();
   }
@@ -2749,7 +2775,7 @@ export class WebDriver implements ParityDriver {
   async editIssueTitle(name: string): Promise<void> {
     await this.titleField().fill(name, { timeout: WebDriver.OPEN_MS });
     // Blur out of the title so the debounced autosave fires.
-    const id = this.page.getByText(/^[A-Z]{2,}-\d+$/).first();
+    const id = this.page.getByText(/^[A-Z0-9]{2,}-\d+$/).first();
     if ((await id.count()) > 0) await id.click({ timeout: WebDriver.OPEN_MS });
     else await this.titleField().press("Tab", { timeout: WebDriver.OPEN_MS });
   }
@@ -2791,7 +2817,7 @@ export class WebDriver implements ParityDriver {
     const editor = await this.descriptionEditor();
     if (!editor) throw new Error("[parity] no description editor on the detail page.");
     await editor.fill(text, { timeout: WebDriver.OPEN_MS });
-    const id = this.page.getByText(/^[A-Z]{2,}-\d+$/).first();
+    const id = this.page.getByText(/^[A-Z0-9]{2,}-\d+$/).first();
     if ((await id.count()) > 0) await id.click({ timeout: WebDriver.OPEN_MS });
     else await this.page.keyboard.press("Escape");
   }
@@ -2857,15 +2883,36 @@ export class WebDriver implements ParityDriver {
     await this.page.getByRole("option", { name: displayName }).click({ timeout: WebDriver.OPEN_MS });
   }
 
-  async runsOnOptions(): Promise<string[]> {
+  private async openRunsOn(): Promise<Locator> {
     const row = await this.propertyRow("Runs on");
     if (!row) throw new Error("[parity] no sidebar Runs-on row.");
     await row.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
     const options = this.page.getByRole("option");
     await options.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    return options;
+  }
+
+  async runsOnOptions(): Promise<string[]> {
+    const options = await this.openRunsOn();
     const names = (await options.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
     await this.page.keyboard.press("Escape");
     return names;
+  }
+
+  async pickRunsOn(name: string): Promise<void> {
+    // A click swallowed by a re-render leaves the dropdown open with no
+    // selection, so retry until the options detach (a select closes them).
+    for (let attempt = 0; ; attempt++) {
+      const options = await this.openRunsOn();
+      await options.filter({ hasText: name }).first().click({ timeout: WebDriver.OPEN_MS });
+      try {
+        await this.page.getByRole("option").first().waitFor({ state: "detached", timeout: 5000 });
+        return;
+      } catch {
+        if (attempt >= 2) throw new Error(`[parity] runs-on pick ${JSON.stringify(name)} did not land.`);
+        await this.page.keyboard.press("Escape").catch(() => {});
+      }
+    }
   }
 
   /** Open the date picker popover for the named sidebar row. */
@@ -2942,7 +2989,7 @@ export class WebDriver implements ParityDriver {
     // Identifier links also appear in the sidebar (right column) and in
     // widgets; the banner pill sits in the main column (left), so collect
     // small containers per link and keep the leftmost one.
-    const links = this.page.getByRole("link", { name: /[A-Z]{2,}-\d+/ });
+    const links = this.page.getByRole("link", { name: /[A-Z0-9]{2,}-\d+/ });
     const count = await links.count();
     let best: { node: Locator; x: number } | null = null;
     for (let i = 0; i < count; i++) {
@@ -2954,7 +3001,7 @@ export class WebDriver implements ParityDriver {
       ).trim();
       // The banner link wraps the identifier plus the parent name; skip the
       // child's own link by comparing the embedded identifier.
-      const match = /([A-Z]{2,}-\d+)/.exec(text);
+      const match = /([A-Z0-9]{2,}-\d+)/.exec(text);
       if (!match || match[1] === childSeq) continue;
       let node = links.nth(i).locator("xpath=parent::*");
       for (let level = 0; level < 5; level++) {
@@ -3137,12 +3184,14 @@ export class WebDriver implements ParityDriver {
       .click({ timeout: WebDriver.OPEN_MS });
   }
 
-  async quickActionNames(): Promise<string[]> {
+  private async openQuickActions(): Promise<Locator> {
     // The overflow trigger is an icon-only menu button in the detail
     // header bar (the row holding the breadcrumb and the subscribe
     // toggle). Walk up from the toggle to that bar, then open the popup
-    // button inside it.
+    // button inside it. Archived detail renders no subscribe toggle, so
+    // anchor on the header identifier there instead.
     let bar = this.page.getByRole("button", { name: /^(Subscribe|Unsubscribe)$/ }).first();
+    if ((await bar.count()) === 0) bar = this.page.getByText(/^[A-Z0-9]{2,}-\d+$/).first();
     for (let i = 0; i < 8; i++) {
       bar = bar.locator("xpath=parent::*");
       const triggers = bar.locator('button[aria-haspopup="menu"], button[aria-haspopup="true"]');
@@ -3153,7 +3202,35 @@ export class WebDriver implements ParityDriver {
     }
     const items = this.page.getByRole("menuitem");
     await items.first().waitFor({ timeout: WebDriver.DETAIL_MS });
+    return items;
+  }
+
+  async quickActionNames(): Promise<string[]> {
+    const items = await this.openQuickActions();
     return (await items.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async clickQuickAction(name: string): Promise<void> {
+    // A click swallowed by a re-render leaves the menu open with no
+    // effect, so retry until the menu closes (every item closes it).
+    for (let attempt = 0; ; attempt++) {
+      const items = await this.openQuickActions();
+      await items.filter({ hasText: name }).first().click({ timeout: WebDriver.OPEN_MS });
+      try {
+        await this.page.getByRole("menuitem").first().waitFor({ state: "detached", timeout: 5000 });
+        return;
+      } catch {
+        if (attempt >= 2) throw new Error(`[parity] quick action ${JSON.stringify(name)} did not land.`);
+        await this.page.keyboard.press("Escape").catch(() => {});
+      }
+    }
+  }
+
+  async quickActionDisabled(name: string): Promise<boolean> {
+    const items = await this.openQuickActions();
+    const disabled = await items.filter({ hasText: name }).first().isDisabled();
+    await this.page.keyboard.press("Escape").catch(() => {});
+    return disabled;
   }
 
   async openDescriptionHistory(): Promise<void> {
@@ -3557,7 +3634,7 @@ export class WebDriver implements ParityDriver {
 
   async peekIdentifier(): Promise<string | null> {
     const id = this.peekPortal()
-      .getByText(/^[A-Z]{2,}-\d+$/)
+      .getByText(/^[A-Z0-9]{2,}-\d+$/)
       .first();
     if ((await id.count()) === 0) return null;
     return ((await id.innerText()) ?? "").trim();
@@ -3565,6 +3642,10 @@ export class WebDriver implements ParityDriver {
 
   async closePeek(): Promise<void> {
     await this.peekPortal().locator("button:has(svg.lucide-move-right)").first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async peekCloseVisible(): Promise<boolean> {
+    return (await this.peekPortal().locator("button:has(svg.lucide-move-right)").count()) > 0;
   }
 
   async setPeekMode(mode: string): Promise<void> {
@@ -3764,6 +3845,11 @@ export class WebDriver implements ParityDriver {
     await btn.click({ timeout: WebDriver.OPEN_MS });
   }
 
+  async widgetHeaderControlCount(widget: string): Promise<number> {
+    const header = await this.waitWidgetHeader(widget);
+    return await header.locator("button").count();
+  }
+
   /** Direct row blocks inside the section content. */
   private async widgetRows(widget: string): Promise<Locator[]> {
     const content = await this.widgetContent(widget);
@@ -3830,7 +3916,7 @@ export class WebDriver implements ParityDriver {
     const text = ((await dialog.innerText().catch(() => "")) ?? "").trim();
     const lines = text.split("\n").map((line) => line.trim());
     for (let i = 0; i + 1 < lines.length; i++) {
-      if (/^[A-Z]{2,}-\d+$/.test(lines[i] ?? "")) {
+      if (/^[A-Z0-9]{2,}-\d+$/.test(lines[i] ?? "")) {
         const next = lines[i + 1] ?? "";
         if (next !== "" && !/^(Create|Discard|Save|Cancel|Select|Deselect|No work|Advanced)/.test(next)) return next;
       }
@@ -3983,8 +4069,16 @@ export class WebDriver implements ParityDriver {
   }
 
   async confirmModal(label: string): Promise<void> {
-    const dialog = await this.openAppDialog();
-    if (!dialog) throw new Error("[parity] no confirm modal is open.");
+    // The dialog mounts asynchronously after the menu click, so poll for
+    // it instead of checking once (a single check flakes under load).
+    const deadline = Date.now() + WebDriver.OPEN_MS;
+    let dialog: Locator | null = null;
+    for (;;) {
+      dialog = await this.openAppDialog();
+      if (dialog) break;
+      if (Date.now() > deadline) throw new Error("[parity] no confirm modal is open.");
+      await this.page.waitForTimeout(250);
+    }
     await dialog.getByRole("button", { name: label }).first().click({ timeout: WebDriver.OPEN_MS });
     await dialog.waitFor({ state: "detached", timeout: WebDriver.OPEN_MS }).catch(() => {});
   }

@@ -892,9 +892,14 @@ export class WebNewDriver implements ParityDriver {
 
   async homeWaitForWidgets(): Promise<string[]> {
     return todo("homeWaitForWidgets");
+  }
+
   // ---- Issue detail (NEWFRONT-121): stubs until the area lands. ----
   async openIssueDetail(_workspaceSlug: string, _issueSeq: string): Promise<void> {
     return todo("openIssueDetail");
+  }
+  async openReadOnlyIssueDetail(_workspaceSlug: string, _issueSeq: string): Promise<void> {
+    return todo("openReadOnlyIssueDetail");
   }
   async issueDetailTitle(): Promise<string | null> {
     return todo("issueDetailTitle");
@@ -946,6 +951,12 @@ export class WebNewDriver implements ParityDriver {
   }
   async quickActionNames(): Promise<string[]> {
     return todo("quickActionNames");
+  }
+  async clickQuickAction(_name: string): Promise<void> {
+    return todo("clickQuickAction");
+  }
+  async quickActionDisabled(_name: string): Promise<boolean> {
+    return todo("quickActionDisabled");
   }
   async openLegacyIssueRoute(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
     return todo("openLegacyIssueRoute");
@@ -1056,6 +1067,9 @@ export class WebNewDriver implements ParityDriver {
   async pickAssignee(_displayName: string): Promise<void> {
     return todo("pickAssignee");
   }
+  async pickRunsOn(_name: string): Promise<void> {
+    return todo("pickRunsOn");
+  }
   async runsOnOptions(): Promise<string[]> {
     return todo("runsOnOptions");
   }
@@ -1113,6 +1127,9 @@ export class WebNewDriver implements ParityDriver {
   async closePeek(): Promise<void> {
     return todo("closePeek");
   }
+  async peekCloseVisible(): Promise<boolean> {
+    return todo("peekCloseVisible");
+  }
   async clickListRow(_name: string): Promise<void> {
     return todo("clickListRow");
   }
@@ -1151,6 +1168,9 @@ export class WebNewDriver implements ParityDriver {
   }
   async widgetExpanded(_widget: string): Promise<boolean> {
     return todo("widgetExpanded");
+  }
+  async widgetHeaderControlCount(_widget: string): Promise<number> {
+    return todo("widgetHeaderControlCount");
   }
   async toggleWidgetSection(_widget: string): Promise<void> {
     return todo("toggleWidgetSection");
