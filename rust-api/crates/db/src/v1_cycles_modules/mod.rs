@@ -11,6 +11,12 @@
 //! * [`module_queries`] — the five module read querysets M1-M5
 //!   (PIDASHCONV-308: tenant scopes, archived filters, issue-count
 //!   annotations, member-visibility asymmetry, kwargs/GET ordering).
+//!
+//! Ports `apps/api/pi_dash/db/models/cycle.py` for the db layer:
+//!
+//! * [`cycle`] — `Cycle`, `CycleIssue`, `CycleUserProperties`
+//!   (PIDASHCONV-291: column lists, manager exclusion filters,
+//!   `archived_at` guards, `CycleUserProperties` scoping, save rules).
 //!   Serializers, guards, tasks and handlers belong to the sibling D-20
 //!   issues; the domain gate is PIDASHCONV-425.
 //!
@@ -22,5 +28,6 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
+pub mod cycle;
 pub mod module;
 pub mod module_queries;
