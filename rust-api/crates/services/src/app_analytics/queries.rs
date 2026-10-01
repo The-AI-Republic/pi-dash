@@ -420,6 +420,9 @@ pub fn base_plot_count_sql(
 
 /// Q-01c estimate plot (`analytics_plot.py:110-115`):
 /// `SUM(CAST(estimate_point__value AS float))` grouped by dimension, ordered by `x_axis`.
+/// NULL dimensions are excluded for every axis (`analytics_plot.py:84-86`: `extract_axis`
+/// always returns `"dimension"`, so the exclude is unconditional — same guard as
+/// [`base_plot_count_sql`]; segment NULLs are NOT excluded, matching Python).
 /// Returns `None` for an unknown `x_axis` or `segment`. Params: `$1` = workspace slug.
 pub fn base_plot_estimate_sql(
     x_axis: &str,
@@ -459,10 +462,15 @@ pub fn base_plot_estimate_sql(
         }
         _ => (String::new(), String::new(), String::new()),
     };
+    // NULL dimensions are excluded for every axis (`analytics_plot.py:84-86`):
+    // the guard repeats the inlined expression (a SELECT alias is not visible
+    // in the same level's WHERE). Segment NULLs stay included — Python excludes
+    // only the dimension (`analytics_plot.py:89-115` has no segment exclude).
+    let null_guard = format!(" AND {dim_expr} IS NOT NULL");
     Some(format!(
         "SELECT {dim_expr} AS \"dimension\"{seg_select}, \
          SUM(CAST(\"{ESTIMATE_POINT_TABLE}\".\"value\" AS DOUBLE PRECISION)) AS \"estimate\" \
-         FROM \"{ISSUE_TABLE}\"{extra_joins}{dim_join}{seg_join}{scope} \
+         FROM \"{ISSUE_TABLE}\"{extra_joins}{dim_join}{seg_join}{scope}{null_guard} \
          GROUP BY \"dimension\"{seg_group} ORDER BY \"dimension\" ASC",
         scope = workspace_scope().replace("{filters}", filters_sql),
     ))
@@ -1916,6 +1924,27 @@ mod tests {
         ));
         assert_eq!(sql.matches("\"estimate_points\"").count(), 3);
         assert!(base_plot_estimate_sql("nope", None, "TRUE").is_none());
+        assert!(base_plot_estimate_sql("priority", Some("nope"), "TRUE").is_none());
+        // Every axis excludes NULL dimensions: `extract_axis` always returns
+        // "dimension", so `if x_axis == "dimension"` (analytics_plot.py:85) is
+        // always true and the exclude runs unconditionally (PIDASHCONV-506,
+        // mirroring PIDASHCONV-496 for the count branch). The guard repeats the
+        // inlined dimension expression (a SELECT alias is not visible in the
+        // same level's WHERE).
+        let plain = base_plot_estimate_sql("priority", None, "TRUE").expect("plain axis");
+        assert!(plain.contains("\"issues\".\"priority\" IS NOT NULL"));
+        let nullable = base_plot_estimate_sql("labels__id", None, "TRUE").expect("nullable axis");
+        assert!(nullable.contains("\"issue_labels\".\"label_id\" IS NOT NULL"));
+        let dated = base_plot_estimate_sql("created_at", None, "TRUE").expect("date axis");
+        assert!(dated.contains("IS NOT NULL"));
+        assert!(dated.contains("EXTRACT(YEAR"));
+        // Segment interplay: segment NULLs are NOT excluded in Python
+        // (analytics_plot.py:89-115 has no segment exclude) — only the
+        // dimension carries the guard.
+        let segmented =
+            base_plot_estimate_sql("priority", Some("labels__id"), "TRUE").expect("segmented axis");
+        assert!(segmented.contains("\"issues\".\"priority\" IS NOT NULL"));
+        assert!(!segmented.contains("\"issue_labels\".\"label_id\" IS NOT NULL"));
     }
 
     #[test]
