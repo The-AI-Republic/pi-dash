@@ -4301,6 +4301,7 @@ export class WebDriver implements ParityDriver {
     const btn = this.page.getByRole("button", { name: "Comment & Run" }).first();
     await btn.waitFor({ timeout: WebDriver.OPEN_MS });
     return btn.isDisabled().catch(() => true);
+  }
 
   // Shell chrome (NEWFRONT-126). The old app boots its workspace shell from
   // full page loads, and a load occasionally lands on the signed-out entry

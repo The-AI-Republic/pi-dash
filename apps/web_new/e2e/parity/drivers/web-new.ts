@@ -1432,6 +1432,7 @@ export class WebNewDriver implements ParityDriver {
   }
   async commentAndRunDisabled(): Promise<boolean> {
     return todo("commentAndRunDisabled");
+  }
 
   async sidebarBrandVisible(): Promise<boolean> {
     return todo("sidebarBrandVisible");
