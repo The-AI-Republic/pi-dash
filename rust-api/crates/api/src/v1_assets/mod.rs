@@ -12,3 +12,4 @@ pub mod asset_generic;
 pub mod asset_server;
 pub mod asset_user;
 pub mod permissions;
+pub mod sticky;
