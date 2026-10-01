@@ -34,7 +34,7 @@
  * still produces a report for the local sources.
  */
 
-import { readdirSync, readFileSync, statSync, writeFileSync, existsSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join, relative, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -180,7 +180,7 @@ function enumerateShortcuts(root, cloudRoot) {
         .filter((s) => /[a-zA-Z]/.test(s));
       for (const lit of new Set(lits)) keys.push(lit);
       // Key combos: endeavor to catch "cmd+k", "ctrl+p", "?" style bindings.
-      const combos = [...text.matchAll(/["'`](?:(?:cmd|ctrl|shift|alt|meta|mod)\s*\+\s*){1,3}[a-z0-9?\/\[\]\\-](?:\s*\+\s*[a-z0-9?\/\[\]\\-])*["'`]/gi)]
+      const combos = [...text.matchAll(/["'`](?:(?:cmd|ctrl|shift|alt|meta|mod)\s*\+\s*){1,3}[a-z0-9?/[\]\\-](?:\s*\+\s*[a-z0-9?/[\]\\-])*["'`]/gi)]
         .map((m) => m[0].slice(1, -1));
       for (const c of new Set(combos)) keys.push(c);
       items.push({ category: "shortcuts", kind: "shortcut-site", id: r, keys });
@@ -198,7 +198,7 @@ function enumerateRedirects(root, cloudRoot) {
     const r = rel(root, f);
     if (r && /\.(ts|tsx)$/.test(r)) redirectFiles.push({ f, r });
   }
-  for (const { f, r } of redirectFiles) push(r, [r, stripGroups(r)]);
+  for (const { r } of redirectFiles) push(r, [r, stripGroups(r)]);
   for (const appDir of ["apps/web/app", "apps/admin/app", "apps/space/app", "desktop-overlay/apps/web/app"]) {
     for (const f of walk(join(root, appDir))) {
       const r = rel(root, f);
@@ -373,7 +373,7 @@ function normEndpoint(s) {
     .toLowerCase()
     .replace(/`\s*\+.*$/, "")
     .replace(/\?.*$/, "")
-    .replace(/[\[\]]/g, "")
+    .replace(/[[\]]/g, "")
     .split("/")
     .map((g) => g.trim().replace(/^[.\s|]+/, "").replace(/^(get|post|put|patch|delete|head|options)\s+/i, "").trim())
     .filter((g) => g && g !== "..." && !/^(get|post|put|patch|delete|head|options)$/.test(g));
