@@ -7,19 +7,20 @@ run's database.
 
 ## Services
 
-| Service  | Image                                                                     | Port           | Notes                                                          |
-| -------- | ------------------------------------------------------------------------- | -------------- | -------------------------------------------------------------- |
-| `pg`     | postgres:15.7-alpine                                                      | 15419          | Scratch database `pidash`, user `parity19`                     |
-| `redis`  | redis:7-alpine                                                            | 16319          | Django cache backend                                           |
-| `mq`     | rabbitmq:3-management-alpine                                              | none published | Broker for background tasks                                    |
-| `api`    | built from `apps/api` (`Dockerfile.dev`, lean migrate-plus-serve command) | 18019          | Django + uvicorn, migrates on boot                             |
-| `worker` | same image as `api` (celery worker, default queue)                        | none published | Consumes background tasks: mention links, notifications        |
-| `oracle` | built from the repo (`apps/web/Dockerfile.dev`)                           | internal :3000 | Old app with same-origin API calls                             |
-| `proxy`  | caddy:2-alpine (`stack/Caddyfile`)                                        | 13000          | One origin: frontend plus `/auth`, `/api`, `/static` to Django |
-| `live`   | built from `apps/live` (opt-in profile `full`)                            | 13001          | Realtime server for realtime rows                              |
+| Service  | Image                                                                     | Port           | Notes                                                                                       |
+| -------- | ------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------- |
+| `pg`     | postgres:15.7-alpine                                                      | 15419          | Scratch database `pidash`, user `parity19`                                                  |
+| `redis`  | redis:7-alpine                                                            | 16319          | Django cache backend                                                                        |
+| `mq`     | rabbitmq:3-management-alpine                                              | none published | Broker for background tasks                                                                 |
+| `api`    | built from `apps/api` (`Dockerfile.dev`, lean migrate-plus-serve command) | 18019          | Django + uvicorn, migrates on boot                                                          |
+| `worker` | same image as `api` (celery worker, default queue)                        | none published | Consumes background tasks: mention links, notifications                                     |
+| `oracle` | built from the repo (`apps/web/Dockerfile.dev`)                           | internal :3000 | Old app with same-origin API calls                                                          |
+| `proxy`  | caddy:2-alpine (`stack/Caddyfile`)                                        | 13000          | One origin: frontend plus `/auth`, `/api`, `/static` to Django, `/parity19-assets` to minio |
+| `minio`  | minio/minio (bucket `parity19-assets`, created at boot)                   | 19019          | Object storage backing presigned asset uploads                                              |
+| `live`   | built from `apps/live` (opt-in profile `full`)                            | 13001          | Realtime server for realtime rows                                                           |
 
 All ports move through `PARITY_PG_PORT`, `PARITY_REDIS_PORT`,
-`PARITY_API_PORT`, `PARITY_ORACLE_PORT`, `PARITY_LIVE_PORT`. The defaults
+`PARITY_API_PORT`, `PARITY_ORACLE_PORT`, `PARITY_MINIO_PORT`, `PARITY_LIVE_PORT`. The defaults
 are the contract the Playwright config assumes (`PARITY_ORACLE_URL`
 defaults to the proxy on `:13000`, `PARITY_NEW_URL` to web_new on `:3010`,
 `PARITY_API_URL` to `:18019`).
