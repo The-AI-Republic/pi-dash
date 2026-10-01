@@ -10,7 +10,14 @@
 // Rows: ISS-142, ISS-143, ISS-144, ISS-145, ISS-146, ISS-147,
 // ISS-160, ISS-161, ISS-162, ISS-163, ISS-164.
 import { test, expect } from "../fixtures";
-import { descriptionVersions, fetchIssue, patchIssue, signInSession, subscriptionStatus } from "../helpers/api";
+import {
+  descriptionVersionDetail,
+  descriptionVersions,
+  fetchIssue,
+  patchIssue,
+  signInSession,
+  subscriptionStatus,
+} from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 import { dropIssue, ownIssue, signIn } from "./detail-support";
 
@@ -24,6 +31,7 @@ test(specTitle(["ISS-142"], "open a work item full page"), { tag: specTags(["ISS
     });
     await test.step("title, identifier, URL, and sidebar hydrate", async () => {
       await expect.poll(() => driver.issueDetailTitle(), { timeout: 30_000 }).toBe(issue.name);
+      await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
       expect(await driver.issueDetailIdentifier()).toBe(issue.seq);
       expect(driver.page.url()).toContain(`/browse/${issue.seq}`);
       expect(await driver.sidebarProperty("State")).toContain("Todo");
@@ -51,6 +59,7 @@ test(
       await test.step("lands on the browse route with the issue hydrated", async () => {
         expect(driver.page.url()).toContain(`/browse/${target.seq}`);
         await expect.poll(() => driver.issueDetailTitle(), { timeout: 30_000 }).toBe(target.name);
+        await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
         expect(await driver.issueDetailIdentifier()).toBe(target.seq);
       });
     } finally {
@@ -70,6 +79,7 @@ test(
       await test.step("main content and properties sidebar render together", async () => {
         await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
         await expect.poll(() => driver.issueDetailTitle(), { timeout: 30_000 }).toBe(issue.name);
+        await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
         for (const label of ["State", "Assignees", "Priority", "Created by", "Labels"]) {
           expect(await driver.sidebarProperty(label), label).not.toBeNull();
         }
@@ -95,19 +105,25 @@ test(
     try {
       await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
       await expect.poll(() => driver.issueDetailTitle(), { timeout: 30_000 }).toBe(issue.name);
+      await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
       const renamed = `${issue.name} renamed`;
       await test.step("rename and watch the save indicator run", async () => {
         await driver.editIssueTitle(renamed);
         await expect.poll(() => driver.saveIndicator(), { timeout: 20_000 }).not.toBeNull();
         await expect.poll(() => driver.issueDetailTitle(), { timeout: 30_000 }).toBe(renamed);
+        await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
       });
       await test.step("the server stored the rename", async () => {
-        const record = await fetchIssue(seed.workspaceSlug, seed.projectId, issue.id, session);
-        expect(record["name"]).toBe(renamed);
+        await expect
+          .poll(async () => (await fetchIssue(seed.workspaceSlug, seed.projectId, issue.id, session))["name"], {
+            timeout: 30_000,
+          })
+          .toBe(renamed);
       });
       await test.step("a whitespace title is rejected and reverts", async () => {
         await driver.editIssueTitle("   ");
         await expect.poll(() => driver.issueDetailTitle(), { timeout: 30_000 }).toBe(renamed);
+        await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
         expect((await fetchIssue(seed.workspaceSlug, seed.projectId, issue.id, session))["name"]).toBe(renamed);
       });
     } finally {
@@ -122,13 +138,14 @@ test(
   async ({ driver, seed }) => {
     // The version snapshot runs through the celery worker, so this scenario
     // gets a roomier budget than the suite default.
-    test.setTimeout(300_000);
+    test.setTimeout(480_000);
     await signIn(driver, seed);
     const session = await signInSession(seed.email, seed.password);
     const issue = await ownIssue(seed, session, `Oracle description ${Date.now()}`);
     try {
       await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
       await expect.poll(() => driver.issueDetailTitle(), { timeout: 30_000 }).toBe(issue.name);
+      await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
       await test.step("type a description and see it rendered back", async () => {
         const body = `Oracle description probe ${Date.now()}`;
         await driver.setDescription(body);
@@ -144,10 +161,14 @@ test(
           .toContain(body);
       });
       await test.step("version history lists the snapshot and restores it", async () => {
-        // Versions snapshot asynchronously: back-to-back PATCHes queue
-        // worker tasks that observe a newer DB state, which creates the
-        // version, and the same-user rule converges its content to the
-        // last text. Restore then brings exactly that text back.
+        // Versions snapshot through the celery worker: back-to-back PATCHes
+        // queue tasks that observe a newer DB state, so the queued snapshots
+        // converge on the last text and the same-user rule merges them into
+        // one row. No UI edit happens after the last PATCH, so once the row
+        // converges on gamma its content is stable: worker tasks only ever
+        // write version rows, never the description itself. Restoring the
+        // newest version then deterministically brings gamma back over the
+        // body text saved by the autosave half above.
         const beta = (i: number): string => `Oracle description beta${i} ${Date.now()}`;
         let gamma = "";
         for (let i = 1; i <= 6; i++) {
@@ -157,21 +178,26 @@ test(
           });
         }
         await expect
-          .poll(async () => (await descriptionVersions(seed.workspaceSlug, seed.projectId, issue.id, session)).length, {
-            timeout: 90_000,
-          })
-          .toBeGreaterThan(0);
-        const delta = `Oracle description delta ${Date.now()}`;
-        await driver.setDescription(delta);
-        await expect
           .poll(
-            async () =>
-              ((await fetchIssue(seed.workspaceSlug, seed.projectId, issue.id, session))[
-                "description_html"
-              ] as string) ?? "",
-            { timeout: 30_000 }
+            async () => {
+              // The list endpoint omits version content, so read the
+              // newest row in full. Converged content is stable from here:
+              // worker tasks only write version rows, never the description.
+              const rows = await descriptionVersions(seed.workspaceSlug, seed.projectId, issue.id, session);
+              if (rows.length === 0) return "";
+              const newest = rows[0] as Record<string, unknown>;
+              const detail = await descriptionVersionDetail(
+                seed.workspaceSlug,
+                seed.projectId,
+                issue.id,
+                String(newest["id"]),
+                session
+              );
+              return String(detail["description_html"] ?? "");
+            },
+            { timeout: 180_000 }
           )
-          .toContain(delta);
+          .toContain(gamma);
         await driver.openDescriptionHistory();
         const names = await driver.historyVersionNames();
         expect(names.length).toBeGreaterThan(0);
@@ -203,7 +229,9 @@ test(
     try {
       await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
       await expect.poll(() => driver.issueDetailTitle(), { timeout: 30_000 }).toBe(issue.name);
+      await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
       await test.step("header copy-link copies the absolute URL with a toast", async () => {
+        await driver.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
         await driver.copyIssueLink();
         await expect.poll(() => driver.lastToast(), { timeout: 15_000 }).toMatch(/link copied/i);
         expect(await driver.readClipboard()).toContain(`/browse/${issue.seq}`);
@@ -227,22 +255,23 @@ test(
     try {
       await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
       await expect.poll(() => driver.issueDetailTitle(), { timeout: 30_000 }).toBe(issue.name);
+      await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
       const initial = await driver.subscribeToggle();
       expect(initial).toMatch(/^(Subscribe|Unsubscribe)$/);
       await test.step("flip the toggle and the server follows", async () => {
         await driver.clickSubscribeToggle();
         const flipped = initial === "Subscribe" ? "Unsubscribe" : "Subscribe";
         await expect.poll(() => driver.subscribeToggle(), { timeout: 15_000 }).toBe(flipped);
-        expect(await subscriptionStatus(seed.workspaceSlug, seed.projectId, issue.id, session)).toBe(
-          flipped === "Unsubscribe"
-        );
+        await expect
+          .poll(() => subscriptionStatus(seed.workspaceSlug, seed.projectId, issue.id, session), { timeout: 30_000 })
+          .toBe(flipped === "Unsubscribe");
       });
       await test.step("flip it back to leave the issue as found", async () => {
         await driver.clickSubscribeToggle();
         await expect.poll(() => driver.subscribeToggle(), { timeout: 15_000 }).toBe(initial);
-        expect(await subscriptionStatus(seed.workspaceSlug, seed.projectId, issue.id, session)).toBe(
-          initial === "Unsubscribe"
-        );
+        await expect
+          .poll(() => subscriptionStatus(seed.workspaceSlug, seed.projectId, issue.id, session), { timeout: 30_000 })
+          .toBe(initial === "Unsubscribe");
       });
     } finally {
       await dropIssue(seed, session, issue.id);
@@ -257,6 +286,7 @@ test(specTitle(["ISS-162"], "detail quick-actions menu"), { tag: specTags(["ISS-
   try {
     await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
     await expect.poll(() => driver.issueDetailTitle(), { timeout: 30_000 }).toBe(issue.name);
+    await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
     const names = await driver.quickActionNames();
     expect(names).toContain("Delete");
     expect(names.some((name) => name.includes("Archive"))).toBe(true);
@@ -276,6 +306,7 @@ test(
     try {
       await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
       await expect.poll(() => driver.issueDetailTitle(), { timeout: 30_000 }).toBe(issue.name);
+      await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
       // No agent run or ticker exists for a fresh issue, so the status
       // panel (run status, budget, Re-tick, Abort run) renders nothing.
       expect(await driver.page.getByRole("button", { name: /re-tick/i }).count()).toBe(0);

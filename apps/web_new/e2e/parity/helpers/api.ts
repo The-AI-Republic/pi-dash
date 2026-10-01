@@ -857,6 +857,24 @@ function requireOk(res: Response, what: string): void {
   if (!res.ok) throw new Error(`[parity] ${what} failed with HTTP ${res.status}.`);
 }
 
+/** Same throttle-tolerant fetch against `/api/...` paths outside workspaces. */
+async function authedApi(
+  apiPath: string,
+  sessionCookie: string,
+  init?: RequestInit,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Response> {
+  const backoffMs = [3000, 6000, 12000, 20000, 30000];
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`${apiBase}/api${apiPath}`, {
+      ...init,
+      headers: { ...(init?.headers ?? {}), cookie: sessionCookie },
+    });
+    if (res.status !== 429 || attempt >= backoffMs.length) return res;
+    await new Promise((resolve) => setTimeout(resolve, backoffMs[attempt]));
+  }
+}
+
 /** Project identifier (e.g. `PAR`) plus the raw record. */
 export async function projectFacts(
   workspaceSlug: string,
@@ -991,7 +1009,8 @@ export async function deleteIssue(
     { method: "DELETE" },
     apiBase
   );
-  if (!res.ok && res.status !== 204) throw new Error(`[parity] issue delete failed with HTTP ${res.status}.`);
+  if (!res.ok && res.status !== 204 && res.status !== 404)
+    throw new Error(`[parity] issue delete failed with HTTP ${res.status}.`);
 }
 
 /** Project state facts as the state dropdown reports them. */
@@ -1034,7 +1053,11 @@ export async function createState(
     workspaceSlug,
     `/projects/${projectId}/states/`,
     sessionCookie,
-    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, group }) },
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, group, color: "#3A3A3A", sequence: 10000 + (Date.now() % 8000) }),
+    },
     apiBase
   );
   requireOk(res, "state create");
@@ -1060,7 +1083,8 @@ export async function deleteState(
     { method: "DELETE" },
     apiBase
   );
-  if (!res.ok && res.status !== 204) throw new Error(`[parity] state delete failed with HTTP ${res.status}.`);
+  if (!res.ok && res.status !== 204 && res.status !== 404)
+    throw new Error(`[parity] state delete failed with HTTP ${res.status}.`);
 }
 
 /** Project label facts. */
@@ -1127,7 +1151,8 @@ export async function deleteProjectLabel(
     { method: "DELETE" },
     apiBase
   );
-  if (!res.ok && res.status !== 204) throw new Error(`[parity] label delete failed with HTTP ${res.status}.`);
+  if (!res.ok && res.status !== 204 && res.status !== 404)
+    throw new Error(`[parity] label delete failed with HTTP ${res.status}.`);
 }
 
 /** True when the session user subscribes to the issue's activity. */
@@ -1151,7 +1176,7 @@ export async function subscriptionStatus(
   return payload.subscribed;
 }
 
-/** Description version rows, oldest first as the server reports them. */
+/** Description version rows, newest first as the server reports them. */
 export async function descriptionVersions(
   workspaceSlug: string,
   projectId: string,
@@ -1172,7 +1197,264 @@ export async function descriptionVersions(
   return rows as Record<string, unknown>[];
 }
 
+/** One description version row in full (the list endpoint omits content). */
+export async function descriptionVersionDetail(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  versionId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/work-items/${issueId}/description-versions/${versionId}/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  requireOk(res, "description version read");
+  return (await res.json()) as Record<string, unknown>;
+}
+
 /** Names of the project's issues as the server reports them, in API order. */
+/** Paginated-or-array list readback shared by the widget collections. */
+async function collectionRows(res: Response, what: string): Promise<Record<string, unknown>[]> {
+  requireOk(res, what);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows as Record<string, unknown>[];
+}
+
+/** Sub-issues of a parent, as the widget reads them. */
+export async function subIssues(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>[]> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/sub-issues/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  requireOk(res, "sub-issues read");
+  // The endpoint returns a dict (`{"sub_issues": [...]}`), not a list.
+  const payload: unknown = await res.json();
+  if (Array.isArray(payload)) return payload as Record<string, unknown>[];
+  if (typeof payload === "object" && payload !== null) {
+    const record = payload as Record<string, unknown>;
+    for (const key of ["sub_issues", "results"]) {
+      if (Array.isArray(record[key])) return record[key] as Record<string, unknown>[];
+    }
+  }
+  throw new Error("[parity] sub-issues read returned an unknown shape.");
+}
+
+/** Relations of an issue, flattened across the server's per-type groups. */
+export async function issueRelations(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>[]> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/issue-relation/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  requireOk(res, "relations read");
+  // The endpoint returns a dict keyed by relation type (`blocking`,
+  // `blocked_by`, `duplicate`, `relates_to`, `start_after`, ...), not a
+  // list, so flatten it with the group key attached to each row.
+  const payload = (await res.json()) as Record<string, unknown>;
+  const flat: Record<string, unknown>[] = [];
+  for (const [group, rows] of Object.entries(payload)) {
+    if (Array.isArray(rows))
+      for (const row of rows) flat.push({ ...(row as Record<string, unknown>), relation_group: group });
+  }
+  return flat;
+}
+
+/** Add relations: `{relation_type, issues: [ids]}` (see IssueRelationViewSet.create). */
+export async function addRelation(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  body: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<unknown> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/issue-relation/`,
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+    apiBase
+  );
+  requireOk(res, "relation add");
+  return (await res.json()) as unknown;
+}
+
+/** Remove one relation edge (both directions, server-side). */
+export async function removeRelation(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  body: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<unknown> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/remove-relation/`,
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+    apiBase
+  );
+  requireOk(res, "relation remove");
+  return (await res.json()) as unknown;
+}
+
+/** External links of an issue. */
+export async function issueLinks(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>[]> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/issue-links/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  return collectionRows(res, "links read");
+}
+
+/** Add an external link `{url, title?}`. */
+export async function addLink(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  body: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/issue-links/`,
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+    apiBase
+  );
+  requireOk(res, "link add");
+  return (await res.json()) as Record<string, unknown>;
+}
+
+/** Patch one external link. */
+export async function patchLink(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  linkId: string,
+  sessionCookie: string,
+  patch: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/issue-links/${linkId}/`,
+    sessionCookie,
+    { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(patch) },
+    apiBase
+  );
+  requireOk(res, "link patch");
+  return (await res.json()) as Record<string, unknown>;
+}
+
+/** Delete one external link. */
+export async function deleteLink(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  linkId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/issue-links/${linkId}/`,
+    sessionCookie,
+    { method: "DELETE" },
+    apiBase
+  );
+  requireOk(res, "link delete");
+}
+
+/** Attachments of an issue. */
+export async function issueAttachments(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>[]> {
+  const res = await authedApi(
+    `/assets/v2/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/attachments/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  return collectionRows(res, "attachments read");
+}
+
+/** Comments of an issue, oldest first. */
+export async function issueComments(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>[]> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/${issueId}/comments/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  return collectionRows(res, "comments read");
+}
+
+/** Recent agent runs visible to the session user, newest first. */
+export async function recentRuns(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>[]> {
+  const res = await authedApi("/runners/runs/?per_page=100", sessionCookie, undefined, apiBase);
+  return collectionRows(res, "runs read");
+}
+
+/** Instance config object (carries the upload `file_size_limit`). */
+export async function instanceConfig(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const res = await authedApi("/instances/", sessionCookie, undefined, apiBase);
+  requireOk(res, "instance config read");
+  const body = (await res.json()) as Record<string, unknown>;
+  return (body["config"] ?? body) as Record<string, unknown>;
+}
+
 export async function serverIssueNames(
   workspaceSlug: string,
   projectId: string,
@@ -2318,7 +2600,215 @@ export async function serverHomeIssues(
     if (typeof record.id !== "string" || typeof record.name !== "string")
       throw new Error("[parity] home issue row carried no id/name pair.");
     return { id: record.id, name: record.name };
-  });
+  });/** Module facts for sidebar-module scenarios. */
+export interface ModuleFacts {
+  id: string;
+  name: string;
+}
+
+/** Create a project module in-spec (deleted by the scenario). */
+export async function createModule(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  name: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ModuleFacts> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/modules/`,
+    sessionCookie,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+    },
+    apiBase
+  );
+  requireOk(res, "module create");
+  const record = (await res.json()) as { id?: unknown; name?: unknown };
+  if (typeof record.id !== "string" || typeof record.name !== "string") {
+    throw new Error("[parity] module create response carried no id/name.");
+  }
+  return { id: record.id, name: record.name };
+}
+
+/** Delete a project module created in-spec. */
+export async function deleteModule(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/modules/${moduleId}/`,
+    sessionCookie,
+    { method: "DELETE" },
+    apiBase
+  );
+  if (!res.ok && res.status !== 204 && res.status !== 404) {
+    throw new Error(`[parity] module delete failed with HTTP ${res.status}.`);
+  }
+}
+
+/** Cycle facts for sidebar-cycle scenarios. */
+export interface CycleFacts {
+  id: string;
+  name: string;
+}
+
+/** Create a project cycle in-spec (deleted by the scenario). */
+export async function createCycle(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  name: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CycleFacts> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/cycles/`,
+    sessionCookie,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+    },
+    apiBase
+  );
+  requireOk(res, "cycle create");
+  const record = (await res.json()) as { id?: unknown; name?: unknown };
+  if (typeof record.id !== "string" || typeof record.name !== "string") {
+    throw new Error("[parity] cycle create response carried no id/name.");
+  }
+  return { id: record.id, name: record.name };
+}
+
+/** Delete a project cycle created in-spec. */
+export async function deleteCycle(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/cycles/${cycleId}/`,
+    sessionCookie,
+    { method: "DELETE" },
+    apiBase
+  );
+  if (!res.ok && res.status !== 204 && res.status !== 404) {
+    throw new Error(`[parity] cycle delete failed with HTTP ${res.status}.`);
+  }
+}
+
+/** Project facts for the conditional-rows hidden-state scenario. */
+export interface ProjectFacts {
+  id: string;
+  identifier: string;
+}
+
+/** Create a scratch project in-spec (views default off; deleted by the scenario). */
+export async function createProject(
+  workspaceSlug: string,
+  sessionCookie: string,
+  name: string,
+  identifier: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ProjectFacts> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/`,
+    sessionCookie,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, identifier }),
+    },
+    apiBase
+  );
+  requireOk(res, "project create");
+  const record = (await res.json()) as { id?: unknown; identifier?: unknown };
+  if (typeof record.id !== "string" || typeof record.identifier !== "string") {
+    throw new Error("[parity] project create response carried no id/identifier.");
+  }
+  return { id: record.id, identifier: record.identifier };
+}
+
+/** Patch a scratch project's settings (e.g. `{ module_view: true }`). */
+export async function patchProject(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  patch: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, unknown>> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/`,
+    sessionCookie,
+    { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(patch) },
+    apiBase
+  );
+  requireOk(res, "project patch");
+  return (await res.json()) as Record<string, unknown>;
+}
+
+/**
+ * Clear the oracle user's persisted list filters on a project (rich + legacy
+ * expressions in user-properties). Sibling filter specs share the user, and
+ * a leftover filter hides every list row behind a blank page — the client's
+ * local filter state stays empty, so the filtered empty state (and its UI
+ * clear action) never renders and only the API clear restores the rows.
+ */
+export async function clearProjectListFilters(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/user-properties/`,
+    sessionCookie,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        rich_filters: {},
+        filters: {
+          state: null,
+          labels: null,
+          priority: null,
+          assignees: null,
+          created_by: null,
+          start_date: null,
+          subscriber: null,
+          state_group: null,
+          target_date: null,
+        },
+      }),
+    },
+    apiBase
+  );
+  requireOk(res, "project filters clear");
+}
+
+/** Delete a scratch project created in-spec (cascades to its issues). */
+export async function deleteProject(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await authed(workspaceSlug, `/projects/${projectId}/`, sessionCookie, { method: "DELETE" }, apiBase);
+  if (!res.ok && res.status !== 204 && res.status !== 404) {
+    throw new Error(`[parity] project delete failed with HTTP ${res.status}.`);
+  }
 }
 
 // ---------------------------------------------------------------------------

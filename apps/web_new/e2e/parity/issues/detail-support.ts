@@ -61,14 +61,20 @@ export async function ownIssue(
   seed: ParitySeedFacts,
   session: string,
   name: string,
-  extra: Record<string, unknown> = {}
+  extra: Record<string, unknown> = {},
+  projectId: string = seed.projectId
 ): Promise<SeedIssue> {
-  const { identifier } = await projectFacts(seed.workspaceSlug, seed.projectId, session);
-  const created = await createIssue(seed.workspaceSlug, seed.projectId, session, name, extra);
+  const { identifier } = await projectFacts(seed.workspaceSlug, projectId, session);
+  const created = await createIssue(seed.workspaceSlug, projectId, session, name, extra);
   return { seq: `${identifier}-${created.sequence_id}`, id: created.id, name };
 }
 
 /** Delete a scenario-owned issue (best effort: leftovers are timestamped). */
-export async function dropIssue(seed: ParitySeedFacts, session: string, id: string): Promise<void> {
-  await deleteIssue(seed.workspaceSlug, seed.projectId, id, session);
+export async function dropIssue(
+  seed: ParitySeedFacts,
+  session: string,
+  id: string,
+  projectId: string = seed.projectId
+): Promise<void> {
+  await deleteIssue(seed.workspaceSlug, projectId, id, session);
 }
