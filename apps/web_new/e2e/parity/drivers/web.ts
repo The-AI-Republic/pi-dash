@@ -2359,16 +2359,38 @@ export class WebDriver implements ParityDriver {
     }
   }
 
+  private layoutsEmptyScope(): Locator {
+    // Every empty state renders through the detailed empty-state card,
+    // whose copy column pins its width; scoping to it keeps list chrome
+    // (group headers, switcher) out of title/action reads.
+    return this.page.locator("div.max-w-\\[25rem\\]").first();
+  }
+
   async layoutsEmptyTitle(): Promise<string | null> {
-    return this.layoutsTodo("layoutsEmptyTitle");
+    const scope = this.layoutsEmptyScope();
+    if ((await scope.count()) === 0) return null;
+    const heading = scope.locator("h3").first();
+    if ((await heading.count()) === 0) return null;
+    return (((await heading.innerText()) ?? "").trim());
   }
 
   async layoutsEmptyActions(): Promise<Array<{ label: string; disabled: boolean }>> {
-    return this.layoutsTodo("layoutsEmptyActions");
+    const scope = this.layoutsEmptyScope();
+    if ((await scope.count()) === 0) return [];
+    const buttons = scope.locator("button");
+    const count = await buttons.count();
+    const actions: Array<{ label: string; disabled: boolean }> = [];
+    for (let i = 0; i < count; i++) {
+      actions.push({
+        label: (((await buttons.nth(i).innerText()) ?? "").trim().replace(/\s+/g, " ")),
+        disabled: await buttons.nth(i).isDisabled(),
+      });
+    }
+    return actions;
   }
 
-  async layoutsEmptyChoose(_label: string): Promise<void> {
-    return this.layoutsTodo("layoutsEmptyChoose");
+  async layoutsEmptyChoose(label: string): Promise<void> {
+    await this.layoutsEmptyScope().locator("button", { hasText: label }).first().click();
   }
 
   async layoutsMobileOfferedLayouts(): Promise<LayoutsLayoutKey[]> {
