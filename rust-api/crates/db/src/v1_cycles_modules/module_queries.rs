@@ -45,6 +45,12 @@
 //! untouched, so [`OrderBy`] carries the raw column plus direction and
 //! the builder quotes it onto the base table — an unknown column fails at
 //! the database exactly like Django's `FieldError`-at-evaluation.
+//! (PIDASHCONV-510: the M4/M5 GET `?order_by=` additionally resolves
+//! Django-side to `?` → `RANDOM()`, single-level FK traversals onto the
+//! already-joined tables, bare output aliases for the two annotations
+//! that exist at `.order_by()` time, and bare-M2M default orderings with
+//! extra joins — [`OrderTarget`] carries those shapes and [`apply_order`]
+//! renders them identically in every builder.)
 //!
 //! # Reads scope tables, not views
 //!
@@ -116,6 +122,16 @@ const USER_TABLE: &str = "users";
 const ISSUE_LINK_TABLE: &str = "issue_links";
 /// `file_assets` table behind `attachment_count` (M4/M5 GET).
 const FILE_ASSET_TABLE: &str = "file_assets";
+/// `labels` table behind bare-M2M `order_by=labels` (M4/M5 GET,
+/// PIDASHCONV-510).
+const LABEL_TABLE: &str = "labels";
+/// `issue_assignees` through table behind `order_by=assignees`.
+const ISSUE_ASSIGNEE_TABLE: &str = "issue_assignees";
+/// `issue_labels` through table behind `order_by=labels`.
+const ISSUE_LABEL_TABLE: &str = "issue_labels";
+/// Alias of the parent self-join (`select_related("parent")`, M4/M5 GET);
+/// `order_by=parent__<col>` renders onto it (PIDASHCONV-510).
+pub const PARENT_ALIAS: &str = "T7";
 
 // ---------------------------------------------------------------------------
 // Shared scope inputs
@@ -134,6 +150,61 @@ pub enum ArchivedFilter {
     Any,
 }
 
+/// Where an [`OrderBy`] renders its term (PIDASHCONV-510: the M4/M5
+/// GET `?order_by=` resolves Django-side to more than base-table
+/// columns — every shape below was read off live Django 4.2
+/// `str(queryset.query)` output for the M4 GET chain).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderTarget {
+    /// `ORDER BY "<base>"."<column>"` — plain columns, FK `<name>_id`
+    /// columns, and unknown text (which fails at the database exactly
+    /// like Django's `FieldError`-at-evaluation). Every pre-510 shape.
+    Base,
+    /// `ORDER BY "<table>"."<column>"` onto an already-joined table or
+    /// alias (see [`issue_traversal_table`]). The tail passes through
+    /// raw, so an unresolvable tail fails at the database exactly like
+    /// Django's `FieldError` — no column allowlist needed.
+    Table(&'static str),
+    /// `ORDER BY "<column>"` — a bare output alias. Django renders the
+    /// early annotations positionally (`ORDER BY 35`); the alias is the
+    /// same semantics without depending on the `issues.*` width. Only
+    /// for annotations that exist at `.order_by()` time
+    /// (`sub_issues_count`, `bridge_id`); `link_count` and
+    /// `attachment_count` are annotated after and stay [`OrderTarget::Base`]
+    /// pass-through 500s, like Django's `FieldError` for them.
+    Alias,
+    /// `ORDER BY RANDOM() ASC` — Django `?` (the compiler yields an
+    /// ascending `Random()`; `-?` is a `FieldError`, never random, so
+    /// only the exact `?` maps here and the flag always renders `ASC`).
+    Random,
+    /// A bare-M2M default ordering: the builder adds the two `LEFT JOIN`s
+    /// and orders by the related model's `Meta.ordering` term.
+    M2M(M2MOrder),
+}
+
+/// The bare-M2M names the M4 GET resolves (`assignees`, `labels`).
+/// Both related models order `('-created_at',)` (`db/models/user.py:137`,
+/// `db/models/label.py:44`), so plain `assignees` renders
+/// `ORDER BY "users"."created_at" DESC` and the `-` prefix inverts it
+/// to `ASC` (verified against live `str(query)` output).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum M2MOrder {
+    /// `LEFT JOIN "issue_assignees"` + `LEFT JOIN "users"`.
+    Assignees,
+    /// `LEFT JOIN "issue_labels"` + `LEFT JOIN "labels"`.
+    Labels,
+}
+
+impl M2MOrder {
+    /// `(through_table, through_issue_fk, through_target_fk, target_table)`.
+    fn tables(self) -> (&'static str, &'static str, &'static str, &'static str) {
+        match self {
+            M2MOrder::Assignees => (ISSUE_ASSIGNEE_TABLE, "issue_id", "assignee_id", USER_TABLE),
+            M2MOrder::Labels => (ISSUE_LABEL_TABLE, "issue_id", "label_id", LABEL_TABLE),
+        }
+    }
+}
+
 /// A parsed `.order_by(...)` argument: the raw column plus direction.
 ///
 /// Django passes `self.kwargs.get("order_by", <default>)` through
@@ -142,14 +213,20 @@ pub enum ArchivedFilter {
 /// leading `-` selects descending; anything else is ascending, including
 /// Django's verbatim behavior for unknown columns (database error at
 /// evaluation, like `FieldError`). Parsing lives in the services layer
-/// (`services::v1_cycles_modules::module_queries`, PIDASHCONV-308);
-/// builders quote the column onto their base table.
+/// (`services::v1_cycles_modules::module_queries`, PIDASHCONV-308) and,
+/// for the M4/M5 GET `?order_by=`, in the handler's `resolve_issue_order`
+/// (PIDASHCONV-406); [`OrderTarget::Base`] quotes the column onto the
+/// base table while the other targets render per [`apply_order`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderBy {
-    /// Raw column text (e.g. `created_at`).
+    /// Raw column text (e.g. `created_at`); the raw `?` token for
+    /// [`OrderTarget::Random`] and the raw M2M name for
+    /// [`OrderTarget::M2M`].
     pub column: String,
     /// True when the raw text starts with `-`.
     pub descending: bool,
+    /// Where the term renders (default [`OrderTarget::Base`]).
+    pub target: OrderTarget,
 }
 
 impl OrderBy {
@@ -158,6 +235,47 @@ impl OrderBy {
         Self {
             column: column.into(),
             descending,
+            target: OrderTarget::Base,
+        }
+    }
+
+    /// `OrderBy` for a traversal onto an already-joined table or alias.
+    pub fn table(table: &'static str, column: impl Into<String>, descending: bool) -> Self {
+        Self {
+            column: column.into(),
+            descending,
+            target: OrderTarget::Table(table),
+        }
+    }
+
+    /// `OrderBy` for a bare output alias (early annotations).
+    pub fn alias(column: impl Into<String>, descending: bool) -> Self {
+        Self {
+            column: column.into(),
+            descending,
+            target: OrderTarget::Alias,
+        }
+    }
+
+    /// `OrderBy` for the exact `?` token (random).
+    pub fn random() -> Self {
+        Self {
+            column: "?".to_owned(),
+            descending: false,
+            target: OrderTarget::Random,
+        }
+    }
+
+    /// `OrderBy` for a bare-M2M name.
+    pub fn m2m(which: M2MOrder, descending: bool) -> Self {
+        let column = match which {
+            M2MOrder::Assignees => "assignees",
+            M2MOrder::Labels => "labels",
+        };
+        Self {
+            column: column.to_owned(),
+            descending,
+            target: OrderTarget::M2M(which),
         }
     }
 
@@ -176,6 +294,78 @@ impl OrderBy {
             Order::Desc
         } else {
             Order::Asc
+        }
+    }
+}
+
+/// Map a single-level `?order_by=` traversal head to its already-joined
+/// table or alias in the M4/M5 GET builders (`None` = not a supported
+/// head; the caller passes the name through to 500 like Django's
+/// `FieldError`). Deeper paths (`state__project__name`) and relations
+/// needing new joins (`created_by__email`, `assignees__email`) resolve
+/// Django-side to 200s the builder cannot express — recorded residual
+/// divergences (PIDASHCONV-510), still 500 here.
+pub fn issue_traversal_table(head: &str) -> Option<&'static str> {
+    match head {
+        "state" => Some(state::TABLE),
+        "project" => Some(project::TABLE),
+        "workspace" => Some(WORKSPACE_TABLE),
+        "parent" => Some(PARENT_ALIAS),
+        "issue_module" => Some(module_issue::TABLE),
+        _ => None,
+    }
+}
+
+/// Append the `ORDER BY` term for `order` onto `sel`, whose base table
+/// is `base` — the one rendering helper every builder calls, so exotic
+/// targets render identically wherever they appear. Non-`Base` targets
+/// only reach the M4/M5 GET builders (kwargs chains always carry the
+/// default); rendered elsewhere they fail at the database exactly like
+/// Django's `FieldError` for the same name on those chains.
+fn apply_order(sel: &mut sea_query::SelectStatement, base: &str, order: &OrderBy) {
+    match order.target {
+        OrderTarget::Base => {
+            sel.order_by(
+                (
+                    Alias::new(base.to_owned()),
+                    Alias::new(order.column.clone()),
+                ),
+                order.order(),
+            );
+        }
+        OrderTarget::Table(table) => {
+            sel.order_by(
+                (
+                    Alias::new(table.to_owned()),
+                    Alias::new(order.column.clone()),
+                ),
+                order.order(),
+            );
+        }
+        OrderTarget::Alias => {
+            sel.order_by(Alias::new(order.column.clone()), order.order());
+        }
+        // Django's compiler yields `OrderBy(Random())` ascending — the
+        // `-` flag never survives onto `?` (`-?` is a FieldError).
+        OrderTarget::Random => {
+            sel.order_by_expr(Expr::cust("RANDOM()"), Order::Asc);
+        }
+        // Related `Meta.ordering` is `('-created_at',)`: the request `-`
+        // inverts it, so plain M2M renders `DESC`.
+        OrderTarget::M2M(which) => {
+            let (_, _, _, target) = which.tables();
+            let direction = if order.descending {
+                Order::Asc
+            } else {
+                Order::Desc
+            };
+            sel.order_by(
+                (
+                    Alias::new(target.to_owned()),
+                    Alias::new("created_at".to_owned()),
+                ),
+                direction,
+            );
         }
     }
 }
@@ -408,13 +598,7 @@ pub fn module_list_sql(order: &OrderBy, archived: ArchivedFilter) -> String {
     }
     sel.cond_where(scope);
     sel.group_by_col((Alias::new(module::TABLE), Alias::new("id")));
-    sel.order_by(
-        (
-            Alias::new(module::TABLE.to_owned()),
-            Alias::new(order.column.clone()),
-        ),
-        order.order(),
-    );
+    apply_order(&mut sel, module::TABLE, order);
     sel.to_string(PostgresQueryBuilder)
 }
 
@@ -440,13 +624,7 @@ pub fn module_detail_sql(order: &OrderBy) -> String {
             .add(Expr::col((Alias::new(module::TABLE), Alias::new("id"))).eq(Expr::cust("$3"))),
     );
     sel.group_by_col((Alias::new(module::TABLE), Alias::new("id")));
-    sel.order_by(
-        (
-            Alias::new(module::TABLE.to_owned()),
-            Alias::new(order.column.clone()),
-        ),
-        order.order(),
-    );
+    apply_order(&mut sel, module::TABLE, order);
     sel.to_string(PostgresQueryBuilder)
 }
 
@@ -576,13 +754,7 @@ pub fn module_issue_queryset_sql(order: &OrderBy) -> String {
             )
             .add(Expr::col((Alias::new(project::TABLE), Alias::new("archived_at"))).is_null()),
     );
-    sel.order_by(
-        (
-            Alias::new(module_issue::TABLE.to_owned()),
-            Alias::new(order.column.clone()),
-        ),
-        order.order(),
-    );
+    apply_order(&mut sel, module_issue::TABLE, order);
     sel.to_string(PostgresQueryBuilder)
 }
 
@@ -689,12 +861,35 @@ fn module_issue_get_sql_inner(order: &OrderBy, issue_bind: Option<&str>) -> Stri
     // (select_related("parent")).
     sel.join(
         JoinType::LeftJoin,
-        TableRef::Table(Alias::new(ISSUE_TABLE.to_owned()).into_iden()).alias(Alias::new("T7")),
+        TableRef::Table(Alias::new(ISSUE_TABLE.to_owned()).into_iden())
+            .alias(Alias::new(PARENT_ALIAS)),
         Condition::all().add(
             Expr::col((Alias::new(ISSUE_TABLE), Alias::new("parent_id")))
-                .equals((Alias::new("T7"), Alias::new("id"))),
+                .equals((Alias::new(PARENT_ALIAS), Alias::new("id"))),
         ),
     );
+    // Bare-M2M ordering joins (PIDASHCONV-510), after T7 like Django:
+    // `LEFT JOIN "<through>"` + `LEFT JOIN "<target>"`, no DISTINCT —
+    // rows multiply per through-row exactly like the Django queryset.
+    if let OrderTarget::M2M(which) = order.target {
+        let (through, issue_fk, target_fk, target) = which.tables();
+        sel.join(
+            JoinType::LeftJoin,
+            Alias::new(through.to_owned()),
+            Condition::all().add(
+                Expr::col((Alias::new(ISSUE_TABLE), Alias::new("id")))
+                    .equals((Alias::new(through), Alias::new(issue_fk))),
+            ),
+        );
+        sel.join(
+            JoinType::LeftJoin,
+            Alias::new(target.to_owned()),
+            Condition::all().add(
+                Expr::col((Alias::new(through), Alias::new(target_fk)))
+                    .equals((Alias::new(target), Alias::new("id"))),
+            ),
+        );
+    }
     let mut scope = Condition::all()
         .add(Expr::cust(ISSUE_MANAGER_OUTER_GUARDS))
         .add(Expr::col((Alias::new(module_issue::TABLE), Alias::new("deleted_at"))).is_null())
@@ -712,13 +907,7 @@ fn module_issue_get_sql_inner(order: &OrderBy, issue_bind: Option<&str>) -> Stri
             scope.add(Expr::col((Alias::new(ISSUE_TABLE), Alias::new("id"))).eq(Expr::cust(bind)));
     }
     sel.cond_where(scope);
-    sel.order_by(
-        (
-            Alias::new(ISSUE_TABLE.to_owned()),
-            Alias::new(order.column.clone()),
-        ),
-        order.order(),
-    );
+    apply_order(&mut sel, ISSUE_TABLE, order);
     sel.to_string(PostgresQueryBuilder)
 }
 
@@ -880,6 +1069,106 @@ mod tests {
         // kwargs `.order_by(...)` passes through untouched.
         let sql = module_list_sql(&OrderBy::new("name", false), ArchivedFilter::Live);
         assert!(sql.contains(r#"ORDER BY "modules"."name" ASC"#), "{sql}");
+    }
+
+    #[test]
+    fn m4_get_order_random_renders_random_asc() {
+        // PIDASHCONV-510: `?order_by=?` → Django `ORDER BY RANDOM() ASC`,
+        // no extra joins.
+        let sql = module_issue_list_get_sql(&OrderBy::random());
+        assert!(sql.contains("ORDER BY RANDOM() ASC"), "{sql}");
+        assert!(!sql.contains("issue_assignees"), "{sql}");
+        assert!(!sql.contains("issue_labels"), "{sql}");
+    }
+
+    #[test]
+    fn m4_get_order_traversal_renders_qualified() {
+        // PIDASHCONV-510: `state__group` reuses the select_related join.
+        let sql = module_issue_list_get_sql(&OrderBy::table("states", "group", false));
+        assert!(sql.contains(r#"ORDER BY "states"."group" ASC"#), "{sql}");
+        let sql = module_issue_list_get_sql(&OrderBy::table("states", "group", true));
+        assert!(sql.contains(r#"ORDER BY "states"."group" DESC"#), "{sql}");
+        // Parent traversals render onto the T7 self-join alias.
+        let sql = module_issue_list_get_sql(&OrderBy::table(PARENT_ALIAS, "created_at", false));
+        assert!(sql.contains(r#"ORDER BY "T7"."created_at" ASC"#), "{sql}");
+    }
+
+    #[test]
+    fn m4_get_order_alias_renders_bare() {
+        // PIDASHCONV-510: early annotations order by bare alias (Django
+        // renders the positional `ORDER BY 35` — same semantics, without
+        // depending on the `issues.*` width).
+        let sql = module_issue_list_get_sql(&OrderBy::alias("sub_issues_count", false));
+        assert!(sql.contains(r#"ORDER BY "sub_issues_count" ASC"#), "{sql}");
+        assert!(!sql.contains(r#""issues"."sub_issues_count""#), "{sql}");
+    }
+
+    #[test]
+    fn m4_get_order_m2m_joins_and_inverts_direction() {
+        // PIDASHCONV-510: `assignees` — through + target LEFT JOINs after
+        // T7, related Meta.ordering ('-created_at',) as-is → DESC ...
+        let sql = module_issue_list_get_sql(&OrderBy::m2m(M2MOrder::Assignees, false));
+        let t7 = sql.find(r#""T7""#).expect("T7 join");
+        let through = sql
+            .find(r#"LEFT JOIN "issue_assignees" ON "issues"."id" = "issue_assignees"."issue_id""#)
+            .expect("through join");
+        assert!(through > t7, "{sql}");
+        assert!(
+            sql.contains(r#"LEFT JOIN "users" ON "issue_assignees"."assignee_id" = "users"."id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"ORDER BY "users"."created_at" DESC"#),
+            "{sql}"
+        );
+        // ... and the `-` prefix inverts it to ASC.
+        let sql = module_issue_list_get_sql(&OrderBy::m2m(M2MOrder::Assignees, true));
+        assert!(
+            sql.contains(r#"ORDER BY "users"."created_at" ASC"#),
+            "{sql}"
+        );
+        // `labels` mirrors via issue_labels/labels.
+        let sql = module_issue_list_get_sql(&OrderBy::m2m(M2MOrder::Labels, false));
+        assert!(
+            sql.contains(
+                r#"LEFT JOIN "issue_labels" ON "issues"."id" = "issue_labels"."issue_id""#
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"LEFT JOIN "labels" ON "issue_labels"."label_id" = "labels"."id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"ORDER BY "labels"."created_at" DESC"#),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn m5_get_shares_exotic_order_targets() {
+        // PIDASHCONV-510: M5 GET shares the inner builder — M2M joins
+        // render there too, plus the pk predicate.
+        let sql = module_issue_detail_get_sql(&OrderBy::m2m(M2MOrder::Assignees, false));
+        assert!(sql.contains(r#"LEFT JOIN "issue_assignees""#), "{sql}");
+        assert!(
+            sql.contains(r#"ORDER BY "users"."created_at" DESC"#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""issues"."id" = ($4)"#), "{sql}");
+    }
+
+    #[test]
+    fn traversal_head_table_mapping() {
+        // PIDASHCONV-510: only heads onto already-joined tables map;
+        // relations needing new joins stay `None` (pass-through 500s).
+        assert_eq!(issue_traversal_table("state"), Some("states"));
+        assert_eq!(issue_traversal_table("project"), Some("projects"));
+        assert_eq!(issue_traversal_table("workspace"), Some("workspaces"));
+        assert_eq!(issue_traversal_table("parent"), Some(PARENT_ALIAS));
+        assert_eq!(issue_traversal_table("issue_module"), Some("module_issues"));
+        assert_eq!(issue_traversal_table("created_by"), None);
+        assert_eq!(issue_traversal_table("assignees"), None);
     }
 
     #[test]
