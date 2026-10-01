@@ -28,6 +28,10 @@
 //!   character classes and counted repetition — all supported by the `regex`
 //!   crate (no lookaround or backreferences). `regex::Replacer` closures
 //!   reproduce the `match.group(1) if match.lastindex else ""` prefix rule.
+//!   One deliberate spelling difference: Python `re` `\s` also matches
+//!   `U+001C..=U+001F` (the whole-BMP delta vs the `regex` crate's
+//!   `White_Space` `\s`), so the auth pattern writes those classes as
+//!   `[\s\x1c-\x1f]` / `[^\s\x1c-\x1f,;]` to keep redaction identical.
 //!
 //! Fixture: `rust-api/fixtures/dispatch/fx-disp-01-types.golden.json`
 //! (`sanitize_error`, `classify_error`, `is_usage_limit`).
@@ -46,8 +50,12 @@ fn secret_patterns() -> &'static [regex::Regex; 3] {
     static PATTERNS: OnceLock<[regex::Regex; 3]> = OnceLock::new();
     PATTERNS.get_or_init(|| {
         [
-            regex::Regex::new(r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s,;]+")
-                .expect("auth pattern compiles"),
+            // `[\s\x1c-\x1f]`: Python `re` `\s` matches U+001C..=U+001F, the
+            // `regex` crate's does not — the classes below are that union.
+            regex::Regex::new(
+                r"(?i)(authorization[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*(?:bearer[\s\x1c-\x1f]+)?)[^\s\x1c-\x1f,;]+",
+            )
+            .expect("auth pattern compiles"),
             regex::Regex::new(r"\b(?:sk|gh[opsu])_[A-Za-z0-9_-]{12,}\b")
                 .expect("token pattern compiles"),
             regex::Regex::new(r"\bsk-[A-Za-z0-9_-]{12,}\b").expect("byok pattern compiles"),
@@ -435,6 +443,16 @@ mod tests {
                 "authorization: Bearer [REDACTED] end".to_string(),
             ),
             ("   ".to_string(), "   ".to_string()),
+            // U+001C is `\s` in Python `re` but not in the `regex` crate:
+            // the separator joins the match in group 1 yet truncates the tail.
+            (
+                "authorization\u{1c}: Bearer tok-abc-123 end".to_string(),
+                "authorization\u{1c}: Bearer [REDACTED] end".to_string(),
+            ),
+            (
+                "authorization: sec\u{1c}ret done".to_string(),
+                "authorization: [REDACTED]\u{1c}ret done".to_string(),
+            ),
             (
                 "mix sk-abc123def456ghi789 and ghp_abc123def456ghi789 done".to_string(),
                 "mix [REDACTED] and [REDACTED] done".to_string(),

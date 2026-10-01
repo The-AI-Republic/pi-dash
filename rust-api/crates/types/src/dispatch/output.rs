@@ -9,11 +9,12 @@
 //!   [`CloudAgentOutput::new`] and routes `Deserialize` through it, so both
 //!   spellings enforce the same rules. Fields are private so no construction
 //!   path can bypass validation.
-//! * `strip_whitespace=True` is Python `str.strip` semantics: Unicode
-//!   `White_Space` plus `U+001C..=U+001F` (which Rust's
-//!   `char::is_whitespace` does not cover). Stripping runs before the length
-//!   check, as in pydantic. Note `summary` has a `max_length` but no strip
-//!   (`output.py:11`) — ported as-is.
+//! * `strip_whitespace=True` is pydantic-core trim semantics: Unicode
+//!   `White_Space` only, exactly `str::trim` — notably *not* Python
+//!   `str.strip`, which would also strip `U+001C..=U+001F` (verified against
+//!   the real `output.py` on pydantic 2.13.5: the separators survive).
+//!   Stripping runs before the length check, as in pydantic. Note `summary`
+//!   has a `max_length` but no strip (`output.py:11`) — ported as-is.
 //! * Length caps count characters (code points), matching Python `len()` for
 //!   every string representable in Rust (`&str` cannot hold the lone
 //!   surrogates where the two counters could differ, and `serde_json`
@@ -77,11 +78,11 @@ impl std::fmt::Display for OutputValidationError {
 
 impl std::error::Error for OutputValidationError {}
 
-/// Python `str.strip` (no-arg) semantics: `char::is_whitespace` covers the
-/// Unicode `White_Space` property; `U+001C..=U+001F` are stripped by Python
-/// but are not `White_Space`.
-fn python_strip(text: &str) -> &str {
-    text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
+/// pydantic-core `strip_whitespace` semantics: Unicode `White_Space` only,
+/// exactly `str::trim` (`U+001C..=U+001F` survive — the real `output.py`
+/// keeps them on pydantic 2.13.5).
+fn pydantic_strip(text: &str) -> &str {
+    text.trim()
 }
 
 /// Structured agent outcome (`output.py:9-13`).
@@ -143,7 +144,7 @@ impl CloudAgentOutput {
         items
             .into_iter()
             .map(|item| {
-                let stripped = python_strip(&item);
+                let stripped = pydantic_strip(&item);
                 if stripped.chars().count() > max_chars {
                     return Err(OutputValidationError {
                         field,
@@ -353,7 +354,9 @@ mod tests {
             .expect("strip-then-count");
         assert_eq!(output.evidence()[0].chars().count(), 1000);
 
-        // The U+001C..=U+001F strip gap between Python and Rust is closed.
+        // U+001C..=U+001F are NOT stripped: pydantic-core trims White_Space
+        // only (observed on the real output.py under pydantic 2.13.5), even
+        // though Python str.strip would remove them.
         let output = CloudAgentOutput::new(
             Outcome::Noop,
             "s".into(),
@@ -361,7 +364,17 @@ mod tests {
             vec![],
         )
         .expect("valid");
-        assert_eq!(output.evidence(), &["sep".to_string()]);
+        assert_eq!(output.evidence(), &["\u{1c}sep\u{1d}".to_string()]);
+
+        // Non-ASCII White_Space (NEL, NBSP) still strips.
+        let output = CloudAgentOutput::new(
+            Outcome::Noop,
+            "s".into(),
+            vec!["\u{85}pad\u{a0}".into()],
+            vec![],
+        )
+        .expect("valid");
+        assert_eq!(output.evidence(), &["pad".to_string()]);
 
         // summary is NOT stripped (output.py:11 has max_length only).
         let output =
