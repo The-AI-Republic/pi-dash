@@ -325,6 +325,137 @@ export interface ParityDriver {
   rulesCommentCardText(commentId: string): Promise<string>;
   /** Whether the intake triage chrome (Accept/Decline) is currently offered. */
   rulesIntakeTriageVisible(): Promise<boolean>;
+
+  // Issue multi-select and bulk operations (NEWFRONT-120, ISS-108–116).
+  // In builds where selection is disabled these reads stay at their
+  // empty values: no checkboxes, no bulk bar.
+  /** Row and group-header selection checkboxes currently rendered. */
+  selectionCheckboxCount(): Promise<number>;
+  /** Whether any sticky bulk bar (functional toolbar or upgrade banner) shows. */
+  bulkBarVisible(): Promise<boolean>;
+  /** Press a key as the user would; Shift held when `shift` is set. */
+  pressKey(key: string, shift?: boolean): Promise<void>;
+  /** Reload and report whether a leave-confirmation dialog appeared. */
+  reloadSawDialog(): Promise<boolean>;
+
+  // Create/edit work-item modal (NEWFRONT-120, ISS-117–136).
+  /** Dismiss the first-run welcome dialog when it overlays the app. */
+  dismissWelcomeDialog(): Promise<void>;
+  /** Open the create work-item modal from the issues header. */
+  openCreateModal(): Promise<void>;
+  /** Whether the create/edit modal is currently open. */
+  createModalOpen(): Promise<boolean>;
+  /** Heading text of the open modal (create, edit, or draft title). */
+  createModalHeading(): Promise<string>;
+  /** Fill the modal title field. */
+  fillCreateTitle(title: string): Promise<void>;
+  /** Current value of the modal title field. */
+  createTitleValue(): Promise<string>;
+  /** Inline validation error under the title field, if any. */
+  createTitleError(): Promise<string>;
+  /** Press the modal primary button (Save / Update / Save to Drafts). */
+  submitCreateModal(): Promise<void>;
+  /** Press the modal Discard button. */
+  clickModalDiscard(): Promise<void>;
+  /** Switch the "Create more" toggle on (create only). */
+  enableCreateMore(): Promise<void>;
+  /** Label of the modal primary button. */
+  modalPrimaryButtonLabel(): Promise<string>;
+  /** Current value of the git work-branch field (section must be expanded). */
+  gitBranchValue(): Promise<string>;
+  /** Whether the modal title field currently holds keyboard focus. */
+  createTitleFocused(): Promise<boolean>;
+  /** Whether the given text shows inside the open modal. */
+  modalTextContains(text: string): Promise<boolean>;
+  /** Press "Save to Drafts" in the discard-confirm dialog. */
+  confirmSaveDraft(): Promise<void>;
+  /** Press "Cancel" in the discard-confirm dialog. */
+  cancelDiscardDialog(): Promise<void>;
+  /** Press the dialog's own "Discard" button, dropping the draft. */
+  discardDialogDiscard(): Promise<void>;
+  /** Open the named draft for editing (double-clicks its block). */
+  openDraftForEdit(name: string): Promise<void>;
+  /** Press "Publish issue" in the open draft modal. */
+  publishDraft(): Promise<void>;
+  /** Click the row's More menu and then the named entry (Edit, Delete, …). */
+  openRowMenuEntry(issueName: string, entry: string): Promise<void>;
+  /** Whether the modal button with the given accessible name is disabled. */
+  modalButtonDisabled(name: string): Promise<boolean>;
+  /** Open the parent picker from the modal ("Add parent"). */
+  openParentPicker(): Promise<void>;
+  /** Type into the parent picker search. */
+  searchParentInModal(query: string): Promise<void>;
+  /** Choose the parent search result showing the given issue name. */
+  selectParentResult(issueName: string): Promise<void>;
+  /** New-tab links rendered next to the parent search results. */
+  parentResultNewTabLinks(): Promise<number>;
+  /** Remove the attached parent through the parent chip menu. */
+  removeParentInModal(issueName: string): Promise<void>;
+  /** Open the labels picker from the modal strip. */
+  openLabelsPicker(): Promise<void>;
+  /** Type a label name and confirm, creating it when permitted. */
+  createLabelInModal(name: string): Promise<void>;
+  /** Whether the modal shows the label as selected. */
+  selectedLabelVisible(name: string): Promise<boolean>;
+  /** Hover the issue row (reveals the hover preview card). */
+  hoverIssueRow(issueName: string): Promise<void>;
+  /** Click the toast "View work item" action; returns the opened page URL. */
+  openToastViewAction(): Promise<string>;
+  /** Confirm the archive modal. */
+  confirmArchive(): Promise<void>;
+  /** Confirm the delete modal. */
+  confirmDeleteIssue(): Promise<void>;
+  /** Whether a modal dialog currently shows an input with `placeholder`. */
+  modalHasPlaceholder(placeholder: string): Promise<boolean>;
+  /** Type `text` into the modal input with `placeholder` (replacing it). */
+  fillModalPlaceholder(placeholder: string, text: string): Promise<void>;
+  /**
+   * Click every rendered "Load more" row once so paginated list rows
+   * render. Returns whether any existed. Newly created rows sort last
+   * and hide behind group pagination on a busy shared stack.
+   */
+  expandListRows(): Promise<boolean>;
+  /** Switch the issues view to the layout whose tooltip reads `label`. */
+  switchIssueLayout(label: string): Promise<void>;
+  /**
+   * Best-effort return to the list layout. The active layout persists
+   * across navigation on the shared stack, so list oracles call this
+   * before asserting list content. Never throws: a dead page or a header
+   * without the switcher simply leaves the layout alone.
+   */
+  ensureListLayout(): Promise<void>;
+  /** Expand or collapse the "Advanced — git" section of the modal. */
+  toggleAdvancedGit(): Promise<void>;
+  /** Fill the git work-branch field (section must be expanded). */
+  fillGitBranch(branch: string): Promise<void>;
+  /** Inline validation error under the git branch field, if any. */
+  gitBranchError(): Promise<string>;
+  /** Type into the modal description editor. */
+  fillDescription(text: string): Promise<void>;
+  /** How many times the exact text occurs on the page. */
+  countText(text: string): Promise<number>;
+
+  // Workspace drafts (NEWFRONT-120, ISS-137–141).
+  /** Open the workspace drafts page; requires an authenticated session. */
+  openDraftsPage(workspaceSlug: string): Promise<void>;
+  /** Names of the drafts currently rendered, in display order. */
+  visibleDraftNames(): Promise<string[]>;
+  /** Open the create-draft modal from the drafts empty state. */
+  openCreateDraftModal(): Promise<void>;
+  /** Whether the given text is visible anywhere on the page. */
+  pageTextContains(text: string): Promise<boolean>;
+  /** Delete the named draft through its quick actions and confirm. */
+  deleteDraftByName(name: string): Promise<void>;
+  /** How many draft blocks are rendered on the drafts page. */
+  draftBlockCount(): Promise<number>;
+  /** Full text of the draft block holding the named draft. */
+  draftBlockText(name: string): Promise<string>;
+  /** Wait for the drafts page to settle; re-enters the route when stuck. */
+  settleDraftsPage(workspaceSlug: string): Promise<"empty" | "list">;
+  /** Retry wrapper around the shared sign-in flow for the loaded shared stack. */
+  signInWithPasswordRetry(email: string, password: string): Promise<void>;
+  /** Settled list entry: reloads past stalls, returns to list layout, waits for life. */
+  openProjectIssuesSettled(workspaceSlug: string, projectId: string): Promise<void>;
   // --- NEWFRONT-123 (home): home dashboard reads and actions. ---
   // Added additively per the NEWFRONT-26 shared driver contract; every
   // method is mirrored as a throwing stub in drivers/web_new.
