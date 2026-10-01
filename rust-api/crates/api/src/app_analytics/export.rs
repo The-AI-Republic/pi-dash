@@ -586,8 +586,12 @@ fn provider_display(value: Option<&Value>) -> String {
 /// Missing, null, non-array or empty means the fallback query runs (`if
 /// not project_ids`, `base.py:33`); a non-empty array passes through
 /// element-wise, rendered the way the ORM layer stringifies values, so a
-/// malformed id fails UUID parsing below (500) exactly where Django fails
-/// at query time (500).
+/// malformed id fails UUID parsing below with the `ValidationError` 400
+/// Django's `UUIDField.to_python` raises during param prep
+/// (`handle_exception`'s `ValidationError` branch). Residual divergence,
+/// unreached by the suite: Django's `uuid.UUID(int=...)` accepts integer
+/// and boolean elements (and passes `None` through as a null array
+/// element); those answer 400 here instead of Django's 200.
 fn extract_project_ids(body: &Value) -> Vec<String> {
     match body.get("project") {
         Some(Value::Array(items)) if !items.is_empty() => items
@@ -641,11 +645,18 @@ async fn create_inner(
     if project_ids.is_empty() {
         project_ids = exporter_project_fallback(&pool, slug, &resolved.id).await?;
     }
-    // UUID-typed `project` ArrayField: Django fails at query time on a
-    // malformed id (500); parse here and answer the same generic 500.
+    // UUID-typed `project` ArrayField: `UUIDField.to_python` raises
+    // `ValidationError` on a malformed id during param prep, so
+    // `handle_exception` answers its 400 branch (`app/views/base.py`);
+    // parse here and answer the same body (the app_issues precedent).
     let mut project_uuids = Vec::with_capacity(project_ids.len());
     for id in &project_ids {
-        project_uuids.push(id.parse::<uuid::Uuid>().map_err(|_| Denial::ServerError)?);
+        project_uuids.push(id.parse::<uuid::Uuid>().map_err(|_| {
+            Denial::Raw(
+                StatusCode::BAD_REQUEST,
+                crate::app_issues::INVALID_DETAIL_BODY.to_owned(),
+            )
+        })?);
     }
     let token = uuid::Uuid::new_v4().simple().to_string();
     let now = Utc::now();
