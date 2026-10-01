@@ -2290,10 +2290,215 @@ export interface ParityDriver {
   layoutsReleaseStalls(): Promise<void>;
   /** Current page URL (navigation assertions). */
   layoutsCurrentUrl(): Promise<string>;
+  // --- NEWFRONT-118 (layouts B): kanban board + gantt timeline
+  // --- (ISS-028/059). Appended; existing methods above are untouched per
+  // --- the shared driver contract.
+
+  /** Switch to the board through the header switcher; resolves once it renders. */
+  kanbanOpenBoard(): Promise<void>;
+  /** Whether the board layout is rendered. */
+  kanbanBoardVisible(): Promise<boolean>;
+  /** Switch to the timeline through the header switcher; resolves once it renders. */
+  ganttOpenTimeline(): Promise<void>;
+  /** Whether the timeline layout is rendered. */
+  ganttTimelineVisible(): Promise<boolean>;
+  /** Which layout the header switcher marks active. */
+  boardActiveLayout(): Promise<BoardLayoutKey>;
+  /** Reload the issues page and wait for the switcher to settle. */
+  boardReloadIssues(): Promise<void>;
+  /** Group columns in display order: value id, header name, live count. */
+  kanbanColumns(): Promise<KanbanColumn[]>;
+  /** Swimlanes in display order; empty when the board is not sub-grouped. */
+  kanbanSwimlanes(): Promise<KanbanColumn[]>;
+  /** Every rendered card: issue id, title, and group/sub-group value ids. */
+  kanbanCards(): Promise<KanbanCard[]>;
+  /** Card titles in one flat column, top to bottom. */
+  kanbanColumnCards(columnName: string): Promise<string[]>;
+  /** Toggle one flat column collapsed/expanded; resolves once it settles. */
+  kanbanToggleColumn(columnName: string): Promise<void>;
+  /** Whether one flat column is currently collapsed. */
+  kanbanColumnCollapsed(columnName: string): Promise<boolean>;
+  /** Toggle one swimlane's cards; resolves once it settles. */
+  kanbanToggleSwimlane(laneName: string): Promise<void>;
+  /** Whether one swimlane's cards are currently hidden. */
+  kanbanSwimlaneCollapsed(laneName: string): Promise<boolean>;
+  /** Identifier rendered on a card (e.g. PAR-12), or null when hidden. */
+  kanbanCardIdentifier(issueName: string): Promise<string | null>;
+  /** Whether a card renders its wrapped display-property chips. */
+  kanbanCardShowsProperties(issueName: string): Promise<boolean>;
+  /** Hover a card so its hover-only controls reveal. */
+  kanbanCardHover(issueName: string): Promise<void>;
+  /** Whether a card currently offers its quick-actions entry. */
+  kanbanCardQuickActionsVisible(issueName: string): Promise<boolean>;
+  /** Href of a card link (null when the card is not a link). */
+  kanbanCardHref(issueName: string): Promise<string | null>;
+  /** Open peek by clicking a card; resolves once the peek panel shows the issue. */
+  kanbanOpenCardPeek(issueName: string): Promise<void>;
+  /** Whether the peek panel currently shows an issue. */
+  issuePeekVisible(): Promise<boolean>;
+  /** Title shown in the peek panel, or null when hidden. */
+  issuePeekTitle(): Promise<string | null>;
+  /** Close the peek panel. */
+  issuePeekClose(): Promise<void>;
+  /** Whether one column ends with a quick-add entry. */
+  kanbanColumnHasQuickAdd(columnName: string): Promise<boolean>;
+  /** Create an issue through one column's quick-add; resolves once its card shows. */
+  kanbanQuickAdd(columnName: string, title: string): Promise<void>;
+  /** Whether one group header offers the create (+) entry. */
+  kanbanHeaderCreateVisible(columnName: string): Promise<boolean>;
+  /** Activate one group header's create entry; resolves once the modal or menu shows. */
+  kanbanHeaderCreate(columnName: string): Promise<void>;
+  /** Whether the create modal is currently open. */
+  kanbanCreateModalVisible(): Promise<boolean>;
+  /** Entries of one group header's create menu (cycle/module context). */
+  kanbanHeaderMenuItems(columnName: string): Promise<string[]>;
+  /** Pick one entry of one group header's create menu. */
+  kanbanHeaderMenuChoose(columnName: string, item: string): Promise<void>;
+  /** Reorder a card directly above another card; resolves once it settles. */
+  kanbanDragCardBefore(sourceName: string, targetName: string): Promise<void>;
+  /** Drop a card at the end of a column; resolves once it settles. */
+  kanbanDragCardToColumnEnd(sourceName: string, columnName: string): Promise<void>;
+  /** Drop a card on the delete zone; resolves once the confirm modal shows. */
+  kanbanDragCardToDelete(sourceName: string): Promise<void>;
+  /** Whether the delete-confirm modal is currently open. */
+  kanbanDeleteModalVisible(): Promise<boolean>;
+  /** Confirm the open delete modal; resolves once the card is gone. */
+  kanbanConfirmDelete(): Promise<void>;
+  /**
+   * Hold a card over a column, read the drop overlay text (null when no
+   * overlay shows), then release. The release drops the card: refused
+   * drops move nothing, accepted drops apply — callers assert the card's
+   * final place via kanbanCards.
+   */
+  kanbanDragHoldOverColumn(sourceName: string, columnName: string): Promise<{ overlay: string | null }>;
+  /** Most recently shown toast still visible, or null when none shows. */
+  boardLastToast(): Promise<{ title: string; message: string } | null>;
+  /** Scroll one flat column to its bottom so the next page auto-loads. */
+  kanbanColumnScrollEnd(columnName: string): Promise<void>;
+  /** Whether one sub-grouped column shows its explicit load-more entry. */
+  kanbanColumnHasLoadMore(columnName: string): Promise<boolean>;
+  /** Activate one sub-grouped column's load-more entry; resolves once it settles. */
+  kanbanColumnLoadMore(columnName: string): Promise<void>;
+  /** Whether one column currently shows skeleton loaders. */
+  kanbanColumnLoading(columnName: string): Promise<boolean>;
+  /** Current scroll offsets of the board container. */
+  kanbanBoardScroll(): Promise<{ x: number; y: number }>;
+  /**
+   * Press on a card and hold it near one board edge for holdMs, then
+   * release. Callers compare kanbanBoardScroll before/after to observe
+   * auto-scroll; the release may move the card.
+   */
+  kanbanDragHoldNearEdge(sourceName: string, edge: "left" | "right" | "top" | "bottom", holdMs: number): Promise<void>;
+  /** Timeline header: live count, zoom entries, Today and fullscreen presence. */
+  ganttHeader(): Promise<{ count: number | null; views: string[]; hasToday: boolean; hasFullscreen: boolean }>;
+  /** Which zoom the timeline switcher marks active. */
+  ganttActiveZoom(): Promise<GanttZoom | "unknown">;
+  /** Switch the timeline zoom; resolves once the chart re-renders. */
+  ganttSetZoom(view: GanttZoom): Promise<void>;
+  /** Measured pixel width of one timeline day column. */
+  ganttDayWidth(): Promise<number>;
+  /** Whether weekend day columns render distinctly from weekdays. */
+  ganttWeekendTinted(): Promise<boolean>;
+  /** Weekday names starting each rendered week row, in order. */
+  ganttWeekRowStarts(): Promise<string[]>;
+  /** Activate Today; resolves once the chart re-centers. */
+  ganttClickToday(): Promise<void>;
+  /** Whether today's column is inside the viewport. */
+  ganttTodayVisible(): Promise<boolean>;
+  /** Whether today's column carries the highlight marker. */
+  ganttTodayHighlighted(): Promise<boolean>;
+  /** Toggle fullscreen; resolves once the mode settles. */
+  ganttToggleFullscreen(): Promise<void>;
+  /** Whether the chart currently renders in the fullscreen portal. */
+  ganttFullscreenActive(): Promise<boolean>;
+  /** Pixel width of the timeline items container. */
+  ganttTimelineWidth(): Promise<number>;
+  /** Horizontal scroll offset of the timeline container. */
+  ganttScrollLeft(): Promise<number>;
+  /** Scroll the timeline horizontally to an offset; resolves once it settles. */
+  ganttScrollTo(x: number): Promise<void>;
+  /** Sidebar rows top to bottom: identifier, name, duration label. */
+  ganttSidebarRows(): Promise<GanttSidebarRow[]>;
+  /** Open peek by clicking a sidebar row; resolves once the peek panel shows. */
+  ganttOpenRowPeek(issueName: string): Promise<void>;
+  /** Sidebar row titles top to bottom. */
+  ganttSidebarOrder(): Promise<string[]>;
+  /** Reorder a sidebar row directly above another; resolves once it settles. */
+  ganttDragRowBefore(sourceName: string, targetName: string): Promise<void>;
+  /** Whether an issue renders a dated bar (vs an empty row). */
+  ganttBarExists(issueName: string): Promise<boolean>;
+  /** Drag a bar body horizontally by whole days; resolves once it settles. */
+  ganttDragBar(issueName: string, dayDelta: number): Promise<void>;
+  /** Drag a bar edge handle by whole days; resolves once it settles. */
+  ganttResizeBar(issueName: string, side: "left" | "right", dayDelta: number): Promise<void>;
+  /** Hover a bar edge handle and read its floating date label (null when absent). */
+  ganttResizePreview(issueName: string, side: "left" | "right"): Promise<string | null>;
+  /** Whether a bar offers its resize affordances. */
+  ganttHandlesVisible(issueName: string): Promise<boolean>;
+  /** Whether hovering an issue's empty timeline row reveals the add entry. */
+  ganttRowAddVisible(issueName: string): Promise<boolean>;
+  /** Plant a block on an undated issue's row at a visible day offset; resolves once the bar shows. */
+  ganttAddBlock(issueName: string, dayOffset: number): Promise<void>;
+  /** Create an issue through the timeline quick-add; resolves once its bar shows. */
+  ganttQuickAdd(title: string): Promise<void>;
+  /** Whether the timeline offers its quick-add entry. */
+  ganttHasQuickAdd(): Promise<boolean>;
+  /** Bar presentation: state tint, half-date mask, pinned name (null when no bar). */
+  ganttBarInfo(issueName: string): Promise<{ tinted: boolean; masked: boolean; namePinned: boolean } | null>;
+  /** Hover a bar so its hover-only preview opens. */
+  ganttHoverBar(issueName: string): Promise<void>;
+  /** Whether the bar hover preview is currently open. */
+  ganttPreviewVisible(): Promise<boolean>;
+  /** Open peek by clicking a bar; resolves once the peek panel shows. */
+  ganttOpenBarPeek(issueName: string): Promise<void>;
+  /** Whether an issue's row shows the scroll-to-block arrow. */
+  ganttScrollArrowVisible(issueName: string): Promise<boolean>;
+  /** Activate an issue's scroll-to-block arrow; resolves once the bar is in view. */
+  ganttClickScrollArrow(issueName: string): Promise<void>;
+  /** Whether an issue's bar is inside the viewport. */
+  ganttBarInView(issueName: string): Promise<boolean>;
+  /** Whether the sidebar currently shows skeleton rows. */
+  ganttSidebarLoading(): Promise<boolean>;
+  /** Whether the load-more sentinel currently shows. */
+  ganttLoadMoreVisible(): Promise<boolean>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */
 export type RulesCommentMenuOption = "edit" | "copy_link" | "access_switch" | "fold" | "unfold" | "delete";
+
+/** Canonical issue-layout keys for the board/timeline driver area. */
+export type BoardLayoutKey = "list" | "kanban" | "calendar" | "spreadsheet" | "gantt";
+
+/**
+ * One kanban group column or swimlane: value id, header name, live count.
+ * `rendered` is false while the column body is not mounted (collapsed or
+ * still virtualized away); `id` is empty then because only the body
+ * carries the value id.
+ */
+export interface KanbanColumn {
+  id: string;
+  name: string;
+  count: number;
+  rendered: boolean;
+}
+
+/** One rendered kanban card: issue id, title, group/sub-group value ids. */
+export interface KanbanCard {
+  issueId: string;
+  name: string;
+  groupId: string;
+  subGroupId: string;
+}
+
+/** Timeline zoom entries as the switcher labels them. */
+export type GanttZoom = "Week" | "Month" | "Quarter";
+
+/** One gantt sidebar row: identifier, name, duration label. */
+export interface GanttSidebarRow {
+  identifier: string | null;
+  name: string;
+  duration: string | null;
+}
 
 /** Canonical issue-layout keys shared by both frontend drivers. */
 export type LayoutsLayoutKey = "list" | "kanban" | "calendar" | "spreadsheet" | "gantt_chart";
