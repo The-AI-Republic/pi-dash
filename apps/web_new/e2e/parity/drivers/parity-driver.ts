@@ -621,6 +621,185 @@ export interface ParityDriver {
   composerCommentImageCount(text: string): Promise<number>;
   /** Notices currently visible, oldest first, with their success/error kind. */
   composerVisibleNotices(): Promise<{ message: string; kind: "success" | "error" | "unknown" }[]>;
+  // ---- Issue detail (NEWFRONT-121). ----
+  /** Open the full-page detail of `IDENT-seq` (e.g. `PAR-1`); ends hydrated. */
+  openIssueDetail(workspaceSlug: string, issueSeq: string): Promise<void>;
+  /** Open a read-only detail of `IDENT-seq` (archived, or viewed without edit rights); ends with the sidebar hydrated. */
+  openReadOnlyIssueDetail(workspaceSlug: string, issueSeq: string): Promise<void>;
+  /** Title heading text on the detail page, or null when absent. */
+  issueDetailTitle(): Promise<string | null>;
+  /** Identifier line (e.g. `PAR-1`) on the detail page, or null when absent. */
+  issueDetailIdentifier(): Promise<string | null>;
+  /** Edit the title inline; ends with the save settled. */
+  editIssueTitle(name: string): Promise<void>;
+  /** Current save indicator text (`Saving…`/`Saved`), or null when hidden. */
+  saveIndicator(): Promise<string | null>;
+  /** Plain text of the description body, or null when the editor is absent. */
+  descriptionText(): Promise<string | null>;
+  /** Replace the description through the UI; ends with the save settled. */
+  setDescription(text: string): Promise<void>;
+  /** Value text of a sidebar property row named by its label, or null. */
+  sidebarProperty(label: string): Promise<string | null>;
+  /** True when a sidebar property row with the label renders (even with an empty value). */
+  sidebarRowPresent(label: string): Promise<boolean>;
+  /** True when the sidebar property row carries an editing control (dropdown trigger, picker). */
+  sidebarRowHasControl(label: string): Promise<boolean>;
+  /** Pick a state from the sidebar State dropdown. */
+  pickState(name: string): Promise<void>;
+  /** Pick a priority from the sidebar Priority dropdown. */
+  pickPriority(name: string): Promise<void>;
+  /** Click the header copy-link button. */
+  copyIssueLink(): Promise<void>;
+  /** Text of the most recent toast, or null when none shows. */
+  lastToast(): Promise<string | null>;
+  /** Clipboard text (the copy-link scenarios grant clipboard permission). */
+  readClipboard(): Promise<string>;
+  /** Current subscribe toggle label, or null when the toggle is absent. */
+  subscribeToggle(): Promise<string | null>;
+  /** Click the subscribe toggle; ends with the toggle settled. */
+  clickSubscribeToggle(): Promise<void>;
+  /** Names of the detail header `…` quick-action menu items. */
+  quickActionNames(): Promise<string[]>;
+  /** Click the named detail header `…` quick-action menu item. */
+  clickQuickAction(name: string): Promise<void>;
+  /** True when the named `…` quick-action menu item is disabled; ends with the menu closed. */
+  quickActionDisabled(name: string): Promise<boolean>;
+  /** Open the legacy short-link route that redirects to the detail page. */
+  openLegacyIssueRoute(workspaceSlug: string, projectId: string, issueId: string): Promise<void>;
+  /** True when the detail page shows the does-not-exist empty state. */
+  seesDetailMissing(): Promise<boolean>;
+  /** True when the current page shows authenticated app chrome (not the sign-in card). */
+  signedIn(): Promise<boolean>;
+  /** Open the "Last edited by" description-history menu; ends with versions listed. */
+  openDescriptionHistory(): Promise<void>;
+  /** Names of the description versions in the open history menu. */
+  historyVersionNames(): Promise<string[]>;
+  /** Restore the named history version through the preview modal; ends with the save settled. */
+  restoreHistoryVersion(name: string): Promise<void>;
+  /** Pick an assignee from the sidebar Assignees picker. */
+  pickAssignee(displayName: string): Promise<void>;
+  /** Names of the Runs-on execution-target options; ends with the dropdown closed. */
+  runsOnOptions(): Promise<string[]>;
+  /** Pick the named execution target from the sidebar Runs-on dropdown. */
+  pickRunsOn(name: string): Promise<void>;
+  /** Pick a day of the month in the sidebar date picker for the named row. */
+  pickDate(label: string, day: string): Promise<void>;
+  /** True when the named day cell is disabled in the currently open date picker. */
+  calendarDayDisabled(day: string): Promise<boolean>;
+  /** Clear the sidebar date row through its hover remove control. */
+  clearDate(label: string): Promise<void>;
+  /** Pick a cycle from the sidebar Cycle dropdown. */
+  pickCycle(name: string): Promise<void>;
+  /** Clear the sidebar Cycle row through its "No cycle" option. */
+  clearCycle(): Promise<void>;
+  /** Toggle a module in the sidebar Modules multi-dropdown; ends with the menu closed. */
+  toggleModule(name: string): Promise<void>;
+  /** Set the parent through the picker modal by searching for the named issue. */
+  setParentByName(name: string): Promise<void>;
+  /** Text of the parent banner pill (excluding the child's own identifier), or null when absent. */
+  parentBanner(childSeq: string): Promise<string | null>;
+  /** Names of the banner ellipsis menu items (sibling work items plus remove). */
+  bannerMenuNames(childSeq: string): Promise<string[]>;
+  /** Remove the parent through the banner menu. */
+  removeParent(): Promise<void>;
+  /** Follow the banner link to the parent's detail page; ends hydrated. */
+  openParentFromBanner(): Promise<void>;
+  /** Add a label through the sidebar Labels combobox (selects or creates). */
+  addLabel(name: string): Promise<void>;
+  /** Remove a label chip from the sidebar Labels row. */
+  removeLabel(name: string): Promise<void>;
+
+  // ---- Peek panel (NEWFRONT-121). ----
+  /** Open the issues list with the peek panel on `issueId`; ends with the peek hydrated. */
+  openPeek(workspaceSlug: string, projectId: string, issueId: string): Promise<void>;
+  /** True while the peek panel is rendered. */
+  peekOpen(): Promise<boolean>;
+  /** Issue name shown in the peek, or null when the peek is absent. */
+  peekTitle(): Promise<string | null>;
+  /** Identifier (e.g. `PAR-1`) shown in the peek, or null when absent. */
+  peekIdentifier(): Promise<string | null>;
+  /** Close the peek through its header close control; ends with the panel gone. */
+  closePeek(): Promise<void>;
+  /** True when the peek header close control is rendered (even while loading). */
+  peekCloseVisible(): Promise<boolean>;
+  /** Click the named issue row in the list; ends once the URL or peek settles. */
+  clickListRow(name: string): Promise<void>;
+  /** Switch the peek display mode (`Side Peek` | `Modal` | `Full Screen`); ends applied. */
+  setPeekMode(mode: string): Promise<void>;
+  /** Bounding box of the peek panel, or null when absent. */
+  peekPanelBox(): Promise<{ x: number; y: number; width: number; height: number } | null>;
+  /** Click the peek header copy-link control. */
+  copyPeekLink(): Promise<void>;
+  /** Href of the peek "open full screen" control, or null when disabled/absent. */
+  peekFullScreenHref(): Promise<string | null>;
+  /** Open the peek header `…` menu; returns the item names. */
+  peekQuickActionNames(): Promise<string[]>;
+  /** Title of the peek error empty state, or null when the peek loaded. */
+  peekErrorTitle(): Promise<string | null>;
+
+  // ---- Detail widgets (NEWFRONT-121). ----
+  /** Titles of the widget collapsibles currently rendered. */
+  widgetTitles(): Promise<string[]>;
+  /** Names of the rows in the named widget section. */
+  widgetRowNames(widget: string): Promise<string[]>;
+  /** Progress text (`<done>/<total> Done`) of the named widget, or null. */
+  widgetProgress(widget: string): Promise<string | null>;
+  /** Group titles inside the named widget (e.g. relation types), or []. */
+  widgetGroupNames(widget: string): Promise<string[]>;
+  /** Ensure the named widget section is expanded. */
+  openWidgetSection(widget: string): Promise<void>;
+  /** True when the named widget section is currently expanded. */
+  widgetExpanded(widget: string): Promise<boolean>;
+  /** Number of control buttons nested in the named widget's header row. */
+  widgetHeaderControlCount(widget: string): Promise<number>;
+  /** Toggle the named widget section open/closed; ends settled. */
+  toggleWidgetSection(widget: string): Promise<void>;
+  /** Option names of the named widget's add (`+`) menu. */
+  widgetAddMenuNames(widget: string): Promise<string[]>;
+  /** Open the sub-issue create modal through the widget; ends with the modal open. */
+  openSubIssueCreateModal(): Promise<void>;
+  /** Parent name preset in the open create modal, or null. */
+  createModalParentName(): Promise<string | null>;
+  /** True when the open create modal locks the project field. */
+  createModalProjectLocked(): Promise<boolean>;
+  /** Submit the open create modal with the given issue name; ends with the modal closed. */
+  createModalSubmit(name: string): Promise<void>;
+  /** Add an existing issue as a sub-issue: search, pick, confirm; ends with the row rendered. */
+  addExistingSubIssue(search: string, name: string): Promise<void>;
+  /** Click the named row in the named widget (opens child peek / attachment). */
+  clickWidgetRow(widget: string, rowName: string): Promise<void>;
+  /** Names of the named row's ellipsis-menu items in the named widget. */
+  widgetRowActionNames(widget: string, rowName: string): Promise<string[]>;
+  /** Click the named ellipsis-menu action for the named row in the named widget. */
+  clickWidgetRowAction(widget: string, rowName: string, action: string): Promise<void>;
+  /** Title of the open confirm modal, or null when no dialog shows. */
+  confirmModalTitle(): Promise<string | null>;
+  /** Full text of the open confirm modal, or null when no dialog shows. */
+  confirmModalText(): Promise<string | null>;
+  /** Click the named button in the open dialog; ends with the dialog closed. */
+  confirmModal(label: string): Promise<void>;
+  /** Add a relation through the widget: pick the type, search, pick, confirm. */
+  addRelationViaModal(type: string, search: string, name: string): Promise<void>;
+  /** Add an external link through the Links widget modal. */
+  addLinkModal(url: string, title?: string): Promise<void>;
+  /** Click the copy control of the named link row; ends with the URL copied. */
+  clickLinkCopy(rowName: string): Promise<void>;
+  /** Change the named link's title through the Links widget. */
+  editLinkTitle(rowName: string, title: string): Promise<void>;
+  /** Href/target of the named link row, or null. */
+  linkRowTarget(rowName: string): Promise<{ href: string; target: string | null } | null>;
+  /** Upload a file through the Attachments widget; ends with the row rendered. */
+  uploadAttachment(file: { name: string; mime: string; bytes: Buffer }): Promise<void>;
+  /** Click the widget action-row button (e.g. `Manually Run AI`); ends settled. */
+  clickWidgetAction(name: string): Promise<void>;
+  /** Post a comment through the composer; ends with the comment rendered. */
+  postComment(text: string): Promise<void>;
+  /** Type into the composer without submitting; the draft stays editable. */
+  typeComment(text: string): Promise<void>;
+  /** Click the `Comment & Run` composer control; ends settled. */
+  clickCommentAndRun(): Promise<void>;
+  /** True while Comment & Run is disabled (the empty-composer short-circuit). */
+  commentAndRunDisabled(): Promise<boolean>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */

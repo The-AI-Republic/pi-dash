@@ -894,6 +894,89 @@ export class WebNewDriver implements ParityDriver {
     return todo("homeWaitForWidgets");
   }
 
+  // ---- Issue detail (NEWFRONT-121): stubs until the area lands. ----
+  async openIssueDetail(_workspaceSlug: string, _issueSeq: string): Promise<void> {
+    return todo("openIssueDetail");
+  }
+  async openReadOnlyIssueDetail(_workspaceSlug: string, _issueSeq: string): Promise<void> {
+    return todo("openReadOnlyIssueDetail");
+  }
+  async issueDetailTitle(): Promise<string | null> {
+    return todo("issueDetailTitle");
+  }
+  async issueDetailIdentifier(): Promise<string | null> {
+    return todo("issueDetailIdentifier");
+  }
+  async editIssueTitle(_name: string): Promise<void> {
+    return todo("editIssueTitle");
+  }
+  async saveIndicator(): Promise<string | null> {
+    return todo("saveIndicator");
+  }
+  async descriptionText(): Promise<string | null> {
+    return todo("descriptionText");
+  }
+  async setDescription(_text: string): Promise<void> {
+    return todo("setDescription");
+  }
+  async sidebarProperty(_label: string): Promise<string | null> {
+    return todo("sidebarProperty");
+  }
+  async sidebarRowPresent(_label: string): Promise<boolean> {
+    return todo("sidebarRowPresent");
+  }
+  async sidebarRowHasControl(_label: string): Promise<boolean> {
+    return todo("sidebarRowHasControl");
+  }
+  async pickState(_name: string): Promise<void> {
+    return todo("pickState");
+  }
+  async pickPriority(_name: string): Promise<void> {
+    return todo("pickPriority");
+  }
+  async copyIssueLink(): Promise<void> {
+    return todo("copyIssueLink");
+  }
+  async lastToast(): Promise<string | null> {
+    return todo("lastToast");
+  }
+  async readClipboard(): Promise<string> {
+    return todo("readClipboard");
+  }
+  async subscribeToggle(): Promise<string | null> {
+    return todo("subscribeToggle");
+  }
+  async clickSubscribeToggle(): Promise<void> {
+    return todo("clickSubscribeToggle");
+  }
+  async quickActionNames(): Promise<string[]> {
+    return todo("quickActionNames");
+  }
+  async clickQuickAction(_name: string): Promise<void> {
+    return todo("clickQuickAction");
+  }
+  async quickActionDisabled(_name: string): Promise<boolean> {
+    return todo("quickActionDisabled");
+  }
+  async openLegacyIssueRoute(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
+    return todo("openLegacyIssueRoute");
+  }
+  async seesDetailMissing(): Promise<boolean> {
+    return todo("seesDetailMissing");
+  }
+  async signedIn(): Promise<boolean> {
+    return todo("signedIn");
+  }
+  async openDescriptionHistory(): Promise<void> {
+    return todo("openDescriptionHistory");
+  }
+  async historyVersionNames(): Promise<string[]> {
+    return todo("historyVersionNames");
+  }
+  async restoreHistoryVersion(_name: string): Promise<void> {
+    return todo("restoreHistoryVersion");
+  }
+
   // --- Comment composer and CRUD (NEWFRONT-112). Stubs mirror the
   // interface additions so scenarios compile against either target.
 
@@ -980,5 +1063,185 @@ export class WebNewDriver implements ParityDriver {
 
   async composerVisibleNotices(): Promise<{ message: string; kind: "success" | "error" | "unknown" }[]> {
     return todo("composerVisibleNotices");
+  }
+  async pickAssignee(_displayName: string): Promise<void> {
+    return todo("pickAssignee");
+  }
+  async pickRunsOn(_name: string): Promise<void> {
+    return todo("pickRunsOn");
+  }
+  async runsOnOptions(): Promise<string[]> {
+    return todo("runsOnOptions");
+  }
+  async pickDate(_label: string, _day: string): Promise<void> {
+    return todo("pickDate");
+  }
+  async calendarDayDisabled(_day: string): Promise<boolean> {
+    return todo("calendarDayDisabled");
+  }
+  async clearDate(_label: string): Promise<void> {
+    return todo("clearDate");
+  }
+  async pickCycle(_name: string): Promise<void> {
+    return todo("pickCycle");
+  }
+  async clearCycle(): Promise<void> {
+    return todo("clearCycle");
+  }
+  async toggleModule(_name: string): Promise<void> {
+    return todo("toggleModule");
+  }
+  async setParentByName(_name: string): Promise<void> {
+    return todo("setParentByName");
+  }
+  async parentBanner(_childSeq: string): Promise<string | null> {
+    return todo("parentBanner");
+  }
+  async bannerMenuNames(_childSeq: string): Promise<string[]> {
+    return todo("bannerMenuNames");
+  }
+  async removeParent(): Promise<void> {
+    return todo("removeParent");
+  }
+  async openParentFromBanner(): Promise<void> {
+    return todo("openParentFromBanner");
+  }
+  async addLabel(_name: string): Promise<void> {
+    return todo("addLabel");
+  }
+  async removeLabel(_name: string): Promise<void> {
+    return todo("removeLabel");
+  }
+  async openPeek(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
+    return todo("openPeek");
+  }
+  async peekOpen(): Promise<boolean> {
+    return todo("peekOpen");
+  }
+  async peekTitle(): Promise<string | null> {
+    return todo("peekTitle");
+  }
+  async peekIdentifier(): Promise<string | null> {
+    return todo("peekIdentifier");
+  }
+  async closePeek(): Promise<void> {
+    return todo("closePeek");
+  }
+  async peekCloseVisible(): Promise<boolean> {
+    return todo("peekCloseVisible");
+  }
+  async clickListRow(_name: string): Promise<void> {
+    return todo("clickListRow");
+  }
+  async setPeekMode(_mode: string): Promise<void> {
+    return todo("setPeekMode");
+  }
+  async peekPanelBox(): Promise<{ x: number; y: number; width: number; height: number } | null> {
+    return todo("peekPanelBox");
+  }
+  async copyPeekLink(): Promise<void> {
+    return todo("copyPeekLink");
+  }
+  async peekFullScreenHref(): Promise<string | null> {
+    return todo("peekFullScreenHref");
+  }
+  async peekQuickActionNames(): Promise<string[]> {
+    return todo("peekQuickActionNames");
+  }
+  async peekErrorTitle(): Promise<string | null> {
+    return todo("peekErrorTitle");
+  }
+  async widgetTitles(): Promise<string[]> {
+    return todo("widgetTitles");
+  }
+  async widgetRowNames(_widget: string): Promise<string[]> {
+    return todo("widgetRowNames");
+  }
+  async widgetProgress(_widget: string): Promise<string | null> {
+    return todo("widgetProgress");
+  }
+  async widgetGroupNames(_widget: string): Promise<string[]> {
+    return todo("widgetGroupNames");
+  }
+  async openWidgetSection(_widget: string): Promise<void> {
+    return todo("openWidgetSection");
+  }
+  async widgetExpanded(_widget: string): Promise<boolean> {
+    return todo("widgetExpanded");
+  }
+  async widgetHeaderControlCount(_widget: string): Promise<number> {
+    return todo("widgetHeaderControlCount");
+  }
+  async toggleWidgetSection(_widget: string): Promise<void> {
+    return todo("toggleWidgetSection");
+  }
+  async widgetAddMenuNames(_widget: string): Promise<string[]> {
+    return todo("widgetAddMenuNames");
+  }
+  async openSubIssueCreateModal(): Promise<void> {
+    return todo("openSubIssueCreateModal");
+  }
+  async createModalParentName(): Promise<string | null> {
+    return todo("createModalParentName");
+  }
+  async createModalProjectLocked(): Promise<boolean> {
+    return todo("createModalProjectLocked");
+  }
+  async createModalSubmit(_name: string): Promise<void> {
+    return todo("createModalSubmit");
+  }
+  async addExistingSubIssue(_search: string, _name: string): Promise<void> {
+    return todo("addExistingSubIssue");
+  }
+  async clickWidgetRow(_widget: string, _rowName: string): Promise<void> {
+    return todo("clickWidgetRow");
+  }
+  async widgetRowActionNames(_widget: string, _rowName: string): Promise<string[]> {
+    return todo("widgetRowActionNames");
+  }
+  async clickWidgetRowAction(_widget: string, _rowName: string, _action: string): Promise<void> {
+    return todo("clickWidgetRowAction");
+  }
+  async confirmModalTitle(): Promise<string | null> {
+    return todo("confirmModalTitle");
+  }
+  async confirmModalText(): Promise<string | null> {
+    return todo("confirmModalText");
+  }
+  async confirmModal(_label: string): Promise<void> {
+    return todo("confirmModal");
+  }
+  async addRelationViaModal(_type: string, _search: string, _name: string): Promise<void> {
+    return todo("addRelationViaModal");
+  }
+  async addLinkModal(_url: string, _title?: string): Promise<void> {
+    return todo("addLinkModal");
+  }
+  async clickLinkCopy(_rowName: string): Promise<void> {
+    return todo("clickLinkCopy");
+  }
+  async editLinkTitle(_rowName: string, _title: string): Promise<void> {
+    return todo("editLinkTitle");
+  }
+  async linkRowTarget(_rowName: string): Promise<{ href: string; target: string | null } | null> {
+    return todo("linkRowTarget");
+  }
+  async uploadAttachment(_file: { name: string; mime: string; bytes: Buffer }): Promise<void> {
+    return todo("uploadAttachment");
+  }
+  async clickWidgetAction(_name: string): Promise<void> {
+    return todo("clickWidgetAction");
+  }
+  async postComment(_text: string): Promise<void> {
+    return todo("postComment");
+  }
+  async typeComment(_text: string): Promise<void> {
+    return todo("typeComment");
+  }
+  async clickCommentAndRun(): Promise<void> {
+    return todo("clickCommentAndRun");
+  }
+  async commentAndRunDisabled(): Promise<boolean> {
+    return todo("commentAndRunDisabled");
   }
 }

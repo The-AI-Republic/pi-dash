@@ -27,6 +27,8 @@ export class WebDriver implements ParityDriver {
 
   /** Every wait below is explicitly bounded: the suite config leaves action and navigation timeouts at Playwright's unbounded defaults, so a bare waitFor would hang to the test timeout instead of failing honestly. */
   private static readonly WAIT_MS = 30_000;
+  /** Tighter bound for menus and dialogs, which render synchronously once open. */
+  private static readonly OPEN_MS = 30_000;
 
   async openEntry(): Promise<void> {
     // The entry render occasionally never arrives under concurrent
@@ -316,7 +318,28 @@ export class WebDriver implements ParityDriver {
 
   async openProjectIssues(workspaceSlug: string, projectId: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues`);
-    await this.page.waitForLoadState("domcontentloaded", { timeout: WebDriver.WAIT_MS });
+    await this.page.waitForLoadState("domcontentloaded");
+    // The dev-server route module intermittently fails to fetch under
+    // sibling contention, leaving main empty; reload until the list boots
+    // (chrome text renders) the same way the detail/peek opens do.
+    const deadline = Date.now() + WebDriver.DETAIL_MS;
+    let loops = 0;
+    for (;;) {
+      // Bounded: a blank boot renders no <main> at all, and an unbounded
+      // read would hang past the deadline instead of iterating to it.
+      const text = await this.page
+        .getByRole("main")
+        .innerText({ timeout: 5000 })
+        .catch(() => "");
+      if (text.trim().length > 50) return;
+      if ((await this.page.getByPlaceholder("name@company.com").count()) > 0) {
+        throw new Error("[parity] session lost while opening the issues list.");
+      }
+      loops++;
+      if (Date.now() > deadline) return;
+      if (loops % 15 === 0) await this.page.reload().catch(() => {});
+      else await this.page.waitForTimeout(2000);
+    }
   }
 
   async openSignInWithParams(params: Record<string, string>): Promise<void> {
@@ -2674,6 +2697,628 @@ export class WebDriver implements ParityDriver {
     return false;
   }
 
+  // ---- Issue detail (NEWFRONT-121). ----
+  // Selectors follow the detail behavior observed on the running old app:
+  // the title is a textarea (placeholder "Work item title"), the sidebar
+  // is a "Properties" section of label/value rows, dropdowns render a
+  // listbox of options, and the description is the contenteditable above
+  // the "Last edited by" line (the composer sits below it).
+
+  private static readonly DETAIL_MS = 120_000;
+
+  async signedIn(): Promise<boolean> {
+    return (await this.page.getByPlaceholder("name@company.com").count()) === 0;
+  }
+
+  async openIssueDetail(workspaceSlug: string, issueSeq: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/browse/${issueSeq}`);
+    // Hydration can be slow on the dev-server oracle, but a missing issue
+    // or a lost session must fail fast with a diagnosis, not a timeout.
+    const deadline = Date.now() + WebDriver.DETAIL_MS;
+    let loops = 0;
+    for (;;) {
+      if ((await this.titleField().count()) > 0) return;
+      if (await this.seesDetailMissing()) {
+        throw new Error(`[parity] detail shows the missing state for ${issueSeq} (reseeded away?).`);
+      }
+      if ((await this.page.getByPlaceholder("name@company.com").count()) > 0) {
+        throw new Error("[parity] session lost while opening the detail page.");
+      }
+      loops++;
+      if (Date.now() > deadline) {
+        await this.titleField().waitFor({ timeout: 5000 });
+        return;
+      }
+      // A blank page means the dev-server route module failed to fetch
+      // (stack network flap); reloading usually converges.
+      if (loops % 15 === 0) await this.page.reload().catch(() => {});
+      else await this.page.waitForTimeout(2000);
+    }
+  }
+
+  async openReadOnlyIssueDetail(workspaceSlug: string, issueSeq: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/browse/${issueSeq}`);
+    // No title field renders on read-only detail (static title instead),
+    // so the identifier plus a hydrated sidebar row decide. Reload
+    // through blank dev-server boots like the opener.
+    const deadline = Date.now() + WebDriver.DETAIL_MS;
+    let loops = 0;
+    for (;;) {
+      if ((await this.issueDetailIdentifier()) === issueSeq) {
+        if ((await this.sidebarProperty("State")) !== null) return;
+      }
+      if ((await this.page.getByPlaceholder("name@company.com").count()) > 0) {
+        throw new Error("[parity] session lost while opening the read-only detail page.");
+      }
+      loops++;
+      if (Date.now() > deadline) throw new Error(`[parity] read-only detail did not hydrate for ${issueSeq}.`);
+      if (loops % 15 === 0) await this.page.reload().catch(() => {});
+      else await this.page.waitForTimeout(2000);
+    }
+  }
+
+  private titleField(): Locator {
+    return this.page.getByPlaceholder("Work item title").first();
+  }
+
+  async issueDetailTitle(): Promise<string | null> {
+    if ((await this.titleField().count()) === 0) return null;
+    return await this.titleField().inputValue();
+  }
+
+  async issueDetailIdentifier(): Promise<string | null> {
+    const id = this.page.getByText(/^[A-Z0-9]{2,}-\d+$/).first();
+    if ((await id.count()) === 0) return null;
+    return (await id.innerText()).trim();
+  }
+
+  async editIssueTitle(name: string): Promise<void> {
+    await this.titleField().fill(name, { timeout: WebDriver.OPEN_MS });
+    // Blur out of the title so the debounced autosave fires.
+    const id = this.page.getByText(/^[A-Z0-9]{2,}-\d+$/).first();
+    if ((await id.count()) > 0) await id.click({ timeout: WebDriver.OPEN_MS });
+    else await this.titleField().press("Tab", { timeout: WebDriver.OPEN_MS });
+  }
+
+  async saveIndicator(): Promise<string | null> {
+    const saving = this.page.getByText(/^Saving…$/).first();
+    if ((await saving.count()) > 0) return "Saving…";
+    const saved = this.page.getByText(/^Saved$/).first();
+    if ((await saved.count()) > 0) return "Saved";
+    return null;
+  }
+
+  /** The description editor: contenteditable above the "Last edited by" line. */
+  private async descriptionEditor(): Promise<Locator | null> {
+    const editors = this.page.locator("[contenteditable='true']");
+    const count = await editors.count();
+    if (count === 0) return null;
+    if (count === 1) return editors.first();
+    const marker = this.page.getByText(/Last edited by/).first();
+    if ((await marker.count()) === 0) return editors.first();
+    const markerBox = await marker.boundingBox();
+    if (!markerBox) return editors.first();
+    for (let i = 0; i < count; i++) {
+      const box = await editors.nth(i).boundingBox();
+      if (box && box.y + box.height <= markerBox.y) return editors.nth(i);
+    }
+    return null;
+  }
+
+  async descriptionText(): Promise<string | null> {
+    const editor = await this.descriptionEditor();
+    if (!editor) return null;
+    return ((await editor.innerText()) ?? "").trim();
+  }
+
+  async setDescription(text: string): Promise<void> {
+    const placeholder = this.page.getByText("Click to add description").first();
+    if ((await placeholder.count()) > 0) await placeholder.click({ timeout: WebDriver.OPEN_MS });
+    const editor = await this.descriptionEditor();
+    if (!editor) throw new Error("[parity] no description editor on the detail page.");
+    await editor.fill(text, { timeout: WebDriver.OPEN_MS });
+    const id = this.page.getByText(/^[A-Z0-9]{2,}-\d+$/).first();
+    if ((await id.count()) > 0) await id.click({ timeout: WebDriver.OPEN_MS });
+    else await this.page.keyboard.press("Escape");
+  }
+
+  /** The label/value row for a sidebar property, found by walking up. */
+  private async propertyRow(label: string): Promise<Locator | null> {
+    // Labels repeat across the page (the sidebar "Modules" label and a nav
+    // link share the text), so try every exact match until one climbs to a
+    // row; rows with an empty value carry only the label text plus their
+    // dropdown trigger, which the length check below would reject.
+    const matches = this.page.getByText(label, { exact: true });
+    const count = await matches.count();
+    for (let m = 0; m < count; m++) {
+      let node = matches.nth(m).locator("xpath=parent::*");
+      for (let i = 0; i < 4; i++) {
+        const text = ((await node.innerText().catch(() => "")) ?? "").trim();
+        if (text.length < 300) {
+          if (text.length > label.length + 1) return node;
+          if ((await node.getByRole("button").count()) > 0) return node;
+        }
+        node = node.locator("xpath=parent::*");
+      }
+    }
+    return null;
+  }
+
+  async sidebarProperty(label: string): Promise<string | null> {
+    const row = await this.propertyRow(label);
+    if (!row) return null;
+    const text = ((await row.innerText()) ?? "").trim();
+    return text.replace(label, "").trim() || null;
+  }
+
+  async sidebarRowPresent(label: string): Promise<boolean> {
+    return (await this.propertyRow(label)) !== null;
+  }
+
+  async sidebarRowHasControl(label: string): Promise<boolean> {
+    const row = await this.propertyRow(label);
+    if (!row) return false;
+    return (await row.getByRole("button").count()) > 0;
+  }
+
+  private async pickFromProperty(label: string, name: string): Promise<void> {
+    const row = await this.propertyRow(label);
+    if (!row) throw new Error(`[parity] no sidebar property ${JSON.stringify(label)}.`);
+    await row.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("option", { name }).click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pickState(name: string): Promise<void> {
+    await this.pickFromProperty("State", name);
+  }
+
+  async pickPriority(name: string): Promise<void> {
+    await this.pickFromProperty("Priority", name);
+  }
+
+  async pickAssignee(displayName: string): Promise<void> {
+    const row = await this.propertyRow("Assignees");
+    if (!row) throw new Error("[parity] no sidebar Assignees row.");
+    await row.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("option", { name: displayName }).click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  private async openRunsOn(): Promise<Locator> {
+    const row = await this.propertyRow("Runs on");
+    if (!row) throw new Error("[parity] no sidebar Runs-on row.");
+    await row.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    const options = this.page.getByRole("option");
+    await options.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    return options;
+  }
+
+  async runsOnOptions(): Promise<string[]> {
+    const options = await this.openRunsOn();
+    const names = (await options.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
+    await this.page.keyboard.press("Escape");
+    return names;
+  }
+
+  async pickRunsOn(name: string): Promise<void> {
+    // A click swallowed by a re-render leaves the dropdown open with no
+    // selection, so retry until the options detach (a select closes them).
+    for (let attempt = 0; ; attempt++) {
+      const options = await this.openRunsOn();
+      await options.filter({ hasText: name }).first().click({ timeout: WebDriver.OPEN_MS });
+      try {
+        await this.page.getByRole("option").first().waitFor({ state: "detached", timeout: 5000 });
+        return;
+      } catch {
+        if (attempt >= 2) throw new Error(`[parity] runs-on pick ${JSON.stringify(name)} did not land.`);
+        await this.page.keyboard.press("Escape").catch(() => {});
+      }
+    }
+  }
+
+  /** Open the date picker popover for the named sidebar row. */
+  private async openDatePicker(label: string): Promise<Locator> {
+    const row = await this.propertyRow(label);
+    if (!row) throw new Error(`[parity] no sidebar property ${JSON.stringify(label)}.`);
+    await row.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    const grid = this.page.getByRole("grid");
+    await grid.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    return row;
+  }
+
+  /** Day cells show the bare day number; adjacent-month days never read 15–25. */
+  private dayCell(day: string): Locator {
+    return this.page
+      .getByRole("gridcell")
+      .filter({ hasText: new RegExp(`^${day}$`) })
+      .first();
+  }
+
+  async pickDate(label: string, day: string): Promise<void> {
+    await this.openDatePicker(label);
+    await this.dayCell(day).click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async calendarDayDisabled(day: string): Promise<boolean> {
+    const cell = this.dayCell(day);
+    if ((await cell.count()) === 0) return false;
+    const disabled = await cell.getAttribute("aria-disabled").catch(() => null);
+    if (disabled !== null) return disabled === "true";
+    return ((await cell.getAttribute("class").catch(() => "")) ?? "").includes("disabled");
+  }
+
+  async clearDate(label: string): Promise<void> {
+    const row = await this.propertyRow(label);
+    if (!row) throw new Error(`[parity] no sidebar property ${JSON.stringify(label)}.`);
+    // The clear X hides inside the nested value buttons until the group
+    // wrapper is hovered; clicking the revealed icon clears the date.
+    const group = row.locator("div.group").first();
+    await group.hover();
+    const icon = group.locator("svg[class*='group-hover']").first();
+    await icon.waitFor({ timeout: WebDriver.OPEN_MS });
+    await icon.click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pickCycle(name: string): Promise<void> {
+    await this.pickFromProperty("Cycle", name);
+  }
+
+  async clearCycle(): Promise<void> {
+    await this.pickFromProperty("Cycle", "No cycle");
+  }
+
+  async toggleModule(name: string): Promise<void> {
+    await this.pickFromProperty("Modules", name);
+    // The multi-select menu stays open after a toggle; dismiss it so later
+    // reads see the settled row rather than the open menu.
+    await this.page.keyboard.press("Escape");
+  }
+
+  async setParentByName(name: string): Promise<void> {
+    const row = await this.propertyRow("Parent");
+    if (!row) throw new Error("[parity] no sidebar Parent row.");
+    await row.getByRole("button", { name: /Add parent work item/ }).click({ timeout: WebDriver.OPEN_MS });
+    const dialog = this.appDialogs();
+    await dialog.first().waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+    await dialog.locator("input").first().fill(name, { timeout: WebDriver.OPEN_MS });
+    const option = dialog.getByRole("option", { name: new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) });
+    await option.first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  /** The banner pill: bordered container holding an identifier link that is not the child's. */
+  private async bannerPill(childSeq: string): Promise<Locator | null> {
+    // Identifier links also appear in the sidebar (right column) and in
+    // widgets; the banner pill sits in the main column (left), so collect
+    // small containers per link and keep the leftmost one.
+    const links = this.page.getByRole("link", { name: /[A-Z0-9]{2,}-\d+/ });
+    const count = await links.count();
+    let best: { node: Locator; x: number } | null = null;
+    for (let i = 0; i < count; i++) {
+      const text = (
+        (await links
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      // The banner link wraps the identifier plus the parent name; skip the
+      // child's own link by comparing the embedded identifier.
+      const match = /([A-Z0-9]{2,}-\d+)/.exec(text);
+      if (!match || match[1] === childSeq) continue;
+      let node = links.nth(i).locator("xpath=parent::*");
+      for (let level = 0; level < 5; level++) {
+        const inner = ((await node.innerText().catch(() => "")) ?? "").trim();
+        if (inner.length >= 200) break;
+        const up = node.locator("xpath=parent::*");
+        const upText = ((await up.innerText().catch(() => "")) ?? "").trim();
+        if (upText.length >= 200) break;
+        node = up;
+      }
+      const inner = ((await node.innerText().catch(() => "")) ?? "").trim();
+      if (inner.length >= 200 || inner === "") continue;
+      const box = await node.boundingBox().catch(() => null);
+      const x = box ? box.x : Number.MAX_SAFE_INTEGER;
+      if (!best || x < best.x) best = { node, x };
+    }
+    return best ? best.node : null;
+  }
+
+  async parentBanner(childSeq: string): Promise<string | null> {
+    const pill = await this.bannerPill(childSeq);
+    if (!pill) return null;
+    return ((await pill.innerText().catch(() => "")) ?? "").trim() || null;
+  }
+
+  /** Open the banner ellipsis menu; ends with its items visible. */
+  private async openBannerMenu(childSeq: string): Promise<void> {
+    // The banner re-renders after navigation, so poll for the pill first.
+    let pill: Locator | null = null;
+    const deadline = Date.now() + WebDriver.DETAIL_MS;
+    while (!pill && Date.now() < deadline) {
+      pill = await this.bannerPill(childSeq);
+      if (!pill) await this.page.waitForTimeout(2000);
+    }
+    if (!pill) throw new Error("[parity] no parent banner pill.");
+    await pill
+      .locator('button[aria-haspopup="menu"], button[aria-haspopup="true"]')
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async bannerMenuNames(childSeq: string): Promise<string[]> {
+    // The menu lists sibling work items above the remove item; read all.
+    await this.openBannerMenu(childSeq);
+    const items = this.page.getByRole("menuitem");
+    return (await items.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async removeParent(): Promise<void> {
+    const childSeq = (await this.issueDetailIdentifier()) ?? "";
+    await this.openBannerMenu(childSeq);
+    await this.page
+      .getByRole("menuitem", { name: /Remove parent work item/i })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async openParentFromBanner(): Promise<void> {
+    const childSeq = (await this.issueDetailIdentifier()) ?? "";
+    const pill = await this.bannerPill(childSeq);
+    if (!pill) throw new Error("[parity] no parent banner pill.");
+    await pill.getByRole("link").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.titleField().waitFor({ timeout: WebDriver.DETAIL_MS });
+  }
+
+  async addLabel(name: string): Promise<void> {
+    const row = await this.propertyRow("Labels");
+    if (!row) throw new Error("[parity] no sidebar Labels row.");
+    await row.click({ timeout: WebDriver.OPEN_MS });
+    const combo = this.page.getByRole("combobox");
+    await combo.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    await combo.first().fill(name, { timeout: WebDriver.OPEN_MS });
+    // Selecting the filtered option assigns; Enter creates it when absent.
+    const option = this.page.getByRole("option", { name });
+    if ((await option.count()) > 0) await option.first().click({ timeout: WebDriver.OPEN_MS });
+    else await combo.first().press("Enter", { timeout: WebDriver.OPEN_MS });
+    await this.page.keyboard.press("Escape");
+  }
+
+  async removeLabel(name: string): Promise<void> {
+    const row = await this.propertyRow("Labels");
+    if (!row) throw new Error("[parity] no sidebar Labels row.");
+    // The chip button removes the label on click; make sure the picker is
+    // closed first so its option list cannot intercept the click.
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByRole("combobox")
+      .waitFor({ state: "detached", timeout: WebDriver.OPEN_MS })
+      .catch(() => {});
+    const chip = row.getByRole("button", {
+      name: new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    });
+    if ((await chip.count()) === 0) throw new Error(`[parity] no label chip ${JSON.stringify(name)}.`);
+    await chip.first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async copyIssueLink(): Promise<void> {
+    // The header copy control is an unnamed icon button beside the
+    // subscribe toggle whose svg is not a lucide icon (same shape as the
+    // peek copy control).
+    let bar = this.page.getByRole("button", { name: /^(Subscribe|Unsubscribe)$/ }).first();
+    await bar.waitFor({ timeout: WebDriver.OPEN_MS });
+    let found = false;
+    for (let i = 0; i < 8; i++) {
+      const triggers = bar.locator('button[aria-haspopup="menu"], button[aria-haspopup="true"]');
+      if ((await triggers.count()) > 0) {
+        found = true;
+        break;
+      }
+      bar = bar.locator("xpath=parent::*");
+    }
+    if (!found) throw new Error("[parity] no detail header bar.");
+    const candidates = bar.locator("button:not([aria-haspopup]):has(svg:not([class*='lucide']))");
+    const count = await candidates.count();
+    for (let i = 0; i < count; i++) {
+      const candidate = candidates.nth(i);
+      const nested = await candidate
+        .evaluate((node) => node.closest('[aria-haspopup="listbox"]') !== null)
+        .catch(() => true);
+      if (!nested) {
+        await candidate.click({ timeout: WebDriver.OPEN_MS });
+        return;
+      }
+    }
+    throw new Error("[parity] no detail copy-link control.");
+  }
+
+  /**
+   * App modal dialogs, excluding toasts: both render role=dialog, but
+   * toasts live under the Notifications live region.
+   */
+  private appDialogs(): Locator {
+    return this.page.locator('xpath=//*[@role="dialog" and not(ancestor::*[@aria-label="Notifications"])]');
+  }
+
+  async lastToast(): Promise<string | null> {
+    // Toasts render as dialogs inside the Notifications region (the
+    // viewport's own alert nodes only cover high-priority toasts).
+    const toasts = this.page.locator(
+      'xpath=//*[@aria-label="Notifications"]//*[@role="dialog" or @role="alertdialog"]'
+    );
+    if ((await toasts.count()) > 0) {
+      // Newest first: the stack prepends, so .last() is the stale toast when
+      // two overlap (e.g. Comment & Run's success + dispatch-error pair).
+      const text = (
+        (await toasts
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== "") return text;
+    }
+    const status = this.page.getByRole("status");
+    if ((await status.count()) > 0) {
+      const text = ((await status.first().innerText()) ?? "").trim();
+      if (text !== "") return text;
+    }
+    const alert = this.page.getByRole("alert");
+    if ((await alert.count()) === 0) return null;
+    const text = ((await alert.first().innerText()) ?? "").trim();
+    return text === "" ? null : text;
+  }
+
+  async readClipboard(): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    return await this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async subscribeToggle(): Promise<string | null> {
+    const toggle = this.page.getByRole("button", { name: /^(Subscribe|Unsubscribe)$/ }).first();
+    if ((await toggle.count()) === 0) return null;
+    return ((await toggle.innerText()) ?? "").trim() || null;
+  }
+
+  async clickSubscribeToggle(): Promise<void> {
+    await this.page
+      .getByRole("button", { name: /^(Subscribe|Unsubscribe)$/ })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  private async openQuickActions(): Promise<Locator> {
+    // The overflow trigger is an icon-only menu button in the detail
+    // header bar (the row holding the breadcrumb and the subscribe
+    // toggle). Walk up from the toggle to that bar, then open the popup
+    // button inside it. Archived detail renders no subscribe toggle, so
+    // anchor on the header identifier there instead.
+    let bar = this.page.getByRole("button", { name: /^(Subscribe|Unsubscribe)$/ }).first();
+    if ((await bar.count()) === 0) bar = this.page.getByText(/^[A-Z0-9]{2,}-\d+$/).first();
+    for (let i = 0; i < 8; i++) {
+      bar = bar.locator("xpath=parent::*");
+      const triggers = bar.locator('button[aria-haspopup="menu"], button[aria-haspopup="true"]');
+      if ((await triggers.count()) > 0) {
+        await triggers.first().click({ timeout: WebDriver.OPEN_MS });
+        break;
+      }
+    }
+    const items = this.page.getByRole("menuitem");
+    await items.first().waitFor({ timeout: WebDriver.DETAIL_MS });
+    return items;
+  }
+
+  async quickActionNames(): Promise<string[]> {
+    const items = await this.openQuickActions();
+    return (await items.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async clickQuickAction(name: string): Promise<void> {
+    // A click swallowed by a re-render leaves the menu open with no
+    // effect, so retry until the menu closes (every item closes it).
+    for (let attempt = 0; ; attempt++) {
+      const items = await this.openQuickActions();
+      await items.filter({ hasText: name }).first().click({ timeout: WebDriver.OPEN_MS });
+      try {
+        await this.page.getByRole("menuitem").first().waitFor({ state: "detached", timeout: 5000 });
+        return;
+      } catch {
+        if (attempt >= 2) throw new Error(`[parity] quick action ${JSON.stringify(name)} did not land.`);
+        await this.page.keyboard.press("Escape").catch(() => {});
+      }
+    }
+  }
+
+  async quickActionDisabled(name: string): Promise<boolean> {
+    const items = await this.openQuickActions();
+    const disabled = await items.filter({ hasText: name }).first().isDisabled();
+    await this.page.keyboard.press("Escape").catch(() => {});
+    return disabled;
+  }
+
+  async openDescriptionHistory(): Promise<void> {
+    // The "Last edited by" line is a history menu button; under contention
+    // the first click can be swallowed by a re-render, so retry until the
+    // version items show. Scope to visible items: re-renders can leave
+    // hidden duplicate menu snapshots that .first() would otherwise hit.
+    const trigger = this.page.getByRole("button", { name: /Last edited by/ }).first();
+    const visibleItems = this.page.locator('[role="menuitem"]:visible');
+    for (let attempt = 0; ; attempt++) {
+      await trigger.click({ timeout: WebDriver.OPEN_MS });
+      try {
+        await visibleItems.first().waitFor({ timeout: 5000 });
+        return;
+      } catch {
+        if (attempt >= 2) throw new Error("[parity] description history menu did not open.");
+      }
+    }
+  }
+
+  async historyVersionNames(): Promise<string[]> {
+    // Visible items only: hidden duplicate menu snapshots would otherwise
+    // prepend stale names that no clickable item matches.
+    const items = this.page.locator('[role="menuitem"]:visible');
+    return (await items.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async restoreHistoryVersion(name: string): Promise<void> {
+    // The menu can render hidden duplicate snapshots, so pick the first
+    // visible item matching the name and fall back to a forced click when
+    // a hidden overlay intercepts. Never scope through [role="menu"]: the
+    // container role is unreliable across re-renders. Match time-blind:
+    // item labels carry relative timestamps ("less than a minute ago")
+    // that drift between the names read and the restore click.
+    const key = (text: string): string =>
+      text
+        .replace(
+          /(less than a minute ago|\d+\s+(second|minute|hour|day|week|month|year)s?\s+ago|just now|yesterday)/gi,
+          ""
+        )
+        .replace(/\s+/g, "")
+        .toLowerCase();
+    const want = key(name);
+    for (let attempt = 0; ; attempt++) {
+      const candidates = this.page.locator('[role="menuitem"]:visible');
+      const count = await candidates.count();
+      let targetIndex = -1;
+      for (let i = 0; i < count; i++) {
+        const text = ((await candidates.nth(i).textContent()) ?? "").trim();
+        if (want.length > 0 && key(text).includes(want)) {
+          targetIndex = i;
+          break;
+        }
+      }
+      if (targetIndex >= 0) {
+        const target = candidates.nth(targetIndex);
+        try {
+          await target.click({ timeout: 10_000 });
+        } catch {
+          await target.click({ timeout: 10_000, force: true });
+        }
+        break;
+      }
+      if (attempt >= 3) throw new Error(`[parity] history version ${JSON.stringify(name)} not visible.`);
+      await this.openDescriptionHistory();
+    }
+    // The headlessui dialog wrapper is an in-flow zero-height node (the
+    // visible panel lives in fixed children), so never wait on the dialog
+    // container itself: drive the Restore button and await its detach.
+    const restore = this.appDialogs().last().getByRole("button", { name: "Restore" });
+    await restore.waitFor({ timeout: WebDriver.OPEN_MS });
+    try {
+      await restore.click({ timeout: WebDriver.OPEN_MS });
+    } catch {
+      await restore.click({ timeout: WebDriver.OPEN_MS, force: true });
+    }
+    await restore.waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
+  }
+
+  async openLegacyIssueRoute(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues/${issueId}`);
+    await this.page.waitForURL(/\/browse\//, { timeout: WebDriver.DETAIL_MS });
+  }
+
+  async seesDetailMissing(): Promise<boolean> {
+    return (await this.page.getByText(/does not exist/i).count()) > 0;
+  }
+
   // --- Comment composer and CRUD (NEWFRONT-112). Selectors observed on
   // the running old app against the seeded stack; no app code is reused.
 
@@ -2934,5 +3579,634 @@ export class WebDriver implements ParityDriver {
       notices.push({ message, kind });
     }
     return notices;
+  }
+  // ---- Peek panel (NEWFRONT-121). ----
+  // Selectors follow the peek behavior observed on the running old app: the
+  // panel renders inside #full-screen-portal; the header is icon-only
+  // (a move-right button closes, a move-diagonal link opens the full page,
+  // a listbox button switches the layout, an icon button copies the link);
+  // the body reuses the detail title field, action row, Properties section
+  // and comment composer. Deep-links use ?peekIssueId (peekProjectId is
+  // omitted when it equals the route project).
+
+  private peekPortal(): Locator {
+    return this.page.locator("#full-screen-portal");
+  }
+
+  async openPeek(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues?peekIssueId=${issueId}`);
+    const deadline = Date.now() + WebDriver.DETAIL_MS;
+    let loops = 0;
+    for (;;) {
+      if ((await this.peekTitleField().count()) > 0) return;
+      if ((await this.peekErrorTitle()) !== null) return;
+      if ((await this.page.getByPlaceholder("name@company.com").count()) > 0) {
+        throw new Error("[parity] session lost while opening the peek.");
+      }
+      loops++;
+      if (Date.now() > deadline) {
+        await this.peekTitleField().waitFor({ timeout: 5000 });
+        return;
+      }
+      if (loops % 15 === 0) await this.page.reload().catch(() => {});
+      else await this.page.waitForTimeout(2000);
+    }
+  }
+
+  async peekOpen(): Promise<boolean> {
+    // The portal shell stays mounted with no children once the peek
+    // closes; while loading, the skeleton already renders children but
+    // carries no text yet, so children (not text) decide.
+    const portal = this.peekPortal();
+    if ((await portal.count()) === 0) return false;
+    if ((await portal.locator("xpath=./*").count()) > 0) return true;
+    return ((await portal.innerText().catch(() => "")) ?? "").trim().length > 0;
+  }
+
+  private peekTitleField(): Locator {
+    return this.peekPortal().getByPlaceholder("Work item title").first();
+  }
+
+  async peekTitle(): Promise<string | null> {
+    if ((await this.peekTitleField().count()) === 0) return null;
+    return await this.peekTitleField().inputValue();
+  }
+
+  async peekIdentifier(): Promise<string | null> {
+    const id = this.peekPortal()
+      .getByText(/^[A-Z0-9]{2,}-\d+$/)
+      .first();
+    if ((await id.count()) === 0) return null;
+    return ((await id.innerText()) ?? "").trim();
+  }
+
+  async closePeek(): Promise<void> {
+    await this.peekPortal().locator("button:has(svg.lucide-move-right)").first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async peekCloseVisible(): Promise<boolean> {
+    return (await this.peekPortal().locator("button:has(svg.lucide-move-right)").count()) > 0;
+  }
+
+  async setPeekMode(mode: string): Promise<void> {
+    const portal = this.peekPortal();
+    await portal.locator('button[aria-haspopup="listbox"]').first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("option", { name: mode }).first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async peekPanelBox(): Promise<{ x: number; y: number; width: number; height: number } | null> {
+    const panel = this.peekPortal().locator("xpath=./*").first();
+    if ((await panel.count()) === 0) return null;
+    const box = await panel.boundingBox().catch(() => null);
+    if (!box) return null;
+    return { x: box.x, y: box.y, width: box.width, height: box.height };
+  }
+
+  /** Right header group: smallest ancestor of the subscribe toggle holding the menu trigger. */
+  private async peekHeaderActions(): Promise<Locator> {
+    const portal = this.peekPortal();
+    const toggle = portal.getByRole("button", { name: /^(Subscribe|Unsubscribe)$/ }).first();
+    await toggle.waitFor({ timeout: WebDriver.OPEN_MS });
+    let node = toggle.locator("xpath=parent::*");
+    for (let i = 0; i < 6; i++) {
+      const menus = node.locator('button[aria-haspopup="menu"], button[aria-haspopup="true"]');
+      if ((await menus.count()) > 0) return node;
+      node = node.locator("xpath=parent::*");
+    }
+    return portal;
+  }
+
+  async copyPeekLink(): Promise<void> {
+    // The copy control is the unnamed icon button beside the subscribe
+    // toggle whose svg is not a lucide icon. The layout toggle nests an
+    // inner plain button holding the mode icon, which matches the same
+    // shape, so skip any candidate inside the listbox toggle.
+    const group = await this.peekHeaderActions();
+    const candidates = group.locator("button:not([aria-haspopup]):has(svg:not([class*='lucide']))");
+    const count = await candidates.count();
+    for (let i = 0; i < count; i++) {
+      const candidate = candidates.nth(i);
+      const nested = await candidate
+        .evaluate((node) => node.closest('[aria-haspopup="listbox"]') !== null)
+        .catch(() => true);
+      if (!nested) {
+        await candidate.click({ timeout: WebDriver.OPEN_MS });
+        return;
+      }
+    }
+    throw new Error("[parity] no peek copy-link control.");
+  }
+
+  async peekFullScreenHref(): Promise<string | null> {
+    const link = this.peekPortal().locator("a:has(svg.lucide-move-diagonal)").first();
+    if ((await link.count()) === 0) return null;
+    return await link.getAttribute("href").catch(() => null);
+  }
+
+  async peekQuickActionNames(): Promise<string[]> {
+    const group = await this.peekHeaderActions();
+    const trigger = group.locator('button[aria-haspopup="menu"], button[aria-haspopup="true"]').first();
+    await trigger.click({ timeout: WebDriver.OPEN_MS });
+    const items = this.page.locator('[role="menuitem"]:visible');
+    await items.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    return (await items.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async peekErrorTitle(): Promise<string | null> {
+    const portal = this.peekPortal();
+    if ((await portal.count()) === 0) return null;
+    const text = ((await portal.innerText().catch(() => "")) ?? "").trim();
+    const match = /Work item does not exist/.exec(text);
+    return match ? match[0] : null;
+  }
+
+  /** Click the named issue row in the list; ends once the URL or peek settles. */
+  async clickListRow(name: string): Promise<void> {
+    const before = this.page.url();
+    await this.page.getByText(name, { exact: true }).first().click({ timeout: WebDriver.OPEN_MS });
+    const deadline = Date.now() + WebDriver.OPEN_MS;
+    for (;;) {
+      if (this.page.url() !== before) return;
+      if (await this.peekOpen()) return;
+      if (Date.now() > deadline) return;
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  // ---- Detail widgets (NEWFRONT-121). ----
+  // Selectors follow the widget behavior observed on the running old app: a
+  // collapsible per widget (a full-width header button holding the title
+  // span plus count/progress, with the rows in a following grid sibling);
+  // sections with no content do not render; the action row above offers add
+  // buttons plus Run AI; the comment composer sits below with Comment and
+  // Comment & Run controls.
+
+  /** Header button of the named widget section, or null when absent. */
+  private async widgetHeader(widget: string): Promise<Locator | null> {
+    const btn = this.page.locator("button.w-full").filter({ hasText: widget }).first();
+    if ((await btn.count()) === 0) return null;
+    return btn;
+  }
+
+  /** Row container of the named widget section (header button's parent). */
+  private async widgetSection(widget: string): Promise<Locator | null> {
+    const btn = await this.widgetHeader(widget);
+    if (!btn) return null;
+    return btn.locator("xpath=parent::*");
+  }
+
+  /** Collapsible content sibling of the header button, or null. */
+  private async widgetContent(widget: string): Promise<Locator | null> {
+    const section = await this.widgetSection(widget);
+    if (!section) return null;
+    const content = section.locator("div.grid.overflow-hidden").first();
+    if ((await content.count()) === 0) return null;
+    return content;
+  }
+
+  async widgetTitles(): Promise<string[]> {
+    const btns = this.page.locator("button.w-full");
+    const count = await btns.count();
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const span = btns.nth(i).locator("span.text-14").first();
+      if ((await span.count()) === 0) continue;
+      const text = ((await span.innerText().catch(() => "")) ?? "").trim();
+      if (text !== "" && !out.includes(text)) out.push(text);
+    }
+    return out;
+  }
+
+  async widgetProgress(widget: string): Promise<string | null> {
+    const btn = await this.widgetHeader(widget);
+    if (!btn) return null;
+    const text = ((await btn.innerText().catch(() => "")) ?? "").trim();
+    const match = /(\d+\s*\/\s*\d+\s*Done)/.exec(text);
+    return match ? match[1].replace(/\s+/g, " ") : null;
+  }
+
+  async widgetGroupNames(widget: string): Promise<string[]> {
+    const content = await this.widgetContent(widget);
+    if (!content) return [];
+    const btns = content.locator("button");
+    const count = await btns.count();
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const text = (
+        (await btns
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (/relates|duplicate|blocked|blocking/i.test(text) && !out.includes(text)) out.push(text);
+    }
+    return out;
+  }
+
+  async openWidgetSection(widget: string): Promise<void> {
+    // The header button's aria-expanded tracks the disclosure's internal
+    // toggle, while the rows render only when the store-driven panel is
+    // mounted — so content visibility (not the aria flag) decides. Clicking
+    // while the panel is already mounted would collapse it.
+    if (await this.widgetExpanded(widget)) return;
+    const btn = await this.waitWidgetHeader(widget);
+    await btn.click({ timeout: WebDriver.OPEN_MS });
+    const deadline = Date.now() + WebDriver.OPEN_MS;
+    for (;;) {
+      if (await this.widgetExpanded(widget)) return;
+      if (Date.now() > deadline) return;
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  /** Header button, waiting for counts to hydrate and render the section. */
+  private async waitWidgetHeader(widget: string): Promise<Locator> {
+    const deadline = Date.now() + WebDriver.OPEN_MS;
+    for (;;) {
+      const btn = await this.widgetHeader(widget);
+      if (btn) return btn;
+      if (Date.now() > deadline) throw new Error(`[parity] no widget section ${JSON.stringify(widget)}.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async widgetExpanded(widget: string): Promise<boolean> {
+    // See openWidgetSection: the panel unmounts while closed, so a mounted
+    // panel with a visible box means open. (The header aria flag tracks a
+    // different toggle and disagrees with the panel on first paint.)
+    const content = await this.widgetContent(widget);
+    if (!content) return false;
+    const box = await content.boundingBox().catch(() => null);
+    return !!box && box.height > 2;
+  }
+
+  async toggleWidgetSection(widget: string): Promise<void> {
+    const btn = await this.waitWidgetHeader(widget);
+    await btn.click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async widgetHeaderControlCount(widget: string): Promise<number> {
+    const header = await this.waitWidgetHeader(widget);
+    return await header.locator("button").count();
+  }
+
+  /** Direct row blocks inside the section content. */
+  private async widgetRows(widget: string): Promise<Locator[]> {
+    const content = await this.widgetContent(widget);
+    if (!content) return [];
+    // Rows live one wrapper below the min-h-0 container; descend while a
+    // single wrapper holds all the text.
+    let scope = content.locator("div.min-h-0").first();
+    if ((await scope.count()) === 0) scope = content;
+    for (let depth = 0; depth < 3; depth++) {
+      const kids = scope.locator("xpath=./*");
+      if ((await kids.count()) !== 1) break;
+      scope = kids.first();
+    }
+    const kids = scope.locator("xpath=./*");
+    const count = await kids.count();
+    const out: Locator[] = [];
+    for (let i = 0; i < count; i++) out.push(kids.nth(i));
+    return out;
+  }
+
+  async widgetRowNames(widget: string): Promise<string[]> {
+    const rows = await this.widgetRows(widget);
+    const out: string[] = [];
+    for (const row of rows) {
+      const text = ((await row.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ");
+      if (text !== "") out.push(text);
+    }
+    return out;
+  }
+
+  async widgetAddMenuNames(widget: string): Promise<string[]> {
+    // The section "+" (an unnamed icon button nested in the header) and
+    // the action-row add button open the same menu; the action row reads
+    // the same for every widget, so use it directly.
+    const map: Record<string, string> = {
+      "Sub-work items": "Add sub-work item",
+      Relations: "Add relation",
+      Links: "Add link",
+      Attachments: "Attach",
+    };
+    const trigger = map[widget];
+    if (!trigger) throw new Error(`[parity] no add menu for widget ${JSON.stringify(widget)}.`);
+    await this.page.getByRole("button", { name: trigger }).first().click({ timeout: WebDriver.OPEN_MS });
+    const items = this.page.locator('[role="menuitem"]:visible');
+    await items.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    return (await items.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async openSubIssueCreateModal(): Promise<void> {
+    // The action-row button opens a Create-new/Add-existing menu; picking
+    // Create new raises the modal with the parent preset.
+    await this.page.getByRole("button", { name: "Add sub-work item" }).first().click({ timeout: WebDriver.OPEN_MS });
+    const items = this.page.locator('[role="menuitem"]:visible');
+    await items.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    await items.filter({ hasText: "Create new" }).first().click({ timeout: WebDriver.OPEN_MS });
+    const dialog = this.appDialogs();
+    await dialog.first().waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+  }
+
+  async createModalParentName(): Promise<string | null> {
+    // The preset parent renders as an identifier line followed by the
+    // parent's name (no "Parent" caption in the text).
+    const dialog = this.appDialogs().first();
+    const text = ((await dialog.innerText().catch(() => "")) ?? "").trim();
+    const lines = text.split("\n").map((line) => line.trim());
+    for (let i = 0; i + 1 < lines.length; i++) {
+      if (/^[A-Z0-9]{2,}-\d+$/.test(lines[i] ?? "")) {
+        const next = lines[i + 1] ?? "";
+        if (next !== "" && !/^(Create|Discard|Save|Cancel|Select|Deselect|No work|Advanced)/.test(next)) return next;
+      }
+    }
+    return null;
+  }
+
+  async createModalProjectLocked(): Promise<boolean> {
+    const dialog = this.appDialogs().first();
+    const projectField = dialog.locator("input, button").filter({ hasText: /Parity Project|PAR/ });
+    if ((await projectField.count()) === 0) return false;
+    const disabled = await projectField
+      .first()
+      .getAttribute("disabled")
+      .catch(() => null);
+    const aria = await projectField
+      .first()
+      .getAttribute("aria-disabled")
+      .catch(() => null);
+    return disabled !== null || aria === "true";
+  }
+
+  async createModalSubmit(name: string): Promise<void> {
+    // The modal's submit is the exact "Save" button ("Create more" only
+    // toggles keep-open and matches a loose /Create/ first).
+    const dialog = this.appDialogs().first();
+    const nameField = dialog.locator('input[type="text"], input:not([type])').first();
+    await nameField.fill(name, { timeout: WebDriver.OPEN_MS });
+    await dialog.getByRole("button", { name: "Save", exact: true }).first().click({ timeout: WebDriver.OPEN_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebDriver.OPEN_MS }).catch(() => {});
+  }
+
+  async addExistingSubIssue(search: string, name: string): Promise<void> {
+    await this.page.getByRole("button", { name: "Add sub-work item" }).first().click({ timeout: WebDriver.OPEN_MS });
+    const menu = this.page.locator('[role="menuitem"]:visible');
+    await menu.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    await menu.filter({ hasText: "Add existing" }).first().click({ timeout: WebDriver.OPEN_MS });
+    const dialog = this.appDialogs();
+    await dialog.first().waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+    const searchField = dialog.first().locator("input").first();
+    await searchField.fill(search, { timeout: WebDriver.OPEN_MS });
+    await dialog.first().getByRole("option", { name }).first().click({ timeout: WebDriver.OPEN_MS });
+    await dialog
+      .first()
+      .getByRole("button", { name: "Add selected work items" })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await dialog
+      .first()
+      .waitFor({ state: "detached", timeout: WebDriver.OPEN_MS })
+      .catch(() => {});
+  }
+
+  private async widgetRow(widget: string, rowName: string): Promise<Locator> {
+    const rows = await this.widgetRows(widget);
+    for (const row of rows) {
+      const text = ((await row.innerText().catch(() => "")) ?? "").trim();
+      if (text.includes(rowName)) return row;
+    }
+    throw new Error(`[parity] no row ${JSON.stringify(rowName)} in widget ${JSON.stringify(widget)}.`);
+  }
+
+  /**
+   * Nearest block holding the named row's title that also contains the
+   * wanted control. Row text blocks split by count (one link renders as
+   * two blocks, two links as two cards), so walking up from the title to
+   * the control's scope beats matching whole blocks.
+   */
+  private async widgetRowScope(widget: string, rowName: string, control: string): Promise<Locator> {
+    const content = await this.widgetContent(widget);
+    if (!content) throw new Error(`[parity] no widget section ${JSON.stringify(widget)}.`);
+    const titleEl = content.getByText(rowName).last();
+    if ((await titleEl.count()) === 0) {
+      throw new Error(`[parity] no row ${JSON.stringify(rowName)} in widget ${JSON.stringify(widget)}.`);
+    }
+    let scope = titleEl.locator("xpath=parent::*");
+    for (let i = 0; i < 6; i++) {
+      if ((await scope.locator(control).count()) > 0) return scope;
+      scope = scope.locator("xpath=parent::*");
+    }
+    throw new Error(`[parity] no control ${JSON.stringify(control)} for row ${JSON.stringify(rowName)}.`);
+  }
+
+  async clickWidgetRow(widget: string, rowName: string): Promise<void> {
+    try {
+      const scope = await this.widgetRowScope(widget, rowName, "a[href]");
+      await scope.locator("a[href]").first().click({ timeout: WebDriver.OPEN_MS });
+    } catch {
+      const row = await this.widgetRow(widget, rowName);
+      await row.click({ timeout: WebDriver.OPEN_MS });
+    }
+  }
+
+  async widgetRowActionNames(widget: string, rowName: string): Promise<string[]> {
+    const scope = await this.widgetRowScope(
+      widget,
+      rowName,
+      'button[aria-haspopup="menu"], button[aria-haspopup="true"]'
+    );
+    const trigger = scope.locator('button[aria-haspopup="menu"], button[aria-haspopup="true"]').first();
+    await trigger.click({ timeout: WebDriver.OPEN_MS });
+    const items = this.page.locator('[role="menuitem"]:visible');
+    await items.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    return (await items.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async clickWidgetRowAction(widget: string, rowName: string, action: string): Promise<void> {
+    const scope = await this.widgetRowScope(
+      widget,
+      rowName,
+      'button[aria-haspopup="menu"], button[aria-haspopup="true"]'
+    );
+    const trigger = scope.locator('button[aria-haspopup="menu"], button[aria-haspopup="true"]').first();
+    await trigger.click({ timeout: WebDriver.OPEN_MS });
+    const items = this.page.locator('[role="menuitem"]:visible');
+    await items.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    await items.filter({ hasText: action }).first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  /**
+   * First app dialog with rendered content, or null. The dialog wrapper
+   * itself has a zero box (positioning shell — Playwright calls it
+   * hidden), so content presence, not wrapper visibility, decides.
+   */
+  private async openAppDialog(): Promise<Locator | null> {
+    const dialogs = this.appDialogs();
+    const count = await dialogs.count();
+    for (let i = 0; i < count; i++) {
+      const candidate = dialogs.nth(i);
+      const text = ((await candidate.innerText().catch(() => "")) ?? "").trim();
+      if (text !== "") return candidate;
+    }
+    return null;
+  }
+
+  async confirmModalTitle(): Promise<string | null> {
+    const dialog = await this.openAppDialog();
+    if (!dialog) return null;
+    const heading = dialog.locator("h1, h2, h3, [role='heading']").first();
+    if ((await heading.count()) > 0) return ((await heading.innerText().catch(() => "")) ?? "").trim() || null;
+    const text = ((await dialog.innerText().catch(() => "")) ?? "").trim();
+    return text.split("\n")[0]?.trim() || null;
+  }
+
+  async confirmModalText(): Promise<string | null> {
+    const dialog = await this.openAppDialog();
+    if (!dialog) return null;
+    const text = ((await dialog.innerText().catch(() => "")) ?? "").trim();
+    return text === "" ? null : text;
+  }
+
+  async confirmModal(label: string): Promise<void> {
+    // The dialog mounts asynchronously after the menu click, so poll for
+    // it instead of checking once (a single check flakes under load).
+    const deadline = Date.now() + WebDriver.OPEN_MS;
+    let dialog: Locator | null = null;
+    for (;;) {
+      dialog = await this.openAppDialog();
+      if (dialog) break;
+      if (Date.now() > deadline) throw new Error("[parity] no confirm modal is open.");
+      await this.page.waitForTimeout(250);
+    }
+    await dialog.getByRole("button", { name: label }).first().click({ timeout: WebDriver.OPEN_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebDriver.OPEN_MS }).catch(() => {});
+  }
+
+  async addRelationViaModal(type: string, search: string, name: string): Promise<void> {
+    await this.page.getByRole("button", { name: "Add relation" }).first().click({ timeout: WebDriver.OPEN_MS });
+    const items = this.page.locator('[role="menuitem"]:visible');
+    await items.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    await items.filter({ hasText: type }).first().click({ timeout: WebDriver.OPEN_MS });
+    // The shared existing-issues modal multi-selects, then submits.
+    const dialog = this.appDialogs();
+    await dialog.first().waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+    const searchField = dialog.first().locator("input").first();
+    await searchField.fill(search, { timeout: WebDriver.OPEN_MS });
+    await dialog.first().getByRole("option", { name }).first().click({ timeout: WebDriver.OPEN_MS });
+    await dialog
+      .first()
+      .getByRole("button", { name: "Add selected work items" })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await dialog
+      .first()
+      .waitFor({ state: "detached", timeout: WebDriver.OPEN_MS })
+      .catch(() => {});
+  }
+
+  async addLinkModal(url: string, title?: string): Promise<void> {
+    await this.page.getByRole("button", { name: "Add link" }).first().click({ timeout: WebDriver.OPEN_MS });
+    const dialog = this.appDialogs();
+    await dialog.first().waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+    const fields = dialog.first().locator("input");
+    await fields.first().fill(url, { timeout: WebDriver.OPEN_MS });
+    if (title !== undefined && (await fields.count()) > 1) {
+      await fields.nth(1).fill(title, { timeout: WebDriver.OPEN_MS });
+    }
+    await dialog
+      .first()
+      .getByRole("button", { name: /Add|Save|Create/ })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await dialog
+      .first()
+      .waitFor({ state: "detached", timeout: WebDriver.OPEN_MS })
+      .catch(() => {});
+  }
+
+  async editLinkTitle(rowName: string, title: string): Promise<void> {
+    const scope = await this.widgetRowScope(
+      "Links",
+      rowName,
+      'button[aria-haspopup="menu"], button[aria-haspopup="true"]'
+    );
+    const trigger = scope.locator('button[aria-haspopup="menu"], button[aria-haspopup="true"]').first();
+    await trigger.click({ timeout: WebDriver.OPEN_MS });
+    const items = this.page.locator('[role="menuitem"]:visible');
+    await items.first().waitFor({ timeout: WebDriver.OPEN_MS });
+    await items.filter({ hasText: /edit/i }).first().click({ timeout: WebDriver.OPEN_MS });
+    const dialog = this.appDialogs();
+    await dialog.first().waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+    const fields = dialog.first().locator("input");
+    await fields.nth(1).fill(title, { timeout: WebDriver.OPEN_MS });
+    await dialog
+      .first()
+      .getByRole("button", { name: /Save|Update/ })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+    await dialog
+      .first()
+      .waitFor({ state: "detached", timeout: WebDriver.OPEN_MS })
+      .catch(() => {});
+  }
+
+  async clickLinkCopy(rowName: string): Promise<void> {
+    // The copy control is a pointer-styled span holding the copy icon
+    // (the row's anchor opens the URL instead, so the generic row click
+    // would navigate away rather than copy).
+    const scope = await this.widgetRowScope("Links", rowName, "span.cursor-pointer");
+    await scope.locator("span.cursor-pointer").first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async linkRowTarget(rowName: string): Promise<{ href: string; target: string | null } | null> {
+    const scope = await this.widgetRowScope("Links", rowName, "a[href]").catch(() => null);
+    if (!scope) return null;
+    const link = scope.locator("a[href]").first();
+    if ((await link.count()) === 0) return null;
+    const href = await link.getAttribute("href").catch(() => null);
+    if (!href) return null;
+    return { href, target: await link.getAttribute("target").catch(() => null) };
+  }
+
+  async uploadAttachment(file: { name: string; mime: string; bytes: Buffer }): Promise<void> {
+    const chooserWait = this.page.waitForEvent("filechooser", { timeout: WebDriver.OPEN_MS }).catch(() => null);
+    await this.page.getByRole("button", { name: "Attach" }).first().click({ timeout: WebDriver.OPEN_MS });
+    const chooser = await chooserWait;
+    if (chooser) {
+      await chooser.setFiles([{ name: file.name, mimeType: file.mime, buffer: file.bytes }]);
+      return;
+    }
+    const input = this.page.locator('input[type="file"]').first();
+    await input.waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+    await input.setInputFiles([{ name: file.name, mimeType: file.mime, buffer: file.bytes }]);
+  }
+
+  async clickWidgetAction(name: string): Promise<void> {
+    await this.page.getByRole("button", { name }).first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async typeComment(text: string): Promise<void> {
+    const editor = this.page.locator("[contenteditable='true']").last();
+    await editor.click({ timeout: WebDriver.OPEN_MS });
+    await editor.fill(text, { timeout: WebDriver.OPEN_MS });
+  }
+
+  async postComment(text: string): Promise<void> {
+    await this.typeComment(text);
+    await this.page
+      .getByRole("button", { name: /^Comment$/ })
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async clickCommentAndRun(): Promise<void> {
+    await this.page.getByRole("button", { name: "Comment & Run" }).first().click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async commentAndRunDisabled(): Promise<boolean> {
+    const btn = this.page.getByRole("button", { name: "Comment & Run" }).first();
+    await btn.waitFor({ timeout: WebDriver.OPEN_MS });
+    return btn.isDisabled().catch(() => true);
   }
 }
