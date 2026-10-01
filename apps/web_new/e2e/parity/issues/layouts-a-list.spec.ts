@@ -21,6 +21,7 @@ import {
   serverPatchIssue,
   serverPatchProjectUserProperties,
   serverWorkspaceUserId,
+  sessionBrowserCookies,
   signInSession,
   uniqueSuffix,
 } from "../helpers/api";
@@ -44,10 +45,12 @@ test(
   { tag: specTags(["ISS-011"]) },
   async ({ driver, seed }) => {
     test.setTimeout(540_000);
-    await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
     const session = await signInSession(seed.email, seed.password);
     await resetPrefs(seed.workspaceSlug, seed.projectId, session);
-    await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
+    await driver.openAuthenticated(
+      `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
+      sessionBrowserCookies(session)
+    );
 
     const title = `Parity quickadd ${uniqueSuffix()}`;
     await test.step("create through the quick-add form", async () => {
@@ -79,15 +82,19 @@ test(
   { tag: specTags(["ISS-011"]) },
   async ({ driver, seed }) => {
     test.setTimeout(540_000);
-    await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
     const session = await signInSession(seed.email, seed.password);
     const stateName = `Parity Doing ${uniqueSuffix()}`;
     const stateId = await serverCreateState(seed.workspaceSlug, seed.projectId, session, stateName, "started");
     await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
       display_filters: { layout: "list", group_by: "state", order_by: "sort_order", show_empty_groups: true },
     });
-    await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
-    expect(await driver.layoutsListGroups()).toEqual(expect.arrayContaining(["Todo", stateName]));
+    await driver.openAuthenticated(
+      `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
+      sessionBrowserCookies(session)
+    );
+    await expect
+      .poll(async () => driver.layoutsListGroups(), { timeout: 60_000 })
+      .toEqual(expect.arrayContaining(["Todo", stateName]));
 
     const title = `Parity sectionadd ${uniqueSuffix()}`;
     await driver.layoutsListQuickAdd(title, stateName);
@@ -108,13 +115,15 @@ test(
   { tag: specTags(["ISS-008"]) },
   async ({ driver, seed }) => {
     test.setTimeout(540_000);
-    await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
     const session = await signInSession(seed.email, seed.password);
     await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
       display_filters: { layout: "list", group_by: "state", order_by: "sort_order" },
     });
-    await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
-    expect(await driver.layoutsListGroups()).toEqual(["Todo"]);
+    await driver.openAuthenticated(
+      `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
+      sessionBrowserCookies(session)
+    );
+    await expect.poll(async () => driver.layoutsListGroups(), { timeout: 60_000 }).toEqual(["Todo"]);
 
     await test.step("collapse hides the rows", async () => {
       expect(await driver.layoutsListGroupExpanded("Todo")).toEqual(true);
@@ -126,7 +135,9 @@ test(
     await test.step("expand shows them again", async () => {
       await driver.layoutsListToggleGroup("Todo");
       expect(await driver.layoutsListGroupExpanded("Todo")).toEqual(true);
-      expect(await driver.layoutsListGroupIssueNames("Todo")).toEqual(expect.arrayContaining([...seed.issueNames]));
+      await expect
+        .poll(async () => driver.layoutsListGroupIssueNames("Todo"), { timeout: 60_000 })
+        .toEqual(expect.arrayContaining([...seed.issueNames]));
     });
 
     await test.step("the collapsed state survives reload and is shared with the board", async () => {
@@ -147,7 +158,6 @@ test(
 
 test(specTitle(["ISS-009"], "hide and show empty groups"), { tag: specTags(["ISS-009"]) }, async ({ driver, seed }) => {
   test.setTimeout(540_000);
-  await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
   const session = await signInSession(seed.email, seed.password);
   const stateName = `Parity Empty ${uniqueSuffix()}`;
   const stateId = await serverCreateState(seed.workspaceSlug, seed.projectId, session, stateName, "started");
@@ -155,16 +165,20 @@ test(specTitle(["ISS-009"], "hide and show empty groups"), { tag: specTags(["ISS
     await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
       display_filters: { layout: "list", group_by: "state", order_by: "sort_order", show_empty_groups: false },
     });
-    await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
-    expect(await driver.layoutsListGroups()).toEqual(["Todo"]);
+    await driver.openAuthenticated(
+      `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
+      sessionBrowserCookies(session)
+    );
+    await expect.poll(async () => driver.layoutsListGroups(), { timeout: 60_000 }).toEqual(["Todo"]);
 
     await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
       display_filters: { layout: "list", group_by: "state", order_by: "sort_order", show_empty_groups: true },
     });
     await driver.layoutsReloadIssues();
-    const shown = await driver.layoutsListGroups();
-    expect(shown).toHaveLength(2);
-    expect(shown).toEqual(expect.arrayContaining(["Todo", stateName]));
+    await expect.poll(async () => driver.layoutsListGroups(), { timeout: 60_000 }).toHaveLength(2);
+    await expect
+      .poll(async () => driver.layoutsListGroups(), { timeout: 60_000 })
+      .toEqual(expect.arrayContaining(["Todo", stateName]));
   } finally {
     await serverDeleteState(seed.workspaceSlug, seed.projectId, stateId, session);
     await resetPrefs(seed.workspaceSlug, seed.projectId, session);
@@ -176,7 +190,6 @@ test(
   { tag: specTags(["ISS-010"]) },
   async ({ driver, seed }) => {
     test.setTimeout(540_000);
-    await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
     const session = await signInSession(seed.email, seed.password);
     const prefix = `Parity page ${uniqueSuffix()}`;
     const createdIds: string[] = [];
@@ -204,8 +217,11 @@ test(
         await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
           display_filters: { layout: "list", group_by: "state", order_by: "sort_order" },
         });
-        await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
-        expect(await driver.layoutsListGroupHasLoadMore("Todo")).toEqual(true);
+        await driver.openAuthenticated(
+          `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
+          sessionBrowserCookies(session)
+        );
+        await expect.poll(async () => driver.layoutsListGroupHasLoadMore("Todo"), { timeout: 60_000 }).toEqual(true);
         await driver.layoutsListGroupLoadMore("Todo");
         expect(await driver.layoutsListGroupHasLoadMore("Todo")).toEqual(true);
         await driver.layoutsListGroupLoadMore("Todo");
@@ -220,6 +236,10 @@ test(
           display_filters: { layout: "list", group_by: null, order_by: "sort_order" },
         });
         await driver.layoutsReloadIssues();
+        // Rows first: the no-row read below must not pass on a slow load.
+        await expect
+          .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 60_000 })
+          .not.toHaveLength(0);
         expect(await driver.layoutsListGroupHasLoadMore("All work items")).toEqual(false);
         await driver.layoutsListScrollEnd();
         await expect
@@ -246,10 +266,12 @@ test(
   { tag: specTags(["ISS-013"]) },
   async ({ driver, seed }) => {
     test.setTimeout(540_000);
-    await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
     const session = await signInSession(seed.email, seed.password);
     await resetPrefs(seed.workspaceSlug, seed.projectId, session);
-    await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
+    await driver.openAuthenticated(
+      `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
+      sessionBrowserCookies(session)
+    );
     const first = seed.issueNames[0] ?? "";
 
     await test.step("rows are links that open peek", async () => {
@@ -288,10 +310,12 @@ test(
   { tag: specTags(["ISS-014"]) },
   async ({ driver, seed }) => {
     test.setTimeout(540_000);
-    await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
     const session = await signInSession(seed.email, seed.password);
     await resetPrefs(seed.workspaceSlug, seed.projectId, session);
-    await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
+    await driver.openAuthenticated(
+      `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
+      sessionBrowserCookies(session)
+    );
     const first = seed.issueNames[0] ?? "";
     const rows = await serverIssues(seed.workspaceSlug, seed.projectId, session);
     const firstId = rows.find((row) => row.name === first)?.id ?? "";
@@ -347,10 +371,13 @@ test(
     const first = seed.issueNames[0] ?? "";
     const firstId = rows.find((row) => row.name === first)?.id ?? "";
     await serverPatchIssue(seed.workspaceSlug, seed.projectId, firstId, { assignee_ids: [guestId] }, ownerSession);
+    const guestSession = await signInSession(seed.guestEmail, seed.guestPassword);
     try {
-      await driver.rulesEnsureSignedIn(seed.guestEmail, seed.guestPassword, seed.workspaceSlug);
       await resetPrefs(seed.workspaceSlug, seed.projectId, ownerSession);
-      await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
+      await driver.openAuthenticated(
+        `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
+        sessionBrowserCookies(guestSession)
+      );
       expect(await driver.layoutsRowState(first)).toEqual("Todo");
       expect(await driver.layoutsRowCanEditState(first)).toEqual(false);
     } finally {

@@ -396,6 +396,189 @@ export interface ParityDriver {
   layoutsRowMenuChoose(issueName: string, item: string): Promise<void>;
   /** Menu entries offered by right-clicking a row. */
   layoutsRowContextMenuItems(issueName: string): Promise<string[]>;
+
+  // --- Spreadsheet (ISS-015..020). ---
+
+  /** Column header titles in display order (first is the work-item column). */
+  layoutsSheetHeaders(): Promise<string[]>;
+  /** Issue names rendered as sheet rows, top to bottom. */
+  layoutsSheetRowNames(): Promise<string[]>;
+  /** Whether the first column sticks to the left edge. */
+  layoutsSheetFirstColumnSticky(): Promise<boolean>;
+  /** Whether the first column currently carries the scroll shadow. */
+  layoutsSheetFirstColumnShadowed(): Promise<boolean>;
+  /** Scroll the sheet horizontally to its right end. */
+  layoutsSheetScrollRight(): Promise<void>;
+  /** Whether the header row sticks to the top. */
+  layoutsSheetHeaderSticky(): Promise<boolean>;
+  /** Text rendered in one property cell. */
+  layoutsSheetCellText(issueName: string, column: string): Promise<string>;
+  /** Whether a cell opens an editor (edit gating per cell). */
+  layoutsSheetCellEditable(issueName: string, column: string): Promise<boolean>;
+  /** Change a row's state through its sheet cell. */
+  layoutsSheetCellSetState(issueName: string, stateName: string): Promise<void>;
+  /** Change a row's priority through its sheet cell. */
+  layoutsSheetCellSetPriority(issueName: string, priorityName: string): Promise<void>;
+  /** Change a row's due date through its sheet cell (ISO date, YYYY-MM-DD). */
+  layoutsSheetCellSetDueDate(issueName: string, isoDate: string): Promise<void>;
+  /** Assign a member through the sheet assignee cell (by display name). */
+  layoutsSheetCellSetAssignee(issueName: string, memberName: string): Promise<void>;
+  /** Focus one sheet cell through the keyboard path. */
+  layoutsSheetFocusCell(issueName: string, column: string): Promise<void>;
+  /** Press an arrow key while a sheet cell holds focus. */
+  layoutsSheetPressArrow(arrow: "up" | "down" | "left" | "right"): Promise<void>;
+  /** Which sheet cell currently holds keyboard focus (null when none). */
+  layoutsSheetFocusedCell(): Promise<{ issueName: string; column: string } | null>;
+  /** Sort menu entries offered by a column header. */
+  layoutsSheetSortMenu(column: string): Promise<string[]>;
+  /** Pick ascending/descending in a column's sort menu. */
+  layoutsSheetSort(column: string, direction: "ascending" | "descending"): Promise<void>;
+  /** Clear a column's sort through its header menu. */
+  layoutsSheetClearSort(column: string): Promise<void>;
+  /** Active sort marker on a header: ascending, descending, or none. */
+  layoutsSheetSortMarker(column: string): Promise<"ascending" | "descending" | "none">;
+  /** Create an issue through the sheet's sticky add row. */
+  layoutsSheetQuickAdd(title: string): Promise<void>;
+  /** Scroll the sheet to its end so the next page auto-loads. */
+  layoutsSheetScrollEnd(): Promise<void>;
+  /** Whether a sheet row offers a sub-issue expander. */
+  layoutsSheetHasSubIssueToggle(issueName: string): Promise<boolean>;
+  /** Expand a sheet row's sub-issues; resolves once children render. */
+  layoutsSheetExpandSubIssues(issueName: string): Promise<void>;
+  /** Names of the expanded sub-issues under a sheet row. */
+  layoutsSheetSubIssueNames(issueName: string): Promise<string[]>;
+  /** Activate the sub-issue-count cell (navigates to the sub-issues view). */
+  layoutsSheetOpenSubIssueCount(issueName: string): Promise<void>;
+
+  // --- Calendar (ISS-021..027). Day tiles are addressed by day number. ---
+
+  /** Active calendar mode (month/week) as the Options menu reports it. */
+  layoutsCalMode(): Promise<"month" | "week">;
+  /** Title text in the calendar header (month name or week range). */
+  layoutsCalTitle(): Promise<string>;
+  /** Step the calendar back one month/week; resolves once it settles. */
+  layoutsCalPrev(): Promise<void>;
+  /** Step the calendar forward one month/week; resolves once it settles. */
+  layoutsCalNext(): Promise<void>;
+  /** Jump the calendar back to today; resolves once it settles. */
+  layoutsCalToday(): Promise<void>;
+  /** Month names offered by the header title picker. */
+  layoutsCalMonthPickerMonths(): Promise<string[]>;
+  /** Year currently shown in the open month picker. */
+  layoutsCalMonthPickerYear(): Promise<number>;
+  /** Step the open month picker's year. */
+  layoutsCalMonthPickerYearStep(direction: "prev" | "next"): Promise<void>;
+  /** Pick a month in the open month picker; resolves once the grid settles. */
+  layoutsCalMonthPickerChoose(month: string): Promise<void>;
+  /** Whether the month picker can be opened (disabled in week view). */
+  layoutsCalMonthPickerEnabled(): Promise<boolean>;
+  /** Switch month/week through the Options menu. */
+  layoutsCalSetMode(mode: "month" | "week"): Promise<void>;
+  /** Whether weekend columns are currently shown. */
+  layoutsCalWeekendsVisible(): Promise<boolean>;
+  /** Toggle weekend columns through the Options menu. */
+  layoutsCalSetWeekends(show: boolean): Promise<void>;
+  /** Number of day columns in the current grid (7 or 5). */
+  layoutsCalColumnCount(): Promise<number>;
+  /** Issue titles on one day tile. */
+  layoutsCalDayIssueNames(dayNumber: number): Promise<string[]>;
+  /** Whether a day tile carries the today badge. */
+  layoutsCalDayIsToday(dayNumber: number): Promise<boolean>;
+  /** Whether a day tile offers "load more". */
+  layoutsCalDayHasLoadMore(dayNumber: number): Promise<boolean>;
+  /** Activate a day's "load more"; resolves once it settles. */
+  layoutsCalDayLoadMore(dayNumber: number): Promise<void>;
+  /** Drag a dated block onto another day; resolves once it settles. */
+  layoutsCalDragBlock(issueName: string, toDayNumber: number): Promise<void>;
+  /** Text rendered on one calendar block (identifier + title). */
+  layoutsCalBlockText(issueName: string): Promise<string>;
+  /** Whether hovering a block reveals its preview popover. */
+  layoutsCalBlockHoverPreview(issueName: string): Promise<boolean>;
+  /** Open peek by clicking a calendar block. */
+  layoutsCalBlockOpenPeek(issueName: string): Promise<void>;
+  /** Quick-action entries offered on a calendar block. */
+  layoutsCalBlockQuickActions(issueName: string): Promise<string[]>;
+  /** Create an issue through a day tile's add control (due that day). */
+  layoutsCalDayQuickAdd(dayNumber: number, title: string): Promise<void>;
+  /** Add entries offered by a day tile's menu. */
+  layoutsCalDayAddMenu(dayNumber: number): Promise<string[]>;
+  /** Tap a day tile (mobile day-detail); resolves once the list settles. */
+  layoutsCalTapDay(dayNumber: number): Promise<void>;
+  /** Issue names in the mobile day-detail list under the grid. */
+  layoutsCalDayDetailNames(): Promise<string[]>;
+
+  // --- Row-action depth (ISS-060..067). ---
+
+  /** Whether a row-menu entry is disabled. */
+  layoutsRowMenuItemDisabled(issueName: string, item: string): Promise<boolean>;
+  /** Explanatory note under a row-menu entry (null when none). */
+  layoutsRowMenuItemNote(issueName: string, item: string): Promise<string | null>;
+  /** Whether the create/edit work-item modal is currently open. */
+  layoutsWorkItemModalVisible(): Promise<boolean>;
+  /** Title text of the open work-item modal (null when closed). */
+  layoutsWorkItemModalTitle(): Promise<string | null>;
+  /** Close the open work-item modal. */
+  layoutsWorkItemModalClose(): Promise<void>;
+  /** Whether the delete-confirm modal is currently open. */
+  layoutsDeleteModalVisible(): Promise<boolean>;
+  /** Confirm the open delete modal; resolves once it closes. */
+  layoutsDeleteModalConfirm(): Promise<void>;
+  /** Whether the archive-confirm modal is currently open. */
+  layoutsArchiveModalVisible(): Promise<boolean>;
+  /** Confirm the open archive modal; resolves once it closes. */
+  layoutsArchiveModalConfirm(): Promise<void>;
+  /** Whether the move-to-project modal is currently open. */
+  layoutsMoveModalVisible(): Promise<boolean>;
+  /** Pick a project in the open move modal; resolves once it closes. */
+  layoutsMoveModalChoose(projectName: string): Promise<void>;
+  /** Whether the add-existing-issues modal is currently open. */
+  layoutsAddExistingModalVisible(): Promise<boolean>;
+  /** Pick an issue in the add-existing modal; resolves once it closes. */
+  layoutsAddExistingModalChoose(issueName: string): Promise<void>;
+  /** Menu entries in the issue detail/peek header menu. */
+  layoutsDetailMenuItems(): Promise<string[]>;
+  /** Pick one entry of the detail/peek header menu. */
+  layoutsDetailMenuChoose(item: string): Promise<void>;
+  /** Whether the peek header carries its own copy-link button. */
+  layoutsPeekCopyLinkVisible(): Promise<boolean>;
+  /** Menu entries in the whole-list ellipsis menu. */
+  layoutsListPageMenuItems(): Promise<string[]>;
+  /** Group-header add entries in cycle/module context (null opens the modal directly). */
+  layoutsGroupHeaderAddMenu(groupTitle: string): Promise<string[] | null>;
+
+  // --- Empty states (ISS-068..074). ---
+
+  /** Title of the rendered empty state (null when the layout renders). */
+  layoutsEmptyTitle(): Promise<string | null>;
+  /** Action buttons of the rendered empty state: label + disabled. */
+  layoutsEmptyActions(): Promise<Array<{ label: string; disabled: boolean }>>;
+  /** Click one empty-state action; resolves once it settles. */
+  layoutsEmptyChoose(label: string): Promise<void>;
+
+  // --- Shared leftovers (ISS-003..006): mobile header, loaders, highlight. ---
+
+  /** Layout keys the compact (mobile) layout selector offers. */
+  layoutsMobileOfferedLayouts(): Promise<LayoutsLayoutKey[]>;
+  /** Whether the mobile header's Display control is present. */
+  layoutsMobileDisplayVisible(): Promise<boolean>;
+  /** Whether the mobile header's Analytics button is present. */
+  layoutsMobileAnalyticsVisible(): Promise<boolean>;
+  /** Whether a layout skeleton is currently rendered. */
+  layoutsSkeletonVisible(): Promise<boolean>;
+  /** Whether the floating mutation spinner is currently shown. */
+  layoutsMutationSpinnerVisible(): Promise<boolean>;
+  /** Whether a row carries the fresh/drop highlight marker. */
+  layoutsRowHighlighted(issueName: string): Promise<boolean>;
+  /** Whether an unconfirmed (pulsing temp) row is currently rendered. */
+  layoutsTempRowVisible(): Promise<boolean>;
+  /** Stall issue-list GETs by ms (loader scenarios; release with layoutsReleaseStalls). */
+  layoutsStallIssuesGet(delayMs: number): Promise<void>;
+  /** Stall issue POST/PATCH by ms (mutation/temp-row scenarios). */
+  layoutsStallIssueMutation(delayMs: number): Promise<void>;
+  /** Release any stalls installed by the two methods above. */
+  layoutsReleaseStalls(): Promise<void>;
+  /** Current page URL (navigation assertions). */
+  layoutsCurrentUrl(): Promise<string>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */

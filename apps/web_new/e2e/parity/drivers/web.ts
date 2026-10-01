@@ -1310,9 +1310,10 @@ export class WebDriver implements ParityDriver {
   }
 
   private async layoutsWaitForLayout(layout: LayoutsLayoutKey): Promise<void> {
-    // Layout switches refetch and re-render heavy views (the timeline
-    // especially); the loaded shared host needs a long leash.
-    const deadline = Date.now() + 120_000;
+    // Layout switches refetch and re-render heavy views; the timeline
+    // compiles a heavy chart bundle on first load and needs ~150s on the
+    // loaded shared host, so every switch gets a long leash.
+    const deadline = Date.now() + 300_000;
     for (;;) {
       const visible =
         layout === "list"
@@ -1373,14 +1374,16 @@ export class WebDriver implements ParityDriver {
       (await this.page.getByText("All work items", { exact: true }).count()) +
       (await this.page.getByRole("button", { name: "Options" }).count()) +
       (await this.page.getByText("Work items", { exact: true }).count()) +
-      (await this.page.getByRole("button", { name: "Quarter" }).count());
+      (await this.page.getByText("Quarter", { exact: true }).count());
     if (otherMarkers > 0) return false;
     if ((await this.page.locator('a[id^="issue-"]').count()) > 0) return true;
     return (await this.layoutsActiveLayout()) === "kanban";
   }
 
   async layoutsGanttVisible(): Promise<boolean> {
-    return (await this.page.getByRole("button", { name: "Quarter" }).count()) > 0;
+    // The zoom control ("Week / Month / Quarter / Today") is a row of
+    // role-less divs, so the marker is the Quarter label as plain text.
+    return (await this.page.getByText("Quarter", { exact: true }).count()) > 0;
   }
 
   async layoutsListGroups(): Promise<string[]> {
@@ -1393,7 +1396,7 @@ export class WebDriver implements ParityDriver {
     return titles;
   }
 
-  private async layoutsGroupSection(title: string): Promise<Locator> {
+  private async layoutsGroupSectionFast(title: string): Promise<Locator | null> {
     const sections = this.page.locator('div[data-drop-target-for-element="true"]');
     const count = await sections.count();
     for (let i = 0; i < count; i++) {
@@ -1401,7 +1404,20 @@ export class WebDriver implements ParityDriver {
       if ((await header.count()) === 0) continue;
       if (WebDriver.layoutsHeaderTitle((await header.innerText()) ?? "") === title) return sections.nth(i);
     }
-    throw new Error(`[parity] list group "${title}" not found.`);
+    return null;
+  }
+
+  private async layoutsGroupSection(title: string): Promise<Locator> {
+    // The list body (sections) renders after the header chrome the page
+    // waits settle on, so a fresh open/reload needs a bounded wait here
+    // instead of an immediate throw.
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const found = await this.layoutsGroupSectionFast(title);
+      if (found) return found;
+      if (Date.now() >= deadline) throw new Error(`[parity] list group "${title}" not found.`);
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsListGroupExpanded(title: string): Promise<boolean> {
@@ -1436,7 +1452,11 @@ export class WebDriver implements ParityDriver {
   }
 
   async layoutsListGroupHasLoadMore(title: string): Promise<boolean> {
-    const section = await this.layoutsGroupSection(title);
+    // Absence-tolerant: a missing group reads as no row (callers polling
+    // for true still converge; callers asserting false pair it with a
+    // positive read so a slow load cannot pass vacuously).
+    const section = await this.layoutsGroupSectionFast(title);
+    if (!section) return false;
     return (await section.getByText("Load more").count()) > 0;
   }
 
@@ -1500,7 +1520,7 @@ export class WebDriver implements ParityDriver {
 
   async layoutsRowHref(issueName: string): Promise<string | null> {
     const row = this.layoutsIssueRow(issueName);
-    if ((await row.count()) === 0) throw new Error(`[parity] no row renders "${issueName}".`);
+    await row.waitFor({ timeout: 60_000 });
     return row.getAttribute("href");
   }
 
@@ -1546,6 +1566,7 @@ export class WebDriver implements ParityDriver {
     // The leading cell is an empty grid slot without children and carries
     // the expander button once sub-issues exist.
     const row = this.layoutsIssueRow(issueName);
+    await row.waitFor({ timeout: 60_000 });
     const slot = row.locator("div.grid.size-4").first();
     if ((await slot.count()) === 0) return false;
     return (await slot.locator("button").count()) > 0;
@@ -1568,6 +1589,7 @@ export class WebDriver implements ParityDriver {
     // Expanded children render as nested rows inside the parent's block,
     // after the parent's own link.
     const row = this.layoutsIssueRow(issueName);
+    await row.waitFor({ timeout: 60_000 });
     const block = row.locator("xpath=..");
     const nested = block.locator('a[id^="issue-"]');
     const count = await nested.count();
@@ -1613,6 +1635,7 @@ export class WebDriver implements ParityDriver {
     // triggers carry the toggle name, and the mobile trigger is hidden on
     // desktop, so what remains first is the priority control.
     const row = this.layoutsIssueRow(issueName);
+    await row.waitFor({ timeout: 60_000 });
     const candidates = row.locator("button:not([disabled])").filter({ hasNot: row.locator("span") });
     const count = await candidates.count();
     for (let i = 0; i < count; i++) {
@@ -1703,5 +1726,349 @@ export class WebDriver implements ParityDriver {
     } finally {
       await this.page.keyboard.press("Escape");
     }
+  }
+
+  // --- NEWFRONT-117 round 2 (spreadsheet, calendar, row actions, empty
+  // --- states, mobile/loaders): landing as throwing stubs first so the
+  // --- extended interface compiles; each wave replaces its stubs with
+  // --- observed-app implementations.
+  private layoutsTodo(target: string): never {
+    throw new Error(`[parity] layouts driver ${target} not implemented yet.`);
+  }
+
+  async layoutsSheetHeaders(): Promise<string[]> {
+    return this.layoutsTodo("layoutsSheetHeaders");
+  }
+
+  async layoutsSheetRowNames(): Promise<string[]> {
+    return this.layoutsTodo("layoutsSheetRowNames");
+  }
+
+  async layoutsSheetFirstColumnSticky(): Promise<boolean> {
+    return this.layoutsTodo("layoutsSheetFirstColumnSticky");
+  }
+
+  async layoutsSheetFirstColumnShadowed(): Promise<boolean> {
+    return this.layoutsTodo("layoutsSheetFirstColumnShadowed");
+  }
+
+  async layoutsSheetScrollRight(): Promise<void> {
+    return this.layoutsTodo("layoutsSheetScrollRight");
+  }
+
+  async layoutsSheetHeaderSticky(): Promise<boolean> {
+    return this.layoutsTodo("layoutsSheetHeaderSticky");
+  }
+
+  async layoutsSheetCellText(_issueName: string, _column: string): Promise<string> {
+    return this.layoutsTodo("layoutsSheetCellText");
+  }
+
+  async layoutsSheetCellEditable(_issueName: string, _column: string): Promise<boolean> {
+    return this.layoutsTodo("layoutsSheetCellEditable");
+  }
+
+  async layoutsSheetCellSetState(_issueName: string, _stateName: string): Promise<void> {
+    return this.layoutsTodo("layoutsSheetCellSetState");
+  }
+
+  async layoutsSheetCellSetPriority(_issueName: string, _priorityName: string): Promise<void> {
+    return this.layoutsTodo("layoutsSheetCellSetPriority");
+  }
+
+  async layoutsSheetFocusCell(_issueName: string, _column: string): Promise<void> {
+    return this.layoutsTodo("layoutsSheetFocusCell");
+  }
+
+  async layoutsSheetPressArrow(_arrow: "up" | "down" | "left" | "right"): Promise<void> {
+    return this.layoutsTodo("layoutsSheetPressArrow");
+  }
+
+  async layoutsSheetFocusedCell(): Promise<{ issueName: string; column: string } | null> {
+    return this.layoutsTodo("layoutsSheetFocusedCell");
+  }
+
+  async layoutsSheetSortMenu(_column: string): Promise<string[]> {
+    return this.layoutsTodo("layoutsSheetSortMenu");
+  }
+
+  async layoutsSheetSort(_column: string, _direction: "ascending" | "descending"): Promise<void> {
+    return this.layoutsTodo("layoutsSheetSort");
+  }
+
+  async layoutsSheetClearSort(_column: string): Promise<void> {
+    return this.layoutsTodo("layoutsSheetClearSort");
+  }
+
+  async layoutsSheetSortMarker(_column: string): Promise<"ascending" | "descending" | "none"> {
+    return this.layoutsTodo("layoutsSheetSortMarker");
+  }
+
+  async layoutsSheetQuickAdd(_title: string): Promise<void> {
+    return this.layoutsTodo("layoutsSheetQuickAdd");
+  }
+
+  async layoutsSheetScrollEnd(): Promise<void> {
+    return this.layoutsTodo("layoutsSheetScrollEnd");
+  }
+
+  async layoutsSheetHasSubIssueToggle(_issueName: string): Promise<boolean> {
+    return this.layoutsTodo("layoutsSheetHasSubIssueToggle");
+  }
+
+  async layoutsSheetExpandSubIssues(_issueName: string): Promise<void> {
+    return this.layoutsTodo("layoutsSheetExpandSubIssues");
+  }
+
+  async layoutsSheetSubIssueNames(_issueName: string): Promise<string[]> {
+    return this.layoutsTodo("layoutsSheetSubIssueNames");
+  }
+
+  async layoutsSheetOpenSubIssueCount(_issueName: string): Promise<void> {
+    return this.layoutsTodo("layoutsSheetOpenSubIssueCount");
+  }
+
+  async layoutsCalMode(): Promise<"month" | "week"> {
+    return this.layoutsTodo("layoutsCalMode");
+  }
+
+  async layoutsCalTitle(): Promise<string> {
+    return this.layoutsTodo("layoutsCalTitle");
+  }
+
+  async layoutsCalPrev(): Promise<void> {
+    return this.layoutsTodo("layoutsCalPrev");
+  }
+
+  async layoutsCalNext(): Promise<void> {
+    return this.layoutsTodo("layoutsCalNext");
+  }
+
+  async layoutsCalToday(): Promise<void> {
+    return this.layoutsTodo("layoutsCalToday");
+  }
+
+  async layoutsCalMonthPickerMonths(): Promise<string[]> {
+    return this.layoutsTodo("layoutsCalMonthPickerMonths");
+  }
+
+  async layoutsCalMonthPickerYear(): Promise<number> {
+    return this.layoutsTodo("layoutsCalMonthPickerYear");
+  }
+
+  async layoutsCalMonthPickerYearStep(_direction: "prev" | "next"): Promise<void> {
+    return this.layoutsTodo("layoutsCalMonthPickerYearStep");
+  }
+
+  async layoutsCalMonthPickerChoose(_month: string): Promise<void> {
+    return this.layoutsTodo("layoutsCalMonthPickerChoose");
+  }
+
+  async layoutsCalMonthPickerEnabled(): Promise<boolean> {
+    return this.layoutsTodo("layoutsCalMonthPickerEnabled");
+  }
+
+  async layoutsCalSetMode(_mode: "month" | "week"): Promise<void> {
+    return this.layoutsTodo("layoutsCalSetMode");
+  }
+
+  async layoutsCalWeekendsVisible(): Promise<boolean> {
+    return this.layoutsTodo("layoutsCalWeekendsVisible");
+  }
+
+  async layoutsCalSetWeekends(_show: boolean): Promise<void> {
+    return this.layoutsTodo("layoutsCalSetWeekends");
+  }
+
+  async layoutsCalColumnCount(): Promise<number> {
+    return this.layoutsTodo("layoutsCalColumnCount");
+  }
+
+  async layoutsCalDayIssueNames(_dayNumber: number): Promise<string[]> {
+    return this.layoutsTodo("layoutsCalDayIssueNames");
+  }
+
+  async layoutsCalDayIsToday(_dayNumber: number): Promise<boolean> {
+    return this.layoutsTodo("layoutsCalDayIsToday");
+  }
+
+  async layoutsCalDayHasLoadMore(_dayNumber: number): Promise<boolean> {
+    return this.layoutsTodo("layoutsCalDayHasLoadMore");
+  }
+
+  async layoutsCalDayLoadMore(_dayNumber: number): Promise<void> {
+    return this.layoutsTodo("layoutsCalDayLoadMore");
+  }
+
+  async layoutsCalDragBlock(_issueName: string, _toDayNumber: number): Promise<void> {
+    return this.layoutsTodo("layoutsCalDragBlock");
+  }
+
+  async layoutsCalBlockText(_issueName: string): Promise<string> {
+    return this.layoutsTodo("layoutsCalBlockText");
+  }
+
+  async layoutsCalBlockHoverPreview(_issueName: string): Promise<boolean> {
+    return this.layoutsTodo("layoutsCalBlockHoverPreview");
+  }
+
+  async layoutsCalBlockOpenPeek(_issueName: string): Promise<void> {
+    return this.layoutsTodo("layoutsCalBlockOpenPeek");
+  }
+
+  async layoutsCalBlockQuickActions(_issueName: string): Promise<string[]> {
+    return this.layoutsTodo("layoutsCalBlockQuickActions");
+  }
+
+  async layoutsCalDayQuickAdd(_dayNumber: number, _title: string): Promise<void> {
+    return this.layoutsTodo("layoutsCalDayQuickAdd");
+  }
+
+  async layoutsCalDayAddMenu(_dayNumber: number): Promise<string[]> {
+    return this.layoutsTodo("layoutsCalDayAddMenu");
+  }
+
+  async layoutsCalTapDay(_dayNumber: number): Promise<void> {
+    return this.layoutsTodo("layoutsCalTapDay");
+  }
+
+  async layoutsCalDayDetailNames(): Promise<string[]> {
+    return this.layoutsTodo("layoutsCalDayDetailNames");
+  }
+
+  async layoutsRowMenuItemDisabled(_issueName: string, _item: string): Promise<boolean> {
+    return this.layoutsTodo("layoutsRowMenuItemDisabled");
+  }
+
+  async layoutsRowMenuItemNote(_issueName: string, _item: string): Promise<string | null> {
+    return this.layoutsTodo("layoutsRowMenuItemNote");
+  }
+
+  async layoutsWorkItemModalVisible(): Promise<boolean> {
+    return this.layoutsTodo("layoutsWorkItemModalVisible");
+  }
+
+  async layoutsWorkItemModalTitle(): Promise<string | null> {
+    return this.layoutsTodo("layoutsWorkItemModalTitle");
+  }
+
+  async layoutsWorkItemModalClose(): Promise<void> {
+    return this.layoutsTodo("layoutsWorkItemModalClose");
+  }
+
+  async layoutsDeleteModalVisible(): Promise<boolean> {
+    return this.layoutsTodo("layoutsDeleteModalVisible");
+  }
+
+  async layoutsDeleteModalConfirm(): Promise<void> {
+    return this.layoutsTodo("layoutsDeleteModalConfirm");
+  }
+
+  async layoutsArchiveModalVisible(): Promise<boolean> {
+    return this.layoutsTodo("layoutsArchiveModalVisible");
+  }
+
+  async layoutsArchiveModalConfirm(): Promise<void> {
+    return this.layoutsTodo("layoutsArchiveModalConfirm");
+  }
+
+  async layoutsMoveModalVisible(): Promise<boolean> {
+    return this.layoutsTodo("layoutsMoveModalVisible");
+  }
+
+  async layoutsMoveModalChoose(_projectName: string): Promise<void> {
+    return this.layoutsTodo("layoutsMoveModalChoose");
+  }
+
+  async layoutsAddExistingModalVisible(): Promise<boolean> {
+    return this.layoutsTodo("layoutsAddExistingModalVisible");
+  }
+
+  async layoutsAddExistingModalChoose(_issueName: string): Promise<void> {
+    return this.layoutsTodo("layoutsAddExistingModalChoose");
+  }
+
+  async layoutsDetailMenuItems(): Promise<string[]> {
+    return this.layoutsTodo("layoutsDetailMenuItems");
+  }
+
+  async layoutsDetailMenuChoose(_item: string): Promise<void> {
+    return this.layoutsTodo("layoutsDetailMenuChoose");
+  }
+
+  async layoutsPeekCopyLinkVisible(): Promise<boolean> {
+    return this.layoutsTodo("layoutsPeekCopyLinkVisible");
+  }
+
+  async layoutsListPageMenuItems(): Promise<string[]> {
+    return this.layoutsTodo("layoutsListPageMenuItems");
+  }
+
+  async layoutsGroupHeaderAddMenu(_groupTitle: string): Promise<string[] | null> {
+    return this.layoutsTodo("layoutsGroupHeaderAddMenu");
+  }
+
+  async layoutsEmptyTitle(): Promise<string | null> {
+    return this.layoutsTodo("layoutsEmptyTitle");
+  }
+
+  async layoutsEmptyActions(): Promise<Array<{ label: string; disabled: boolean }>> {
+    return this.layoutsTodo("layoutsEmptyActions");
+  }
+
+  async layoutsEmptyChoose(_label: string): Promise<void> {
+    return this.layoutsTodo("layoutsEmptyChoose");
+  }
+
+  async layoutsMobileOfferedLayouts(): Promise<LayoutsLayoutKey[]> {
+    return this.layoutsTodo("layoutsMobileOfferedLayouts");
+  }
+
+  async layoutsMobileDisplayVisible(): Promise<boolean> {
+    return this.layoutsTodo("layoutsMobileDisplayVisible");
+  }
+
+  async layoutsMobileAnalyticsVisible(): Promise<boolean> {
+    return this.layoutsTodo("layoutsMobileAnalyticsVisible");
+  }
+
+  async layoutsSkeletonVisible(): Promise<boolean> {
+    return this.layoutsTodo("layoutsSkeletonVisible");
+  }
+
+  async layoutsMutationSpinnerVisible(): Promise<boolean> {
+    return this.layoutsTodo("layoutsMutationSpinnerVisible");
+  }
+
+  async layoutsRowHighlighted(_issueName: string): Promise<boolean> {
+    return this.layoutsTodo("layoutsRowHighlighted");
+  }
+
+  async layoutsTempRowVisible(): Promise<boolean> {
+    return this.layoutsTodo("layoutsTempRowVisible");
+  }
+
+  async layoutsStallIssuesGet(_delayMs: number): Promise<void> {
+    return this.layoutsTodo("layoutsStallIssuesGet");
+  }
+
+  async layoutsStallIssueMutation(_delayMs: number): Promise<void> {
+    return this.layoutsTodo("layoutsStallIssueMutation");
+  }
+
+  async layoutsReleaseStalls(): Promise<void> {
+    return this.layoutsTodo("layoutsReleaseStalls");
+  }
+
+  async layoutsSheetCellSetDueDate(_issueName: string, _isoDate: string): Promise<void> {
+    return this.layoutsTodo("layoutsSheetCellSetDueDate");
+  }
+
+  async layoutsCurrentUrl(): Promise<string> {
+    return this.layoutsTodo("layoutsCurrentUrl");
+  }
+
+  async layoutsSheetCellSetAssignee(_issueName: string, _memberName: string): Promise<void> {
+    return this.layoutsTodo("layoutsSheetCellSetAssignee");
   }
 }

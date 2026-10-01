@@ -1935,6 +1935,27 @@ export async function serverDeleteModule(
   }
 }
 
+/**
+ * Browser cookies from a `signInSession` header, for `openAuthenticated`.
+ * Layout specs authenticate this way instead of driving the sign-in card:
+ * the card belongs to the auth rows, and skipping it keeps each scenario
+ * focused on its own area while staying immune to card-load flakiness.
+ */
+export function sessionBrowserCookies(sessionCookie: string): BrowserCookie[] {
+  const jar = cookieJar(sessionCookie.split(";").map((pair) => pair.trim()));
+  const sessionId = jar.get("session-id");
+  if (sessionId === undefined) throw new Error("[parity] session cookie carried no session-id.");
+  const domain = oracleHostFromEnv();
+  const cookies: BrowserCookie[] = [
+    { name: "session-id", value: sessionId, domain, path: "/", httpOnly: true, sameSite: "Lax" },
+  ];
+  const csrf = jar.get("csrftoken");
+  if (csrf !== undefined) {
+    cookies.push({ name: "csrftoken", value: csrf, domain, path: "/", httpOnly: true, sameSite: "Lax" });
+  }
+  return cookies;
+}
+
 /** Resolve a workspace member's user id by email; throws when absent. */
 export async function serverWorkspaceUserId(
   workspaceSlug: string,
@@ -1979,4 +2000,35 @@ export async function serverAddIssuesToModule(
     }
   );
   if (!res.ok) throw new Error(`[parity] module-issues add failed with HTTP ${res.status}.`);
+}
+
+/** Project feature flags the layout scenarios assert or toggle (ISS-016). */
+export interface LayoutsProjectDetails {
+  id: string;
+  name: string;
+  cycleView: boolean;
+  moduleView: boolean;
+}
+
+/** One project's detail row: flags the column specs toggle and restore. */
+export async function serverProjectDetails(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<LayoutsProjectDetails> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project read failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as { id?: unknown; name?: unknown; cycle_view?: unknown; module_view?: unknown };
+  if (typeof record.id !== "string" || typeof record.name !== "string") {
+    throw new Error("[parity] project row missed id or name.");
+  }
+  return {
+    id: record.id,
+    name: record.name,
+    cycleView: record.cycle_view === true,
+    moduleView: record.module_view === true,
+  };
 }

@@ -10,6 +10,7 @@ import {
   seedProjectUserProperties,
   serverPatchProjectUserProperties,
   serverProjectUserProperties,
+  sessionBrowserCookies,
   signInSession,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
@@ -34,16 +35,19 @@ test(
   specTitle(ROWS_001, "switch the issue layout through the header control"),
   { tag: specTags(ROWS_001) },
   async ({ driver, seed }) => {
-    test.setTimeout(540_000);
-    await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+    // Five switches including the slow first gantt compile (~150s loaded).
+    test.setTimeout(720_000);
     const session = await signInSession(seed.email, seed.password);
     await resetPrefs(seed.workspaceSlug, seed.projectId, session);
-    await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
+    await driver.openAuthenticated(
+      `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
+      sessionBrowserCookies(session)
+    );
 
     await test.step("all five layouts are offered, list is active", async () => {
       expect(await driver.layoutsOfferedLayouts()).toEqual(["list", "kanban", "calendar", "spreadsheet", "gantt"]);
       expect(await driver.layoutsActiveLayout()).toEqual("list");
-      expect(await driver.layoutsListVisible()).toEqual(true);
+      await expect.poll(async () => driver.layoutsListVisible(), { timeout: 60_000 }).toEqual(true);
     });
 
     const switches = [
@@ -87,10 +91,12 @@ test(specTitle(ROWS_001, "guests can switch layouts too"), { tag: specTags(ROWS_
   if (!seed.guestEmail || !seed.guestPassword) {
     throw new Error("[parity] seed facts carry no guest; re-run the stack seed step (see stack/README.md).");
   }
-  await driver.rulesEnsureSignedIn(seed.guestEmail, seed.guestPassword, seed.workspaceSlug);
   const session = await signInSession(seed.guestEmail, seed.guestPassword);
   await resetPrefs(seed.workspaceSlug, seed.projectId, session);
-  await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
+  await driver.openAuthenticated(
+    `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
+    sessionBrowserCookies(session)
+  );
 
   await driver.layoutsSwitchTo("calendar");
   expect(await driver.layoutsActiveLayout()).toEqual("calendar");
@@ -104,10 +110,12 @@ test(
   { tag: specTags(ROWS_002) },
   async ({ driver, seed }) => {
     test.setTimeout(540_000);
-    await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
     const session = await signInSession(seed.email, seed.password);
     await resetPrefs(seed.workspaceSlug, seed.projectId, session);
-    await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
+    await driver.openAuthenticated(
+      `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
+      sessionBrowserCookies(session)
+    );
 
     await test.step("a UI switch survives reload", async () => {
       await driver.layoutsSwitchTo("spreadsheet");
@@ -123,8 +131,8 @@ test(
         display_filters: { layout: "list", group_by: "state", order_by: "sort_order" },
       });
       await driver.layoutsReloadIssues();
-      expect(await driver.layoutsListVisible()).toEqual(true);
-      expect(await driver.layoutsListGroups()).toEqual(["Todo"]);
+      await expect.poll(async () => driver.layoutsListVisible(), { timeout: 60_000 }).toEqual(true);
+      await expect.poll(async () => driver.layoutsListGroups(), { timeout: 60_000 }).toEqual(["Todo"]);
     });
 
     await test.step("sort order restores from the stored preferences", async () => {
@@ -132,13 +140,16 @@ test(
         display_filters: { layout: "list", group_by: null, order_by: "-created_at" },
       });
       await driver.layoutsReloadIssues();
-      const names = await driver.layoutsListGroupIssueNames("All work items");
-      expect(names).toEqual([...seed.issueNames].reverse());
+      await expect
+        .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 60_000 })
+        .toEqual([...seed.issueNames].reverse());
       await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
         display_filters: { layout: "list", group_by: null, order_by: "sort_order" },
       });
       await driver.layoutsReloadIssues();
-      expect(await driver.layoutsListGroupIssueNames("All work items")).toEqual([...seed.issueNames]);
+      await expect
+        .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 60_000 })
+        .toEqual([...seed.issueNames]);
     });
 
     await test.step("display properties restore from the stored preferences", async () => {
@@ -147,8 +158,10 @@ test(
         display_properties: { state: false },
       });
       await driver.layoutsReloadIssues();
-      expect(await driver.layoutsListGroupIssueNames("All work items")).toEqual([...seed.issueNames]);
-      expect(await driver.hasVisibleText("Todo")).toEqual(false);
+      await expect
+        .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 60_000 })
+        .toEqual([...seed.issueNames]);
+      await expect.poll(async () => driver.hasVisibleText("Todo"), { timeout: 60_000 }).toEqual(false);
     });
 
     await test.step("teardown restores the seeded preferences", async () => {
