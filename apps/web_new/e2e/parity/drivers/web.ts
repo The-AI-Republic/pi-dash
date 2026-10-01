@@ -2145,48 +2145,115 @@ export class WebDriver implements ParityDriver {
     return names;
   }
 
-  async layoutsRowMenuItemDisabled(_issueName: string, _item: string): Promise<boolean> {
-    return this.layoutsTodo("layoutsRowMenuItemDisabled");
+  private async layoutsOpenRowMenuItem(issueName: string, item: string): Promise<Locator> {
+    // Items are located by their h5 title: the accessible name covers
+    // the whole item (title plus the Archive gating note), so an exact
+    // name match cannot address a noted item.
+    await this.layoutsOpenRowMenu(issueName);
+    const entries = this.page.getByRole("menuitem");
+    const count = await entries.count();
+    for (let i = 0; i < count; i++) {
+      const heading = entries.nth(i).locator("h5").first();
+      if ((await heading.count()) > 0 && (((await heading.innerText()) ?? "").trim()) === item) {
+        return entries.nth(i);
+      }
+    }
+    throw new Error(`[parity] row menu has no item "${item}".`);
   }
 
-  async layoutsRowMenuItemNote(_issueName: string, _item: string): Promise<string | null> {
-    return this.layoutsTodo("layoutsRowMenuItemNote");
+  async layoutsRowMenuItemDisabled(issueName: string, item: string): Promise<boolean> {
+    const entry = await this.layoutsOpenRowMenuItem(issueName, item);
+    try {
+      if (((await entry.getAttribute("aria-disabled")) ?? "") === "true") return true;
+      return (((await entry.getAttribute("class")) ?? "").includes("text-placeholder"));
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  async layoutsRowMenuItemNote(issueName: string, item: string): Promise<string | null> {
+    const entry = await this.layoutsOpenRowMenuItem(issueName, item);
+    try {
+      const note = entry.locator("p").first();
+      if ((await note.count()) === 0) return null;
+      return (((await note.innerText()) ?? "").trim().replace(/\s+/g, " "));
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  private layoutsWorkItemModalTitleHeading(): Locator {
+    return this.page.getByRole("dialog").locator("h3.text-h4-medium").first();
   }
 
   async layoutsWorkItemModalVisible(): Promise<boolean> {
-    return this.layoutsTodo("layoutsWorkItemModalVisible");
+    return (await this.layoutsWorkItemModalTitleHeading().count()) > 0;
   }
 
   async layoutsWorkItemModalTitle(): Promise<string | null> {
-    return this.layoutsTodo("layoutsWorkItemModalTitle");
+    const heading = this.layoutsWorkItemModalTitleHeading();
+    if ((await heading.count()) === 0) return null;
+    return (((await heading.innerText()) ?? "").trim());
   }
 
   async layoutsWorkItemModalClose(): Promise<void> {
-    return this.layoutsTodo("layoutsWorkItemModalClose");
+    // The modal has no dedicated close control; Escape dismisses it via
+    // the dialog shell. Parity specs never dirty the form first, so no
+    // draft prompt intervenes.
+    await this.page.keyboard.press("Escape");
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if (!(await this.layoutsWorkItemModalVisible())) return;
+      if (Date.now() >= deadline) throw new Error("[parity] work-item modal never closed.");
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsDeleteModalVisible(): Promise<boolean> {
-    return this.layoutsTodo("layoutsDeleteModalVisible");
+    return (await this.page.getByRole("heading", { name: "Delete Work item", exact: true }).count()) > 0;
   }
 
   async layoutsDeleteModalConfirm(): Promise<void> {
-    return this.layoutsTodo("layoutsDeleteModalConfirm");
+    await this.page.getByRole("button", { name: "Delete", exact: true }).click();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if (!(await this.layoutsDeleteModalVisible())) return;
+      if (Date.now() >= deadline) throw new Error("[parity] delete modal never closed after confirm.");
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsArchiveModalVisible(): Promise<boolean> {
-    return this.layoutsTodo("layoutsArchiveModalVisible");
+    // The heading carries the identifier suffix ("Archive Work item PAR
+    // 12"), so the marker is a heading containing the fixed prefix.
+    return (await this.page.locator("h3", { hasText: "Archive Work item" }).count()) > 0;
   }
 
   async layoutsArchiveModalConfirm(): Promise<void> {
-    return this.layoutsTodo("layoutsArchiveModalConfirm");
+    await this.page.getByRole("button", { name: "Archive", exact: true }).click();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if (!(await this.layoutsArchiveModalVisible())) return;
+      if (Date.now() >= deadline) throw new Error("[parity] archive modal never closed after confirm.");
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsMoveModalVisible(): Promise<boolean> {
-    return this.layoutsTodo("layoutsMoveModalVisible");
+    return (await this.page.getByRole("heading", { name: "Move to project", exact: true }).count()) > 0;
   }
 
-  async layoutsMoveModalChoose(_projectName: string): Promise<void> {
-    return this.layoutsTodo("layoutsMoveModalChoose");
+  async layoutsMoveModalChoose(projectName: string): Promise<void> {
+    // Project buttons move immediately on click and the view navigates
+    // to the moved issue, so the wait is for the modal to disappear.
+    const dialog = this.page.getByRole("dialog");
+    await dialog.locator("button", { hasText: projectName }).first().click();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if (!(await this.layoutsMoveModalVisible())) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] move modal never applied "${projectName}".`);
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsAddExistingModalVisible(): Promise<boolean> {
@@ -2214,8 +2281,23 @@ export class WebDriver implements ParityDriver {
     }
   }
 
+  private async layoutsOpenDetailMenu(): Promise<void> {
+    // The detail trigger wraps its ellipsis IconButton in the menu
+    // button, so it is the button containing a button; row triggers
+    // wrap a div instead and never match.
+    const panel = this.page.locator("div.absolute.top-0.right-0.bottom-0").first();
+    const scope = (await panel.count()) > 0 ? panel : this.page;
+    await scope.locator("button:has(button)").first().click();
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+  }
+
   async layoutsDetailMenuItems(): Promise<string[]> {
-    return this.layoutsTodo("layoutsDetailMenuItems");
+    await this.layoutsOpenDetailMenu();
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
   }
 
   async layoutsDetailMenuChoose(_item: string): Promise<void> {
@@ -2223,15 +2305,58 @@ export class WebDriver implements ParityDriver {
   }
 
   async layoutsPeekCopyLinkVisible(): Promise<boolean> {
-    return this.layoutsTodo("layoutsPeekCopyLinkVisible");
+    // Scoped to the peek panel (absent on the browse page): inside the
+    // header action group the copy control is the text-less plain
+    // button — the menu trigger nests a button, the subscribe control
+    // carries text, and both live outside the menu container.
+    const panel = this.page.locator("div.absolute.top-0.right-0.bottom-0").first();
+    if ((await panel.count()) === 0) return false;
+    const trigger = panel.locator("button:has(button)").first();
+    if ((await trigger.count()) === 0) return false;
+    const group = trigger.locator("xpath=ancestor::div[contains(@class, 'gap-2')][1]");
+    const copy = group.locator(
+      "xpath=.//button[not(.//button) and not(ancestor::div[@data-main-menu='true']) and normalize-space(string(.))='']"
+    );
+    return (await copy.count()) > 0;
+  }
+
+  private layoutsListPageMenuTrigger(): Locator {
+    // The whole-list ellipsis pins its container size in its classes;
+    // row triggers carry an accessible name instead and never match.
+    return this.page.locator("div.size-\\[26px\\] > button").first();
   }
 
   async layoutsListPageMenuItems(): Promise<string[]> {
-    return this.layoutsTodo("layoutsListPageMenuItems");
+    await this.layoutsListPageMenuTrigger().click();
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
   }
 
-  async layoutsGroupHeaderAddMenu(_groupTitle: string): Promise<string[] | null> {
-    return this.layoutsTodo("layoutsGroupHeaderAddMenu");
+  private async layoutsGroupHeaderAddControl(groupTitle: string): Promise<{ menu: boolean; control: Locator }> {
+    // Cycle/module headers wrap the plus in a menu button (span); plain
+    // project headers render the plus as a bare div that opens the
+    // create modal directly.
+    const section = await this.layoutsGroupSection(groupTitle);
+    const header = section.locator('div[class*="group/list-header"]').first();
+    const menuPlus = header.locator("span.h-5.w-5").first();
+    if ((await menuPlus.count()) > 0) return { menu: true, control: menuPlus };
+    return { menu: false, control: header.locator("div.h-5.w-5").first() };
+  }
+
+  async layoutsGroupHeaderAddMenu(groupTitle: string): Promise<string[] | null> {
+    const { menu, control } = await this.layoutsGroupHeaderAddControl(groupTitle);
+    if (!menu) return null;
+    await control.click();
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
   }
 
   async layoutsEmptyTitle(): Promise<string | null> {
@@ -2331,20 +2456,56 @@ export class WebDriver implements ParityDriver {
     return this.layoutsTodo("layoutsMobileDisplayCycleModuleDisabled");
   }
 
-  async layoutsRowMenuOpenNewTabUrl(_issueName: string): Promise<string> {
-    return this.layoutsTodo("layoutsRowMenuOpenNewTabUrl");
+  async layoutsRowMenuOpenNewTabUrl(issueName: string): Promise<string> {
+    // window.open lands in a popup page: read its URL without waiting
+    // for the app to boot there, then close it again.
+    await this.layoutsOpenRowMenu(issueName);
+    const [popup] = await Promise.all([
+      this.page.context().waitForEvent("page", { timeout: 15_000 }),
+      this.page.getByRole("menuitem", { name: "Open in new tab", exact: true }).first().click(),
+    ]);
+    const url = popup.url();
+    await popup.close();
+    return url;
   }
 
-  async layoutsWorkItemModalHasText(_text: string): Promise<boolean> {
-    return this.layoutsTodo("layoutsWorkItemModalHasText");
+  async layoutsWorkItemModalHasText(text: string): Promise<boolean> {
+    // Scoped to the dialog: the list behind the modal shows the same
+    // names. Prefilled names sit in inputs (display value) or select
+    // chips (text) depending on the field.
+    const dialog = this.page.getByRole("dialog");
+    if ((await dialog.count()) === 0) return false;
+    if ((await dialog.getByText(text, { exact: false }).count()) > 0) return true;
+    return (await dialog.getByDisplayValue(text).count()) > 0;
   }
 
-  async layoutsListPageMenuChoose(_item: string): Promise<void> {
-    return this.layoutsTodo("layoutsListPageMenuChoose");
+  async layoutsListPageMenuChoose(item: string): Promise<void> {
+    await this.layoutsListPageMenuTrigger().click();
+    await this.page.getByRole("menuitem", { name: item, exact: true }).first().click();
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if ((await this.page.getByRole("menuitem").count()) === 0) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] list page menu never closed after "${item}".`);
+      await this.page.waitForTimeout(300);
+    }
   }
 
-  async layoutsGroupHeaderAddChoose(_groupTitle: string, _item: string | null): Promise<void> {
-    return this.layoutsTodo("layoutsGroupHeaderAddChoose");
+  async layoutsGroupHeaderAddChoose(groupTitle: string, item: string | null): Promise<void> {
+    const { menu, control } = await this.layoutsGroupHeaderAddControl(groupTitle);
+    if (!menu || item === null) {
+      await control.click();
+    } else {
+      await control.click();
+      await this.page.getByRole("menuitem", { name: item, exact: true }).first().click();
+    }
+    // Either branch lands in a modal (create/add-existing); wait for one
+    // instead of trusting the click-to-paint gap on the loaded host.
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsWorkItemModalVisible()) || (await this.layoutsAddExistingModalVisible())) return;
+      if (Date.now() >= deadline) throw new Error("[parity] group-header add never opened a modal.");
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsSheetToggleSubIssues(_issueName: string): Promise<void> {
