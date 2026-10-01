@@ -35,8 +35,12 @@ SELECT "dimension", COUNT(*) AS "count" FROM (
 --
 -- (Q-01c) build_graph_plot estimate branch (analytics_plot.py:110-115):
 --   annotate(estimate=Sum(Cast(estimate_point__value AS float))).order_by(x_axis).
+--   NULL dimensions excluded for EVERY axis (:84-86: extract_axis always returns
+--   "dimension", so the exclude is unconditional — same guard as Q-01b).
+--   Segment NULLs are NOT excluded (no segment exclude in :89-115).
 SELECT "dimension", SUM(CAST("estimate_points"."value" AS DOUBLE PRECISION)) AS "estimate"
   FROM "issues" LEFT OUTER JOIN "estimate_points" ...
+ WHERE ("workspaces"."slug" = %s AND <filters> AND <x_axis expr> IS NOT NULL)
  GROUP BY "dimension" ORDER BY <x_axis> ASC;
 -- Seed row: keys {high,medium,urgent}, one bucket each with {dimension, estimate}.
 --
