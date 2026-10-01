@@ -25,6 +25,13 @@ pub mod app_pages;
 /// Assistant turn pipeline + stale-turn sweep (D-06, PIDASHCONV-254).
 pub mod assistant;
 pub mod celery;
+/// Creation + dispatch tasks (D-11 L6, PIDASHCONV-487): the executor-aware
+/// creation seam, the lease-and-offer dispatch engine with transactional
+/// enqueue, and the bounded run-event append. Lives at
+/// `dispatch/dispatch.rs` via an explicit path — the single file the issue
+/// owns, no `mod.rs`.
+#[path = "dispatch/dispatch.rs"]
+pub mod dispatch;
 pub mod integrations;
 /// Loop turn dispatch: thread rotation + turn creation + run enqueue
 /// (D-03, PIDASHCONV-157): same explicit-path form as [`loop_scan`].
