@@ -15,10 +15,11 @@ Each `fx-*.json` carries its own `trace` array; this file is the index.
   (`GenericAssetUpdateSerializer`: is_uploaded default True). Views bypass
   these serializers (read `request.data` directly) — recorded in-file.
 - `fx-ser-sticky.json` — `api/serializers/sticky.py:12-34` (`StickySerializer`
-  validate(): HTML sanitize pass-through, invalid HTML ->
-  `{"error": "html content is not valid"}` `:21-27`, invalid binary ->
-  `{"description_binary": ...}` `:29-32`; name not required `:17`;
-  workspace/owner read-only `:16`); validators
+  validate(): HTML sanitize pass-through, invalid HTML (only >10MB input live) ->
+  `{"error": ["html content is not valid"]}` `:21-27`, binary branch `:29-32`
+  dead (BinaryField -> read-only ModelField, key dropped before validate());
+  name not required `:17`; workspace/owner read-only input silently dropped,
+  never 400 `:16`); validators
   `utils/content_validator.py` (`validate_html_content`,
   `validate_binary_data`).
 - `fx-ser-intake.json` — `api/serializers/intake.py:12-39`
