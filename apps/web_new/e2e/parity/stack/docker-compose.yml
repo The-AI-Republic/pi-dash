@@ -1,17 +1,21 @@
 # Seeded parity stack (NEWFRONT-19).
 #
 # Own scratch backend for parity runs: Django API, Postgres, Redis,
-# RabbitMQ, and the realtime apps/live service. Every name, port, and
+# RabbitMQ, MinIO object storage, and the realtime apps/live service. Every name, port, and
 # volume carries the parity19 prefix so runs never share a database with
 # dev work or with each other. Ports are overridable through the
 # PARITY_* environment variables; the defaults below are the contract
 # the Playwright config and the runbook assume.
-name: parity19
+# Project (and therefore volume/network) isolation for parallel local runs:
+# set PARITY_PROJECT=parity19s4 (say) to get a fully private stack on the
+# same daemon. Unset keeps the stock parity19 names, so CI and the runbook
+# are unchanged. (Container names take PARITY_CONTAINER_PREFIX likewise.)
+name: ${PARITY_PROJECT:-parity19}
 
 services:
   pg:
     image: postgres:15.7-alpine
-    container_name: parity19-pg
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-pg
     command: postgres -c 'max_connections=1000'
     environment:
       POSTGRES_USER: parity19
@@ -30,7 +34,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: parity19-redis
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-redis
     ports:
       - "${PARITY_REDIS_PORT:-16319}:6379"
     healthcheck:
@@ -41,18 +45,43 @@ services:
 
   mq:
     image: rabbitmq:3-management-alpine
-    container_name: parity19-mq
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-mq
     environment:
       RABBITMQ_DEFAULT_USER: parity19
       RABBITMQ_DEFAULT_PASS: parity19
       RABBITMQ_DEFAULT_VHOST: pidash
+
+  minio:
+    image: minio/minio
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-minio
+    # Object storage for asset uploads (NEWFRONT-143): without it every
+    # presigned upload 500s (no bucket configured). Mirrors the dev minio
+    # setup; the bucket is created idempotently at boot. No healthcheck:
+    # the API only signs URLs (never contacts minio), and browsers upload
+    # minutes after boot, so start ordering is enough.
+    entrypoint: >
+      /bin/sh -c "
+      mkdir -p /export/parity19-assets &&
+      minio server /export --console-address ':9091' &
+      sleep 5 &&
+      mc alias set myminio http://localhost:9000 parity19minio parity19minio-scratch-secret &&
+      mc mb myminio/parity19-assets -p || true
+      && tail -f /dev/null
+      "
+    environment:
+      MINIO_ROOT_USER: parity19minio
+      MINIO_ROOT_PASSWORD: parity19minio-scratch-secret
+    volumes:
+      - parity19_miniodata:/export
+    ports:
+      - "${PARITY_MINIO_PORT:-19019}:9000"
 
   api:
     build:
       context: ../../../../../apps/api
       dockerfile: Dockerfile.dev
     image: parity19-api:local
-    container_name: parity19-api
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-api
     # The stock dev entrypoint registers instances and buckets; parity runs
     # need only migrations plus the server, so the command replaces it.
     command:
@@ -66,10 +95,21 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio:
+        condition: service_started
     volumes:
       - ./parity_scratch_settings.py:/code/parity_scratch_settings.py:ro
     environment:
       DJANGO_SETTINGS_MODULE: parity_scratch_settings
+      # Object storage (NEWFRONT-143): the asset endpoints sign presigned
+      # URLs against this bucket; unset means every upload 500s.
+      USE_MINIO: "1"
+      AWS_ACCESS_KEY_ID: parity19minio
+      AWS_SECRET_ACCESS_KEY: parity19minio-scratch-secret
+      AWS_S3_BUCKET_NAME: parity19-assets
+      AWS_REGION: us-east-1
+      AWS_S3_ENDPOINT_URL: http://minio:9000
+      MINIO_ENDPOINT_URL: http://minio:9000
       SECRET_KEY: parity19-fixed-local-secret-not-used-outside-scratch
       ALLOWED_HOSTS: "*"
       DATABASE_URL: postgresql://parity19:parity19@pg:5432/pidash
@@ -99,7 +139,7 @@ services:
       context: ../../../../..
       dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.oracle
     image: parity19-oracle:local
-    container_name: parity19-oracle
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle
     # Empty base keeps API calls same-origin; the proxy routes them to Django.
     environment:
       VITE_API_BASE_URL: ""
@@ -154,10 +194,15 @@ services:
 
   proxy:
     image: caddy:2-alpine
-    container_name: parity19-proxy
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-proxy
     depends_on:
       - api
       - oracle
+      - minio
+    # Forwarded so the Caddyfile's {$ORACLE_UPSTREAM} override (native
+    # frontend) reaches the server; unset keeps the stock oracle:3000.
+    environment:
+      ORACLE_UPSTREAM: ${ORACLE_UPSTREAM:-oracle:3000}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
     ports:
@@ -168,7 +213,7 @@ services:
       context: ../../../../..
       dockerfile: apps/live/Dockerfile.live
     image: parity19-live:local
-    container_name: parity19-live
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-live
     depends_on:
       redis:
         condition: service_healthy
@@ -181,3 +226,4 @@ services:
 
 volumes:
   parity19_pgdata:
+  parity19_miniodata:

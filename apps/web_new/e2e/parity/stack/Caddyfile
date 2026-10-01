@@ -17,7 +17,20 @@
 	handle /static/* {
 		reverse_proxy api:8000
 	}
+	# Object storage (NEWFRONT-143): presigned asset URLs are path-style on
+	# the request host, so browsers PUT/GET bucket paths through this same
+	# origin; route them to minio. Must precede the frontend catch-all.
+	handle /parity19-assets {
+		reverse_proxy minio:9000
+	}
+	handle /parity19-assets/* {
+		reverse_proxy minio:9000
+	}
+	# The oracle normally runs in Docker as `oracle:3000`. Point
+	# ORACLE_UPSTREAM at `host.docker.internal:<port>` to serve a natively
+	# run frontend through the same one-origin proxy instead; unset means
+	# the stock container, so CI and the runbook are unchanged.
 	handle /* {
-		reverse_proxy oracle:3000
+		reverse_proxy {$ORACLE_UPSTREAM:oracle:3000}
 	}
 }

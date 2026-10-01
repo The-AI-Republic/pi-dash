@@ -624,4 +624,92 @@ export class WebNewDriver implements ParityDriver {
   async homeWaitForWidgets(): Promise<string[]> {
     return todo("homeWaitForWidgets");
   }
+
+  // --- Comment composer and CRUD (NEWFRONT-112). Stubs mirror the
+  // interface additions so scenarios compile against either target.
+
+  async composerOpenIssue(_workspaceSlug: string, _issueRef: string): Promise<void> {
+    return todo("composerOpenIssue");
+  }
+
+  async composerType(_text: string): Promise<void> {
+    return todo("composerType");
+  }
+
+  async composerPasteHtml(_html: string): Promise<void> {
+    return todo("composerPasteHtml");
+  }
+
+  async composerDraftText(): Promise<string> {
+    return todo("composerDraftText");
+  }
+
+  async composerSubmitDisabled(): Promise<boolean> {
+    return todo("composerSubmitDisabled");
+  }
+
+  async composerSubmit(): Promise<void> {
+    return todo("composerSubmit");
+  }
+
+  async composerPressEnter(): Promise<void> {
+    return todo("composerPressEnter");
+  }
+
+  async composerPressShiftEnter(): Promise<void> {
+    return todo("composerPressShiftEnter");
+  }
+
+  async composerAttachFile(_path: string): Promise<void> {
+    return todo("composerAttachFile");
+  }
+
+  async composerVisibleCommentTexts(): Promise<string[]> {
+    return todo("composerVisibleCommentTexts");
+  }
+
+  async composerOpenCommentMenu(_text: string): Promise<void> {
+    return todo("composerOpenCommentMenu");
+  }
+
+  async composerMenuClick(_item: string): Promise<void> {
+    return todo("composerMenuClick");
+  }
+
+  async composerEditType(_text: string): Promise<void> {
+    return todo("composerEditType");
+  }
+
+  async composerEditSaveDisabled(): Promise<boolean> {
+    return todo("composerEditSaveDisabled");
+  }
+
+  async composerEditSave(): Promise<void> {
+    return todo("composerEditSave");
+  }
+
+  async composerEditDiscard(): Promise<void> {
+    return todo("composerEditDiscard");
+  }
+
+  async composerEditPressEnter(): Promise<void> {
+    return todo("composerEditPressEnter");
+  }
+
+  async composerCommentMeta(_text: string): Promise<{
+    author: string;
+    time: string;
+    edited: boolean;
+    tooltip: string | null;
+  }> {
+    return todo("composerCommentMeta");
+  }
+
+  async composerCommentImageCount(_text: string): Promise<number> {
+    return todo("composerCommentImageCount");
+  }
+
+  async composerVisibleNotices(): Promise<{ message: string; kind: "success" | "error" | "unknown" }[]> {
+    return todo("composerVisibleNotices");
+  }
 }

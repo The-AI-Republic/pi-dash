@@ -38,6 +38,9 @@ export interface ParitySeedFacts {
   guestPassword?: string;
   /** Pending triage row for the intake-screen variant (NEWFRONT-113). */
   inboxIssueId?: string;
+  /** Bot identity for the CMT-012 automated-author step (NEWFRONT-112). */
+  botEmail?: string;
+  botPassword?: string;
 }
 
 /** A cookie shaped for a browser context, used to enter the app pre-authenticated. */
@@ -418,6 +421,54 @@ export interface ParityDriver {
    * fetch failure leaves the loader stuck. Callers assert on the result.
    */
   homeWaitForWidgets(): Promise<string[]>;
+  // --- Comment composer and CRUD (NEWFRONT-112, rows CMT-001..012) ---
+  // Appended additively per the shared driver contract on NEWFRONT-30:
+  // never modify the methods above or another area's methods.
+  /** Open a work item detail page by browse ref (e.g. "PAR-1"); ends with the activity section visible. */
+  composerOpenIssue(workspaceSlug: string, issueRef: string): Promise<void>;
+  /** Type text into the comment composer. */
+  composerType(text: string): Promise<void>;
+  /** Paste an HTML fragment into the composer as formatted rich text. */
+  composerPasteHtml(html: string): Promise<void>;
+  /** Current draft text in the composer. */
+  composerDraftText(): Promise<string>;
+  /** Whether the composer submit control is currently disabled. */
+  composerSubmitDisabled(): Promise<boolean>;
+  /** Submit the composer through its submit button. */
+  composerSubmit(): Promise<void>;
+  /** Press Enter with no modifiers while the composer is focused. */
+  composerPressEnter(): Promise<void>;
+  /** Press Shift+Enter while the composer is focused (newline, never a submit). */
+  composerPressShiftEnter(): Promise<void>;
+  /** Attach a file to the composer draft. */
+  composerAttachFile(path: string): Promise<void>;
+  /** Bodies of the comments currently rendered in the feed, in display order. */
+  composerVisibleCommentTexts(): Promise<string[]>;
+  /** Open the overflow menu of the comment card showing the given text. */
+  composerOpenCommentMenu(text: string): Promise<void>;
+  /** Click a menu item (e.g. "Edit", "Delete") in the open comment menu. */
+  composerMenuClick(item: string): Promise<void>;
+  /** Replace the inline edit form content with the given text. */
+  composerEditType(text: string): Promise<void>;
+  /** Whether the inline edit form's save control is currently disabled. */
+  composerEditSaveDisabled(): Promise<boolean>;
+  /** Save the inline edit form through its save control. */
+  composerEditSave(): Promise<void>;
+  /** Discard the inline edit form, restoring the original body. */
+  composerEditDiscard(): Promise<void>;
+  /** Press Enter with no modifiers while the edit form is focused. */
+  composerEditPressEnter(): Promise<void>;
+  /** Header facts for the card showing the given text. */
+  composerCommentMeta(text: string): Promise<{
+    author: string;
+    time: string;
+    edited: boolean;
+    tooltip: string | null;
+  }>;
+  /** Images rendered in the body of the card showing the given text. */
+  composerCommentImageCount(text: string): Promise<number>;
+  /** Notices currently visible, oldest first, with their success/error kind. */
+  composerVisibleNotices(): Promise<{ message: string; kind: "success" | "error" | "unknown" }[]>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */
