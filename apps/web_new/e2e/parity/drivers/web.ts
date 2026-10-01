@@ -4522,8 +4522,8 @@ export class WebDriver implements ParityDriver {
 
   /**
    * The collapse toggle is an unlabeled icon button carrying the panel-left
-   * glyph; prefer the committed testid, and fall back to the glyph on baked
-   * builds that predate it. Both resolve to the same control.
+   * glyph; prefer the testid when a build carries one, and fall back to the
+   * glyph otherwise. Both resolve to the same control.
    */
   private sidebarToggleButton(): Locator {
     return this.page.locator('[data-testid="sidebar-toggle"], button:has(svg.lucide-panel-left)');
@@ -4532,8 +4532,8 @@ export class WebDriver implements ParityDriver {
   /**
    * The personalize trigger is the unlabeled preferences button heading the
    * sidebar beside the product wordmark: the first control in the sidebar.
-   * Prefer the committed testid, and fall back to that position on baked
-   * builds that predate it.
+   * Prefer the testid when a build carries one, and fall back to that
+   * position otherwise.
    */
   private personalizeButton(): Locator {
     return this.sidebar().locator('[data-testid="personalize-nav"], button').first();
@@ -4679,9 +4679,9 @@ export class WebDriver implements ParityDriver {
 
   async openProjectActions(): Promise<void> {
     // The quick-actions trigger is a span wrapping the horizontal-ellipsis
-    // glyph; prefer the committed testid, and fall back to the glyph on
-    // baked builds that predate it. The overflow trigger is a button, so the
-    // span scope never confuses the two.
+    // glyph; prefer the testid when a build carries one, and fall back to
+    // the glyph otherwise. The overflow trigger is a button, so the span
+    // scope never confuses the two.
     await this.shellMain()
       .locator('[data-testid="project-actions-trigger"], span:has(> svg.lucide-ellipsis)')
       .first()
@@ -6691,5 +6691,124 @@ export class WebDriver implements ParityDriver {
       if (active.tagName === "BODY") return null;
       return active.tagName.toLowerCase();
     });
+  }
+
+  async sidebarBrandVisible(): Promise<boolean> {
+    const brand = this.sidebar().getByText("Pi Dash", { exact: true }).first();
+    return (await brand.count()) > 0 && (await brand.isVisible());
+  }
+
+  async sidebarQuickActionNames(): Promise<string[]> {
+    const texts = await this.sidebar().getByRole("button").allTextContents();
+    return texts.map((t) => t.trim().replace(/\s+/g, " ")).filter((t) => t.length > 0);
+  }
+
+  async sidebarAccountButtonCount(): Promise<number> {
+    return await this.sidebar().getByRole("button").filter({ hasText: "@" }).count();
+  }
+
+  /** The resize grip on the sidebar's right edge. */
+  private sidebarGrip(): Locator {
+    return this.page.getByRole("separator", { name: "Resize sidebar" }).first();
+  }
+
+  async dragSidebarGripBy(dx: number): Promise<void> {
+    const grip = this.sidebarGrip();
+    const box = await grip.boundingBox();
+    if (box === null) throw new Error("[parity] sidebar resize grip has no layout box.");
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await this.page.mouse.move(x, y);
+    await this.page.mouse.down();
+    await this.page.mouse.move(x + dx, y, { steps: 10 });
+    await this.page.mouse.up();
+  }
+
+  async doubleClickSidebarGrip(): Promise<void> {
+    const grip = this.sidebarGrip();
+    const box = await grip.boundingBox();
+    if (box === null) throw new Error("[parity] sidebar resize grip has no layout box.");
+    // Offset down the edge: the grip's own center can sit under the
+    // header row, while the edge below it takes the collapse gesture.
+    await this.page.mouse.dblclick(box.x + box.width / 2, box.y + 100);
+  }
+
+  async hoverCollapsedEdge(): Promise<void> {
+    await this.page.mouse.move(4, 400);
+  }
+
+  async clickOutsideSidebar(): Promise<void> {
+    // Raw mouse event: the floating shell animates under the cursor, which
+    // defeats actionability checks, while the outside detector only needs
+    // the press itself.
+    await this.page.mouse.click(450, 400);
+  }
+
+  async sidebarEntryVisible(name: string): Promise<boolean> {
+    return (await this.sidebar().innerText()).includes(name);
+  }
+
+  /** The listed-projects count input inside the open dialog. */
+  private projectCapField(): Locator {
+    return this.page.locator('[role="dialog"]').locator('input[type="number"]').first();
+  }
+
+  async projectCapTypeText(text: string): Promise<void> {
+    const input = this.projectCapField();
+    await input.click();
+    await input.press("End");
+    for (const char of text) await input.press(char);
+  }
+
+  async projectCapFill(value: string): Promise<void> {
+    await this.projectCapField().fill(value);
+  }
+
+  async projectCapMinErrorVisible(): Promise<boolean> {
+    const error = this.page.locator('[role="dialog"]').getByText("Minimum value is 1");
+    return (await error.count()) > 0 && (await error.first().isVisible());
+  }
+
+  async railSettingsEntryPresent(): Promise<boolean> {
+    return (await this.page.getByRole("link", { name: "Settings", exact: true }).count()) > 0;
+  }
+
+  async railContextMenuText(): Promise<string> {
+    await this.page.mouse.click(8, 400, { button: "right" });
+    await this.page.waitForTimeout(1000);
+    return (await this.page.locator("#context-menu-portal").textContent()) ?? "";
+  }
+
+  async inboxDotPresent(): Promise<boolean> {
+    // The dot is a span nested inside the inbox link's icon wrapper and
+    // mounts only with unread notifications, so the icon subtree carries no
+    // span while the inbox is empty.
+    return (await this.page.locator('a[href$="/notifications/"] div span').count()) > 0;
+  }
+
+  async hoverProjectHeader(): Promise<void> {
+    await this.shellMain().locator('button[aria-haspopup="listbox"]').first().hover();
+  }
+
+  async projectNameVisibleCount(name: string): Promise<number> {
+    return await this.page.getByText(name, { exact: false }).count();
+  }
+
+  async projectActionDialogHeading(): Promise<string | null> {
+    // The dialog root is a zero-size wrapper around fixed panels, so the
+    // heading inside the panel is the visible proof it opened.
+    const heading = this.page.locator('[role="dialog"]').getByRole("heading").first();
+    if ((await heading.count()) === 0) return null;
+    return ((await heading.textContent()) ?? "").trim().replace(/\s+/g, " ") || null;
+  }
+
+  async activeCyclesHeaderVisible(): Promise<boolean> {
+    const header = this.page.getByText("Active cycles", { exact: false }).first();
+    return (await header.count()) > 0 && (await header.isVisible());
+  }
+
+  async errorNoticeVisible(): Promise<boolean> {
+    const notice = this.page.getByText("Something went wrong");
+    return (await notice.count()) > 0 && (await notice.first().isVisible());
   }
 }

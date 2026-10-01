@@ -33,11 +33,7 @@ test(specTitle(ROWS, "top bar composition and sidebar toggle"), { tag: specTags(
   });
 
   await test.step("no unread dot shows with an empty inbox", async () => {
-    // The dot is a span nested inside the inbox link's icon wrapper and
-    // mounts only with unread notifications, so the icon subtree carries no
-    // span while the inbox is empty.
-    const dots = await driver.page.locator('a[href$="/notifications/"] div span').count();
-    expect(dots).toBe(0);
+    expect(await driver.inboxDotPresent()).toBe(false);
   });
 
   await test.step("the toggle collapses and reopens the sidebar", async () => {
@@ -54,9 +50,7 @@ test(specTitle(ROWS, "top bar composition and sidebar toggle"), { tag: specTags(
     await expect.poll(() => driver.sidebarPresent(), { timeout: 30_000 }).toBe(false);
     // Generous budget: under shared-stack contention the notifications
     // page can take a while to mount its bar.
-    await expect
-      .poll(() => driver.page.getByRole("link", { name: "Star us on GitHub" }).count(), { timeout: 60_000 })
-      .toBeGreaterThan(0);
+    await expect.poll(async () => (await driver.topBarControls()).starLink, { timeout: 60_000 }).toBe(true);
     const controls = await driver.topBarControls();
     expect(controls.accountFallback).toBe(true);
     expect(controls.inbox).toBe(true);

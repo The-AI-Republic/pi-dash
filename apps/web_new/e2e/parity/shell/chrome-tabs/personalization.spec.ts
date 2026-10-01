@@ -37,8 +37,7 @@ test(
 
       await driver.setPersonalItemEnabled("Drafts", !draftsBefore);
       await expect.poll(() => driver.personalItemChecked("Drafts"), { timeout: 15_000 }).toBe(!draftsBefore);
-      const sidebarText = await driver.page.locator("#main-sidebar").innerText();
-      expect(sidebarText.includes("Drafts")).toBe(!draftsBefore);
+      await expect.poll(() => driver.sidebarEntryVisible("Drafts"), { timeout: 15_000 }).toBe(!draftsBefore);
 
       await driver.setPersonalItemEnabled("Drafts", draftsBefore ?? true);
       await expect.poll(() => driver.personalItemChecked("Drafts"), { timeout: 15_000 }).toBe(draftsBefore);
@@ -125,13 +124,9 @@ test(
 
       // The input blocks exponent characters the number field would
       // otherwise accept, while plain digits flow through to the server.
-      const dialog = driver.page.locator('[role="dialog"]');
-      const input = dialog.locator('input[type="number"]').first();
-      await input.click();
-      await input.press("End");
-      await input.press("e");
+      await driver.projectCapTypeText("e");
       expect(await driver.projectCapInput()).toBe("2");
-      await input.press("5");
+      await driver.projectCapTypeText("5");
       expect(await driver.projectCapInput()).toBe("25");
       await expect
         .poll(async () => (await getWorkspaceUserProperties(seed.workspaceSlug, session))["navigation_project_limit"], {
@@ -140,8 +135,8 @@ test(
         .toBe(25);
 
       // Below-minimum values are clamped on the server and flagged inline.
-      await input.fill("0");
-      await expect(dialog.getByText("Minimum value is 1")).toBeVisible({ timeout: 10_000 });
+      await driver.projectCapFill("0");
+      await expect.poll(() => driver.projectCapMinErrorVisible(), { timeout: 10_000 }).toBe(true);
       await expect
         .poll(async () => (await getWorkspaceUserProperties(seed.workspaceSlug, session))["navigation_project_limit"], {
           timeout: 15_000,

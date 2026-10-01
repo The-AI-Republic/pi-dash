@@ -1432,6 +1432,81 @@ export class WebNewDriver implements ParityDriver {
   }
   async commentAndRunDisabled(): Promise<boolean> {
     return todo("commentAndRunDisabled");
+
+  async sidebarBrandVisible(): Promise<boolean> {
+    return todo("sidebarBrandVisible");
+  }
+
+  async sidebarQuickActionNames(): Promise<string[]> {
+    return todo("sidebarQuickActionNames");
+  }
+
+  async sidebarAccountButtonCount(): Promise<number> {
+    return todo("sidebarAccountButtonCount");
+  }
+
+  async dragSidebarGripBy(): Promise<void> {
+    return todo("dragSidebarGripBy");
+  }
+
+  async doubleClickSidebarGrip(): Promise<void> {
+    return todo("doubleClickSidebarGrip");
+  }
+
+  async hoverCollapsedEdge(): Promise<void> {
+    return todo("hoverCollapsedEdge");
+  }
+
+  async clickOutsideSidebar(): Promise<void> {
+    return todo("clickOutsideSidebar");
+  }
+
+  async sidebarEntryVisible(): Promise<boolean> {
+    return todo("sidebarEntryVisible");
+  }
+
+  async projectCapTypeText(): Promise<void> {
+    return todo("projectCapTypeText");
+  }
+
+  async projectCapFill(): Promise<void> {
+    return todo("projectCapFill");
+  }
+
+  async projectCapMinErrorVisible(): Promise<boolean> {
+    return todo("projectCapMinErrorVisible");
+  }
+
+  async railSettingsEntryPresent(): Promise<boolean> {
+    return todo("railSettingsEntryPresent");
+  }
+
+  async railContextMenuText(): Promise<string> {
+    return todo("railContextMenuText");
+  }
+
+  async inboxDotPresent(): Promise<boolean> {
+    return todo("inboxDotPresent");
+  }
+
+  async hoverProjectHeader(): Promise<void> {
+    return todo("hoverProjectHeader");
+  }
+
+  async projectNameVisibleCount(): Promise<number> {
+    return todo("projectNameVisibleCount");
+  }
+
+  async projectActionDialogHeading(): Promise<string | null> {
+    return todo("projectActionDialogHeading");
+  }
+
+  async activeCyclesHeaderVisible(): Promise<boolean> {
+    return todo("activeCyclesHeaderVisible");
+  }
+
+  async errorNoticeVisible(): Promise<boolean> {
+    return todo("errorNoticeVisible");
   }
 
   // Activity feed stubs (NEWFRONT-114). Mirror of the interface additions;

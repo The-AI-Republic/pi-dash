@@ -153,11 +153,10 @@ test(
         await driver.openProjectTab(seed.workspaceSlug, secondId, "issues");
         await expect.poll(() => driver.projectHeaderText(), { timeout: 30_000 }).toContain(SECOND_NAME);
         expect(await driver.projectHeaderTruncated()).toBe(true);
-        const header = driver.page.locator("main main").locator('button[aria-haspopup="listbox"]').first();
-        const before = await driver.page.getByText(SECOND_NAME, { exact: false }).count();
-        await header.hover();
+        const before = await driver.projectNameVisibleCount(SECOND_NAME);
+        await driver.hoverProjectHeader();
         await expect
-          .poll(() => driver.page.getByText(SECOND_NAME, { exact: false }).count(), { timeout: 15_000 })
+          .poll(() => driver.projectNameVisibleCount(SECOND_NAME), { timeout: 15_000 })
           .toBeGreaterThan(before);
       } finally {
         await deleteProject(seed.workspaceSlug, secondId, session);
@@ -185,10 +184,7 @@ test(
 
       await driver.openProjectActions();
       await driver.clickProjectAction("Publish project");
-      // The dialog root is a zero-size wrapper around fixed panels, so the
-      // heading inside the panel is the visible proof it opened.
-      const dialog = driver.page.locator('[role="dialog"]');
-      await expect(dialog.getByRole("heading", { name: "Publish project" })).toBeVisible({ timeout: 15_000 });
+      await expect.poll(() => driver.projectActionDialogHeading(), { timeout: 15_000 }).toBe("Publish project");
       await driver.page.keyboard.press("Escape");
     });
 

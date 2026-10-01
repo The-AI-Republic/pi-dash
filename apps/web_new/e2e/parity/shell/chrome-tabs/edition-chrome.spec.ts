@@ -41,8 +41,7 @@ test(
       await driver.page.goto(`/${seed.workspaceSlug}/active-cycles/`);
       await driver.page.waitForLoadState("domcontentloaded");
       await expect.poll(() => driver.page.url(), { timeout: 30_000 }).toContain("/active-cycles");
-      const header = driver.page.getByText("Active cycles", { exact: false }).first();
-      await expect(header).toBeVisible({ timeout: 30_000 });
+      await expect.poll(() => driver.activeCyclesHeaderVisible(), { timeout: 30_000 }).toBe(true);
       await expect.poll(() => driver.upgradePillCount(), { timeout: 15_000 }).toBeGreaterThan(0);
       await driver.openWorkspaceHome(seed.workspaceSlug);
       await expect.poll(() => driver.page.url(), { timeout: 30_000 }).toContain(`/${seed.workspaceSlug}/`);

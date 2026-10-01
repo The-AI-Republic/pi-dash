@@ -192,7 +192,7 @@ test(
         await driver.page.waitForTimeout(3_000);
         expect(driver.page.url().endsWith(`/projects/${seed.projectId}`)).toBe(true);
         expect(await driver.activeTabName()).toBeNull();
-        await expect(driver.page.getByText("Something went wrong")).toBeVisible({ timeout: 10_000 });
+        await expect.poll(() => driver.errorNoticeVisible(), { timeout: 10_000 }).toBe(true);
       } finally {
         await patchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
           preferences: { navigation: { default_tab: "work_items", hide_in_more_menu: [] } },

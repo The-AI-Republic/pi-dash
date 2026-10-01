@@ -29,18 +29,15 @@ test(
       await test.step("no rail strip and no rail settings entry", async () => {
         await open();
         expect(await driver.railPresent()).toBe(false);
-        const settingsLinks = await driver.page.getByRole("link", { name: "Settings", exact: true }).count();
-        expect(settingsLinks).toBe(0);
+        expect(await driver.railSettingsEntryPresent()).toBe(false);
         expect(await driver.contentPaddingLeft()).toBeGreaterThan(0);
       });
     }
 
     await test.step("no density or docking controls are offered anywhere", async () => {
       await driver.openProjectTab(seed.workspaceSlug, seed.projectId, "issues");
-      await driver.page.mouse.click(8, 400, { button: "right" });
-      await driver.page.waitForTimeout(1000);
-      const portal = await driver.page.locator("#context-menu-portal").textContent();
-      expect(portal ?? "").not.toMatch(/Icon only|Dock App Rail|Undock App Rail/);
+      const menuText = await driver.railContextMenuText();
+      expect(menuText).not.toMatch(/Icon only|Dock App Rail|Undock App Rail/);
     });
   }
 );

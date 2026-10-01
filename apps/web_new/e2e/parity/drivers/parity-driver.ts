@@ -1328,6 +1328,44 @@ export interface ParityDriver {
   setViewportSize(width: number, height: number): Promise<void>;
   /** Open the workspace notifications page (the app sidebar stays unmounted there). */
   openNotifications(workspaceSlug: string): Promise<void>;
+  /** True while the sidebar header shows the product brand. */
+  sidebarBrandVisible(): Promise<boolean>;
+  /** Names of the quick-action buttons carried by the sidebar header. */
+  sidebarQuickActionNames(): Promise<string[]>;
+  /** How many account controls the sidebar currently renders. */
+  sidebarAccountButtonCount(): Promise<number>;
+  /** Drag the sidebar resize grip horizontally by the given pixels. */
+  dragSidebarGripBy(dx: number): Promise<void>;
+  /** Double-click the sidebar resize grip (collapse gesture). */
+  doubleClickSidebarGrip(): Promise<void>;
+  /** Hover the collapsed left edge where a peek overlay would appear. */
+  hoverCollapsedEdge(): Promise<void>;
+  /** Click content outside the floating sidebar (outside-tap gesture). */
+  clickOutsideSidebar(): Promise<void>;
+  /** True while a personal entry with this name shows in the sidebar. */
+  sidebarEntryVisible(name: string): Promise<boolean>;
+  /** Type text at the end of the listed-projects count input. */
+  projectCapTypeText(text: string): Promise<void>;
+  /** Replace the listed-projects count input with the given value. */
+  projectCapFill(value: string): Promise<void>;
+  /** True while the count input flags a below-minimum value inline. */
+  projectCapMinErrorVisible(): Promise<boolean>;
+  /** True while a rail settings entry links anywhere on the page. */
+  railSettingsEntryPresent(): Promise<boolean>;
+  /** Context-menu text summoned from the left-edge rail zone. */
+  railContextMenuText(): Promise<string>;
+  /** True while the inbox link carries an unread dot. */
+  inboxDotPresent(): Promise<boolean>;
+  /** Hover the project header button (hover-reveal gesture). */
+  hoverProjectHeader(): Promise<void>;
+  /** How many visible matches of a project name the page shows. */
+  projectNameVisibleCount(name: string): Promise<number>;
+  /** Heading of the dialog the last project action opened, or null. */
+  projectActionDialogHeading(): Promise<string | null>;
+  /** True while the paywalled Cycles page header is visible. */
+  activeCyclesHeaderVisible(): Promise<boolean>;
+  /** True while the generic error notice shows (bare-address flows). */
+  errorNoticeVisible(): Promise<boolean>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */
