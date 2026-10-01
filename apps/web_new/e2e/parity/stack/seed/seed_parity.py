@@ -56,6 +56,12 @@ MENTION_PASSWORD = os.environ.get("PARITY_SEED_MENTION_PASSWORD", "Parity-Seed-2
 # the project lets guests use everything).
 GUEST_EMAIL = os.environ.get("PARITY_SEED_GUEST_EMAIL", "parity-guest@example.com")
 GUEST_PASSWORD = os.environ.get("PARITY_SEED_GUEST_PASSWORD", "Parity-Seed-2")
+# NEWFRONT-112: a bot identity for the CMT-012 automated-author step. It
+# owns no workspace and seeds no comments (zero blast radius on comment
+# counts); scenarios sign it in through the API only, to post one comment
+# whose card must carry the bot label.
+BOT_EMAIL = os.environ.get("PARITY_SEED_BOT_EMAIL", "parity-bot@example.com")
+BOT_PASSWORD = os.environ.get("PARITY_SEED_BOT_PASSWORD", "Parity-Seed-1")
 WORKSPACE_NAME = "Parity Workspace"
 WORKSPACE_SLUG = "parity-ws"
 PROJECT_NAME = "Parity Project"
@@ -111,6 +117,12 @@ def refresh_project_issues(project, workspace, state, user) -> None:
         # every per-issue dependent row before replacing the issues
         # themselves; otherwise a reseed collides with leftover comments
         # (NEWFRONT-115: first hit by a mention probe comment).
+        # NEWFRONT-112: release reply threads first so the issue_comments
+        # delete below cannot trip the self-referencing parent FK.
+        cursor.execute(
+            "UPDATE issue_comments SET parent_id = NULL WHERE project_id = %s",
+            [str(project.id)],
+        )
         for table in (
             "issue_reactions",
             "issue_comments",
@@ -341,6 +353,26 @@ def build() -> dict:
             key=key, defaults={"value": value, "category": "authentication"}
         )
 
+    bot, bot_created = User.objects.get_or_create(
+        email=BOT_EMAIL,
+        defaults={
+            "username": "parity_bot",
+            "password": make_password(BOT_PASSWORD),
+            "display_name": "Parity Bot",
+            "first_name": "Parity",
+            "last_name": "Bot",
+            "is_active": True,
+            "is_email_verified": True,
+            "is_bot": True,
+        },
+    )
+    if not bot_created:
+        bot.password = make_password(BOT_PASSWORD)
+        bot.is_active = True
+        bot.is_email_verified = True
+        bot.is_bot = True
+        bot.save(update_fields=["password", "is_active", "is_email_verified", "is_bot"])
+
     workspace, ws_created = Workspace.objects.get_or_create(
         slug=WORKSPACE_SLUG,
         defaults={"name": WORKSPACE_NAME, "owner": user, "created_by_id": user.id},
@@ -349,6 +381,9 @@ def build() -> dict:
         workspace.save(created_by_id=user.id, disable_auto_set_user=True)
     WorkspaceMember.objects.get_or_create(
         workspace=workspace, member=user, defaults={"role": 20}
+    )
+    WorkspaceMember.objects.get_or_create(
+        workspace=workspace, member=bot, defaults={"role": 15}
     )
     Profile.objects.filter(user=user).update(last_workspace_id=workspace.id)
 
@@ -395,6 +430,11 @@ def build() -> dict:
         member=mention_user,
         defaults={"role": 15, "workspace_id": workspace.id, "created_by_id": user.id},
     )
+    ProjectMember.objects.get_or_create(
+        project=project,
+        member=bot,
+        defaults={"role": 15, "workspace_id": workspace.id, "created_by_id": user.id},
+    )
     # Project creation signals already stamp a property row per member;
     # keep exactly one row and force the flat list layout on it.
     ProjectUserProperty.objects.update_or_create(
@@ -428,6 +468,8 @@ def build() -> dict:
     facts = {
         "email": EMAIL,
         "password": PASSWORD,
+        "botEmail": BOT_EMAIL,
+        "botPassword": BOT_PASSWORD,
         "workspaceSlug": WORKSPACE_SLUG,
         "workspaceName": WORKSPACE_NAME,
         "projectId": str(project.id),

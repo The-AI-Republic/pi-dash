@@ -8,7 +8,7 @@
 // moves to the password step, and the password submit posts the native
 // form, landing in the workspace. Later oracle issues extend this driver
 // (never fork it) as new areas need new actions.
-import type { Locator, Page } from "@playwright/test";
+import { expect, type Locator, type Page } from "@playwright/test";
 import type {
   ParityBrowserCookie,
   ParityDriver,
@@ -1884,5 +1884,234 @@ export class WebDriver implements ParityDriver {
     const pulsing = this.page.locator(".animate-pulse, [data-testid*='skeleton' i], [aria-busy='true']").first();
     if ((await pulsing.count()) > 0) return true;
     return false;
+  }
+
+  // --- Comment composer and CRUD (NEWFRONT-112). Selectors observed on
+  // the running old app against the seeded stack; no app code is reused.
+
+  /** The composer box labelled "Add comment" in the activity section. */
+  private composerBox(): Locator {
+    return this.page.getByRole("group", { name: "Add comment" });
+  }
+
+  /** The editable rich-text surface inside the composer box. */
+  private composerEditor(): Locator {
+    return this.composerBox().locator('[contenteditable="true"]');
+  }
+
+  /** The composer submit button (the "Comment" action, not "Comment & Run"). */
+  private composerSubmitButton(): Locator {
+    return this.composerBox().getByRole("button", { name: "Comment", exact: true });
+  }
+
+  /** The card element for the comment showing the given text. */
+  private commentCard(text: string): Locator {
+    return this.page.locator('div[id^="comment-"]', { hasText: text });
+  }
+
+  /** The editable surface of the open inline edit form. */
+  private commentEditEditor(): Locator {
+    return this.page.locator('div[id^="comment-"] [contenteditable="true"]');
+  }
+
+  async composerOpenIssue(workspaceSlug: string, issueRef: string): Promise<void> {
+    // domcontentloaded (not full load): same cold-dev-server reasoning as
+    // openEntry; the Activity wait below is the readiness gate.
+    await this.page.goto(`/${workspaceSlug}/browse/${issueRef}/`, { waitUntil: "domcontentloaded", timeout: 300_000 });
+    // The first navigation after sign-in compiles the work-item bundle in
+    // the dev server; observed 80s+ on a loaded host with 120s flaky, so
+    // the budget is 300s (the scenario timeout is 600s).
+    await this.page.getByText("Activity").first().waitFor({ timeout: 300_000 });
+  }
+
+  async composerType(text: string): Promise<void> {
+    const editor = this.composerEditor();
+    await editor.click();
+    await editor.pressSequentially(text);
+  }
+
+  async composerPasteHtml(html: string): Promise<void> {
+    const page = this.page;
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.evaluate(
+      ([fragment]: [string]) => {
+        const blobHtml = new Blob([fragment], { type: "text/html" });
+        const blobText = new Blob([fragment.replace(/<[^>]*>/g, "")], { type: "text/plain" });
+        return navigator.clipboard.write([new ClipboardItem({ "text/html": blobHtml, "text/plain": blobText })]);
+      },
+      [html]
+    );
+    const editor = this.composerEditor();
+    await editor.click();
+    await editor.press(`${process.platform === "darwin" ? "Meta" : "Control"}+v`);
+  }
+
+  async composerDraftText(): Promise<string> {
+    const raw = await this.composerEditor().innerText();
+    return raw.trim();
+  }
+
+  async composerSubmitDisabled(): Promise<boolean> {
+    return this.composerSubmitButton().isDisabled();
+  }
+
+  async composerSubmit(): Promise<void> {
+    // Fail fast when the composer never arms (e.g. a stuck upload leaves
+    // submit disabled): a blind click would hang until the test timeout.
+    const button = this.composerSubmitButton();
+    await button.waitFor({ state: "visible", timeout: 30_000 });
+    await expect(button).toBeEnabled({ timeout: 30_000 });
+    await button.click({ timeout: 30_000 });
+  }
+
+  async composerPressEnter(): Promise<void> {
+    const editor = this.composerEditor();
+    await editor.focus();
+    await this.page.keyboard.press("Enter");
+  }
+
+  async composerPressShiftEnter(): Promise<void> {
+    const editor = this.composerEditor();
+    await editor.focus();
+    await this.page.keyboard.press("Shift+Enter");
+  }
+
+  async composerAttachFile(path: string): Promise<void> {
+    const page = this.page;
+    const attachButton = this.composerBox().locator('button:has(svg[class*="image"])');
+    const [chooser] = await Promise.all([
+      page.waitForEvent("filechooser", { timeout: 30_000 }),
+      attachButton.click({ timeout: 30_000 }),
+    ]);
+    await chooser.setFiles(path);
+  }
+
+  async composerVisibleCommentTexts(): Promise<string[]> {
+    const cards = this.page.locator('div[id^="comment-"]');
+    const count = await cards.count();
+    const bodies: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const body = cards.nth(index).locator('[contenteditable="false"]').first();
+      if ((await body.count()) === 0) continue;
+      bodies.push(((await body.innerText()) ?? "").trim());
+    }
+    return bodies;
+  }
+
+  async composerOpenCommentMenu(text: string): Promise<void> {
+    const card = this.commentCard(text);
+    await card.scrollIntoViewIfNeeded();
+    await card.locator("[data-main-menu] > button").click({ timeout: 30_000 });
+  }
+
+  async composerMenuClick(item: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name: item }).click({ timeout: 30_000 });
+  }
+
+  async composerEditType(text: string): Promise<void> {
+    const editor = this.commentEditEditor();
+    await editor.click();
+    await editor.press(`${process.platform === "darwin" ? "Meta" : "Control"}+a`);
+    await editor.pressSequentially(text);
+  }
+
+  /** The card holding the open inline edit form (exactly one is ever open). */
+  private commentEditCard(): Locator {
+    // Found from the open editor upward: a `{ has: <page-scoped locator> }`
+    // filter cannot see the card, since the inner locator must match a
+    // *descendant* of each candidate, not the page.
+    return this.commentEditEditor().locator('xpath=ancestor::div[starts-with(@id, "comment-")][1]');
+  }
+
+  async composerEditSave(): Promise<void> {
+    // The edit form renders save (check) then discard (cross) side by side
+    // whenever the draft is non-empty; the save control leads.
+    await this.commentEditCard().locator('form div[class*="self-end"] button').first().click({ timeout: 30_000 });
+  }
+
+  async composerEditDiscard(): Promise<void> {
+    await this.commentEditCard().locator('form div[class*="self-end"] button').last().click({ timeout: 30_000 });
+  }
+
+  async composerEditSaveDisabled(): Promise<boolean> {
+    return this.commentEditCard().locator('form div[class*="self-end"] button').first().isDisabled();
+  }
+
+  async composerEditPressEnter(): Promise<void> {
+    const editor = this.commentEditEditor();
+    await editor.focus();
+    await this.page.keyboard.press("Enter");
+  }
+
+  async composerCommentMeta(text: string): Promise<{
+    author: string;
+    time: string;
+    edited: boolean;
+    tooltip: string | null;
+  }> {
+    const card = this.commentCard(text);
+    // Center the card first: the sticky composer overlaps viewport edges,
+    // so a minimal scroll can park the time span under it where hover
+    // events never land.
+    await card.evaluate((element) => element.scrollIntoView({ block: "center" }));
+    const author = (
+      (await card
+        .locator("div.text-caption-sm-medium")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const timeSpan = card.locator('span[tabindex="0"]').first();
+    const time = ((await timeSpan.innerText().catch(() => "")) ?? "").trim();
+    const tip = this.page.locator(".bp4-tooltip2");
+    // The exact-time tooltip is hover-triggered (200ms open delay); focus
+    // alone never opens it.
+    let tooltip: string | null = null;
+    try {
+      await timeSpan.hover({ timeout: 10_000 });
+      await tip.first().waitFor({ timeout: 10_000 });
+      tooltip =
+        (
+          (await tip
+            .first()
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim() || null;
+    } catch {
+      tooltip = null;
+    }
+    // Park the mouse away so the tooltip closes; a lingering portal would
+    // be misread as the next card's tooltip.
+    await this.page.mouse.move(8, 8);
+    await tip
+      .first()
+      .waitFor({ state: "detached", timeout: 5_000 })
+      .catch(() => undefined);
+    return { author, time, edited: time.includes("(edited)"), tooltip };
+  }
+
+  async composerCommentImageCount(text: string): Promise<number> {
+    // Attached images render as embedded image nodes (an <img> each) in
+    // the read-only card body; the card shows no file-name list, and the
+    // header avatar lives outside the body, so body <img> count is exact.
+    const card = this.commentCard(text);
+    await card.scrollIntoViewIfNeeded();
+    return card.locator('[contenteditable="false"] img').count();
+  }
+
+  async composerVisibleNotices(): Promise<{ message: string; kind: "success" | "error" | "unknown" }[]> {
+    const dialogs = this.page.locator('div[aria-label="Notifications"] div[role="dialog"]');
+    const count = await dialogs.count();
+    const notices: { message: string; kind: "success" | "error" | "unknown" }[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const dialog = dialogs.nth(index);
+      const message = ((await dialog.innerText().catch(() => "")) ?? "").trim();
+      if (message.length === 0) continue;
+      let kind: "success" | "error" | "unknown" = "unknown";
+      if ((await dialog.locator('[class*="bg-success"]').count()) > 0) kind = "success";
+      else if ((await dialog.locator('[class*="bg-danger"], [class*="bg-error"]').count()) > 0) kind = "error";
+      notices.push({ message, kind });
+    }
+    return notices;
   }
 }

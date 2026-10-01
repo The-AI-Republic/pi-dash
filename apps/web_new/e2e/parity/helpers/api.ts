@@ -686,6 +686,176 @@ export async function adminSignInSession(
   return header;
 }
 
+/** A project issue as the server reports it, with the fields scenarios need. */
+export interface ServerIssue {
+  id: string;
+  name: string;
+  sequenceId: number;
+  projectIdentifier: string;
+}
+
+/** A work-item comment as the server reports it through the history API. */
+export interface ServerComment {
+  id: string;
+  comment_html: string;
+  comment_stripped: string;
+  actor: string;
+  actorDisplayName: string;
+  actorIsBot: boolean;
+  created_at: string;
+  edited_at: string | null;
+}
+
+/** Project issues as the server reports them, in API order. */
+export async function serverIssues(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerIssue[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] issues read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const record = row as { id?: unknown; name?: unknown; sequence_id?: unknown; project_detail?: unknown };
+    if (typeof record.id !== "string" || typeof record.name !== "string") {
+      throw new Error("[parity] issue row carried no string id/name.");
+    }
+    const detail = (record.project_detail ?? {}) as { identifier?: unknown };
+    return {
+      id: record.id,
+      name: record.name,
+      sequenceId: typeof record.sequence_id === "number" ? record.sequence_id : 0,
+      projectIdentifier: typeof detail.identifier === "string" ? detail.identifier : "",
+    };
+  });
+}
+
+/** Resolve one issue's server UUID by its display name. */
+export async function serverIssueIdByName(
+  workspaceSlug: string,
+  projectId: string,
+  name: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const issues = await serverIssues(workspaceSlug, projectId, sessionCookie, apiBase);
+  const found = issues.find((issue) => issue.name === name);
+  if (!found) throw new Error(`[parity] no issue named ${JSON.stringify(name)}.`);
+  return found.id;
+}
+
+/** Comments on one issue as the server reports them, oldest first. */
+export async function serverComments(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerComment[]> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/history/?activity_type=issue-comment`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] comments read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const record = row as {
+      id?: unknown;
+      comment_html?: unknown;
+      comment_stripped?: unknown;
+      actor?: unknown;
+      actor_detail?: unknown;
+      created_at?: unknown;
+      edited_at?: unknown;
+    };
+    if (typeof record.id !== "string") throw new Error("[parity] comment row carried no string id.");
+    const actor = (record.actor_detail ?? {}) as {
+      display_name?: unknown;
+      first_name?: unknown;
+      is_bot?: unknown;
+    };
+    return {
+      id: record.id,
+      comment_html: typeof record.comment_html === "string" ? record.comment_html : "",
+      comment_stripped: typeof record.comment_stripped === "string" ? record.comment_stripped : "",
+      actor: typeof record.actor === "string" ? record.actor : "",
+      actorDisplayName:
+        typeof actor.display_name === "string" && actor.display_name.length > 0
+          ? actor.display_name
+          : typeof actor.first_name === "string"
+            ? actor.first_name
+            : "",
+      actorIsBot: actor.is_bot === true,
+      created_at: typeof record.created_at === "string" ? record.created_at : "",
+      edited_at: typeof record.edited_at === "string" ? record.edited_at : null,
+    };
+  });
+}
+
+/**
+ * Post a comment on one issue as the session owner (NEWFRONT-112, CMT-012
+ * bot step). Sends the same create payload the composer posts; the
+ * session-authenticated write carries the CSRF token from its cookie.
+ * Returns the created comment's server id.
+ */
+export async function serverCreateComment(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  commentHtml: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const csrfMatch = /(?:^|;\s*)csrftoken=([^;]+)/.exec(sessionCookie);
+  const csrf = csrfMatch?.[1] ?? "";
+  if (csrf === "") throw new Error("[parity] comment create has no CSRF token.");
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/comments/`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: sessionCookie, "X-CSRFToken": csrf },
+      body: JSON.stringify({ comment_html: commentHtml }),
+    }
+  );
+  if (!res.ok) throw new Error(`[parity] comment create failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { id?: unknown };
+  if (typeof payload.id !== "string") throw new Error("[parity] comment create carried no string id.");
+  return payload.id;
+}
+
+/**
+ * Replace one comment's stored HTML (NEWFRONT-112, CMT-003 untouched-save
+ * step). The server stamps an edit time only when the HTML actually
+ * differs, so PATCHing the identical body back must leave edited_at null.
+ */
+export async function serverPatchComment(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  commentId: string,
+  commentHtml: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const csrfMatch = /(?:^|;\s*)csrftoken=([^;]+)/.exec(sessionCookie);
+  const csrf = csrfMatch?.[1] ?? "";
+  if (csrf === "") throw new Error("[parity] comment patch has no CSRF token.");
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/comments/${commentId}/`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json", cookie: sessionCookie, "X-CSRFToken": csrf },
+      body: JSON.stringify({ comment_html: commentHtml }),
+    }
+  );
+  if (!res.ok) throw new Error(`[parity] comment patch failed with HTTP ${res.status}.`);
+}
+
 /** Names of the project's issues as the server reports them, in API order. */
 export async function serverIssueNames(
   workspaceSlug: string,
