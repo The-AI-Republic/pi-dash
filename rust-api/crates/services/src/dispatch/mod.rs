@@ -6,19 +6,25 @@
 //!   (`cloud_agent/admission.py`, `cloud_agent/api.py`,
 //!   `cloud_agent/checks.py`, `managed_runner/policy.py`,
 //!   `managed_runner/checks.py`, `managed_runner/permissions.py`).
+//! * [`tools`] — run toolset: `build_tools` gate, tool closures, GitHub
+//!   adapter, model routing, CE seams (`cloud_agent/tools.py`,
+//!   `cloud_agent/github_mcp.py`, `cloud_agent/model.py`,
+//!   `ee/cloud_agent/toolsets.py`, `ee/cloud_agent/model_provider.py`).
 //!
-//! Sibling L5+ issues add their own files under this module; L1 types live in
+//! Sibling L6+ issues add their own files under this module; L1 types live in
 //! `pidash_types::dispatch` and L2 read shapes in `pidash_db::dispatch`.
 //!
 //! Fixture ids replayed by the unit tests alongside each module:
-//! `rust-api/fixtures/dispatch/fx-disp-03-policy.golden.json` (FX-DISP-03) and
+//! `rust-api/fixtures/dispatch/fx-disp-03-policy.golden.json` (FX-DISP-03),
 //! `rust-api/fixtures/dispatch/fx-disp-04-admission-checks.golden.json`
-//! (FX-DISP-04).
+//! (FX-DISP-04), and `rust-api/fixtures/dispatch/fx-disp-05-tools.golden.json`
+//! (FX-DISP-05).
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod admission;
 pub mod policy;
+pub mod tools;
 
 pub use admission::admission_bucket;
 pub use admission::admission_retry_after;
@@ -78,3 +84,158 @@ pub use policy::TOOL_CATALOG_VERSION;
 pub use policy::TOOL_PLAN_VERSION;
 pub use policy::UNAVAILABLE_CAPABILITIES;
 pub use policy::WRITE_TOOLS;
+pub use tools::advisory_lock_key;
+pub use tools::audit_guards;
+pub use tools::bounded;
+pub use tools::build_github_mcp_grant;
+pub use tools::build_tools;
+pub use tools::canonical;
+pub use tools::check_github_binding;
+pub use tools::check_github_installation;
+pub use tools::check_scope;
+pub use tools::clamp_search_limit;
+pub use tools::collapse_replay;
+pub use tools::collapsed_replay;
+pub use tools::comment_created;
+pub use tools::comment_row;
+pub use tools::extra_toolsets_enabled_for;
+pub use tools::extra_toolsets_schema_tool;
+pub use tools::failure_error_code;
+pub use tools::fingerprint;
+pub use tools::get_file_call;
+pub use tools::github_mcp_spec;
+pub use tools::github_toolset_spec;
+pub use tools::idempotency_key_hash;
+pub use tools::issue_brief;
+pub use tools::issue_created;
+pub use tools::issue_data;
+pub use tools::issue_relations_result;
+pub use tools::linked_pr_call;
+pub use tools::linked_pr_number;
+pub use tools::py_stripped;
+pub use tools::relation_write_args;
+pub use tools::relations_source;
+pub use tools::replay_decision;
+pub use tools::resolve_extra_toolsets_for_run;
+pub use tools::resolve_file_ref;
+pub use tools::resolve_model_for_creator;
+pub use tools::resolve_model_for_run;
+pub use tools::resolve_tool_call_id;
+pub use tools::saved_sequence_id;
+pub use tools::saved_sort_order;
+pub use tools::scope_project_source;
+pub use tools::scope_roles;
+pub use tools::tool_completed_event;
+pub use tools::tool_risk;
+pub use tools::tool_sequence_id;
+pub use tools::transition_result;
+pub use tools::transition_same_state;
+pub use tools::truncate_chars;
+pub use tools::unresolved_refs_message;
+pub use tools::validate_comment_body;
+pub use tools::validate_create_issue;
+pub use tools::validate_github_path;
+pub use tools::validate_github_ref;
+pub use tools::validate_pr_aspect;
+pub use tools::validate_relation_count;
+pub use tools::validate_workpad_body;
+pub use tools::with_grouped_relations;
+pub use tools::workpad_updated;
+pub use tools::write_admission;
+pub use tools::CommentCreated;
+pub use tools::CommentRow;
+pub use tools::ExistingCall;
+pub use tools::GetFileCall;
+pub use tools::GithubBindingVerdict;
+pub use tools::GithubClientSpec;
+pub use tools::GithubMcpSpec;
+pub use tools::GithubToolsetSpec;
+pub use tools::IssueBrief;
+pub use tools::IssueCreated;
+pub use tools::IssueDetail;
+pub use tools::LinkedPrCall;
+pub use tools::LinkedReviewRow;
+pub use tools::ProjectSource;
+pub use tools::RelationWriteArgs;
+pub use tools::RelationsSource;
+pub use tools::ReplayDecision;
+pub use tools::ScopeActorVerdicts;
+pub use tools::StateRow;
+pub use tools::ToolCallFailure;
+pub use tools::ToolCompletedPayload;
+pub use tools::ToolDenied;
+pub use tools::ToolRisk;
+pub use tools::TransitionResult;
+pub use tools::WorkpadUpdated;
+pub use tools::COMMENT_BODY_MAX_CHARS;
+pub use tools::COMMENT_DESCRIPTION_INSERT_SQL;
+pub use tools::COMMENT_DESCRIPTION_LINK_SQL;
+pub use tools::COMMENT_INSERT_SQL;
+pub use tools::COMMENT_LIST_LIMIT;
+pub use tools::COMMENT_MAX_CHARS;
+pub use tools::COUNT_SUCCEEDED_WRITES_SQL;
+pub use tools::CREATE_ADVISORY_LOCK_SQL;
+pub use tools::CREATE_BACKLOG_STATE_SQL;
+pub use tools::CREATE_DEFAULT_POD_SQL;
+pub use tools::CREATE_DEFAULT_STATE_SQL;
+pub use tools::CREATE_DESCRIPTION_MAX_CHARS;
+pub use tools::CREATE_ISSUE_INSERT_SQL;
+pub use tools::CREATE_ISSUE_SEQUENCE_INSERT_SQL;
+pub use tools::CREATE_PROJECT_LOCK_SQL;
+pub use tools::CREATE_SAVE_DEFAULT_STATE_SQL;
+pub use tools::CREATE_SAVE_FALLBACK_STATE_SQL;
+pub use tools::CREATE_SEQ_MAX_SQL;
+pub use tools::CREATE_SEQ_SCAN_SQL;
+pub use tools::CREATE_SORT_ORDER_MAX_SQL;
+pub use tools::CREATE_TITLE_MAX_CHARS;
+pub use tools::CURRENT_ISSUE_COMMENTS_SQL;
+pub use tools::ERROR_CODE_MAX_CHARS;
+pub use tools::FIND_EXISTING_CALL_SQL;
+pub use tools::GET_PROJECT_ISSUE_SQL;
+pub use tools::GITHUB_BINDING_SQL;
+pub use tools::GITHUB_INSTALLATION_SQL;
+pub use tools::GITHUB_PATH_MAX_CHARS;
+pub use tools::GITHUB_REF_MAX_CHARS;
+pub use tools::GITHUB_TOOL_NAMES;
+pub use tools::ISSUE_DESCRIPTION_MAX_CHARS;
+pub use tools::ISSUE_SORT_ORDER_DEFAULT;
+pub use tools::ISSUE_SORT_ORDER_STEP;
+pub use tools::ISSUE_WORKPAD_MAX_CHARS;
+pub use tools::LEDGER_INSERT_READ_SQL;
+pub use tools::LEDGER_INSERT_WRITE_SQL;
+pub use tools::LEDGER_MARK_FAILED_SQL;
+pub use tools::LEDGER_MARK_SUBMITTED_SQL;
+pub use tools::LEDGER_MARK_SUCCEEDED_SQL;
+pub use tools::LINKED_PR_SQL;
+pub use tools::LINKED_REVIEWS_LIMIT;
+pub use tools::LINKED_REVIEWS_SQL;
+pub use tools::MSG_NO_LINKED_PULL_REQUEST;
+pub use tools::MSG_TOOL_RESULT_TOO_LARGE;
+pub use tools::OWN_PROJECT_ISSUES_PREDICATE;
+pub use tools::PROJECT_READ_GATE_SQL;
+pub use tools::PROJECT_STATES_SQL;
+pub use tools::PR_ASPECTS;
+pub use tools::PR_ASPECT_DEFAULT;
+pub use tools::RELATIONS_RESULT_KEY;
+pub use tools::RELATION_MAX_TARGETS;
+pub use tools::REPLAY_COLLAPSE_BYTES;
+pub use tools::ROLE_ADMIN;
+pub use tools::ROLE_GUEST;
+pub use tools::ROLE_MEMBER;
+pub use tools::SCOPE_ROLES_READ;
+pub use tools::SCOPE_ROLES_WRITE;
+pub use tools::SCOPE_RUN_SQL;
+pub use tools::SCOPE_WORKSPACE_MEMBER_SQL;
+pub use tools::SEARCH_DEFAULT_LIMIT;
+pub use tools::SEARCH_ISSUES_SQL;
+pub use tools::SEARCH_MAX_LIMIT;
+pub use tools::SERVER_KEY_GITHUB;
+pub use tools::SOURCE_INTERNAL;
+pub use tools::SOURCE_MCP;
+pub use tools::TOOL_CATALOG;
+pub use tools::TRANSITION_ISSUE_LOCK_SQL;
+pub use tools::TRANSITION_ISSUE_SAVE_SQL;
+pub use tools::TRANSITION_STATE_GET_SQL;
+pub use tools::WORKPAD_MAX_CHARS;
+pub use tools::WORKPAD_UPDATE_SQL;
+pub use tools::WRITE_TOOL_USED_SQL;
