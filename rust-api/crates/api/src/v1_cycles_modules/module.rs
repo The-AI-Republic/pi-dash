@@ -2893,35 +2893,27 @@ pub fn page_denial(error: crate::paginator::PageError) -> Denial {
 
 /// Resolve the module-issues GET `?order_by=` (default `created_at`,
 /// ascending) against what Django's `.order_by()` accepts at
-/// `views/module.py:618` (PIDASHCONV-510; every arm verified against live
-/// `str(query)` output): the exact `?` (random — `-?` is a `FieldError`,
-/// never random), the two annotations that exist at order time
-/// (`sub_issues_count`, `bridge_id` — `link_count`/`attachment_count`
-/// are annotated after and `FieldError`), FK field names by their
-/// `<name>_id` columns (bare FKs order by the related `Meta.ordering`
-/// Django-side — known divergence, PIDASHCONV-511, unchanged here),
-/// bare-M2M names (`assignees`, `labels`), and single-level traversals
-/// onto the already-joined tables. Anything else runs quoted onto its
-/// table and fails at the database, exactly like Django's
-/// `FieldError`-at-evaluation → generic 500.
+/// `views/module.py:618` (PIDASHCONV-510/511; every arm verified against
+/// live `str(query)` output): the exact `?` (random — `-?` is a
+/// `FieldError`, never random), the two annotations that exist at order
+/// time (`sub_issues_count`, `bridge_id` — `link_count`/
+/// `attachment_count` are annotated after and `FieldError`), bare-FK
+/// names by the related model's `Meta.ordering` (`type` excepted:
+/// `IssueType` has no ordering, so Django orders it by the local
+/// `type_id`), bare-M2M names (`assignees`, `labels`), and
+/// single-level traversals onto the already-joined tables. Anything
+/// else runs quoted onto its table and fails at the database, exactly
+/// like Django's `FieldError`-at-evaluation → generic 500.
 pub fn resolve_issue_order(
     raw: Option<&str>,
 ) -> pidash_db::v1_cycles_modules::module_queries::OrderBy {
-    use pidash_db::v1_cycles_modules::module_queries::{issue_traversal_table, M2MOrder, OrderBy};
+    use pidash_db::v1_cycles_modules::module_queries::{
+        issue_traversal_table, M2MOrder, OrderBy, RelatedOrder,
+    };
     if raw == Some("?") {
         return OrderBy::random();
     }
     const EARLY_ANNOTATIONS: [&str; 2] = ["sub_issues_count", "bridge_id"];
-    const FK_FIELDS: [&str; 8] = [
-        "created_by",
-        "updated_by",
-        "project",
-        "workspace",
-        "parent",
-        "state",
-        "estimate_point",
-        "type",
-    ];
     let text = raw.unwrap_or("created_at");
     let (descending, column) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -2930,11 +2922,27 @@ pub fn resolve_issue_order(
     if EARLY_ANNOTATIONS.contains(&column) {
         return OrderBy::alias(column, descending);
     }
-    if FK_FIELDS.contains(&column) {
-        return OrderBy::new(format!("{column}_id"), descending);
+    // `type` is the only FK Django orders by its local column:
+    // `IssueType` has no `Meta.ordering`, so `order_by=type` renders
+    // `ORDER BY "issues"."type_id"` with no join (live str(query)).
+    if column == "type" {
+        return OrderBy::new("type_id", descending);
     }
-    if column == "assigned_pod" {
-        return OrderBy::new("assigned_pod_id", descending);
+    // Bare FKs (and the reverse FK `issue_module`) order by the
+    // related `Meta.ordering` (PIDASHCONV-511).
+    if let Some(which) = match column {
+        "state" => Some(RelatedOrder::State),
+        "project" => Some(RelatedOrder::Project),
+        "workspace" => Some(RelatedOrder::Workspace),
+        "parent" => Some(RelatedOrder::Parent),
+        "created_by" => Some(RelatedOrder::CreatedBy),
+        "updated_by" => Some(RelatedOrder::UpdatedBy),
+        "estimate_point" => Some(RelatedOrder::EstimatePoint),
+        "assigned_pod" => Some(RelatedOrder::AssignedPod),
+        "issue_module" => Some(RelatedOrder::IssueModule),
+        _ => None,
+    } {
+        return OrderBy::related(which, descending);
     }
     if column == "assignees" {
         return OrderBy::m2m(M2MOrder::Assignees, descending);
@@ -2955,8 +2963,10 @@ pub fn resolve_issue_order(
 /// `queryset.count()` trims the ordering-only joins, so M2M totals
 /// count distinct issue ids (PIDASHCONV-510; live bridges are unique
 /// per issue+module, so only ordering joins can multiply here). The
-/// page window itself still slices the multiplied rows, exactly like
-/// Django's `queryset[offset:stop]`.
+/// PIDASHCONV-511 related-ordering joins are to-one `LEFT JOIN`s, so
+/// they never multiply and keep `rows.len()`. The page window itself
+/// still slices the multiplied rows, exactly like Django's
+/// `queryset[offset:stop]`.
 fn envelope_total(
     order: &pidash_db::v1_cycles_modules::module_queries::OrderBy,
     rows: &[sqlx::postgres::PgRow],
@@ -5312,7 +5322,7 @@ mod tests {
 
     #[test]
     fn issue_order_resolution() {
-        use pidash_db::v1_cycles_modules::module_queries::{M2MOrder, OrderTarget};
+        use pidash_db::v1_cycles_modules::module_queries::{M2MOrder, OrderTarget, RelatedOrder};
         assert_eq!(resolve_issue_order(None).column, "created_at");
         assert!(!resolve_issue_order(None).descending);
         assert_eq!(resolve_issue_order(None).target, OrderTarget::Base);
@@ -5320,9 +5330,39 @@ mod tests {
         assert!(order.descending);
         assert_eq!(order.column, "created_at");
         assert_eq!(order.target, OrderTarget::Base);
-        // Bare FKs keep the `<name>_id` mapping (PIDASHCONV-511 owns the
-        // related-Meta.ordering divergence).
-        assert_eq!(resolve_issue_order(Some("state")).column, "state_id");
+        // PIDASHCONV-511: bare FKs (and the reverse FK `issue_module`)
+        // order by the related `Meta.ordering`, carrying the request
+        // direction (the builder XORs it onto each term).
+        for (name, which) in [
+            ("state", RelatedOrder::State),
+            ("project", RelatedOrder::Project),
+            ("workspace", RelatedOrder::Workspace),
+            ("parent", RelatedOrder::Parent),
+            ("created_by", RelatedOrder::CreatedBy),
+            ("updated_by", RelatedOrder::UpdatedBy),
+            ("estimate_point", RelatedOrder::EstimatePoint),
+            ("assigned_pod", RelatedOrder::AssignedPod),
+            ("issue_module", RelatedOrder::IssueModule),
+        ] {
+            let order = resolve_issue_order(Some(name));
+            assert_eq!(order.target, OrderTarget::Related(which), "{name}");
+            assert_eq!(order.column, name);
+            assert!(!order.descending);
+            let negated = format!("-{name}");
+            let order = resolve_issue_order(Some(&negated));
+            assert_eq!(order.target, OrderTarget::Related(which), "{negated}");
+            assert!(order.descending);
+        }
+        // `type` is the exception: `IssueType` has no `Meta.ordering`,
+        // so Django orders by the local `type_id` with no join.
+        let order = resolve_issue_order(Some("type"));
+        assert_eq!(order.target, OrderTarget::Base);
+        assert_eq!(order.column, "type_id");
+        assert!(!order.descending);
+        let order = resolve_issue_order(Some("-type"));
+        assert_eq!(order.target, OrderTarget::Base);
+        assert_eq!(order.column, "type_id");
+        assert!(order.descending);
         // PIDASHCONV-510: exact `?` is random; `-?` passes through to
         // 500 exactly like Django's FieldError for it.
         let order = resolve_issue_order(Some("?"));
