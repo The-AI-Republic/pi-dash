@@ -4726,23 +4726,28 @@ export class WebDriver implements ParityDriver {
   }
 
   /**
-   * The overflow trigger is the first horizontal-ellipsis button following
-   * the last tab link in document order. The strip renders before the page
-   * content, so the trigger always wins that race; the project switcher
-   * precedes the tabs and carries no ellipsis glyph, and the strip's hidden
-   * measuring copies stay wrapped in an opacity-0 container, so neither can
-   * match. Only single-segment project destinations count as tabs: page
-   * content links the same project with trailing slashes (rejected by the
-   * final-character check, since XPath 1.0 has no ends-with) and deeper
-   * paths (rejected by the slash count). The svg test uses local-name
-   * because a bare `svg` step only matches the null namespace while rendered
-   * icons live in the SVG namespace. One locator resolves the trigger
-   * directly, so there is no snapshot index to go stale between a read and
-   * its click.
+   * The overflow trigger is the horizontal-ellipsis button inside the tab
+   * list: the tabs container is the first div after the header switcher
+   * whose subtree holds tab links, and the trigger is that container's
+   * ellipsis button. Scoping to the container matters because page content
+   * below the strip renders its own ellipsis menu buttons (issue rows show
+   * them at narrow widths), which a document-wide following search would
+   * mistake for the trigger. Only single-segment project destinations count
+   * as tabs: page content links the same project with trailing slashes
+   * (rejected by the final-character check, since XPath 1.0 has no
+   * ends-with) and deeper paths (rejected by the slash count). The svg test
+   * uses local-name because a bare `svg` step only matches the null
+   * namespace while rendered icons live in the SVG namespace. One locator
+   * resolves the trigger directly, so there is no snapshot index to go stale
+   * between a read and its click.
    */
   private overflowTrigger(): Locator {
+    const tabLink =
+      'a[contains(@href,"/projects/")][substring(@href,string-length(@href))!="/"][string-length(@href)-string-length(translate(@href,"/",""))=4][not(ancestor::div[contains(@class,"opacity-0")])]';
+    const ellipsisButton =
+      'button[.//*[local-name()="svg"][contains(@class,"lucide-ellipsis")]][not(@aria-haspopup="listbox")][not(ancestor::div[contains(@class,"opacity-0")])]';
     return this.tabStrip().locator(
-      'xpath=(.//a[contains(@href,"/projects/")][substring(@href,string-length(@href))!="/"][string-length(@href)-string-length(translate(@href,"/",""))=4][not(ancestor::div[contains(@class,"opacity-0")])])[last()]/following::button[.//*[local-name()="svg"][contains(@class,"lucide-ellipsis")]][not(@aria-haspopup="listbox")][not(ancestor::div[contains(@class,"opacity-0")])][1]'
+      `xpath=.//button[@aria-haspopup="listbox"]/following::div[.//${tabLink}][not(ancestor-or-self::div[contains(@class,"opacity-0")])][1]//${ellipsisButton}`
     );
   }
 
