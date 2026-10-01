@@ -53,6 +53,9 @@ pub mod tasks_webhooks;
 /// api-v1 asset + intake task publishers (D-21, PIDASHCONV-417): Celery
 /// wire surface for the four `.delay()` units, no task bodies.
 pub mod v1_assets;
+/// api-v1 cycles + modules task publishers (D-20, PIDASHCONV-310): Celery
+/// wire surface for the eleven `.delay()` units, no task bodies.
+pub mod v1_cycles_modules;
 pub mod worker;
 
 pub use amqp::{AmqpConfig, AmqpError, Publisher, CELERY_EXCHANGE, CELERY_ROUTING_KEY};
