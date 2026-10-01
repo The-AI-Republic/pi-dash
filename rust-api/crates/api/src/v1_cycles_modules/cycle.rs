@@ -3167,73 +3167,179 @@ pub fn parse_iso_datetime(text: &str) -> Option<ParsedDatetime> {
 }
 
 /// Python 3.12 `datetime.fromisoformat` (probed): extended/basic calendar
-/// and ISO week dates, any single non-digit separator, `HH[MM[SS]]` times
-/// with `.`/`,` fractions of any length (truncated to micros), `Z` or
-/// numeric offsets (hours, hours+minutes, hours+minutes+seconds, each with
-/// an optional fraction on the last unit). Years 1-9999, offsets strictly
-/// inside ±24h.
+/// and ISO week dates, any single char separator (digits included:
+/// `2026-10-01110:30:00` parses), `HH[MM[SS]]` times with `.`/`,`
+/// fractions of any length (truncated to micros), `Z` or numeric offsets
+/// (hours, hours+minutes, hours+minutes+seconds, each with an optional
+/// fraction on the last unit). Years 1-9999, offsets strictly inside ±24h.
 pub fn parse_fromisoformat(text: &str) -> Option<ParsedDatetime> {
     if text.is_empty() {
         return None;
     }
     let bytes = text.as_bytes();
     // Date prefix: `YYYY-MM-DD` | `YYYYMMDD` | `YYYY-Www[-D]` | `YYYYWww[D]`.
-    let (date, extended, rest) = parse_fromiso_date(bytes)?;
-    if rest.is_empty() {
-        return Some(ParsedDatetime {
-            naive: date.and_hms_opt(0, 0, 0)?,
-            offset_micros: None,
-        });
+    // Only a `W` at 4/5 opens a week date; anywhere else it is an
+    // ordinary char (`2026-10-01W10:30:00` parses with `W` as separator).
+    if matches!(text.find('W'), Some(4) | Some(5)) {
+        return parse_fromiso_week_datetime(text);
     }
-    // Exactly one separator char. After an extended (dashed) date it is
-    // never a digit (`2026-10-0110:30:00` fails); after a basic date any
-    // char goes (`20261001110:30:00` parses, probed).
-    let sep_len = rest.chars().next()?.len_utf8();
-    if extended && rest[..sep_len].bytes().any(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let (naive_time, rest) = parse_fromiso_time(&rest[sep_len..])?;
-    let naive = date.and_time(naive_time);
-    let offset_micros = match rest {
-        "" => None,
-        "Z" => Some(0),
-        _ => Some(parse_fromiso_offset(rest)?),
-    };
-    Some(ParsedDatetime {
-        naive,
-        offset_micros,
-    })
+    let (date, rest) = parse_fromiso_date(bytes)?;
+    parse_fromiso_rest(date, rest, false).map(|(parsed, _)| parsed)
 }
 
-/// The `fromisoformat` date prefix plus whether it is extended (dashed)
-/// plus the unparsed remainder.
-fn parse_fromiso_date(bytes: &[u8]) -> Option<(chrono::NaiveDate, bool, &str)> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    // Week dates contain `W`: `YYYY-Www-D` | `YYYY-Www` | `YYYYWwwD` | `YYYYWww`.
-    if let Some(wpos) = text.find('W') {
-        return parse_fromiso_week_date(text, wpos);
+/// Everything after a `fromisoformat` date: bare (midnight naive) or one
+/// separator char plus time plus the tz tail, plus the basic time's digit
+/// count (`None` for extended times and bare dates). With `shape_only`
+/// the components are grammar-checked but range checks (hour ≤ 23,
+/// offset inside ±24h, ...) are skipped, so a well-formed but
+/// out-of-range rest still parses; the basic week fallback uses that to
+/// tell range failures (hard, unless the digit count is odd) from grammar
+/// failures (fall back).
+fn parse_fromiso_rest(
+    date: chrono::NaiveDate,
+    rest: &str,
+    shape_only: bool,
+) -> Option<(ParsedDatetime, Option<usize>)> {
+    if rest.is_empty() {
+        return Some((
+            ParsedDatetime {
+                naive: date.and_hms_opt(0, 0, 0)?,
+                offset_micros: None,
+            },
+            None,
+        ));
     }
+    // Exactly one separator char, always (`20261001110:30:00` and
+    // `2026-10-01110:30:00` both parse, probed).
+    let sep_len = rest.chars().next()?.len_utf8();
+    let (naive_time, rest, frac_len, basic_digits) =
+        parse_fromiso_time(&rest[sep_len..], shape_only)?;
+    let naive = date.and_time(naive_time);
+    let offset_micros = parse_fromiso_tz_tail(rest, frac_len, shape_only)?;
+    Some((
+        ParsedDatetime {
+            naive,
+            offset_micros,
+        },
+        basic_digits,
+    ))
+}
+
+/// The tz remainder after a `fromisoformat` time (probed): empty (naive),
+/// `Z`, or a numeric offset — or skipped chars followed by `Z` or a
+/// numeric offset. The allowance depends on the fraction that was just
+/// consumed (`frac_len` digits, dotted or dotless, on any unit): none →
+/// one skip (`T10:30:00X+05:30` parses; even a bare `.` skips:
+/// `T10:30:00.+00:00` parses); 1-5 digits → no skip (`T10:30:00.5X+05:30`
+/// fails); 6+ digits → unlimited skips (`T10:30:00.000000ABCDEFG+05:30`
+/// parses — there is no second fraction, the middle is skipped). A
+/// marker-first remainder never skips, so `Z+00:00` fails, and a `Z`
+/// reached by skipping poisons the parse (`T10:30:00.000000XYZ+05:30`
+/// fails: after `XY` comes `Z+05:30`); a skip with no tz after it fails
+/// (`T1033404` fails); there is no skip inside the offset itself
+/// (`+05X+06:00` fails). Up to `allowance` trailing NULs are tolerated
+/// (`T10:30:00\0` parses naive, `T10:30:00\0\0` and `T10:30:00.5\0` fail,
+/// `T10:30:00.000000\0\0` parses naive).
+fn parse_fromiso_tz_tail(rest: &str, frac_len: usize, shape_only: bool) -> Option<Option<i64>> {
+    let allowance = tz_skip_allowance(frac_len);
+    let mut tail = rest;
+    let mut stripped: u32 = 0;
+    while allowance.is_none_or(|max| stripped < max) {
+        match tail.strip_suffix('\0') {
+            Some(shorter) => {
+                tail = shorter;
+                stripped += 1;
+            }
+            None => break,
+        }
+    }
+    match tail {
+        "" => Some(None),
+        "Z" => Some(Some(0)),
+        _ => {
+            let mut rest = tail;
+            let mut skips: u32 = 0;
+            loop {
+                if rest == "Z" {
+                    return Some(Some(0));
+                }
+                let first = rest.as_bytes().first()?;
+                if *first == b'+' || *first == b'-' {
+                    return Some(Some(parse_fromiso_offset(rest, shape_only)?));
+                }
+                if *first == b'Z' || !allowance.is_none_or(|max| skips < max) {
+                    return None;
+                }
+                let skip = rest.chars().next()?.len_utf8();
+                rest = &rest[skip..];
+                skips += 1;
+                if rest.is_empty() {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+/// Skip allowance from the consumed fraction's digit count (probed):
+/// `None` means unlimited.
+fn tz_skip_allowance(frac_len: usize) -> Option<u32> {
+    if frac_len == 0 {
+        Some(1)
+    } else if frac_len < 6 {
+        Some(0)
+    } else {
+        None
+    }
+}
+
+/// The `fromisoformat` calendar date prefix plus the unparsed remainder
+/// (week dates, which contain `W`, are handled before this is reached).
+fn parse_fromiso_date(bytes: &[u8]) -> Option<(chrono::NaiveDate, &str)> {
+    let text = std::str::from_utf8(bytes).ok()?;
     if bytes.len() >= 10 && bytes[4] == b'-' && bytes[7] == b'-' {
         let year = digits_to_i32(&bytes[0..4])?;
+        if !(1..=9999).contains(&year) {
+            return None;
+        }
         let month = digits_to_u32(&bytes[5..7])?;
         let day = digits_to_u32(&bytes[8..10])?;
         let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
-        return Some((date, true, &text[10..]));
+        return Some((date, &text[10..]));
     }
     if bytes.len() >= 8 && bytes[0..8].iter().all(|b| b.is_ascii_digit()) {
         let year = digits_to_i32(&bytes[0..4])?;
+        if !(1..=9999).contains(&year) {
+            return None;
+        }
         let month = digits_to_u32(&bytes[4..6])?;
         let day = digits_to_u32(&bytes[6..8])?;
         let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
-        return Some((date, false, &text[8..]));
+        return Some((date, &text[8..]));
     }
     None
 }
 
-/// The `fromisoformat` ISO week prefix (`YYYY-Www-D`, `YYYY-Www`,
-/// `YYYYWwwD`, `YYYYWww`); a bare week means Monday.
-fn parse_fromiso_week_date(text: &str, wpos: usize) -> Option<(chrono::NaiveDate, bool, &str)> {
+/// A `fromisoformat` ISO week datetime. The weekday takes the date's
+/// own shape only — `-D` after `YYYY-Www`, a trailing `D` after `YYYYWww`
+/// — and it backtracks: the with-weekday parse is tried first, then the
+/// bare-week (Monday) parse (`2026W404110:30:00` is Thursday, `2026W40610:30`
+/// is Monday, `2026-W40-11:30:00` is Monday, all probed). The basic `D`
+/// wins outright only with an even basic digit count (or an extended
+/// time). On an odd count Monday wins when it parses (`2026W404103340Z`
+/// is Monday), a Monday grammar failure keeps a valid with-day parse
+/// (`2026W404Z103+05.5` is Thursday), and a Monday range failure fails
+/// hard. A with-day grammar failure falls back to Monday-or-None, and a
+/// with-day range failure does the same on odd counts but fails hard on
+/// even counts (`2026W401030:00` fails even though Monday 03:00 would
+/// parse). The extended `-D` additionally needs
+/// end-or-nondigit after D (`2026-W40-4110:30:00` fails the with-day
+/// attempt and falls back to Monday, probed). With no dash the bare week
+/// takes any separator, digits included (`2026-W40610:30:00` is Monday,
+/// probed).
+fn parse_fromiso_week_datetime(text: &str) -> Option<ParsedDatetime> {
     let bytes = text.as_bytes();
+    let wpos = text.find('W')?;
     if wpos != 4 && wpos != 5 {
         return None;
     }
@@ -3250,35 +3356,91 @@ fn parse_fromiso_week_date(text: &str, wpos: usize) -> Option<(chrono::NaiveDate
         return None;
     }
     let week: u32 = rest[0..2].parse().ok()?;
-    let (weekday, rest) = match rest[2..].strip_prefix('-') {
-        Some(tail) => {
-            let digit = tail.as_bytes().first()?;
-            if !digit.is_ascii_digit() {
-                return None;
+    let tail = &rest[2..];
+    let monday = chrono::NaiveDate::from_isoywd_opt(year, week, chrono::Weekday::Mon)?;
+    if extended {
+        match tail.strip_prefix('-') {
+            Some(day) => {
+                // Try `-D` (D must be followed by end or a non-digit),
+                // fall back to Monday with the dash as separator.
+                let day_end = day.len() <= 1 || !day.as_bytes()[1].is_ascii_digit();
+                if day_end {
+                    if let Some((parsed, _)) = weekday_try_backtrack(year, week, day, false) {
+                        return Some(parsed);
+                    }
+                }
+                parse_fromiso_rest(monday, tail, false).map(|(parsed, _)| parsed)
             }
-            (digit - b'0', &tail[1..])
+            None => parse_fromiso_rest(monday, tail, false).map(|(parsed, _)| parsed),
         }
-        None => match rest.as_bytes().get(2..).and_then(|tail| tail.first()) {
-            Some(digit) if digit.is_ascii_digit() => (digit - b'0', &rest[3..]),
-            _ => (1, &rest[2..]),
-        },
-    };
-    if !(1..=7).contains(&weekday) {
-        return None;
+    } else {
+        // Try `D`: it wins outright only with an even basic digit count
+        // (or an extended time). On an odd count Monday wins when it
+        // parses, a Monday grammar failure keeps a valid with-day parse,
+        // and a Monday range failure fails hard. A with-day grammar
+        // failure falls back to Monday-or-None, and a with-day range
+        // failure does the same on odd counts but fails hard on even
+        // counts — so check the shape when the full parse fails, and the
+        // parity in both cases.
+        let with_full = weekday_try_backtrack(year, week, tail, false);
+        let with_odd = match &with_full {
+            Some((_, basic_digits)) => basic_digits.is_some_and(|count| count % 2 == 1),
+            None => match weekday_try_backtrack(year, week, tail, true) {
+                None => {
+                    return parse_fromiso_rest(monday, tail, false).map(|(parsed, _)| parsed);
+                }
+                Some((_, basic_digits)) => basic_digits.is_some_and(|count| count % 2 == 1),
+            },
+        };
+        if !with_odd {
+            return with_full.map(|(parsed, _)| parsed);
+        }
+        let without_full = parse_fromiso_rest(monday, tail, false);
+        if without_full.is_some() {
+            return without_full.map(|(parsed, _)| parsed);
+        }
+        if parse_fromiso_rest(monday, tail, true).is_none() {
+            return with_full.map(|(parsed, _)| parsed);
+        }
+        None
     }
-    let date = chrono::NaiveDate::from_isoywd_opt(
-        year,
-        week,
-        chrono::Weekday::try_from(weekday - 1).ok()?,
-    )?;
-    Some((date, extended, rest))
 }
 
-/// The `fromisoformat` time plus the tz remainder:
+/// The with-weekday attempt: a leading digit 1-7 names the day, and the
+/// whole rest (separator, time, tz) must parse after it.
+fn weekday_try_backtrack(
+    year: i32,
+    week: u32,
+    text: &str,
+    shape_only: bool,
+) -> Option<(ParsedDatetime, Option<usize>)> {
+    let digit = *text.as_bytes().first()?;
+    if !(b'1'..=b'7').contains(&digit) {
+        return None;
+    }
+    let weekday = chrono::Weekday::try_from(digit - b'0' - 1).ok()?;
+    let date = chrono::NaiveDate::from_isoywd_opt(year, week, weekday)?;
+    parse_fromiso_rest(date, &text[1..], shape_only)
+}
+
+/// The `fromisoformat` time plus the tz remainder plus the consumed
+/// fraction's digit count (which drives the tz skip allowance):
 /// `HH[[:]MM[[:]SS]][.,frac]` (a fraction after any unit means sub-second
-/// micros, probed: `T10:30.5` is 10:30:00.5). Mixed basic/extended forms
-/// never parse (`T10:3000`, `T1030:00` fail).
-fn parse_fromiso_time(text: &str) -> Option<(chrono::NaiveTime, &str)> {
+/// micros, probed: `T10:30.5` is 10:30:00.5), plus a basic-only dotless
+/// fraction: 2+ digits glued after SS (`T103340040` is .040s; a single
+/// glued digit ends the time instead, probed: `T1033404` fails). Mixed
+/// basic/extended forms never parse (`T10:3000`, `T1030:00` fail), and a
+/// colon is never backtracked (`T10:30:0+00:00` fails). With
+/// `shape_only` the units are grammar-checked (two digits each) but the
+/// clock ranges are not enforced (midnight stands in for the time). The
+/// digit count covers basic unit digits plus the dotless run (including a
+/// lone run-1 digit that stays in the tz tail) plus one lone tail digit
+/// after a short basic time; dotted fractions never count, and extended
+/// times report `None`.
+fn parse_fromiso_time(
+    text: &str,
+    shape_only: bool,
+) -> Option<(chrono::NaiveTime, &str, usize, Option<usize>)> {
     let bytes = text.as_bytes();
     if bytes.len() < 2 || !bytes[0..2].iter().all(|b| b.is_ascii_digit()) {
         return None;
@@ -3287,8 +3449,10 @@ fn parse_fromiso_time(text: &str) -> Option<(chrono::NaiveTime, &str)> {
     let mut rest = &text[2..];
     let mut minute: u32 = 0;
     let mut second: u32 = 0;
+    let mut digits: Option<usize> = Some(2);
     // Optional `:MM` / `MM`.
     if let Some(tail) = rest.strip_prefix(':') {
+        digits = None;
         if tail.len() < 2 || !tail.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
             return None;
         }
@@ -3303,30 +3467,65 @@ fn parse_fromiso_time(text: &str) -> Option<(chrono::NaiveTime, &str)> {
             rest = &tail[2..];
         }
     } else if rest.len() >= 2 && rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
+        digits = Some(4);
         minute = rest[0..2].parse().ok()?;
         rest = &rest[2..];
         if rest.len() >= 2 && rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
+            digits = Some(6);
             second = rest[0..2].parse().ok()?;
             rest = &rest[2..];
+            // Basic dotless fraction: a run of 2+ digits.
+            let run: usize = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+            if run >= 2 {
+                let mut micros: i64 = 0;
+                for (index, byte) in rest.bytes().take(6).enumerate() {
+                    if !byte.is_ascii_digit() {
+                        break;
+                    }
+                    micros += (byte - b'0') as i64 * 10_i64.pow(5 - index as u32);
+                }
+                let time = time_or_shape_midnight(hour, minute, second, micros, shape_only)?;
+                return Some((time, &rest[run..], run, Some(6 + run)));
+            }
         }
     }
-    let micros;
-    (micros, rest) = parse_frac_micros_opt(rest)?;
-    let time = chrono::NaiveTime::from_hms_micro_opt(hour, minute, second, micros as u32)?;
-    Some((time, rest))
+    // A lone digit left in the tz tail still counts (a run-1 after SS or
+    // after a short basic time).
+    if digits.is_some() && rest.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
+        digits = digits.map(|count| count + 1);
+    }
+    let (micros, frac_len, rest) = parse_frac_micros_opt(rest)?;
+    let time = time_or_shape_midnight(hour, minute, second, micros, shape_only)?;
+    Some((time, rest, frac_len, digits))
 }
 
-/// The optional fraction after a time component: `.`/`,` plus ≥1 digit
-/// (any length, truncated to micros). No dot means `(0, rest)`; a dot
-/// with no digits never parses.
-fn parse_frac_micros_opt(text: &str) -> Option<(i64, &str)> {
+/// Build the clock time, or midnight when only the shape is wanted.
+fn time_or_shape_midnight(
+    hour: u32,
+    minute: u32,
+    second: u32,
+    micros: i64,
+    shape_only: bool,
+) -> Option<chrono::NaiveTime> {
+    if shape_only {
+        return chrono::NaiveTime::from_hms_opt(0, 0, 0);
+    }
+    chrono::NaiveTime::from_hms_micro_opt(hour, minute, second, micros as u32)
+}
+
+/// The optional dotted fraction after a time component: `.`/`,` plus ≥1
+/// digit (any length, truncated to micros), returning micros, digit count
+/// and remainder. No dot — or a dot with no digits — means `(0, 0, rest)`
+/// unconsumed: a bare dot ends the time and the tz tail skips it
+/// (`T10:30:00.+00:00` parses, probed).
+fn parse_frac_micros_opt(text: &str) -> Option<(i64, usize, &str)> {
     let tail = match text.strip_prefix('.').or_else(|| text.strip_prefix(',')) {
         Some(tail) => tail,
-        None => return Some((0, text)),
+        None => return Some((0, 0, text)),
     };
     let digits: usize = tail.bytes().take_while(|b| b.is_ascii_digit()).count();
     if digits == 0 {
-        return None;
+        return Some((0, 0, text));
     }
     let mut micros: i64 = 0;
     for (index, byte) in tail.bytes().take(6).enumerate() {
@@ -3335,15 +3534,18 @@ fn parse_frac_micros_opt(text: &str) -> Option<(i64, &str)> {
         }
         micros += (byte - b'0') as i64 * 10_i64.pow(5 - index as u32);
     }
-    Some((micros, &tail[digits..]))
+    Some((micros, digits, &tail[digits..]))
 }
 
 /// The `fromisoformat` numeric offset in micros east of UTC:
-/// `±HH[[:]MM[[:]SS]]` with an optional `.`/`,` fraction after any unit
-/// (always sub-second micros, probed: `+05.5` is 5h + 0.5s). Components
-/// are never range-checked (`+05:99` normalises to +6:39); only the total
-/// must sit strictly inside ±24h.
-fn parse_fromiso_offset(text: &str) -> Option<i64> {
+/// `±HH[MM[SS]]` basic or `±HH:MM[:SS]` extended (the mode locks on the
+/// first separator: `+0530:15` and `+05:3015` fail, probed), with an
+/// optional `.`/`,` fraction after any unit (always sub-second micros,
+/// probed: `+05.5` is 5h + 0.5s) — except a zero `HH:MM:SS` drops the
+/// fraction entirely (`+00:00:00.5` is UTC, probed). Components are never
+/// range-checked (`+05:99` normalises to +6:39); only the total must sit
+/// strictly inside ±24h (skipped with `shape_only`).
+fn parse_fromiso_offset(text: &str, shape_only: bool) -> Option<i64> {
     let bytes = text.as_bytes();
     let sign: i64 = match bytes.first()? {
         b'+' => 1,
@@ -3356,57 +3558,81 @@ fn parse_fromiso_offset(text: &str) -> Option<i64> {
     }
     let hours: i64 = rest[0..2].parse().ok()?;
     let mut rest = &rest[2..];
-    let mut micros: i64 = hours * 3_600_000_000;
     if rest.starts_with('.') || rest.starts_with(',') {
-        let (frac, tail) = parse_frac_micros_opt(rest)?;
-        micros += frac;
-        rest = tail;
-    } else {
-        let colon = rest.starts_with(':');
-        if colon {
-            rest = &rest[1..];
-        }
-        if rest.len() >= 2 && rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-            let minutes: i64 = rest[0..2].parse().ok()?;
-            micros += minutes * 60_000_000;
-            rest = &rest[2..];
-            if rest.starts_with('.') || rest.starts_with(',') {
-                let (frac, tail) = parse_frac_micros_opt(rest)?;
-                micros += frac;
-                rest = tail;
-            } else {
-                let colon = rest.starts_with(':');
-                if colon {
-                    rest = &rest[1..];
-                }
-                if rest.len() >= 2 && rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-                    let seconds: i64 = rest[0..2].parse().ok()?;
-                    micros += seconds * 1_000_000;
-                    rest = &rest[2..];
-                    let (frac, tail) = parse_frac_micros_opt(rest)?;
-                    micros += frac;
-                    rest = tail;
-                } else if colon {
-                    return None;
-                }
-            }
-        } else if colon {
+        let (frac, _, tail) = parse_frac_micros_opt(rest)?;
+        return finish_fromiso_offset(sign, hours, 0, 0, frac, tail, shape_only);
+    }
+    let mut minutes: i64 = 0;
+    let mut seconds: i64 = 0;
+    if rest.starts_with(':') {
+        // Extended: `HH:MM[:SS]`.
+        rest = &rest[1..];
+        if rest.len() < 2 || !rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
             return None;
         }
+        minutes = rest[0..2].parse().ok()?;
+        rest = &rest[2..];
+        if rest.starts_with('.') || rest.starts_with(',') {
+            let (frac, _, tail) = parse_frac_micros_opt(rest)?;
+            return finish_fromiso_offset(sign, hours, minutes, 0, frac, tail, shape_only);
+        }
+        if let Some(tail) = rest.strip_prefix(':') {
+            if tail.len() < 2 || !tail.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            seconds = tail[0..2].parse().ok()?;
+            rest = &tail[2..];
+        }
+    } else {
+        // Basic: `HH[MM[SS]]`.
+        if rest.len() >= 2 && rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
+            minutes = rest[0..2].parse().ok()?;
+            rest = &rest[2..];
+            if rest.starts_with('.') || rest.starts_with(',') {
+                let (frac, _, tail) = parse_frac_micros_opt(rest)?;
+                return finish_fromiso_offset(sign, hours, minutes, 0, frac, tail, shape_only);
+            }
+            if rest.len() >= 2 && rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
+                seconds = rest[0..2].parse().ok()?;
+                rest = &rest[2..];
+            }
+        }
     }
+    let (frac, _, tail) = parse_frac_micros_opt(rest)?;
+    finish_fromiso_offset(sign, hours, minutes, seconds, frac, tail, shape_only)
+}
+
+/// Total a `fromisoformat` offset: the sign applies to the whole-unit part
+/// and the fraction alike; a zero whole part drops the fraction; the total
+/// must sit strictly inside ±24h; nothing may remain.
+fn finish_fromiso_offset(
+    sign: i64,
+    hours: i64,
+    minutes: i64,
+    seconds: i64,
+    frac_micros: i64,
+    rest: &str,
+    shape_only: bool,
+) -> Option<i64> {
     if !rest.is_empty() {
         return None;
     }
-    if micros.abs() >= 24 * 3_600_000_000 {
+    if hours == 0 && minutes == 0 && seconds == 0 {
+        return Some(0);
+    }
+    let micros = sign * (hours * 3_600_000_000 + minutes * 60_000_000 + seconds * 1_000_000)
+        + sign * frac_micros;
+    if !shape_only && micros.abs() >= 24 * 3_600_000_000 {
         return None;
     }
-    Some(sign * micros)
+    Some(micros)
 }
 
-/// Django's `datetime_re` fallback (`dateparse.py:20-25`, exact):
-/// padded-or-not `YYYY-M-D`, `T`/space, `H:M[:S[.,frac[ignored]]]`,
-/// optional whitespace, optional `Z|±HH[[:]MM]`. Offsets are whole
-/// minutes strictly inside ±24h (`timezone()` raises past that).
+/// Django's `datetime_re` fallback (`dateparse.py`, exact):
+/// padded-or-not `YYYY-M-D`, `T`/space, `H:M[:S[.,frac]]]`, optional
+/// whitespace, optional `Z|±HH[[:]MM]`. The frac is `\d{1,6}\d{0,6}`
+/// (micros come from the first 6, left-justified). Offsets are whole minutes
+/// strictly inside ±24h (`timezone()` raises past that).
 pub fn parse_django_datetime_re(text: &str) -> Option<ParsedDatetime> {
     let bytes = text.as_bytes();
     if bytes.len() < 5 {
@@ -3416,6 +3642,11 @@ pub fn parse_django_datetime_re(text: &str) -> Option<ParsedDatetime> {
         return None;
     }
     let year = digits_to_i32(&bytes[0..4])?;
+    // Django builds `datetime(...)` from the groups, which raises for year
+    // 0 (and DRF turns the raise into invalid, probed).
+    if !(1..=9999).contains(&year) {
+        return None;
+    }
     let mut rest = &text[5..];
     let (month, tail) = take_1_or_2_digits(rest)?;
     rest = tail.strip_prefix('-')?;
@@ -3441,10 +3672,9 @@ pub fn parse_django_datetime_re(text: &str) -> Option<ParsedDatetime> {
             if digits == 0 || digits > 12 {
                 return None;
             }
-            for (index, byte) in tail.bytes().take(6).enumerate() {
-                micros += (byte - b'0') as i64 * 10_i64.pow(5 - index as u32);
-            }
-            rest = &tail[digits..];
+            let (frac, _, tail) = parse_frac_micros_opt(rest)?;
+            micros = frac;
+            rest = tail;
         }
     }
     // `\s*` then the optional tzinfo, then end.
@@ -7369,12 +7599,142 @@ mod tests {
                 .to_string(),
             "10:00:00"
         );
-        // Any single non-digit char separates date and time; lowercase t ok.
+        // Any single char separates date and time, digits included.
         assert!(parse_iso_datetime("2026-10-01X10:30:00").is_some());
         assert!(parse_iso_datetime("2026-10-01t10:30:00Z").is_some());
-        // After a basic date even a digit separates.
         assert!(parse_iso_datetime("20261001110:30:00").is_some());
+        assert!(parse_iso_datetime("2026-10-01110:30:00").is_some());
+        // ... but the char after it must still start a time.
         assert!(parse_iso_datetime("2026-10-0110:30:00").is_none());
+        // Skips before the tz depend on the fraction: none → one skip,
+        // 1-5 digits → none, 6+ digits → unlimited; never after a marker.
+        assert!(parse_iso_datetime("2026-10-01T10:30:00X+05:30").is_some());
+        assert!(parse_iso_datetime("2026-10-01T10:30:00.+00:00").is_some());
+        assert!(parse_iso_datetime("2026-10-01T10Z").is_some());
+        assert!(parse_iso_datetime("2026-10-01T10:30:00Z+00:00").is_none());
+        assert!(parse_iso_datetime("2026-10-01T10:30:00XY+05:30").is_none());
+        assert!(parse_iso_datetime("2026-10-01T10:30:00+05X+06:00").is_none());
+        assert!(parse_iso_datetime("2026-10-01T10:30:00.5X+05:30").is_none());
+        assert!(parse_iso_datetime("2026-10-01T10:30:00.00000X+05:30").is_none());
+        assert!(parse_iso_datetime("2026-10-01T10:30:00.000000X+05:30").is_some());
+        assert!(parse_iso_datetime("2026-10-01T10:30:00.000000XY+05:30").is_some());
+        assert!(parse_iso_datetime("2026-10-01T10:30:00.000000XYW+05:30").is_some());
+        assert!(parse_iso_datetime("2026-10-01T10:30:00.000000ABCDEFG+05:30").is_some());
+        // ... but a Z reached by skipping poisons the parse (Z with junk).
+        assert!(parse_iso_datetime("2026-10-01T10:30:00.000000XYZ+05:30").is_none());
+        assert!(parse_iso_datetime("2026-10-01T10:30:00.000000QQZ+05:30").is_none());
+        assert!(parse_iso_datetime("2026-10-01T10:30:00.000000QQZ").is_some());
+        assert!(parse_iso_datetime("2026-10-01T10:30:00.000000X").is_none());
+        assert!(parse_iso_datetime("2026-10-01T10:30.000000X+05:30").is_some());
+        assert!(parse_iso_datetime("2026-10-01T10.000000X+05:30").is_some());
+        assert!(parse_iso_datetime("2026-10-01T103000000000X+05:30").is_some());
+        assert!(parse_iso_datetime("2026-10-01T10300000000X+05:30").is_none());
+        assert!(parse_iso_datetime("2026-10-01T103000000000Z+05:30").is_none());
+        // Trailing NULs are tolerated up to the skip allowance.
+        let nul = parse_iso_datetime("2026-10-01T10:30:00\0").expect("nul naive");
+        assert_eq!(
+            nul.naive.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "2026-10-01T10:30:00"
+        );
+        assert_eq!(nul.offset_micros, None);
+        assert!(parse_iso_datetime("2026-10-01T10:30:00\0\0").is_none());
+        assert!(parse_iso_datetime("2026-10-01T10:30:00.5\0").is_none());
+        assert!(parse_iso_datetime("2026-10-01T10:30:00.000000\0\0\0").is_some());
+        assert!(parse_iso_datetime("2026-10-01T10:30:00.000000Q\0").is_none());
+        assert!(parse_iso_datetime("2026-1-1T1:1\0").is_none());
+        assert!(parse_iso_datetime("2026-10-01\0").is_none());
+        // Basic dotless fraction: 2+ digits; one digit ends the time.
+        assert_eq!(
+            utc("20261001T103340040")
+                .expect("dotless frac")
+                .format("%H:%M:%S%.6f")
+                .to_string(),
+            "10:33:40.040000"
+        );
+        assert!(parse_iso_datetime("20261001T1033404").is_none());
+        // No colon backtrack in fromisoformat — but the Django regex saves
+        // one-digit seconds at the parse_datetime layer.
+        assert!(parse_fromisoformat("2026-10-01T10:30:0+00:00").is_none());
+        assert!(parse_iso_datetime("2026-10-01T10:30:0+00:00").is_some());
+        // The weekday backtracks: with-day first, then bare-week Monday.
+        let backtrack = parse_iso_datetime("2026W404110Z").expect("week backtrack");
+        assert_eq!(
+            backtrack.naive.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "2026-10-01T10:00:00"
+        );
+        assert_eq!(backtrack.offset_micros, Some(0));
+        let ext_fallback = parse_iso_datetime("2026-W40-11:30:00").expect("ext fallback");
+        assert_eq!(
+            ext_fallback.naive.format("%Y-%m-%d").to_string(),
+            "2026-09-28"
+        );
+        assert!(parse_iso_datetime("2026W404X10:30").is_some());
+        assert!(parse_iso_datetime("2026-W40-4T10:30").is_some());
+        assert!(parse_iso_datetime("2026W40610:30").is_some());
+        assert!(parse_iso_datetime("2026-W40610:30:00").is_some());
+        // The basic `D` wins only with an even digit count (or an
+        // extended time): odd counts go Monday even when fully valid.
+        let even_valid = parse_iso_datetime("2026W4041200000+05:30").expect("even valid");
+        assert_eq!(
+            even_valid.naive.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "2026-10-01T20:00:00"
+        );
+        let odd_valid = parse_iso_datetime("2026W404103340Z").expect("odd valid");
+        assert_eq!(
+            odd_valid.naive.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "2026-09-28T10:33:40"
+        );
+        assert!(parse_iso_datetime("2026W40630000000+05:30").is_none());
+        assert!(parse_iso_datetime("2026W404300000Z").is_none());
+        assert!(parse_iso_datetime("2026W4043000+05:30").is_none());
+        // On an odd count a Monday grammar failure keeps the with-day
+        // parse, but a Monday range failure fails hard.
+        let odd_kept = parse_iso_datetime("2026W404Z103+05.5").expect("odd kept");
+        assert_eq!(
+            odd_kept.naive.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "2026-10-01T10:00:00"
+        );
+        assert_eq!(odd_kept.offset_micros, Some(18_000_500_000));
+        assert!(parse_iso_datetime("2026W404 103340040").is_some());
+        // ... while an even with-day parse wins outright, whatever
+        // Monday does.
+        assert!(parse_iso_datetime("2026W4041192359+05:30").is_some());
+        assert!(parse_iso_datetime("2026W404Z100000+05:30").is_some());
+        // A well-formed but out-of-range with-day rest fails hard —
+        // unless the basic time has an odd digit count.
+        assert!(parse_iso_datetime("2026W401030:00").is_none());
+        assert!(parse_iso_datetime("2026W401030:00+05:30").is_none());
+        assert!(parse_iso_datetime("2026W404130000000").is_none());
+        assert!(parse_iso_datetime("2026W404110990000").is_none());
+        assert!(parse_iso_datetime("2026W404110339900").is_none());
+        assert!(parse_iso_datetime("2026W40113334+05:30").is_none());
+        assert!(parse_iso_datetime("2026W401130:00.000+05:30").is_none());
+        assert!(parse_iso_datetime("2026W401130.00000+05:30").is_none());
+        assert!(parse_iso_datetime("2026W40103340040Z").is_some());
+        assert!(parse_iso_datetime("2026W40103340040+05:30").is_some());
+        assert!(parse_iso_datetime("2026W401133334+05:30").is_some());
+        assert!(parse_iso_datetime("2026W4010300000000+05:30").is_some());
+        assert!(parse_iso_datetime("2026W4011334.00000+05:30").is_some());
+        assert!(parse_iso_datetime("2026-10-01W10:30:00").is_some());
+        // ... while grammar failures (even tz-structural ones) fall back.
+        let tz_fallback =
+            parse_iso_datetime("2026W404103000X+05:30").expect("tz-structural fallback");
+        assert_eq!(
+            tz_fallback.naive.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "2026-09-28T10:30:00"
+        );
+        assert!(parse_iso_datetime("2026W40610:30+05:30").is_some());
+        assert!(parse_iso_datetime("2026-W40-4110:30:00").is_none());
+        let dash_fallback = parse_iso_datetime("2026-W40-20:30:00").expect("dash fallback");
+        assert_eq!(
+            dash_fallback.naive.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "2026-09-28T20:30:00"
+        );
+        assert!(parse_iso_datetime("2026W4011:30:00").is_none());
+        assert!(parse_iso_datetime("2026W400").is_none());
+        // Year zero fails everywhere.
+        assert!(parse_iso_datetime("0000-10-01T10:30:00").is_none());
+        assert!(parse_iso_datetime("00001001T103000").is_none());
         // Mixed basic/extended times never parse.
         assert!(parse_iso_datetime("2026-10-01T10:3000").is_none());
         assert!(parse_iso_datetime("2026-10-01T1030:00").is_none());
@@ -7395,6 +7755,14 @@ mod tests {
             Some((5 * 3600 + 30 * 60 + 15) * 1_000_000)
         );
         assert_eq!(off("+05.5"), Some(5 * 3_600_000_000 + 500_000));
+        // A zero whole part drops the fraction; the sign covers the rest.
+        assert_eq!(off("+00:00:00.5"), Some(0));
+        assert_eq!(off("+00.5"), Some(0));
+        assert_eq!(off("-00:00:01.5"), Some(-1_500_000));
+        // Basic offsets take seconds too; mixed basic/extended never parse.
+        assert_eq!(off("+053015"), Some((5 * 3600 + 30 * 60 + 15) * 1_000_000));
+        assert!(parse_iso_datetime("2026-10-01T10:30:00+0530:15").is_none());
+        assert!(parse_iso_datetime("2026-10-01T10:30:00+05:3015").is_none());
         // Tz components are never range-checked (they normalise); only the
         // ±24h total matters.
         assert_eq!(
