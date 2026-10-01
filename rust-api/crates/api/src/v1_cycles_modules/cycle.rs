@@ -3923,8 +3923,10 @@ fn digits_to_u32(digits: &[u8]) -> Option<u32> {
     std::str::from_utf8(digits).ok()?.parse().ok()
 }
 
-/// DRF `DateTimeField.enforce_timezone` failure: naive input in a DST
-/// fold, or an aware input whose user-zone shift leaves years 1-9999.
+/// DRF `DateTimeField.enforce_timezone` failure: an aware input whose
+/// user-zone shift leaves years 1-9999, or (unreachable in practice) a
+/// gap-probe underflow. Naive fold-hour inputs PASS at fold 0 — see
+/// [`enforce_user_timezone`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnforceFail {
     Overflow,
@@ -3936,9 +3938,9 @@ pub enum EnforceFail {
 /// (no view passes `project` in context), so the field zone is always
 /// `default_timezone()` = the active request zone = the actor's zone
 /// (`TimezoneMixin`). Naive inputs attach there (`make_aware` +
-/// `valid_datetime`, which rejects ambiguous folds but ACCEPTS imaginary
-/// gap times at fold 0); aware inputs shift there (`astimezone`, whose
-/// `OverflowError` is the range check).
+/// `valid_datetime`, which ACCEPTS ambiguous folds at fold 0 and
+/// imaginary gap times at the pre-transition offset); aware inputs
+/// shift there (`astimezone`, whose `OverflowError` is the range check).
 pub fn enforce_user_timezone(
     parsed: &ParsedDatetime,
     user_tz: &Tz,
@@ -6064,8 +6066,9 @@ pub async fn get_cycle_issue_inner(
 }
 
 /// `DELETE .../cycles/<cycle_id>/cycle-issues/<issue_id>/`
-/// (`views/cycle.py:1084-1136`): bridge `.get` → cycle-name read →
-/// soft-delete (+ fan-out) → `issue_activity` → 204.
+/// (`views/cycle.py:1084-1136`): bridge `.get` → soft-delete
+/// (+ fan-out) → `issue_activity` → 204. The delete never reads the
+/// cycle itself, so a missing cycle name cannot 404 here.
 pub async fn remove_cycle_issue_inner(
     state: &AppState,
     headers: &HeaderMap,
@@ -6318,7 +6321,7 @@ pub fn chart_number_value(number: ChartNumber) -> Value {
 /// missing). `completed` carries one entry per completion in distribution
 /// order (date-ascending, physical ties); `None` dates are uncompleted
 /// rows, skipped like Python's `is not None` guard. Future dates (past
-/// UTC today) render `null`.
+/// `today`, the actor-zone day — see the caller) render `null`.
 pub fn burndown_chart(
     total: ChartNumber,
     completed: &[(Option<chrono::NaiveDate>, ChartNumber)],
@@ -6412,9 +6415,10 @@ pub async fn fetch_burndown_points(
     Ok(out)
 }
 
-/// Points total: `sum(float(v))` in physical row order (Django's
-/// orderless `values_list`, a `ctid`-ordered seqscan — the D-27
-/// precedent). Empty sums to int `0`, exactly like Python's `sum([])`.
+/// Points total: `sum(float(v))` in `Issue.Meta.ordering` order
+/// (`-created_at`, carried by the `values_list` — `db/models/issue.py`;
+/// NOT the D-27 `ctid` precedent, which is app-path-specific). Empty
+/// sums to int `0`, exactly like Python's `sum([])`.
 pub async fn fetch_burndown_points_total(
     pool: &PgPool,
     slug: &str,
@@ -6424,7 +6428,7 @@ pub async fn fetch_burndown_points_total(
     let sql = format!(
         "SELECT CAST(ep.\"value\" AS FLOAT) AS v {from} \
          INNER JOIN \"estimate_points\" ep ON ep.\"id\" = i.\"estimate_point_id\" \
-         WHERE {scope} ORDER BY i.\"ctid\"",
+         WHERE {scope} ORDER BY i.\"created_at\" DESC",
         from = BURNDOWN_SCOPE_FROM,
         scope = BURNDOWN_SCOPE_WHERE,
     );
@@ -6612,7 +6616,10 @@ pub async fn transfer_cycle_issues_inner(
     };
     let start_date = row_datetime_opt(&recount, "start_date", "transfer-recount")?;
     let end_date = row_datetime_opt(&recount, "end_date", "transfer-recount")?;
-    let today = micros_now().date_naive();
+    // `burndown_plot` compares each chart day against
+    // `timezone.now().date()` with the ACTOR zone active
+    // (`TimezoneMixin`, `analytics_plot.py:247-257`) — not the UTC day.
+    let today = micros_now().with_timezone(&pre.actor.timezone).date_naive();
     // Estimate gate (`:153-159`): the EXISTS the snapshot branch reads.
     let estimate_type: bool = sqlx::query_scalar::<_, i32>(queries::TRANSFER_ESTIMATE_TYPE_SQL)
         .bind(slug)
@@ -8419,6 +8426,44 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&chart).expect("json"),
             r#"{"2026-10-01":3}"#
+        );
+    }
+
+    #[test]
+    fn burndown_today_actor_zone_split() {
+        // F-C: the transfer caller derives `today` in the ACTOR zone, not
+        // UTC (`timezone.now().date()` under `TimezoneMixin`,
+        // `analytics_plot.py:247-257`). At 2026-10-02T00:30:00Z the UTC
+        // day is 10-02 while America/New_York still sits on 10-01, and
+        // the 10-02 chart entry flips between a number and `null`.
+        use chrono_tz::Tz;
+        let ny: Tz = "America/New_York".parse().expect("tz");
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-02T00:30:00Z")
+            .expect("dt")
+            .to_utc();
+        let utc_today = now.date_naive();
+        let actor_today = now.with_timezone(&ny).date_naive();
+        assert_eq!(utc_today.to_string(), "2026-10-02");
+        assert_eq!(actor_today.to_string(), "2026-10-01");
+        let start = Some(
+            chrono::DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z")
+                .expect("dt")
+                .to_utc(),
+        );
+        let end = Some(
+            chrono::DateTime::parse_from_rfc3339("2026-10-02T00:00:00Z")
+                .expect("dt")
+                .to_utc(),
+        );
+        let actor_chart = burndown_chart(ChartNumber::Int(3), &[], start, end, actor_today);
+        assert_eq!(
+            serde_json::to_string(&actor_chart).expect("json"),
+            r#"{"2026-10-01":3,"2026-10-02":null}"#
+        );
+        let utc_chart = burndown_chart(ChartNumber::Int(3), &[], start, end, utc_today);
+        assert_eq!(
+            serde_json::to_string(&utc_chart).expect("json"),
+            r#"{"2026-10-01":3,"2026-10-02":3}"#
         );
     }
 
