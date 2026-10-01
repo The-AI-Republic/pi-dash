@@ -432,3 +432,165 @@ def test_yield_allowed_for_the_runner_owner(api_key_client, workspace, issue, cr
     )
     resp = api_key_client.post(_yield_url(workspace, run.id), {"outcome": "progressed"}, format="json")
     assert resp.status_code == http_status.HTTP_200_OK, resp.data
+
+
+# ---------------------------------------------------------------------------
+# run yield on a run with no work item (scheduler / direct) — PDASHOSS01-276
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def scheduler_run(db, workspace, project, create_user):
+    """An active run fired by a scheduler binding: project-scoped, so
+    ``work_item`` is NULL and ``scheduler_binding`` is set."""
+    from datetime import timedelta
+
+    from pi_dash.db.models import Scheduler, SchedulerBinding
+    from pi_dash.runner.models import AgentRunTrigger, Pod
+
+    with impersonate(create_user):
+        scheduler = Scheduler.objects.create(
+            workspace=workspace, slug="coordinator", name="Coordinator", description="x", prompt="Scan."
+        )
+        binding = SchedulerBinding.objects.create(
+            scheduler=scheduler,
+            project=project,
+            workspace=workspace,
+            dtstart=timezone.now() - timedelta(days=1),
+            rrule="FREQ=HOURLY",
+            tzid="UTC",
+            enabled=True,
+            actor=create_user,
+        )
+    return AgentRun.objects.create(
+        workspace=workspace,
+        created_by=create_user,
+        pod=Pod.default_for_project(project),
+        work_item=None,
+        scheduler_binding=binding,
+        trigger=AgentRunTrigger.SCHEDULER,
+        status=AgentRunStatus.RUNNING,
+        prompt="x",
+        started_at=timezone.now(),
+    )
+
+
+@pytest.mark.unit
+def test_yield_records_the_outcome_on_a_scheduler_run(api_key_client, workspace, scheduler_run):
+    resp = api_key_client.post(
+        _yield_url(workspace, scheduler_run.id),
+        {"outcome": "done", "note": "  nothing to file  "},
+        format="json",
+        HTTP_X_PI_DASH_RUN_ID=str(scheduler_run.id),
+    )
+    assert resp.status_code == http_status.HTTP_200_OK, resp.data
+    assert resp.data["ok"] is True
+    assert resp.data["run_id"] == str(scheduler_run.id)
+    assert resp.data["outcome"] == "done"
+    assert resp.data["run_kind"] == "scheduler"
+    assert resp.data["work_item_id"] is None
+    assert resp.data["scheduler_binding_id"] == str(scheduler_run.scheduler_binding_id)
+    assert resp.data["stop_ticking"] is False
+    scheduler_run.refresh_from_db()
+    assert scheduler_run.done_payload["status"] == "done"
+    assert scheduler_run.done_payload["note"] == "nothing to file"
+    assert "yielded_at" in scheduler_run.done_payload
+
+
+@pytest.mark.unit
+def test_yield_on_a_scheduler_run_ignores_stop_ticking(api_key_client, workspace, scheduler_run):
+    """A scheduled run has no ticking clock. ``--stop-ticking`` is accepted
+    (the agent's command still exits 0) but nothing is stored, and the
+    response says so."""
+    resp = api_key_client.post(
+        _yield_url(workspace, scheduler_run.id),
+        {"outcome": "blocked", "stop_ticking": True},
+        format="json",
+    )
+    assert resp.status_code == http_status.HTTP_200_OK, resp.data
+    assert resp.data["stop_ticking"] is False
+    assert "no ticking clock" in resp.data["detail"]
+    scheduler_run.refresh_from_db()
+    assert scheduler_run.done_payload["status"] == "blocked"
+    assert "stop_ticking" not in scheduler_run.done_payload
+    binding = scheduler_run.scheduler_binding
+    binding.refresh_from_db()
+    assert binding.enabled is True
+
+
+@pytest.mark.unit
+def test_scheduler_run_outcome_survives_the_terminal_payload(api_key_client, workspace, scheduler_run):
+    """The runner's terminal ``done_payload`` arrives after the yield and
+    must not erase it, and the binding's terminate hook still runs."""
+    from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+    resp = api_key_client.post(_yield_url(workspace, scheduler_run.id), {"outcome": "progressed"}, format="json")
+    assert resp.status_code == http_status.HTTP_200_OK, resp.data
+    assert finalize_agent_run(
+        scheduler_run.id, AgentRunStatus.COMPLETED, updates={"done_payload": {"conclusion": "ok"}}
+    )
+    scheduler_run.refresh_from_db()
+    assert scheduler_run.status == AgentRunStatus.COMPLETED
+    assert scheduler_run.done_payload["status"] == "progressed"
+    assert scheduler_run.done_payload["conclusion"] == "ok"
+
+
+@pytest.mark.unit
+def test_yield_rejects_another_members_scheduler_run(api_key_client, workspace, scheduler_run):
+    from pi_dash.db.models import User, WorkspaceMember
+
+    other = User.objects.create(email="member-d@example.com", username="member_d")
+    WorkspaceMember.objects.create(workspace=workspace, member=other, role=15)
+    AgentRun.objects.filter(pk=scheduler_run.pk).update(created_by=other)
+    resp = api_key_client.post(_yield_url(workspace, scheduler_run.id), {"outcome": "done"}, format="json")
+    assert resp.status_code == http_status.HTTP_404_NOT_FOUND
+    scheduler_run.refresh_from_db()
+    assert scheduler_run.done_payload is None
+
+
+@pytest.mark.unit
+def test_yield_409s_on_a_finished_scheduler_run(api_key_client, workspace, scheduler_run):
+    AgentRun.objects.filter(pk=scheduler_run.pk).update(status=AgentRunStatus.COMPLETED)
+    resp = api_key_client.post(_yield_url(workspace, scheduler_run.id), {"outcome": "done"}, format="json")
+    assert resp.status_code == http_status.HTTP_409_CONFLICT
+    scheduler_run.refresh_from_db()
+    assert scheduler_run.done_payload is None
+
+
+@pytest.mark.unit
+def test_yield_records_the_outcome_on_a_direct_run(api_key_client, workspace, project, create_user):
+    """A run with neither a work item nor a scheduler binding (a direct
+    run) is still the caller's run — record the outcome, don't 404."""
+    from pi_dash.runner.models import Pod
+
+    run = AgentRun.objects.create(
+        workspace=workspace,
+        created_by=create_user,
+        work_item=None,
+        pod=Pod.default_for_project(project),
+        status=AgentRunStatus.RUNNING,
+        prompt="x",
+        started_at=timezone.now(),
+    )
+    resp = api_key_client.post(_yield_url(workspace, run.id), {"outcome": "done"}, format="json")
+    assert resp.status_code == http_status.HTTP_200_OK, resp.data
+    assert resp.data["run_kind"] == "direct"
+    assert resp.data["work_item_id"] is None
+    run.refresh_from_db()
+    assert run.done_payload["status"] == "done"
+
+
+@pytest.mark.unit
+def test_issue_run_yield_response_is_unchanged_but_for_run_kind(api_key_client, workspace, issue, active_run):
+    resp = api_key_client.post(
+        _yield_url(workspace, active_run.id), {"outcome": "done", "stop_ticking": True}, format="json"
+    )
+    assert resp.status_code == http_status.HTTP_200_OK, resp.data
+    assert resp.data == {
+        "ok": True,
+        "run_id": str(active_run.id),
+        "work_item_id": str(issue.id),
+        "outcome": "done",
+        "stop_ticking": True,
+        "run_kind": "issue",
+    }

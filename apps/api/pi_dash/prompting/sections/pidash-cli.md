@@ -98,6 +98,10 @@ pidash issue patch {{ ident }} --remove-label needs-design         # detach one
 
 - `pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--stop-ticking] [--note "<one line>"]` — report this run's outcome. Call it once, as your **last** `pidash` command, after any state move. The outcome is informational: `done` means "this run's turn is done", and `waiting_on_external` (waiting on CI, a merge, or a dependency issue) applies in **every** stage. No outcome stops the issue's ticking clock, and a run that reports nothing keeps ticking too. `--stop-ticking` is the only run-side signal that stops it — send it when the issue is finished or parked on a human, never while CI, a merge, or a dependency wait remains. See "Ending the run" for what each outcome means and exactly when to stop the clock.
 
+{% else %}#### Run outcome
+
+- `pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--note "<one line>"]` — report this scheduled run's outcome. Optional; when you send it, make it your **last** `pidash` command. The outcome is recorded on the run for the humans reading the schedule's run history, and the command prints `{"ok": true, "run_kind": "scheduler", …}` and exits `0`. A scheduled run has no ticking clock: no outcome changes when the schedule next fires, and `--stop-ticking` is accepted and ignored — it never disables the schedule.
+
 {% endif %}#### Debugging
 
 - `pidash workspace me` — print the authenticated user. For sanity-checking credentials only; you should not need this in normal flow.
