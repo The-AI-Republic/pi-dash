@@ -10,6 +10,11 @@
 // (never fork it) as new areas need new actions.
 import type { Locator, Page } from "@playwright/test";
 import type {
+  BoardLayoutKey,
+  GanttSidebarRow,
+  GanttZoom,
+  KanbanCard,
+  KanbanColumn,
   ParityBrowserCookie,
   ParityDriver,
   ParityTarget,
@@ -1241,5 +1246,1191 @@ export class WebDriver implements ParityDriver {
     await accept.waitFor({ timeout: 60_000 });
     await decline.waitFor({ timeout: 60_000 });
     return (await accept.isVisible()) && (await decline.isVisible());
+  }
+
+  // --- NEWFRONT-118 (layouts B): kanban board + gantt timeline.
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract. Selectors below address the old app's rendered
+  // --- DOM as observed during oracle recon; they carry no old-app code.
+
+  private static readonly BOARD_ORDER: BoardLayoutKey[] = ["list", "kanban", "calendar", "spreadsheet", "gantt"];
+  private static readonly BOARD_FIRST_WAIT_MS = 90_000;
+  private static readonly BOARD_SETTLE_WAIT_MS = 150_000;
+  private static readonly BOARD_POLL_STEP_MS = 2_000;
+
+  private boardSwitcherButtons(): Locator {
+    // The header layout switcher is a row of icon-only buttons with no
+    // accessible names; position is the only stable address.
+    return this.page.locator("div.flex.items-center.gap-1.rounded-md.bg-layer-3.p-1 > button");
+  }
+
+  private boardMain(): Locator {
+    return this.page.getByRole("main");
+  }
+
+  private async boardWaitForLayout(layout: BoardLayoutKey): Promise<void> {
+    const buttons = this.boardSwitcherButtons();
+    await buttons.first().waitFor({ timeout: WebDriver.BOARD_FIRST_WAIT_MS });
+    const index = WebDriver.BOARD_ORDER.indexOf(layout);
+    await buttons.nth(index).click({ timeout: WebDriver.BOARD_FIRST_WAIT_MS });
+    const deadline = Date.now() + WebDriver.BOARD_SETTLE_WAIT_MS;
+    for (;;) {
+      if ((await this.boardActiveLayout()) === layout) {
+        if (layout === "kanban" && (await this.kanbanBoardVisible())) return;
+        if (layout === "gantt" && (await this.ganttTimelineVisible())) return;
+        if (layout !== "kanban" && layout !== "gantt") return;
+      }
+      if (Date.now() > deadline) throw new Error(`[parity] timed out waiting for the ${layout} layout to render.`);
+      await this.page.waitForTimeout(WebDriver.BOARD_POLL_STEP_MS);
+    }
+  }
+
+  async kanbanOpenBoard(): Promise<void> {
+    await this.boardWaitForLayout("kanban");
+  }
+
+  async kanbanBoardVisible(): Promise<boolean> {
+    // Kanban column bodies carry ids of the shape {group}__{subgroup};
+    // no other layout renders such ids.
+    const columns = this.boardMain().locator('div[id*="__"]');
+    if ((await columns.count()) === 0) return false;
+    return (await this.page.locator("#gantt-container").count()) === 0;
+  }
+
+  async ganttOpenTimeline(): Promise<void> {
+    await this.boardWaitForLayout("gantt");
+  }
+
+  async ganttTimelineVisible(): Promise<boolean> {
+    return (await this.page.locator("#gantt-container").count()) > 0;
+  }
+
+  async boardActiveLayout(): Promise<BoardLayoutKey> {
+    const buttons = this.boardSwitcherButtons();
+    const count = await buttons.count();
+    for (let index = 0; index < count; index += 1) {
+      const cls =
+        (await buttons
+          .nth(index)
+          .getAttribute("class")
+          .catch(() => null)) ?? "";
+      if (cls.includes("bg-layer-transparent-active")) return WebDriver.BOARD_ORDER[index] ?? "list";
+    }
+    return "list";
+  }
+
+  async boardReloadIssues(): Promise<void> {
+    await this.page.reload();
+    await this.boardSwitcherButtons().first().waitFor({ timeout: WebDriver.BOARD_FIRST_WAIT_MS });
+  }
+
+  private static splitHeaderCount(text: string): { name: string; count: number } {
+    const clean = text.trim().replace(/\s+/g, " ");
+    const match = /^(.*)\s+(\d+)$/.exec(clean);
+    if (!match || match[1] === undefined || match[1].length === 0) {
+      throw new Error(`[parity] header text carried no trailing count: ${JSON.stringify(clean)}.`);
+    }
+    return { name: match[1], count: Number(match[2]) };
+  }
+
+  private boardFlatColumnOuters(): Locator {
+    // Outer column shells in flat (non-swimlane) mode, in display order.
+    // Each shell holds a sticky header plus, when the column body is
+    // rendered, the {group}__null inner drop target.
+    return this.boardMain().locator("div.group.relative.flex.flex-shrink-0.flex-col");
+  }
+
+  private async boardIsSwimlane(): Promise<boolean> {
+    return (await this.boardMain().locator('div[class*="top-[50px]"]').count()) > 0;
+  }
+
+  async kanbanColumns(): Promise<KanbanColumn[]> {
+    if (await this.boardIsSwimlane()) return this.kanbanSwimlaneGroupColumns();
+    const outers = this.boardFlatColumnOuters();
+    const count = await outers.count();
+    const columns: KanbanColumn[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const outer = outers.nth(index);
+      const header = outer.locator(":scope > div.sticky").first();
+      if ((await header.count()) === 0) continue;
+      const { name, count: issues } = WebDriver.splitHeaderCount(await header.innerText());
+      const inner = outer.locator(':scope div[id$="__null"]').first();
+      const rendered = (await inner.count()) > 0;
+      const id = rendered ? (((await inner.getAttribute("id")) ?? "").replace(/__null$/, "") ?? "") : "";
+      columns.push({ id, name, count: issues, rendered });
+    }
+    return columns;
+  }
+
+  private async kanbanSwimlaneGroupColumns(): Promise<KanbanColumn[]> {
+    // Swimlane mode renders the group headers in a top row; their value
+    // ids come positionally from the first lane's column drop targets,
+    // which share the same group order.
+    const headerRow = this.boardMain().locator('div.sticky.top-0[class*="z-[4]"]').first();
+    await headerRow.waitFor({ timeout: WebDriver.WAIT_MS });
+    const headers = headerRow.locator(":scope > div");
+    const headerCount = await headers.count();
+    const firstLane = await this.kanbanLaneWrapper(0);
+    const inners = firstLane.locator('div[id*="__"]');
+    const innerCount = await inners.count();
+    if (headerCount !== innerCount) {
+      throw new Error(`[parity] swimlane group headers (${headerCount}) and columns (${innerCount}) disagree.`);
+    }
+    const columns: KanbanColumn[] = [];
+    for (let index = 0; index < headerCount; index += 1) {
+      const { name, count } = WebDriver.splitHeaderCount(await headers.nth(index).innerText());
+      const id = ((await inners.nth(index).getAttribute("id")) ?? "").split("__")[0] ?? "";
+      columns.push({ id, name, count, rendered: true });
+    }
+    return columns;
+  }
+
+  private kanbanLaneBars(): Locator {
+    return this.boardMain().locator('div[class*="top-[50px]"]');
+  }
+
+  private async kanbanLaneWrapper(laneIndex: number): Promise<Locator> {
+    return this.kanbanLaneBars().nth(laneIndex).locator("xpath=..");
+  }
+
+  private async kanbanLaneWrapperByName(laneName: string): Promise<Locator> {
+    const bars = this.kanbanLaneBars();
+    const count = await bars.count();
+    for (let index = 0; index < count; index += 1) {
+      const { name } = WebDriver.splitHeaderCount(await bars.nth(index).innerText());
+      if (name === laneName) return bars.nth(index).locator("xpath=..");
+    }
+    throw new Error(`[parity] no swimlane named ${JSON.stringify(laneName)}.`);
+  }
+
+  async kanbanSwimlanes(): Promise<KanbanColumn[]> {
+    const bars = this.kanbanLaneBars();
+    const count = await bars.count();
+    const lanes: KanbanColumn[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const { name, count: issues } = WebDriver.splitHeaderCount(await bars.nth(index).innerText());
+      const wrapper = bars.nth(index).locator("xpath=..");
+      const inner = wrapper.locator('div[id*="__"]').first();
+      const rendered = (await inner.count()) > 0;
+      const id = rendered ? (((await inner.getAttribute("id")) ?? "").split("__")[1] ?? "") : "";
+      lanes.push({ id, name, count: issues, rendered });
+    }
+    return lanes;
+  }
+
+  private boardCardLinks(): Locator {
+    // Kanban cards link with ids of the shape issue_{id}_{group}_{sub};
+    // the underscore prefix distinguishes them from list/gantt rows.
+    return this.boardMain().locator('a[id^="issue_"]');
+  }
+
+  private static splitCardId(cardId: string): { issueId: string; groupId: string; subGroupId: string } {
+    const parts = cardId.split("_");
+    if (parts.length < 4 || parts[0] !== "issue") {
+      throw new Error(`[parity] unexpected kanban card id ${JSON.stringify(cardId)}.`);
+    }
+    return { issueId: parts[1] ?? "", groupId: parts[2] ?? "", subGroupId: parts.slice(3).join("_") };
+  }
+
+  private boardCardName(card: Locator): Locator {
+    return card.locator("div.text-body-sm-medium > span").first();
+  }
+
+  private async boardCardByName(issueName: string): Promise<Locator> {
+    const cards = this.boardCardLinks();
+    const count = await cards.count();
+    for (let index = 0; index < count; index += 1) {
+      const card = cards.nth(index);
+      if (
+        (await this.boardCardName(card)
+          .innerText()
+          .catch(() => null)) === issueName
+      )
+        return card;
+    }
+    throw new Error(`[parity] no kanban card titled ${JSON.stringify(issueName)}.`);
+  }
+
+  async kanbanCards(): Promise<KanbanCard[]> {
+    const cards = this.boardCardLinks();
+    const count = await cards.count();
+    const out: KanbanCard[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const card = cards.nth(index);
+      const id = (await card.getAttribute("id")) ?? "";
+      const { issueId, groupId, subGroupId } = WebDriver.splitCardId(id);
+      out.push({ issueId, name: await this.boardCardName(card).innerText(), groupId, subGroupId });
+    }
+    return out;
+  }
+
+  private async boardFlatColumnOuterByName(columnName: string): Promise<Locator> {
+    const outers = this.boardFlatColumnOuters();
+    const count = await outers.count();
+    for (let index = 0; index < count; index += 1) {
+      const outer = outers.nth(index);
+      const header = outer.locator(":scope > div.sticky").first();
+      if ((await header.count()) === 0) continue;
+      const { name } = WebDriver.splitHeaderCount(await header.innerText());
+      if (name === columnName) return outer;
+    }
+    throw new Error(`[parity] no kanban column named ${JSON.stringify(columnName)}.`);
+  }
+
+  async kanbanColumnCards(columnName: string): Promise<string[]> {
+    const outer = await this.boardFlatColumnOuterByName(columnName);
+    const cards = outer.locator('a[id^="issue_"]');
+    const count = await cards.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      names.push(await this.boardCardName(cards.nth(index)).innerText());
+    }
+    return names;
+  }
+
+  private boardHeaderButtons(outer: Locator): Locator {
+    // Flat header entries in order: the collapse toggle, then the create
+    // (+) entry when offered.
+    return outer.locator(":scope > div.sticky button");
+  }
+
+  async kanbanToggleColumn(columnName: string): Promise<void> {
+    const outer = await this.boardFlatColumnOuterByName(columnName);
+    const before = await this.kanbanColumnCollapsed(columnName);
+    await this.boardHeaderButtons(outer).first().click({ timeout: WebDriver.WAIT_MS });
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.kanbanColumnCollapsed(columnName)) !== before) return;
+      if (Date.now() > deadline) throw new Error(`[parity] column ${JSON.stringify(columnName)} never toggled.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async kanbanColumnCollapsed(columnName: string): Promise<boolean> {
+    // A collapsed header folds to a narrow vertical strip; the width
+    // class is the definitive marker (a lazy column keeps full width).
+    const outer = await this.boardFlatColumnOuterByName(columnName);
+    const header = outer.locator(":scope > div.sticky > div").first();
+    const cls = (await header.getAttribute("class").catch(() => null)) ?? "";
+    return cls.includes("w-[44px]");
+  }
+
+  async kanbanToggleSwimlane(laneName: string): Promise<void> {
+    const bar = await this.kanbanLaneBarByName(laneName);
+    const before = await this.kanbanSwimlaneCollapsed(laneName);
+    await bar.click({ timeout: WebDriver.WAIT_MS });
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.kanbanSwimlaneCollapsed(laneName)) !== before) return;
+      if (Date.now() > deadline) throw new Error(`[parity] swimlane ${JSON.stringify(laneName)} never toggled.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  private async kanbanLaneBarByName(laneName: string): Promise<Locator> {
+    const bars = this.kanbanLaneBars();
+    const count = await bars.count();
+    for (let index = 0; index < count; index += 1) {
+      const { name } = WebDriver.splitHeaderCount(await bars.nth(index).innerText());
+      if (name === laneName) return bars.nth(index);
+    }
+    throw new Error(`[parity] no swimlane named ${JSON.stringify(laneName)}.`);
+  }
+
+  async kanbanSwimlaneCollapsed(laneName: string): Promise<boolean> {
+    // A collapsed lane unmounts its board section (no column drop
+    // targets); an expanded-but-empty lane keeps them.
+    const wrapper = await this.kanbanLaneWrapperByName(laneName);
+    return (await wrapper.locator('div[id*="__"]').count()) === 0;
+  }
+
+  async kanbanCardIdentifier(issueName: string): Promise<string | null> {
+    const card = await this.boardCardByName(issueName);
+    const badge = card.locator("button[disabled]").first();
+    if ((await badge.count()) === 0) return null;
+    return (await badge.innerText()).trim() || null;
+  }
+
+  async kanbanCardShowsProperties(issueName: string): Promise<boolean> {
+    const card = await this.boardCardByName(issueName);
+    return (await card.locator("div.whitespace-nowrap button").count()) > 0;
+  }
+
+  async kanbanCardHover(issueName: string): Promise<void> {
+    const card = await this.boardCardByName(issueName);
+    await card.hover({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async kanbanCardQuickActionsVisible(issueName: string): Promise<boolean> {
+    const card = await this.boardCardByName(issueName);
+    const menu = card.locator('button[id^="headlessui-menu-button"]').first();
+    if ((await menu.count()) === 0) return false;
+    return await menu.isVisible();
+  }
+
+  async kanbanCardHref(issueName: string): Promise<string | null> {
+    const card = await this.boardCardByName(issueName);
+    return await card.getAttribute("href");
+  }
+
+  private issuePeekPanel(): Locator {
+    return this.page.locator("div.absolute.top-0.right-0.bottom-0").last();
+  }
+
+  async kanbanOpenCardPeek(issueName: string): Promise<void> {
+    const card = await this.boardCardByName(issueName);
+    await card.click({ timeout: WebDriver.WAIT_MS });
+    await this.issuePeekPanel().waitFor({ timeout: WebDriver.BOARD_FIRST_WAIT_MS });
+    const deadline = Date.now() + WebDriver.BOARD_FIRST_WAIT_MS;
+    for (;;) {
+      if ((await this.issuePeekTitle()) === issueName) return;
+      if (Date.now() > deadline) throw new Error(`[parity] peek never showed ${JSON.stringify(issueName)}.`);
+      await this.page.waitForTimeout(WebDriver.BOARD_POLL_STEP_MS);
+    }
+  }
+
+  async issuePeekVisible(): Promise<boolean> {
+    const panel = this.issuePeekPanel();
+    if ((await panel.count()) === 0) return false;
+    return await panel.isVisible();
+  }
+
+  async issuePeekTitle(): Promise<string | null> {
+    if (!(await this.issuePeekVisible())) return null;
+    const text = await this.issuePeekPanel().innerText();
+    const lines = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    const idIndex = lines.findIndex((line) => /^[A-Z]+-\d+$/.test(line));
+    if (idIndex < 0 || idIndex + 1 >= lines.length) return null;
+    return lines[idIndex + 1] ?? null;
+  }
+
+  async issuePeekClose(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if (!(await this.issuePeekVisible())) return;
+      if (Date.now() > deadline) throw new Error("[parity] peek never closed.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  private boardColumnQuickAdd(outer: Locator): Locator {
+    return outer.getByText("New work item", { exact: true });
+  }
+
+  async kanbanColumnHasQuickAdd(columnName: string): Promise<boolean> {
+    const outer = await this.boardFlatColumnOuterByName(columnName);
+    const entry = this.boardColumnQuickAdd(outer);
+    if ((await entry.count()) === 0) return false;
+    return await entry.first().isVisible();
+  }
+
+  async kanbanQuickAdd(columnName: string, title: string): Promise<void> {
+    const outer = await this.boardFlatColumnOuterByName(columnName);
+    await this.boardColumnQuickAdd(outer).first().click({ timeout: WebDriver.WAIT_MS });
+    const field = outer.getByPlaceholder("Work item title");
+    await field.waitFor({ timeout: WebDriver.WAIT_MS });
+    await field.fill(title);
+    await field.press("Enter");
+    const deadline = Date.now() + WebDriver.BOARD_FIRST_WAIT_MS;
+    for (;;) {
+      if ((await this.kanbanColumnCards(columnName)).includes(title)) return;
+      if (Date.now() > deadline) {
+        throw new Error(`[parity] quick-added card ${JSON.stringify(title)} never showed.`);
+      }
+      await this.page.waitForTimeout(WebDriver.BOARD_POLL_STEP_MS);
+    }
+  }
+
+  async kanbanHeaderCreateVisible(columnName: string): Promise<boolean> {
+    const outer = await this.boardFlatColumnOuterByName(columnName);
+    const header = outer.locator(":scope > div.sticky").first();
+    // Project context renders a second header button; cycle/module
+    // context renders a menu entry instead.
+    if ((await this.boardHeaderButtons(outer).count()) > 1) return true;
+    const menuEntry = header.locator("span.cursor-pointer").first();
+    if ((await menuEntry.count()) === 0) return false;
+    return await menuEntry.isVisible();
+  }
+
+  async kanbanHeaderCreate(columnName: string): Promise<void> {
+    const outer = await this.boardFlatColumnOuterByName(columnName);
+    const header = outer.locator(":scope > div.sticky").first();
+    if ((await this.boardHeaderButtons(outer).count()) > 1) {
+      await this.boardHeaderButtons(outer).nth(1).click({ timeout: WebDriver.WAIT_MS });
+    } else {
+      await header.locator("span.cursor-pointer").first().click({ timeout: WebDriver.WAIT_MS });
+    }
+    const deadline = Date.now() + WebDriver.BOARD_FIRST_WAIT_MS;
+    for (;;) {
+      if (await this.kanbanCreateModalVisible()) return;
+      const items = header.locator('[role="menuitem"], [role="menu"] button, ul button');
+      if ((await items.count()) > 0) return;
+      if (Date.now() > deadline) throw new Error("[parity] header create opened neither a modal nor a menu.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async kanbanCreateModalVisible(): Promise<boolean> {
+    // The create modal is the only surface pairing the assignee picker
+    // placeholder with a dialog; peek labels the same control differently.
+    const field = this.page.getByPlaceholder("Assignees");
+    if ((await field.count()) === 0) return false;
+    return await field.first().isVisible();
+  }
+
+  private async boardHeaderMenuScope(columnName: string): Promise<{ header: Locator; items: Locator }> {
+    const outer = await this.boardFlatColumnOuterByName(columnName);
+    const header = outer.locator(":scope > div.sticky").first();
+    return { header, items: this.page.locator('[role="menu"] [role="menuitem"], [role="menu"] button') };
+  }
+
+  async kanbanHeaderMenuItems(columnName: string): Promise<string[]> {
+    const { items } = await this.boardHeaderMenuScope(columnName);
+    const count = await items.count();
+    const out: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      out.push(((await items.nth(index).innerText()) ?? "").trim().replace(/\s+/g, " "));
+    }
+    return out.filter((entry) => entry.length > 0);
+  }
+
+  async kanbanHeaderMenuChoose(columnName: string, item: string): Promise<void> {
+    const { items } = await this.boardHeaderMenuScope(columnName);
+    const count = await items.count();
+    for (let index = 0; index < count; index += 1) {
+      const label = ((await items.nth(index).innerText()) ?? "").trim().replace(/\s+/g, " ");
+      if (label === item) {
+        await items.nth(index).click({ timeout: WebDriver.WAIT_MS });
+        return;
+      }
+    }
+    throw new Error(`[parity] no header menu entry ${JSON.stringify(item)}.`);
+  }
+
+  private async boardMouseDrag(points: { x: number; y: number }[]): Promise<void> {
+    // The board drag engine is pointer-based: press, stepped moves with
+    // pauses so drop targets register, then release.
+    if (points.length < 2) throw new Error("[parity] drag needs at least two points.");
+    const [first, ...rest] = points as [{ x: number; y: number }, ...{ x: number; y: number }[]];
+    await this.page.mouse.move(first.x, first.y);
+    await this.page.mouse.down();
+    for (const point of rest) {
+      await this.page.mouse.move(point.x, point.y, { steps: 8 });
+      await this.page.waitForTimeout(150);
+    }
+    await this.page.mouse.up();
+  }
+
+  private static boxCenter(box: { x: number; y: number; width: number; height: number }): {
+    x: number;
+    y: number;
+  } {
+    return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  }
+
+  private async boardSettle(description: string, ready: () => Promise<boolean>): Promise<void> {
+    const deadline = Date.now() + WebDriver.BOARD_FIRST_WAIT_MS;
+    for (;;) {
+      if (await ready().catch(() => false)) return;
+      if (Date.now() > deadline) throw new Error(`[parity] ${description} never settled.`);
+      await this.page.waitForTimeout(WebDriver.BOARD_POLL_STEP_MS);
+    }
+  }
+
+  async kanbanDragCardBefore(sourceName: string, targetName: string): Promise<void> {
+    const source = await this.boardCardByName(sourceName);
+    const target = await this.boardCardByName(targetName);
+    const sourceBox = await source.boundingBox();
+    const targetBox = await target.boundingBox();
+    if (!sourceBox || !targetBox) throw new Error("[parity] drag card has no box.");
+    const from = WebDriver.boxCenter(sourceBox);
+    const onto = { x: targetBox.x + targetBox.width / 2, y: targetBox.y + 8 };
+    await this.boardMouseDrag([from, onto]);
+    await this.boardSettle("card reorder", async () => {
+      const cards = await this.kanbanCards();
+      const names = cards.map((card) => card.name);
+      const sourceIndex = names.indexOf(sourceName);
+      const targetIndex = names.indexOf(targetName);
+      return sourceIndex >= 0 && targetIndex >= 0 && sourceIndex === targetIndex - 1;
+    });
+  }
+
+  async kanbanDragCardToColumnEnd(sourceName: string, columnName: string): Promise<void> {
+    const source = await this.boardCardByName(sourceName);
+    const outer = await this.boardFlatColumnOuterByName(columnName);
+    const sourceBox = await source.boundingBox();
+    await outer.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    const outerBox = await outer.boundingBox();
+    if (!sourceBox || !outerBox) throw new Error("[parity] drag card or column has no box.");
+    const from = WebDriver.boxCenter(sourceBox);
+    const onto = { x: outerBox.x + outerBox.width / 2, y: outerBox.y + outerBox.height - 12 };
+    await this.boardMouseDrag([from, onto]);
+    await this.boardSettle("column drop", async () => (await this.kanbanColumnCards(columnName)).includes(sourceName));
+  }
+
+  private boardDeleteZone(): Locator {
+    return this.page.getByText("Drop here to delete", { exact: false });
+  }
+
+  async kanbanDragCardToDelete(sourceName: string): Promise<void> {
+    const source = await this.boardCardByName(sourceName);
+    const sourceBox = await source.boundingBox();
+    // The zone mounts with the board (transparent until a drag starts),
+    // so its box can be read before pressing the card.
+    const zoneBox = await this.boardDeleteZone().first().boundingBox();
+    if (!sourceBox || !zoneBox) throw new Error("[parity] delete drag has no box.");
+    const from = WebDriver.boxCenter(sourceBox);
+    const onto = WebDriver.boxCenter(zoneBox);
+    await this.boardMouseDrag([from, onto]);
+    await this.boardSettle("delete modal", async () => this.kanbanDeleteModalVisible());
+  }
+
+  private boardDeleteModal(): Locator {
+    return this.page.getByRole("dialog").filter({ hasText: "Delete Work item" });
+  }
+
+  async kanbanDeleteModalVisible(): Promise<boolean> {
+    const modal = this.boardDeleteModal();
+    if ((await modal.count()) === 0) {
+      // Fall back to the title text: some modal roots carry no dialog role.
+      const title = this.page.getByText("Delete Work item", { exact: true });
+      if ((await title.count()) === 0) return false;
+      return await title.first().isVisible();
+    }
+    return await modal.first().isVisible();
+  }
+
+  async kanbanConfirmDelete(): Promise<void> {
+    const modal = this.boardDeleteModal();
+    const scope = (await modal.count()) > 0 ? modal.first() : this.page;
+    const confirm = scope.getByRole("button", { name: /^Delete$/ }).first();
+    await confirm.click({ timeout: WebDriver.WAIT_MS });
+    await this.boardSettle("delete confirm", async () => !(await this.kanbanDeleteModalVisible()));
+  }
+
+  async kanbanDragHoldOverColumn(sourceName: string, columnName: string): Promise<{ overlay: string | null }> {
+    const source = await this.boardCardByName(sourceName);
+    const outer = await this.boardFlatColumnOuterByName(columnName);
+    const sourceBox = await source.boundingBox();
+    await outer.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    const outerBox = await outer.boundingBox();
+    if (!sourceBox || !outerBox) throw new Error("[parity] overlay drag has no box.");
+    const from = WebDriver.boxCenter(sourceBox);
+    const onto = WebDriver.boxCenter(outerBox);
+    await this.page.mouse.move(from.x, from.y);
+    await this.page.mouse.down();
+    await this.page.mouse.move(onto.x, onto.y, { steps: 8 });
+    await this.page.waitForTimeout(1_000);
+    // The feedback overlay is the column body's first child; it hides
+    // behind a `hidden` class when the column accepts the card.
+    const overlay = outer.locator(':scope div[id$="__null"] > div').first();
+    let text: string | null = null;
+    if ((await overlay.count()) > 0) {
+      const cls = (await overlay.getAttribute("class").catch(() => null)) ?? "";
+      if (!cls.split(/\s+/).includes("hidden")) {
+        text = ((await overlay.innerText().catch(() => null)) ?? "").trim().replace(/\s+/g, " ") || null;
+      }
+    }
+    await this.page.mouse.up();
+    await this.page.waitForTimeout(1_500);
+    return { overlay: text };
+  }
+
+  async boardLastToast(): Promise<{ title: string; message: string } | null> {
+    const toasts = this.page.locator('[aria-label="Notifications"] [role="dialog"]');
+    const count = await toasts.count();
+    if (count === 0) return null;
+    const text = (
+      (await toasts
+        .nth(count - 1)
+        .innerText()
+        .catch(() => null)) ?? ""
+    ).trim();
+    if (!text) return null;
+    const [title, ...rest] = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (!title) return null;
+    return { title, message: rest.join(" ") };
+  }
+
+  async kanbanColumnScrollEnd(columnName: string): Promise<void> {
+    const outer = await this.boardFlatColumnOuterByName(columnName);
+    const inner = outer.locator(':scope div[id$="__null"]').first();
+    await inner.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
+    await this.page.waitForTimeout(2_000);
+  }
+
+  async kanbanColumnHasLoadMore(columnName: string): Promise<boolean> {
+    const outer = await this.boardFlatColumnOuterByName(columnName);
+    const link = outer.getByText("Load more", { exact: false });
+    if ((await link.count()) === 0) return false;
+    return await link.first().isVisible();
+  }
+
+  async kanbanColumnLoadMore(columnName: string): Promise<void> {
+    const outer = await this.boardFlatColumnOuterByName(columnName);
+    const before = await this.kanbanColumnCards(columnName);
+    await outer.getByText("Load more", { exact: false }).first().click({ timeout: WebDriver.WAIT_MS });
+    await this.boardSettle("load more", async () => (await this.kanbanColumnCards(columnName)).length > before.length);
+  }
+
+  async kanbanColumnLoading(columnName: string): Promise<boolean> {
+    const outer = await this.boardFlatColumnOuterByName(columnName);
+    return (await outer.locator('div[class*="animate-pulse"]').count()) > 0;
+  }
+
+  async kanbanBoardScroll(): Promise<{ x: number; y: number }> {
+    return await this.page.evaluate(() => {
+      const probe = document.querySelector('div[id*="__"]');
+      let node: HTMLElement | null = probe instanceof HTMLElement ? probe : null;
+      while (node) {
+        if (node.scrollWidth > node.clientWidth + 4 || node.scrollHeight > node.clientHeight + 4) {
+          return { x: node.scrollLeft, y: node.scrollTop };
+        }
+        node = node.parentElement;
+      }
+      return { x: 0, y: 0 };
+    });
+  }
+
+  async kanbanDragHoldNearEdge(
+    sourceName: string,
+    edge: "left" | "right" | "top" | "bottom",
+    holdMs: number
+  ): Promise<void> {
+    const source = await this.boardCardByName(sourceName);
+    const sourceBox = await source.boundingBox();
+    const viewport = this.page.viewportSize() ?? { width: 1280, height: 720 };
+    if (!sourceBox) throw new Error("[parity] edge-hold card has no box.");
+    const from = WebDriver.boxCenter(sourceBox);
+    const margin = 12;
+    const onto =
+      edge === "left"
+        ? { x: margin, y: viewport.height / 2 }
+        : edge === "right"
+          ? { x: viewport.width - margin, y: viewport.height / 2 }
+          : edge === "top"
+            ? { x: viewport.width / 2, y: margin }
+            : { x: viewport.width / 2, y: viewport.height - margin };
+    await this.page.mouse.move(from.x, from.y);
+    await this.page.mouse.down();
+    await this.page.mouse.move(onto.x, onto.y, { steps: 10 });
+    await this.page.waitForTimeout(holdMs);
+    await this.page.mouse.up();
+    await this.page.waitForTimeout(1_000);
+  }
+
+  private ganttContainer(): Locator {
+    return this.page.locator("#gantt-container");
+  }
+
+  private ganttChartRoot(): Locator {
+    return this.ganttContainer().locator("xpath=..");
+  }
+
+  async ganttHeader(): Promise<{ count: number | null; views: string[]; hasToday: boolean; hasFullscreen: boolean }> {
+    const root = this.ganttChartRoot();
+    const text =
+      (
+        (await root
+          .first()
+          .innerText()
+          .catch(() => null)) ?? ""
+      ).split("\n")[0] ?? "";
+    const countMatch = /(\d+)\s+Work items/.exec(text);
+    // The zoom switcher renders one entry per zoom level; the active one
+    // carries the pill marker.
+    const views: string[] = [];
+    for (const view of ["Week", "Month", "Quarter"] as const) {
+      if ((await root.getByRole("button", { name: view, exact: true }).count()) > 0) views.push(view);
+    }
+    const hasToday = (await root.getByRole("button", { name: "Today", exact: true }).count()) > 0;
+    const buttons = root.locator(":scope button");
+    const buttonCount = await buttons.count();
+    let hasFullscreen = false;
+    for (let index = 0; index < buttonCount; index += 1) {
+      const label = (
+        (await buttons
+          .nth(index)
+          .innerText()
+          .catch(() => null)) ?? ""
+      ).trim();
+      // The fullscreen toggle is the header's trailing icon-only button.
+      if (label === "") hasFullscreen = true;
+    }
+    return { count: countMatch ? Number(countMatch[1]) : null, views, hasToday, hasFullscreen };
+  }
+
+  private ganttZoomCells(): Locator {
+    // Sub-title cells of the rendered zoom: days (week), week ranges
+    // (month), or months (quarter).
+    return this.ganttContainer().locator("div.flex.h-5 > div");
+  }
+
+  async ganttActiveZoom(): Promise<GanttZoom | "unknown"> {
+    const cells = this.ganttZoomCells();
+    if ((await cells.count()) === 0) return "unknown";
+    const first = (
+      (await cells
+        .first()
+        .innerText()
+        .catch(() => null)) ?? ""
+    )
+      .trim()
+      .replace(/\s+/g, " ");
+    if (/^\d+\s*-\s*\d+/.test(first)) return "Month";
+    if (/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i.test(first)) return "Quarter";
+    if (/^(Su|M|T|W|Th|F|Sa)\b/i.test(first)) return "Week";
+    return "unknown";
+  }
+
+  async ganttSetZoom(view: GanttZoom): Promise<void> {
+    const root = this.ganttChartRoot();
+    const entry = root.getByRole("button", { name: view, exact: true }).first();
+    if ((await entry.count()) === 0) {
+      // Select-style switcher: open the current value, then pick the entry.
+      const current = await this.ganttActiveZoom();
+      if (current === "unknown") throw new Error("[parity] timeline zoom switcher not found.");
+      await root.getByRole("button", { name: current, exact: true }).first().click({ timeout: WebDriver.WAIT_MS });
+      await this.page.getByRole("option", { name: view, exact: true }).first().click({ timeout: WebDriver.WAIT_MS });
+    } else {
+      await entry.click({ timeout: WebDriver.WAIT_MS });
+    }
+    await this.boardSettle("zoom switch", async () => (await this.ganttActiveZoom()) === view);
+  }
+
+  async ganttDayWidth(): Promise<number> {
+    const zoom = await this.ganttActiveZoom();
+    if (zoom === "unknown") throw new Error("[parity] cannot measure day width for an unknown zoom.");
+    const cells = this.ganttZoomCells();
+    if (zoom === "Week" || zoom === "Month") {
+      const box = await cells.first().boundingBox();
+      if (!box) throw new Error("[parity] zoom cell has no box.");
+      return zoom === "Week" ? box.width : box.width / 7;
+    }
+    // Quarter cells span whole months: measure the current month's cell
+    // (marked with the today pill) and divide by its days.
+    const count = await cells.count();
+    for (let index = 0; index < count; index += 1) {
+      const pill = cells.nth(index).locator('[class*="bg-accent-primary"]');
+      if ((await pill.count()) > 0) {
+        const box = await cells.nth(index).boundingBox();
+        if (!box) throw new Error("[parity] quarter cell has no box.");
+        const now = new Date();
+        const days = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+        return box.width / days;
+      }
+    }
+    throw new Error("[parity] current month cell not found; center today first.");
+  }
+
+  async ganttWeekendTinted(): Promise<boolean> {
+    // Weekend day columns carry an inner tint block; weekdays do not.
+    const tinted = await this.page.evaluate(() => {
+      const container = document.querySelector("#gantt-container");
+      if (!container) return { total: 0, weekend: 0 };
+      const columns = [...container.querySelectorAll("div.flex.h-full.w-full > div")];
+      const weekend = columns.filter((column) => column.querySelector("div.bg-surface-2")).length;
+      return { total: columns.length, weekend };
+    });
+    return tinted.total > 0 && tinted.weekend > 0 && tinted.weekend < tinted.total;
+  }
+
+  async ganttWeekRowStarts(): Promise<string[]> {
+    if ((await this.ganttActiveZoom()) !== "Week") return [];
+    return await this.page.evaluate(() => {
+      const container = document.querySelector("#gantt-container");
+      if (!container) return [];
+      const blocks = [...container.querySelectorAll("div.absolute.top-0.left-0 > div.relative")];
+      return blocks.map((block) => {
+        const first = block.querySelector("div.flex.h-5 > div div");
+        return (first?.textContent ?? "").trim().split(/\s+/)[0] ?? "";
+      });
+    });
+  }
+
+  private ganttTodayRects(): Promise<{ left: number; right: number }[]> {
+    return this.page.evaluate(() => {
+      const marked = [...document.querySelectorAll("#gantt-container div.bg-accent-primary\\/20")] as HTMLElement[];
+      return marked.map((element) => {
+        const rect = element.getBoundingClientRect();
+        return { left: rect.left, right: rect.right };
+      });
+    });
+  }
+
+  async ganttClickToday(): Promise<void> {
+    await this.ganttChartRoot()
+      .getByRole("button", { name: "Today", exact: true })
+      .click({ timeout: WebDriver.WAIT_MS });
+    const viewport = this.page.viewportSize() ?? { width: 1280, height: 720 };
+    await this.boardSettle("today re-center", async () => {
+      const rects = await this.ganttTodayRects();
+      if (rects.length === 0) return false;
+      const widest = rects.reduce((a, b) => (b.right - b.left > a.right - a.left ? b : a));
+      const center = (widest.left + widest.right) / 2;
+      return Math.abs(center - viewport.width / 2) < 150;
+    });
+  }
+
+  async ganttTodayVisible(): Promise<boolean> {
+    const viewport = this.page.viewportSize() ?? { width: 1280, height: 720 };
+    const rects = await this.ganttTodayRects();
+    return rects.some((rect) => rect.left < viewport.width && rect.right > 0);
+  }
+
+  async ganttTodayHighlighted(): Promise<boolean> {
+    return (await this.ganttContainer().locator('div[class*="bg-accent-primary/20"]').count()) > 0;
+  }
+
+  async ganttToggleFullscreen(): Promise<void> {
+    const root = this.ganttChartRoot();
+    const before = await this.ganttFullscreenActive();
+    const buttons = root.locator(":scope button");
+    const count = await buttons.count();
+    for (let index = count - 1; index >= 0; index -= 1) {
+      const label = (
+        (await buttons
+          .nth(index)
+          .innerText()
+          .catch(() => null)) ?? ""
+      ).trim();
+      if (label === "") {
+        await buttons.nth(index).click({ timeout: WebDriver.WAIT_MS });
+        await this.boardSettle("fullscreen toggle", async () => (await this.ganttFullscreenActive()) !== before);
+        return;
+      }
+    }
+    throw new Error("[parity] fullscreen toggle not found.");
+  }
+
+  async ganttFullscreenActive(): Promise<boolean> {
+    return (await this.page.locator("#full-screen-portal #gantt-container").count()) > 0;
+  }
+
+  async ganttTimelineWidth(): Promise<number> {
+    return await this.page.evaluate(() => {
+      const container = document.querySelector("#gantt-container");
+      if (!(container instanceof HTMLElement)) return 0;
+      const items = [...container.querySelectorAll("div")].find((element) => {
+        const width = (element as HTMLElement).style?.width ?? "";
+        return /^\d+px$/.test(width) && element.children.length > 0;
+      }) as HTMLElement | undefined;
+      return items ? Math.round(items.getBoundingClientRect().width) : 0;
+    });
+  }
+
+  async ganttScrollLeft(): Promise<number> {
+    return await this.ganttContainer().evaluate((element) => element.scrollLeft);
+  }
+
+  async ganttScrollTo(x: number): Promise<void> {
+    await this.ganttContainer().evaluate((element, target) => {
+      element.scrollLeft = target;
+    }, x);
+    await this.page.waitForTimeout(2_000);
+  }
+
+  private ganttSidebar(): Locator {
+    return this.page.locator("#gantt-sidebar");
+  }
+
+  private ganttSidebarLinks(): Locator {
+    return this.ganttSidebar().locator('a[id^="issue-"]');
+  }
+
+  private async ganttSidebarLinkByName(issueName: string): Promise<Locator> {
+    const links = this.ganttSidebarLinks();
+    const count = await links.count();
+    for (let index = 0; index < count; index += 1) {
+      if ((await this.ganttSidebarRowName(links.nth(index))) === issueName) return links.nth(index);
+    }
+    throw new Error(`[parity] no timeline row titled ${JSON.stringify(issueName)}.`);
+  }
+
+  private async ganttSidebarRowName(link: Locator): Promise<string> {
+    const text = ((await link.innerText().catch(() => null)) ?? "").trim().replace(/\s+/g, " ");
+    return text.replace(/^[A-Z]+-\d+\s+/, "");
+  }
+
+  private async ganttSidebarRowIdentifier(link: Locator): Promise<string | null> {
+    const text = ((await link.innerText().catch(() => null)) ?? "").trim().replace(/\s+/g, " ");
+    const match = /^([A-Z]+-\d+)\s+/.exec(text);
+    return match ? (match[1] ?? null) : null;
+  }
+
+  private ganttSidebarRowDuration(link: Locator): Locator {
+    return link.locator("xpath=../..").locator(":scope > div.flex-shrink-0");
+  }
+
+  async ganttSidebarRows(): Promise<GanttSidebarRow[]> {
+    const links = this.ganttSidebarLinks();
+    const count = await links.count();
+    const rows: GanttSidebarRow[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const link = links.nth(index);
+      const duration = this.ganttSidebarRowDuration(link);
+      rows.push({
+        identifier: await this.ganttSidebarRowIdentifier(link),
+        name: await this.ganttSidebarRowName(link),
+        duration: (await duration.count()) > 0 ? (await duration.innerText()).trim() || null : null,
+      });
+    }
+    return rows;
+  }
+
+  async ganttOpenRowPeek(issueName: string): Promise<void> {
+    const link = await this.ganttSidebarLinkByName(issueName);
+    await link.click({ timeout: WebDriver.WAIT_MS });
+    await this.issuePeekPanel().waitFor({ timeout: WebDriver.BOARD_FIRST_WAIT_MS });
+    await this.boardSettle("row peek", async () => (await this.issuePeekTitle()) === issueName);
+  }
+
+  async ganttSidebarOrder(): Promise<string[]> {
+    const links = this.ganttSidebarLinks();
+    const count = await links.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      names.push(await this.ganttSidebarRowName(links.nth(index)));
+    }
+    return names;
+  }
+
+  async ganttDragRowBefore(sourceName: string, targetName: string): Promise<void> {
+    const source = await this.ganttSidebarLinkByName(sourceName);
+    const target = await this.ganttSidebarLinkByName(targetName);
+    const sourceBox = await source.boundingBox();
+    const targetBox = await target.boundingBox();
+    if (!sourceBox || !targetBox) throw new Error("[parity] sidebar row has no box.");
+    const from = WebDriver.boxCenter(sourceBox);
+    const onto = { x: targetBox.x + targetBox.width / 2, y: targetBox.y + 6 };
+    await this.boardMouseDrag([from, onto]);
+    await this.boardSettle("row reorder", async () => {
+      const order = await this.ganttSidebarOrder();
+      return order.indexOf(sourceName) === order.indexOf(targetName) - 1;
+    });
+  }
+
+  private async ganttIssueIdByName(issueName: string): Promise<string> {
+    const link = await this.ganttSidebarLinkByName(issueName);
+    const id = (await link.getAttribute("id")) ?? "";
+    const match = /^issue-(.+)$/.exec(id);
+    if (!match || !match[1]) throw new Error(`[parity] unexpected timeline row id ${JSON.stringify(id)}.`);
+    return match[1];
+  }
+
+  private ganttBar(issueId: string): Locator {
+    return this.ganttContainer().locator(`div[id="gantt-block-${issueId}"]`);
+  }
+
+  async ganttBarExists(issueName: string): Promise<boolean> {
+    // Dated bars take a positive-width positioned box; undated rows keep
+    // a zero-width placeholder, whether mounted or virtualized away.
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const bar = this.ganttBar(issueId);
+    if ((await bar.count()) === 0) return false;
+    const box = await bar.boundingBox();
+    return !!box && box.width > 0;
+  }
+
+  private ganttBarHandle(issueId: string, side: "left" | "right"): Locator {
+    const bar = this.ganttBar(issueId);
+    const marker = side === "left" ? "-left-1.5" : "-right-1.5";
+    return bar.locator(`div.cursor-col-resize[class*="${marker}"]`).first();
+  }
+
+  async ganttDragBar(issueName: string, dayDelta: number): Promise<void> {
+    if (dayDelta === 0) throw new Error("[parity] bar drag needs a nonzero day delta.");
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const bar = this.ganttBar(issueId);
+    const pxPerDay = await this.ganttDayWidth();
+    await bar.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    const box = await bar.boundingBox();
+    if (!box) throw new Error("[parity] bar has no box.");
+    const before = await bar.evaluate((element) => (element as HTMLElement).style.marginLeft);
+    const from = WebDriver.boxCenter(box);
+    const onto = { x: from.x + dayDelta * pxPerDay, y: from.y };
+    await this.page.mouse.move(from.x, from.y);
+    await this.page.mouse.down();
+    await this.page.mouse.move(onto.x, onto.y, { steps: 12 });
+    await this.page.mouse.up();
+    await this.boardSettle(
+      "bar move",
+      async () => (await bar.evaluate((element) => (element as HTMLElement).style.marginLeft)) !== before
+    );
+  }
+
+  async ganttResizeBar(issueName: string, side: "left" | "right", dayDelta: number): Promise<void> {
+    if (dayDelta === 0) throw new Error("[parity] bar resize needs a nonzero day delta.");
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const bar = this.ganttBar(issueId);
+    const pxPerDay = await this.ganttDayWidth();
+    await bar.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    const handle = this.ganttBarHandle(issueId, side);
+    await handle.waitFor({ timeout: WebDriver.WAIT_MS });
+    const box = await handle.boundingBox();
+    if (!box) throw new Error("[parity] resize handle has no box.");
+    const before = await bar.evaluate((element) => (element as HTMLElement).style.width);
+    const from = WebDriver.boxCenter(box);
+    const onto = { x: from.x + dayDelta * pxPerDay, y: from.y };
+    await this.page.mouse.move(from.x, from.y);
+    await this.page.mouse.down();
+    await this.page.mouse.move(onto.x, onto.y, { steps: 12 });
+    await this.page.mouse.up();
+    await this.boardSettle(
+      "bar resize",
+      async () => (await bar.evaluate((element) => (element as HTMLElement).style.width)) !== before
+    );
+  }
+
+  async ganttResizePreview(issueName: string, side: "left" | "right"): Promise<string | null> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const handle = this.ganttBarHandle(issueId, side);
+    if ((await handle.count()) === 0) return null;
+    await handle.hover({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForTimeout(600);
+    const pill = this.ganttBar(issueId).locator("div.bg-accent-subtle").first();
+    if ((await pill.count()) === 0) return null;
+    if (!(await pill.isVisible())) return null;
+    return (await pill.innerText()).trim() || null;
+  }
+
+  async ganttHandlesVisible(issueName: string): Promise<boolean> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    return (await this.ganttBar(issueId).locator("div.cursor-col-resize").count()) > 0;
+  }
+
+  private ganttRowOf(issueId: string): Locator {
+    // A bar wrapper always mounts inside its timeline row, dated or not;
+    // the row is the nearest full-width ancestor.
+    return this.ganttBar(issueId).locator("xpath=ancestor::div[contains(@class,'min-w-full')][1]");
+  }
+
+  async ganttRowAddVisible(issueName: string): Promise<boolean> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const row = this.ganttRowOf(issueId);
+    await row.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    await row.hover({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForTimeout(600);
+    const add = row.locator("button.absolute").first();
+    if ((await add.count()) === 0) return false;
+    return await add.isVisible();
+  }
+
+  async ganttAddBlock(issueName: string, dayOffset: number): Promise<void> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const pxPerDay = await this.ganttDayWidth();
+    const row = this.ganttRowOf(issueId);
+    await row.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    const sidebarBox = await this.ganttSidebar().boundingBox();
+    const rowBox = await row.boundingBox();
+    if (!sidebarBox || !rowBox) throw new Error("[parity] add-block row has no box.");
+    const at = {
+      x: sidebarBox.x + sidebarBox.width + dayOffset * pxPerDay,
+      y: rowBox.y + rowBox.height / 2,
+    };
+    await this.page.mouse.move(at.x, at.y);
+    await this.page.waitForTimeout(600);
+    await this.page.mouse.click(at.x, at.y);
+    await this.boardSettle("add block", async () => this.ganttBarExists(issueName));
+  }
+
+  async ganttQuickAdd(title: string): Promise<void> {
+    const root = this.ganttChartRoot();
+    await root.getByText("New work item", { exact: true }).first().click({ timeout: WebDriver.WAIT_MS });
+    const field = root.getByPlaceholder("Work item title");
+    await field.waitFor({ timeout: WebDriver.WAIT_MS });
+    await field.fill(title);
+    await field.press("Enter");
+    await this.boardSettle("timeline quick-add", async () => this.ganttBarExists(title));
+  }
+
+  async ganttHasQuickAdd(): Promise<boolean> {
+    const entry = this.ganttChartRoot().getByText("New work item", { exact: true }).first();
+    if ((await entry.count()) === 0) return false;
+    return await entry.isVisible();
+  }
+
+  async ganttBarInfo(issueName: string): Promise<{ tinted: boolean; masked: boolean; namePinned: boolean } | null> {
+    if (!(await this.ganttBarExists(issueName))) return null;
+    const issueId = await this.ganttIssueIdByName(issueName);
+    return await this.ganttBar(issueId).evaluate((bar) => {
+      const content = bar.querySelector("div[id^='issue-']") as HTMLElement | null;
+      if (!content) return null;
+      const tint = window.getComputedStyle(content).backgroundColor;
+      const mask = window.getComputedStyle(content).maskImage ?? "";
+      const name = [...content.querySelectorAll("div")].find((element) => {
+        const style = window.getComputedStyle(element);
+        return style.position === "sticky";
+      }) as HTMLElement | undefined;
+      const pinned = !!name && window.getComputedStyle(name).left !== "auto";
+      return {
+        tinted: !!tint && tint !== "rgba(0, 0, 0, 0)" && tint !== "transparent",
+        masked: mask.includes("gradient"),
+        namePinned: pinned,
+      };
+    });
+  }
+
+  async ganttHoverBar(issueName: string): Promise<void> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const bar = this.ganttBar(issueId);
+    await bar.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    await bar.hover({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForTimeout(600);
+  }
+
+  async ganttPreviewVisible(): Promise<boolean> {
+    const popover = this.page.locator('[data-slot="popover-content"]');
+    if ((await popover.count()) === 0) return false;
+    return await popover.first().isVisible();
+  }
+
+  async ganttOpenBarPeek(issueName: string): Promise<void> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const bar = this.ganttBar(issueId);
+    await bar.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    await bar.click({ timeout: WebDriver.WAIT_MS });
+    await this.issuePeekPanel().waitFor({ timeout: WebDriver.BOARD_FIRST_WAIT_MS });
+    await this.boardSettle("bar peek", async () => (await this.issuePeekTitle()) === issueName);
+  }
+
+  async ganttScrollArrowVisible(issueName: string): Promise<boolean> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const arrow = this.ganttRowOf(issueId).locator("button.sticky").first();
+    if ((await arrow.count()) === 0) return false;
+    return await arrow.isVisible();
+  }
+
+  async ganttClickScrollArrow(issueName: string): Promise<void> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    await this.ganttRowOf(issueId).locator("button.sticky").first().click({ timeout: WebDriver.WAIT_MS });
+    await this.boardSettle("scroll to block", async () => this.ganttBarInView(issueName));
+  }
+
+  async ganttBarInView(issueName: string): Promise<boolean> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const box = await this.ganttBar(issueId).boundingBox();
+    if (!box) return false;
+    const viewport = this.page.viewportSize() ?? { width: 1280, height: 720 };
+    return box.x < viewport.width && box.x + box.width > 0;
+  }
+
+  async ganttSidebarLoading(): Promise<boolean> {
+    return (await this.ganttSidebar().locator('div[class*="animate-pulse"]').count()) > 0;
+  }
+
+  async ganttLoadMoreVisible(): Promise<boolean> {
+    const pulses = this.ganttSidebar().locator('div[class*="animate-pulse"]');
+    if ((await pulses.count()) === 0) return false;
+    return await pulses.last().isVisible();
   }
 }
