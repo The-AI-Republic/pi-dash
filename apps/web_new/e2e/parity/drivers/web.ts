@@ -1925,9 +1925,35 @@ export class WebDriver implements ParityDriver {
   }
 
   async composerType(text: string): Promise<void> {
+    // Every interaction below is explicitly bounded: the suite config
+    // leaves Playwright's action timeout at its unbounded default, so a
+    // bare click would hang to the test timeout instead of failing
+    // honestly (first seen as a 600s notices hang on a loaded host).
+    //
+    // Type until stable: burst typing can be followed ~1-2s later by a
+    // React commit that resets the composer from a stale form value,
+    // wiping the draft after it visibly landed (intermittent, ~50/50;
+    // slow human keystrokes commit between chars and never hit it). A
+    // retype after the wipe lands on settled state, so bounded retries
+    // converge while a single attempt would flake.
     const editor = this.composerEditor();
-    await editor.click();
-    await editor.pressSequentially(text);
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      await editor.click({ timeout: 30_000 });
+      if (attempt > 1) {
+        await editor.press(`${process.platform === "darwin" ? "Meta" : "Control"}+a`, { timeout: 30_000 });
+      }
+      await editor.pressSequentially(text, { timeout: 30_000 });
+      await this.page.waitForTimeout(2_500);
+      const draft = await expect
+        .poll(() => this.composerDraftText(), { timeout: 5_000 })
+        .toContain(text)
+        .then(
+          () => true,
+          () => false
+        );
+      if (draft) return;
+    }
+    throw new Error(`[parity] composer draft never held ${JSON.stringify(text)} after 3 attempts`);
   }
 
   async composerPasteHtml(html: string): Promise<void> {
@@ -1942,12 +1968,12 @@ export class WebDriver implements ParityDriver {
       [html]
     );
     const editor = this.composerEditor();
-    await editor.click();
-    await editor.press(`${process.platform === "darwin" ? "Meta" : "Control"}+v`);
+    await editor.click({ timeout: 30_000 });
+    await editor.press(`${process.platform === "darwin" ? "Meta" : "Control"}+v`, { timeout: 30_000 });
   }
 
   async composerDraftText(): Promise<string> {
-    const raw = await this.composerEditor().innerText();
+    const raw = await this.composerEditor().innerText({ timeout: 30_000 });
     return raw.trim();
   }
 
@@ -1966,13 +1992,13 @@ export class WebDriver implements ParityDriver {
 
   async composerPressEnter(): Promise<void> {
     const editor = this.composerEditor();
-    await editor.focus();
+    await editor.focus({ timeout: 30_000 });
     await this.page.keyboard.press("Enter");
   }
 
   async composerPressShiftEnter(): Promise<void> {
     const editor = this.composerEditor();
-    await editor.focus();
+    await editor.focus({ timeout: 30_000 });
     await this.page.keyboard.press("Shift+Enter");
   }
 
@@ -1983,7 +2009,7 @@ export class WebDriver implements ParityDriver {
       page.waitForEvent("filechooser", { timeout: 30_000 }),
       attachButton.click({ timeout: 30_000 }),
     ]);
-    await chooser.setFiles(path);
+    await chooser.setFiles(path, { timeout: 30_000 });
   }
 
   async composerVisibleCommentTexts(): Promise<string[]> {
@@ -1993,15 +2019,22 @@ export class WebDriver implements ParityDriver {
     for (let index = 0; index < count; index += 1) {
       const body = cards.nth(index).locator('[contenteditable="false"]').first();
       if ((await body.count()) === 0) continue;
-      bodies.push(((await body.innerText()) ?? "").trim());
+      bodies.push(((await body.innerText({ timeout: 30_000 })) ?? "").trim());
     }
     return bodies;
   }
 
   async composerOpenCommentMenu(text: string): Promise<void> {
     const card = this.commentCard(text);
-    await card.scrollIntoViewIfNeeded();
-    await card.locator("[data-main-menu] > button").click({ timeout: 30_000 });
+    await card.scrollIntoViewIfNeeded({ timeout: 30_000 });
+    const button = card.locator("[data-main-menu] > button");
+    // Anchored projects (the seeded stack is one) render a small access
+    // icon over the menu button's center, so a center click is
+    // intercepted; a person clicks the visible corner instead. The point
+    // is computed from the live box, so it tracks the rendered size.
+    const box = await button.boundingBox({ timeout: 30_000 });
+    if (box === null) throw new Error("[parity] comment menu button has no bounding box");
+    await button.click({ timeout: 30_000, position: { x: box.width - 4, y: 4 } });
   }
 
   async composerMenuClick(item: string): Promise<void> {
@@ -2010,9 +2043,9 @@ export class WebDriver implements ParityDriver {
 
   async composerEditType(text: string): Promise<void> {
     const editor = this.commentEditEditor();
-    await editor.click();
-    await editor.press(`${process.platform === "darwin" ? "Meta" : "Control"}+a`);
-    await editor.pressSequentially(text);
+    await editor.click({ timeout: 30_000 });
+    await editor.press(`${process.platform === "darwin" ? "Meta" : "Control"}+a`, { timeout: 30_000 });
+    await editor.pressSequentially(text, { timeout: 30_000 });
   }
 
   /** The card holding the open inline edit form (exactly one is ever open). */
@@ -2039,7 +2072,7 @@ export class WebDriver implements ParityDriver {
 
   async composerEditPressEnter(): Promise<void> {
     const editor = this.commentEditEditor();
-    await editor.focus();
+    await editor.focus({ timeout: 30_000 });
     await this.page.keyboard.press("Enter");
   }
 
@@ -2058,11 +2091,11 @@ export class WebDriver implements ParityDriver {
       (await card
         .locator("div.text-caption-sm-medium")
         .first()
-        .innerText()
+        .innerText({ timeout: 30_000 })
         .catch(() => "")) ?? ""
     ).trim();
     const timeSpan = card.locator('span[tabindex="0"]').first();
-    const time = ((await timeSpan.innerText().catch(() => "")) ?? "").trim();
+    const time = ((await timeSpan.innerText({ timeout: 30_000 }).catch(() => "")) ?? "").trim();
     const tip = this.page.locator(".bp4-tooltip2");
     // The exact-time tooltip is hover-triggered (200ms open delay); focus
     // alone never opens it.
@@ -2074,7 +2107,7 @@ export class WebDriver implements ParityDriver {
         (
           (await tip
             .first()
-            .innerText()
+            .innerText({ timeout: 30_000 })
             .catch(() => "")) ?? ""
         ).trim() || null;
     } catch {
@@ -2095,7 +2128,7 @@ export class WebDriver implements ParityDriver {
     // the read-only card body; the card shows no file-name list, and the
     // header avatar lives outside the body, so body <img> count is exact.
     const card = this.commentCard(text);
-    await card.scrollIntoViewIfNeeded();
+    await card.scrollIntoViewIfNeeded({ timeout: 30_000 });
     return card.locator('[contenteditable="false"] img').count();
   }
 
@@ -2105,7 +2138,7 @@ export class WebDriver implements ParityDriver {
     const notices: { message: string; kind: "success" | "error" | "unknown" }[] = [];
     for (let index = 0; index < count; index += 1) {
       const dialog = dialogs.nth(index);
-      const message = ((await dialog.innerText().catch(() => "")) ?? "").trim();
+      const message = ((await dialog.innerText({ timeout: 30_000 }).catch(() => "")) ?? "").trim();
       if (message.length === 0) continue;
       let kind: "success" | "error" | "unknown" = "unknown";
       if ((await dialog.locator('[class*="bg-success"]').count()) > 0) kind = "success";

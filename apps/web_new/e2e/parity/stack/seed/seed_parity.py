@@ -112,6 +112,73 @@ def refresh_project_issues(project, workspace, state, user) -> None:
     # that defeat ORM deletes, and this is the parity scratch database
     # (parity19-pg), so direct deletes of exactly this project's issue rows
     # are safe.
+    # NEWFRONT-112 reorder: 113's enumerated leaf-before-parent closure
+    # runs FIRST (moved verbatim from below). The legacy block deletes
+    # issue_comments/issues without clearing sync/intake rows, so any
+    # reseed after those rows exist tripped their FKs before the closure
+    # could run. All three blocks stay (idempotent); only the order
+    # changed, so future misses still get fixed in exactly one list.
+    with connection.cursor() as cursor:
+        # NEWFRONT-113: every row that references this project's issues or
+        # their comments first (leaf tables before parents), otherwise any
+        # row an earlier scenario run stored blocks the issue rebuild with
+        # a foreign-key violation on reruns that skip parity-reset.sh.
+        # Table list enumerated from pg_constraint on the scratch database.
+        pid = str(project.id)
+        issue_set = "(SELECT id FROM issues WHERE project_id = %s)"
+        comment_set = "(SELECT id FROM issue_comments WHERE issue_id IN " + issue_set + ")"
+        for table, column in [
+            ("git_comment_syncs", "comment_id"),
+            ("github_comment_syncs", "comment_id"),
+            ("comment_reactions", "comment_id"),
+            ("file_assets", "comment_id"),
+            ("issue_activities", "issue_comment_id"),
+            ("git_issue_syncs", "issue_id"),
+            ("github_issue_syncs", "issue_id"),
+            ("file_assets", "issue_id"),
+            ("issue_activities", "issue_id"),
+            ("issue_sequences", "issue_id"),
+            ("issue_labels", "issue_id"),
+            ("issue_assignees", "issue_id"),
+            ("issue_subscribers", "issue_id"),
+            ("issue_reactions", "issue_id"),
+            ("issue_votes", "issue_id"),
+            ("issue_mentions", "issue_id"),
+            ("issue_attachments", "issue_id"),
+            ("issue_links", "issue_id"),
+            ("issue_blockers", "blocked_by_id"),
+            ("issue_blockers", "block_id"),
+            ("issue_relations", "related_issue_id"),
+            ("issue_relations", "issue_id"),
+            ("cycle_issues", "issue_id"),
+            ("module_issues", "issue_id"),
+            ("intake_issues", "issue_id"),
+            ("intake_issues", "duplicate_to_id"),
+            ("issue_versions", "issue_id"),
+            ("issue_description_versions", "issue_id"),
+            ("issue_agent_ticker", "issue_id"),
+            ("git_code_review_links", "issue_id"),
+            ("github_pull_request_links", "issue_id"),
+            ("agent_run", "work_item_id"),
+        ]:
+            scope = comment_set if column in ("comment_id", "issue_comment_id") else issue_set
+            cursor.execute(f"DELETE FROM {table} WHERE {column} IN {scope}", [pid] * scope.count("%s"))
+        # Threaded replies before their parents (specs never thread deeper).
+        cursor.execute(
+            "DELETE FROM issue_comments WHERE parent_id IN " + comment_set,
+            [pid],
+        )
+        cursor.execute(
+            "DELETE FROM issue_comments WHERE issue_id IN " + issue_set,
+            [pid],
+        )
+        # Sub-issues before their parents; drafts pointing at project issues.
+        cursor.execute("DELETE FROM draft_issues WHERE parent_id IN " + issue_set, [pid])
+        cursor.execute(
+            "DELETE FROM issues WHERE parent_id IN " + issue_set + " AND project_id = %s",
+            [pid, pid],
+        )
+        cursor.execute("DELETE FROM issues WHERE project_id = %s", [pid])
     with connection.cursor() as cursor:
         # Oracle comment/reaction scenarios post on these issues, so clear
         # every per-issue dependent row before replacing the issues
@@ -222,66 +289,9 @@ def refresh_project_issues(project, workspace, state, user) -> None:
                 )
                 cursor.execute(f"DELETE FROM {table} WHERE {condition}", [pid] * len(columns))
             cursor.execute("DELETE FROM issues WHERE project_id = %s", [pid])
-            # NEWFRONT-113: every row that references this project's issues or
-            # their comments first (leaf tables before parents), otherwise any
-            # row an earlier scenario run stored blocks the issue rebuild with
-            # a foreign-key violation on reruns that skip parity-reset.sh.
-            # Table list enumerated from pg_constraint on the scratch database.
-            pid = str(project.id)
-            issue_set = "(SELECT id FROM issues WHERE project_id = %s)"
-            comment_set = "(SELECT id FROM issue_comments WHERE issue_id IN " + issue_set + ")"
-            for table, column in [
-                ("git_comment_syncs", "comment_id"),
-                ("github_comment_syncs", "comment_id"),
-                ("comment_reactions", "comment_id"),
-                ("file_assets", "comment_id"),
-                ("issue_activities", "issue_comment_id"),
-                ("git_issue_syncs", "issue_id"),
-                ("github_issue_syncs", "issue_id"),
-                ("file_assets", "issue_id"),
-                ("issue_activities", "issue_id"),
-                ("issue_sequences", "issue_id"),
-                ("issue_labels", "issue_id"),
-                ("issue_assignees", "issue_id"),
-                ("issue_subscribers", "issue_id"),
-                ("issue_reactions", "issue_id"),
-                ("issue_votes", "issue_id"),
-                ("issue_mentions", "issue_id"),
-                ("issue_attachments", "issue_id"),
-                ("issue_links", "issue_id"),
-                ("issue_blockers", "blocked_by_id"),
-                ("issue_blockers", "block_id"),
-                ("issue_relations", "related_issue_id"),
-                ("issue_relations", "issue_id"),
-                ("cycle_issues", "issue_id"),
-                ("module_issues", "issue_id"),
-                ("intake_issues", "issue_id"),
-                ("intake_issues", "duplicate_to_id"),
-                ("issue_versions", "issue_id"),
-                ("issue_description_versions", "issue_id"),
-                ("issue_agent_ticker", "issue_id"),
-                ("git_code_review_links", "issue_id"),
-                ("github_pull_request_links", "issue_id"),
-                ("agent_run", "work_item_id"),
-            ]:
-                scope = comment_set if column in ("comment_id", "issue_comment_id") else issue_set
-                cursor.execute(f"DELETE FROM {table} WHERE {column} IN {scope}", [pid] * scope.count("%s"))
-            # Threaded replies before their parents (specs never thread deeper).
-            cursor.execute(
-                "DELETE FROM issue_comments WHERE parent_id IN " + comment_set,
-                [pid],
-            )
-            cursor.execute(
-                "DELETE FROM issue_comments WHERE issue_id IN " + issue_set,
-                [pid],
-            )
-            # Sub-issues before their parents; drafts pointing at project issues.
-            cursor.execute("DELETE FROM draft_issues WHERE parent_id IN " + issue_set, [pid])
-            cursor.execute(
-                "DELETE FROM issues WHERE parent_id IN " + issue_set + " AND project_id = %s",
-                [pid, pid],
-            )
-            cursor.execute("DELETE FROM issues WHERE project_id = %s", [pid])
+            # (113's enumerated closure ran first at the top of this
+            # function; this block and the legacy one above are now
+            # idempotent followers.)
     for position, name in enumerate(ISSUE_NAMES):
         issue = Issue(
             workspace=workspace,
