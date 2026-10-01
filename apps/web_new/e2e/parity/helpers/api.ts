@@ -3508,3 +3508,243 @@ export async function deleteIssueStatus(
   );
   return res.status;
 }
+
+// --- Issues filters and display options (NEWFRONT-119): per-user filter
+// --- records, saved-view CRUD, and project feature flags.
+
+/** Issue-filter state as the server stores it per user per entity. */
+export interface IssueUserProperties {
+  filters: Record<string, string[] | null>;
+  display_filters: Record<string, unknown>;
+  display_properties: Record<string, boolean>;
+  rich_filters: Record<string, unknown>;
+}
+
+/** The project's per-user filter record for the session owner. */
+export async function serverUserProperties(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<IssueUserProperties> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/user-properties/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] user-properties read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as {
+    filters?: Record<string, string[] | null>;
+    display_filters?: Record<string, unknown>;
+    display_properties?: Record<string, boolean>;
+    rich_filters?: Record<string, unknown>;
+  };
+  return {
+    filters: payload.filters ?? {},
+    display_filters: payload.display_filters ?? {},
+    display_properties: payload.display_properties ?? {},
+    rich_filters: payload.rich_filters ?? {},
+  };
+}
+
+const SEED_NULL_FILTERS = [
+  "state",
+  "labels",
+  "priority",
+  "assignees",
+  "created_by",
+  "start_date",
+  "subscriber",
+  "state_group",
+  "target_date",
+];
+
+/** PATCH the per-user filter record (session cookie plus CSRF header). */
+async function patchUserProperties(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  body: Record<string, unknown>,
+  apiBase: string
+): Promise<void> {
+  const csrf = sessionCookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("csrftoken="))
+    ?.slice("csrftoken=".length);
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/user-properties/`, {
+    method: "PATCH",
+    headers: {
+      cookie: sessionCookie,
+      "content-type": "application/json",
+      ...(csrf === undefined ? {} : { "X-CSRFToken": csrf }),
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`[parity] user-properties write failed with HTTP ${res.status}.`);
+}
+
+/** Restore the seeded filter record so scenarios never leak state into each other. */
+export async function resetIssueUserProperties(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await patchUserProperties(
+    workspaceSlug,
+    projectId,
+    sessionCookie,
+    {
+      filters: Object.fromEntries(SEED_NULL_FILTERS.map((key) => [key, null])),
+      display_filters: { layout: "list", group_by: null, order_by: "sort_order" },
+      display_properties: {},
+      rich_filters: {},
+    },
+    apiBase
+  );
+}
+
+/** Replace the stored rich_filters expression (reveals the row when active). */
+export async function setIssueRichFilters(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  richFilters: unknown,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await patchUserProperties(workspaceSlug, projectId, sessionCookie, { rich_filters: richFilters }, apiBase);
+}
+
+/** PATCH part of the display record (test setup for layout-dependent panels). */
+export async function setIssueDisplayFilters(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  displayFilters: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await patchUserProperties(workspaceSlug, projectId, sessionCookie, { display_filters: displayFilters }, apiBase);
+}
+
+export interface ProjectViewSummary {
+  id: string;
+  name: string;
+  rich_filters: unknown;
+}
+
+/** Saved project views as the server reports them. */
+export async function serverSavedViews(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ProjectViewSummary[]> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/views/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] views read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const view = row as { id?: unknown; name?: unknown; rich_filters?: unknown };
+    if (typeof view.id !== "string" || typeof view.name !== "string")
+      throw new Error("[parity] view row carried no id/name.");
+    return { id: view.id, name: view.name, rich_filters: view.rich_filters };
+  });
+}
+
+/** Create a saved project view; returns its id (callers delete it after). */
+export async function createProjectView(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  name: string,
+  richFilters: unknown,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const csrf = sessionCookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("csrftoken="))
+    ?.slice("csrftoken=".length);
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/views/`, {
+    method: "POST",
+    headers: {
+      cookie: sessionCookie,
+      "content-type": "application/json",
+      ...(csrf === undefined ? {} : { "X-CSRFToken": csrf }),
+    },
+    body: JSON.stringify({ name, rich_filters: richFilters }),
+  });
+  if (!res.ok) throw new Error(`[parity] view create failed with HTTP ${res.status}.`);
+  const view = (await res.json()) as { id?: unknown };
+  if (typeof view.id !== "string") throw new Error("[parity] view create returned no id.");
+  return view.id;
+}
+
+/** The project's views/cycle/module feature flags (save UI is flag-gated). */
+export async function serverProjectViewFlags(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, boolean>> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project read failed with HTTP ${res.status}.`);
+  const project = (await res.json()) as Record<string, unknown>;
+  const pick = (key: string): boolean => project[key] === true;
+  return {
+    issue_views_view: pick("issue_views_view"),
+    cycle_view: pick("cycle_view"),
+    module_view: pick("module_view"),
+  };
+}
+
+/** Flip project feature flags; callers restore what they found. */
+export async function setProjectViewFlags(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  flags: Record<string, boolean>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const csrf = sessionCookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("csrftoken="))
+    ?.slice("csrftoken=".length);
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    method: "PATCH",
+    headers: {
+      cookie: sessionCookie,
+      "content-type": "application/json",
+      ...(csrf === undefined ? {} : { "X-CSRFToken": csrf }),
+    },
+    body: JSON.stringify(flags),
+  });
+  if (!res.ok) throw new Error(`[parity] project flags write failed with HTTP ${res.status}.`);
+}
+
+/** Delete a saved project view (keeps scenarios from leaking views). */
+export async function deleteProjectView(
+  workspaceSlug: string,
+  projectId: string,
+  viewId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const csrf = sessionCookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("csrftoken="))
+    ?.slice("csrftoken=".length);
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/views/${viewId}/`, {
+    method: "DELETE",
+    headers: {
+      cookie: sessionCookie,
+      ...(csrf === undefined ? {} : { "X-CSRFToken": csrf }),
+    },
+  });
+  if (!res.ok) throw new Error(`[parity] view delete failed with HTTP ${res.status}.`);
+}
