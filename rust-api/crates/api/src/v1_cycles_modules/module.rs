@@ -2880,21 +2880,26 @@ pub fn page_denial(error: crate::paginator::PageError) -> Denial {
 }
 
 /// Resolve the module-issues GET `?order_by=` (default `created_at`,
-/// ascending) against the M4 column set: output annotations order by
-/// alias, FK field names by their `<name>_id` columns (`order_by=state`
-/// orders by `state_id`, verified live), plain columns directly. Anything
-/// else runs quoted onto the table and fails at the database, exactly like
-/// Django's `FieldError`-at-evaluation → generic 500.
+/// ascending) against what Django's `.order_by()` accepts at
+/// `views/module.py:618` (PIDASHCONV-510; every arm verified against live
+/// `str(query)` output): the exact `?` (random — `-?` is a `FieldError`,
+/// never random), the two annotations that exist at order time
+/// (`sub_issues_count`, `bridge_id` — `link_count`/`attachment_count`
+/// are annotated after and `FieldError`), FK field names by their
+/// `<name>_id` columns (bare FKs order by the related `Meta.ordering`
+/// Django-side — known divergence, PIDASHCONV-511, unchanged here),
+/// bare-M2M names (`assignees`, `labels`), and single-level traversals
+/// onto the already-joined tables. Anything else runs quoted onto its
+/// table and fails at the database, exactly like Django's
+/// `FieldError`-at-evaluation → generic 500.
 pub fn resolve_issue_order(
     raw: Option<&str>,
 ) -> pidash_db::v1_cycles_modules::module_queries::OrderBy {
-    use pidash_db::v1_cycles_modules::module_queries::OrderBy;
-    const ANNOTATIONS: [&str; 4] = [
-        "sub_issues_count",
-        "bridge_id",
-        "link_count",
-        "attachment_count",
-    ];
+    use pidash_db::v1_cycles_modules::module_queries::{issue_traversal_table, M2MOrder, OrderBy};
+    if raw == Some("?") {
+        return OrderBy::random();
+    }
+    const EARLY_ANNOTATIONS: [&str; 2] = ["sub_issues_count", "bridge_id"];
     const FK_FIELDS: [&str; 8] = [
         "created_by",
         "updated_by",
@@ -2910,19 +2915,55 @@ pub fn resolve_issue_order(
         Some(rest) => (true, rest),
         None => (false, text),
     };
-    let resolved = if ANNOTATIONS.contains(&column) {
-        column.to_owned()
-    } else if FK_FIELDS.contains(&column) {
-        format!("{column}_id")
-    } else if column == "assigned_pod" {
-        "assigned_pod_id".to_owned()
-    } else {
-        column.to_owned()
-    };
-    OrderBy {
-        descending,
-        column: resolved,
+    if EARLY_ANNOTATIONS.contains(&column) {
+        return OrderBy::alias(column, descending);
     }
+    if FK_FIELDS.contains(&column) {
+        return OrderBy::new(format!("{column}_id"), descending);
+    }
+    if column == "assigned_pod" {
+        return OrderBy::new("assigned_pod_id", descending);
+    }
+    if column == "assignees" {
+        return OrderBy::m2m(M2MOrder::Assignees, descending);
+    }
+    if column == "labels" {
+        return OrderBy::m2m(M2MOrder::Labels, descending);
+    }
+    if let Some((head, tail)) = column.split_once("__") {
+        if let Some(table) = issue_traversal_table(head) {
+            return OrderBy::table(table, tail, descending);
+        }
+    }
+    OrderBy::new(column, descending)
+}
+
+/// Envelope totals for the module-issues page: `rows.len()` — except
+/// the M2M orderings multiply rows per through-row while Django's
+/// `queryset.count()` trims the ordering-only joins, so M2M totals
+/// count distinct issue ids (PIDASHCONV-510; live bridges are unique
+/// per issue+module, so only ordering joins can multiply here). The
+/// page window itself still slices the multiplied rows, exactly like
+/// Django's `queryset[offset:stop]`.
+fn envelope_total(
+    order: &pidash_db::v1_cycles_modules::module_queries::OrderBy,
+    rows: &[sqlx::postgres::PgRow],
+) -> Result<usize, Denial> {
+    use pidash_db::v1_cycles_modules::module_queries::OrderTarget;
+    if !matches!(order.target, OrderTarget::M2M(_)) {
+        return Ok(rows.len());
+    }
+    let mut ids = Vec::with_capacity(rows.len());
+    for row in rows {
+        ids.push(row_uuid(row, "id", "module-issues-total")?);
+    }
+    Ok(count_distinct(ids))
+}
+
+/// Count distinct values (the M2M envelope total).
+fn count_distinct(ids: Vec<uuid::Uuid>) -> usize {
+    use std::collections::HashSet;
+    ids.into_iter().collect::<HashSet<_>>().len()
 }
 
 // ---------------------------------------------------------------------------
@@ -3944,6 +3985,7 @@ pub async fn list_module_issues_inner(
             .await
             .map_err(|error| db_error(error, "module-issues-identifier"))?
             .flatten();
+    let total = envelope_total(&order, &rows)?;
     let window = page_window(query, rows.len())?;
     let fields = fields_param(query, "fields");
     let expand = fields_param(query, "expand");
@@ -3969,7 +4011,7 @@ pub async fn list_module_issues_inner(
             .await?,
         );
     }
-    page_envelope(&window, rows.len(), results)
+    page_envelope(&window, total, results)
 }
 
 /// One validated `pk__in` candidate for the module-issues POST re-query:
@@ -5246,17 +5288,93 @@ mod tests {
 
     #[test]
     fn issue_order_resolution() {
+        use pidash_db::v1_cycles_modules::module_queries::{M2MOrder, OrderTarget};
         assert_eq!(resolve_issue_order(None).column, "created_at");
         assert!(!resolve_issue_order(None).descending);
+        assert_eq!(resolve_issue_order(None).target, OrderTarget::Base);
         let order = resolve_issue_order(Some("-created_at"));
         assert!(order.descending);
         assert_eq!(order.column, "created_at");
+        assert_eq!(order.target, OrderTarget::Base);
+        // Bare FKs keep the `<name>_id` mapping (PIDASHCONV-511 owns the
+        // related-Meta.ordering divergence).
         assert_eq!(resolve_issue_order(Some("state")).column, "state_id");
-        assert_eq!(
-            resolve_issue_order(Some("sub_issues_count")).column,
-            "sub_issues_count"
-        );
+        // PIDASHCONV-510: exact `?` is random; `-?` passes through to
+        // 500 exactly like Django's FieldError for it.
+        let order = resolve_issue_order(Some("?"));
+        assert_eq!(order.target, OrderTarget::Random);
+        assert!(!order.descending);
+        let order = resolve_issue_order(Some("-?"));
+        assert_eq!(order.target, OrderTarget::Base);
+        assert_eq!(order.column, "?");
+        assert!(order.descending);
+        // Only the annotations that exist at `.order_by()` time order by
+        // alias; the late ones pass through (Django FieldErrors → 500).
+        let order = resolve_issue_order(Some("sub_issues_count"));
+        assert_eq!(order.target, OrderTarget::Alias);
+        assert_eq!(order.column, "sub_issues_count");
+        assert!(!order.descending);
+        let order = resolve_issue_order(Some("-bridge_id"));
+        assert_eq!(order.target, OrderTarget::Alias);
+        assert!(order.descending);
+        let order = resolve_issue_order(Some("link_count"));
+        assert_eq!(order.target, OrderTarget::Base);
+        assert_eq!(order.column, "link_count");
+        let order = resolve_issue_order(Some("attachment_count"));
+        assert_eq!(order.target, OrderTarget::Base);
+        // Bare M2M names carry the request direction (the builder inverts
+        // it onto the related `-created_at` ordering).
+        let order = resolve_issue_order(Some("assignees"));
+        assert_eq!(order.target, OrderTarget::M2M(M2MOrder::Assignees));
+        assert!(!order.descending);
+        let order = resolve_issue_order(Some("-assignees"));
+        assert_eq!(order.target, OrderTarget::M2M(M2MOrder::Assignees));
+        assert!(order.descending);
+        let order = resolve_issue_order(Some("labels"));
+        assert_eq!(order.target, OrderTarget::M2M(M2MOrder::Labels));
+        // Single-level traversals onto already-joined tables; the tail
+        // passes raw (bad tails 500 at the database like FieldError).
+        let order = resolve_issue_order(Some("state__group"));
+        assert_eq!(order.target, OrderTarget::Table("states"));
+        assert_eq!(order.column, "group");
+        assert!(!order.descending);
+        let order = resolve_issue_order(Some("-state__group"));
+        assert_eq!(order.target, OrderTarget::Table("states"));
+        assert!(order.descending);
+        let order = resolve_issue_order(Some("parent__created_at"));
+        assert_eq!(order.target, OrderTarget::Table("T7"));
+        let order = resolve_issue_order(Some("issue_module__id"));
+        assert_eq!(order.target, OrderTarget::Table("module_issues"));
+        let order = resolve_issue_order(Some("project__name"));
+        assert_eq!(order.target, OrderTarget::Table("projects"));
+        let order = resolve_issue_order(Some("workspace__slug"));
+        assert_eq!(order.target, OrderTarget::Table("workspaces"));
+        let order = resolve_issue_order(Some("state__nope"));
+        assert_eq!(order.target, OrderTarget::Table("states"));
+        assert_eq!(order.column, "nope");
+        // Heads needing new joins pass through (residual divergences:
+        // Django 200s, Rust 500s — documented in issue_traversal_table).
+        let order = resolve_issue_order(Some("created_by__email"));
+        assert_eq!(order.target, OrderTarget::Base);
+        assert_eq!(order.column, "created_by__email");
+        // Unknown and empty names pass through to the database 500.
         assert_eq!(resolve_issue_order(Some("bogus")).column, "bogus");
+        assert_eq!(resolve_issue_order(Some("bogus")).target, OrderTarget::Base);
+        let order = resolve_issue_order(Some(""));
+        assert_eq!(order.target, OrderTarget::Base);
+        assert_eq!(order.column, "");
+    }
+
+    #[test]
+    fn m2m_envelope_total_counts_distinct() {
+        // PIDASHCONV-510: M2M-multiplied rows collapse to distinct base
+        // rows in the envelope totals (Django's count trims the
+        // ordering-only joins).
+        let a = uuid::Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").expect("uuid");
+        let b = uuid::Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").expect("uuid");
+        assert_eq!(count_distinct(vec![a, a, b]), 2);
+        assert_eq!(count_distinct(vec![a, b]), 2);
+        assert_eq!(count_distinct(vec![]), 0);
     }
 
     #[test]
