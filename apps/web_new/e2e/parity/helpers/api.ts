@@ -1935,6 +1935,32 @@ export async function serverDeleteModule(
   }
 }
 
+/** Resolve a workspace member's user id by email; throws when absent. */
+export async function serverWorkspaceUserId(
+  workspaceSlug: string,
+  email: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/members/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] workspace members read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  for (const row of rows) {
+    const record = row as { member?: unknown; email?: unknown; member_email?: unknown };
+    const candidate =
+      typeof record.email === "string"
+        ? record.email
+        : typeof record.member_email === "string"
+          ? record.member_email
+          : null;
+    if (candidate === email && typeof record.member === "string") return record.member;
+  }
+  throw new Error(`[parity] no workspace member carries email ${email}.`);
+}
+
 /** Attach issues to a module; throws unless the server accepts. */
 export async function serverAddIssuesToModule(
   workspaceSlug: string,

@@ -1255,6 +1255,11 @@ export class WebDriver implements ParityDriver {
 
   private static readonly LAYOUTS_ORDER: LayoutsLayoutKey[] = ["list", "kanban", "calendar", "spreadsheet", "gantt"];
 
+  // First contact with a freshly loaded issues page waits longer than the
+  // shared budget: route compile plus the filter/issue fetch chains take
+  // 45s+ on the loaded shared host.
+  private static readonly LAYOUTS_FIRST_WAIT_MS = 90_000;
+
   private layoutsSwitcherButtons(): Locator {
     return this.page.locator("div.flex.items-center.gap-1.rounded-md.bg-layer-3.p-1 > button");
   }
@@ -1281,7 +1286,7 @@ export class WebDriver implements ParityDriver {
 
   async layoutsOfferedLayouts(): Promise<LayoutsLayoutKey[]> {
     const buttons = this.layoutsSwitcherButtons();
-    await buttons.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    await buttons.first().waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
     const count = await buttons.count();
     if (count !== WebDriver.LAYOUTS_ORDER.length) {
       throw new Error(`[parity] layout switcher offers ${count} layouts, expected ${WebDriver.LAYOUTS_ORDER.length}.`);
@@ -1291,7 +1296,7 @@ export class WebDriver implements ParityDriver {
 
   async layoutsActiveLayout(): Promise<LayoutsLayoutKey> {
     const buttons = this.layoutsSwitcherButtons();
-    await buttons.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    await buttons.first().waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
     const count = await buttons.count();
     for (let i = 0; i < count; i++) {
       const cls = (await buttons.nth(i).getAttribute("class")) ?? "";
@@ -1305,7 +1310,9 @@ export class WebDriver implements ParityDriver {
   }
 
   private async layoutsWaitForLayout(layout: LayoutsLayoutKey): Promise<void> {
-    const deadline = Date.now() + 60_000;
+    // Layout switches refetch and re-render heavy views (the timeline
+    // especially); the loaded shared host needs a long leash.
+    const deadline = Date.now() + 120_000;
     for (;;) {
       const visible =
         layout === "list"
@@ -1326,7 +1333,7 @@ export class WebDriver implements ParityDriver {
   async layoutsSwitchTo(layout: LayoutsLayoutKey): Promise<void> {
     const index = WebDriver.LAYOUTS_ORDER.indexOf(layout);
     const buttons = this.layoutsSwitcherButtons();
-    await buttons.nth(index).waitFor({ timeout: WebDriver.WAIT_MS });
+    await buttons.nth(index).waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
     await buttons.nth(index).scrollIntoViewIfNeeded();
     await buttons.nth(index).click();
     // Clicking the active layout is a specified no-op; the marker is
@@ -1337,7 +1344,7 @@ export class WebDriver implements ParityDriver {
   async layoutsReloadIssues(): Promise<void> {
     await this.page.reload();
     await this.page.waitForLoadState("domcontentloaded");
-    await this.layoutsSwitcherButtons().first().waitFor({ timeout: 60_000 });
+    await this.layoutsSwitcherButtons().first().waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
   }
 
   async layoutsListVisible(): Promise<boolean> {
@@ -1459,7 +1466,7 @@ export class WebDriver implements ParityDriver {
     await trigger.scrollIntoViewIfNeeded();
     await trigger.click();
     const field = this.page.getByPlaceholder("Work item title");
-    await field.waitFor({ timeout: WebDriver.WAIT_MS });
+    await field.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
     await field.fill(title);
     await field.press("Enter");
     // The row appearing proves the save landed; the title is unique per
@@ -1547,7 +1554,7 @@ export class WebDriver implements ParityDriver {
   async layoutsRowExpandSubIssues(issueName: string): Promise<void> {
     const row = this.layoutsIssueRow(issueName);
     const toggle = row.locator("div.grid.size-4 button").first();
-    await toggle.waitFor({ timeout: WebDriver.WAIT_MS });
+    await toggle.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
     await toggle.click();
     const deadline = Date.now() + 30_000;
     for (;;) {
@@ -1579,7 +1586,7 @@ export class WebDriver implements ParityDriver {
 
   async layoutsRowState(issueName: string): Promise<string> {
     const chip = this.layoutsRowStateButton(issueName);
-    await chip.waitFor({ timeout: WebDriver.WAIT_MS });
+    await chip.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
     return ((await chip.innerText()) ?? "").trim();
   }
 
@@ -1590,7 +1597,7 @@ export class WebDriver implements ParityDriver {
     // The option portal renders at the end of the document, after the
     // row chips with the same text, so the last match is the option.
     const option = this.page.getByRole("button", { name: stateName, exact: true }).last();
-    await option.waitFor({ timeout: WebDriver.WAIT_MS });
+    await option.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
     await option.click();
     const deadline = Date.now() + 30_000;
     for (;;) {
@@ -1619,7 +1626,7 @@ export class WebDriver implements ParityDriver {
 
   async layoutsRowPriority(issueName: string): Promise<string> {
     const control = await this.layoutsRowPriorityControl(issueName);
-    await control.waitFor({ timeout: WebDriver.WAIT_MS });
+    await control.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
     const text = ((await control.innerText()) ?? "").trim();
     return text === "" ? "None" : text;
   }
@@ -1629,7 +1636,7 @@ export class WebDriver implements ParityDriver {
     await control.scrollIntoViewIfNeeded();
     await control.click();
     const option = this.page.getByRole("button", { name: priorityName, exact: true }).last();
-    await option.waitFor({ timeout: WebDriver.WAIT_MS });
+    await option.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
     await option.click();
     const deadline = Date.now() + 30_000;
     for (;;) {
@@ -1645,7 +1652,7 @@ export class WebDriver implements ParityDriver {
   private async layoutsOpenRowMenu(issueName: string): Promise<void> {
     const row = this.layoutsIssueRow(issueName);
     const trigger = row.getByRole("button", { name: "Toggle quick actions menu" }).first();
-    await trigger.waitFor({ timeout: WebDriver.WAIT_MS });
+    await trigger.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
     // The trigger is hover-revealed and sits under the property strip for
     // automation clicks, so hover it into its clickable state first; a
     // keyboard activation covers the case where the strip still overlaps.

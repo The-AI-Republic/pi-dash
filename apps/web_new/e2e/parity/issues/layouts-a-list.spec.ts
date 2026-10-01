@@ -20,6 +20,7 @@ import {
   serverListStates,
   serverPatchIssue,
   serverPatchProjectUserProperties,
+  serverWorkspaceUserId,
   signInSession,
   uniqueSuffix,
 } from "../helpers/api";
@@ -338,10 +339,22 @@ test(
     if (!seed.guestEmail || !seed.guestPassword) {
       throw new Error("[parity] seed facts carry no guest; re-run the stack seed step (see stack/README.md).");
     }
-    await driver.rulesEnsureSignedIn(seed.guestEmail, seed.guestPassword, seed.workspaceSlug);
+    // Guests only see issues assigned to them, so the owner shares the
+    // first seed issue before the guest opens the list.
     const ownerSession = await signInSession(seed.email, seed.password);
-    await resetPrefs(seed.workspaceSlug, seed.projectId, ownerSession);
-    await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
-    expect(await driver.layoutsRowCanEditState(seed.issueNames[0] ?? "")).toEqual(false);
+    const guestId = await serverWorkspaceUserId(seed.workspaceSlug, seed.guestEmail, ownerSession);
+    const rows = await serverIssues(seed.workspaceSlug, seed.projectId, ownerSession);
+    const first = seed.issueNames[0] ?? "";
+    const firstId = rows.find((row) => row.name === first)?.id ?? "";
+    await serverPatchIssue(seed.workspaceSlug, seed.projectId, firstId, { assignee_ids: [guestId] }, ownerSession);
+    try {
+      await driver.rulesEnsureSignedIn(seed.guestEmail, seed.guestPassword, seed.workspaceSlug);
+      await resetPrefs(seed.workspaceSlug, seed.projectId, ownerSession);
+      await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
+      expect(await driver.layoutsRowState(first)).toEqual("Todo");
+      expect(await driver.layoutsRowCanEditState(first)).toEqual(false);
+    } finally {
+      await serverPatchIssue(seed.workspaceSlug, seed.projectId, firstId, { assignee_ids: [] }, ownerSession);
+    }
   }
 );
