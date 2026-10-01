@@ -48,6 +48,7 @@ pub mod space;
 pub mod sse_body;
 pub mod state;
 pub mod v1_assets;
+pub mod v1_cycles_modules;
 pub mod v1_projects;
 pub mod web;
 
