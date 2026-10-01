@@ -40,11 +40,14 @@
 //!   admission consumes as an `on_commit` collector — callbacks registered so
 //!   far stay registered even when a later gate raises, exactly like Django's
 //!   ambient-transaction `on_commit`.
-//! * `execution_fields` runs its capacity gate in its own short transaction
-//!   (the inner `atomic` at `creation.py:55-70`, which commits before the
-//!   fields are built); [`lock_cloud_creation_capacity`] instead runs on the
-//!   caller's insertion transaction so the lock is held until the row lands.
-//!   `dispatch_waiting` / `append_event` own their transaction (every call
+//! * `execution_fields` runs on the caller's transaction: the orchestration
+//!   paths (D-12, unported) open a short one — the inner `atomic` at
+//!   `creation.py:55-70`, which commits before the fields are built — while
+//!   the direct-run view (`runner/views/runs.py:262-264`) passes its insertion
+//!   transaction, so the workspace lock is held across gate+insert exactly as
+//!   the savepoint does in Python. [`lock_cloud_creation_capacity`] likewise
+//!   runs on the caller's insertion transaction. `dispatch_waiting` /
+//!   `dispatch_agent_run` / `append_event` own their transaction (every call
 //!   site invokes them outside any open transaction).
 //! * SQL consts project only consumed columns (the services-layer convention);
 //!   fixed enum values are literals, caller-supplied ids are `$n` params, each
@@ -84,10 +87,11 @@ use pidash_db::dispatch::event::KIND_MAX_LENGTH;
 use pidash_db::tx::Transaction;
 use pidash_services::dispatch::HEARTBEAT_GRACE_SECS;
 use pidash_services::dispatch::{
-    build_tool_plan, enforce_creation_rate, managed_runner_availability, resolve_executor_kind,
-    user_has_llm_config, AdmissionCache, CloudAgentAdmissionError, CloudAgentUnavailable,
-    CloudCapabilityUnavailable, DeferredConsume, LlmProfile, ResolveExecutorError, UserFlags,
-    ENROLLED_MANAGED_RUNNERS_EXISTS_SQL, GITHUB_BINDING_EXISTS_SQL, ONLINE_MANAGED_RUNNER_SQL,
+    build_tool_plan, enforce_creation_rate, managed_runner_availability, managed_runner_is_enabled,
+    resolve_executor_kind, user_has_llm_config, AdmissionCache, CloudAgentAdmissionError,
+    CloudAgentUnavailable, CloudCapabilityUnavailable, DeferredConsume, LlmProfile,
+    ResolveExecutorError, UserFlags, ENROLLED_MANAGED_RUNNERS_EXISTS_SQL,
+    GITHUB_BINDING_EXISTS_SQL, ONLINE_MANAGED_RUNNER_SQL,
 };
 use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason, ManagedRunnerUnavailable};
 
@@ -194,9 +198,10 @@ pub enum EventCapDecision {
 
 /// The event-cap state machine (`events.py:19-22`).
 ///
-/// `marker_exists` is consulted only when `count` leaves room for the marker
-/// (`count < max(0, limit - 1)`), mirroring the `and` short-circuit — callers
-/// must skip the marker query otherwise.
+/// `marker_exists` is consulted only when `count` sits in the marker window
+/// (`max(0, limit - 2) <= count < max(0, limit - 1)`), mirroring the outer
+/// `if` plus the `and` short-circuit — callers must skip the marker query
+/// otherwise.
 pub fn event_cap_decision(count: i64, max_events: i64, marker_exists: bool) -> EventCapDecision {
     if count < (max_events - 2).max(0) {
         return EventCapDecision::Append;
@@ -329,8 +334,10 @@ pub fn quota_verdict(
 pub const WORKSPACE_LOCK_SQL: &str =
     "SELECT 1 FROM workspaces WHERE id = $1 AND deleted_at IS NULL FOR UPDATE";
 
-/// The queued-cloud count (`creation.py:57-61,163-167`): `COUNT(*)` in the
-/// `filter()` kwarg order. Params: `$1` workspace id (uuid).
+/// The queued-cloud count (`creation.py:57-61,163-167`): `COUNT(*)` with the
+/// workspace first (the `$1` param); the compiler's own conjunct order
+/// differs textually — equivalent, since `AND` is commutative. Params: `$1`
+/// workspace id (uuid).
 pub const QUEUED_CLOUD_COUNT_SQL: &str = "SELECT COUNT(*) FROM agent_run \
     WHERE workspace_id = $1 AND executor_kind = 'cloud_agent' AND status = 'queued'";
 
@@ -362,9 +369,10 @@ pub const DUE_RUNS_SQL: &str = "SELECT id FROM agent_run \
 pub const LEASE_RUN_SQL: &str = "UPDATE agent_run SET lease_expires_at = $1, \
     dispatch_attempts = dispatch_attempts + 1 WHERE id = $2 AND status = 'queued'";
 
-/// The single-run read (`dispatch.py:62`): `.only(...)` in call order (column
-/// order is unobservable — rows are read by name), `.first()` as `LIMIT 1`.
-/// Param: `$1` run id (uuid).
+/// The single-run read (`dispatch.py:62`): the `.only(...)` columns in call
+/// order (the compiler emits definition order instead — unobservable either
+/// way, rows are read by name), `.first()` as `LIMIT 1`. Param: `$1` run id
+/// (uuid).
 pub const DISPATCH_RUN_SELECT_SQL: &str =
     "SELECT id, status, executor_kind, pod_id, workspace_id FROM agent_run WHERE id = $1 LIMIT 1";
 
@@ -550,17 +558,20 @@ async fn count_queued_cloud(
         .await
 }
 
-async fn github_binding_exists(pool: &PgPool, project: &ProjectScope) -> Result<bool, sqlx::Error> {
+async fn github_binding_exists(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    project: &ProjectScope,
+) -> Result<bool, sqlx::Error> {
     let found = sqlx::query_scalar::<_, i32>(GITHUB_BINDING_EXISTS_SQL)
         .bind(project.project_id)
         .bind(project.workspace_id)
-        .fetch_optional(pool)
+        .fetch_optional(executor)
         .await?;
     Ok(found.is_some())
 }
 
 async fn enrolled_exists(
-    pool: &PgPool,
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     project: &ProjectScope,
     owner_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
@@ -568,13 +579,13 @@ async fn enrolled_exists(
         .bind(owner_id)
         .bind(project.project_id)
         .bind(project.workspace_id)
-        .fetch_optional(pool)
+        .fetch_optional(executor)
         .await?;
     Ok(found.is_some())
 }
 
 async fn online_managed_runner_id(
-    pool: &PgPool,
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     project: &ProjectScope,
     owner_id: Uuid,
     heartbeat_threshold: DateTime<Utc>,
@@ -584,12 +595,12 @@ async fn online_managed_runner_id(
         .bind(project.project_id)
         .bind(project.workspace_id)
         .bind(heartbeat_threshold)
-        .fetch_optional(pool)
+        .fetch_optional(executor)
         .await
 }
 
 async fn latest_enrolled_runner_id(
-    pool: &PgPool,
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     project: &ProjectScope,
     owner_id: Uuid,
 ) -> Result<Option<Uuid>, sqlx::Error> {
@@ -597,22 +608,27 @@ async fn latest_enrolled_runner_id(
         .bind(owner_id)
         .bind(project.project_id)
         .bind(project.workspace_id)
-        .fetch_optional(pool)
+        .fetch_optional(executor)
         .await
 }
 
 /// Resolve the executor-specific `AgentRun` fields for one run creation
 /// (`execution_fields`, `creation.py:11-89`).
 ///
-/// The capacity gate runs in its own short transaction (the inner `atomic`
-/// at `creation.py:55-70`, which commits before the fields are built); the
+/// The capacity gate runs on the caller's transaction — the ambient
+/// `atomic` at `creation.py:55-70` made explicit. Orchestration callers
+/// (D-12) open a short transaction that commits before the fields are built
+/// (today's inner-atomic shape); the direct-run view
+/// (`runner/views/runs.py:262-264`) passes its insertion transaction, so the
+/// workspace lock is held across gate+insert exactly as the savepoint does in
+/// Python and the queue cap stays a hard cap for concurrent creates. The
 /// deferred admission consumes collect into `on_commit` and the caller runs
 /// them after commit — a rolled-back creation burns no quota, while consumes
 /// registered before a later raise stay registered, as on Django's ambient
-/// transaction.
+/// transaction. This function never commits or rolls back `tx` itself.
 #[allow(clippy::too_many_arguments)]
 pub async fn execution_fields<C, F, E, P>(
-    pool: &PgPool,
+    tx: &mut Transaction<'_>,
     inputs: &ExecutionInputs<'_>,
     cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
@@ -633,10 +649,10 @@ where
         managed,
     )?;
     if executor == AgentExecutorKind::CloudAgent {
-        return execution_fields_cloud(pool, inputs, cloud, cache, on_commit, seams).await;
+        return execution_fields_cloud(tx.inner(), inputs, cloud, cache, on_commit, seams).await;
     }
     if executor == AgentExecutorKind::ManagedRunner {
-        return execution_fields_managed(pool, inputs, managed, seams.llm_profile).await;
+        return execution_fields_managed(tx.inner(), inputs, managed, seams.llm_profile).await;
     }
     Ok(ExecutionFields {
         executor_kind: executor,
@@ -648,7 +664,7 @@ where
 }
 
 async fn execution_fields_cloud<C, F, E, P>(
-    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
     inputs: &ExecutionInputs<'_>,
     cloud: &CloudAgentSettings,
     cache: &C,
@@ -686,16 +702,14 @@ where
         }
         admission_error = Some(defer_admission_error(&exc));
     }
-    // The point-in-time gate: the inner atomic commits (releasing the lock)
-    // before the fields are built; the insertion transaction re-checks via
-    // `lock_cloud_creation_capacity` (`creation.py:52-70`).
-    let queued = {
-        let mut gate = Transaction::begin(pool).await?;
-        lock_workspace(&mut **gate.inner(), inputs.project.workspace_id).await?;
-        let queued = count_queued_cloud(&mut **gate.inner(), inputs.project.workspace_id).await?;
-        gate.commit().await?;
-        queued
-    };
+    // The point-in-time gate on the caller's transaction (`creation.py:52-70`):
+    // orchestration callers commit their short transaction after this returns
+    // (releasing the lock before the fields are built, as the inner atomic
+    // does), while the direct-run view holds the lock across gate+insert.
+    // Either way the insertion transaction re-checks via
+    // `lock_cloud_creation_capacity`.
+    lock_workspace(&mut *conn, inputs.project.workspace_id).await?;
+    let queued = count_queued_cloud(&mut *conn, inputs.project.workspace_id).await?;
     match quota_verdict(
         queued,
         cloud.max_queued_per_workspace,
@@ -708,7 +722,7 @@ where
     // The github leg runs only with the kill switch on (the `policy.py:119`
     // short-circuit); the project is always present here.
     let github_available = if cloud.github_tools_enabled {
-        Some(github_binding_exists(pool, inputs.project).await?)
+        Some(github_binding_exists(&mut *conn, inputs.project).await?)
     } else {
         None
     };
@@ -737,7 +751,7 @@ where
 }
 
 async fn execution_fields_managed<P>(
-    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
     inputs: &ExecutionInputs<'_>,
     managed: &ManagedRunnerSettings,
     llm_profile: P,
@@ -745,24 +759,45 @@ async fn execution_fields_managed<P>(
 where
     P: FnOnce() -> LlmProfile,
 {
-    // The availability verdicts (`creation.py:114`); an absent viewer
-    // short-circuits inside `managed_runner_availability` before any seam or
-    // verdict is read, so no query runs for it.
-    let (enrolled, online) = match inputs.actor {
-        Some(actor) => {
-            let enrolled = enrolled_exists(pool, inputs.project, actor.id).await?;
-            let threshold = Utc::now() - ChronoDuration::seconds(HEARTBEAT_GRACE_SECS);
-            let online = online_managed_runner_id(pool, inputs.project, actor.id, threshold)
-                .await?
-                .is_some();
+    let user = inputs.actor.map(|actor| &actor.flags);
+    // Gate-order mirror (`managed_runner/policy.py:76-96`): the kill switch,
+    // viewer-validity and profile gates return before any query, so the
+    // enrolled/online reads run only when every earlier gate passes — and the
+    // online read only when enrolled holds (`:92-95`). The stashed profile
+    // feeds the L4 call below, so the seam is still consulted exactly once,
+    // exactly when the path reaches it.
+    let pre_gates_pass = managed_runner_is_enabled(managed)
+        && matches!(user, Some(flags) if flags.is_active && !flags.is_bot);
+    let profile = pre_gates_pass.then(llm_profile);
+    let profile_available = profile.as_ref().is_some_and(|profile| profile.available);
+    let (enrolled, online) = match (inputs.actor, profile_available) {
+        (Some(actor), true) => {
+            let enrolled = enrolled_exists(&mut *conn, inputs.project, actor.id).await?;
+            let online = if enrolled {
+                let threshold = Utc::now() - ChronoDuration::seconds(HEARTBEAT_GRACE_SECS);
+                online_managed_runner_id(&mut *conn, inputs.project, actor.id, threshold)
+                    .await?
+                    .is_some()
+            } else {
+                false
+            };
             (enrolled, online)
         }
-        None => (false, false),
+        (None, _) | (Some(_), false) => (false, false),
     };
+    // The fallback profile is dead on arrival: L4 re-evaluates these same
+    // gates and returns before consulting it on every path where `profile` is
+    // `None`. Outcomes are identical to the un-mirrored call; only the query
+    // stream changes (0-2 reads instead of always 2).
     let verdict = managed_runner_availability(
         managed,
-        inputs.actor.map(|actor| &actor.flags),
-        llm_profile,
+        user,
+        || {
+            profile.unwrap_or(LlmProfile {
+                available: false,
+                reason_code: String::new(),
+            })
+        },
         enrolled,
         online,
     );
@@ -772,7 +807,7 @@ where
         match inputs.actor {
             Some(actor) => {
                 let threshold = Utc::now() - ChronoDuration::seconds(HEARTBEAT_GRACE_SECS);
-                online_managed_runner_id(pool, inputs.project, actor.id, threshold).await?
+                online_managed_runner_id(&mut *conn, inputs.project, actor.id, threshold).await?
             }
             None => None,
         }
@@ -781,12 +816,12 @@ where
     };
     let transient_enrolled = verdict.reason_code == ManagedRunnerReason::NOT_CONNECTED
         && match inputs.actor {
-            Some(actor) => enrolled_exists(pool, inputs.project, actor.id).await?,
+            Some(actor) => enrolled_exists(&mut *conn, inputs.project, actor.id).await?,
             None => false,
         };
     let latest_enrolled_id = if inputs.automatic && transient_enrolled {
         match inputs.actor {
-            Some(actor) => latest_enrolled_runner_id(pool, inputs.project, actor.id).await?,
+            Some(actor) => latest_enrolled_runner_id(&mut *conn, inputs.project, actor.id).await?,
             None => None,
         }
     } else {
@@ -1005,11 +1040,11 @@ pub async fn append_event(
         .bind(run_id)
         .fetch_one(&mut **tx.inner())
         .await?;
-    // The marker probe runs only when the count leaves room for the marker
-    // (the `and` short-circuit at `events.py:20`); above that the probe value
-    // is irrelevant to the decision.
+    // The marker probe runs only inside the marker window (the outer `if`
+    // at `events.py:19` plus the `and` short-circuit at `:20`); below it the
+    // decision is Append and above it Capped whatever the probe would say.
     let marker_threshold = (max_events - 1).max(0);
-    let marker_exists = if count < marker_threshold {
+    let marker_exists = if (max_events - 2).max(0) <= count && count < marker_threshold {
         sqlx::query_scalar::<_, i32>(EVENT_MARKER_EXISTS_SQL)
             .bind(run_id)
             .fetch_optional(&mut **tx.inner())
@@ -1153,14 +1188,6 @@ mod tests {
         }
     }
 
-    /// A pool that never connects (no test below issues a query through it —
-    /// any attempt fails loudly instead of hanging).
-    fn lazy_pool() -> PgPool {
-        sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://localhost:1/dispatch-no-db")
-            .expect("lazy pool builds")
-    }
-
     fn project(default: &str) -> ProjectScope {
         ProjectScope {
             project_id: Uuid::new_v4(),
@@ -1226,223 +1253,6 @@ mod tests {
             managed_refusal_detail("something_new"),
             "Pi Dash Agent is not available"
         );
-    }
-
-    // -- execution_fields: paths that raise before any database read --------
-
-    #[tokio::test]
-    async fn local_path_returns_bare_fields_without_consulting_anything() {
-        let pool = lazy_pool();
-        let project = project("local_runner");
-        let actor = actor(true, false);
-        let inputs = ExecutionInputs {
-            project: &project,
-            run_kind: "issue",
-            has_issue: true,
-            required_capabilities: &[],
-            actor: Some(&actor),
-            automatic: false,
-            requested: None,
-            now_unix_secs: 1_700_000_000,
-        };
-        let cache = FakeCache::default();
-        let mut deferred = Vec::new();
-        let mut collect = |consume: DeferredConsume| deferred.push(consume);
-        let fields = execution_fields(
-            &pool,
-            &inputs,
-            &django_cloud_settings(),
-            &django_managed_settings(),
-            &cache,
-            &mut collect,
-            panic_seams(),
-        )
-        .await
-        .expect("local resolves");
-        // `{"executor_kind": executor, "tool_plan": {}}` (`creation.py:89`):
-        // no pin key, no waiting marker, no pseudo-key.
-        assert_eq!(fields.executor_kind, AgentExecutorKind::LocalRunner);
-        assert_eq!(fields.tool_plan, json!({}));
-        assert_eq!(fields.pinned_runner_id, None);
-        assert_eq!(fields.error_code, None);
-        assert_eq!(fields.cloud_admission_error, None);
-        assert!(deferred.is_empty(), "no admission bucket is touched");
-        assert!(cache.consumed.borrow().is_empty());
-        assert_eq!(
-            fixture()["execution_fields"]["local_runner"]["tool_plan"],
-            json!({})
-        );
-    }
-
-    #[tokio::test]
-    async fn unknown_executor_raises_before_any_seam_or_bucket() {
-        let pool = lazy_pool();
-        let project = project("local_runner");
-        let actor = actor(true, false);
-        let inputs = ExecutionInputs {
-            project: &project,
-            run_kind: "issue",
-            has_issue: true,
-            required_capabilities: &[],
-            actor: Some(&actor),
-            automatic: false,
-            requested: Some("bogus"),
-            now_unix_secs: 1_700_000_000,
-        };
-        let cache = FakeCache::default();
-        let mut deferred = Vec::new();
-        let mut collect = |consume: DeferredConsume| deferred.push(consume);
-        let err = execution_fields(
-            &pool,
-            &inputs,
-            &django_cloud_settings(),
-            &django_managed_settings(),
-            &cache,
-            &mut collect,
-            panic_seams(),
-        )
-        .await
-        .expect_err("unknown executor raises");
-        assert!(matches!(
-            err,
-            ExecutionFieldsError::Resolve(ResolveExecutorError::UnknownExecutor)
-        ));
-        assert_eq!(err.to_string(), "unknown agent executor");
-        assert!(deferred.is_empty());
-    }
-
-    #[tokio::test]
-    async fn cloud_path_refuses_creator_without_llm_before_admission() {
-        // None / inactive / bot actors never reach the seam (`creation.py:36`).
-        for actor in [None, Some(actor(false, false)), Some(actor(true, true))] {
-            let pool = lazy_pool();
-            let project = project("cloud_agent");
-            let cloud = CloudAgentSettings {
-                enabled: true,
-                ..django_cloud_settings()
-            };
-            let inputs = ExecutionInputs {
-                project: &project,
-                run_kind: "issue",
-                has_issue: true,
-                required_capabilities: &[],
-                actor: actor.as_ref(),
-                automatic: false,
-                requested: None,
-                now_unix_secs: 1_700_000_000,
-            };
-            let cache = FakeCache::default();
-            let mut deferred = Vec::new();
-            let mut collect = |consume: DeferredConsume| deferred.push(consume);
-            let err = execution_fields(
-                &pool,
-                &inputs,
-                &cloud,
-                &django_managed_settings(),
-                &cache,
-                &mut collect,
-                panic_seams(),
-            )
-            .await
-            .expect_err("no funded principal raises");
-            assert!(matches!(err, ExecutionFieldsError::Unavailable(_)));
-            assert_eq!(
-                err.to_string(),
-                "The run creator has no AI provider configured. Configure one in Pi Dash AI settings."
-            );
-            assert!(deferred.is_empty(), "admission never runs");
-        }
-    }
-
-    #[tokio::test]
-    async fn manual_admission_refusal_raises_before_the_capacity_gate() {
-        let pool = lazy_pool();
-        let project = project("cloud_agent");
-        let actor = actor(true, false);
-        let cloud = CloudAgentSettings {
-            enabled: true,
-            ..django_cloud_settings()
-        };
-        let now = 1_700_000_000i64;
-        let bucket = now.div_euclid(60);
-        let inputs = ExecutionInputs {
-            project: &project,
-            run_kind: "issue",
-            has_issue: true,
-            required_capabilities: &[],
-            actor: Some(&actor),
-            automatic: false,
-            requested: None,
-            now_unix_secs: now,
-        };
-        // Fill the workspace bucket to its limit (30).
-        let mut cache = FakeCache::default();
-        cache.counts.insert(
-            format!(
-                "cloud-agent:admission:workspace:{}:{bucket}",
-                project.workspace_id
-            ),
-            30,
-        );
-        let mut deferred = Vec::new();
-        let mut collect = |consume: DeferredConsume| deferred.push(consume);
-        let err = execution_fields(
-            &pool,
-            &inputs,
-            &cloud,
-            &django_managed_settings(),
-            &cache,
-            &mut collect,
-            ExecutionSeams {
-                has_usable_llm_config: || true,
-                extra_toolsets_enabled: || panic!("no plan is built on refuse"),
-                llm_profile: || panic!("managed seam unreachable here"),
-            },
-        )
-        .await
-        .expect_err("manual quota raises");
-        assert!(matches!(err, ExecutionFieldsError::Admission(_)));
-        assert_eq!(err.to_string(), "Cloud Agent creation rate exceeded");
-        // The failed bucket registers nothing (`creation.py:49-50` returns).
-        assert!(deferred.is_empty());
-    }
-
-    #[tokio::test]
-    async fn managed_disabled_raises_at_resolve_without_touching_db() {
-        let pool = lazy_pool();
-        let project = project("managed_runner");
-        let actor = actor(true, false);
-        let inputs = ExecutionInputs {
-            project: &project,
-            run_kind: "issue",
-            has_issue: true,
-            required_capabilities: &[],
-            actor: Some(&actor),
-            automatic: false,
-            requested: None,
-            now_unix_secs: 1_700_000_000,
-        };
-        let cache = FakeCache::default();
-        let mut deferred = Vec::new();
-        let mut collect = |consume: DeferredConsume| deferred.push(consume);
-        let err = execution_fields(
-            &pool,
-            &inputs,
-            &django_cloud_settings(),
-            &django_managed_settings(),
-            &cache,
-            &mut collect,
-            panic_seams(),
-        )
-        .await
-        .expect_err("disabled managed raises");
-        match err {
-            ExecutionFieldsError::Resolve(ResolveExecutorError::ManagedRunner(unavailable)) => {
-                assert_eq!(unavailable.code(), ManagedRunnerReason::DISABLED);
-            }
-            other => panic!("wrong variant: {other:?}"),
-        }
-        assert!(deferred.is_empty());
     }
 
     // -- quota verdict (pure core of both capacity gates) --------------------
@@ -2518,8 +2328,9 @@ mod tests {
             let cache = FakeCache::default();
             let mut deferred = Vec::new();
             let mut collect = |consume: DeferredConsume| deferred.push(consume);
+            let mut tx = Transaction::begin(&pool).await.expect("begin");
             let fields = execution_fields(
-                &pool,
+                &mut tx,
                 &inputs,
                 &cloud_on(),
                 &django_managed_settings(),
@@ -2533,6 +2344,7 @@ mod tests {
             )
             .await
             .expect("cloud fields");
+            tx.rollback().await.expect("rollback");
             assert_eq!(fields.executor_kind, AgentExecutorKind::CloudAgent);
             assert_eq!(fields.tool_plan["v"], 1);
             assert_eq!(fields.tool_plan["limits"]["model_requests"], 25);
@@ -2597,8 +2409,9 @@ mod tests {
             // Online: pinned to the creator's own runner, no marker.
             let mut deferred = Vec::new();
             let mut collect = |consume: DeferredConsume| deferred.push(consume);
+            let mut tx = Transaction::begin(&pool).await.expect("begin");
             let fields = execution_fields(
-                &pool,
+                &mut tx,
                 &inputs_for(false),
                 &django_cloud_settings(),
                 &managed_on(),
@@ -2612,6 +2425,7 @@ mod tests {
             )
             .await
             .expect("managed fields");
+            tx.rollback().await.expect("rollback");
             assert_eq!(fields.executor_kind, AgentExecutorKind::ManagedRunner);
             assert_eq!(fields.tool_plan, serde_json::json!({}));
             assert_eq!(fields.pinned_runner_id, Some(runner));
@@ -2627,8 +2441,9 @@ mod tests {
             .expect("take runner offline");
             let mut deferred = Vec::new();
             let mut collect = |consume: DeferredConsume| deferred.push(consume);
+            let mut tx = Transaction::begin(&pool).await.expect("begin");
             let err = execution_fields(
-                &pool,
+                &mut tx,
                 &inputs_for(false),
                 &django_cloud_settings(),
                 &managed_on(),
@@ -2642,6 +2457,7 @@ mod tests {
             )
             .await
             .expect_err("manual offline raises");
+            tx.rollback().await.expect("rollback");
             match err {
                 ExecutionFieldsError::Managed(refused) => {
                     assert_eq!(refused.code(), ManagedRunnerReason::NOT_CONNECTED);
@@ -2650,8 +2466,9 @@ mod tests {
             }
             let mut deferred = Vec::new();
             let mut collect = |consume: DeferredConsume| deferred.push(consume);
+            let mut tx = Transaction::begin(&pool).await.expect("begin");
             let fields = execution_fields(
-                &pool,
+                &mut tx,
                 &inputs_for(true),
                 &django_cloud_settings(),
                 &managed_on(),
@@ -2665,6 +2482,7 @@ mod tests {
             )
             .await
             .expect("automatic waits");
+            tx.rollback().await.expect("rollback");
             assert_eq!(fields.pinned_runner_id, Some(runner));
             assert_eq!(
                 fields.error_code.as_deref(),
@@ -2719,6 +2537,336 @@ mod tests {
             assert!(lease.is_some());
             holder.rollback().await.expect("release holder");
             cleanup(&pool, &graph, &[oldest, newer], &[]).await;
+        }
+
+        // -- execution_fields: paths that raise before any application query --
+        //
+        // These live here (not in the unit suite) because the caller-tx API
+        // needs a live transaction even on paths that issue no application
+        // query — `BEGIN` is the only statement on them. The assertions
+        // (panicking seams, empty deferred outbox, exact errors) still prove
+        // no gate ran past the raise.
+
+        #[tokio::test]
+        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
+        async fn live_local_path_returns_bare_fields_without_consulting_anything() {
+            let pool = pool().await;
+            let project = project("local_runner");
+            let actor = actor(true, false);
+            let inputs = ExecutionInputs {
+                project: &project,
+                run_kind: "issue",
+                has_issue: true,
+                required_capabilities: &[],
+                actor: Some(&actor),
+                automatic: false,
+                requested: None,
+                now_unix_secs: 1_700_000_000,
+            };
+            let cache = FakeCache::default();
+            let mut deferred = Vec::new();
+            let mut collect = |consume: DeferredConsume| deferred.push(consume);
+            let mut tx = Transaction::begin(&pool).await.expect("begin");
+            let fields = execution_fields(
+                &mut tx,
+                &inputs,
+                &django_cloud_settings(),
+                &django_managed_settings(),
+                &cache,
+                &mut collect,
+                panic_seams(),
+            )
+            .await
+            .expect("local resolves");
+            tx.rollback().await.expect("rollback");
+            // `{"executor_kind": executor, "tool_plan": {}}` (`creation.py:89`):
+            // no pin key, no waiting marker, no pseudo-key.
+            assert_eq!(fields.executor_kind, AgentExecutorKind::LocalRunner);
+            assert_eq!(fields.tool_plan, json!({}));
+            assert_eq!(fields.pinned_runner_id, None);
+            assert_eq!(fields.error_code, None);
+            assert_eq!(fields.cloud_admission_error, None);
+            assert!(deferred.is_empty(), "no admission bucket is touched");
+            assert!(cache.consumed.borrow().is_empty());
+            assert_eq!(
+                fixture()["execution_fields"]["local_runner"]["tool_plan"],
+                json!({})
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
+        async fn live_unknown_executor_raises_before_any_seam_or_bucket() {
+            let pool = pool().await;
+            let project = project("local_runner");
+            let actor = actor(true, false);
+            let inputs = ExecutionInputs {
+                project: &project,
+                run_kind: "issue",
+                has_issue: true,
+                required_capabilities: &[],
+                actor: Some(&actor),
+                automatic: false,
+                requested: Some("bogus"),
+                now_unix_secs: 1_700_000_000,
+            };
+            let cache = FakeCache::default();
+            let mut deferred = Vec::new();
+            let mut collect = |consume: DeferredConsume| deferred.push(consume);
+            let mut tx = Transaction::begin(&pool).await.expect("begin");
+            let err = execution_fields(
+                &mut tx,
+                &inputs,
+                &django_cloud_settings(),
+                &django_managed_settings(),
+                &cache,
+                &mut collect,
+                panic_seams(),
+            )
+            .await
+            .expect_err("unknown executor raises");
+            tx.rollback().await.expect("rollback");
+            assert!(matches!(
+                err,
+                ExecutionFieldsError::Resolve(ResolveExecutorError::UnknownExecutor)
+            ));
+            assert_eq!(err.to_string(), "unknown agent executor");
+            assert!(deferred.is_empty());
+        }
+
+        #[tokio::test]
+        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
+        async fn live_cloud_path_refuses_creator_without_llm_before_admission() {
+            let pool = pool().await;
+            let mut tx = Transaction::begin(&pool).await.expect("begin");
+            // None / inactive / bot actors never reach the seam (`creation.py:36`).
+            for actor in [None, Some(actor(false, false)), Some(actor(true, true))] {
+                let project = project("cloud_agent");
+                let cloud = CloudAgentSettings {
+                    enabled: true,
+                    ..django_cloud_settings()
+                };
+                let inputs = ExecutionInputs {
+                    project: &project,
+                    run_kind: "issue",
+                    has_issue: true,
+                    required_capabilities: &[],
+                    actor: actor.as_ref(),
+                    automatic: false,
+                    requested: None,
+                    now_unix_secs: 1_700_000_000,
+                };
+                let cache = FakeCache::default();
+                let mut deferred = Vec::new();
+                let mut collect = |consume: DeferredConsume| deferred.push(consume);
+                let err = execution_fields(
+                    &mut tx,
+                    &inputs,
+                    &cloud,
+                    &django_managed_settings(),
+                    &cache,
+                    &mut collect,
+                    panic_seams(),
+                )
+                .await
+                .expect_err("no funded principal raises");
+                assert!(matches!(err, ExecutionFieldsError::Unavailable(_)));
+                assert_eq!(
+                    err.to_string(),
+                    "The run creator has no AI provider configured. Configure one in Pi Dash AI settings."
+                );
+                assert!(deferred.is_empty(), "admission never runs");
+            }
+            tx.rollback().await.expect("rollback");
+        }
+
+        #[tokio::test]
+        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
+        async fn live_manual_admission_refusal_raises_before_the_capacity_gate() {
+            let pool = pool().await;
+            let project = project("cloud_agent");
+            let actor = actor(true, false);
+            let cloud = CloudAgentSettings {
+                enabled: true,
+                ..django_cloud_settings()
+            };
+            let now = 1_700_000_000i64;
+            let bucket = now.div_euclid(60);
+            let inputs = ExecutionInputs {
+                project: &project,
+                run_kind: "issue",
+                has_issue: true,
+                required_capabilities: &[],
+                actor: Some(&actor),
+                automatic: false,
+                requested: None,
+                now_unix_secs: now,
+            };
+            // Fill the workspace bucket to its limit (30).
+            let mut cache = FakeCache::default();
+            cache.counts.insert(
+                format!(
+                    "cloud-agent:admission:workspace:{}:{bucket}",
+                    project.workspace_id
+                ),
+                30,
+            );
+            let mut deferred = Vec::new();
+            let mut collect = |consume: DeferredConsume| deferred.push(consume);
+            let mut tx = Transaction::begin(&pool).await.expect("begin");
+            let err = execution_fields(
+                &mut tx,
+                &inputs,
+                &cloud,
+                &django_managed_settings(),
+                &cache,
+                &mut collect,
+                ExecutionSeams {
+                    has_usable_llm_config: || true,
+                    extra_toolsets_enabled: || panic!("no plan is built on refuse"),
+                    llm_profile: || panic!("managed seam unreachable here"),
+                },
+            )
+            .await
+            .expect_err("manual quota raises");
+            tx.rollback().await.expect("rollback");
+            assert!(matches!(err, ExecutionFieldsError::Admission(_)));
+            assert_eq!(err.to_string(), "Cloud Agent creation rate exceeded");
+            // The failed bucket registers nothing (`creation.py:49-50` returns).
+            assert!(deferred.is_empty());
+        }
+
+        #[tokio::test]
+        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
+        async fn live_managed_disabled_raises_at_resolve() {
+            let pool = pool().await;
+            let project = project("managed_runner");
+            let actor = actor(true, false);
+            let inputs = ExecutionInputs {
+                project: &project,
+                run_kind: "issue",
+                has_issue: true,
+                required_capabilities: &[],
+                actor: Some(&actor),
+                automatic: false,
+                requested: None,
+                now_unix_secs: 1_700_000_000,
+            };
+            let cache = FakeCache::default();
+            let mut deferred = Vec::new();
+            let mut collect = |consume: DeferredConsume| deferred.push(consume);
+            let mut tx = Transaction::begin(&pool).await.expect("begin");
+            let err = execution_fields(
+                &mut tx,
+                &inputs,
+                &django_cloud_settings(),
+                &django_managed_settings(),
+                &cache,
+                &mut collect,
+                panic_seams(),
+            )
+            .await
+            .expect_err("disabled managed raises");
+            tx.rollback().await.expect("rollback");
+            match err {
+                ExecutionFieldsError::Resolve(ResolveExecutorError::ManagedRunner(unavailable)) => {
+                    assert_eq!(unavailable.code(), ManagedRunnerReason::DISABLED);
+                }
+                other => panic!("wrong variant: {other:?}"),
+            }
+            assert!(deferred.is_empty());
+        }
+
+        #[tokio::test]
+        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
+        async fn live_execution_fields_holds_workspace_lock_on_caller_tx() {
+            let pool = pool().await;
+            let graph = seed_graph(&pool, "gatelock").await;
+            let now = Utc::now();
+            let cloud = cloud_on();
+            // Fill the queue to the cap so the gate takes the refusal branch
+            // while holding the workspace lock.
+            let mut runs = Vec::new();
+            for _ in 0..20 {
+                runs.push(seed_run(&pool, &graph, "queued", "cloud_agent", now, None).await);
+            }
+            let project = ProjectScope {
+                project_id: graph.project,
+                workspace_id: graph.ws,
+                default_agent_executor: "cloud_agent".to_owned(),
+            };
+            let actor = ActorScope {
+                id: graph.user,
+                flags: UserFlags {
+                    is_active: true,
+                    is_bot: false,
+                },
+            };
+            let inputs = ExecutionInputs {
+                project: &project,
+                run_kind: "direct",
+                has_issue: false,
+                required_capabilities: &[],
+                actor: Some(&actor),
+                automatic: true,
+                requested: None,
+                now_unix_secs: now.timestamp(),
+            };
+            let cache = FakeCache::default();
+            let mut deferred = Vec::new();
+            let mut collect = |consume: DeferredConsume| deferred.push(consume);
+            // The direct-run shape (`runner/views/runs.py:262-264`): gate on
+            // the insertion transaction, which stays open past the call.
+            let mut tx = Transaction::begin(&pool).await.expect("begin");
+            let fields = execution_fields(
+                &mut tx,
+                &inputs,
+                &cloud,
+                &django_managed_settings(),
+                &cache,
+                &mut collect,
+                ExecutionSeams {
+                    has_usable_llm_config: || true,
+                    extra_toolsets_enabled: || false,
+                    llm_profile: || panic!("managed seam unreachable on the cloud path"),
+                },
+            )
+            .await
+            .expect("automatic defers");
+            assert_eq!(
+                fields.cloud_admission_error,
+                Some(DeferredAdmissionError {
+                    code: "run_quota_exceeded".to_owned(),
+                    detail: "Cloud Agent queue is full for this workspace".to_owned(),
+                })
+            );
+            // The lock is still held: a NOWAIT probe from another connection
+            // fails with `lock_not_available` (55P03), deterministically.
+            match sqlx::query_scalar::<_, i32>(
+                "SELECT 1 FROM workspaces WHERE id = $1 FOR UPDATE NOWAIT",
+            )
+            .bind(graph.ws)
+            .fetch_optional(&pool)
+            .await
+            {
+                Err(sqlx::Error::Database(db)) => assert_eq!(
+                    db.code().as_deref(),
+                    Some("55P03"),
+                    "NOWAIT fails with lock_not_available"
+                ),
+                other => panic!("NOWAIT probe must hit the held lock, got {other:?}"),
+            }
+            tx.rollback().await.expect("rollback");
+            // Released: the probe now succeeds.
+            let held = sqlx::query_scalar::<_, i32>(
+                "SELECT 1 FROM workspaces WHERE id = $1 FOR UPDATE NOWAIT",
+            )
+            .bind(graph.ws)
+            .fetch_optional(&pool)
+            .await
+            .expect("probe after rollback");
+            assert_eq!(held, Some(1));
+            cleanup(&pool, &graph, &runs, &[]).await;
         }
     }
 }
