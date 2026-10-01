@@ -272,3 +272,50 @@ def test_expand_user_avatar_asset_unresolvable_renders_null(seed, conn):
     db.set_user_avatar(conn, user["id"], asset_id=aid2, avatar="https://cdn.example/legacy.png")
     body = http.get(key, f"{base(seed)}/{pid}/", params={"expand": "created_by"}).json()
     assert body["created_by"]["avatar_url"] == f"/api/assets/v2/static/{aid2}/"
+
+
+def test_expand_null_fk_renders_empty_object(seed, conn):
+    # A NULL user FK expands to {} (UserLiteSerializer(None).data), not null
+    # (serializers/base.py:108-113, probed). Unlike
+    # test_expand_user_null_email (which sets all four FKs), this test leaves
+    # every FK NULL (PIDASHCONV-515).
+    tag = db.new_tag()
+    pid = db.create_project(conn, seed["ws_a"]["id"], tag + "n",
+                            created_by_id=None)["id"]
+    db.add_project_member(conn, seed["ws_a"]["id"], pid, seed["owner"]["id"], db.ADMIN)
+    row = db.fetch_one(
+        conn,
+        "SELECT default_assignee_id, project_lead_id, created_by_id,"
+        " updated_by_id FROM projects WHERE id = %s",
+        (pid,),
+    )
+    assert row == {
+        "default_assignee_id": None,
+        "project_lead_id": None,
+        "created_by_id": None,
+        "updated_by_id": None,
+    }
+    key = seed["keys"][KEY]
+    expands = ("default_assignee", "project_lead", "created_by", "updated_by")
+    # Sanity: unexpanded, the FKs render null.
+    body = http.get(key, f"{base(seed)}/{pid}/").json()
+    for expand in expands:
+        assert body[expand] is None
+    # Detail: each FK individually, then all four together.
+    for expand in expands:
+        body = http.get(key, f"{base(seed)}/{pid}/", params={"expand": expand}).json()
+        assert body[expand] == {}
+    body = http.get(key, f"{base(seed)}/{pid}/",
+                    params={"expand": ",".join(expands)}).json()
+    for expand in expands:
+        assert body[expand] == {}
+    # List: each FK individually, then all four together.
+    for expand in expands:
+        body = http.get(key, base(seed) + "/", params={"expand": expand}).json()
+        row = next(p for p in body["results"] if p["id"] == pid)
+        assert row[expand] == {}
+    body = http.get(key, base(seed) + "/",
+                    params={"expand": ",".join(expands)}).json()
+    row = next(p for p in body["results"] if p["id"] == pid)
+    for expand in expands:
+        assert row[expand] == {}
