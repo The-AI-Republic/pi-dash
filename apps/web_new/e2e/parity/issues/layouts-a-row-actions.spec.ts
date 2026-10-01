@@ -28,7 +28,6 @@ import {
   serverIssues,
   serverListStates,
   serverModuleIssueIds,
-  serverMoveIssue,
   serverPatchIssue,
   serverPatchProjectUserProperties,
   serverRestoreIssue,
@@ -193,11 +192,13 @@ test(
       await expect
         .poll(async () => serverIssues(seed.workspaceSlug, projectB, session), { timeout: 300_000 })
         .toEqual(expect.arrayContaining([expect.objectContaining({ id })]));
+
+      // The move navigates to the moved issue, so come back to the
+      // source list before asserting the row is gone there.
+      await openPath(driver, projectIssuesPath(seed), session);
       await expect
         .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 300_000 })
         .not.toContain(title);
-
-      await serverMoveIssue(seed.workspaceSlug, seed.projectId, id, projectB, session);
     } finally {
       await serverDeleteIssue(seed.workspaceSlug, projectB, id, session).catch(() =>
         serverDeleteIssue(seed.workspaceSlug, seed.projectId, id, session).catch(() => {})

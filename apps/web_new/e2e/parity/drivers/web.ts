@@ -1725,11 +1725,17 @@ export class WebDriver implements ParityDriver {
   }
 
   private async layoutsReadOpenMenuItems(): Promise<string[]> {
+    // Row menus render the title in an h5 with an optional description
+    // paragraph (Archive's gating note); plain-text menus (calendar day
+    // add) have no h5, so those fall back to the full item text.
     const items = this.page.getByRole("menuitem");
     const count = await items.count();
     const texts: string[] = [];
     for (let i = 0; i < count; i++) {
-      texts.push(((await items.nth(i).innerText()) ?? "").trim().replace(/\s+/g, " "));
+      const heading = items.nth(i).locator("h5").first();
+      const raw =
+        (await heading.count()) > 0 ? await heading.innerText() : await items.nth(i).innerText();
+      texts.push((raw ?? "").trim().replace(/\s+/g, " "));
     }
     return texts;
   }

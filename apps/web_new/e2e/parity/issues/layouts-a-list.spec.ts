@@ -85,28 +85,38 @@ test(
     const session = await signInSession(seed.email, seed.password);
     const stateName = `Parity Doing ${uniqueSuffix()}`;
     const stateId = await serverCreateState(seed.workspaceSlug, seed.projectId, session, stateName, "started");
-    await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
-      display_filters: { layout: "list", group_by: "state", order_by: "sort_order", show_empty_groups: true },
-    });
-    await driver.openAuthenticated(
-      `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
-      sessionBrowserCookies(session)
-    );
-    await expect
-      .poll(async () => driver.layoutsListGroups(), { timeout: 300_000 })
-      .toEqual(expect.arrayContaining(["Todo", stateName]));
+    // Empty sections render headers only (no rows, no quick-add), so the
+    // section holds a seed issue before the quick-add runs; the created
+    // issue inheriting the section's state is what the test proves.
+    const seedTitle = `Parity sectionseed ${uniqueSuffix()}`;
+    const seedId = await serverCreateIssue(seed.workspaceSlug, seed.projectId, session, seedTitle);
+    await serverPatchIssue(seed.workspaceSlug, seed.projectId, seedId, { state_id: stateId }, session);
+    try {
+      await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
+        display_filters: { layout: "list", group_by: "state", order_by: "sort_order", show_empty_groups: true },
+      });
+      await driver.openAuthenticated(
+        `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
+        sessionBrowserCookies(session)
+      );
+      await expect
+        .poll(async () => driver.layoutsListGroups(), { timeout: 300_000 })
+        .toEqual(expect.arrayContaining(["Todo", stateName]));
 
-    const title = `Parity sectionadd ${uniqueSuffix()}`;
-    await driver.layoutsListQuickAdd(title, stateName);
-    const rows = await serverIssues(seed.workspaceSlug, seed.projectId, session);
-    const createdId = rows.find((row) => row.name === title)?.id ?? "";
-    expect(createdId).not.toEqual("");
-    const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, createdId, session);
-    expect(details.stateId).toEqual(stateId);
+      const title = `Parity sectionadd ${uniqueSuffix()}`;
+      await driver.layoutsListQuickAdd(title, stateName);
+      const rows = await serverIssues(seed.workspaceSlug, seed.projectId, session);
+      const createdId = rows.find((row) => row.name === title)?.id ?? "";
+      expect(createdId).not.toEqual("");
+      const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, createdId, session);
+      expect(details.stateId).toEqual(stateId);
 
-    await serverDeleteIssue(seed.workspaceSlug, seed.projectId, createdId, session);
-    await serverDeleteState(seed.workspaceSlug, seed.projectId, stateId, session);
-    await resetPrefs(seed.workspaceSlug, seed.projectId, session);
+      await serverDeleteIssue(seed.workspaceSlug, seed.projectId, createdId, session);
+    } finally {
+      await serverDeleteIssue(seed.workspaceSlug, seed.projectId, seedId, session).catch(() => {});
+      await serverDeleteState(seed.workspaceSlug, seed.projectId, stateId, session);
+      await resetPrefs(seed.workspaceSlug, seed.projectId, session);
+    }
   }
 );
 
