@@ -91,6 +91,7 @@ Top-level component folders (each mapped to covering rows):
 - `core/components/cycles/list/` (grouped list, rows, row actions, peek wiring) -> CYC-001, CYC-002, CYC-003, CYC-004, CYC-023, CYC-028, CYC-029, CYC-031, CYC-044, CYC-046, CYC-048
 - `core/components/cycles/active-cycle/` (hero progress, burn-down, stats cards) -> CYC-041, CYC-042
 - `core/components/cycles/analytics-sidebar/` (header, details, progress, chart, stats) -> CYC-035, CYC-036, CYC-037, CYC-038, CYC-039, CYC-040, CYC-044
+- `core/components/core/sidebar/` (shared progress ring, progress stats, single-stat, mobile sidebar toggle; reused by the modules analytics sidebar and the profile settings frame) -> CYC-038, CYC-039 (renderers for the rowed analytics behaviors); found by coverage audit
 - `core/components/cycles/archived-cycles/` (archived list, header/search/filters, archive confirm, restore) -> CYC-024, CYC-025, CYC-026, CYC-027, CYC-005, CYC-006, CYC-007, CYC-008, CYC-009, CYC-012
 - `core/components/cycles/dropdowns/` + `applied-filters/` (status/start/end filters, estimate measure picker, chips) -> CYC-006, CYC-007, CYC-008, CYC-038
 - `core/components/dropdowns/cycle/` (work-item cycle picker): adjacent to the Issues area; no cycle-area capability — not rowed here.

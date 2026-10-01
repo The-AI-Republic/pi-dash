@@ -130,7 +130,9 @@ API endpoints used by the area (all scoped to the public anchor or spaces auth):
 - `GET /api/public/anchor/:anchor/labels/` → SPC-028 display data (label facet intentionally unoffered: SPC-034, SPC-037)
 - `GET /api/public/anchor/:anchor/members/` → SPC-054 (member names for mentions; assignee display uses issue payload data)
 - `GET /api/public/anchor/:anchor/cycles/`, `GET .../modules/` → fetched into card/group display stores; no visitor-facing cycle/module surface was found — covered by SPC-027/SPC-028 as display data, oracle to confirm whether any visible marker exists
-- Asset endpoints (`POST /api/public/assets/v2/anchor/:anchor/`, `POST .../:entityId/bulk/`, `PATCH .../:assetId/`, `POST .../restore/:assetId/`) → upload + bulk-confirm covered by SPC-053; single-asset confirm and restore are not called from any space flow (dead code for this area: service methods exist, no caller)
+- Asset upload + bulk-confirm (`POST /api/public/assets/v2/anchor/:anchor/` via `SitesFileService.uploadAsset`, `POST .../:entityId/bulk/` via `.updateBulkAssetsUploadStatus`) → covered by SPC-053
+- Editor asset lifecycle restores (`POST .../restore/:assetId/` via `SitesFileService.restoreNewAsset` / `.restoreOldEditorAsset`, wired through the space editor helper) → covered by SPC-053
+- Single-asset confirm (`PATCH .../:assetId/`) is not called from any space flow (dead code for this area: the call exists in the service, no caller; bulk-confirm covers confirmation instead)
 - `POST /auth/spaces/email-check/`, `POST /auth/spaces/magic-generate/` → SPC-058, SPC-059, SPC-060
 - Form posts to `/auth/spaces/sign-in`, `/sign-up`, `/magic-sign-in`, `/magic-sign-up`, `/sign-out` (+ `GET /auth/get-csrf-token/`) → SPC-014, SPC-060, SPC-061
 - Instance info + current-user fetches (shared services) → SPC-005, SPC-016, SPC-018, SPC-059, SPC-062

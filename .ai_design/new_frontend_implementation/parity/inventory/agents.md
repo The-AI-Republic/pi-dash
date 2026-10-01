@@ -76,6 +76,7 @@
 | AGT-060 | Tool-server registry management lives in settings, not in chat | key owners (settings surface) | all | settings pages (owned by profile/settings area) | `GET/POST /api/users/me/ai-assistant/mcp-servers/`, `PATCH/DELETE .../mcp-servers/{id}/` | chat surfaces never create, edit or remove tool servers; the skipped-server notice links to nothing and only reports; registry chrome is rowed under profile/settings | | not started |
 | AGT-061 | Shared history-panel component is not the assistant sidebar (which inlines its own) | n/a (structural negative row) | all | assistant layout | thread listing read | the assistant layout renders its own equivalent sidebar; the reusable history panel stays available for runner chat (rowed under runners); no duplicate or dead sidebar may render | | not started |
 | AGT-062 | Calendar has no drag-to-create, drag-to-reschedule or export affordances | all viewers (negative row) | all | calendar week/month views; run-history table | none | blocks are click-to-inspect only; run history navigates to run detail instead of exporting; nothing downloads, prints or shares from these surfaces | | not started |
+| AGT-063 | Embedded AI writing helper inside rich editors takes a typed request plus the surrounding draft, shows the generated markup for review, and inserts it on confirmation (found by coverage audit) | members editing issues or pages | all | AI helper entry in the issue description editor and the page editor AI menu; task popover | `AIService.createGptTask` / `.performEditorTask` (`POST .../ai-assistant/`, `POST .../rephrase-grammar/`; packages `AIService.prompt` / `.rephraseGrammar` hit the same calls) | typing a request and submitting renders the returned markup for review with an insert action; empty returns are marked invalid; quota rejections and other failures toast distinctly; closing discards the draft request | | not started |
 
 ## Coverage checklist
 
@@ -93,7 +94,7 @@ each mapped to the row IDs that cover it. Anything unmapped is explained, not dr
 | `apps/web/app/(all)/[workspaceSlug]/assistant/page.tsx` | AGT-038, AGT-039, AGT-053 | new-conversation landing and setup swap |
 | `apps/web/app/(all)/[workspaceSlug]/assistant/layout.tsx` | AGT-044, AGT-061 | two-pane shell with inlined sidebar |
 | `apps/web/app/(all)/[workspaceSlug]/assistant/[threadId]/page.tsx` | AGT-045 | thin per-thread wrapper |
-| Project schedulers routes (section layout, header, index redirect, `list`, `calendar`, `[bindingId]` detail) | AGT-007, AGT-010 through AGT-017, AGT-021 | tabs, redirect, list, detail, calendar host pages |
+| Project schedulers routes (section layout, header, index redirect, `list`, `calendar`, `[bindingId]` detail): `projects/(detail)/[projectId]/schedulers/layout.tsx`, `projects/(detail)/[projectId]/schedulers/page.tsx` (index redirect), `projects/(detail)/[projectId]/schedulers/list/page.tsx`, `projects/(detail)/[projectId]/schedulers/calendar/page.tsx`, `projects/(detail)/[projectId]/schedulers/[bindingId]/page.tsx` | AGT-007, AGT-010 through AGT-017, AGT-021 | tabs, redirect, list, detail, calendar host pages; file list made explicit by coverage audit |
 | Project-settings schedulers page | AGT-007, AGT-021 | reuses the installs panel behind a project-admin gate |
 | `settings/projects/[projectId]/automations/page.tsx` + `layout.tsx` | AGT-034, AGT-035, AGT-036, AGT-037 | archive/close rows plus extension slot |
 
@@ -110,6 +111,8 @@ each mapped to the row IDs that cover it. Anything unmapped is explained, not dr
 | `core/hooks/store/use-scheduler.ts`, `core/store/scheduler.store.ts` | AGT-001 through AGT-004 (supporting cache) | definition cache only; installs are fetched per view, not stored |
 | `core/hooks/store/use-prompt-section.ts`, `core/store/prompt-section.store.ts` | AGT-023 through AGT-031 (supporting calls) | thin service delegate; page owns caching via SWR |
 | `core/hooks/use-dictation.tsx` | AGT-050, AGT-051 | capture hook wired into the composer |
+| `core/components/core/modals/gpt-assistant-popover.tsx` (task prompt form, generated-markup review, insert action) | AGT-063 | embedded AI writing helper; found by coverage audit |
+| `ce/components/pages/editor/ai/` (task menu, ask entry, tone options) | AGT-063 | page-editor entry point of the same helper; found by coverage audit |
 
 ### Cloud (ce) component folders
 
@@ -124,7 +127,7 @@ each mapped to the row IDs that cover it. Anything unmapped is explained, not dr
 | `GET/POST /api/workspaces/{slug}/schedulers/`; `GET/PATCH/DELETE .../schedulers/{id}/` | AGT-001, AGT-002, AGT-003, AGT-004 | definition retrieve has a service method but no observed call site — supporting read |
 | `GET/POST /api/workspaces/{slug}/projects/{id}/scheduler-bindings/`; `GET/PATCH/DELETE .../scheduler-bindings/{bindingId}/` | AGT-006 through AGT-013, AGT-018, AGT-019 | installs lifecycle including toggle payloads |
 | `GET .../scheduler-bindings/{bindingId}/runs/?page=&per_page=` | AGT-013, AGT-014 | paged run history |
-| `GET .../scheduler-bindings/occurrences/?from=&to=` | AGT-015, AGT-017 | capped window read with truncation hint |
+| `GET .../scheduler-bindings/occurrences/?from=&to=` (`SchedulerService.listOccurrences`) | AGT-015, AGT-017 | capped window read with truncation hint |
 | Pod list read scoped by project (pod selector source) | AGT-019 (supporting read) | exact path outside surveyed files; oracle confirms |
 | `GET /api/workspaces/{slug}/prompt-sections?kind=&scope=` | AGT-023 | ordered resolved sections |
 | `PUT /api/workspaces/{slug}/prompt-sections/{key}` | AGT-024, AGT-025, AGT-033 | scope in body; tier enforced server-side |

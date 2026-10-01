@@ -154,3 +154,20 @@ jobs:
       - run: pnpm --filter @pidash/api-client build
       - run: pnpm --filter web_new build
       - run: pnpm --filter web_new size
+
+  coverage-audit:
+    name: coverage audit (report only, never blocks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run parity coverage audit
+        run: node apps/web_new/e2e/parity/tools/coverage-audit.mjs --root . --out /tmp/coverage-audit.md || true
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-audit
+          path: /tmp/coverage-audit.md
