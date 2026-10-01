@@ -1,0 +1,263 @@
+{
+  "_trace": "live HTTP fetches against Django (ENABLE_DRF_SPECTACULAR=1; routes pi_dash/urls.py:31-44; throttle settings/common.py:92-94 AnonRateThrottle 30/minute; APPEND_SLASH CommonMiddleware; flag-off verdict after restart with ENABLE_DRF_SPECTACULAR unset \u2014 see flag_off section); denial rewrite authentication/adapter/exception.py:17-34 (reading context), code table authentication/adapter/error.py:71",
+  "_method": "httpx fetches to http://127.0.0.1:8525 (scratch DB pidash_525_test, private redis db 13, flushed before the denial section and before the burst); UI bytes normalized with the contract-suite rule (CSRF hole -> empty string)",
+  "unknown_format": {
+    "url": "/api/schema/?format=xml",
+    "status": 404,
+    "content_type": "application/vnd.oai.openapi; charset=utf-8",
+    "body": "detail:\n  string: Not found.\n  code: not_found\n",
+    "body_sha256": "ed9b4148c4cdb9a1713d8e5325fa13f17c3db3595f7d2fd3d0cd48a4bfd7f2f5"
+  },
+  "method_denials": {
+    "/api/schema/": {
+      "POST": {
+        "status": 405,
+        "allow": "GET, HEAD, OPTIONS",
+        "content_type": "application/vnd.oai.openapi; charset=utf-8",
+        "body": "detail:\n  string: Method \"POST\" not allowed.\n  code: method_not_allowed\n",
+        "body_sha256": "3809ef89b5d0693b7fcb6593bfabe1c32823f3d6bf65a7626baff50cfae5b628"
+      },
+      "PUT": {
+        "status": 405,
+        "allow": "GET, HEAD, OPTIONS",
+        "content_type": "application/vnd.oai.openapi; charset=utf-8",
+        "body": "detail:\n  string: Method \"PUT\" not allowed.\n  code: method_not_allowed\n",
+        "body_sha256": "46232d89f40877c09c8f4f957908c71454b0a32ceaa182c8194915fed956e777"
+      },
+      "PATCH": {
+        "status": 405,
+        "allow": "GET, HEAD, OPTIONS",
+        "content_type": "application/vnd.oai.openapi; charset=utf-8",
+        "body": "detail:\n  string: Method \"PATCH\" not allowed.\n  code: method_not_allowed\n",
+        "body_sha256": "5709beb7cd890ed8f46c8b2c6d73359b35d3776771793e14eb434aab07e2caf0"
+      },
+      "DELETE": {
+        "status": 405,
+        "allow": "GET, HEAD, OPTIONS",
+        "content_type": "application/vnd.oai.openapi; charset=utf-8",
+        "body": "detail:\n  string: Method \"DELETE\" not allowed.\n  code: method_not_allowed\n",
+        "body_sha256": "4674a74911ef3bbd41ec9e30e6cb7a3f8db494a3dfe9a9511ebbf90c7045cb95"
+      }
+    },
+    "/api/schema/swagger-ui/": {
+      "POST": {
+        "status": 405,
+        "allow": "GET, HEAD, OPTIONS",
+        "content_type": "text/html; charset=utf-8",
+        "body": "405 Method Not Allowed",
+        "body_sha256": "74bf058e89f4d51e6a860fbabee81248f6f69a70ce57ed93188f85298c1cc5b9"
+      },
+      "PUT": {
+        "status": 405,
+        "allow": "GET, HEAD, OPTIONS",
+        "content_type": "text/html; charset=utf-8",
+        "body": "405 Method Not Allowed",
+        "body_sha256": "74bf058e89f4d51e6a860fbabee81248f6f69a70ce57ed93188f85298c1cc5b9"
+      },
+      "PATCH": {
+        "status": 405,
+        "allow": "GET, HEAD, OPTIONS",
+        "content_type": "text/html; charset=utf-8",
+        "body": "405 Method Not Allowed",
+        "body_sha256": "74bf058e89f4d51e6a860fbabee81248f6f69a70ce57ed93188f85298c1cc5b9"
+      },
+      "DELETE": {
+        "status": 405,
+        "allow": "GET, HEAD, OPTIONS",
+        "content_type": "text/html; charset=utf-8",
+        "body": "405 Method Not Allowed",
+        "body_sha256": "74bf058e89f4d51e6a860fbabee81248f6f69a70ce57ed93188f85298c1cc5b9"
+      }
+    },
+    "/api/schema/redoc/": {
+      "POST": {
+        "status": 405,
+        "allow": "GET, HEAD, OPTIONS",
+        "content_type": "text/html; charset=utf-8",
+        "body": "405 Method Not Allowed",
+        "body_sha256": "74bf058e89f4d51e6a860fbabee81248f6f69a70ce57ed93188f85298c1cc5b9"
+      },
+      "PUT": {
+        "status": 405,
+        "allow": "GET, HEAD, OPTIONS",
+        "content_type": "text/html; charset=utf-8",
+        "body": "405 Method Not Allowed",
+        "body_sha256": "74bf058e89f4d51e6a860fbabee81248f6f69a70ce57ed93188f85298c1cc5b9"
+      },
+      "PATCH": {
+        "status": 405,
+        "allow": "GET, HEAD, OPTIONS",
+        "content_type": "text/html; charset=utf-8",
+        "body": "405 Method Not Allowed",
+        "body_sha256": "74bf058e89f4d51e6a860fbabee81248f6f69a70ce57ed93188f85298c1cc5b9"
+      },
+      "DELETE": {
+        "status": 405,
+        "allow": "GET, HEAD, OPTIONS",
+        "content_type": "text/html; charset=utf-8",
+        "body": "405 Method Not Allowed",
+        "body_sha256": "74bf058e89f4d51e6a860fbabee81248f6f69a70ce57ed93188f85298c1cc5b9"
+      }
+    }
+  },
+  "slashless_redirect": {
+    "url": "/api/schema",
+    "status": 301,
+    "location": "/api/schema/",
+    "content_type": "text/html; charset=utf-8",
+    "body": ""
+  },
+  "ui_pages": {
+    "swagger_ui": {
+      "url": "/api/schema/swagger-ui/",
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "body_bytes": 4653,
+      "body_sha256": "fdefaf6a866b5284819f6f8f8935ca40e38abe7255178d9e82ece94f2ac9bfa4",
+      "csrf_hole": {
+        "present": true,
+        "occurrences": 1,
+        "token_length": 64,
+        "note": "per-render random token; value NOT recorded (ephemeral). Normalized file replaces the hole with CSRFTOKEN\"] = \"\"; per the contract-suite normalize rule."
+      },
+      "markers": {
+        "title": true,
+        "swagger_bundle": true,
+        "spec_url": true,
+        "redoc_tag": null
+      },
+      "normalized_sha256": "7563e695fd3a3c0b6fbddc5d892ac07756976d9a60f7ea916639d34053a8e094"
+    },
+    "redoc": {
+      "url": "/api/schema/redoc/",
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "body_bytes": 736,
+      "body_sha256": "6d81211ad36e6f0a57712ce9e5b14223c86d59d313e751b1bbf679a6d209e4d2",
+      "csrf_hole": {
+        "present": false
+      },
+      "markers": {
+        "title": true,
+        "swagger_bundle": null,
+        "spec_url": null,
+        "redoc_tag": true
+      },
+      "normalized_sha256": "6d81211ad36e6f0a57712ce9e5b14223c86d59d313e751b1bbf679a6d209e4d2"
+    }
+  },
+  "ui_page_files": {
+    "swagger_ui": "FX-OPENAPI-05.swagger_ui.normalized.html",
+    "redoc": "FX-OPENAPI-05.redoc.normalized.html"
+  },
+  "throttle": {
+    "scope": "anon 30/minute per IP (SimpleRateThrottle sliding window; session-auth-only views => API keys do not identify, every request counts incl. unsafe methods, which throttle-check before the 405 verdict)",
+    "burst_attempt_statuses": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      429,
+      429,
+      429
+    ],
+    "first_429_attempt": 31,
+    "retry_after": "59",
+    "denial_status": 429,
+    "denial_body": "429 Too Many Requests",
+    "denial_content_type": "application/json",
+    "window_reset_reallows": {
+      "slept_seconds": 65,
+      "status_after": 200
+    },
+    "denial_renderers": {
+      "_method": "window filled with 30 cheap redoc GETs (all 200), then the denial captured per renderer",
+      "yaml_429": {
+        "url": "/api/schema/",
+        "status": 429,
+        "content_type": "application/vnd.oai.openapi; charset=utf-8",
+        "retry_after": "59",
+        "body": "error_code: 5900\nerror_message: RATE_LIMIT_EXCEEDED\n",
+        "body_sha256": "197e2eead48a9717e8f3a99c065b7fe51b4987ea4f670131aa368e37082ec11d"
+      },
+      "json_429": {
+        "url": "/api/schema/?format=json",
+        "status": 429,
+        "content_type": "application/vnd.oai.openapi+json",
+        "retry_after": "59",
+        "body": "{\n    \"error_code\": 5900,\n    \"error_message\": \"RATE_LIMIT_EXCEEDED\"\n}",
+        "body_sha256": "b8ce2753c63aec8e91ce7c872093ce4f178b5f1649521818c41ea4ae85ce7730"
+      },
+      "unsafe_while_throttled": {
+        "method": "POST",
+        "url": "/api/schema/",
+        "status": 429,
+        "allow": "GET, HEAD, OPTIONS",
+        "retry_after": "59",
+        "body": "error_code: 5900\nerror_message: RATE_LIMIT_EXCEEDED\n",
+        "note": "429, not 405: DRF runs check_throttles() in initial(), before handler selection."
+      },
+      "mechanism": {
+        "rewrite": "auth_exception_handler (authentication/adapter/exception.py:25-31) replaces Throttled data with {error_code: 5900, error_message: RATE_LIMIT_EXCEEDED} (code table authentication/adapter/error.py:71)",
+        "yaml_json_views": "rewritten dict renders through the OpenAPI YAML/JSON renderer (visible above)",
+        "ui_pages": "TemplateHTMLRenderer.get_exception_template ignores data and renders '<status> <TEXT>' (drf/renderers.py) since no 429.html/api_exception.html template exists",
+        "error_detail_yaml": "?format=xml 404 and schema 405 bodies show DRF ErrorDetail YAML-serialized as {string, code} mapping",
+        "throttle_cache_key": ":1:throttle_anon_127.0.0.1 (observed in redis db 13; DRF SimpleRateThrottle over the default django-redis cache)"
+      }
+    }
+  },
+  "flag_off": {
+    "_method": "server restarted from the same checkout+DB with ENABLE_DRF_SPECTACULAR unset (urls.py:31 gate false); plain GETs",
+    "verdict": "all three routes absent: Django URL resolution 404",
+    "note": "DEBUG=True (test settings) renders the technical-404 HTML page, which embeds the full URL pattern list \u2014 body bytes are environment-specific, hence length+sha+head only",
+    "endpoints": {
+      "/api/schema/": {
+        "status": 404,
+        "content_type": "text/html; charset=utf-8",
+        "body_bytes": 73226,
+        "body_sha256": "894e5dbe861b3a5f40892dd68dd047e9b63f1e2afd832485c791c9815ecf6898",
+        "body_head": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\">\n  <title>Page not found at /api/schema/</title>\n  <meta name=\"robots\" content=\"NONE,NOARCHIVE\">\n  <style type=\"text/css\">\n    html * { padding:0; margin:0; }\n    body * { padding:10px 20px; "
+      },
+      "/api/schema/swagger-ui/": {
+        "status": 404,
+        "content_type": "text/html; charset=utf-8",
+        "body_bytes": 73259,
+        "body_sha256": "d1ceb2db2f6f90182c2ba63d35190ea898350452f8e13950ae26f9c2cc2bd2c7",
+        "body_head": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\">\n  <title>Page not found at /api/schema/swagger-ui/</title>\n  <meta name=\"robots\" content=\"NONE,NOARCHIVE\">\n  <style type=\"text/css\">\n    html * { padding:0; margin:0; }\n    body * { padding:"
+      },
+      "/api/schema/redoc/": {
+        "status": 404,
+        "content_type": "text/html; charset=utf-8",
+        "body_bytes": 73244,
+        "body_sha256": "c95b95407f2a1280224600dc7e64a11ec7e136c0e4d9ea690d85d8d08a4625c1",
+        "body_head": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\">\n  <title>Page not found at /api/schema/redoc/</title>\n  <meta name=\"robots\" content=\"NONE,NOARCHIVE\">\n  <style type=\"text/css\">\n    html * { padding:0; margin:0; }\n    body * { padding:10px "
+      }
+    }
+  }
+}

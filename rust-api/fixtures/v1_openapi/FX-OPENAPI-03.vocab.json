@@ -1,0 +1,3991 @@
+{
+  "_trace": "apps/api/pi_dash/utils/openapi/parameters.py:17-607 (38 constants), responses.py:17-490 (39 constants + create_paginated_response :358-405), examples.py:16-966 (OpenApiExample constants :16-754, SAMPLE_* + SCHEMA_EXAMPLES :756-919, get_sample_for_schema :921-938, PAGE_* :940-966), decorators.py:17-342 (_merge_schema_options :17-30, 21 *_docs factories :33-342), __init__.py:17-367 (re-export surface)",
+  "_method": "AST parse for exact definition line spans + runtime introspection of the live objects with Django configured (pi_dash.settings.test, no DB); decorator defaults captured by running each factory with extend_schema patched in-module; merge/get_sample/ paginated helpers executed over the vectors below",
+  "_type_resolver": "drf_spectacular.plumbing.build_basic_type",
+  "_non_json_values": [],
+  "_reading_notes": [
+    "These constants are drf-spectacular annotation vocabulary with no served behaviour of their own: the doc-builder port renders the pinned subset from FX-OPENAPI-04, not by transliterating constants.",
+    "sticky_docs (decorators.py:286-299) is defined but NOT re-exported in __init__.py; it is imported directly by api/views/sticky.py.",
+    "postprocess_project_id_dual_form is likewise not re-exported; it is wired by dotted path in SPECTACULAR_SETTINGS (settings/openapi.py:44).",
+    "README.md (utils/openapi/) is stale: it names APITokenAuthenticationExtension and postprocess_assign_tags, neither of which exists.",
+    "Decorator tag names outside the 14 SPECTACULAR_SETTINGS tags: Workspaces (workspace_docs), Stickies (sticky_docs), Estimates, Estimate Points, Pages, Work Item Relations \u2014 recorded verbatim."
+  ],
+  "counts": {
+    "parameters": 38,
+    "responses": 39,
+    "examples": 57,
+    "samples": 16,
+    "decorators": 21
+  },
+  "parameters": {
+    "ACTIVITY_ID_PARAMETER": {
+      "lines": "243-256",
+      "class": "OpenApiParameter",
+      "name": "pk",
+      "description": "Activity ID",
+      "required": true,
+      "type_enum": "UUID",
+      "type_resolved": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "location": "path",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Example activity ID",
+          "value": "550e8400-e29b-41d4-a716-446655440000",
+          "summary": null,
+          "description": "A typical activity UUID",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "ASSET_ID_PARAMETER": {
+      "lines": "92-105",
+      "class": "OpenApiParameter",
+      "name": "asset_id",
+      "description": "Asset ID",
+      "required": true,
+      "type_enum": "UUID",
+      "type_resolved": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "location": "path",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Example asset ID",
+          "value": "550e8400-e29b-41d4-a716-446655440000",
+          "summary": null,
+          "description": "A typical asset UUID",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "ATTACHMENT_ID_PARAMETER": {
+      "lines": "228-241",
+      "class": "OpenApiParameter",
+      "name": "pk",
+      "description": "Attachment ID",
+      "required": true,
+      "type_enum": "UUID",
+      "type_resolved": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "location": "path",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Example attachment ID",
+          "value": "550e8400-e29b-41d4-a716-446655440000",
+          "summary": null,
+          "description": "A typical attachment UUID",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "COMMENT_ID_PARAMETER": {
+      "lines": "198-211",
+      "class": "OpenApiParameter",
+      "name": "pk",
+      "description": "Comment ID",
+      "required": true,
+      "type_enum": "UUID",
+      "type_resolved": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "location": "path",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Example comment ID",
+          "value": "550e8400-e29b-41d4-a716-446655440000",
+          "summary": null,
+          "description": "A typical comment UUID",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "CURSOR_PARAMETER": {
+      "lines": "259-272",
+      "class": "OpenApiParameter",
+      "name": "cursor",
+      "description": "Pagination cursor for getting next set of results",
+      "required": false,
+      "type_enum": "STR",
+      "type_resolved": {
+        "type": "string"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Next page cursor",
+          "value": "20:1:0",
+          "summary": null,
+          "description": "Cursor format: 'page_size:page_number:offset'",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "CYCLE_ID_PARAMETER": {
+      "lines": "107-120",
+      "class": "OpenApiParameter",
+      "name": "cycle_id",
+      "description": "Cycle ID",
+      "required": true,
+      "type_enum": "UUID",
+      "type_resolved": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "location": "path",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Example cycle ID",
+          "value": "550e8400-e29b-41d4-a716-446655440000",
+          "summary": null,
+          "description": "A typical cycle UUID",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "CYCLE_VIEW_PARAMETER": {
+      "lines": "442-456",
+      "class": "OpenApiParameter",
+      "name": "cycle_view",
+      "description": "Filter cycles by status",
+      "required": false,
+      "type_enum": "STR",
+      "type_resolved": {
+        "type": "string"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "All cycles",
+          "value": "all",
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "Current cycles",
+          "value": "current",
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "Upcoming cycles",
+          "value": "upcoming",
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "Completed cycles",
+          "value": "completed",
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "Draft cycles",
+          "value": "draft",
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "Incomplete cycles",
+          "value": "incomplete",
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "ESTIMATE_ID_PARAMETER": {
+      "lines": "570-576",
+      "class": "OpenApiParameter",
+      "name": "estimate_id",
+      "description": "Estimate ID",
+      "required": true,
+      "type_enum": "UUID",
+      "type_resolved": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "location": "path",
+      "default": null,
+      "enum": null,
+      "examples": []
+    },
+    "EXPAND_PARAMETER": {
+      "lines": "479-497",
+      "class": "OpenApiParameter",
+      "name": "expand",
+      "description": "Comma-separated list of related fields to expand in response",
+      "required": false,
+      "type_enum": "STR",
+      "type_resolved": {
+        "type": "string"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Expand assignees",
+          "value": "assignees",
+          "summary": null,
+          "description": "Include full assignee details",
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "Multiple expansions",
+          "value": "assignees,labels,state",
+          "summary": null,
+          "description": "Include details for multiple relations",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "EXTERNAL_ID_PARAMETER": {
+      "lines": "287-300",
+      "class": "OpenApiParameter",
+      "name": "external_id",
+      "description": "External system identifier for filtering or lookup",
+      "required": false,
+      "type_enum": "STR",
+      "type_resolved": {
+        "type": "string"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "GitHub Issue",
+          "value": "1234567890",
+          "summary": null,
+          "description": "GitHub issue number",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "EXTERNAL_SOURCE_PARAMETER": {
+      "lines": "302-320",
+      "class": "OpenApiParameter",
+      "name": "external_source",
+      "description": "External system source name for filtering or lookup",
+      "required": false,
+      "type_enum": "STR",
+      "type_resolved": {
+        "type": "string"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "GitHub",
+          "value": "github",
+          "summary": null,
+          "description": "GitHub integration source",
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "Jira",
+          "value": "jira",
+          "summary": null,
+          "description": "Jira integration source",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "FIELDS_PARAMETER": {
+      "lines": "459-477",
+      "class": "OpenApiParameter",
+      "name": "fields",
+      "description": "Comma-separated list of fields to include in response",
+      "required": false,
+      "type_enum": "STR",
+      "type_resolved": {
+        "type": "string"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Basic fields",
+          "value": "id,name,description",
+          "summary": null,
+          "description": "Include only basic fields",
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "With relations",
+          "value": "id,name,assignees,state",
+          "summary": null,
+          "description": "Include fields with relationships",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "INCLUDE_ARCHIVED_PARAMETER": {
+      "lines": "594-607",
+      "class": "OpenApiParameter",
+      "name": "include_archived",
+      "description": "Include archived records in the results. Excluded by default.",
+      "required": false,
+      "type_enum": "BOOL",
+      "type_resolved": {
+        "type": "boolean"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Include archived",
+          "value": true,
+          "summary": null,
+          "description": "Return archived records alongside active ones",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "ISSUE_IDENTIFIER_PARAMETER": {
+      "lines": "77-90",
+      "class": "OpenApiParameter",
+      "name": "issue_identifier",
+      "description": "Issue sequence ID (numeric identifier within project)",
+      "required": true,
+      "type_enum": "INT",
+      "type_resolved": {
+        "type": "integer"
+      },
+      "location": "path",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Example issue identifier",
+          "value": 123,
+          "summary": null,
+          "description": "A typical issue sequence ID",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "ISSUE_ID_PARAMETER": {
+      "lines": "152-165",
+      "class": "OpenApiParameter",
+      "name": "issue_id",
+      "description": "Issue ID",
+      "required": true,
+      "type_enum": "UUID",
+      "type_resolved": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "location": "path",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Example issue ID",
+          "value": "550e8400-e29b-41d4-a716-446655440000",
+          "summary": null,
+          "description": "A typical issue UUID",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "LABEL_ID_PARAMETER": {
+      "lines": "183-196",
+      "class": "OpenApiParameter",
+      "name": "pk",
+      "description": "Label ID",
+      "required": true,
+      "type_enum": "UUID",
+      "type_resolved": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "location": "path",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Example label ID",
+          "value": "550e8400-e29b-41d4-a716-446655440000",
+          "summary": null,
+          "description": "A typical label UUID",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "LIMIT_PARAMETER": {
+      "lines": "394-404",
+      "class": "OpenApiParameter",
+      "name": "limit",
+      "description": "Maximum number of results to return",
+      "required": false,
+      "type_enum": "INT",
+      "type_resolved": {
+        "type": "integer"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Default",
+          "value": 10,
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "More results",
+          "value": 50,
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "LINK_ID_PARAMETER": {
+      "lines": "213-226",
+      "class": "OpenApiParameter",
+      "name": "pk",
+      "description": "Link ID",
+      "required": true,
+      "type_enum": "UUID",
+      "type_resolved": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "location": "path",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Example link ID",
+          "value": "550e8400-e29b-41d4-a716-446655440000",
+          "summary": null,
+          "description": "A typical link UUID",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "MODULE_ID_PARAMETER": {
+      "lines": "122-135",
+      "class": "OpenApiParameter",
+      "name": "module_id",
+      "description": "Module ID",
+      "required": true,
+      "type_enum": "UUID",
+      "type_resolved": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "location": "path",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Example module ID",
+          "value": "550e8400-e29b-41d4-a716-446655440000",
+          "summary": null,
+          "description": "A typical module UUID",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "MODULE_PK_PARAMETER": {
+      "lines": "137-150",
+      "class": "OpenApiParameter",
+      "name": "pk",
+      "description": "Module ID",
+      "required": true,
+      "type_enum": "UUID",
+      "type_resolved": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "location": "path",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Example module ID",
+          "value": "550e8400-e29b-41d4-a716-446655440000",
+          "summary": null,
+          "description": "A typical module UUID",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "ORDER_BY_PARAMETER": {
+      "lines": "323-351",
+      "class": "OpenApiParameter",
+      "name": "order_by",
+      "description": "Field to order results by. Prefix with '-' for descending order",
+      "required": false,
+      "type_enum": "STR",
+      "type_resolved": {
+        "type": "string"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Created date descending",
+          "value": "-created_at",
+          "summary": null,
+          "description": "Most recent items first",
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "Priority ascending",
+          "value": "priority",
+          "summary": null,
+          "description": "Order by priority (urgent, high, medium, low, none)",
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "State group",
+          "value": "state__group",
+          "summary": null,
+          "description": "Order by state group (backlog, unstarted, started, review, test, completed, cancelled)",
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "Assignee name",
+          "value": "assignees__first_name",
+          "summary": null,
+          "description": "Order by assignee first name",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "PAGE_ID_PARAMETER": {
+      "lines": "579-592",
+      "class": "OpenApiParameter",
+      "name": "page_id",
+      "description": "Page ID",
+      "required": true,
+      "type_enum": "UUID",
+      "type_resolved": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "location": "path",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Example page ID",
+          "value": "550e8400-e29b-41d4-a716-446655440000",
+          "summary": null,
+          "description": "A typical page UUID",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "PER_PAGE_PARAMETER": {
+      "lines": "274-284",
+      "class": "OpenApiParameter",
+      "name": "per_page",
+      "description": "Number of results per page (default: 20, max: 100)",
+      "required": false,
+      "type_enum": "INT",
+      "type_resolved": {
+        "type": "integer"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Default",
+          "value": 20,
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "Maximum",
+          "value": 100,
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "PROJECT_IDENTIFIER_PARAMETER": {
+      "lines": "62-75",
+      "class": "OpenApiParameter",
+      "name": "project_identifier",
+      "description": "Project identifier (unique string within workspace)",
+      "required": true,
+      "type_enum": "STR",
+      "type_resolved": {
+        "type": "string"
+      },
+      "location": "path",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Example project identifier",
+          "value": "PROJ",
+          "summary": null,
+          "description": "A typical project identifier",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "PROJECT_ID_PARAMETER": {
+      "lines": "32-45",
+      "class": "OpenApiParameter",
+      "name": "project_id",
+      "description": "Project ID",
+      "required": true,
+      "type_enum": "UUID",
+      "type_resolved": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "location": "path",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Example project ID",
+          "value": "550e8400-e29b-41d4-a716-446655440000",
+          "summary": null,
+          "description": "A typical project UUID",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "PROJECT_ID_QUERY_PARAMETER": {
+      "lines": "426-439",
+      "class": "OpenApiParameter",
+      "name": "project_id",
+      "description": "Project ID for filtering results within a specific project",
+      "required": false,
+      "type_enum": "UUID",
+      "type_resolved": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Example project ID",
+          "value": "550e8400-e29b-41d4-a716-446655440000",
+          "summary": null,
+          "description": "Filter results for this project",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "PROJECT_PK_PARAMETER": {
+      "lines": "47-60",
+      "class": "OpenApiParameter",
+      "name": "pk",
+      "description": "Project ID",
+      "required": true,
+      "type_enum": "UUID",
+      "type_resolved": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "location": "path",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Example project ID",
+          "value": "550e8400-e29b-41d4-a716-446655440000",
+          "summary": null,
+          "description": "A typical project UUID",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "SEARCH_PARAMETER": {
+      "lines": "354-372",
+      "class": "OpenApiParameter",
+      "name": "search",
+      "description": "Search query to filter results by name, description, or identifier",
+      "required": false,
+      "type_enum": "STR",
+      "type_resolved": {
+        "type": "string"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Name search",
+          "value": "bug fix",
+          "summary": null,
+          "description": "Search for items containing 'bug fix'",
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "Sequence ID",
+          "value": "123",
+          "summary": null,
+          "description": "Search by sequence ID number",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "SEARCH_PARAMETER_REQUIRED": {
+      "lines": "374-392",
+      "class": "OpenApiParameter",
+      "name": "search",
+      "description": "Search query to filter results by name, description, or identifier",
+      "required": true,
+      "type_enum": "STR",
+      "type_resolved": {
+        "type": "string"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Name search",
+          "value": "bug fix",
+          "summary": null,
+          "description": "Search for items containing 'bug fix'",
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "Sequence ID",
+          "value": "123",
+          "summary": null,
+          "description": "Search by sequence ID number",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "STATE_ID_PARAMETER": {
+      "lines": "167-180",
+      "class": "OpenApiParameter",
+      "name": "state_id",
+      "description": "State ID",
+      "required": true,
+      "type_enum": "UUID",
+      "type_resolved": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "location": "path",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Example state ID",
+          "value": "550e8400-e29b-41d4-a716-446655440000",
+          "summary": null,
+          "description": "A typical state UUID",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "WORKSPACE_SEARCH_PARAMETER": {
+      "lines": "406-424",
+      "class": "OpenApiParameter",
+      "name": "workspace_search",
+      "description": "Whether to search across entire workspace or within specific project",
+      "required": false,
+      "type_enum": "STR",
+      "type_resolved": {
+        "type": "string"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Project only",
+          "value": "false",
+          "summary": null,
+          "description": "Search within specific project only",
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "Workspace wide",
+          "value": "true",
+          "summary": null,
+          "description": "Search across entire workspace",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "WORKSPACE_SLUG_PARAMETER": {
+      "lines": "17-30",
+      "class": "OpenApiParameter",
+      "name": "slug",
+      "description": "Workspace slug",
+      "required": true,
+      "type_enum": "STR",
+      "type_resolved": {
+        "type": "string"
+      },
+      "location": "path",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Example workspace",
+          "value": "my-workspace",
+          "summary": null,
+          "description": "A typical workspace slug",
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "WORK_ITEM_ASSIGNEES_FILTER_PARAMETER": {
+      "lines": "562-568",
+      "class": "OpenApiParameter",
+      "name": "assignees",
+      "description": "Filter by assignee. Comma-separated user UUIDs.",
+      "required": false,
+      "type_enum": "STR",
+      "type_resolved": {
+        "type": "string"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": []
+    },
+    "WORK_ITEM_LABELS_FILTER_PARAMETER": {
+      "lines": "544-551",
+      "class": "OpenApiParameter",
+      "name": "labels",
+      "description": "Filter by label. Comma-separated label UUIDs and/or label names (case-insensitive).",
+      "required": false,
+      "type_enum": "STR",
+      "type_resolved": {
+        "type": "string"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "By name",
+          "value": "bug,frontend",
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "WORK_ITEM_PARENT_FILTER_PARAMETER": {
+      "lines": "529-542",
+      "class": "OpenApiParameter",
+      "name": "parent",
+      "description": "Filter by parent work item. Comma-separated parent UUIDs and/or identifiers (e.g. PROJ-123). Pass `null` to return only top-level work items.",
+      "required": false,
+      "type_enum": "STR",
+      "type_resolved": {
+        "type": "string"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Children of an epic",
+          "value": "PROJ-123",
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "Top-level only",
+          "value": "null",
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "WORK_ITEM_PRIORITY_FILTER_PARAMETER": {
+      "lines": "553-560",
+      "class": "OpenApiParameter",
+      "name": "priority",
+      "description": "Filter by priority. Comma-separated values from: urgent, high, medium, low, none.",
+      "required": false,
+      "type_enum": "STR",
+      "type_resolved": {
+        "type": "string"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Hot",
+          "value": "urgent,high",
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "WORK_ITEM_STATE_FILTER_PARAMETER": {
+      "lines": "501-515",
+      "class": "OpenApiParameter",
+      "name": "state",
+      "description": "Filter by state. Comma-separated state UUIDs and/or state names (case-insensitive exact match within the project). An unknown name returns 400 listing the valid state names.",
+      "required": false,
+      "type_enum": "STR",
+      "type_resolved": {
+        "type": "string"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "By name",
+          "value": "Backlog,Todo",
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "By id",
+          "value": "550e8400-e29b-41d4-a716-446655440000",
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "WORK_ITEM_STATE_GROUP_FILTER_PARAMETER": {
+      "lines": "517-527",
+      "class": "OpenApiParameter",
+      "name": "state_group",
+      "description": "Filter by state group. Comma-separated values from: backlog, unstarted, started, review, test, completed, cancelled.",
+      "required": false,
+      "type_enum": "STR",
+      "type_resolved": {
+        "type": "string"
+      },
+      "location": "query",
+      "default": null,
+      "enum": null,
+      "examples": [
+        {
+          "name": "Open work",
+          "value": "unstarted,started",
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    }
+  },
+  "responses": {
+    "ADMIN_ONLY_RESPONSE": {
+      "lines": "127-135",
+      "class": "OpenApiResponse",
+      "description": "Only admin or creator can perform this action",
+      "response": null,
+      "examples": [
+        {
+          "name": "Admin Only",
+          "value": {
+            "error": "Only admin or creator can perform this action"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "ARCHIVED_RESPONSE": {
+      "lines": "80-88",
+      "class": "OpenApiResponse",
+      "description": "Resource archived successfully",
+      "response": null,
+      "examples": [
+        {
+          "name": "Archived Successfully",
+          "value": {
+            "message": "Resource archived successfully"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "ASSET_CONFLICT_RESPONSE": {
+      "lines": "447-459",
+      "class": "OpenApiResponse",
+      "description": "Asset with same external ID already exists",
+      "response": null,
+      "examples": [
+        {
+          "name": "Duplicate external asset",
+          "value": {
+            "message": "Asset with same external id and source already exists",
+            "asset_id": "550e8400-e29b-41d4-a716-446655440000",
+            "asset_url": "https://cdn.example.com/existing-file.pdf"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "ASSET_DELETED_RESPONSE": {
+      "lines": "485-485",
+      "class": "OpenApiResponse",
+      "description": "Asset deleted successfully",
+      "response": null,
+      "examples": []
+    },
+    "ASSET_DOWNLOAD_ERROR_RESPONSE": {
+      "lines": "476-481",
+      "class": "OpenApiResponse",
+      "description": "Bad request",
+      "response": null,
+      "examples": [
+        {
+          "name": "Asset not uploaded",
+          "value": {
+            "error": "Asset not yet uploaded"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "ASSET_DOWNLOAD_SUCCESS_RESPONSE": {
+      "lines": "461-474",
+      "class": "OpenApiResponse",
+      "description": "Presigned download URL generated successfully",
+      "response": null,
+      "examples": [
+        {
+          "name": "Asset Download Response",
+          "value": {
+            "asset_id": "550e8400-e29b-41d4-a716-446655440000",
+            "asset_url": "https://s3.amazonaws.com/bucket/file.pdf?signed-url",
+            "asset_name": "document.pdf",
+            "asset_type": "application/pdf"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "ASSET_NOT_FOUND_RESPONSE": {
+      "lines": "487-490",
+      "class": "OpenApiResponse",
+      "description": "Asset not found",
+      "response": null,
+      "examples": [
+        {
+          "name": "Asset not found",
+          "value": {
+            "error": "Asset not found"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "ASSET_UPDATED_RESPONSE": {
+      "lines": "483-483",
+      "class": "OpenApiResponse",
+      "description": "Asset updated successfully",
+      "response": null,
+      "examples": []
+    },
+    "ATTACHMENT_NOT_FOUND_RESPONSE": {
+      "lines": "335-343",
+      "class": "OpenApiResponse",
+      "description": "Attachment not found",
+      "response": null,
+      "examples": [
+        {
+          "name": "Attachment Not Found",
+          "value": {
+            "error": "Attachment not found"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "BAD_SEARCH_REQUEST_RESPONSE": {
+      "lines": "346-354",
+      "class": "OpenApiResponse",
+      "description": "Bad request - invalid search parameters",
+      "response": null,
+      "examples": [
+        {
+          "name": "Bad Search Request",
+          "value": {
+            "error": "Invalid search parameters"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "CANNOT_ARCHIVE_RESPONSE": {
+      "lines": "147-158",
+      "class": "OpenApiResponse",
+      "description": "Resource cannot be archived in current state",
+      "response": null,
+      "examples": [
+        {
+          "name": "Cannot Archive",
+          "value": {
+            "error": "Resource cannot be archived",
+            "reason": "Not in valid state"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "CANNOT_DELETE_RESPONSE": {
+      "lines": "137-145",
+      "class": "OpenApiResponse",
+      "description": "Resource cannot be deleted due to constraints",
+      "response": null,
+      "examples": [
+        {
+          "name": "Cannot Delete",
+          "value": {
+            "error": "Resource cannot be deleted",
+            "reason": "Has dependencies"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "COMMENT_NOT_FOUND_RESPONSE": {
+      "lines": "313-321",
+      "class": "OpenApiResponse",
+      "description": "Comment not found",
+      "response": null,
+      "examples": [
+        {
+          "name": "Comment Not Found",
+          "value": {
+            "error": "Comment not found"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "CONFLICT_RESPONSE": {
+      "lines": "114-125",
+      "class": "OpenApiResponse",
+      "description": "Resource conflict - duplicate or constraint violation",
+      "response": null,
+      "examples": [
+        {
+          "name": "Resource Conflict",
+          "value": {
+            "error": "Resource with the same identifier already exists",
+            "id": "550e8400-e29b-41d4-a716-446655440000"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "CYCLE_CANNOT_ARCHIVE_RESPONSE": {
+      "lines": "278-286",
+      "class": "OpenApiResponse",
+      "description": "Cycle cannot be archived",
+      "response": null,
+      "examples": [
+        {
+          "name": "Cycle Cannot Archive",
+          "value": {
+            "error": "Only completed cycles can be archived"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "DELETED_RESPONSE": {
+      "lines": "70-78",
+      "class": "OpenApiResponse",
+      "description": "Resource deleted successfully",
+      "response": null,
+      "examples": [
+        {
+          "name": "Deleted Successfully",
+          "value": {
+            "message": "Resource deleted successfully"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "EXTERNAL_ID_EXISTS_RESPONSE": {
+      "lines": "222-233",
+      "class": "OpenApiResponse",
+      "description": "Resource with same external ID already exists",
+      "response": null,
+      "examples": [
+        {
+          "name": "External ID Exists",
+          "value": {
+            "error": "Resource with the same external id and external source already exists",
+            "id": "550e8400-e29b-41d4-a716-446655440000"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "FORBIDDEN_RESPONSE": {
+      "lines": "31-42",
+      "class": "OpenApiResponse",
+      "description": "Permission denied. User lacks required permissions.",
+      "response": null,
+      "examples": [
+        {
+          "name": "Forbidden",
+          "value": {
+            "error": "You do not have permission to perform this action",
+            "error_code": "PERMISSION_DENIED"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "GENERIC_ASSET_UPLOAD_SUCCESS_RESPONSE": {
+      "lines": "411-431",
+      "class": "OpenApiResponse",
+      "description": "Presigned URL generated successfully",
+      "response": null,
+      "examples": [
+        {
+          "name": "Generic Asset Upload Response",
+          "value": {
+            "upload_data": {
+              "url": "https://s3.amazonaws.com/bucket-name",
+              "fields": {
+                "key": "workspace-id/uuid-filename.pdf",
+                "AWSAccessKeyId": "AKIA...",
+                "policy": "eyJ...",
+                "signature": "abc123..."
+              }
+            },
+            "asset_id": "550e8400-e29b-41d4-a716-446655440000",
+            "asset_url": "https://cdn.example.com/workspace-id/uuid-filename.pdf"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "GENERIC_ASSET_VALIDATION_ERROR_RESPONSE": {
+      "lines": "433-445",
+      "class": "OpenApiResponse",
+      "description": "Validation error",
+      "response": null,
+      "examples": [
+        {
+          "name": "Missing required fields",
+          "value": {
+            "error": "Name and size are required fields.",
+            "status": false
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        },
+        {
+          "name": "Invalid file type",
+          "value": {
+            "error": "Invalid file type.",
+            "status": false
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "INVALID_REQUEST_RESPONSE": {
+      "lines": "101-112",
+      "class": "OpenApiResponse",
+      "description": "Invalid request data provided",
+      "response": null,
+      "examples": [
+        {
+          "name": "Invalid Request",
+          "value": {
+            "error": "Invalid request data",
+            "details": "Specific validation errors"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "ISSUE_NOT_FOUND_RESPONSE": {
+      "lines": "202-210",
+      "class": "OpenApiResponse",
+      "description": "Issue not found",
+      "response": null,
+      "examples": [
+        {
+          "name": "Issue Not Found",
+          "value": {
+            "error": "Issue not found"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "LABEL_NAME_EXISTS_RESPONSE": {
+      "lines": "246-254",
+      "class": "OpenApiResponse",
+      "description": "Label with the same name already exists",
+      "response": null,
+      "examples": [
+        {
+          "name": "Label Name Exists",
+          "value": {
+            "error": "Label with the same name already exists in the project"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "LABEL_NOT_FOUND_RESPONSE": {
+      "lines": "236-244",
+      "class": "OpenApiResponse",
+      "description": "Label not found",
+      "response": null,
+      "examples": [
+        {
+          "name": "Label Not Found",
+          "value": {
+            "error": "Label not found"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "LINK_NOT_FOUND_RESPONSE": {
+      "lines": "324-332",
+      "class": "OpenApiResponse",
+      "description": "Link not found",
+      "response": null,
+      "examples": [
+        {
+          "name": "Link Not Found",
+          "value": {
+            "error": "Link not found"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "MODULE_ISSUE_NOT_FOUND_RESPONSE": {
+      "lines": "267-275",
+      "class": "OpenApiResponse",
+      "description": "Module issue not found",
+      "response": null,
+      "examples": [
+        {
+          "name": "Module Issue Not Found",
+          "value": {
+            "error": "Module issue not found"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "MODULE_NOT_FOUND_RESPONSE": {
+      "lines": "257-265",
+      "class": "OpenApiResponse",
+      "description": "Module not found",
+      "response": null,
+      "examples": [
+        {
+          "name": "Module Not Found",
+          "value": {
+            "error": "Module not found"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "NOT_FOUND_RESPONSE": {
+      "lines": "46-54",
+      "class": "OpenApiResponse",
+      "description": "The requested resource was not found.",
+      "response": null,
+      "examples": [
+        {
+          "name": "Not Found",
+          "value": {
+            "error": "Not found",
+            "error_code": "RESOURCE_NOT_FOUND"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "PRESIGNED_URL_SUCCESS_RESPONSE": {
+      "lines": "409-409",
+      "class": "OpenApiResponse",
+      "description": "Presigned URL generated successfully",
+      "response": null,
+      "examples": []
+    },
+    "PROJECT_NAME_TAKEN_RESPONSE": {
+      "lines": "191-199",
+      "class": "OpenApiResponse",
+      "description": "Project name already taken",
+      "response": null,
+      "examples": [
+        {
+          "name": "Project Name Taken",
+          "value": {
+            "error": "Project name already taken"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "PROJECT_NOT_FOUND_RESPONSE": {
+      "lines": "171-179",
+      "class": "OpenApiResponse",
+      "description": "Project not found",
+      "response": null,
+      "examples": [
+        {
+          "name": "Project Not Found",
+          "value": {
+            "error": "Project not found"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "REQUIRED_FIELDS_RESPONSE": {
+      "lines": "160-168",
+      "class": "OpenApiResponse",
+      "description": "Required fields are missing",
+      "response": null,
+      "examples": [
+        {
+          "name": "Required Fields Missing",
+          "value": {
+            "error": "Required fields are missing",
+            "fields": [
+              "name",
+              "type"
+            ]
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "STATE_CANNOT_DELETE_RESPONSE": {
+      "lines": "299-310",
+      "class": "OpenApiResponse",
+      "description": "State cannot be deleted",
+      "response": null,
+      "examples": [
+        {
+          "name": "State Cannot Delete",
+          "value": {
+            "error": "State cannot be deleted",
+            "reason": "Default state or has issues"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "STATE_NAME_EXISTS_RESPONSE": {
+      "lines": "289-297",
+      "class": "OpenApiResponse",
+      "description": "State with the same name already exists",
+      "response": null,
+      "examples": [
+        {
+          "name": "State Name Exists",
+          "value": {
+            "error": "State with the same name already exists"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "UNARCHIVED_RESPONSE": {
+      "lines": "90-98",
+      "class": "OpenApiResponse",
+      "description": "Resource unarchived successfully",
+      "response": null,
+      "examples": [
+        {
+          "name": "Unarchived Successfully",
+          "value": {
+            "message": "Resource unarchived successfully"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "UNAUTHORIZED_RESPONSE": {
+      "lines": "18-29",
+      "class": "OpenApiResponse",
+      "description": "Authentication credentials were not provided or are invalid.",
+      "response": null,
+      "examples": [
+        {
+          "name": "Unauthorized",
+          "value": {
+            "error": "Authentication credentials were not provided",
+            "error_code": "AUTHENTICATION_REQUIRED"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "VALIDATION_ERROR_RESPONSE": {
+      "lines": "56-67",
+      "class": "OpenApiResponse",
+      "description": "Validation error occurred with the provided data.",
+      "response": null,
+      "examples": [
+        {
+          "name": "Validation Error",
+          "value": {
+            "error": "Validation failed",
+            "details": {
+              "field_name": [
+                "This field is required."
+              ]
+            }
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "WORKSPACE_NOT_FOUND_RESPONSE": {
+      "lines": "181-189",
+      "class": "OpenApiResponse",
+      "description": "Workspace not found",
+      "response": null,
+      "examples": [
+        {
+          "name": "Workspace Not Found",
+          "value": {
+            "error": "Workspace not found"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    },
+    "WORK_ITEM_NOT_FOUND_RESPONSE": {
+      "lines": "212-220",
+      "class": "OpenApiResponse",
+      "description": "Work item not found",
+      "response": null,
+      "examples": [
+        {
+          "name": "Work Item Not Found",
+          "value": {
+            "error": "Work item not found"
+          },
+          "summary": null,
+          "description": null,
+          "request_only": false,
+          "response_only": false
+        }
+      ]
+    }
+  },
+  "create_paginated_response": {
+    "lines": "358-405",
+    "signature": "(item_schema, schema_name, description='Paginated results', example_name='Paginated Response')",
+    "calls": [
+      {
+        "call": {
+          "item_schema": "CharField",
+          "schema_name": "PaginatedIssueResponse"
+        },
+        "description": "Paginated results",
+        "response_is_instance": true,
+        "inline_serializer_name": "PaginatedIssueResponse",
+        "envelope_fields": {
+          "grouped_by": "CharField",
+          "sub_grouped_by": "CharField",
+          "total_count": "IntegerField",
+          "next_cursor": "CharField",
+          "prev_cursor": "CharField",
+          "next_page_results": "BooleanField",
+          "prev_page_results": "BooleanField",
+          "count": "IntegerField",
+          "total_pages": "IntegerField",
+          "total_results": "IntegerField",
+          "extra_stats": "CharField",
+          "results": "ListField"
+        },
+        "examples": [
+          {
+            "name": "Paginated Response",
+            "value": {
+              "grouped_by": "state",
+              "sub_grouped_by": "priority",
+              "total_count": 150,
+              "next_cursor": "20:1:0",
+              "prev_cursor": "20:0:0",
+              "next_page_results": true,
+              "prev_page_results": false,
+              "count": 20,
+              "total_pages": 8,
+              "total_results": 150,
+              "extra_stats": null,
+              "results": [
+                {
+                  "id": "550e8400-e29b-41d4-a716-446655440000",
+                  "name": "Fix authentication bug in user login",
+                  "description": "Users are unable to log in due to authentication service timeout",
+                  "priority": "high",
+                  "sequence_id": 123,
+                  "state": {
+                    "id": "550e8400-e29b-41d4-a716-446655440001",
+                    "name": "In Progress",
+                    "group": "started"
+                  },
+                  "assignees": [],
+                  "labels": [],
+                  "created_at": "2024-01-15T10:30:00Z"
+                }
+              ]
+            },
+            "summary": "Paginated Response",
+            "description": null,
+            "request_only": false,
+            "response_only": false
+          }
+        ]
+      },
+      {
+        "call": {
+          "item_schema": "IntegerField",
+          "schema_name": "PaginatedCycleResponse",
+          "description": "Custom desc",
+          "example_name": "Custom Example"
+        },
+        "description": "Custom desc",
+        "response_is_instance": true,
+        "inline_serializer_name": "PaginatedCycleResponse",
+        "envelope_fields": {
+          "grouped_by": "CharField",
+          "sub_grouped_by": "CharField",
+          "total_count": "IntegerField",
+          "next_cursor": "CharField",
+          "prev_cursor": "CharField",
+          "next_page_results": "BooleanField",
+          "prev_page_results": "BooleanField",
+          "count": "IntegerField",
+          "total_pages": "IntegerField",
+          "total_results": "IntegerField",
+          "extra_stats": "CharField",
+          "results": "ListField"
+        },
+        "examples": [
+          {
+            "name": "Custom Example",
+            "value": {
+              "grouped_by": "state",
+              "sub_grouped_by": "priority",
+              "total_count": 150,
+              "next_cursor": "20:1:0",
+              "prev_cursor": "20:0:0",
+              "next_page_results": true,
+              "prev_page_results": false,
+              "count": 20,
+              "total_pages": 8,
+              "total_results": 150,
+              "extra_stats": null,
+              "results": [
+                {
+                  "id": "550e8400-e29b-41d4-a716-446655440000",
+                  "name": "Sprint 1 - Q1 2024",
+                  "description": "First sprint of the quarter focusing on core features",
+                  "start_date": "2024-01-01",
+                  "end_date": "2024-01-14",
+                  "status": "current"
+                }
+              ]
+            },
+            "summary": "Custom Example",
+            "description": null,
+            "request_only": false,
+            "response_only": false
+          }
+        ]
+      }
+    ],
+    "notes": "12-key envelope; results[0] = get_sample_for_schema(schema_name); inline_serializer name = schema_name verbatim"
+  },
+  "examples": {
+    "ATTACHMENT_UPLOAD_CONFIRM_EXAMPLE": {
+      "lines": "222-226",
+      "name": "ConfirmUpload",
+      "value": {
+        "is_uploaded": true
+      },
+      "summary": null,
+      "description": "Confirm that the attachment has been successfully uploaded",
+      "request_only": false,
+      "response_only": false
+    },
+    "CYCLE_CREATE_EXAMPLE": {
+      "lines": "229-240",
+      "name": "CycleCreateSerializer",
+      "value": {
+        "name": "Cycle 1",
+        "description": "Cycle 1 description",
+        "start_date": "2021-01-01",
+        "end_date": "2021-01-31",
+        "external_id": "1234567890",
+        "external_source": "github"
+      },
+      "summary": null,
+      "description": "Example request for creating a cycle",
+      "request_only": false,
+      "response_only": false
+    },
+    "CYCLE_EXAMPLE": {
+      "lines": "392-410",
+      "name": "Cycle",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Sprint 1 - Q1 2024",
+        "description": "First sprint of the quarter focusing on core features",
+        "start_date": "2024-01-01",
+        "end_date": "2024-01-14",
+        "status": "current",
+        "total_issues": 15,
+        "completed_issues": 8,
+        "cancelled_issues": 1,
+        "started_issues": 4,
+        "unstarted_issues": 2,
+        "backlog_issues": 0,
+        "created_at": "2024-01-01T10:30:00Z",
+        "updated_at": "2024-01-10T15:45:00Z"
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "CYCLE_ISSUE_EXAMPLE": {
+      "lines": "670-680",
+      "name": "CycleIssue",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "cycle": "550e8400-e29b-41d4-a716-446655440001",
+        "issue": "550e8400-e29b-41d4-a716-446655440002",
+        "sub_issues_count": 3,
+        "created_at": "2024-01-01T10:30:00Z",
+        "updated_at": "2024-01-10T15:45:00Z"
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "CYCLE_ISSUE_REQUEST_EXAMPLE": {
+      "lines": "255-264",
+      "name": "CycleIssueRequestSerializer",
+      "value": {
+        "issues": [
+          "0ec6cfa4-e906-4aad-9390-2df0303a41cd",
+          "0ec6cfa4-e906-4aad-9390-2df0303a41ce"
+        ]
+      },
+      "summary": null,
+      "description": "Example request for adding cycle issues",
+      "request_only": false,
+      "response_only": false
+    },
+    "CYCLE_UPDATE_EXAMPLE": {
+      "lines": "242-253",
+      "name": "CycleUpdateSerializer",
+      "value": {
+        "name": "Updated Cycle",
+        "description": "Updated cycle description",
+        "start_date": "2021-01-01",
+        "end_date": "2021-01-31",
+        "external_id": "1234567890",
+        "external_source": "github"
+      },
+      "summary": null,
+      "description": "Example request for updating a cycle",
+      "request_only": false,
+      "response_only": false
+    },
+    "ESTIMATE_CREATE_EXAMPLE": {
+      "lines": "713-720",
+      "name": "EstimateCreateSerializer",
+      "value": {
+        "name": "Estimate 1",
+        "description": "Estimate 1 description"
+      },
+      "summary": null,
+      "description": "Example request for creating an estimate",
+      "request_only": false,
+      "response_only": false
+    },
+    "ESTIMATE_EXAMPLE": {
+      "lines": "693-701",
+      "name": "Estimate",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Estimate 1",
+        "description": "Estimate 1 description"
+      },
+      "summary": null,
+      "description": "Example response for an estimate",
+      "request_only": false,
+      "response_only": false
+    },
+    "ESTIMATE_POINT_CREATE_EXAMPLE": {
+      "lines": "731-744",
+      "name": "EstimatePointCreateSerializer",
+      "value": [
+        {
+          "value": "1",
+          "description": "Estimate Point 1 description"
+        },
+        {
+          "value": "2",
+          "description": "Estimate Point 2 description"
+        }
+      ],
+      "summary": null,
+      "description": "Example request for creating an estimate point",
+      "request_only": false,
+      "response_only": false
+    },
+    "ESTIMATE_POINT_EXAMPLE": {
+      "lines": "703-712",
+      "name": "EstimatePoint",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "estimate": "550e8400-e29b-41d4-a716-446655440001",
+        "key": 1,
+        "value": "1"
+      },
+      "summary": null,
+      "description": "Example response for an estimate point",
+      "request_only": false,
+      "response_only": false
+    },
+    "ESTIMATE_POINT_UPDATE_EXAMPLE": {
+      "lines": "745-752",
+      "name": "EstimatePointUpdateSerializer",
+      "value": {
+        "value": "1",
+        "description": "Estimate Point 1 description"
+      },
+      "summary": null,
+      "description": "Example request for updating an estimate point",
+      "request_only": false,
+      "response_only": false
+    },
+    "ESTIMATE_UPDATE_EXAMPLE": {
+      "lines": "721-728",
+      "name": "EstimateUpdateSerializer",
+      "value": {
+        "name": "Estimate 1",
+        "description": "Estimate 1 description"
+      },
+      "summary": null,
+      "description": "Example request for updating an estimate",
+      "request_only": false,
+      "response_only": false
+    },
+    "FILE_UPLOAD_EXAMPLE": {
+      "lines": "16-29",
+      "name": "File Upload Success",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "asset": "uploads/workspace_1/file_example.pdf",
+        "attributes": {
+          "name": "example-document.pdf",
+          "size": 1024000,
+          "mimetype": "application/pdf"
+        },
+        "created_at": "2024-01-15T10:30:00Z",
+        "updated_at": "2024-01-15T10:30:00Z"
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "INTAKE_ISSUE_CREATE_EXAMPLE": {
+      "lines": "361-371",
+      "name": "IntakeIssueCreateSerializer",
+      "value": {
+        "issue": {
+          "name": "New Issue",
+          "description": "New issue description",
+          "priority": "medium"
+        }
+      },
+      "summary": null,
+      "description": "Example request for creating an intake issue",
+      "request_only": false,
+      "response_only": false
+    },
+    "INTAKE_ISSUE_EXAMPLE": {
+      "lines": "565-581",
+      "name": "IntakeIssue",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "status": 0,
+        "source": "in_app",
+        "issue": {
+          "id": "550e8400-e29b-41d4-a716-446655440001",
+          "name": "Feature request: Dark mode",
+          "description": "Add dark mode support to the application",
+          "priority": "medium",
+          "sequence_id": 124
+        },
+        "created_at": "2024-01-01T10:30:00Z",
+        "updated_at": "2024-01-10T15:45:00Z"
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "INTAKE_ISSUE_UPDATE_EXAMPLE": {
+      "lines": "373-384",
+      "name": "IntakeIssueUpdateSerializer",
+      "value": {
+        "status": 1,
+        "issue": {
+          "name": "Updated Issue",
+          "description": "Updated issue description",
+          "priority": "high"
+        }
+      },
+      "summary": null,
+      "description": "Example request for updating an intake issue",
+      "request_only": false,
+      "response_only": false
+    },
+    "ISSUE_ATTACHMENT_EXAMPLE": {
+      "lines": "537-552",
+      "name": "IssueAttachment",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "screenshot.png",
+        "size": 1024000,
+        "asset_url": "https://s3.amazonaws.com/bucket/screenshot.png?signed-url",
+        "attributes": {
+          "name": "screenshot.png",
+          "type": "image/png",
+          "size": 1024000
+        },
+        "created_at": "2024-01-01T10:30:00Z",
+        "updated_at": "2024-01-10T15:45:00Z"
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "ISSUE_ATTACHMENT_NOT_UPLOADED_EXAMPLE": {
+      "lines": "555-562",
+      "name": "Issue Attachment Not Uploaded",
+      "value": {
+        "error": "The asset is not uploaded.",
+        "status": false
+      },
+      "summary": null,
+      "description": "Error when trying to download an attachment that hasn't been uploaded yet",
+      "request_only": false,
+      "response_only": false
+    },
+    "ISSUE_ATTACHMENT_UPLOAD_EXAMPLE": {
+      "lines": "210-220",
+      "name": "IssueAttachmentUploadSerializer",
+      "value": {
+        "name": "document.pdf",
+        "type": "application/pdf",
+        "size": 1024000,
+        "external_id": "1234567890",
+        "external_source": "github"
+      },
+      "summary": null,
+      "description": "Example request for creating an issue attachment",
+      "request_only": false,
+      "response_only": false
+    },
+    "ISSUE_COMMENT_CREATE_EXAMPLE": {
+      "lines": "187-196",
+      "name": "IssueCommentCreateSerializer",
+      "value": {
+        "comment_html": "<p>New comment content</p>",
+        "labels": [],
+        "external_id": "1234567890",
+        "external_source": "github"
+      },
+      "summary": null,
+      "description": "Example request for creating an issue comment",
+      "request_only": false,
+      "response_only": false
+    },
+    "ISSUE_COMMENT_EXAMPLE": {
+      "lines": "504-534",
+      "name": "IssueComment",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "comment_html": "<p>This issue has been resolved by implementing OAuth 2.0 flow.</p>",
+        "labels": [],
+        "comment_json": {
+          "type": "doc",
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "This issue has been resolved by implementing OAuth 2.0 flow."
+                }
+              ]
+            }
+          ]
+        },
+        "actor": {
+          "id": "550e8400-e29b-41d4-a716-446655440001",
+          "first_name": "John",
+          "last_name": "Doe",
+          "display_name": "John Doe",
+          "avatar": "https://example.com/avatar.jpg"
+        },
+        "created_at": "2024-01-01T10:30:00Z",
+        "updated_at": "2024-01-10T15:45:00Z"
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "ISSUE_COMMENT_UPDATE_EXAMPLE": {
+      "lines": "198-207",
+      "name": "IssueCommentCreateSerializer",
+      "value": {
+        "comment_html": "<p>Updated comment content</p>",
+        "labels": [
+          "fold"
+        ],
+        "external_id": "1234567890",
+        "external_source": "github"
+      },
+      "summary": null,
+      "description": "Example request for updating an issue comment",
+      "request_only": false,
+      "response_only": false
+    },
+    "ISSUE_CREATE_EXAMPLE": {
+      "lines": "99-112",
+      "name": "IssueCreateSerializer",
+      "value": {
+        "name": "New Issue",
+        "description_markdown": "## Context\n\n- [ ] First step",
+        "priority": "medium",
+        "state": "0ec6cfa4-e906-4aad-9390-2df0303a41cd",
+        "assignees": [
+          "0ec6cfa4-e906-4aad-9390-2df0303a41cd"
+        ],
+        "labels": [
+          "0ec6cfa4-e906-4aad-9390-2df0303a41ce"
+        ],
+        "external_id": "1234567890",
+        "external_source": "github"
+      },
+      "summary": null,
+      "description": "Example request for creating a work item",
+      "request_only": false,
+      "response_only": false
+    },
+    "ISSUE_EXAMPLE": {
+      "lines": "63-76",
+      "name": "Issue",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Implement user authentication",
+        "description": "Add OAuth 2.0 authentication flow",
+        "sequence_id": 1,
+        "priority": "high",
+        "assignees": [
+          "550e8400-e29b-41d4-a716-446655440001"
+        ],
+        "labels": [
+          "550e8400-e29b-41d4-a716-446655440002"
+        ],
+        "created_at": "2024-01-15T10:30:00Z",
+        "updated_at": "2024-01-15T10:30:00Z"
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "ISSUE_LINK_CREATE_EXAMPLE": {
+      "lines": "168-175",
+      "name": "IssueLinkCreateSerializer",
+      "value": {
+        "url": "https://example.com",
+        "title": "Example Link"
+      },
+      "summary": null,
+      "description": "Example request for creating an issue link",
+      "request_only": false,
+      "response_only": false
+    },
+    "ISSUE_LINK_EXAMPLE": {
+      "lines": "487-501",
+      "name": "IssueLink",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "url": "https://github.com/example/repo/pull/123",
+        "title": "Fix authentication bug",
+        "metadata": {
+          "title": "Fix authentication bug",
+          "description": "Pull request to fix authentication timeout issue",
+          "image": "https://github.com/example/repo/avatar.png"
+        },
+        "created_at": "2024-01-01T10:30:00Z",
+        "updated_at": "2024-01-10T15:45:00Z"
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "ISSUE_LINK_UPDATE_EXAMPLE": {
+      "lines": "177-184",
+      "name": "IssueLinkUpdateSerializer",
+      "value": {
+        "url": "https://example.com",
+        "title": "Updated Link"
+      },
+      "summary": null,
+      "description": "Example request for updating an issue link",
+      "request_only": false,
+      "response_only": false
+    },
+    "ISSUE_SEARCH_EXAMPLE": {
+      "lines": "597-619",
+      "name": "IssueSearchResults",
+      "value": {
+        "issues": [
+          {
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "name": "Fix authentication bug in user login",
+            "sequence_id": 123,
+            "project__identifier": "MAB",
+            "project_id": "550e8400-e29b-41d4-a716-446655440001",
+            "workspace__slug": "my-workspace"
+          },
+          {
+            "id": "550e8400-e29b-41d4-a716-446655440002",
+            "name": "Add authentication middleware",
+            "sequence_id": 124,
+            "project__identifier": "MAB",
+            "project_id": "550e8400-e29b-41d4-a716-446655440001",
+            "workspace__slug": "my-workspace"
+          }
+        ]
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "ISSUE_UPDATE_EXAMPLE": {
+      "lines": "114-125",
+      "name": "IssueUpdateSerializer",
+      "value": {
+        "name": "Updated Issue",
+        "description_markdown": "## Context\n\n- [x] First step",
+        "priority": "medium",
+        "state": "0ec6cfa4-e906-4aad-9390-2df0303a41cd",
+        "assignees": [
+          "0ec6cfa4-e906-4aad-9390-2df0303a41cd"
+        ],
+        "labels": [
+          "0ec6cfa4-e906-4aad-9390-2df0303a41ce"
+        ]
+      },
+      "summary": null,
+      "description": "Example request for updating a work item",
+      "request_only": false,
+      "response_only": false
+    },
+    "ISSUE_UPSERT_EXAMPLE": {
+      "lines": "127-140",
+      "name": "IssueUpsertSerializer",
+      "value": {
+        "name": "Updated Issue via External ID",
+        "description": "Updated issue description",
+        "priority": "high",
+        "state": "0ec6cfa4-e906-4aad-9390-2df0303a41cd",
+        "assignees": [
+          "0ec6cfa4-e906-4aad-9390-2df0303a41cd"
+        ],
+        "labels": [
+          "0ec6cfa4-e906-4aad-9390-2df0303a41ce"
+        ],
+        "external_id": "1234567890",
+        "external_source": "github"
+      },
+      "summary": null,
+      "description": "Example request for upserting a work item via external ID",
+      "request_only": false,
+      "response_only": false
+    },
+    "LABEL_CREATE_EXAMPLE": {
+      "lines": "143-153",
+      "name": "LabelCreateUpdateSerializer",
+      "value": {
+        "name": "New Label",
+        "color": "#ff0000",
+        "description": "New label description",
+        "external_id": "1234567890",
+        "external_source": "github"
+      },
+      "summary": null,
+      "description": "Example request for creating a label",
+      "request_only": false,
+      "response_only": false
+    },
+    "LABEL_EXAMPLE": {
+      "lines": "474-484",
+      "name": "Label",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "bug",
+        "color": "#ff4444",
+        "description": "Issues that represent bugs in the system",
+        "created_at": "2024-01-01T10:30:00Z",
+        "updated_at": "2024-01-10T15:45:00Z"
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "LABEL_UPDATE_EXAMPLE": {
+      "lines": "155-165",
+      "name": "LabelCreateUpdateSerializer",
+      "value": {
+        "name": "Updated Label",
+        "color": "#00ff00",
+        "description": "Updated label description",
+        "external_id": "1234567890",
+        "external_source": "github"
+      },
+      "summary": null,
+      "description": "Example request for updating a label",
+      "request_only": false,
+      "response_only": false
+    },
+    "MODULE_CREATE_EXAMPLE": {
+      "lines": "275-286",
+      "name": "ModuleCreateSerializer",
+      "value": {
+        "name": "New Module",
+        "description": "New module description",
+        "start_date": "2021-01-01",
+        "end_date": "2021-01-31",
+        "external_id": "1234567890",
+        "external_source": "github"
+      },
+      "summary": null,
+      "description": "Example request for creating a module",
+      "request_only": false,
+      "response_only": false
+    },
+    "MODULE_EXAMPLE": {
+      "lines": "438-456",
+      "name": "Module",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Authentication Module",
+        "description": "User authentication and authorization features",
+        "start_date": "2024-01-01",
+        "target_date": "2024-02-15",
+        "status": "in-progress",
+        "total_issues": 12,
+        "completed_issues": 5,
+        "cancelled_issues": 0,
+        "started_issues": 4,
+        "unstarted_issues": 3,
+        "backlog_issues": 0,
+        "created_at": "2024-01-01T10:30:00Z",
+        "updated_at": "2024-01-10T15:45:00Z"
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "MODULE_ISSUE_EXAMPLE": {
+      "lines": "584-594",
+      "name": "ModuleIssue",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "module": "550e8400-e29b-41d4-a716-446655440001",
+        "issue": "550e8400-e29b-41d4-a716-446655440002",
+        "sub_issues_count": 2,
+        "created_at": "2024-01-01T10:30:00Z",
+        "updated_at": "2024-01-10T15:45:00Z"
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "MODULE_ISSUE_REQUEST_EXAMPLE": {
+      "lines": "301-310",
+      "name": "ModuleIssueRequestSerializer",
+      "value": {
+        "issues": [
+          "0ec6cfa4-e906-4aad-9390-2df0303a41cd",
+          "0ec6cfa4-e906-4aad-9390-2df0303a41ce"
+        ]
+      },
+      "summary": null,
+      "description": "Example request for adding module issues",
+      "request_only": false,
+      "response_only": false
+    },
+    "MODULE_UPDATE_EXAMPLE": {
+      "lines": "288-299",
+      "name": "ModuleUpdateSerializer",
+      "value": {
+        "name": "Updated Module",
+        "description": "Updated module description",
+        "start_date": "2021-01-01",
+        "end_date": "2021-01-31",
+        "external_id": "1234567890",
+        "external_source": "github"
+      },
+      "summary": null,
+      "description": "Example request for updating a module",
+      "request_only": false,
+      "response_only": false
+    },
+    "PAGE_CREATE_EXAMPLE": {
+      "lines": "952-960",
+      "name": "Create page",
+      "value": {
+        "name": "Release checklist",
+        "description_markdown": "# Release checklist\n\n- [ ] Tag the release\n- [ ] Publish notes",
+        "access": 0
+      },
+      "summary": null,
+      "description": null,
+      "request_only": true,
+      "response_only": false
+    },
+    "PAGE_DETAIL_EXAMPLE": {
+      "lines": "942-950",
+      "name": "Page detail",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Release checklist",
+        "parent": null,
+        "owned_by": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "access": 0,
+        "is_locked": false,
+        "archived_at": null,
+        "created_at": "2024-01-01T10:30:00Z",
+        "updated_at": "2024-01-10T15:45:00Z",
+        "description_html": "<h1>Release checklist</h1><p>Tag the release <strong>first</strong>.</p>",
+        "description_stripped": "Release checklistTag the release first.",
+        "description_markdown": "# Release checklist\n\nTag the release **first**."
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "PAGE_EXAMPLE": {
+      "lines": "940-940",
+      "name": "Page",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Release checklist",
+        "parent": null,
+        "owned_by": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "access": 0,
+        "is_locked": false,
+        "archived_at": null,
+        "created_at": "2024-01-01T10:30:00Z",
+        "updated_at": "2024-01-10T15:45:00Z"
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "PAGE_UPDATE_EXAMPLE": {
+      "lines": "962-966",
+      "name": "Update page body",
+      "value": {
+        "description_markdown": "# Release checklist\n\n- [x] Tag the release\n- [ ] Publish notes"
+      },
+      "summary": null,
+      "description": null,
+      "request_only": true,
+      "response_only": false
+    },
+    "PROJECT_CREATE_EXAMPLE": {
+      "lines": "313-322",
+      "name": "ProjectCreateSerializer",
+      "value": {
+        "name": "New Project",
+        "description": "New project description",
+        "identifier": "new-project",
+        "project_lead": "0ec6cfa4-e906-4aad-9390-2df0303a41ce"
+      },
+      "summary": null,
+      "description": "Example request for creating a project",
+      "request_only": false,
+      "response_only": false
+    },
+    "PROJECT_EXAMPLE": {
+      "lines": "47-59",
+      "name": "Project",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Mobile App Development",
+        "description": "Development of the mobile application",
+        "identifier": "MAD",
+        "network": 2,
+        "project_lead": "550e8400-e29b-41d4-a716-446655440001",
+        "created_at": "2024-01-15T10:30:00Z",
+        "updated_at": "2024-01-15T10:30:00Z"
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "PROJECT_MEMBER_EXAMPLE": {
+      "lines": "647-667",
+      "name": "ProjectMembers",
+      "value": [
+        {
+          "id": "550e8400-e29b-41d4-a716-446655440000",
+          "first_name": "John",
+          "last_name": "Doe",
+          "display_name": "John Doe",
+          "email": "john.doe@example.com",
+          "avatar": "https://example.com/avatar.jpg"
+        },
+        {
+          "id": "550e8400-e29b-41d4-a716-446655440001",
+          "first_name": "Jane",
+          "last_name": "Smith",
+          "display_name": "Jane Smith",
+          "email": "jane.smith@example.com",
+          "avatar": "https://example.com/avatar2.jpg"
+        }
+      ],
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "PROJECT_UPDATE_EXAMPLE": {
+      "lines": "324-333",
+      "name": "ProjectUpdateSerializer",
+      "value": {
+        "name": "Updated Project",
+        "description": "Updated project description",
+        "identifier": "updated-project",
+        "project_lead": "0ec6cfa4-e906-4aad-9390-2df0303a41ce"
+      },
+      "summary": null,
+      "description": "Example request for updating a project",
+      "request_only": false,
+      "response_only": false
+    },
+    "STATE_CREATE_EXAMPLE": {
+      "lines": "336-346",
+      "name": "StateCreateSerializer",
+      "value": {
+        "name": "New State",
+        "color": "#ff0000",
+        "group": "backlog",
+        "external_id": "1234567890",
+        "external_source": "github"
+      },
+      "summary": null,
+      "description": "Example request for creating a state",
+      "request_only": false,
+      "response_only": false
+    },
+    "STATE_EXAMPLE": {
+      "lines": "459-471",
+      "name": "State",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "In Progress",
+        "color": "#f39c12",
+        "group": "started",
+        "sequence": 2,
+        "default": false,
+        "created_at": "2024-01-01T10:30:00Z",
+        "updated_at": "2024-01-10T15:45:00Z"
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "STATE_UPDATE_EXAMPLE": {
+      "lines": "348-358",
+      "name": "StateUpdateSerializer",
+      "value": {
+        "name": "Updated State",
+        "color": "#00ff00",
+        "group": "backlog",
+        "external_id": "1234567890",
+        "external_source": "github"
+      },
+      "summary": null,
+      "description": "Example request for updating a state",
+      "request_only": false,
+      "response_only": false
+    },
+    "STICKY_EXAMPLE": {
+      "lines": "682-690",
+      "name": "Sticky",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Sticky 1",
+        "description_html": "<p>Sticky 1 description</p>",
+        "created_at": "2024-01-01T10:30:00Z"
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "TRANSFER_CYCLE_COMPLETED_ERROR_EXAMPLE": {
+      "lines": "429-435",
+      "name": "Transfer to Completed Cycle Error",
+      "value": {
+        "error": "The cycle where the issues are transferred is already completed"
+      },
+      "summary": null,
+      "description": "Error when trying to transfer to a completed cycle",
+      "request_only": false,
+      "response_only": false
+    },
+    "TRANSFER_CYCLE_ISSUE_ERROR_EXAMPLE": {
+      "lines": "421-427",
+      "name": "Transfer Cycle Issue Error",
+      "value": {
+        "error": "New Cycle Id is required"
+      },
+      "summary": null,
+      "description": "Error when required cycle ID is missing",
+      "request_only": false,
+      "response_only": false
+    },
+    "TRANSFER_CYCLE_ISSUE_EXAMPLE": {
+      "lines": "266-272",
+      "name": "TransferCycleIssueRequestSerializer",
+      "value": {
+        "new_cycle_id": "0ec6cfa4-e906-4aad-9390-2df0303a41ce"
+      },
+      "summary": null,
+      "description": "Example request for transferring cycle issues",
+      "request_only": false,
+      "response_only": false
+    },
+    "TRANSFER_CYCLE_ISSUE_SUCCESS_EXAMPLE": {
+      "lines": "413-419",
+      "name": "Transfer Cycle Issue Success",
+      "value": {
+        "message": "Success"
+      },
+      "summary": null,
+      "description": "Successful transfer of cycle issues to new cycle",
+      "request_only": false,
+      "response_only": false
+    },
+    "USER_EXAMPLE": {
+      "lines": "80-91",
+      "name": "User",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "first_name": "John",
+        "last_name": "Doe",
+        "email": "john.doe@example.com",
+        "avatar": "https://example.com/avatar.jpg",
+        "avatar_url": "https://example.com/avatar.jpg",
+        "display_name": "John Doe"
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "WORKSPACE_EXAMPLE": {
+      "lines": "33-43",
+      "name": "Workspace",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "My Workspace",
+        "slug": "my-workspace",
+        "organization_size": "1-10",
+        "created_at": "2024-01-15T10:30:00Z",
+        "updated_at": "2024-01-15T10:30:00Z"
+      },
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    },
+    "WORKSPACE_MEMBER_EXAMPLE": {
+      "lines": "622-644",
+      "name": "WorkspaceMembers",
+      "value": [
+        {
+          "id": "550e8400-e29b-41d4-a716-446655440000",
+          "first_name": "John",
+          "last_name": "Doe",
+          "display_name": "John Doe",
+          "email": "john.doe@example.com",
+          "avatar": "https://example.com/avatar.jpg",
+          "role": 20
+        },
+        {
+          "id": "550e8400-e29b-41d4-a716-446655440001",
+          "first_name": "Jane",
+          "last_name": "Smith",
+          "display_name": "Jane Smith",
+          "email": "jane.smith@example.com",
+          "avatar": "https://example.com/avatar2.jpg",
+          "role": 15
+        }
+      ],
+      "summary": null,
+      "description": null,
+      "request_only": false,
+      "response_only": false
+    }
+  },
+  "samples": {
+    "SAMPLE_ACTIVITY": {
+      "lines": "839-849",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "field": "priority",
+        "old_value": "medium",
+        "new_value": "high",
+        "created_at": "2024-01-15T11:45:00Z",
+        "actor": {
+          "id": "550e8400-e29b-41d4-a716-446655440002",
+          "display_name": "Jane Smith"
+        }
+      }
+    },
+    "SAMPLE_COMMENT": {
+      "lines": "825-830",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "comment_html": "<p>This issue needs more investigation. I'll look into the database connection timeout.</p>",
+        "created_at": "2024-01-15T14:20:00Z",
+        "actor": {
+          "id": "550e8400-e29b-41d4-a716-446655440002",
+          "display_name": "John Doe"
+        }
+      }
+    },
+    "SAMPLE_CYCLE": {
+      "lines": "779-786",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Sprint 1 - Q1 2024",
+        "description": "First sprint of the quarter focusing on core features",
+        "start_date": "2024-01-01",
+        "end_date": "2024-01-14",
+        "status": "current"
+      }
+    },
+    "SAMPLE_CYCLE_ISSUE": {
+      "lines": "867-873",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "cycle": "550e8400-e29b-41d4-a716-446655440001",
+        "issue": "550e8400-e29b-41d4-a716-446655440002",
+        "sub_issues_count": 3,
+        "created_at": "2024-01-01T10:30:00Z"
+      }
+    },
+    "SAMPLE_ESTIMATE": {
+      "lines": "882-889",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Estimate 1",
+        "description": "Estimate 1 description",
+        "type": "categories",
+        "last_used": false,
+        "created_at": "2024-01-01T10:30:00Z"
+      }
+    },
+    "SAMPLE_ESTIMATE_POINT": {
+      "lines": "891-898",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "estimate": "550e8400-e29b-41d4-a716-446655440001",
+        "key": 1,
+        "value": "1",
+        "description": "Estimate Point 1 description",
+        "created_at": "2024-01-01T10:30:00Z"
+      }
+    },
+    "SAMPLE_GENERIC": {
+      "lines": "861-865",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Sample Item",
+        "created_at": "2024-01-15T12:00:00Z"
+      }
+    },
+    "SAMPLE_INTAKE": {
+      "lines": "851-859",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "status": 0,
+        "issue": {
+          "id": "550e8400-e29b-41d4-a716-446655440003",
+          "name": "Feature request: Dark mode support"
+        },
+        "created_at": "2024-01-15T09:15:00Z"
+      }
+    },
+    "SAMPLE_ISSUE": {
+      "lines": "756-770",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Fix authentication bug in user login",
+        "description": "Users are unable to log in due to authentication service timeout",
+        "priority": "high",
+        "sequence_id": 123,
+        "state": {
+          "id": "550e8400-e29b-41d4-a716-446655440001",
+          "name": "In Progress",
+          "group": "started"
+        },
+        "assignees": [],
+        "labels": [],
+        "created_at": "2024-01-15T10:30:00Z"
+      }
+    },
+    "SAMPLE_LABEL": {
+      "lines": "772-777",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "bug",
+        "color": "#ff4444",
+        "description": "Issues that represent bugs in the system"
+      }
+    },
+    "SAMPLE_LINK": {
+      "lines": "832-837",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "url": "https://github.com/example/repo/pull/123",
+        "title": "Fix authentication timeout issue",
+        "metadata": {}
+      }
+    },
+    "SAMPLE_MODULE": {
+      "lines": "788-795",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Authentication Module",
+        "description": "User authentication and authorization features",
+        "start_date": "2024-01-01",
+        "target_date": "2024-02-15",
+        "status": "in_progress"
+      }
+    },
+    "SAMPLE_PAGE": {
+      "lines": "813-823",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Release checklist",
+        "parent": null,
+        "owned_by": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "access": 0,
+        "is_locked": false,
+        "archived_at": null,
+        "created_at": "2024-01-01T10:30:00Z",
+        "updated_at": "2024-01-10T15:45:00Z"
+      }
+    },
+    "SAMPLE_PROJECT": {
+      "lines": "797-803",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Mobile App Backend",
+        "description": "Backend services for the mobile application",
+        "identifier": "MAB",
+        "network": 2
+      }
+    },
+    "SAMPLE_STATE": {
+      "lines": "805-811",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "In Progress",
+        "color": "#ffa500",
+        "group": "started",
+        "sequence": 2
+      }
+    },
+    "SAMPLE_STICKY": {
+      "lines": "875-880",
+      "value": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Sticky 1",
+        "description_html": "<p>Sticky 1 description</p>",
+        "created_at": "2024-01-01T10:30:00Z"
+      }
+    }
+  },
+  "schema_examples": {
+    "lines": "901-918",
+    "keys": [
+      "Activity",
+      "Comment",
+      "Cycle",
+      "CycleIssue",
+      "Estimate",
+      "EstimatePoint",
+      "Intake",
+      "Issue",
+      "Label",
+      "Link",
+      "Module",
+      "Page",
+      "Project",
+      "State",
+      "Sticky",
+      "WorkItem"
+    ],
+    "mapping": {
+      "Activity": "SAMPLE_ACTIVITY",
+      "Comment": "SAMPLE_COMMENT",
+      "Cycle": "SAMPLE_CYCLE",
+      "CycleIssue": "SAMPLE_CYCLE_ISSUE",
+      "Estimate": "SAMPLE_ESTIMATE",
+      "EstimatePoint": "SAMPLE_ESTIMATE_POINT",
+      "Intake": "SAMPLE_INTAKE",
+      "Issue": "SAMPLE_ISSUE",
+      "Label": "SAMPLE_LABEL",
+      "Link": "SAMPLE_LINK",
+      "Module": "SAMPLE_MODULE",
+      "Page": "SAMPLE_PAGE",
+      "Project": "SAMPLE_PROJECT",
+      "State": "SAMPLE_STATE",
+      "Sticky": "SAMPLE_STICKY",
+      "WorkItem": "SAMPLE_ISSUE"
+    }
+  },
+  "get_sample_for_schema": {
+    "lines": "921-936",
+    "vectors": [
+      {
+        "schema_name": "Issue",
+        "sample": "SAMPLE_ISSUE",
+        "reason": "direct hit"
+      },
+      {
+        "schema_name": "PaginatedIssueResponse",
+        "sample": "SAMPLE_ISSUE",
+        "reason": "Paginated*Response stripped on both ends"
+      },
+      {
+        "schema_name": "PaginatedCycleResponse",
+        "sample": "SAMPLE_CYCLE",
+        "reason": "stripped hit"
+      },
+      {
+        "schema_name": "PaginatedBogusResponse",
+        "sample": "SAMPLE_GENERIC",
+        "reason": "stripped miss -> generic fallback"
+      },
+      {
+        "schema_name": "Nope",
+        "sample": "SAMPLE_GENERIC",
+        "reason": "unknown name -> generic fallback"
+      },
+      {
+        "schema_name": "Paginated",
+        "sample": "SAMPLE_GENERIC",
+        "reason": "'Paginated' alone strips to '' -> generic"
+      },
+      {
+        "schema_name": "",
+        "sample": "SAMPLE_GENERIC",
+        "reason": "empty name -> generic"
+      },
+      {
+        "schema_name": "issue",
+        "sample": "SAMPLE_GENERIC",
+        "reason": "case-sensitive: lowercase misses"
+      }
+    ]
+  },
+  "decorators": {
+    "asset_docs": {
+      "lines": "121-132",
+      "tags": [
+        "Assets"
+      ],
+      "summary": null,
+      "parameters": [],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        }
+      },
+      "extra_keys": []
+    },
+    "cycle_docs": {
+      "lines": "76-88",
+      "tags": [
+        "Cycles"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        },
+        {
+          "const": "PROJECT_ID_PARAMETER",
+          "name": "project_id"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    },
+    "estimate_docs": {
+      "lines": "302-313",
+      "tags": [
+        "Estimates"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        },
+        {
+          "const": "PROJECT_ID_PARAMETER",
+          "name": "project_id"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    },
+    "estimate_point_docs": {
+      "lines": "316-327",
+      "tags": [
+        "Estimate Points"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        },
+        {
+          "const": "PROJECT_ID_PARAMETER",
+          "name": "project_id"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    },
+    "intake_docs": {
+      "lines": "106-118",
+      "tags": [
+        "Intake"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        },
+        {
+          "const": "PROJECT_ID_PARAMETER",
+          "name": "project_id"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    },
+    "issue_activity_docs": {
+      "lines": "196-208",
+      "tags": [
+        "Work Item Activity"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        },
+        {
+          "const": "PROJECT_ID_PARAMETER",
+          "name": "project_id"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    },
+    "issue_attachment_docs": {
+      "lines": "211-223",
+      "tags": [
+        "Work Item Attachments"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        },
+        {
+          "const": "PROJECT_ID_PARAMETER",
+          "name": "project_id"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    },
+    "issue_comment_docs": {
+      "lines": "181-193",
+      "tags": [
+        "Work Item Comments"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        },
+        {
+          "const": "PROJECT_ID_PARAMETER",
+          "name": "project_id"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    },
+    "issue_docs": {
+      "lines": "91-103",
+      "tags": [
+        "Work Items"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        },
+        {
+          "const": "PROJECT_ID_PARAMETER",
+          "name": "project_id"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    },
+    "issue_link_docs": {
+      "lines": "166-178",
+      "tags": [
+        "Work Item Links"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        },
+        {
+          "const": "PROJECT_ID_PARAMETER",
+          "name": "project_id"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    },
+    "label_docs": {
+      "lines": "151-163",
+      "tags": [
+        "Labels"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        },
+        {
+          "const": "PROJECT_ID_PARAMETER",
+          "name": "project_id"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    },
+    "module_docs": {
+      "lines": "241-253",
+      "tags": [
+        "Modules"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        },
+        {
+          "const": "PROJECT_ID_PARAMETER",
+          "name": "project_id"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    },
+    "module_issue_docs": {
+      "lines": "256-268",
+      "tags": [
+        "Modules"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        },
+        {
+          "const": "PROJECT_ID_PARAMETER",
+          "name": "project_id"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    },
+    "page_docs": {
+      "lines": "330-342",
+      "tags": [
+        "Pages"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        },
+        {
+          "const": "PROJECT_ID_PARAMETER",
+          "name": "project_id"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    },
+    "project_docs": {
+      "lines": "61-73",
+      "tags": [
+        "Projects"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    },
+    "state_docs": {
+      "lines": "271-283",
+      "tags": [
+        "States"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        },
+        {
+          "const": "PROJECT_ID_PARAMETER",
+          "name": "project_id"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    },
+    "sticky_docs": {
+      "lines": "286-299",
+      "tags": [
+        "Stickies"
+      ],
+      "summary": "Endpoints for sticky create/update/delete and fetch sticky details",
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    },
+    "user_docs": {
+      "lines": "33-43",
+      "tags": [
+        "Users"
+      ],
+      "summary": null,
+      "parameters": [],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        }
+      },
+      "extra_keys": []
+    },
+    "work_item_docs": {
+      "lines": "136-148",
+      "tags": [
+        "Work Items"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        },
+        {
+          "const": "PROJECT_ID_PARAMETER",
+          "name": "project_id"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    },
+    "work_item_relation_docs": {
+      "lines": "226-238",
+      "tags": [
+        "Work Item Relations"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        },
+        {
+          "const": "PROJECT_ID_PARAMETER",
+          "name": "project_id"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    },
+    "workspace_docs": {
+      "lines": "46-58",
+      "tags": [
+        "Workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "const": "WORKSPACE_SLUG_PARAMETER",
+          "name": "slug"
+        }
+      ],
+      "responses": {
+        "401": {
+          "const": "UNAUTHORIZED_RESPONSE",
+          "description": "Authentication credentials were not provided or are invalid."
+        },
+        "403": {
+          "const": "FORBIDDEN_RESPONSE",
+          "description": "Permission denied. User lacks required permissions."
+        },
+        "404": {
+          "const": "NOT_FOUND_RESPONSE",
+          "description": "The requested resource was not found."
+        }
+      },
+      "extra_keys": []
+    }
+  },
+  "merge_schema_options": {
+    "lines": "17-30",
+    "vectors": [
+      {
+        "kwargs": {
+          "responses": "{404: ...}"
+        },
+        "result_responses_keys": [
+          401,
+          404
+        ],
+        "kwargs_consumed": true,
+        "rule": "responses merged via dict.update (keys union)"
+      },
+      {
+        "kwargs": {
+          "parameters": "[p1, p2]"
+        },
+        "result_parameters": [
+          "p0",
+          "p1",
+          "p2"
+        ],
+        "rule": "parameters merged via list.extend (appended after defaults)"
+      },
+      {
+        "kwargs": {
+          "tags": [
+            "O"
+          ],
+          "summary": "S"
+        },
+        "result_tags": [
+          "O"
+        ],
+        "result_summary": "S",
+        "rule": "all other kwargs override via defaults.update"
+      },
+      {
+        "kwargs": {
+          "responses": "{401: override}"
+        },
+        "result_401": "override",
+        "rule": "same-key response entries are REPLACED, not merged"
+      }
+    ]
+  },
+  "package_surface": {
+    "__all___count": 159,
+    "__all__": [
+      "APIKeyAuthenticationExtension",
+      "WORKSPACE_SLUG_PARAMETER",
+      "PROJECT_ID_PARAMETER",
+      "PROJECT_PK_PARAMETER",
+      "PROJECT_IDENTIFIER_PARAMETER",
+      "ISSUE_IDENTIFIER_PARAMETER",
+      "ASSET_ID_PARAMETER",
+      "CYCLE_ID_PARAMETER",
+      "MODULE_ID_PARAMETER",
+      "MODULE_PK_PARAMETER",
+      "ISSUE_ID_PARAMETER",
+      "STATE_ID_PARAMETER",
+      "LABEL_ID_PARAMETER",
+      "COMMENT_ID_PARAMETER",
+      "LINK_ID_PARAMETER",
+      "ATTACHMENT_ID_PARAMETER",
+      "ACTIVITY_ID_PARAMETER",
+      "CURSOR_PARAMETER",
+      "PER_PAGE_PARAMETER",
+      "EXTERNAL_ID_PARAMETER",
+      "EXTERNAL_SOURCE_PARAMETER",
+      "ORDER_BY_PARAMETER",
+      "SEARCH_PARAMETER",
+      "SEARCH_PARAMETER_REQUIRED",
+      "LIMIT_PARAMETER",
+      "WORKSPACE_SEARCH_PARAMETER",
+      "PROJECT_ID_QUERY_PARAMETER",
+      "CYCLE_VIEW_PARAMETER",
+      "FIELDS_PARAMETER",
+      "EXPAND_PARAMETER",
+      "ESTIMATE_ID_PARAMETER",
+      "WORK_ITEM_STATE_FILTER_PARAMETER",
+      "WORK_ITEM_STATE_GROUP_FILTER_PARAMETER",
+      "WORK_ITEM_PARENT_FILTER_PARAMETER",
+      "WORK_ITEM_LABELS_FILTER_PARAMETER",
+      "WORK_ITEM_PRIORITY_FILTER_PARAMETER",
+      "WORK_ITEM_ASSIGNEES_FILTER_PARAMETER",
+      "PAGE_ID_PARAMETER",
+      "INCLUDE_ARCHIVED_PARAMETER",
+      "UNAUTHORIZED_RESPONSE",
+      "FORBIDDEN_RESPONSE",
+      "NOT_FOUND_RESPONSE",
+      "VALIDATION_ERROR_RESPONSE",
+      "DELETED_RESPONSE",
+      "ARCHIVED_RESPONSE",
+      "UNARCHIVED_RESPONSE",
+      "INVALID_REQUEST_RESPONSE",
+      "CONFLICT_RESPONSE",
+      "ADMIN_ONLY_RESPONSE",
+      "CANNOT_DELETE_RESPONSE",
+      "CANNOT_ARCHIVE_RESPONSE",
+      "REQUIRED_FIELDS_RESPONSE",
+      "PROJECT_NOT_FOUND_RESPONSE",
+      "WORKSPACE_NOT_FOUND_RESPONSE",
+      "PROJECT_NAME_TAKEN_RESPONSE",
+      "ISSUE_NOT_FOUND_RESPONSE",
+      "WORK_ITEM_NOT_FOUND_RESPONSE",
+      "EXTERNAL_ID_EXISTS_RESPONSE",
+      "LABEL_NOT_FOUND_RESPONSE",
+      "LABEL_NAME_EXISTS_RESPONSE",
+      "MODULE_NOT_FOUND_RESPONSE",
+      "MODULE_ISSUE_NOT_FOUND_RESPONSE",
+      "CYCLE_CANNOT_ARCHIVE_RESPONSE",
+      "STATE_NAME_EXISTS_RESPONSE",
+      "STATE_CANNOT_DELETE_RESPONSE",
+      "COMMENT_NOT_FOUND_RESPONSE",
+      "LINK_NOT_FOUND_RESPONSE",
+      "ATTACHMENT_NOT_FOUND_RESPONSE",
+      "BAD_SEARCH_REQUEST_RESPONSE",
+      "create_paginated_response",
+      "PRESIGNED_URL_SUCCESS_RESPONSE",
+      "GENERIC_ASSET_UPLOAD_SUCCESS_RESPONSE",
+      "GENERIC_ASSET_VALIDATION_ERROR_RESPONSE",
+      "ASSET_CONFLICT_RESPONSE",
+      "ASSET_DOWNLOAD_SUCCESS_RESPONSE",
+      "ASSET_DOWNLOAD_ERROR_RESPONSE",
+      "ASSET_UPDATED_RESPONSE",
+      "ASSET_DELETED_RESPONSE",
+      "ASSET_NOT_FOUND_RESPONSE",
+      "FILE_UPLOAD_EXAMPLE",
+      "WORKSPACE_EXAMPLE",
+      "PROJECT_EXAMPLE",
+      "ISSUE_EXAMPLE",
+      "USER_EXAMPLE",
+      "get_sample_for_schema",
+      "ISSUE_CREATE_EXAMPLE",
+      "ISSUE_UPDATE_EXAMPLE",
+      "ISSUE_UPSERT_EXAMPLE",
+      "LABEL_CREATE_EXAMPLE",
+      "LABEL_UPDATE_EXAMPLE",
+      "ISSUE_LINK_CREATE_EXAMPLE",
+      "ISSUE_LINK_UPDATE_EXAMPLE",
+      "ISSUE_COMMENT_CREATE_EXAMPLE",
+      "ISSUE_COMMENT_UPDATE_EXAMPLE",
+      "ISSUE_ATTACHMENT_UPLOAD_EXAMPLE",
+      "ATTACHMENT_UPLOAD_CONFIRM_EXAMPLE",
+      "CYCLE_CREATE_EXAMPLE",
+      "CYCLE_UPDATE_EXAMPLE",
+      "CYCLE_ISSUE_REQUEST_EXAMPLE",
+      "TRANSFER_CYCLE_ISSUE_EXAMPLE",
+      "MODULE_CREATE_EXAMPLE",
+      "MODULE_UPDATE_EXAMPLE",
+      "MODULE_ISSUE_REQUEST_EXAMPLE",
+      "PROJECT_CREATE_EXAMPLE",
+      "PROJECT_UPDATE_EXAMPLE",
+      "STATE_CREATE_EXAMPLE",
+      "STATE_UPDATE_EXAMPLE",
+      "INTAKE_ISSUE_CREATE_EXAMPLE",
+      "INTAKE_ISSUE_UPDATE_EXAMPLE",
+      "ESTIMATE_CREATE_EXAMPLE",
+      "ESTIMATE_UPDATE_EXAMPLE",
+      "ESTIMATE_POINT_CREATE_EXAMPLE",
+      "ESTIMATE_POINT_UPDATE_EXAMPLE",
+      "CYCLE_EXAMPLE",
+      "TRANSFER_CYCLE_ISSUE_SUCCESS_EXAMPLE",
+      "TRANSFER_CYCLE_ISSUE_ERROR_EXAMPLE",
+      "TRANSFER_CYCLE_COMPLETED_ERROR_EXAMPLE",
+      "MODULE_EXAMPLE",
+      "STATE_EXAMPLE",
+      "PAGE_EXAMPLE",
+      "PAGE_DETAIL_EXAMPLE",
+      "PAGE_CREATE_EXAMPLE",
+      "PAGE_UPDATE_EXAMPLE",
+      "LABEL_EXAMPLE",
+      "ISSUE_LINK_EXAMPLE",
+      "ISSUE_COMMENT_EXAMPLE",
+      "ISSUE_ATTACHMENT_EXAMPLE",
+      "ISSUE_ATTACHMENT_NOT_UPLOADED_EXAMPLE",
+      "INTAKE_ISSUE_EXAMPLE",
+      "MODULE_ISSUE_EXAMPLE",
+      "ISSUE_SEARCH_EXAMPLE",
+      "WORKSPACE_MEMBER_EXAMPLE",
+      "PROJECT_MEMBER_EXAMPLE",
+      "CYCLE_ISSUE_EXAMPLE",
+      "STICKY_EXAMPLE",
+      "ESTIMATE_EXAMPLE",
+      "ESTIMATE_POINT_EXAMPLE",
+      "workspace_docs",
+      "project_docs",
+      "issue_docs",
+      "intake_docs",
+      "asset_docs",
+      "user_docs",
+      "cycle_docs",
+      "work_item_docs",
+      "work_item_relation_docs",
+      "label_docs",
+      "issue_link_docs",
+      "issue_comment_docs",
+      "issue_activity_docs",
+      "issue_attachment_docs",
+      "module_docs",
+      "module_issue_docs",
+      "state_docs",
+      "page_docs",
+      "estimate_docs",
+      "estimate_point_docs",
+      "preprocess_filter_api_v1_paths",
+      "generate_operation_summary"
+    ],
+    "defined_but_not_exported": [
+      "postprocess_project_id_dual_form",
+      "sticky_docs"
+    ]
+  }
+}
