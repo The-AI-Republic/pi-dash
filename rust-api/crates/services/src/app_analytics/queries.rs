@@ -509,7 +509,7 @@ pub fn base_label_details_sql(filters_sql: &str) -> String {
          ON (\"{ISSUE_TABLE}\".\"id\" = \"{ISSUE_LABEL_TABLE}\".\"issue_id\") \
          LEFT OUTER JOIN \"{LABEL_TABLE}\" \
          ON (\"{ISSUE_LABEL_TABLE}\".\"label_id\" = \"{LABEL_TABLE}\".\"id\"){} \
-         AND \"{LABEL_TABLE}\".\"id\" IS NOT NULL AND \"{ISSUE_LABEL_TABLE}\".\"deleted_at\" IS NULL) \
+         AND \"{LABEL_TABLE}\".\"id\" IS NOT NULL AND \"{ISSUE_LABEL_TABLE}\".\"deleted_at\" IS NULL \
          ORDER BY \"{LABEL_TABLE}\".\"id\" ASC",
         workspace_scope().replace("{filters}", filters_sql)
     )
@@ -551,7 +551,7 @@ pub fn base_cycle_details_sql(filters_sql: &str) -> String {
          LEFT OUTER JOIN \"{CYCLE_TABLE}\" \
          ON (\"{CYCLE_ISSUE_TABLE}\".\"cycle_id\" = \"{CYCLE_TABLE}\".\"id\"){} \
          AND \"{CYCLE_ISSUE_TABLE}\".\"cycle_id\" IS NOT NULL \
-         AND \"{CYCLE_ISSUE_TABLE}\".\"deleted_at\" IS NULL) \
+         AND \"{CYCLE_ISSUE_TABLE}\".\"deleted_at\" IS NULL \
          ORDER BY \"{CYCLE_TABLE}\".\"id\" ASC",
         workspace_scope().replace("{filters}", filters_sql)
     )
@@ -569,7 +569,7 @@ pub fn base_module_details_sql(filters_sql: &str) -> String {
          LEFT OUTER JOIN \"{MODULE_TABLE}\" \
          ON (\"{MODULE_ISSUE_TABLE}\".\"module_id\" = \"{MODULE_TABLE}\".\"id\"){} \
          AND \"{MODULE_ISSUE_TABLE}\".\"module_id\" IS NOT NULL \
-         AND \"{MODULE_ISSUE_TABLE}\".\"deleted_at\" IS NULL) \
+         AND \"{MODULE_ISSUE_TABLE}\".\"deleted_at\" IS NULL \
          ORDER BY \"{MODULE_TABLE}\".\"id\" ASC",
         workspace_scope().replace("{filters}", filters_sql)
     )
@@ -1945,6 +1945,47 @@ mod tests {
             base_plot_estimate_sql("priority", Some("labels__id"), "TRUE").expect("segmented axis");
         assert!(segmented.contains("\"issues\".\"priority\" IS NOT NULL"));
         assert!(!segmented.contains("\"issue_labels\".\"label_id\" IS NOT NULL"));
+    }
+
+    /// Every rendered statement must parse: the label/cycle/module detail
+    /// builders once emitted a stray `)` after the scope's closed WHERE
+    /// paren, which Postgres rejected (`syntax error at or near ")"`) and
+    /// the handler surfaced as a 500 on those axes (PIDASHCONV-521).
+    /// Fragment assertions cannot catch that; balanced parens can.
+    #[test]
+    fn rendered_statements_have_balanced_parens() {
+        let filters = "TRUE";
+        let mut statements: Vec<(&str, String)> = vec![
+            ("state", base_state_details_sql(filters)),
+            ("label", base_label_details_sql(filters)),
+            ("assignee", base_assignee_details_sql(filters)),
+            ("cycle", base_cycle_details_sql(filters)),
+            ("module", base_module_details_sql(filters)),
+        ];
+        for axis in [
+            "priority",
+            "state_id",
+            "labels__id",
+            "assignees__id",
+            "estimate_point__value",
+            "issue_cycle__cycle_id",
+            "issue_module__module_id",
+            "created_at",
+        ] {
+            statements.push((
+                "count",
+                base_plot_count_sql(axis, None, filters).expect("known axis"),
+            ));
+            statements.push((
+                "estimate",
+                base_plot_estimate_sql(axis, None, filters).expect("known axis"),
+            ));
+        }
+        for (name, sql) in &statements {
+            let open = sql.chars().filter(|c| *c == '(').count();
+            let close = sql.chars().filter(|c| *c == ')').count();
+            assert_eq!(open, close, "{name} statement has unbalanced parens: {sql}");
+        }
     }
 
     #[test]
