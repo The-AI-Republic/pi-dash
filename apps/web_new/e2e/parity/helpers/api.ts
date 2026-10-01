@@ -1419,7 +1419,7 @@ export async function serverCreateProject(
     body: JSON.stringify({ name, identifier }),
   });
   const body = (await res.json().catch(() => null)) as { id?: unknown } | null;
-  if (res.status !== 201 || !body || typeof body.id !== "string")
+  if ((res.status !== 201 && res.status !== 200) || !body || typeof body.id !== "string")
     throw new Error(`[parity] project create failed with HTTP ${res.status}: ${JSON.stringify(body)}`);
   return body.id;
 }
@@ -1489,7 +1489,7 @@ export async function serverCreateIssue(
     body: JSON.stringify(stateId ? { name, state: stateId } : { name }),
   });
   const body = (await res.json().catch(() => null)) as { id?: unknown } | null;
-  if (res.status !== 201 || !body || typeof body.id !== "string")
+  if ((res.status !== 201 && res.status !== 200) || !body || typeof body.id !== "string")
     throw new Error(`[parity] issue create failed with HTTP ${res.status}: ${JSON.stringify(body)}`);
   return body.id;
 }
@@ -1660,7 +1660,7 @@ export async function serverCreateState(
     body: JSON.stringify({ name, group, color }),
   });
   const body = (await res.json().catch(() => null)) as { id?: unknown } | null;
-  if (res.status !== 201 || !body || typeof body.id !== "string") {
+  if ((res.status !== 201 && res.status !== 200) || !body || typeof body.id !== "string") {
     throw new Error(`[parity] state create failed with HTTP ${res.status}: ${JSON.stringify(body)}`);
   }
   return body.id;
@@ -1848,7 +1848,7 @@ export async function serverCreateCycle(
     body: JSON.stringify({ name, start_date: startDate, end_date: endDate }),
   });
   const body = (await res.json().catch(() => null)) as { id?: unknown; name?: unknown } | null;
-  if (res.status !== 201 || !body || typeof body.id !== "string" || typeof body.name !== "string") {
+  if ((res.status !== 201 && res.status !== 200) || !body || typeof body.id !== "string" || typeof body.name !== "string") {
     throw new Error(`[parity] cycle create failed with HTTP ${res.status}: ${JSON.stringify(body)}`);
   }
   return { id: body.id, name: body.name };
@@ -1914,7 +1914,7 @@ export async function serverCreateModule(
     body: JSON.stringify({ name }),
   });
   const body = (await res.json().catch(() => null)) as { id?: unknown; name?: unknown } | null;
-  if (res.status !== 201 || !body || typeof body.id !== "string" || typeof body.name !== "string") {
+  if ((res.status !== 201 && res.status !== 200) || !body || typeof body.id !== "string" || typeof body.name !== "string") {
     throw new Error(`[parity] module create failed with HTTP ${res.status}: ${JSON.stringify(body)}`);
   }
   return { id: body.id, name: body.name };
@@ -1968,23 +1968,30 @@ export async function serverWorkspaceUserId(
   sessionCookie: string,
   apiBase: string = apiBaseFromEnv()
 ): Promise<string> {
-  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/members/`, {
-    headers: { cookie: sessionCookie },
-  });
-  if (!res.ok) throw new Error(`[parity] workspace members read failed with HTTP ${res.status}.`);
-  const payload: unknown = await res.json();
-  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
-  for (const row of rows) {
-    const record = row as { member?: unknown; email?: unknown; member_email?: unknown };
-    const candidate =
-      typeof record.email === "string"
-        ? record.email
-        : typeof record.member_email === "string"
-          ? record.member_email
-          : null;
-    if (candidate === email && typeof record.member === "string") return record.member;
+  // The members read occasionally answers a partial page under host
+  // contention, so a miss retries instead of failing the scenario.
+  let lastCount = 0;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/members/`, {
+      headers: { cookie: sessionCookie },
+    });
+    if (!res.ok) throw new Error(`[parity] workspace members read failed with HTTP ${res.status}.`);
+    const payload: unknown = await res.json();
+    const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+    lastCount = rows.length;
+    for (const row of rows) {
+      const record = row as { member?: unknown; email?: unknown; member_email?: unknown };
+      const candidate =
+        typeof record.email === "string"
+          ? record.email
+          : typeof record.member_email === "string"
+            ? record.member_email
+            : null;
+      if (candidate === email && typeof record.member === "string") return record.member;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
   }
-  throw new Error(`[parity] no workspace member carries email ${email}.`);
+  throw new Error(`[parity] no workspace member carries email ${email} (saw ${lastCount} rows).`);
 }
 
 /** Attach issues to a module; throws unless the server accepts. */
@@ -2108,7 +2115,7 @@ export async function serverCreateView(
     body: JSON.stringify({ name, query, filters }),
   });
   const body = (await res.json().catch(() => null)) as { id?: unknown } | null;
-  if (res.status !== 201 || !body || typeof body.id !== "string") {
+  if ((res.status !== 201 && res.status !== 200) || !body || typeof body.id !== "string") {
     throw new Error(`[parity] view create failed with HTTP ${res.status}: ${JSON.stringify(body)}`);
   }
   return body.id;

@@ -203,13 +203,9 @@ test(
     // from the DOM, while a fresh issue bypasses it.
     const prefix = `Parity stale ${uniqueSuffix()}`;
     const createdIds: string[] = [];
-    for (let batch = 0; batch < 95; batch += 12) {
-      const made = await Promise.all(
-        Array.from({ length: Math.min(12, 95 - batch) }, (_, k) =>
-          serverCreateIssue(seed.workspaceSlug, seed.projectId, session, `${prefix} ${batch + k}`)
-        )
-      );
-      createdIds.push(...made);
+    // Sequential: the fresh issue below must sort strictly last.
+    for (let batch = 0; batch < 95; batch++) {
+      createdIds.push(await serverCreateIssue(seed.workspaceSlug, seed.projectId, session, `${prefix} ${batch}`));
     }
     const freshName = `Parity fresh ${uniqueSuffix()}`;
     const freshId = await serverCreateIssue(seed.workspaceSlug, seed.projectId, session, freshName);

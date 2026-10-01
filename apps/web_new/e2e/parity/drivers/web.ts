@@ -8,7 +8,7 @@
 // moves to the password step, and the password submit posts the native
 // form, landing in the workspace. Later oracle issues extend this driver
 // (never fork it) as new areas need new actions.
-import type { Locator, Page } from "@playwright/test";
+import type { ElementHandle, Locator, Page } from "@playwright/test";
 import type {
   LayoutsLayoutKey,
   ParityBrowserCookie,
@@ -1556,11 +1556,14 @@ export class WebDriver implements ParityDriver {
   }
 
   async layoutsPeekTitle(): Promise<string | null> {
-    // Seed issues carry no description, so the panel reads as the
-    // identifier line (PAR-1), the title line, then the description
-    // placeholder: the title is the line right after the identifier.
+    // The peek title is an editable textarea (a char counter like 18/255
+    // sits beside it, which a text read would mistake for the title), so
+    // the read takes the field value, falling back to the legacy line
+    // scan when the field is absent.
     const panel = this.layoutsPeekPanel();
     if ((await panel.count()) === 0) return null;
+    const field = panel.locator("textarea").first();
+    if ((await field.count()) > 0) return ((await field.inputValue()) ?? "").trim() || null;
     const lines = ((await panel.innerText()) ?? "")
       .split("\n")
       .map((line) => line.trim())
@@ -1754,80 +1757,8 @@ export class WebDriver implements ParityDriver {
     throw new Error(`[parity] layouts driver ${target} not implemented yet.`);
   }
 
-  async layoutsSheetHeaders(): Promise<string[]> {
-    return this.layoutsTodo("layoutsSheetHeaders");
-  }
-
-  async layoutsSheetRowNames(): Promise<string[]> {
-    return this.layoutsTodo("layoutsSheetRowNames");
-  }
-
-  async layoutsSheetFirstColumnSticky(): Promise<boolean> {
-    return this.layoutsTodo("layoutsSheetFirstColumnSticky");
-  }
-
-  async layoutsSheetFirstColumnShadowed(): Promise<boolean> {
-    return this.layoutsTodo("layoutsSheetFirstColumnShadowed");
-  }
-
-  async layoutsSheetScrollRight(): Promise<void> {
-    return this.layoutsTodo("layoutsSheetScrollRight");
-  }
-
-  async layoutsSheetHeaderSticky(): Promise<boolean> {
-    return this.layoutsTodo("layoutsSheetHeaderSticky");
-  }
-
-  async layoutsSheetCellText(_issueName: string, _column: string): Promise<string> {
-    return this.layoutsTodo("layoutsSheetCellText");
-  }
-
-  async layoutsSheetCellEditable(_issueName: string, _column: string): Promise<boolean> {
-    return this.layoutsTodo("layoutsSheetCellEditable");
-  }
-
-  async layoutsSheetCellSetState(_issueName: string, _stateName: string): Promise<void> {
-    return this.layoutsTodo("layoutsSheetCellSetState");
-  }
-
-  async layoutsSheetCellSetPriority(_issueName: string, _priorityName: string): Promise<void> {
-    return this.layoutsTodo("layoutsSheetCellSetPriority");
-  }
-
-  async layoutsSheetFocusCell(_issueName: string, _column: string): Promise<void> {
-    return this.layoutsTodo("layoutsSheetFocusCell");
-  }
-
-  async layoutsSheetPressArrow(_arrow: "up" | "down" | "left" | "right"): Promise<void> {
-    return this.layoutsTodo("layoutsSheetPressArrow");
-  }
-
-  async layoutsSheetFocusedCell(): Promise<{ issueName: string; column: string } | null> {
-    return this.layoutsTodo("layoutsSheetFocusedCell");
-  }
-
-  async layoutsSheetSortMenu(_column: string): Promise<string[]> {
-    return this.layoutsTodo("layoutsSheetSortMenu");
-  }
-
-  async layoutsSheetSort(_column: string, _direction: "ascending" | "descending"): Promise<void> {
-    return this.layoutsTodo("layoutsSheetSort");
-  }
-
-  async layoutsSheetClearSort(_column: string): Promise<void> {
-    return this.layoutsTodo("layoutsSheetClearSort");
-  }
-
-  async layoutsSheetSortMarker(_column: string): Promise<"ascending" | "descending" | "none"> {
-    return this.layoutsTodo("layoutsSheetSortMarker");
-  }
-
   async layoutsSheetQuickAdd(_title: string): Promise<void> {
     return this.layoutsTodo("layoutsSheetQuickAdd");
-  }
-
-  async layoutsSheetScrollEnd(): Promise<void> {
-    return this.layoutsTodo("layoutsSheetScrollEnd");
   }
 
   async layoutsSheetHasSubIssueToggle(_issueName: string): Promise<boolean> {
@@ -2066,24 +1997,8 @@ export class WebDriver implements ParityDriver {
     return this.layoutsTodo("layoutsTempRowVisible");
   }
 
-  async layoutsStallIssuesGet(_delayMs: number): Promise<void> {
-    return this.layoutsTodo("layoutsStallIssuesGet");
-  }
-
-  async layoutsStallIssueMutation(_delayMs: number): Promise<void> {
-    return this.layoutsTodo("layoutsStallIssueMutation");
-  }
-
-  async layoutsReleaseStalls(): Promise<void> {
-    return this.layoutsTodo("layoutsReleaseStalls");
-  }
-
   async layoutsSheetCellSetDueDate(_issueName: string, _isoDate: string): Promise<void> {
     return this.layoutsTodo("layoutsSheetCellSetDueDate");
-  }
-
-  async layoutsCurrentUrl(): Promise<string> {
-    return this.layoutsTodo("layoutsCurrentUrl");
   }
 
   async layoutsSheetCellSetAssignee(_issueName: string, _memberName: string): Promise<void> {
@@ -2125,4 +2040,309 @@ export class WebDriver implements ParityDriver {
   async layoutsSheetToggleSubIssues(_issueName: string): Promise<void> {
     return this.layoutsTodo("layoutsSheetToggleSubIssues");
   }
+  // --- NEWFRONT-117 round 2: spreadsheet (ISS-015..020). ---
+
+  private layoutsSheetTable(): Locator {
+    return this.page
+      .locator("table")
+      .filter({ has: this.page.locator('th span:text-is("Work items")') })
+      .first();
+  }
+
+  private async layoutsSheetHeaderCells(): Promise<Locator> {
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const cells = table.locator("thead th");
+    const deadline = Date.now() + 120_000;
+    for (;;) {
+      if ((await cells.count()) > 0) return cells;
+      if (Date.now() >= deadline) throw new Error("[parity] sheet header never rendered.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  private layoutsSheetFirstCell(issueName: string): Locator {
+    return this.layoutsSheetTable().locator('td[id^="issue-"]', { hasText: issueName }).first();
+  }
+
+  private async layoutsSheetHeaderIndex(column: string): Promise<number> {
+    const headers = await this.layoutsSheetHeaders();
+    const index = headers.indexOf(column);
+    if (index < 0) throw new Error(`[parity] no sheet column "${column}" (have: ${headers.join(", ")}).`);
+    return index;
+  }
+
+  private async layoutsSheetCell(issueName: string, column: string): Promise<Locator> {
+    const index = await this.layoutsSheetHeaderIndex(column);
+    const first = this.layoutsSheetFirstCell(issueName);
+    await first.waitFor({ timeout: 120_000 });
+    return first.locator("xpath=ancestor::tr[1]").locator(":scope > td").nth(index);
+  }
+
+  private async layoutsSheetScroller(): Promise<ElementHandle<HTMLElement>> {
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const handle = await table.evaluateHandle((node) => {
+      let current = node.parentElement;
+      while (current && current.scrollWidth <= current.clientWidth + 1) current = current.parentElement;
+      return current as HTMLElement | null;
+    });
+    const element = handle.asElement() as ElementHandle<HTMLElement> | null;
+    if (!element) throw new Error("[parity] no horizontal sheet scroller found.");
+    return element;
+  }
+
+  async layoutsSheetHeaders(): Promise<string[]> {
+    const cells = await this.layoutsSheetHeaderCells();
+    const count = await cells.count();
+    const titles: string[] = [];
+    for (let i = 0; i < count; i++) {
+      titles.push((((await cells.nth(i).innerText()) ?? "") as string).trim().replace(/\s+/g, " "));
+    }
+    return titles;
+  }
+
+  async layoutsSheetRowNames(): Promise<string[]> {
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const cells = table.locator('td[id^="issue-"]');
+    const deadline = Date.now() + 120_000;
+    for (;;) {
+      if ((await cells.count()) > 0) break;
+      if (Date.now() >= deadline) throw new Error("[parity] sheet rows never rendered.");
+      await this.page.waitForTimeout(500);
+    }
+    const count = await cells.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const cell = cells.nth(i);
+      const label = cell.locator("p").first();
+      names.push((((await label.innerText().catch(() => "")) ?? "") as string).trim());
+    }
+    return names.filter((name) => name !== "");
+  }
+
+  async layoutsSheetFirstColumnSticky(): Promise<boolean> {
+    const cells = await this.layoutsSheetHeaderCells();
+    const first = cells.first();
+    return (await first.evaluate((node) => getComputedStyle(node).position)) === "sticky";
+  }
+
+  async layoutsSheetHeaderSticky(): Promise<boolean> {
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const head = table.locator("thead").first();
+    return (await head.evaluate((node) => getComputedStyle(node).position)) === "sticky";
+  }
+
+  async layoutsSheetScrollRight(): Promise<void> {
+    const scroller = await this.layoutsSheetScroller();
+    await scroller.evaluate((node) => node.scrollTo({ left: node.scrollWidth }));
+  }
+
+  async layoutsSheetFirstColumnShadowed(): Promise<boolean> {
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const first = table.locator('tbody td[id^="issue-"]').first();
+    await first.waitFor({ timeout: 120_000 });
+    const shadow = await first.evaluate((node) => (node as HTMLElement).style.boxShadow);
+    return shadow !== "" && shadow !== "none";
+  }
+
+  async layoutsSheetCellText(issueName: string, column: string): Promise<string> {
+    const cell = await this.layoutsSheetCell(issueName, column);
+    return (((await cell.innerText()) ?? "") as string).trim().replace(/\s+/g, " ");
+  }
+
+  async layoutsSheetCellEditable(issueName: string, column: string): Promise<boolean> {
+    const cell = await this.layoutsSheetCell(issueName, column);
+    return (await cell.locator("button:not([disabled])").count()) > 0;
+  }
+
+  private async layoutsSheetPickOption(trigger: Locator, optionName: string, _issueName: string): Promise<void> {
+    await trigger.scrollIntoViewIfNeeded();
+    await trigger.click();
+    // Dropdown portals render at the end of the document, after any row
+    // control carrying the same text, so the last match is the option.
+    const option = this.page.getByRole("button", { name: optionName, exact: true }).last();
+    await option.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    await option.click();
+  }
+
+  async layoutsSheetCellSetState(issueName: string, stateName: string): Promise<void> {
+    const cell = await this.layoutsSheetCell(issueName, "State");
+    const trigger = cell.locator("button:not([disabled])").first();
+    await this.layoutsSheetPickOption(trigger, stateName, issueName);
+    const deadline = Date.now() + 120_000;
+    for (;;) {
+      if ((await this.layoutsSheetCellText(issueName, "State")) === stateName) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] sheet cell never showed state "${stateName}".`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsSheetCellSetPriority(issueName: string, priorityName: string): Promise<void> {
+    const cell = await this.layoutsSheetCell(issueName, "Priority");
+    const trigger = cell.locator("button:not([disabled])").first();
+    await this.layoutsSheetPickOption(trigger, priorityName, issueName);
+    const deadline = Date.now() + 120_000;
+    for (;;) {
+      if ((await this.layoutsSheetCellText(issueName, "Priority")) === priorityName) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] sheet cell never showed priority "${priorityName}".`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsSheetFocusCell(issueName: string, column: string): Promise<void> {
+    const cell = await this.layoutsSheetCell(issueName, column);
+    await cell.evaluate((node) => (node as HTMLElement).focus());
+  }
+
+  async layoutsSheetPressArrow(arrow: "up" | "down" | "left" | "right"): Promise<void> {
+    const key = { up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight" }[arrow];
+    await this.page.keyboard.press(key);
+    await this.page.waitForTimeout(500);
+  }
+
+  async layoutsSheetFocusedCell(): Promise<{ issueName: string; column: string } | null> {
+    const headers = await this.layoutsSheetHeaders();
+    const found = await this.page.evaluate(() => {
+      const active = document.activeElement as HTMLElement | null;
+      const cell = active?.closest?.("td") as HTMLTableCellElement | null;
+      if (!cell) return null;
+      const row = cell.parentElement as HTMLTableRowElement | null;
+      if (!row) return null;
+      const first = row.cells[0] as HTMLElement | undefined;
+      const name = first?.querySelector("p")?.textContent?.trim() ?? "";
+      return { cellIndex: cell.cellIndex, issueName: name };
+    });
+    if (!found || !found.issueName) return null;
+    const column = headers[found.cellIndex] ?? "";
+    if (!column) return null;
+    return { issueName: found.issueName, column };
+  }
+
+  private async layoutsSheetOpenSortMenu(column: string): Promise<Locator> {
+    const index = await this.layoutsSheetHeaderIndex(column);
+    const cells = await this.layoutsSheetHeaderCells();
+    const header = cells.nth(index);
+    await header.scrollIntoViewIfNeeded();
+    await header.click();
+    const menu = this.page.getByRole("menuitem");
+    const deadline = Date.now() + 120_000;
+    for (;;) {
+      if ((await menu.count()) > 0) return menu;
+      if (Date.now() >= deadline) throw new Error(`[parity] sort menu for "${column}" never opened.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  private async layoutsSheetCloseMenu(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      if ((await this.page.getByRole("menuitem").count()) === 0) return;
+      if (Date.now() >= deadline) throw new Error("[parity] menu never closed.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsSheetSortMenu(column: string): Promise<string[]> {
+    const menu = await this.layoutsSheetOpenSortMenu(column);
+    const count = await menu.count();
+    const entries: string[] = [];
+    for (let i = 0; i < count; i++) {
+      entries.push((((await menu.nth(i).innerText()) ?? "") as string).trim().replace(/\s+/g, " "));
+    }
+    await this.layoutsSheetCloseMenu();
+    return entries;
+  }
+
+  async layoutsSheetSort(column: string, direction: "ascending" | "descending"): Promise<void> {
+    const menu = await this.layoutsSheetOpenSortMenu(column);
+    await menu.nth(direction === "ascending" ? 0 : 1).click();
+    const deadline = Date.now() + 120_000;
+    for (;;) {
+      if ((await this.layoutsSheetSortMarker(column)) !== "none") return;
+      if (Date.now() >= deadline) throw new Error(`[parity] sort marker never appeared on "${column}".`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsSheetClearSort(column: string): Promise<void> {
+    const menu = await this.layoutsSheetOpenSortMenu(column);
+    const count = await menu.count();
+    for (let i = 0; i < count; i++) {
+      const text = ((((await menu.nth(i).innerText()) ?? "") as string).trim());
+      if (text.includes("Clear sorting")) {
+        await menu.nth(i).click();
+        const deadline = Date.now() + 120_000;
+        for (;;) {
+          if ((await this.layoutsSheetSortMarker(column)) === "none") return;
+          if (Date.now() >= deadline) throw new Error(`[parity] sort marker never cleared on "${column}".`);
+          await this.page.waitForTimeout(500);
+        }
+      }
+    }
+    await this.layoutsSheetCloseMenu();
+    throw new Error(`[parity] no Clear sorting entry on "${column}".`);
+  }
+
+  async layoutsSheetSortMarker(column: string): Promise<"ascending" | "descending" | "none"> {
+    const index = await this.layoutsSheetHeaderIndex(column);
+    const cells = await this.layoutsSheetHeaderCells();
+    const marker = cells.nth(index).locator("div.rounded-full svg").first();
+    if ((await marker.count()) === 0) return "none";
+    const cls = (await marker.getAttribute("class")) ?? "";
+    // The sorted header carries a direction glyph: the wide-to-narrow
+    // arrow marks the ascending key, the narrow-to-wide the descending.
+    if (cls.includes("arrow-down-wide-narrow")) return "ascending";
+    if (cls.includes("arrow-up-narrow-wide")) return "descending";
+    throw new Error(`[parity] unknown sort marker classes "${cls}".`);
+  }
+
+  async layoutsSheetScrollEnd(): Promise<void> {
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
+    const scroller = await table.evaluateHandle((node) => {
+      let current = node.parentElement;
+      while (current && current.scrollHeight <= current.clientHeight + 1) current = current.parentElement;
+      return current as HTMLElement | null;
+    });
+    const element = scroller.asElement() as ElementHandle<HTMLElement> | null;
+    if (!element) throw new Error("[parity] no vertical sheet scroller found.");
+    await element.evaluate((node) => node.scrollTo({ top: node.scrollHeight }));
+    await this.page.waitForTimeout(1000);
+  }
+
+  async layoutsCurrentUrl(): Promise<string> {
+    return this.page.url();
+  }
+
+  async layoutsStallIssuesGet(delayMs: number): Promise<void> {
+    await this.page.route(/\/issues\//, async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await route.continue();
+    });
+  }
+
+  async layoutsStallIssueMutation(delayMs: number): Promise<void> {
+    await this.page.route(/\/issues\//, async (route) => {
+      const method = route.request().method();
+      if (method !== "POST" && method !== "PATCH" && method !== "PUT") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await route.continue();
+    });
+  }
+
+  async layoutsReleaseStalls(): Promise<void> {
+    await this.page.unrouteAll({ behavior: "wait" });
+}
 }

@@ -195,13 +195,10 @@ test(
     const createdIds: string[] = [];
     try {
       await test.step("seed 102 extra issues", async () => {
-        for (let batch = 0; batch < 102; batch += 12) {
-          const made = await Promise.all(
-            Array.from({ length: Math.min(12, 102 - batch) }, (_, k) =>
-              serverCreateIssue(seed.workspaceSlug, seed.projectId, session, `${prefix} ${batch + k}`)
-            )
-          );
-          createdIds.push(...made);
+        // Sequential: concurrent creates interleave sort_order, so only
+        // sequential creation keeps the tail (max sequence) last.
+        for (let batch = 0; batch < 102; batch++) {
+          createdIds.push(await serverCreateIssue(seed.workspaceSlug, seed.projectId, session, `${prefix} ${batch}`));
         }
         expect(await serverIssueNames(seed.workspaceSlug, seed.projectId, session)).toHaveLength(105);
       });
@@ -241,7 +238,10 @@ test(
           .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 120_000 })
           .not.toHaveLength(0);
         expect(await driver.layoutsListGroupHasLoadMore("All work items")).toEqual(false);
-        await driver.layoutsListScrollEnd();
+        for (let scroll = 0; scroll < 4; scroll++) {
+          if ((await driver.layoutsListGroupIssueNames("All work items")).includes(tailName ?? "")) break;
+          await driver.layoutsListScrollEnd();
+        }
         await expect
           .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 120_000 })
           .toContain(tailName);

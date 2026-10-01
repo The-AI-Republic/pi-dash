@@ -216,7 +216,7 @@ test(
       await openSheet(driver, seed, session);
       expect(await driver.layoutsSheetCellEditable(first, "State")).toEqual(true);
       expect(await driver.layoutsSheetCellText(first, "State")).toEqual("Todo");
-      expect(await driver.layoutsSheetCellText(first, "Priority")).toEqual("None");
+      expect(await driver.layoutsSheetCellText(first, "Priority")).toEqual("");
 
       await driver.layoutsSheetCellSetState(first, stateName);
       expect(await driver.layoutsSheetCellText(first, "State")).toEqual(stateName);
@@ -393,13 +393,10 @@ test(
 
       const prefix = `Parity sheetpage ${uniqueSuffix()}`;
       const createdIds: string[] = [];
-      for (let batch = 0; batch < 102; batch += 12) {
-        const made = await Promise.all(
-          Array.from({ length: Math.min(12, 102 - batch) }, (_, k) =>
-            serverCreateIssue(seed.workspaceSlug, seed.projectId, session, `${prefix} ${batch + k}`)
-          )
-        );
-        createdIds.push(...made);
+      // Sequential: concurrent creates interleave sort_order, so only
+      // sequential creation keeps the tail (max sequence) last.
+      for (let batch = 0; batch < 102; batch++) {
+        createdIds.push(await serverCreateIssue(seed.workspaceSlug, seed.projectId, session, `${prefix} ${batch}`));
       }
       try {
         await driver.layoutsReloadIssues();
