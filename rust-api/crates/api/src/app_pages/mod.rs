@@ -126,6 +126,7 @@
 //! stands.
 
 pub mod gate;
+pub mod handlers_versions;
 
 use axum::extract::{Path, Request, State};
 use axum::http::{header, StatusCode};
@@ -328,7 +329,8 @@ fn owned(
     router
 }
 
-/// Register the favorites + description + state-op + write routes
+/// Register the favorites + description + state-op + write + versions +
+/// duplicate routes
 /// (`app/urls/page.py`). Sibling D-30 handler issues extend this router
 /// with their own paths; merges keep both sides.
 pub fn routes() -> Router<AppState> {
@@ -380,6 +382,27 @@ pub fn routes() -> Router<AppState> {
             owned(
                 axum::routing::patch(page_partial_update).delete(page_destroy),
                 &["GET", "PUT", "POST", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/versions/",
+            owned(
+                axum::routing::get(handlers_versions::versions_list),
+                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/versions/{pk}/",
+            owned(
+                axum::routing::get(handlers_versions::version_detail),
+                &["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/duplicate/",
+            owned(
+                axum::routing::post(handlers_versions::duplicate),
+                &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
             ),
         )
 }
