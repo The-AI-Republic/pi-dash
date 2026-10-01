@@ -444,7 +444,7 @@ async fn versions_response(
             Err(denial) => return denial.into_response(),
         }
     } else {
-        project_raw.parse::<Uuid>().unwrap_or(Uuid::nil())
+        project_raw.parse::<Uuid>().unwrap_or_default()
     };
     let gate = match gate::resolve_gate(&state, "GET", slug, &project_id, Some(*page_id), extension)
         .await
@@ -512,7 +512,7 @@ pub async fn duplicate(
             Err(denial) => return denial.into_response(),
         }
     } else {
-        project_raw.parse::<Uuid>().unwrap_or(Uuid::nil())
+        project_raw.parse::<Uuid>().unwrap_or_default()
     };
     let gate = match gate::resolve_gate(
         &state,

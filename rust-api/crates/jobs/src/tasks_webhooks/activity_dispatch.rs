@@ -1901,7 +1901,7 @@ pub async fn run_activity<R: RedisOrigin>(
                         id,
                         issue_flat_json(&IssueFlatRow {
                             id: Uuid::parse_str(&row.get::<String, _>("fid"))
-                                .unwrap_or(Uuid::nil()),
+                                .unwrap_or_default(),
                             name: row.get("name"),
                             description_json: row.get("description_json"),
                             description_html: row.get("description_html"),
