@@ -1095,7 +1095,10 @@ pub async fn render_project(
                     };
                     match row_uuid_opt(row, attname)? {
                         Some(uid) => expand_user(pool, &uid).await?,
-                        None => Value::Null,
+                        // `expansion[expand](None).data` renders `{}` for a
+                        // null FK (`serializers/base.py:108-113`, probed:
+                        // `UserLiteSerializer(None).data == {}`).
+                        None => Value::Object(serde_json::Map::new()),
                     }
                 }
                 _ => {
