@@ -96,6 +96,7 @@ explained instead.
 | --- | --- |
 | `…/projects/(detail)/[projectId]/intake/layout.tsx` (app-header shell wrapping the intake header + content outlet) | INT-001 |
 | `…/projects/(detail)/[projectId]/intake/page.tsx` (feature gate on the intake toggle, page title, mounts the two-pane root with URL tab/item params) | INT-001, INT-002, INT-003, INT-028 |
+| `app/routes/redirects/core/inbox.tsx` (retired project inbox address forwards to the intake route) | INT-001 | found by coverage audit |
 
 ### Top-level component folders
 
@@ -138,11 +139,11 @@ INT-009; the status default behavior is INT-012. No filter is unmapped.
 
 | Endpoint | Covering rows |
 | --- | --- |
-| `GET /api/workspaces/{ws}/projects/{pid}/intake-issues/` (list; status filter; order-by; cursor paging; guest scoping) | INT-004, INT-006, INT-007, INT-009, INT-010, INT-011, INT-012, INT-032 |
-| `POST /api/workspaces/{ws}/projects/{pid}/intake-issues/` (create; name required; priority validated; forces triage state; source in-app; logs activity) | INT-013, INT-014, INT-017, INT-033 |
+| `GET /api/workspaces/{ws}/projects/{pid}/intake-issues/` (list; status filter; order-by; cursor paging; guest scoping; called as `inbox-issues/` by `InboxIssueService.list`) | INT-004, INT-006, INT-007, INT-009, INT-010, INT-011, INT-012, INT-032 |
+| `POST /api/workspaces/{ws}/projects/{pid}/intake-issues/` (create; name required; priority validated; forces triage state; source in-app; logs activity; called as `inbox-issues/` by `InboxIssueService.create`) | INT-013, INT-014, INT-017, INT-033 |
 | `GET /api/workspaces/{ws}/projects/{pid}/intake-issues/{issueId}/` (retrieve; guest own-only unless guest-view-all) | INT-019, INT-028, INT-032 |
-| `PATCH /api/workspaces/{ws}/projects/{pid}/intake-issues/{issueId}/` (update issue fields and/or intake status; admin/creator; guest limited to name/description; status change admin-only; activity logged) | INT-019, INT-020, INT-021, INT-022, INT-023, INT-026 |
-| `DELETE /api/workspaces/{ws}/projects/{pid}/intake-issues/{issueId}/` (delete; admin/creator; also deletes work item unless accepted) | INT-025 |
+| `PATCH /api/workspaces/{ws}/projects/{pid}/intake-issues/{issueId}/` (update issue fields and/or intake status; admin/creator; guest limited to name/description; status change admin-only; activity logged; called as `inbox-issues/` by `InboxIssueService.update` / `.updateIssue`) | INT-019, INT-020, INT-021, INT-022, INT-023, INT-026 |
+| `DELETE /api/workspaces/{ws}/projects/{pid}/intake-issues/{issueId}/` (delete; admin/creator; also deletes work item unless accepted; called as `inbox-issues/` by `InboxIssueService.destroy`) | INT-025 |
 | `GET /api/workspaces/{ws}/projects/{pid}/intake-work-items/{workItemId}/description-versions/` and `…/{versionId}/` (list/retrieve description versions) | INT-029 |
 | `GET /api/workspaces/{ws}/projects/{pid}/intake-state/` (project triage state) | INT-033 |
 | `GET/POST /api/workspaces/{ws}/projects/{pid}/intakes/` and `GET/PATCH/DELETE …/intakes/{pk}/` (intake container: list/create/update/delete; pending-count annotation; default intake cannot be deleted) | list read backs the screen's single-intake lookup, covered by INT-001/INT-004; create/update/delete of intake containers are not exposed by any screen in the surveyed sources — no covering row: candidate cloud "multiple intakes / forms" feature (forms ingestion is cloud, INT-034), otherwise dead code for the OSS intake UI |

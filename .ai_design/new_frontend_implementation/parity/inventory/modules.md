@@ -115,7 +115,7 @@ the row IDs that cover it. Anything unmapped is explained, not dropped silently.
 | `core/components/modules/dropdowns/order-by.tsx` (sort key + direction menu) | MOD-005 | sort keys: name, progress, work-item count, due date, created date, manual |
 | `core/components/modules/applied-filters/` (`root.tsx` chip strip incl. favorites chip, `status.tsx`, `members.tsx`, `date.tsx`, barrel) | MOD-007 | — |
 | `core/components/modules/select/status.tsx` (form status picker) | MOD-022 | — |
-| `core/components/modules/sidebar-select/select-status.tsx` (`SidebarStatusSelect`) | — | dead code: barrel-exported but imported nowhere |
+| `core/components/modules/sidebar-select/` (folder; sole component `select-status.tsx`, `SidebarStatusSelect`) | — | dead code: barrel-exported but imported nowhere; found by coverage audit |
 | `core/components/power-k/menus/modules.tsx` (status-icon module menu builder) | MOD-037 | — |
 | `core/components/power-k/ui/pages/open-entity/project-modules-menu.tsx` (palette module jump list) | MOD-037 | — |
 | `core/components/power-k/ui/pages/context-based/work-item/modules-menu.tsx` (work-item module assignment picker) | MOD-037 | membership writes owned by the issues area |
