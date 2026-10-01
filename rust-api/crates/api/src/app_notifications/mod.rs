@@ -1868,10 +1868,11 @@ async fn save_snoozed(
 // MarkAllReadNotificationViewSet.create (base.py:232-288)
 // ---------------------------------------------------------------------------
 
-/// The exact constant 200 body (`base.py:288`): DRF renders
-/// `{"message": "Successful"}` however many rows were touched —
+/// The exact constant 200 body (`base.py:288`): DRF's compact renderer
+/// (`COMPACT_JSON` is the default and the project does not override it)
+/// emits `{"message":"Successful"}` however many rows were touched —
 /// including zero (an empty `bulk_update([])` is a no-op).
-const MARK_ALL_READ_BODY: &str = r#"{"message": "Successful"}"#;
+const MARK_ALL_READ_BODY: &str = r#"{"message":"Successful"}"#;
 
 /// Python truthiness of one `request.data` value (`base.py:235-237`):
 /// absent / `null` / `false` / `0` / `""` / `[]` / `{}` are falsy and
@@ -2094,25 +2095,28 @@ async fn fetch_preference_by_id(pool: &PgPool, id: &Uuid) -> Result<Option<Prefe
 }
 
 /// `UserNotificationPreferenceSerializer` output (`fields="__all__"`,
-/// `app/serializers/notification.py:25-28`) in the live key order
-/// (FX-NOTIF-05): `id` first (`BaseSerializer`), then the model fields.
-/// Struct order is the byte order.
+/// `app/serializers/notification.py:25-28`) in the live key order: pk +
+/// declared (`BaseSerializer.id`), then the non-relational model fields,
+/// then the forward relations (DRF `get_default_field_names`) — the five
+/// flags render before the FKs, exactly like `NotificationBody`. (The
+/// FX-NOTIF-05 `output_keys` array lists `_meta` order; it is the key
+/// *set*, not the wire order.) Struct order is the byte order.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct PreferenceBody {
     id: String,
     created_at: String,
     updated_at: String,
     deleted_at: Option<String>,
-    created_by: Option<String>,
-    updated_by: Option<String>,
-    user: String,
-    workspace: Option<String>,
-    project: Option<String>,
     property_change: bool,
     state_change: bool,
     comment: bool,
     mention: bool,
     issue_completed: bool,
+    created_by: Option<String>,
+    updated_by: Option<String>,
+    user: String,
+    workspace: Option<String>,
+    project: Option<String>,
 }
 
 /// Render one preference row: datetimes in the request's zone
@@ -2124,16 +2128,16 @@ fn render_preference(row: &PreferenceRow, tz: &Tz) -> PreferenceBody {
         created_at: render_datetime_in(&row.created_at, tz),
         updated_at: render_datetime_in(&row.updated_at, tz),
         deleted_at: row.deleted_at.as_ref().map(|dt| render_datetime_in(dt, tz)),
-        created_by: row.created_by_id.map(|id| id.to_string()),
-        updated_by: row.updated_by_id.map(|id| id.to_string()),
-        user: row.user_id.to_string(),
-        workspace: row.workspace_id.map(|id| id.to_string()),
-        project: row.project_id.map(|id| id.to_string()),
         property_change: row.property_change,
         state_change: row.state_change,
         comment: row.comment,
         mention: row.mention,
         issue_completed: row.issue_completed,
+        created_by: row.created_by_id.map(|id| id.to_string()),
+        updated_by: row.updated_by_id.map(|id| id.to_string()),
+        user: row.user_id.to_string(),
+        workspace: row.workspace_id.map(|id| id.to_string()),
+        project: row.project_id.map(|id| id.to_string()),
     }
 }
 
@@ -2313,12 +2317,14 @@ async fn check_preference_fk(
 
 /// Validated preference PATCH writes: each `Some` replaces its column;
 /// `None` leaves it. Nullable columns use the inner `Option` (`None`
-/// clears the column).
+/// clears the column). There is deliberately no `updated_by` slot: a
+/// body-supplied value is validated (a malformed one still 400s) but
+/// never written — `BaseModel.save` unconditionally overwrites it with
+/// the crum user on update, so the stamp always wins.
 #[derive(Debug, Default)]
 struct PreferencePatch {
     deleted_at: Option<Option<DateTime<Utc>>>,
     created_by: Option<Option<Uuid>>,
-    updated_by: Option<Option<Uuid>>,
     user: Option<Uuid>,
     workspace: Option<Option<Uuid>>,
     project: Option<Option<Uuid>>,
@@ -2351,16 +2357,24 @@ async fn compile_preference_patch(
             }
         }
     }
+    // Each flag helper returns `Some` exactly when its key is present
+    // and valid, so plain assignment is exact (absent and invalid both
+    // leave the patch slot untouched; invalid additionally records).
+    patch.property_change = check_preference_flag(&mut errors, data, "property_change");
+    patch.state_change = check_preference_flag(&mut errors, data, "state_change");
+    patch.comment = check_preference_flag(&mut errors, data, "comment");
+    patch.mention = check_preference_flag(&mut errors, data, "mention");
+    patch.issue_completed = check_preference_flag(&mut errors, data, "issue_completed");
     if let Some(id) =
         check_preference_fk(pool, &mut errors, data, "created_by", "users", true, false).await?
     {
         patch.created_by = Some(id);
     }
-    if let Some(id) =
-        check_preference_fk(pool, &mut errors, data, "updated_by", "users", true, false).await?
-    {
-        patch.updated_by = Some(id);
-    }
+    // `updated_by` is validated but never stored: `BaseModel.save`
+    // overwrites it with the crum user on every update
+    // (`db/models/base.py:40-42`), so the stamp wins and writing both
+    // would be a duplicate-`SET` Postgres error.
+    check_preference_fk(pool, &mut errors, data, "updated_by", "users", true, false).await?;
     if let Some(Some(id)) =
         check_preference_fk(pool, &mut errors, data, "user", "users", false, false).await?
     {
@@ -2384,14 +2398,6 @@ async fn compile_preference_patch(
     {
         patch.project = Some(id);
     }
-    // Each flag helper returns `Some` exactly when its key is present
-    // and valid, so plain assignment is exact (absent and invalid both
-    // leave the patch slot untouched; invalid additionally records).
-    patch.property_change = check_preference_flag(&mut errors, data, "property_change");
-    patch.state_change = check_preference_flag(&mut errors, data, "state_change");
-    patch.comment = check_preference_flag(&mut errors, data, "comment");
-    patch.mention = check_preference_flag(&mut errors, data, "mention");
-    patch.issue_completed = check_preference_flag(&mut errors, data, "issue_completed");
     if errors.is_empty() {
         Ok(patch)
     } else {
@@ -2423,9 +2429,6 @@ async fn save_preference(
     }
     if let Some(owner) = patch.created_by {
         columns.push(("created_by_id", PreferenceValue::Id(owner)));
-    }
-    if let Some(updater) = patch.updated_by {
-        columns.push(("updated_by_id", PreferenceValue::Id(updater)));
     }
     if let Some(owner) = patch.user {
         columns.push(("user_id", PreferenceValue::Id(Some(owner))));
@@ -2518,7 +2521,7 @@ async fn preference_patch(
                 .expect("serializable preference"),
         ),
         Ok(None) => Denial::ServerError.into_response(),
-        Err(denial) => return denial.into_response(),
+        Err(denial) => denial.into_response(),
     }
 }
 
@@ -2903,7 +2906,7 @@ mod tests {
     /// mark-all-read answers the exact constant body (`base.py:288`).
     #[test]
     fn mark_all_read_body_is_constant() {
-        assert_eq!(MARK_ALL_READ_BODY, r#"{"message": "Successful"}"#);
+        assert_eq!(MARK_ALL_READ_BODY, r#"{"message":"Successful"}"#);
     }
 
     /// Body-param truthiness follows Python, not JSON: the string
@@ -3000,8 +3003,9 @@ mod tests {
         );
     }
 
-    /// The preference body carries the 14 live keys in the live order
-    /// (FX-NOTIF-05).
+    /// The preference body carries the 14 live keys in the live order:
+    /// pk + declared, then the non-relational fields, then the forward
+    /// relations (DRF `get_default_field_names`) — flags before FKs.
     #[test]
     fn preference_key_order_matches_live_django() {
         let body = serde_json::to_string(&PreferenceBody {
@@ -3009,16 +3013,16 @@ mod tests {
             created_at: "t".to_owned(),
             updated_at: "t".to_owned(),
             deleted_at: None,
-            created_by: None,
-            updated_by: None,
-            user: "u".to_owned(),
-            workspace: None,
-            project: None,
             property_change: true,
             state_change: true,
             comment: true,
             mention: true,
             issue_completed: true,
+            created_by: None,
+            updated_by: None,
+            user: "u".to_owned(),
+            workspace: None,
+            project: None,
         })
         .expect("body serializes");
         let mut last = 0;
@@ -3027,16 +3031,16 @@ mod tests {
             "created_at",
             "updated_at",
             "deleted_at",
-            "created_by",
-            "updated_by",
-            "user",
-            "workspace",
-            "project",
             "property_change",
             "state_change",
             "comment",
             "mention",
             "issue_completed",
+            "created_by",
+            "updated_by",
+            "user",
+            "workspace",
+            "project",
         ] {
             let needle = format!("\"{key}\":");
             let at = body[last..]
