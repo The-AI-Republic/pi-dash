@@ -49,7 +49,9 @@
 //! Django-side to `?` → `RANDOM()`, single-level FK traversals onto the
 //! already-joined tables, bare output aliases for the two annotations
 //! that exist at `.order_by()` time, and bare-M2M default orderings with
-//! extra joins — [`OrderTarget`] carries those shapes and [`apply_order`]
+//! extra joins; PIDASHCONV-511: bare-FK names resolve to the related
+//! model's `Meta.ordering` terms, with extra joins where the M4 GET
+//! lacks them — [`OrderTarget`] carries those shapes and [`apply_order`]
 //! renders them identically in every builder.)
 //!
 //! # Reads scope tables, not views
@@ -108,7 +110,7 @@
 use sea_query::{Alias, Condition, Expr, IntoIden, JoinType, Order, Query, TableRef};
 
 use super::module::{self, module_issue};
-use crate::v1_projects::models::{project, project_member, state};
+use crate::v1_projects::models::{estimate_point, project, project_member, state};
 
 /// `workspaces` table (no db-layer port owns it yet; literal matches the
 /// Django table name, same as `queries_stateest::WORKSPACE_TABLE`).
@@ -129,6 +131,9 @@ const LABEL_TABLE: &str = "labels";
 const ISSUE_ASSIGNEE_TABLE: &str = "issue_assignees";
 /// `issue_labels` through table behind `order_by=labels`.
 const ISSUE_LABEL_TABLE: &str = "issue_labels";
+/// `pod` table behind bare-FK `order_by=assigned_pod` (M4/M5 GET,
+/// PIDASHCONV-511; `runner.Pod`, `db_table = "pod"`, singular).
+const POD_TABLE: &str = "pod";
 /// Alias of the parent self-join (`select_related("parent")`, M4/M5 GET);
 /// `order_by=parent__<col>` renders onto it (PIDASHCONV-510).
 pub const PARENT_ALIAS: &str = "T7";
@@ -180,6 +185,10 @@ pub enum OrderTarget {
     /// A bare-M2M default ordering: the builder adds the two `LEFT JOIN`s
     /// and orders by the related model's `Meta.ordering` term.
     M2M(M2MOrder),
+    /// A bare-FK (or reverse-FK) default ordering: the related model's
+    /// `Meta.ordering` terms, with the extra `LEFT JOIN` when the M4
+    /// GET does not already join the table ([`RelatedOrder`]).
+    Related(RelatedOrder),
 }
 
 /// The bare-M2M names the M4 GET resolves (`assignees`, `labels`).
@@ -201,6 +210,107 @@ impl M2MOrder {
         match self {
             M2MOrder::Assignees => (ISSUE_ASSIGNEE_TABLE, "issue_id", "assignee_id", USER_TABLE),
             M2MOrder::Labels => (ISSUE_LABEL_TABLE, "issue_id", "label_id", LABEL_TABLE),
+        }
+    }
+}
+
+/// The bare-FK (and reverse-FK) names the M4 GET resolves to the
+/// related model's `Meta.ordering` (PIDASHCONV-511): Django orders
+/// `order_by=<fk>` by the related ordering, *not* by `<name>_id` —
+/// every shape below was read off live Django 4.2 `str(queryset.query)`
+/// output for the M4 GET chain. The request `-` inverts each term.
+/// `type` is deliberately NOT here: `IssueType` has no
+/// `Meta.ordering`, so Django orders `type` by the local
+/// `"issues"."type_id"` with no join at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelatedOrder {
+    /// `ORDER BY "states"."sequence"` (`State.Meta.ordering`,
+    /// `db/models/state.py:129`; no new join — `select_related`).
+    State,
+    /// `ORDER BY "projects"."created_at" DESC` (`Project.Meta.ordering
+    /// = ('-created_at',)`, `db/models/project.py:253`; no new join).
+    Project,
+    /// `ORDER BY "workspaces"."created_at" DESC`
+    /// (`Workspace.Meta.ordering`, `db/models/workspace.py:182`).
+    Workspace,
+    /// `ORDER BY "T7"."created_at" DESC` (`Issue.Meta.ordering`,
+    /// `db/models/issue.py:254`, onto the parent self-join alias).
+    Parent,
+    /// `LEFT JOIN "users"` on `created_by_id` +
+    /// `ORDER BY "users"."created_at" DESC` (`User.Meta.ordering`,
+    /// `db/models/user.py:137`).
+    CreatedBy,
+    /// `LEFT JOIN "users"` on `updated_by_id` + the same term.
+    UpdatedBy,
+    /// `LEFT JOIN "estimate_points"` +
+    /// `ORDER BY "estimate_points"."value" ASC`
+    /// (`EstimatePoint.Meta.ordering`, `db/models/estimate.py:57`;
+    /// `value` is a varchar — string sort, ported as-is).
+    EstimatePoint,
+    /// `LEFT JOIN "pod"` + TWO terms:
+    /// `ORDER BY "pod"."is_default" DESC, "pod"."created_at" ASC`
+    /// (`Pod.Meta.ordering = ('-is_default', 'created_at')`,
+    /// `runner/models.py`; the `-` inverts both).
+    AssignedPod,
+    /// `ORDER BY "module_issues"."created_at" DESC` (bare reverse FK
+    /// onto the already-joined bridge table;
+    /// `ModuleIssue.Meta.ordering`, `db/models/module.py:168`).
+    IssueModule,
+}
+
+impl RelatedOrder {
+    /// The raw `?order_by=` name.
+    fn name(self) -> &'static str {
+        match self {
+            RelatedOrder::State => "state",
+            RelatedOrder::Project => "project",
+            RelatedOrder::Workspace => "workspace",
+            RelatedOrder::Parent => "parent",
+            RelatedOrder::CreatedBy => "created_by",
+            RelatedOrder::UpdatedBy => "updated_by",
+            RelatedOrder::EstimatePoint => "estimate_point",
+            RelatedOrder::AssignedPod => "assigned_pod",
+            RelatedOrder::IssueModule => "issue_module",
+        }
+    }
+
+    /// The extra `LEFT JOIN` the terms need, as `(table,
+    /// issues_fk_column)` — `None` when the M4 GET already joins the
+    /// table (`state`/`project`/`workspace`/`parent` via
+    /// `select_related`, `issue_module` via the filter traversal).
+    /// Django appends these joins after the parent `T7` join.
+    fn join(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            RelatedOrder::CreatedBy => Some((USER_TABLE, "created_by_id")),
+            RelatedOrder::UpdatedBy => Some((USER_TABLE, "updated_by_id")),
+            RelatedOrder::EstimatePoint => Some((estimate_point::TABLE, "estimate_point_id")),
+            RelatedOrder::AssignedPod => Some((POD_TABLE, "assigned_pod_id")),
+            RelatedOrder::State
+            | RelatedOrder::Project
+            | RelatedOrder::Workspace
+            | RelatedOrder::Parent
+            | RelatedOrder::IssueModule => None,
+        }
+    }
+
+    /// The related `Meta.ordering` terms as `(table, column,
+    /// model_descending)`; the request `-` XORs each term's direction
+    /// (verified per name against live `str(query)` output).
+    fn terms(self) -> &'static [(&'static str, &'static str, bool)] {
+        match self {
+            RelatedOrder::State => &[(state::TABLE, "sequence", false)],
+            RelatedOrder::Project => &[(project::TABLE, "created_at", true)],
+            RelatedOrder::Workspace => &[(WORKSPACE_TABLE, "created_at", true)],
+            RelatedOrder::Parent => &[(PARENT_ALIAS, "created_at", true)],
+            RelatedOrder::CreatedBy | RelatedOrder::UpdatedBy => {
+                &[(USER_TABLE, "created_at", true)]
+            }
+            RelatedOrder::EstimatePoint => &[(estimate_point::TABLE, "value", false)],
+            RelatedOrder::AssignedPod => &[
+                (POD_TABLE, "is_default", true),
+                (POD_TABLE, "created_at", false),
+            ],
+            RelatedOrder::IssueModule => &[(module_issue::TABLE, "created_at", true)],
         }
     }
 }
@@ -276,6 +386,16 @@ impl OrderBy {
             column: column.to_owned(),
             descending,
             target: OrderTarget::M2M(which),
+        }
+    }
+
+    /// `OrderBy` for a bare-FK (or reverse-FK) name: the related
+    /// model's `Meta.ordering` terms (PIDASHCONV-511).
+    pub fn related(which: RelatedOrder, descending: bool) -> Self {
+        Self {
+            column: which.name().to_owned(),
+            descending,
+            target: OrderTarget::Related(which),
         }
     }
 
@@ -366,6 +486,26 @@ fn apply_order(sel: &mut sea_query::SelectStatement, base: &str, order: &OrderBy
                 ),
                 direction,
             );
+        }
+        // Related `Meta.ordering` terms (PIDASHCONV-511): the request
+        // `-` XORs each term's model direction, so a `-created_at`
+        // term renders `DESC` plain / `ASC` inverted while an
+        // ascending term (`sequence`, `value`) renders the opposite.
+        OrderTarget::Related(which) => {
+            for (table, column, model_descending) in which.terms() {
+                let direction = if order.descending != *model_descending {
+                    Order::Desc
+                } else {
+                    Order::Asc
+                };
+                sel.order_by(
+                    (
+                        Alias::new((*table).to_owned()),
+                        Alias::new((*column).to_owned()),
+                    ),
+                    direction,
+                );
+            }
         }
     }
 }
@@ -890,6 +1030,21 @@ fn module_issue_get_sql_inner(order: &OrderBy, issue_bind: Option<&str>) -> Stri
             ),
         );
     }
+    // Bare-FK related-ordering joins (PIDASHCONV-511), after T7 like
+    // Django: one `LEFT JOIN "<table>" ON ("issues"."<fk>" =
+    // "<table>"."id")`. To-one, so rows never multiply (unlike M2M).
+    if let OrderTarget::Related(which) = order.target {
+        if let Some((table, fk)) = which.join() {
+            sel.join(
+                JoinType::LeftJoin,
+                Alias::new(table.to_owned()),
+                Condition::all().add(
+                    Expr::col((Alias::new(ISSUE_TABLE), Alias::new(fk)))
+                        .equals((Alias::new(table), Alias::new("id"))),
+                ),
+            );
+        }
+    }
     let mut scope = Condition::all()
         .add(Expr::cust(ISSUE_MANAGER_OUTER_GUARDS))
         .add(Expr::col((Alias::new(module_issue::TABLE), Alias::new("deleted_at"))).is_null())
@@ -1146,6 +1301,104 @@ mod tests {
     }
 
     #[test]
+    fn m4_get_order_related_terms_and_joins() {
+        // PIDASHCONV-511: bare FKs order by the related Meta.ordering,
+        // read off live Django 4.2 str(query) output for the M4 GET.
+        // Already-joined tables add no join: `state` renders the
+        // ascending `sequence` term ...
+        let sql = module_issue_list_get_sql(&OrderBy::related(RelatedOrder::State, false));
+        assert!(sql.contains(r#"ORDER BY "states"."sequence" ASC"#), "{sql}");
+        let sql = module_issue_list_get_sql(&OrderBy::related(RelatedOrder::State, true));
+        assert!(
+            sql.contains(r#"ORDER BY "states"."sequence" DESC"#),
+            "{sql}"
+        );
+        // ... while `-created_at` orderings render DESC plain / ASC
+        // inverted, reusing the select_related / bridge joins.
+        for (which, term) in [
+            (
+                RelatedOrder::Project,
+                r#"ORDER BY "projects"."created_at" DESC"#,
+            ),
+            (
+                RelatedOrder::Workspace,
+                r#"ORDER BY "workspaces"."created_at" DESC"#,
+            ),
+            (RelatedOrder::Parent, r#"ORDER BY "T7"."created_at" DESC"#),
+            (
+                RelatedOrder::IssueModule,
+                r#"ORDER BY "module_issues"."created_at" DESC"#,
+            ),
+        ] {
+            let sql = module_issue_list_get_sql(&OrderBy::related(which, false));
+            assert!(sql.contains(term), "{sql}");
+            let inverted = term.replace("DESC", "ASC");
+            let sql = module_issue_list_get_sql(&OrderBy::related(which, true));
+            assert!(sql.contains(&inverted), "{sql}");
+        }
+        // New joins render after T7, like Django: `created_by` and
+        // `updated_by` each LEFT JOIN `users` on their own FK ...
+        for (which, join) in [
+            (
+                RelatedOrder::CreatedBy,
+                r#"LEFT JOIN "users" ON "issues"."created_by_id" = "users"."id""#,
+            ),
+            (
+                RelatedOrder::UpdatedBy,
+                r#"LEFT JOIN "users" ON "issues"."updated_by_id" = "users"."id""#,
+            ),
+        ] {
+            let sql = module_issue_list_get_sql(&OrderBy::related(which, false));
+            let t7 = sql.find(r#""T7""#).expect("T7 join");
+            let extra = sql.find(join).expect("ordering join");
+            assert!(extra > t7, "{sql}");
+            assert!(
+                sql.contains(r#"ORDER BY "users"."created_at" DESC"#),
+                "{sql}"
+            );
+            let sql = module_issue_list_get_sql(&OrderBy::related(which, true));
+            assert!(
+                sql.contains(r#"ORDER BY "users"."created_at" ASC"#),
+                "{sql}"
+            );
+        }
+        // ... `estimate_point` joins `estimate_points` for the
+        // ascending `value` term ...
+        let sql = module_issue_list_get_sql(&OrderBy::related(RelatedOrder::EstimatePoint, false));
+        assert!(
+            sql.contains(
+                r#"LEFT JOIN "estimate_points" ON "issues"."estimate_point_id" = "estimate_points"."id""#
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"ORDER BY "estimate_points"."value" ASC"#),
+            "{sql}"
+        );
+        let sql = module_issue_list_get_sql(&OrderBy::related(RelatedOrder::EstimatePoint, true));
+        assert!(
+            sql.contains(r#"ORDER BY "estimate_points"."value" DESC"#),
+            "{sql}"
+        );
+        // ... and `assigned_pod` joins `pod` for TWO terms (the `-`
+        // inverts both).
+        let sql = module_issue_list_get_sql(&OrderBy::related(RelatedOrder::AssignedPod, false));
+        assert!(
+            sql.contains(r#"LEFT JOIN "pod" ON "issues"."assigned_pod_id" = "pod"."id""#),
+            "{sql}"
+        );
+        let first = sql
+            .find(r#"ORDER BY "pod"."is_default" DESC, "pod"."created_at" ASC"#)
+            .expect("two-term ordering");
+        assert!(first > 0, "{sql}");
+        let sql = module_issue_list_get_sql(&OrderBy::related(RelatedOrder::AssignedPod, true));
+        assert!(
+            sql.contains(r#"ORDER BY "pod"."is_default" ASC, "pod"."created_at" DESC"#),
+            "{sql}"
+        );
+    }
+
+    #[test]
     fn m5_get_shares_exotic_order_targets() {
         // PIDASHCONV-510: M5 GET shares the inner builder — M2M joins
         // render there too, plus the pk predicate.
@@ -1156,6 +1409,13 @@ mod tests {
             "{sql}"
         );
         assert!(sql.contains(r#""issues"."id" = ($4)"#), "{sql}");
+        // PIDASHCONV-511: related-ordering joins render there too.
+        let sql = module_issue_detail_get_sql(&OrderBy::related(RelatedOrder::AssignedPod, false));
+        assert!(sql.contains(r#"LEFT JOIN "pod""#), "{sql}");
+        assert!(
+            sql.contains(r#"ORDER BY "pod"."is_default" DESC, "pod"."created_at" ASC"#),
+            "{sql}"
+        );
     }
 
     #[test]
