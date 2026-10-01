@@ -6301,14 +6301,19 @@ pub fn coerce_issue_candidate(value: &Value) -> Result<IssueCandidate, Denial> {
 /// view the cycle view passes no `created_by`/`updated_by`
 /// (`views/cycle.py:953-965` vs `views/module.py:697-707`). Field order
 /// follows the model (`issue` before `cycle`, `db/models/cycle.py:104`).
+/// `issue` renders the RAW request value, not the folded id: the instance
+/// attribute is never folded (only the SQL prep is), so protected types
+/// pass through as-is (`5`, `true`) and strings verbatim (an uppercase
+/// UUID stays uppercase — `handle_field`/`is_protected_type`).
 pub fn render_bridge_dump(bridges: &[CreatedBridge]) -> String {
     let mut out = String::from("[");
     for (index, bridge) in bridges.iter().enumerate() {
         if index > 0 {
             out.push_str(", ");
         }
+        let issue = serde_json::to_string(&bridge.issue_raw).unwrap_or_else(|_| "null".to_owned());
         out.push_str(&format!(
-            "{{\"model\": \"db.cycleissue\", \"pk\": \"{}\", \"fields\": {{\"created_at\": {}, \"updated_at\": {}, \"created_by\": {}, \"updated_by\": {}, \"deleted_at\": null, \"project\": \"{}\", \"workspace\": \"{}\", \"issue\": \"{}\", \"cycle\": \"{}\"}}}}",
+            "{{\"model\": \"db.cycleissue\", \"pk\": \"{}\", \"fields\": {{\"created_at\": {}, \"updated_at\": {}, \"created_by\": {}, \"updated_by\": {}, \"deleted_at\": null, \"project\": \"{}\", \"workspace\": \"{}\", \"issue\": {}, \"cycle\": \"{}\"}}}}",
             bridge.id,
             render_django_datetime(&bridge.created_at),
             render_django_datetime(&bridge.updated_at),
@@ -6316,7 +6321,7 @@ pub fn render_bridge_dump(bridges: &[CreatedBridge]) -> String {
             render_uuid_opt(&bridge.updated_by),
             bridge.project_id,
             bridge.workspace_id,
-            bridge.issue_id,
+            issue,
             bridge.cycle_id,
         ));
     }
@@ -6338,9 +6343,9 @@ pub fn render_django_datetime(value: &chrono::DateTime<chrono::Utc>) -> String {
 
 /// One bridge row staged for insert (ids + timestamps generated up front so
 /// the `serialize("json", ...)` payload renders the inserted values).
-/// `issue_raw` is the RAW request value (`bulk_create` receives
-/// `issue_id=<raw>`: ints/bools/None reach Postgres and fail there, after
-/// the filter coerced them for matching).
+/// `issue_id` is the FOLDED id (what the ORM's `to_python` binds at both
+/// the filter and the insert); `issue_raw` is the RAW request value, which
+/// the dump renders verbatim (the instance attribute is never folded).
 #[derive(Debug, Clone)]
 pub struct CreatedBridge {
     pub id: uuid::Uuid,
@@ -6532,15 +6537,22 @@ pub async fn add_cycle_issues_inner(
             batch.iter().map(|b| b.created_at).collect();
         let updated: Vec<chrono::DateTime<chrono::Utc>> =
             batch.iter().map(|b| b.updated_at).collect();
-        // Raw values bound as text-cast uuid: valid UUID strings insert;
-        // ints/bools fail `uuid_in` and NULLs fail not-null, exactly like
-        // the ORM's raw `issue_id=<raw>` (all → generic 500).
-        let issue_texts: Vec<Option<String>> =
-            batch.iter().map(|b| issue_raw_text(&b.issue_raw)).collect();
+        // The ORM compiles `issue_id=<raw>` through
+        // `UUIDField.get_db_prep_value` → `to_python` at INSERT as well as
+        // at the filter, so ints/bools arrive folded (`UUID(int=...)`): a
+        // folded miss is an FK 400, a live clash is ignored — never a
+        // `uuid_in` 500. NULL binds NULL (not-null → the same 400).
+        let issue_ids: Vec<Option<uuid::Uuid>> = batch
+            .iter()
+            .map(|b| match &b.issue_raw {
+                Value::Null => None,
+                _ => Some(b.issue_id),
+            })
+            .collect();
         sqlx::query(
             r#"INSERT INTO "cycle_issues" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at",
                      "project_id", "workspace_id", "cycle_id", "issue_id")
-               SELECT unnest($1::uuid[]), unnest($2::timestamptz[]), unnest($3::timestamptz[]), NULL, NULL, NULL, $4, $5, $6, unnest($7::text[])::uuid
+               SELECT unnest($1::uuid[]), unnest($2::timestamptz[]), unnest($3::timestamptz[]), NULL, NULL, NULL, $4, $5, $6, unnest($7::uuid[])
                ON CONFLICT DO NOTHING"#,
         )
         .bind(&ids)
@@ -6549,7 +6561,7 @@ pub async fn add_cycle_issues_inner(
         .bind(project_id)
         .bind(cycle_workspace_id)
         .bind(cycle_id)
-        .bind(&issue_texts)
+        .bind(&issue_ids)
         .execute(&pre.pool)
         .await
         .map_err(|error| db_write_error(error, "cycle-issues-add-insert"))?;
@@ -6673,17 +6685,17 @@ pub fn coerce_new_issue_id(value: &Value) -> Result<uuid::Uuid, Denial> {
     }
 }
 
-/// The raw value as INSERT text (`unnest($::text[])::uuid`): UUID strings
-/// verbatim; ints/bools in Python `str()` form (`True`, not `true`) so
-/// `uuid_in` fails them exactly like the ORM's raw bind; null → NULL.
-pub fn issue_raw_text(value: &Value) -> Option<String> {
+/// Python `str()` of a raw id value, for activity payloads that stringify
+/// the request value rather than the folded id (`str(new_cycle_id)` in the
+/// transfer move entries): strings verbatim, ints/bools in `str()` form
+/// (`True`, not `true`).
+pub fn raw_id_text(value: &Value) -> String {
     match value {
-        Value::Null => None,
-        Value::String(s) => Some(s.clone()),
-        Value::Bool(true) => Some("True".to_owned()),
-        Value::Bool(false) => Some("False".to_owned()),
-        Value::Number(_) => Some(py_repr(value)),
-        Value::Array(_) | Value::Object(_) => Some(py_repr(value)),
+        Value::Null => "None".to_owned(),
+        Value::String(s) => s.clone(),
+        Value::Bool(true) => "True".to_owned(),
+        Value::Bool(false) => "False".to_owned(),
+        Value::Number(_) | Value::Array(_) | Value::Object(_) => py_repr(value),
     }
 }
 
@@ -7250,6 +7262,10 @@ pub async fn transfer_cycle_issues_inner(
         Some(id) => id,
         None => return Err(Denial::ServerError),
     };
+    // The move activity stringifies the RAW request value
+    // (`str(new_cycle_id)`), not the folded lookup id: an uppercase UUID
+    // stays uppercase, an int/bool renders in `str()` form.
+    let new_cycle_text = raw_id_text(new_raw);
     // Target lookup + guard (`:59-66`): missing → 500 (ported bug T1),
     // ended → 400, dateless → proceeds.
     let target: Option<sqlx::postgres::PgRow> = sqlx::query(queries::TRANSFER_CYCLE_LOOKUP_SQL)
@@ -7414,7 +7430,7 @@ pub async fn transfer_cycle_issues_inner(
         move_ids.push(bridge_id);
         activity.push(pidash_jobs::v1_cycles_modules::publish::CycleMove::new(
             &cycle_id.to_string(),
-            &new_cycle_id.to_string(),
+            &new_cycle_text,
             &issue_id.to_string(),
         ));
     }
@@ -9318,6 +9334,51 @@ mod tests {
         assert!(
             dump.contains(r#""updated_at": "2026-10-01T07:07:25+00:00""#),
             "{dump}"
+        );
+    }
+
+    #[test]
+    fn bridge_dump_renders_raw_issue_value() {
+        // The dump stringifies the RAW request value, not the folded id:
+        // protected types pass through as-is, strings verbatim.
+        let mk = |raw: Value| CreatedBridge {
+            id: uuid::Uuid::nil(),
+            created_at: chrono::DateTime::from_timestamp(0, 0)
+                .expect("epoch")
+                .to_utc(),
+            updated_at: chrono::DateTime::from_timestamp(0, 0)
+                .expect("epoch")
+                .to_utc(),
+            created_by: None,
+            updated_by: None,
+            project_id: uuid::Uuid::nil(),
+            workspace_id: uuid::Uuid::nil(),
+            cycle_id: uuid::Uuid::nil(),
+            issue_id: uuid::Uuid::from_u128(5),
+            issue_raw: raw,
+        };
+        let dump = render_bridge_dump(&[mk(Value::from(5))]);
+        assert!(dump.contains(r#""issue": 5"#), "{dump}");
+        let dump = render_bridge_dump(&[mk(Value::Bool(true))]);
+        assert!(dump.contains(r#""issue": true"#), "{dump}");
+        let dump = render_bridge_dump(&[mk(Value::String(
+            "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA".to_owned(),
+        ))]);
+        assert!(
+            dump.contains(r#""issue": "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA""#),
+            "{dump}"
+        );
+    }
+
+    #[test]
+    fn raw_id_text_matches_python_str() {
+        assert_eq!(raw_id_text(&Value::from(5)), "5");
+        assert_eq!(raw_id_text(&Value::Bool(true)), "True");
+        assert_eq!(raw_id_text(&Value::Bool(false)), "False");
+        assert_eq!(raw_id_text(&Value::Null), "None");
+        assert_eq!(
+            raw_id_text(&Value::String("C000-URL".to_owned())),
+            "C000-URL"
         );
     }
 
