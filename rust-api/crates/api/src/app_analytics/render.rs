@@ -72,19 +72,50 @@
 //!   verified against live Django.
 //!
 //! Out of scope (sibling handler issues): workspace base analytics + the
-//! analytic-view viewset (PIDASHCONV-389), saved/export/default/project-stats
-//! (PIDASHCONV-399), project advance (PIDASHCONV-424, which reuses
-//! [`build_analytics_chart`] and the scope helpers here — same module, no
-//! fork), export-issues (PIDASHCONV-430). Query builders stay in
-//! `pidash_services::app_analytics::queries`, gates in [`super::gates`].
+//! analytic-view viewset (PIDASHCONV-389), export-issues (PIDASHCONV-430).
+//! Query builders stay in `pidash_services::app_analytics::queries`, gates in
+//! [`super::gates`].
 //! Handlers-B (PIDASHCONV-399) lives in this same module: the four
 //! owned routes `saved-analytic-view/<analytic_id>/` (GET),
 //! `export-analytics/` (POST), `default-analytics/` (GET) and
 //! `project-stats/` (GET) with their session-auth-then-gate order, plot
 //! COUNT/SUM shapes and DRF-byte rendering. Name-sharing with the
-//! advance shell resolved at merge: [`routes`] serves all seven paths,
+//! advance shell resolved at merge: [`routes`] serves all ten paths,
 //! `json_value_response` / `pool_owned` / `IssuesDenial` are the
 //! handlers-B spellings of the shared private helpers.
+//!
+//! Handlers-D (PIDASHCONV-424, this issue) lives here too: the three
+//! project advance routes of
+//! `apps/api/pi_dash/app/views/analytic/project_analytics.py` —
+//! `GET projects/<project_id>/advance-analytics[/-stats/-charts]/`
+//! (`ProjectAdvanceAnalyticsEndpoint.get`, `:85-96`,
+//! `ProjectAdvanceAnalyticsStatsEndpoint.get`, `:166-181`,
+//! `ProjectAdvanceAnalyticsChartEndpoint.get`, `:318-367`, plus
+//! `initialize_workspace`, `:32-43`) — reusing [`build_analytics_chart`]
+//! (with a project `extra_scope`), the scope helpers and the monthly
+//! zero-fill ([`completion_monthly_body`]) — same module, no fork.
+//! Fixture ids: FX-A-H-01 (these 3 routes), FX-A-Q-05 (query builders),
+//! FX-A-G-01 (these routes).
+//!
+//! Ported project quirks (also listed in the PR):
+//! - B3 (`project_analytics.py:320`): the chart `type` defaults to
+//!   `"projects"` but no `projects` branch exists, so a bare GET 400s.
+//! - B4 (`project_analytics.py:63-74` and siblings): the cycle/module
+//!   branches scope the through id-list with `base_filters` but drop the
+//!   route's `project_id` entirely (only the custom chart keeps both).
+//! - B5 (`project_analytics.py:253`): the daily branch counts
+//!   `count = created + completed`, so completed rows count twice.
+//! - The cycle/module chart lookups are global by id (no scoping); a
+//!   missing row or start date is `{"data":[],"schema":{}}`, while a
+//!   missing END date 500s (`cycle.end_date.date()` / `<= None`).
+//! - `?cycle_id=` (empty) is "present" (`GET.get` returns `""`), so it
+//!   400s on the UUID coercion; cycle wins over module (`if`/`elif`).
+//! - The stats method never reads `chart_period_range`: `?date_filter=`
+//!   is silently ignored there.
+//! - The Q-05 `project_completion_daily_sql` sketch is not valid SQL (it
+//!   quotes the Django lookup `"issue"."state__group"` verbatim); the
+//!   daily path owns the complete statement instead (services is
+//!   read-only for this layer).
 //!
 
 use std::collections::HashMap;
@@ -104,7 +135,7 @@ use crate::state::AppState;
 use super::gates::{decide_gate, gate_for, tenant_context, GateOutcome};
 use crate::app_issues::{fetch_json_rows, query_last, Denial as IssuesDenial, QueryMap};
 use pidash_auth::permissions::allow::AllowFacts;
-use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
+use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_db::issue_filters::issue_filters_get;
 use pidash_services::app_analytics::queries as q;
 use pidash_types::WorkspaceId;
@@ -118,11 +149,18 @@ use pidash_types::WorkspaceId;
 pub const PATH_ADVANCE: &str = "workspaces/<slug>/advance-analytics/";
 pub const PATH_STATS: &str = "workspaces/<slug>/advance-analytics-stats/";
 pub const PATH_CHARTS: &str = "workspaces/<slug>/advance-analytics-charts/";
+/// Canonical gate-table paths for the three project advance rows
+/// (PIDASHCONV-424, handlers-D).
+pub const PATH_PROJECT_ADVANCE: &str = "workspaces/<slug>/projects/<id>/advance-analytics/";
+pub const PATH_PROJECT_STATS: &str = "workspaces/<slug>/projects/<id>/advance-analytics-stats/";
+pub const PATH_PROJECT_CHARTS: &str = "workspaces/<slug>/projects/<id>/advance-analytics-charts/";
 
 /// Register the owned D-35 analytic paths: the three workspace
 /// advance-analytics GETs (PIDASHCONV-414, handlers-C) plus the four
 /// handlers-B routes (PIDASHCONV-399) — saved-analytic-view GET,
-/// export-analytics POST, default-analytics GET, project-stats GET.
+/// export-analytics POST, default-analytics GET, project-stats GET —
+/// plus the three project advance-analytics GETs (PIDASHCONV-424,
+/// handlers-D).
 /// Owned methods serve from Rust; everything else proxies to Django (its
 /// 401-anon-before-405 and DRF metadata live there) — the `app_cycles`
 /// precedent. Sibling handler issues extend this merge; merges keep both
@@ -140,6 +178,18 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/workspaces/{slug}/advance-analytics-charts/",
             owned(axum::routing::get(charts_get), &["GET"]),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/advance-analytics/",
+            owned(axum::routing::get(project_advance_get), &["GET"]),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/advance-analytics-stats/",
+            owned(axum::routing::get(project_advance_stats_get), &["GET"]),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/advance-analytics-charts/",
+            owned(axum::routing::get(project_advance_charts_get), &["GET"]),
         )
         .route(
             "/api/workspaces/{slug}/saved-analytic-view/{analytic_id}/",
@@ -208,6 +258,16 @@ pub const INVALID_TAB_BODY: &str = r#"{"message":"Invalid tab"}"#;
 /// `{"message": "Invalid type"}` 400 (`advance.py:351`) in DRF's compact
 /// rendering (same caveat as [`INVALID_TAB_BODY`]).
 pub const INVALID_TYPE_BODY: &str = r#"{"message":"Invalid type"}"#;
+/// `Project.resolve` miss (`Http404("Project not found")`,
+/// `project.py:218`): DRF propagates the args
+/// (`NotFound("Project not found")`), rendered compact with a lowercase
+/// `detail` key (verified against live Django; the `v1_projects`
+/// `{"Detail": ...}` spelling does not match this path).
+pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
+/// Empty chart body when cycle/module/project dates are missing
+/// (`project_analytics.py:201,213,221`) in DRF's compact rendering (the
+/// Q-05 builder const keeps spaces and is not used for the body).
+pub const EMPTY_PROJECT_CHART_BODY: &str = r#"{"data":[],"schema":{}}"#;
 /// DRF's rendering of the `build_analytics_chart` `ValidationError`
 /// (`rest_framework.exceptions.ValidationError` is answered by DRF's own
 /// `exception_handler`, not the view's `handle_exception` branch): a bare
@@ -232,6 +292,8 @@ pub(crate) enum Denial {
     InvalidDetail,
     /// 404, `ObjectDoesNotExist` branch.
     NotFound,
+    /// 404, `Project.resolve` miss on a non-UUID project identifier.
+    ProjectNotFound,
     /// 500, generic branch.
     ServerError,
     /// A pre-rendered exact body with its status.
@@ -247,6 +309,7 @@ impl Denial {
             Denial::InvalidType => (StatusCode::BAD_REQUEST, INVALID_TYPE_BODY.to_owned()),
             Denial::InvalidDetail => (StatusCode::BAD_REQUEST, INVALID_DETAIL_BODY.to_owned()),
             Denial::NotFound => (StatusCode::NOT_FOUND, NOT_FOUND_BODY.to_owned()),
+            Denial::ProjectNotFound => (StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
@@ -350,6 +413,109 @@ fn check_gate(method: &str, path: &str, slug: &str, role: Option<i16>) -> Result
         _ => Err(Denial::Forbidden),
     }
 }
+
+/// Resolve the slug-or-UUID `project_id` kwarg (`_rewrite_project_kwarg`,
+/// `app/views/base.py:49-77`, via `Project.resolve`,
+/// `db/models/project.py:191-219`): UUIDs pass through unverified (the gate
+/// 403s unknown ones); other identifiers match `identifier = UPPER(TRIM(raw))`
+/// in the workspace; misses are `Http404("Project not found")`. Anonymous
+/// callers skip the rewrite ([`actor`] denies first) so the slug-existence
+/// oracle stays closed — the `v1_projects` precedent (PIDASHCONV-372).
+async fn resolve_project_id(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    raw: &str,
+) -> Result<uuid::Uuid, Denial> {
+    if let Ok(id) = raw.parse::<uuid::Uuid>() {
+        return Ok(id);
+    }
+    let upper = raw.trim().to_uppercase();
+    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
+        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
+           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
+    )
+    .bind(slug)
+    .bind(upper)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+}
+
+/// The active project-membership role for the PROJECT-level gates:
+/// `member=user, workspace__slug=slug, project_id=project_id, is_active=True`
+/// (`app/permissions/base.py:53-59`) — the `app_cycles` precedent
+/// (soft-deleted rows excluded on both sides).
+async fn project_role(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> Result<Option<i16>, Denial> {
+    let row: Option<(Option<i16>,)> = sqlx::query_as(
+        r#"SELECT pm.role FROM project_members pm
+           JOIN workspaces w ON w.id = pm.workspace_id AND w.deleted_at IS NULL
+           WHERE w.slug = $1 AND pm.project_id = $2 AND pm.member_id = $3
+             AND pm.is_active AND pm.deleted_at IS NULL"#,
+    )
+    .bind(slug)
+    .bind(project_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(row.and_then(|row| row.0))
+}
+
+/// Build the gate facts for a project advance route: PROJECT-level
+/// ADMIN/MEMBER (advance + stats) or ADMIN/MEMBER/GUEST (charts), with the
+/// workspace-admin override (`app/permissions/base.py:61-78`, FX-A-G-01).
+/// `allowed` carries the route's roles; `ws_role` / `project_role` are the
+/// active membership rows (any role).
+fn project_facts(
+    slug: &str,
+    ws_role: Option<i16>,
+    project_role: Option<i16>,
+    allowed: &[i32],
+) -> AllowFacts {
+    AllowFacts {
+        workspace: WorkspaceId::from(slug),
+        authenticated: true,
+        is_workspace_member: ws_role.is_some(),
+        has_allowed_workspace_role: false,
+        is_creator: false,
+        has_allowed_project_role: project_role
+            .map(i32::from)
+            .is_some_and(|role| allowed.contains(&role)),
+        is_project_member: project_role.is_some(),
+        is_workspace_admin: ws_role.map(i32::from) == Some(ROLE_ADMIN),
+    }
+}
+
+/// Enforce the gate-table row for one project advance path: anonymous never
+/// reaches here ([`actor`] denied first); a deny answers the decorator 403.
+fn check_project_gate(
+    path: &str,
+    slug: &str,
+    ws_role: Option<i16>,
+    project_role: Option<i16>,
+    allowed: &[i32],
+) -> Result<(), Denial> {
+    let row = super::gates::gate_for("GET", path).ok_or(Denial::ServerError)?;
+    let scope = super::gates::tenant_context(slug);
+    match super::gates::decide_gate(
+        &row.gate,
+        &scope,
+        &project_facts(slug, ws_role, project_role, allowed),
+    ) {
+        super::gates::GateOutcome::Allow => Ok(()),
+        _ => Err(Denial::Forbidden),
+    }
+}
+
+/// Allowed roles per project advance route (`project_analytics.py:84,165,317`).
+const PROJECT_ADMIN_MEMBER: &[i32] = &[ROLE_ADMIN, ROLE_MEMBER];
+const PROJECT_ADMIN_MEMBER_GUEST: &[i32] = &[ROLE_ADMIN, ROLE_MEMBER, ROLE_GUEST];
 
 // ---------------------------------------------------------------------------
 // Filters: get_analytics_filters + date ranges
@@ -1072,7 +1238,8 @@ async fn charts_get(
             .map(String::as_str)
             .unwrap_or(q::DEFAULT_CHART_X_AXIS);
         let group_by = params.get("group_by").map(String::as_str);
-        let body = build_analytics_chart(pool, &slug, &actor.id, &ctx, x_axis, group_by).await?;
+        let body =
+            build_analytics_chart(pool, &slug, &actor.id, &ctx, x_axis, group_by, "").await?;
         return Ok(json_response(StatusCode::OK, body));
     }
     if chart_type == "work-items" {
@@ -1279,54 +1446,13 @@ async fn work_item_completion_chart(
         stats.insert(month.format("%Y-%m-%d").to_string(), (created, completed));
     }
     // The zero-fill walks `current_month` from `start_date` through the
-    // current month-start (`advance.py:287-309`). `start_date` is the
-    // workspace month-start, OVERWRITTEN as-is by the period start when
-    // `chart_period_range` is set (`advance.py:267-270` — no month-start
-    // normalization, ported quirk: a mid-month start both empties the loop
-    // when it falls after the 1st and can 500 on the day-preserving month
-    // step, e.g. Aug 31 -> Sept 31, exactly like Python's `replace` raising
-    // `ValueError` into the generic 500). Keys after the first are
-    // therefore not necessarily month-starts and never match the
-    // month-keyed stats dict (count 0 there).
-    let mut current = match ctx.period {
+    // current month-start (`advance.py:287-309`) — shared with the project
+    // chart (PIDASHCONV-424); see [`completion_monthly_body`].
+    let first = match ctx.period {
         Some((period_start, _)) => period_start,
         None => start,
     };
-    let last_month = now.date_naive().with_day(1).expect("month start");
-    let mut data = Vec::new();
-    while current <= last_month {
-        let key = current.format("%Y-%m-%d").to_string();
-        let (created, completed) = stats.get(&key).copied().unwrap_or((0, 0));
-        let mut row = Map::new();
-        row.insert("key".to_owned(), Value::from(key.clone()));
-        row.insert("name".to_owned(), Value::from(key));
-        row.insert("count".to_owned(), Value::from(created));
-        row.insert("completed_issues".to_owned(), Value::from(completed));
-        row.insert("created_issues".to_owned(), Value::from(created));
-        data.push(Value::Object(row));
-        // Day-preserving month step (`replace(year, month)`); an invalid
-        // day is the 500 above.
-        let (next_year, next_month) = if current.month() == 12 {
-            (current.year() + 1, 1)
-        } else {
-            (current.year(), current.month() + 1)
-        };
-        current = NaiveDate::from_ymd_opt(next_year, next_month, current.day())
-            .ok_or(Denial::ServerError)?;
-    }
-    let mut schema = Map::new();
-    schema.insert(
-        "completed_issues".to_owned(),
-        Value::from(q::COMPLETION_SCHEMA_COMPLETED),
-    );
-    schema.insert(
-        "created_issues".to_owned(),
-        Value::from(q::COMPLETION_SCHEMA_CREATED),
-    );
-    let mut out = Map::new();
-    out.insert("data".to_owned(), Value::Array(data));
-    out.insert("schema".to_owned(), Value::Object(schema));
-    Ok(Value::Object(out).to_string())
+    completion_monthly_body(&stats, first, now)
 }
 
 // ---------------------------------------------------------------------------
@@ -1622,7 +1748,9 @@ fn chart_joins(axis: &Axis, group: Option<&Axis>) -> String {
 /// the sibling chart paths, fetch plans aside) grouped by the x axis —
 /// simply, or per group when `group_by` is set — with
 /// `Count("id", distinct=True)`. Shared with the project advance chart
-/// path (PIDASHCONV-424) from this module — no fork.
+/// path (PIDASHCONV-424) from this module — no fork: the project path
+/// passes its `.filter(project_id=...)` (+ optional cycle/module id-list)
+/// predicate as `extra_scope` (empty on the workspace path).
 pub(crate) async fn build_analytics_chart(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -1630,6 +1758,7 @@ pub(crate) async fn build_analytics_chart(
     ctx: &FilterCtx,
     x_axis: &str,
     group_by: Option<&str>,
+    extra_scope: &str,
 ) -> Result<String, Denial> {
     // `if x_axis not in x_axis_mapper: raise ValidationError(...)`.
     let axis = axis_for(x_axis).ok_or_else(|| {
@@ -1661,8 +1790,13 @@ pub(crate) async fn build_analytics_chart(
     };
     // Queryset filters apply in this order: base scope, the axis additional
     // filters, then the group-axis additional filters (`build_chart.py`).
+    // The project path's predicate (a conjunction like the rest) appends
+    // last; AND order is immaterial.
     let group_filter = group.as_ref().map(|axis| axis.filter).unwrap_or("");
-    let scope = format!("{base}{}{group_filter}{date_pred}", axis.filter);
+    let scope = format!(
+        "{base}{}{group_filter}{date_pred}{extra_scope}",
+        axis.filter
+    );
     let joins = chart_joins(&axis, group.as_ref());
 
     if let Some(group) = group {
@@ -1840,6 +1974,572 @@ async fn grouped_chart_response(
     let mut out = Map::new();
     out.insert("data".to_owned(), Value::Array(arr));
     out.insert("schema".to_owned(), Value::Object(schema_map));
+    Ok(Value::Object(out).to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Project advance shell (PIDASHCONV-424, handlers-D)
+// ---------------------------------------------------------------------------
+
+/// JOINs for the stats assignee annotations (`assignees__display_name` /
+/// `assignees__id` / avatar `Case`, `project_analytics.py:134-153`): the M2M
+/// through rows plus their users, both LEFT (a missing assignee is the NULL
+/// bucket, not a dropped row) — the handlers-B `assignee_joins` precedent.
+/// No deleted guard on the through join there either (probe-verified below).
+pub const ASSIGNEE_JOINS: &str =
+    " LEFT OUTER JOIN \"issue_assignees\" ON (\"issues\".\"id\" = \"issue_assignees\".\"issue_id\") \
+     LEFT OUTER JOIN \"users\" ON (\"issue_assignees\".\"assignee_id\" = \"users\".\"id\")";
+
+/// Inline one validated UUID as a quoted literal (the
+/// [`FilterCtx::checked_id_list`] precedent: parse-validated, so quoting is
+/// exact and cannot break out of the string).
+fn uuid_literal(id: &uuid::Uuid) -> String {
+    format!("'{}'", id.as_hyphenated())
+}
+
+/// The `?cycle_id=` / `?module_id=` branch (`project_analytics.py:63-74` and
+/// siblings): cycle wins when both are present (`if`/`elif`); `Plain` keeps
+/// the route's `project_id` scoping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThroughBranch {
+    Plain,
+    Cycle(uuid::Uuid),
+    Module(uuid::Uuid),
+}
+
+/// Read the branch off the query params. An empty value is still "present"
+/// (`request.GET.get` returns `""`, which `is not None`), so it 400s on the
+/// UUID coercion exactly like any malformed id (the `handle_exception`
+/// `ValidationError` branch).
+fn through_branch(params: &HashMap<String, String>) -> Result<ThroughBranch, Denial> {
+    if let Some(raw) = params.get("cycle_id") {
+        return raw
+            .parse::<uuid::Uuid>()
+            .map(ThroughBranch::Cycle)
+            .map_err(|_| Denial::InvalidDetail);
+    }
+    if let Some(raw) = params.get("module_id") {
+        return raw
+            .parse::<uuid::Uuid>()
+            .map(ThroughBranch::Module)
+            .map_err(|_| Denial::InvalidDetail);
+    }
+    Ok(ThroughBranch::Plain)
+}
+
+/// The through-table id list for one branch
+/// (`CycleIssue.objects.filter(**base_filters, cycle_id=...)` /
+/// `ModuleIssue...`, `project_analytics.py:64-72`): the Q-05
+/// [`q::project_through_ids_sql`] shell with the through-table joins spliced
+/// in. The through models extend `ProjectBaseModel` (own `project` +
+/// `workspace` columns), so their `base_filters` scope is exactly
+/// [`cycle_like_scope`]. `Plain` has no list (empty string, unused).
+fn through_ids_subquery(branch: ThroughBranch, ctx: &FilterCtx) -> Result<String, Denial> {
+    let (table, fk_col, id) = match branch {
+        ThroughBranch::Cycle(id) => ("cycle_issues", "cycle_id", id),
+        ThroughBranch::Module(id) => ("module_issues", "module_id", id),
+        ThroughBranch::Plain => return Ok(String::new()),
+    };
+    let base = cycle_like_scope(table, ctx)?;
+    let shell = q::project_through_ids_sql(table, fk_col, &base, &uuid_literal(&id));
+    Ok(with_joins(shell, table, &cycle_like_joins(table)))
+}
+
+/// `GET workspaces/<slug>/projects/<id>/advance-analytics/`
+/// (`ProjectAdvanceAnalyticsEndpoint.get`, `project_analytics.py:84-94`).
+async fn project_advance_get(
+    State(state): State<AppState>,
+    extension: Option<axum::Extension<SessionHandle>>,
+    Path((slug, project_id_raw)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Response, Denial> {
+    let actor = actor(&state, extension).await?;
+    let pool = pool_of(&state)?;
+    let project_id = resolve_project_id(pool, &slug, &project_id_raw).await?;
+    let ws_role = workspace_role(pool, &slug, &actor.id).await?;
+    let pm_role = project_role(pool, &slug, &project_id, &actor.id).await?;
+    check_project_gate(
+        PATH_PROJECT_ADVANCE,
+        &slug,
+        ws_role,
+        pm_role,
+        PROJECT_ADMIN_MEMBER,
+    )?;
+
+    // `initialize_workspace(slug, type="analytics")` (project_analytics.py:32-43).
+    let now = Utc::now();
+    let ctx = FilterCtx::parse(&params, "analytics", now);
+    let branch = through_branch(&params)?;
+    let body = project_overview_data(pool, &slug, &actor.id, &ctx, &project_id, branch).await?;
+    Ok(json_response(StatusCode::OK, body))
+}
+
+/// `get_work_items_stats` (`project_analytics.py:58-82`): the base scope plus
+/// the route's `project_id` — or the through-table id list on the
+/// cycle/module branches (which carry `base_filters` but NO project scoping,
+/// ported quirk B4) — plus one `state__group` filter per key, in
+/// [`q::PROJECT_WORK_ITEM_KEYS`] order.
+async fn project_overview_data(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    user_id: &uuid::Uuid,
+    ctx: &FilterCtx,
+    project_id: &uuid::Uuid,
+    branch: ThroughBranch,
+) -> Result<String, Denial> {
+    let base = issue_scope(ctx)?;
+    let window = ctx.window_ph();
+    let wph = || {
+        window
+            .as_ref()
+            .map(|(gte, lte)| (gte.as_str(), lte.as_str()))
+    };
+    let narrowing = match branch {
+        ThroughBranch::Plain => format!(
+            " AND \"issues\".\"project_id\" = {}",
+            uuid_literal(project_id)
+        ),
+        _ => format!(
+            " AND \"issues\".\"id\" IN ({})",
+            through_ids_subquery(branch, ctx)?
+        ),
+    };
+    let mut out = Map::new();
+    for (key, group) in q::PROJECT_WORK_ITEM_KEYS {
+        let mut scope = format!("{base}{narrowing}");
+        if let Some(group) = group {
+            scope.push_str(&format!(" AND \"states\".\"group\" = '{group}'"));
+        }
+        let sql = with_joins(
+            q::project_filtered_count_sql("issues", &scope, wph()),
+            "issues",
+            ISSUE_JOINS,
+        );
+        let count = count_one(pool, &sql, slug, user_id, ctx, RangeKind::Window).await?;
+        out.insert((*key).to_owned(), count_obj(count));
+    }
+    Ok(Value::Object(out).to_string())
+}
+
+/// `ProjectAdvanceAnalyticsStatsEndpoint.get`
+/// (`project_analytics.py:165-179`).
+async fn project_advance_stats_get(
+    State(state): State<AppState>,
+    extension: Option<axum::Extension<SessionHandle>>,
+    Path((slug, project_id_raw)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Response, Denial> {
+    let actor = actor(&state, extension).await?;
+    let pool = pool_of(&state)?;
+    let project_id = resolve_project_id(pool, &slug, &project_id_raw).await?;
+    let ws_role = workspace_role(pool, &slug, &actor.id).await?;
+    let pm_role = project_role(pool, &slug, &project_id, &actor.id).await?;
+    check_project_gate(
+        PATH_PROJECT_STATS,
+        &slug,
+        ws_role,
+        pm_role,
+        PROJECT_ADMIN_MEMBER,
+    )?;
+
+    // `initialize_workspace(slug, type="chart")` (project_analytics.py:32-43).
+    let now = Utc::now();
+    let ctx = FilterCtx::parse(&params, "chart", now);
+    let stats_type = params
+        .get("type")
+        .map(String::as_str)
+        .unwrap_or("work-items");
+    if stats_type != "work-items" {
+        return Err(Denial::InvalidType);
+    }
+    let branch = through_branch(&params)?;
+    let body = project_assignee_stats(pool, &slug, &actor.id, &ctx, &project_id, branch).await?;
+    Ok(json_response(StatusCode::OK, body))
+}
+
+/// `get_work_items_stats` (`project_analytics.py:119-163`):
+/// `values("display_name", "assignee_id", "avatar_url")` + five
+/// `Count(id, filter=Q(...), distinct=True)` `.order_by("display_name")`.
+/// NOTE: the method never reads `chart_period_range`, so `?date_filter=` is
+/// silently ignored here (like the workspace stats dead-method quirk).
+async fn project_assignee_stats(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    user_id: &uuid::Uuid,
+    ctx: &FilterCtx,
+    project_id: &uuid::Uuid,
+    branch: ThroughBranch,
+) -> Result<String, Denial> {
+    let base = issue_scope(ctx)?;
+    let sub = match branch {
+        ThroughBranch::Plain => None,
+        _ => Some(through_ids_subquery(branch, ctx)?),
+    };
+    let shell = q::project_assignee_stats_sql(&base, &uuid_literal(project_id), sub.as_deref());
+    let joins = format!("{ISSUE_JOINS}{ASSIGNEE_JOINS}");
+    let sql = with_joins(shell, "issues", &joins);
+    type AssigneeStatRow = (
+        Option<String>,
+        Option<uuid::Uuid>,
+        Option<String>,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    );
+    let rows: Vec<AssigneeStatRow> = sqlx::query_as(&sql)
+        .bind(slug)
+        .bind(user_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let mut arr = Vec::with_capacity(rows.len());
+    for (
+        display_name,
+        assignee_id,
+        avatar_url,
+        cancelled,
+        completed,
+        backlog,
+        un_started,
+        started,
+    ) in rows
+    {
+        let mut row = Map::new();
+        row.insert(
+            "display_name".to_owned(),
+            display_name.map(Value::from).unwrap_or(Value::Null),
+        );
+        row.insert(
+            "assignee_id".to_owned(),
+            assignee_id
+                .map(|id| Value::from(id.to_string()))
+                .unwrap_or(Value::Null),
+        );
+        row.insert(
+            "avatar_url".to_owned(),
+            avatar_url.map(Value::from).unwrap_or(Value::Null),
+        );
+        row.insert("cancelled_work_items".to_owned(), Value::from(cancelled));
+        row.insert("completed_work_items".to_owned(), Value::from(completed));
+        row.insert("backlog_work_items".to_owned(), Value::from(backlog));
+        row.insert("un_started_work_items".to_owned(), Value::from(un_started));
+        row.insert("started_work_items".to_owned(), Value::from(started));
+        arr.push(Value::Object(row));
+    }
+    Ok(Value::Array(arr).to_string())
+}
+
+/// `ProjectAdvanceAnalyticsChartEndpoint.get`
+/// (`project_analytics.py:317-367`).
+async fn project_advance_charts_get(
+    State(state): State<AppState>,
+    extension: Option<axum::Extension<SessionHandle>>,
+    Path((slug, project_id_raw)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Response, Denial> {
+    let actor = actor(&state, extension).await?;
+    let pool = pool_of(&state)?;
+    let project_id = resolve_project_id(pool, &slug, &project_id_raw).await?;
+    let ws_role = workspace_role(pool, &slug, &actor.id).await?;
+    let pm_role = project_role(pool, &slug, &project_id, &actor.id).await?;
+    check_project_gate(
+        PATH_PROJECT_CHARTS,
+        &slug,
+        ws_role,
+        pm_role,
+        PROJECT_ADMIN_MEMBER_GUEST,
+    )?;
+
+    // `initialize_workspace(slug, type="chart")` (project_analytics.py:32-43).
+    let now = Utc::now();
+    let ctx = FilterCtx::parse(&params, "chart", now);
+    let chart_type = params.get("type").map(String::as_str).unwrap_or("projects");
+
+    if chart_type == "custom-work-items" {
+        // `x_axis` defaults to `"PRIORITY"` (`project_analytics.py:322`).
+        let x_axis = params
+            .get("x_axis")
+            .map(String::as_str)
+            .unwrap_or(q::DEFAULT_CHART_X_AXIS);
+        let group_by = params.get("group_by").map(String::as_str);
+        let branch = through_branch(&params)?;
+        // Unlike the other branches, the custom path KEEPS the route's
+        // `project_id` scoping alongside the optional id list
+        // (`project_analytics.py:327-345`).
+        let mut extra = format!(
+            " AND \"issues\".\"project_id\" = {}",
+            uuid_literal(&project_id)
+        );
+        if branch != ThroughBranch::Plain {
+            extra.push_str(&format!(
+                " AND \"issues\".\"id\" IN ({})",
+                through_ids_subquery(branch, &ctx)?
+            ));
+        }
+        let body =
+            build_analytics_chart(pool, &slug, &actor.id, &ctx, x_axis, group_by, &extra).await?;
+        return Ok(json_response(StatusCode::OK, body));
+    }
+    if chart_type == "work-items" {
+        let branch = through_branch(&params)?;
+        let body = project_completion_chart(pool, &slug, &actor.id, &ctx, &project_id, branch, now)
+            .await?;
+        return Ok(json_response(StatusCode::OK, body));
+    }
+    Err(Denial::InvalidType)
+}
+
+/// `work_item_completion_chart` (`project_analytics.py:183-315`): the daily
+/// through-table chart on the cycle/module branches, the monthly
+/// `TruncMonth` chart otherwise. The cycle/module lookups are global by id
+/// (no workspace/project scoping — `Cycle.objects.filter(id=...)`); a missing
+/// row or start date is the empty body, while a missing END date 500s
+/// (`cycle.end_date.date()` / the `<= None` comparison raising into the
+/// generic branch).
+#[allow(clippy::too_many_arguments)]
+async fn project_completion_chart(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    user_id: &uuid::Uuid,
+    ctx: &FilterCtx,
+    project_id: &uuid::Uuid,
+    branch: ThroughBranch,
+    now: DateTime<Utc>,
+) -> Result<String, Denial> {
+    match branch {
+        ThroughBranch::Cycle(id) => {
+            type CycleDatesRow = (Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+            let row: Option<CycleDatesRow> = sqlx::query_as(
+                "SELECT \"start_date\", \"end_date\" FROM \"cycles\" WHERE \"id\" = $1 AND \"deleted_at\" IS NULL",
+            )
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+            let (start, end) = match row {
+                Some((Some(start), end)) => (start.date_naive(), end),
+                _ => return Ok(EMPTY_PROJECT_CHART_BODY.to_owned()),
+            };
+            let end = end.map(|end| end.date_naive()).ok_or(Denial::ServerError)?;
+            project_completion_daily(
+                pool,
+                slug,
+                user_id,
+                ctx,
+                "cycle_issues",
+                "cycle_id",
+                &id,
+                start,
+                end,
+            )
+            .await
+        }
+        ThroughBranch::Module(id) => {
+            let row: Option<(Option<NaiveDate>, Option<NaiveDate>)> = sqlx::query_as(
+                "SELECT \"start_date\", \"target_date\" FROM \"modules\" WHERE \"id\" = $1 AND \"deleted_at\" IS NULL",
+            )
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+            let (start, end) = match row {
+                Some((Some(start), end)) => (start, end),
+                _ => return Ok(EMPTY_PROJECT_CHART_BODY.to_owned()),
+            };
+            let end = end.ok_or(Denial::ServerError)?;
+            project_completion_daily(
+                pool,
+                slug,
+                user_id,
+                ctx,
+                "module_issues",
+                "module_id",
+                &id,
+                start,
+                end,
+            )
+            .await
+        }
+        ThroughBranch::Plain => {
+            // `Project.objects.filter(id=project_id).first()` (default manager;
+            // unreachable past the gate for live projects, but a soft-deleted
+            // project keeps its membership rows, so the MISS branch is live:
+            // `project.created_at` on `None` is the generic 500).
+            let row: Option<(Option<DateTime<Utc>>,)> = sqlx::query_as(
+                "SELECT \"created_at\" FROM \"projects\" WHERE \"id\" = $1 AND \"deleted_at\" IS NULL",
+            )
+            .bind(project_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+            let start = match row {
+                Some((Some(created),)) => created.date_naive().with_day(1).expect("month start"),
+                Some((None,)) => return Ok(EMPTY_PROJECT_CHART_BODY.to_owned()),
+                None => return Err(Denial::ServerError),
+            };
+            let mut scope = issue_scope(ctx)?;
+            scope.push_str(&format!(
+                " AND \"issues\".\"project_id\" = {}",
+                uuid_literal(project_id)
+            ));
+            let period = ctx.period_ph();
+            let pph = || {
+                period
+                    .as_ref()
+                    .map(|(gte, lte)| (gte.as_str(), lte.as_str()))
+            };
+            let shell = q::advance_completion_monthly_sql(&scope, pph());
+            let sql = with_joins(shell, "issues", ISSUE_JOINS);
+            let rows: Vec<(DateTime<Utc>, i64, i64)> =
+                bind_range!(sqlx::query_as(&sql), slug, user_id, ctx, RangeKind::Period)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
+            let mut stats = HashMap::new();
+            for (month, created, completed) in rows {
+                stats.insert(month.format("%Y-%m-%d").to_string(), (created, completed));
+            }
+            let first = match ctx.period {
+                Some((period_start, _)) => period_start,
+                None => start,
+            };
+            completion_monthly_body(&stats, first, now)
+        }
+    }
+}
+
+/// The cycle/module daily branch (`project_analytics.py:223-258`):
+/// `values("created_at__date")` over the through rows (their OWN
+/// `created_at`), `created=Count(id)` / `completed=Count(id,
+/// filter=Q(issue__state__group="completed"))`, then a per-day zero-fill.
+/// NOTE: the Q-05 `project_completion_daily_sql` sketch is not valid SQL (it
+/// quotes the Django lookup `"issue"."state__group"` verbatim), so this path
+/// owns the complete statement: the completed count joins `issues` (plain
+/// forward join — Django never applies a related manager there) and `states`.
+/// Ported bug B5: `count = created + completed`, so completed rows count
+/// twice in `count`. No project scoping and no period filter here.
+#[allow(clippy::too_many_arguments)]
+async fn project_completion_daily(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    user_id: &uuid::Uuid,
+    ctx: &FilterCtx,
+    through_table: &str,
+    fk_col: &str,
+    fk_id: &uuid::Uuid,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<String, Denial> {
+    let base = cycle_like_scope(through_table, ctx)?;
+    let joins = format!(
+        "{0} LEFT OUTER JOIN \"issues\" ON (\"{1}\".\"issue_id\" = \"issues\".\"id\") \
+         LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\")",
+        cycle_like_joins(through_table),
+        through_table,
+    );
+    let sql = format!(
+        "SELECT \"{t}\".\"created_at\"::date AS \"created_at__date\", \
+         COUNT(\"{t}\".\"id\") AS \"created_count\", \
+         COUNT(\"{t}\".\"id\") FILTER (WHERE \"states\".\"group\" = 'completed') AS \"completed_count\" \
+         FROM \"{t}\"{joins} WHERE ({base} AND \"{t}\".\"{fk}\" = {lit}) \
+         GROUP BY \"{t}\".\"created_at\"::date ORDER BY \"{t}\".\"created_at\"::date",
+        t = through_table,
+        joins = joins,
+        base = base,
+        fk = fk_col,
+        lit = uuid_literal(fk_id),
+    );
+    let rows: Vec<(NaiveDate, i64, i64)> = sqlx::query_as(&sql)
+        .bind(slug)
+        .bind(user_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let mut stats = HashMap::new();
+    for (day, created, completed) in rows {
+        stats.insert(day.format("%Y-%m-%d").to_string(), (created, completed));
+    }
+    let mut data = Vec::new();
+    let mut current = start;
+    while current <= end {
+        let key = current.format("%Y-%m-%d").to_string();
+        let (created, completed) = stats.get(&key).copied().unwrap_or((0, 0));
+        let mut row = Map::new();
+        row.insert("key".to_owned(), Value::from(key.clone()));
+        row.insert("name".to_owned(), Value::from(key));
+        row.insert("count".to_owned(), Value::from(created + completed));
+        row.insert("completed_issues".to_owned(), Value::from(completed));
+        row.insert("created_issues".to_owned(), Value::from(created));
+        data.push(Value::Object(row));
+        current = current.succ_opt().ok_or(Denial::ServerError)?;
+    }
+    let mut schema = Map::new();
+    schema.insert(
+        "completed_issues".to_owned(),
+        Value::from(q::COMPLETION_SCHEMA_COMPLETED),
+    );
+    schema.insert(
+        "created_issues".to_owned(),
+        Value::from(q::COMPLETION_SCHEMA_CREATED),
+    );
+    let mut out = Map::new();
+    out.insert("data".to_owned(), Value::Array(data));
+    out.insert("schema".to_owned(), Value::Object(schema));
+    Ok(Value::Object(out).to_string())
+}
+
+/// Render the monthly zero-fill body shared by the workspace
+/// (`advance.py:287-309`) and project (`project_analytics.py:285-308`)
+/// completion charts: `first` is the loop start (the `created_at`
+/// month-start, OVERWRITTEN as-is by the period start when
+/// `chart_period_range` is set — no month-start normalization, ported quirk:
+/// a mid-month start both empties the loop when it falls after the 1st and
+/// can 500 on the day-preserving month step, e.g. Aug 31 -> Sept 31, exactly
+/// like Python's `replace` raising `ValueError` into the generic 500). Keys
+/// after the first are therefore not necessarily month-starts and never match
+/// the month-keyed stats dict (count 0 there).
+fn completion_monthly_body(
+    stats: &HashMap<String, (i64, i64)>,
+    first: NaiveDate,
+    now: DateTime<Utc>,
+) -> Result<String, Denial> {
+    let mut current = first;
+    let last_month = now.date_naive().with_day(1).expect("month start");
+    let mut data = Vec::new();
+    while current <= last_month {
+        let key = current.format("%Y-%m-%d").to_string();
+        let (created, completed) = stats.get(&key).copied().unwrap_or((0, 0));
+        let mut row = Map::new();
+        row.insert("key".to_owned(), Value::from(key.clone()));
+        row.insert("name".to_owned(), Value::from(key));
+        row.insert("count".to_owned(), Value::from(created));
+        row.insert("completed_issues".to_owned(), Value::from(completed));
+        row.insert("created_issues".to_owned(), Value::from(created));
+        data.push(Value::Object(row));
+        // Day-preserving month step (`replace(year, month)`); an invalid
+        // day is the 500 above.
+        let (next_year, next_month) = if current.month() == 12 {
+            (current.year() + 1, 1)
+        } else {
+            (current.year(), current.month() + 1)
+        };
+        current = NaiveDate::from_ymd_opt(next_year, next_month, current.day())
+            .ok_or(Denial::ServerError)?;
+    }
+    let mut schema = Map::new();
+    schema.insert(
+        "completed_issues".to_owned(),
+        Value::from(q::COMPLETION_SCHEMA_COMPLETED),
+    );
+    schema.insert(
+        "created_issues".to_owned(),
+        Value::from(q::COMPLETION_SCHEMA_CREATED),
+    );
+    let mut out = Map::new();
+    out.insert("data".to_owned(), Value::Array(data));
+    out.insert("schema".to_owned(), Value::Object(schema));
     Ok(Value::Object(out).to_string())
 }
 
@@ -3745,5 +4445,222 @@ mod tests {
         let rows = vec![(Some("high".to_owned()), None, 1)];
         let dist = distribution_from_count_rows(rows, "priority", false);
         assert_eq!(dist["high"], json!([{"dimension": "high", "count": 1}]));
+    }
+
+    // -- PIDASHCONV-424 (handlers-D) --------------------------------------
+
+    #[test]
+    fn project_gate_paths_match_gate_table() {
+        // The three project rows are PROJECT-level (FX-A-G-01): charts admits
+        // GUEST, the other two stop at MEMBER.
+        for (path, guest) in [
+            (PATH_PROJECT_ADVANCE, false),
+            (PATH_PROJECT_STATS, false),
+            (PATH_PROJECT_CHARTS, true),
+        ] {
+            let row = super::super::gates::gate_for("GET", path).expect("gate row");
+            match row.gate {
+                super::super::gates::Gate::Project { roles } => {
+                    assert!(roles.contains(&ROLE_ADMIN), "{path}");
+                    assert!(roles.contains(&ROLE_MEMBER), "{path}");
+                    assert_eq!(roles.contains(&ROLE_GUEST), guest, "{path}");
+                }
+                _ => panic!("{path} is not a project gate"),
+            }
+        }
+    }
+
+    #[test]
+    fn project_denial_bodies_are_byte_exact() {
+        let (status, body) = Denial::ProjectNotFound.status_and_body();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, PROJECT_NOT_FOUND_BODY);
+        assert_eq!(PROJECT_NOT_FOUND_BODY, r#"{"detail":"Project not found"}"#);
+        // The empty chart body is DRF-compact (no spaces).
+        assert_eq!(EMPTY_PROJECT_CHART_BODY, r#"{"data":[],"schema":{}}"#);
+        assert_eq!(
+            serde_json::from_str::<Value>(EMPTY_PROJECT_CHART_BODY).expect("json"),
+            json!({"data": [], "schema": {}}),
+        );
+    }
+
+    #[test]
+    fn through_branch_precedence_and_validation() {
+        let id = "12345678-1234-1234-1234-1234567890ab";
+        let params = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect::<HashMap<String, String>>()
+        };
+        // Cycle wins when both are present (`if`/`elif`).
+        assert!(matches!(
+            through_branch(&params(&[("cycle_id", id), ("module_id", id)])).expect("branch"),
+            ThroughBranch::Cycle(_)
+        ));
+        assert!(matches!(
+            through_branch(&params(&[("module_id", id)])).expect("branch"),
+            ThroughBranch::Module(_)
+        ));
+        assert_eq!(
+            through_branch(&params(&[])).expect("branch"),
+            ThroughBranch::Plain
+        );
+        // Malformed ids — including the empty-but-present value — 400 on the
+        // UUID coercion (the `ValidationError` branch).
+        for raw in ["nope", "", "123"] {
+            assert!(
+                matches!(
+                    through_branch(&params(&[("cycle_id", raw)])),
+                    Err(Denial::InvalidDetail)
+                ),
+                "{raw:?}"
+            );
+            assert!(
+                matches!(
+                    through_branch(&params(&[("module_id", raw)])),
+                    Err(Denial::InvalidDetail)
+                ),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn project_facts_follow_the_project_gate() {
+        // (ws role, project role, allowed, advance?, charts?)
+        let cases = [
+            (Some(20), Some(20), true, true), // admin member
+            (Some(15), Some(15), true, true), // member member
+            (Some(5), Some(5), false, true),  // guest: charts only
+            (None, None, false, false),       // outsider
+            (Some(20), Some(5), true, true),  // ws-admin override: any project row
+            (Some(20), None, false, false),   // ws admin without a project row still denies
+            (None, Some(15), true, true),     // project row alone suffices
+        ];
+        for (ws, pm, advance, charts) in cases {
+            let facts = project_facts("an-ws", ws, pm, PROJECT_ADMIN_MEMBER);
+            let row = super::super::gates::gate_for("GET", PATH_PROJECT_ADVANCE).expect("gate row");
+            let scope = super::super::gates::tenant_context("an-ws");
+            let outcome = super::super::gates::decide_gate(&row.gate, &scope, &facts);
+            assert_eq!(
+                outcome,
+                if advance {
+                    super::super::gates::GateOutcome::Allow
+                } else {
+                    super::super::gates::GateOutcome::Deny
+                },
+                "advance ws={ws:?} pm={pm:?}"
+            );
+            assert_eq!(
+                check_project_gate(
+                    PATH_PROJECT_CHARTS,
+                    "an-ws",
+                    ws,
+                    pm,
+                    PROJECT_ADMIN_MEMBER_GUEST
+                )
+                .is_ok(),
+                charts,
+                "charts ws={ws:?} pm={pm:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn through_ids_subquery_carries_base_scope() {
+        let ctx = FilterCtx::parse(&HashMap::new(), "analytics", utc(2026, 9, 30));
+        let id = uuid::Uuid::parse_str("12345678-1234-1234-1234-1234567890ab").expect("uuid");
+        let sub = through_ids_subquery(ThroughBranch::Cycle(id), &ctx).expect("subquery");
+        // The id list selects through issue ids over the spliced joins (the
+        // Q-05 shell leaves joins to the handler).
+        assert!(
+            sub.contains("SELECT \"issue_id\" FROM \"cycle_issues\""),
+            "{sub}"
+        );
+        assert!(sub.contains("INNER JOIN \"projects\""), "{sub}");
+        assert!(sub.contains("INNER JOIN \"project_members\""), "{sub}");
+        assert!(sub.contains("\"workspaces\".\"slug\" = $1"), "{sub}");
+        assert!(
+            sub.contains("\"cycle_id\" = '12345678-1234-1234-1234-1234567890ab'"),
+            "{sub}"
+        );
+        let sub = through_ids_subquery(ThroughBranch::Module(id), &ctx).expect("subquery");
+        assert!(sub.contains("FROM \"module_issues\""), "{sub}");
+        assert!(sub.contains("\"module_id\" = "), "{sub}");
+        assert_eq!(
+            through_ids_subquery(ThroughBranch::Plain, &ctx).expect("plain"),
+            String::new()
+        );
+    }
+
+    #[test]
+    fn uuid_literal_quotes_hyphenated() {
+        let id = uuid::Uuid::parse_str("12345678-1234-1234-1234-1234567890ab").expect("uuid");
+        assert_eq!(uuid_literal(&id), "'12345678-1234-1234-1234-1234567890ab'");
+    }
+
+    #[test]
+    fn project_work_item_keys_are_the_five() {
+        assert_eq!(
+            q::PROJECT_WORK_ITEM_KEYS
+                .iter()
+                .map(|(key, _)| *key)
+                .collect::<Vec<_>>(),
+            [
+                "total_work_items",
+                "started_work_items",
+                "backlog_work_items",
+                "un_started_work_items",
+                "completed_work_items",
+            ]
+        );
+    }
+
+    #[test]
+    fn completion_monthly_body_zero_fills_and_steps_months() {
+        let mut stats = HashMap::new();
+        stats.insert("2026-09-01".to_owned(), (3, 1));
+        // Plain month-start: one bucket per month through the current one.
+        let body = completion_monthly_body(
+            &stats,
+            NaiveDate::from_ymd_opt(2026, 9, 1).expect("date"),
+            utc(2026, 9, 30),
+        )
+        .expect("body");
+        let parsed: Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(
+            parsed["data"],
+            json!([{
+                "key": "2026-09-01",
+                "name": "2026-09-01",
+                "count": 3,
+                "completed_issues": 1,
+                "created_issues": 3,
+            }]),
+        );
+        assert_eq!(
+            parsed["schema"],
+            json!({"completed_issues": "completed_issues", "created_issues": "created_issues"}),
+        );
+        // Mid-month start after the 1st empties the loop outright (ported quirk).
+        let body = completion_monthly_body(
+            &stats,
+            NaiveDate::from_ymd_opt(2026, 9, 15).expect("date"),
+            utc(2026, 9, 30),
+        )
+        .expect("body");
+        let parsed: Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(parsed["data"], json!([]));
+        // Day-preserving step onto an invalid day is the generic 500 (Aug 31
+        // -> Sept 31, like Python's `replace` raising `ValueError`).
+        assert!(matches!(
+            completion_monthly_body(
+                &stats,
+                NaiveDate::from_ymd_opt(2026, 8, 31).expect("date"),
+                utc(2026, 10, 15),
+            ),
+            Err(Denial::ServerError)
+        ));
     }
 }
