@@ -601,4 +601,4 @@ export interface ParityDriver {
 export type RulesCommentMenuOption = "edit" | "copy_link" | "access_switch" | "fold" | "unfold" | "delete";
 
 /** Canonical issue-layout keys shared by both frontend drivers. */
-export type LayoutsLayoutKey = "list" | "kanban" | "calendar" | "spreadsheet" | "gantt";
+export type LayoutsLayoutKey = "list" | "kanban" | "calendar" | "spreadsheet" | "gantt_chart";

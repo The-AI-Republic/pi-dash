@@ -1253,7 +1253,13 @@ export class WebDriver implements ParityDriver {
   // --- control with an accessible toggle name; the peek panel is the
   // --- absolute right-side panel plus a peekIssueId URL param.
 
-  private static readonly LAYOUTS_ORDER: LayoutsLayoutKey[] = ["list", "kanban", "calendar", "spreadsheet", "gantt"];
+  private static readonly LAYOUTS_ORDER: LayoutsLayoutKey[] = [
+    "list",
+    "kanban",
+    "calendar",
+    "spreadsheet",
+    "gantt_chart",
+  ];
 
   // First contact with a freshly loaded issues page waits longer than the
   // shared budget: route compile plus the filter/issue fetch chains take

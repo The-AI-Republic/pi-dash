@@ -45,7 +45,13 @@ test(
     );
 
     await test.step("all five layouts are offered, list is active", async () => {
-      expect(await driver.layoutsOfferedLayouts()).toEqual(["list", "kanban", "calendar", "spreadsheet", "gantt"]);
+      expect(await driver.layoutsOfferedLayouts()).toEqual([
+        "list",
+        "kanban",
+        "calendar",
+        "spreadsheet",
+        "gantt_chart",
+      ]);
       expect(await driver.layoutsActiveLayout()).toEqual("list");
       await expect.poll(async () => driver.layoutsListVisible(), { timeout: 120_000 }).toEqual(true);
     });
@@ -54,7 +60,7 @@ test(
       { layout: "calendar", visible: () => driver.layoutsCalendarVisible() },
       { layout: "spreadsheet", visible: () => driver.layoutsSpreadsheetVisible() },
       { layout: "kanban", visible: () => driver.layoutsKanbanVisible() },
-      { layout: "gantt", visible: () => driver.layoutsGanttVisible() },
+      { layout: "gantt_chart", visible: () => driver.layoutsGanttVisible() },
     ] as const;
     for (const { layout, visible } of switches) {
       await test.step(`switch to ${layout} renders it and persists the choice`, async () => {
