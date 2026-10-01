@@ -2200,6 +2200,21 @@ export async function deleteServerDraft(
   if (!res.ok) throw new Error(`[parity] draft delete failed with HTTP ${res.status}.`);
 }
 
+/** Cycle/module view flags of one project; setup for flag-gated UI. */
+export async function serverProjectViews(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ cycleView: boolean; moduleView: boolean }> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project read failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as { cycle_view?: unknown; module_view?: unknown };
+  return { cycleView: record.cycle_view === true, moduleView: record.module_view === true };
+}
+
 /** Ids plus names of the workspace drafts as the server reports them. */
 export async function serverDrafts(
   workspaceSlug: string,
@@ -2220,3 +2235,74 @@ export async function serverDrafts(
   });
 }
 
+/** Create a project cycle; setup for flows that need cycle context. */
+export async function createServerCycle(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  payload: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerIssue> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`[parity] cycle create failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as { id?: unknown; name?: unknown };
+  if (typeof record.id !== "string" || typeof record.name !== "string")
+    throw new Error("[parity] created cycle carried no string id/name.");
+  return { id: record.id, name: record.name };
+}
+
+/** Delete a project cycle created for setup. */
+export async function deleteServerCycle(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchShared(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/`,
+    { method: "DELETE", headers: { cookie: sessionCookie } },
+    3
+  );
+  if (!res.ok) throw new Error(`[parity] cycle delete failed with HTTP ${res.status}.`);
+}
+
+/** Create a project module; setup for flows that need module context. */
+export async function createServerModule(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  payload: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerIssue> {
+  const res = await fetchShared(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`[parity] module create failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as { id?: unknown; name?: unknown };
+  if (typeof record.id !== "string" || typeof record.name !== "string")
+    throw new Error("[parity] created module carried no string id/name.");
+  return { id: record.id, name: record.name };
+}
+
+/** Delete a project module created for setup. */
+export async function deleteServerModule(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchShared(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/`,
+    { method: "DELETE", headers: { cookie: sessionCookie } },
+    3
+  );
+  if (!res.ok) throw new Error(`[parity] module delete failed with HTTP ${res.status}.`);
+}

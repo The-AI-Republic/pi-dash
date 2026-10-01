@@ -17,6 +17,7 @@ import {
   deleteServerIssue,
   deleteServerState,
   patchServerIssue,
+  serverCreateIssue,
   serverIssueRecord,
   serverIssueNames,
   serverIssues,
@@ -231,49 +232,120 @@ test(
   { tag: specTags(["ISS-133"]) },
   async ({ driver, seed }) => {
     // The preview card opens on hover of dated calendar blocks
-    // (openOnHover popover), so create a dedicated dated issue, switch
-    // to the calendar layout, and hover its block. The shared seed is
-    // never mutated.
-    const TITLE = `NF120 preview ${Date.now()}`;
+    // (openOnHover popover). Issues are created through the API: the card
+    // (not the creation flow) is under test, and UI creation would not fit
+    // the test budget on slow runs. The shared seed is never mutated.
+    // Calendar placement keys off the target date: start-only issues
+    // render no block anywhere, so the start-only date branch has no hover
+    // surface (like the neither-set branch) and stays uncovered by design.
+    const STAMP = Date.now();
+    const RANGE = `NF120 preview range ${STAMP}`;
+    const OVERDUE = `NF120 preview overdue ${STAMP}`;
+    const NODATE = `NF120 preview nodate ${STAMP}`;
+    const dayOffset = (days: number): string => new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+    // The card renders "MMM dd, yyyy" offset-free for date-only values.
+    const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const cardDate = (iso: string): string =>
+      `${MONTHS[Number(iso.slice(5, 7)) - 1]} ${iso.slice(8, 10)}, ${iso.slice(0, 4)}`;
+    // Keep the plain range inside this month so it stays on the visible
+    // calendar grid whatever day the suite runs (falling back to tomorrow
+    // at month's end, when only grid spillover covers it).
+    const thisMonth = dayOffset(0).slice(0, 7);
+    const future = [7, 3, 1].map(dayOffset).find((iso) => iso.slice(0, 7) === thisMonth) ?? dayOffset(1);
+    const yesterday = dayOffset(-1);
     await signInAndOpenIssues(driver, seed);
     const session = await signInSession(seed.email, seed.password);
-    const today = new Date().toISOString().slice(0, 10);
-    await createIssue(driver, session, seed, TITLE);
-    const mine = (await serverIssues(seed.workspaceSlug, seed.projectId, session)).find(
-      (issue) => issue.name === TITLE
-    )!;
 
-    await test.step("setup: date the issue so it renders in the calendar", async () => {
-      await patchServerIssue(seed.workspaceSlug, seed.projectId, mine.id, session, {
-        start_date: today,
-        target_date: today,
+    // The shared helper posts without retries; the scratch stack throttles
+    // under sibling load, so retry creation a few times here.
+    const createApiIssue = async (name: string): Promise<string> => {
+      let last: unknown;
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        try {
+          return await serverCreateIssue(seed.workspaceSlug, seed.projectId, session, name);
+        } catch (error) {
+          last = error;
+          await new Promise((resolve) => setTimeout(resolve, 10000 * attempt));
+        }
+      }
+      throw last;
+    };
+
+    await test.step("setup: dated issues with distinct priorities", async () => {
+      await createApiIssue(RANGE);
+      await createApiIssue(OVERDUE);
+      await createApiIssue(NODATE);
+      const listed = await serverIssues(seed.workspaceSlug, seed.projectId, session);
+      const idOf = (name: string): string => listed.find((issue) => issue.name === name)!.id;
+      await patchServerIssue(seed.workspaceSlug, seed.projectId, idOf(RANGE), session, {
+        start_date: future,
+        target_date: future,
+        priority: "urgent",
+      });
+      await patchServerIssue(seed.workspaceSlug, seed.projectId, idOf(OVERDUE), session, {
+        target_date: yesterday,
       });
       await driver.openProjectIssuesSettled(seed.workspaceSlug, seed.projectId);
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const shown = await expect
-          .poll(() => driver.countText(TITLE), { timeout: 30_000 })
-          .toBeGreaterThan(0)
-          .then(() => true)
-          .catch(() => false);
-        if (shown) break;
-        await driver.openProjectIssuesSettled(seed.workspaceSlug, seed.projectId);
-      }
-      await expect.poll(() => driver.countText(TITLE), { timeout: 120_000 }).toBeGreaterThan(0);
+      await expect.poll(() => driver.countText(RANGE), { timeout: 120_000 }).toBeGreaterThan(0);
+    });
+
+    // Identifier, state and title the card must repeat, read back from the
+    // server so the assertions pin the link, not a hardcoded guess.
+    const listed = await serverIssues(seed.workspaceSlug, seed.projectId, session);
+    const rangeId = listed.find((issue) => issue.name === RANGE)!.id;
+    const rangeDetail = await serverIssueRecord(seed.workspaceSlug, seed.projectId, rangeId, session);
+    const identifier = `${(await serverProject(seed.workspaceSlug, seed.projectId, session)).identifier}-${String(rangeDetail["sequence_id"])}`;
+    const states = await serverStates(seed.workspaceSlug, seed.projectId, session);
+    const stateName = states.find((state) => state.id === String(rangeDetail["state_id"]))!.name;
+
+    await test.step("an undated row shows a tooltip, not a preview card", async () => {
+      // Only calendar and gantt blocks carry the preview card, and neither
+      // renders an issue with no dates at all — so the neither-set branch
+      // has no hover surface. The list row hover pops a title tooltip
+      // instead; pin that, so the null case stays honestly uncovered
+      // rather than silently untested.
+      const before = await driver.countText(NODATE);
+      await driver.hoverIssueRow(NODATE);
+      await expect.poll(() => driver.countText(NODATE), { timeout: 30_000 }).toBeGreaterThan(before);
+      expect((await driver.hoverCardRead(NODATE)).text).toBe("");
+    });
+
+    await test.step("the calendar renders the dated issues", async () => {
       await driver.switchIssueLayout("Calendar Layout");
-      await expect.poll(() => driver.countText(TITLE), { timeout: 120_000 }).toBeGreaterThan(0);
+      await expect.poll(() => driver.countText(RANGE), { timeout: 120_000 }).toBeGreaterThan(0);
     });
 
-    await test.step("the card repeats the hovered title", async () => {
-      const before = await driver.countText(TITLE);
-      await driver.hoverIssueRow(TITLE);
-      await expect.poll(() => driver.countText(TITLE), { timeout: 30_000 }).toBeGreaterThan(before);
+    let plainColor = "";
+    await test.step("the range card shows identifier, state, title, priority and dates", async () => {
+      const card = await driver.hoverCardRead(RANGE);
+      expect(card.text).toContain(identifier);
+      expect(card.text).toContain(stateName);
+      expect(card.text).toContain(RANGE);
+      expect(card.text).toContain(`${cardDate(future)} - ${cardDate(future)}`);
+      expect(card.priorityIcon).toContain("circle-alert");
+      plainColor = card.dateColor;
+      expect(plainColor).not.toBe("");
     });
 
-    await test.step("cleanup: restore the list layout and remove the issue", async () => {
+    await test.step("an overdue due date highlights", async () => {
+      const card = await driver.hoverCardRead(OVERDUE);
+      expect(card.text).toContain(OVERDUE);
+      expect(card.text).toContain(cardDate(yesterday));
+      expect(card.priorityIcon).toContain("ban");
+      expect(card.dateColor).not.toBe("");
+      expect(card.dateColor).not.toBe(plainColor);
+    });
+
+    await test.step("cleanup: restore the list layout and remove the issues", async () => {
       // The layout persists server-side for every stack user, so never
       // leave the calendar behind.
       await driver.switchIssueLayout("List Layout");
-      await deleteServerIssue(seed.workspaceSlug, seed.projectId, mine.id, session);
+      const current = await serverIssues(seed.workspaceSlug, seed.projectId, session);
+      for (const title of [RANGE, OVERDUE, NODATE]) {
+        const mine = current.find((issue) => issue.name === title);
+        expect(mine).toBeDefined();
+        await deleteServerIssue(seed.workspaceSlug, seed.projectId, mine!.id, session);
+      }
     });
   }
 );

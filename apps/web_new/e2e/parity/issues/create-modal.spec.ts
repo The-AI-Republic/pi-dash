@@ -12,13 +12,18 @@
 // switcher once its buttons are observable.
 import { test, expect } from "../fixtures";
 import {
+  createServerCycle,
+  createServerModule,
+  deleteServerCycle,
   deleteServerDraft,
   deleteServerIssue,
+  deleteServerModule,
   serverDraftNames,
   serverDrafts,
   serverIssueRecord,
   serverIssueNames,
   serverIssues,
+  serverProjectViews,
   signInSession,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
@@ -246,6 +251,102 @@ test(
 );
 
 test(
+  specTitle(["ISS-124"], "creating from a module page links the module implicitly"),
+  { tag: specTags(["ISS-124"]) },
+  async ({ driver, seed }) => {
+    // The module page opens the same reduced modal as the cycle page: no
+    // cycle/modules pickers, so the route context stays invisible and only
+    // materializes on save. (One early probe caught a full picker row
+    // mid-render; four settled reads since agree on the reduced form.)
+    const STAMP = Date.now();
+    const MODULE = `NF120 ctx module ${STAMP}`;
+    const NAME = `NF120 module context ${STAMP}`;
+    const session = await signInSession(seed.email, seed.password);
+    const today = new Date().toISOString().slice(0, 10);
+    const module = await createServerModule(seed.workspaceSlug, seed.projectId, session, {
+      name: MODULE,
+      start_date: today,
+      target_date: today,
+    });
+    await driver.openEntry();
+    await driver.signInWithPasswordRetry(seed.email, seed.password);
+
+    await test.step("the modal carries no visible module context", async () => {
+      await driver.openModulePage(seed.workspaceSlug, seed.projectId, module.id);
+      // The page itself shows the module; only the modal hides it.
+      await expect.poll(() => driver.pageTextContains(MODULE), { timeout: 90_000 }).toBe(true);
+      await driver.openCreateModal();
+      expect(await driver.modalTextContains(MODULE)).toBe(false);
+      expect(await driver.modalTextContains("Cycle")).toBe(false);
+      expect(await driver.modalTextContains("Modules")).toBe(false);
+    });
+
+    await test.step("saving links the issue to the module", async () => {
+      await driver.fillCreateTitle(NAME);
+      await driver.submitCreateModal();
+      await expect.poll(() => driver.createModalOpen(), { timeout: 30_000 }).toBe(false);
+      const all = await serverIssues(seed.workspaceSlug, seed.projectId, session);
+      const mine = all.find((issue) => issue.name === NAME);
+      expect(mine).toBeDefined();
+      const detail = await serverIssueRecord(seed.workspaceSlug, seed.projectId, mine!.id, session);
+      expect((detail["module_ids"] ?? []) as unknown[]).toContain(module.id);
+      expect(detail["cycle_id"] ?? null).toBeNull();
+      await deleteServerIssue(seed.workspaceSlug, seed.projectId, mine!.id, session);
+    });
+
+    await test.step("cleanup removes the module", async () => {
+      await deleteServerModule(seed.workspaceSlug, seed.projectId, module.id, session);
+    });
+  }
+);
+
+test(
+  specTitle(["ISS-124"], "creating from a cycle page links the cycle implicitly"),
+  { tag: specTags(["ISS-124"]) },
+  async ({ driver, seed }) => {
+    // Unlike the module page — whose modal visibly pre-seeds the module
+    // chip — the cycle page opens a modal with no cycle/modules pickers at
+    // all: the route context stays implicit and only materializes on save.
+    const STAMP = Date.now();
+    const CYCLE = `NF120 ctx cycle ${STAMP}`;
+    const NAME = `NF120 cycle context ${STAMP}`;
+    const session = await signInSession(seed.email, seed.password);
+    const cycle = await createServerCycle(seed.workspaceSlug, seed.projectId, session, {
+      name: CYCLE,
+      start_date: new Date().toISOString(),
+      end_date: new Date(Date.now() + 7 * 86400000).toISOString(),
+    });
+    await driver.openEntry();
+    await driver.signInWithPasswordRetry(seed.email, seed.password);
+
+    await test.step("the modal carries no visible cycle context", async () => {
+      await driver.openCyclePage(seed.workspaceSlug, seed.projectId, cycle.id);
+      await driver.openCreateModal();
+      expect(await driver.modalTextContains(CYCLE)).toBe(false);
+      expect(await driver.modalTextContains("Cycle")).toBe(false);
+      expect(await driver.modalTextContains("Modules")).toBe(false);
+    });
+
+    await test.step("saving links the issue to the cycle", async () => {
+      await driver.fillCreateTitle(NAME);
+      await driver.submitCreateModal();
+      await expect.poll(() => driver.createModalOpen(), { timeout: 30_000 }).toBe(false);
+      const all = await serverIssues(seed.workspaceSlug, seed.projectId, session);
+      const mine = all.find((issue) => issue.name === NAME);
+      expect(mine).toBeDefined();
+      const detail = await serverIssueRecord(seed.workspaceSlug, seed.projectId, mine!.id, session);
+      expect(String(detail["cycle_id"] ?? "")).toBe(cycle.id);
+      expect(((detail["module_ids"] ?? []) as unknown[]).length).toBe(0);
+      await deleteServerIssue(seed.workspaceSlug, seed.projectId, mine!.id, session);
+    });
+
+    await test.step("cleanup removes the cycle", async () => {
+      await deleteServerCycle(seed.workspaceSlug, seed.projectId, cycle.id, session);
+    });
+  }
+);
+
+test(
   specTitle(["ISS-124"], "creating from the project page leaves cycle and modules empty"),
   { tag: specTags(["ISS-124"]) },
   async ({ driver, seed }) => {
@@ -308,6 +409,70 @@ test(
       expect(issues).not.toContain("NF120 escape guard");
       const drafts = await serverDraftNames(seed.workspaceSlug, session);
       expect(drafts).not.toContain("NF120 escape guard");
+    });
+
+    await test.step("fields carry an explicit tab-index order", async () => {
+      await driver.openCreateModal();
+      const order = await driver.modalTabOrder();
+      // The title leads the order; pickers and actions follow in a fixed
+      // sequence (state/priority/assignee values vary, so match the index).
+      expect(order).toContain("input#1:Title");
+      expect(order.some((entry) => entry.startsWith("button#4:"))).toBe(true);
+      expect(order.some((entry) => entry.startsWith("button#5:"))).toBe(true);
+      expect(order.some((entry) => entry.startsWith("button#6:"))).toBe(true);
+      expect(order).toContain("div#7:Labels");
+      expect(order).toContain("div#8:Start date");
+      expect(order).toContain("div#9:Due date");
+      // The cycle/modules pickers join the order only while the project's
+      // view flags enable them (sibling suites toggle these on the shared
+      // stack), so assert their presence against the live flags.
+      const session = await signInSession(seed.email, seed.password);
+      const views = await serverProjectViews(seed.workspaceSlug, seed.projectId, session);
+      if (views.cycleView) expect(order).toContain("button#10:Cycle");
+      else expect(order.some((entry) => entry.startsWith("button#10:"))).toBe(false);
+      if (views.moduleView) expect(order).toContain("button#11:Modules");
+      else expect(order.some((entry) => entry.startsWith("button#11:"))).toBe(false);
+      expect(order).toContain("div#15:Discard");
+      expect(order).toContain("div#16:Save");
+      await driver.clickModalDiscard();
+      await expect.poll(() => driver.createModalOpen(), { timeout: 30_000 }).toBe(false);
+    });
+
+    await test.step("enter in the title submits the modal", async () => {
+      const NAME = `NF120 enter submits ${Date.now()}`;
+      await driver.openCreateModal();
+      await driver.fillCreateTitle(NAME);
+      await driver.fillDescription("entered body");
+      await driver.focusCreateTitle();
+      await driver.pressKey("Enter");
+      await expect.poll(() => driver.createModalOpen(), { timeout: 30_000 }).toBe(false);
+      const session = await signInSession(seed.email, seed.password);
+      await expect
+        .poll(() => serverIssueNames(seed.workspaceSlug, seed.projectId, session), { timeout: 60_000 })
+        .toContain(NAME);
+      const all = await serverIssues(seed.workspaceSlug, seed.projectId, session);
+      const mine = all.find((issue) => issue.name === NAME);
+      expect(mine).toBeDefined();
+      await deleteServerIssue(seed.workspaceSlug, seed.projectId, mine!.id, session);
+    });
+
+    await test.step("enter in the description does not submit", async () => {
+      const NAME = `NF120 enter newline ${Date.now()}`;
+      await driver.openCreateModal();
+      await driver.fillCreateTitle(NAME);
+      await driver.fillDescription("first line");
+      // Focus stays in the editor after typing, so this Enter lands there.
+      await driver.pressKey("Enter");
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      expect(await driver.createModalOpen()).toBe(true);
+      expect(await driver.createTitleValue()).toBe(NAME);
+      const session = await signInSession(seed.email, seed.password);
+      const issues = await serverIssueNames(seed.workspaceSlug, seed.projectId, session);
+      expect(issues).not.toContain(NAME);
+      await driver.clickModalDiscard();
+      await expect.poll(() => driver.pageTextContains("Save this draft?"), { timeout: 15_000 }).toBe(true);
+      await driver.discardDialogDiscard();
+      await expect.poll(() => driver.createModalOpen(), { timeout: 30_000 }).toBe(false);
     });
   }
 );
@@ -430,13 +595,19 @@ test(
     const session = await signInSession(seed.email, seed.password);
 
     await test.step("save a draft through the draft modal", async () => {
-      const names = await driver.visibleDraftNames();
-      if (!names.includes(NAME)) {
-        await driver.openCreateDraftModal();
-        expect(await driver.modalPrimaryButtonLabel()).toContain("Draft");
-        await driver.fillCreateTitle(NAME);
-        await driver.submitCreateModal();
+      // Never reuse a same-name draft: a stale one can be linked to a
+      // foreign project, and the draft modal's default project drifts on
+      // the shared stack, so always recreate with the seed project pinned
+      // (the publish step asserts the issue lands in the seed project).
+      const stale = (await serverDrafts(seed.workspaceSlug, session)).find((draft) => draft.name === NAME);
+      if (stale) await deleteServerDraft(seed.workspaceSlug, stale.id, session);
+      await driver.openCreateDraftModal();
+      expect(await driver.modalPrimaryButtonLabel()).toContain("Draft");
+      if ((await driver.modalProjectName()) !== seed.projectName) {
+        await driver.selectModalProject(seed.projectName);
       }
+      await driver.fillCreateTitle(NAME);
+      await driver.submitCreateModal();
       await expect.poll(() => driver.visibleDraftNames(), { timeout: 120_000 }).toContain(NAME);
     });
 

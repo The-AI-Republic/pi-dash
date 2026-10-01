@@ -672,6 +672,46 @@ export class WebNewDriver implements ParityDriver {
     return todo("openProjectIssuesSettled");
   }
 
+  async copyDraftByName(_name: string): Promise<void> {
+    return todo("copyDraftByName");
+  }
+
+  async moveDraftToProject(_name: string): Promise<void> {
+    return todo("moveDraftToProject");
+  }
+
+  async confirmMoveToProject(): Promise<void> {
+    return todo("confirmMoveToProject");
+  }
+
+  async modalProjectName(): Promise<string> {
+    return todo("modalProjectName");
+  }
+
+  async selectModalProject(_name: string): Promise<void> {
+    return todo("selectModalProject");
+  }
+
+  async hoverCardRead(_issueName: string): Promise<{ text: string; priorityIcon: string; dateColor: string }> {
+    return todo("hoverCardRead");
+  }
+
+  async modalTabOrder(): Promise<string[]> {
+    return todo("modalTabOrder");
+  }
+
+  async focusCreateTitle(): Promise<void> {
+    return todo("focusCreateTitle");
+  }
+
+  async openCyclePage(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
+    return todo("openCyclePage");
+  }
+
+  async openModulePage(_workspaceSlug: string, _projectId: string, _moduleId: string): Promise<void> {
+    return todo("openModulePage");
+  }
+
   // --- NEWFRONT-123 (home) stubs: mirror of the oracle driver additions. ---
 
   async homeOpen(_workspaceSlug: string): Promise<void> {

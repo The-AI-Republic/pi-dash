@@ -456,6 +456,27 @@ export interface ParityDriver {
   signInWithPasswordRetry(email: string, password: string): Promise<void>;
   /** Settled list entry: reloads past stalls, returns to list layout, waits for life. */
   openProjectIssuesSettled(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Copy the named draft through its quick-action menu (opens the duplicated payload). */
+  copyDraftByName(name: string): Promise<void>;
+  /** Move the named draft toward a project through its quick-action menu. */
+  moveDraftToProject(name: string): Promise<void>;
+  /** Confirm the move-to-project modal ("Add to project"). */
+  confirmMoveToProject(): Promise<void>;
+  /** Project currently selected in the open issue modal. */
+  modalProjectName(): Promise<string>;
+  /** Select the named project in the open issue modal's picker. */
+  selectModalProject(name: string): Promise<void>;
+  /** Hover the named issue and read its preview card (empty fields when no card shows). */
+  hoverCardRead(issueName: string): Promise<{ text: string; priorityIcon: string; dateColor: string }>;
+  /** Tabindex order of the modal's focusable fields, as tag#index:label triples. */
+  modalTabOrder(): Promise<string[]>;
+  /** Focus the modal's title field without changing its value. */
+  focusCreateTitle(): Promise<void>;
+  /** Open a cycle page and wait until its Add action shows. */
+  openCyclePage(workspaceSlug: string, projectId: string, cycleId: string): Promise<void>;
+  /** Open a module page and wait until its Add action shows. */
+  openModulePage(workspaceSlug: string, projectId: string, moduleId: string): Promise<void>;
+
   // --- NEWFRONT-123 (home): home dashboard reads and actions. ---
   // Added additively per the NEWFRONT-26 shared driver contract; every
   // method is mirrored as a throwing stub in drivers/web_new.

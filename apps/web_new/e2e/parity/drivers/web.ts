@@ -1302,24 +1302,27 @@ export class WebDriver implements ParityDriver {
     throw lastError;
   }
 
-
   private async trySignInOnce(email: string, password: string): Promise<void> {
+    // Waits stay short on purpose: a stalled page must fail an attempt
+    // fast so the retry loop — not one hung wait — spends the budget.
+    // Slow-but-healthy loads still pass because the next attempt retries
+    // against an already-compiling page.
     const page = this.page;
     await page.goto("/");
     const emailField = page.getByPlaceholder("name@company.com").first();
-    await emailField.waitFor({ timeout: 60_000 });
+    await emailField.waitFor({ timeout: 30_000 });
     await emailField.fill(email);
     const emailForm = page.locator("form", { has: emailField });
     await this.submitOf(emailForm).click();
     const passwordField = page.getByPlaceholder("Enter password");
-    await passwordField.waitFor({ timeout: 60_000 });
+    await passwordField.waitFor({ timeout: 30_000 });
     await passwordField.fill(password);
     const passwordForm = page.locator("form", { has: passwordField });
     // The old app posts the native form, so this ends in a full page load
     // landing inside the workspace. Wait for the path to actually leave the
     // entry route: the entry URL alone already satisfies looser patterns.
     await Promise.all([
-      page.waitForURL((url) => url.pathname !== "/", { timeout: 60_000 }),
+      page.waitForURL((url) => url.pathname !== "/", { timeout: 30_000 }),
       this.submitOf(passwordForm).click(),
     ]);
   }
@@ -1353,10 +1356,14 @@ export class WebDriver implements ParityDriver {
     // The list fetch stalls under shared-stack load and the list does not
     // retry on its own, so reload a few times instead of handing callers a
     // dead page. Signs of life are the header action plus rendered
-    // paragraph text (issue rows and surrounding chrome).
+    // paragraph text (issue rows and surrounding chrome). Every wait is
+    // bounded: an unbounded navigation hang would eat the whole test
+    // budget instead of letting the next attempt retry.
     for (let attempt = 0; attempt < 3; attempt++) {
-      await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues`);
-      await this.page.waitForLoadState("domcontentloaded");
+      await this.page
+        .goto(`/${workspaceSlug}/projects/${projectId}/issues`, { timeout: 45_000 })
+        .catch(() => undefined);
+      await this.page.waitForLoadState("domcontentloaded").catch(() => undefined);
       await this.healRuntimeError();
       // The active layout persists across navigation on the shared stack; a
       // non-list layout hides the rows list oracles assert on, so return to
@@ -1380,7 +1387,6 @@ export class WebDriver implements ParityDriver {
     }
     // Leave the last page as-is for the caller's polling to judge.
   }
-
 
   // Issue multi-select and bulk operations (NEWFRONT-120). Observed on the
   // running old app: with bulk operations unavailable, list rows render no
@@ -1521,7 +1527,16 @@ export class WebDriver implements ParityDriver {
   }
 
   async discardDialogDiscard(): Promise<void> {
-    await this.page.getByRole("button", { name: "Discard", exact: true }).last().click();
+    const discard = this.page.getByRole("button", { name: "Discard", exact: true }).last();
+    try {
+      await discard.click({ timeout: 15_000 });
+    } catch {
+      // A stale modal overlay can keep covering the confirm while the
+      // button itself stays focused and enabled; keyboard-activate it the
+      // way a user would instead of failing on hit-testing.
+      await discard.focus();
+      await this.page.keyboard.press("Enter");
+    }
   }
 
   async openDraftForEdit(name: string): Promise<void> {
@@ -1660,7 +1675,14 @@ export class WebDriver implements ParityDriver {
   }
 
   async hoverIssueRow(issueName: string): Promise<void> {
-    await this.page.getByText(issueName, { exact: true }).first().hover();
+    // Let a stuck progress overlay clear first; bounded either way, so a
+    // hung hover fails fast instead of eating the test budget.
+    await this.page
+      .waitForFunction(() => !document.documentElement.classList.contains("bprogress-busy"), null, {
+        timeout: 15_000,
+      })
+      .catch(() => undefined);
+    await this.page.getByText(issueName, { exact: true }).first().hover({ timeout: 60_000 });
   }
 
   async openToastViewAction(): Promise<string> {
@@ -1808,8 +1830,8 @@ export class WebDriver implements ParityDriver {
   // drafts route renders one block per draft, and the empty state offers a
   // "Create draft work item" action opening the draft variant of the modal.
   async openDraftsPage(workspaceSlug: string): Promise<void> {
-    await this.page.goto(`/${workspaceSlug}/drafts`);
-    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.goto(`/${workspaceSlug}/drafts`, { timeout: 60_000 }).catch(() => undefined);
+    await this.page.waitForLoadState("domcontentloaded").catch(() => undefined);
     await this.healRuntimeError();
   }
 
@@ -1851,10 +1873,11 @@ export class WebDriver implements ParityDriver {
   async deleteDraftByName(name: string): Promise<void> {
     // The block's right-click menu renders its entries as plain buttons
     // carrying the untranslated keys ("delete", …); the confirm alert
-    // carries the capitalized Delete. Right-click the block itself (away
-    // from the name text) so no hover tooltip steals the pointer.
+    // carries the capitalized Delete. Right-click the block center: a
+    // corner click can land on the neighboring block (each block owns its
+    // menu, so a miss acts on the wrong draft).
     const block = this.page.locator('div[id^="issue-"]', { hasText: name }).first();
-    await block.click({ button: "right", position: { x: 8, y: 8 } });
+    await block.click({ button: "right" });
     // The open menu intercepts pointer events at the item, so a real click
     // never lands; dispatch it straight to the item instead.
     const entry = this.page.getByRole("button", { name: "delete", exact: true }).first();
@@ -1886,6 +1909,162 @@ export class WebDriver implements ParityDriver {
       await this.page.waitForTimeout(2000);
     }
   }
+
+  // Draft quick actions, continued (NEWFRONT-120, ISS-139). The block's
+  // right-click menu carries the same untranslated keys as the delete
+  // entry: copying opens the duplicated payload in the draft modal, moving
+  // opens the move-to-project modal for the draft.
+  async copyDraftByName(name: string): Promise<void> {
+    const block = this.page.locator('div[id^="issue-"]', { hasText: name }).first();
+    await block.click({ button: "right" });
+    const entry = this.page.getByRole("button", { name: "make_a_copy", exact: true }).first();
+    await entry.waitFor({ timeout: 30_000 });
+    await entry.dispatchEvent("click");
+  }
+
+  async moveDraftToProject(name: string): Promise<void> {
+    const block = this.page.locator('div[id^="issue-"]', { hasText: name }).first();
+    await block.click({ button: "right" });
+    const entry = this.page.getByRole("button", { name: "move_to_project", exact: true }).first();
+    await entry.waitFor({ timeout: 30_000 });
+    await entry.dispatchEvent("click");
+  }
+
+  async confirmMoveToProject(): Promise<void> {
+    await this.page.getByRole("button", { name: "Add to project", exact: true }).first().click();
+  }
+
+  private modalFormScope(): Locator {
+    // Scope to the dialog holding the modal form: toasts share the dialog
+    // role, so an unscoped .first() lands on a toast instead of the modal.
+    return this.page.getByRole("dialog").filter({ has: this.page.getByPlaceholder("Title") });
+  }
+
+  private modalProjectChip(): Locator {
+    // The project chip is the modal's first nested button (an outer button
+    // wrapping the clickable inner one); later nested buttons are the
+    // state/assignee/date rows. Structural on purpose: the chip shows
+    // whatever project the modal targeted, which on the shared stack is
+    // often not the seed project.
+    return this.modalFormScope()
+      .getByRole("button")
+      .filter({ has: this.page.getByRole("button") })
+      .first()
+      .getByRole("button");
+  }
+
+  async modalProjectName(): Promise<string> {
+    const chip = this.modalProjectChip();
+    await chip.waitFor({ timeout: 30_000 });
+    return ((await chip.textContent()) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async selectModalProject(name: string): Promise<void> {
+    await this.modalProjectChip().click();
+    const option = this.page.getByRole("option", { name, exact: true }).first();
+    await option.waitFor({ timeout: 30_000 });
+    await option.click();
+    // Confirm the chip flipped; callers save right after, so a missed
+    // selection must fail here instead of landing elsewhere.
+    const started = Date.now();
+    for (;;) {
+      const current = (
+        (await this.modalProjectChip()
+          .textContent()
+          .catch(() => null)) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (current === name) return;
+      if (Date.now() - started > 15_000) throw new Error(`[parity] project chip stuck at ${JSON.stringify(current)}.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  // Work-item preview card (NEWFRONT-120, ISS-133). Observed on the running
+  // old app: hovering a calendar block pops a card whose heading carries
+  // the title; the card root wraps an identifier/state row, the title, and
+  // a priority-plus-date row around it. One hover reads everything: each
+  // hover cycle risks a stuck progress overlay under shared-stack load,
+  // so the text, icon and color come from a single pop.
+  async hoverCardRead(issueName: string): Promise<{ text: string; priorityIcon: string; dateColor: string }> {
+    const empty = { text: "", priorityIcon: "", dateColor: "" };
+    // A failed hover propagates: only a successful hover with no card
+    // (undated rows) reports empty fields.
+    await this.hoverIssueRow(issueName);
+    try {
+      const heading = this.page.locator("h6", { hasText: issueName }).first();
+      await heading.waitFor({ timeout: 15_000 });
+      const read = await heading.evaluate((el) => {
+        // The heading sits in a title wrapper inside the card root.
+        const root = el.parentElement?.parentElement;
+        const text = (root?.textContent ?? "").replace(/\s+/g, " ").trim();
+        const row = root?.lastElementChild;
+        const svg = row?.querySelector("svg");
+        const classes = (svg?.getAttribute("class") ?? "").split(/\s+/);
+        const priorityIcon = classes.filter((name) => name.startsWith("lucide-") && name !== "lucide").join(" ");
+        const span = row?.querySelector("span");
+        const dateColor = !span || (span.textContent ?? "").trim() === "" ? "" : getComputedStyle(span).color;
+        return { text, priorityIcon, dateColor };
+      });
+      if (read.text.length <= issueName.length + 5) return empty;
+      return read;
+    } catch {
+      return empty;
+    } finally {
+      // Close the popover so an open card never covers the next hover
+      // target; a missing card leaves nothing to close.
+      await this.page.keyboard.press("Escape").catch(() => undefined);
+    }
+  }
+
+  // Modal keyboard contract (NEWFRONT-120, ISS-125). The modal carries an
+  // explicit tab order over its fields; read it back as triples so the
+  // scenario pins the order without depending on styling.
+  async modalTabOrder(): Promise<string[]> {
+    return this.modalScope().evaluate((scope: HTMLElement) => {
+      const labelOf = (el: Element): string => {
+        const labelled = el.getAttribute("placeholder") ?? el.getAttribute("id") ?? el.textContent ?? "";
+        return labelled.replace(/\s+/g, " ").trim().slice(0, 40);
+      };
+      return Array.from(scope.querySelectorAll("[tabindex]")).map(
+        (el) => `${el.tagName.toLowerCase()}#${el.getAttribute("tabindex")}:${labelOf(el)}`
+      );
+    });
+  }
+
+  async focusCreateTitle(): Promise<void> {
+    await this.page.getByPlaceholder("Title").first().click();
+  }
+
+  // Cycle/module page entry (NEWFRONT-120, ISS-124). These pages compile on
+  // first load and fetch their context over the throttled shared stack, so
+  // re-enter until the Add action shows instead of trusting one load.
+  private async openIssueContextPage(route: string, label: string): Promise<void> {
+    const started = Date.now();
+    for (;;) {
+      await this.page.goto(route, { timeout: 45_000 }).catch(() => undefined);
+      await this.page.waitForLoadState("domcontentloaded").catch(() => undefined);
+      await this.healRuntimeError();
+      const ready = await this.page
+        .getByRole("button", { name: "Add work item" })
+        .first()
+        .waitFor({ timeout: 30_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (ready) return;
+      if (Date.now() - started > 150_000) throw new Error(`[parity] ${label} page never offered its Add action.`);
+    }
+  }
+
+  async openCyclePage(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    await this.openIssueContextPage(`/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`, "cycle");
+  }
+
+  async openModulePage(workspaceSlug: string, projectId: string, moduleId: string): Promise<void> {
+    await this.openIssueContextPage(`/${workspaceSlug}/projects/${projectId}/modules/${moduleId}`, "module");
+  }
+
   // --- NEWFRONT-123 (home): selectors observed on the running old app. ---
   // The dashboard centers on a narrow column: a greeting heading carrying
   // the salutation plus the user name, a date-and-clock sub-line, an
