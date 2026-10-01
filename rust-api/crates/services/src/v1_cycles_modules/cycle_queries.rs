@@ -259,20 +259,28 @@ impl TransferBlock {
 pub struct NewCycleFacts {
     /// Whether the lookup returned a row.
     pub exists: bool,
-    /// The row's `end_date` as a UTC epoch (`None` = SQL `NULL`, i.e. a
-    /// dateless/draft target — the guard passes, `:62`).
-    pub end_epoch_secs: Option<i64>,
+    /// The row's `end_date` as a UTC epoch in microseconds (`None` = SQL
+    /// `NULL`, i.e. a dateless/draft target — the guard passes, `:62`).
+    /// Microseconds match both Python `datetime` and Postgres
+    /// `timestamptz` precision exactly, so the strict `<` below agrees
+    /// with Python's `end_date < timezone.now()` on every input —
+    /// second precision would flip the guard when `end_date` falls in
+    /// the same whole second strictly before `now`.
+    pub end_epoch_micros: Option<i64>,
 }
 
 /// The new-cycle guard (transfer file `:59-66`): a missing target is
 /// the 500 (ported bug T1); an ended target (`end_date < now`, strict)
 /// is the 400. The `now` instant is the caller's `timezone.now()` as a
-/// UTC epoch, matching the comparison Python performs.
-pub fn check_new_cycle(facts: &NewCycleFacts, now_epoch_secs: i64) -> Result<(), TransferBlock> {
+/// UTC epoch in microseconds, matching the comparison Python performs.
+pub fn check_new_cycle(facts: &NewCycleFacts, now_epoch_micros: i64) -> Result<(), TransferBlock> {
     if !facts.exists {
         return Err(TransferBlock::NewCycleMissing);
     }
-    if facts.end_epoch_secs.is_some_and(|end| end < now_epoch_secs) {
+    if facts
+        .end_epoch_micros
+        .is_some_and(|end| end < now_epoch_micros)
+    {
         return Err(TransferBlock::NewCycleCompleted);
     }
     Ok(())
@@ -658,42 +666,54 @@ mod tests {
 
     #[test]
     fn new_cycle_guard_table() {
+        // Epoch micros (matches `NewCycleFacts` precision).
+        const NOW: i64 = 1_700_000_000_000_000;
         // Missing target → 500 (ported bug T1).
         let missing = NewCycleFacts {
             exists: false,
-            end_epoch_secs: None,
+            end_epoch_micros: None,
         };
         assert_eq!(
-            check_new_cycle(&missing, 1_700_000_000),
+            check_new_cycle(&missing, NOW),
             Err(TransferBlock::NewCycleMissing)
         );
         // Ended target (strict `<`) → 400.
         let ended = NewCycleFacts {
             exists: true,
-            end_epoch_secs: Some(1_699_999_999),
+            end_epoch_micros: Some(1_699_999_999_000_000),
         };
         assert_eq!(
-            check_new_cycle(&ended, 1_700_000_000),
+            check_new_cycle(&ended, NOW),
+            Err(TransferBlock::NewCycleCompleted)
+        );
+        // Sub-second end strictly before now → 400 (second precision
+        // would wrongly proceed here).
+        let sub_second = NewCycleFacts {
+            exists: true,
+            end_epoch_micros: Some(NOW - 1),
+        };
+        assert_eq!(
+            check_new_cycle(&sub_second, NOW),
             Err(TransferBlock::NewCycleCompleted)
         );
         // Boundary: end == now proceeds (strict comparison).
         let boundary = NewCycleFacts {
             exists: true,
-            end_epoch_secs: Some(1_700_000_000),
+            end_epoch_micros: Some(NOW),
         };
-        assert!(check_new_cycle(&boundary, 1_700_000_000).is_ok());
+        assert!(check_new_cycle(&boundary, NOW).is_ok());
         // Future end and dateless targets proceed.
         for facts in [
             NewCycleFacts {
                 exists: true,
-                end_epoch_secs: Some(1_700_000_001),
+                end_epoch_micros: Some(NOW + 1),
             },
             NewCycleFacts {
                 exists: true,
-                end_epoch_secs: None,
+                end_epoch_micros: None,
             },
         ] {
-            assert!(check_new_cycle(&facts, 1_700_000_000).is_ok());
+            assert!(check_new_cycle(&facts, NOW).is_ok());
         }
     }
 
