@@ -1,0 +1,534 @@
+{
+  "fixture_id": "FX-DISP-02",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "apps/api/pi_dash/runner/models.py:207-235 (AgentRunStatus)",
+    "apps/api/pi_dash/runner/models.py:237-250 (AgentRunTrigger)",
+    "apps/api/pi_dash/runner/models.py:872-1000+ (AgentRun, dispatch-touched subset noted below)",
+    "apps/api/pi_dash/runner/models.py:1162-1185 (AgentRunEvent)",
+    "apps/api/pi_dash/runner/models.py:1187-1230 (AgentRunToolCall)"
+  ],
+  "method": "Column lists + Meta extracted by executing Python ast over the real runner/models.py (no app registry needed); enum values verbatim from the TextChoices assignments. runner/models.py is READ-ONLY for this domain (owned by D-13...D-15); dispatch only reads the subset listed under dispatch_touched_subset.",
+  "agent_run_status_values": [
+    "queued",
+    "assigned",
+    "waiting_for_worktree",
+    "running",
+    "cancel_requested",
+    "awaiting_approval",
+    "awaiting_reauth",
+    "paused_awaiting_input",
+    "blocked",
+    "completed",
+    "failed",
+    "cancelled",
+    "refused"
+  ],
+  "agent_run_trigger_values": [
+    "state_transition",
+    "run_ai",
+    "comment_and_run",
+    "tick",
+    "scheduler",
+    "direct"
+  ],
+  "tool_call_status_values": [
+    "prepared",
+    "submitted",
+    "succeeded",
+    "failed",
+    "unknown",
+    "denied"
+  ],
+  "dispatch_touched_subset": {
+    "agent_run": [
+      "id",
+      "workspace",
+      "created_by",
+      "pod",
+      "pinned_runner",
+      "work_item",
+      "scheduler_binding",
+      "status",
+      "executor_kind",
+      "dispatch_attempts",
+      "cancel_requested_at",
+      "cancel_reason",
+      "error_code",
+      "tool_plan",
+      "prompt",
+      "trigger",
+      "lease_expires_at",
+      "started_at",
+      "llm_model",
+      "usage",
+      "done_payload",
+      "error",
+      "tool_calls (reverse)",
+      "events (reverse)"
+    ],
+    "agent_run_event": [
+      "id",
+      "agent_run",
+      "seq",
+      "kind",
+      "payload",
+      "created_at"
+    ],
+    "agent_run_tool_call": [
+      "id",
+      "agent_run",
+      "tool_call_id",
+      "source",
+      "server_key",
+      "tool_name",
+      "risk",
+      "status",
+      "request_fingerprint",
+      "result_fingerprint",
+      "idempotency_key_hash",
+      "safe_replay_result",
+      "error_code",
+      "submitted_at",
+      "completed_at"
+    ]
+  },
+  "agent_run_columns": [
+    {
+      "name": "id",
+      "type": "UUIDField",
+      "primary_key": true,
+      "default": "Attribute(value=Name(id='uuid', ctx=Load()), attr='uuid4', ctx=Load())",
+      "editable": false,
+      "db_index": true
+    },
+    {
+      "name": "workspace",
+      "type": "ForeignKey",
+      "on_delete": "Attribute(value=Name(id='models', ctx=Load()), attr='CASCADE', ctx=Load())",
+      "related_name": "agent_runs"
+    },
+    {
+      "name": "owner",
+      "type": "ForeignKey",
+      "on_delete": "Attribute(value=Name(id='models', ctx=Load()), attr='SET_NULL', ctx=Load())",
+      "null": true,
+      "blank": true,
+      "related_name": "agent_runs"
+    },
+    {
+      "name": "created_by",
+      "type": "ForeignKey",
+      "on_delete": "Attribute(value=Name(id='models', ctx=Load()), attr='PROTECT', ctx=Load())",
+      "related_name": "agent_runs_created",
+      "null": false
+    },
+    {
+      "name": "pod",
+      "type": "ForeignKey",
+      "on_delete": "Attribute(value=Name(id='models', ctx=Load()), attr='PROTECT', ctx=Load())",
+      "related_name": "agent_runs"
+    },
+    {
+      "name": "runner",
+      "type": "ForeignKey",
+      "on_delete": "Attribute(value=Name(id='models', ctx=Load()), attr='SET_NULL', ctx=Load())",
+      "null": true,
+      "blank": true,
+      "related_name": "agent_runs"
+    },
+    {
+      "name": "pinned_runner",
+      "type": "ForeignKey",
+      "on_delete": "Attribute(value=Name(id='models', ctx=Load()), attr='SET_NULL', ctx=Load())",
+      "null": true,
+      "blank": true,
+      "related_name": "pinned_agent_runs"
+    },
+    {
+      "name": "work_item",
+      "type": "ForeignKey",
+      "on_delete": "Attribute(value=Name(id='models', ctx=Load()), attr='SET_NULL', ctx=Load())",
+      "null": true,
+      "blank": true,
+      "related_name": "agent_runs"
+    },
+    {
+      "name": "scheduler_binding",
+      "type": "ForeignKey",
+      "on_delete": "Attribute(value=Name(id='models', ctx=Load()), attr='SET_NULL', ctx=Load())",
+      "null": true,
+      "blank": true,
+      "related_name": "agent_runs"
+    },
+    {
+      "name": "parent_run",
+      "type": "ForeignKey",
+      "on_delete": "Attribute(value=Name(id='models', ctx=Load()), attr='SET_NULL', ctx=Load())",
+      "null": true,
+      "blank": true,
+      "related_name": "follow_up_runs",
+      "help_text": "Prior run this attempt follows up on; null for an issue's initial run."
+    },
+    {
+      "name": "status",
+      "type": "CharField",
+      "max_length": 24,
+      "choices": "Attribute(value=Name(id='AgentRunStatus', ctx=Load()), attr='choices', ctx=Load())",
+      "default": "Attribute(value=Name(id='AgentRunStatus', ctx=Load()), attr='QUEUED', ctx=Load())",
+      "db_index": true
+    },
+    {
+      "name": "executor_kind",
+      "type": "CharField",
+      "max_length": 24,
+      "choices": "Attribute(value=Name(id='AgentExecutorKind', ctx=Load()), attr='choices', ctx=Load())",
+      "default": "Attribute(value=Name(id='AgentExecutorKind', ctx=Load()), attr='LOCAL_RUNNER', ctx=Load())",
+      "db_index": true
+    },
+    {
+      "name": "dispatch_attempts",
+      "type": "PositiveIntegerField",
+      "default": 0
+    },
+    {
+      "name": "cancel_requested_at",
+      "type": "DateTimeField",
+      "null": true,
+      "blank": true
+    },
+    {
+      "name": "cancel_reason",
+      "type": "CharField",
+      "max_length": 512,
+      "blank": true,
+      "default": ""
+    },
+    {
+      "name": "error_code",
+      "type": "CharField",
+      "max_length": 64,
+      "blank": true,
+      "default": "",
+      "db_index": true
+    },
+    {
+      "name": "tool_plan",
+      "type": "JSONField",
+      "default": "Name(id='dict', ctx=Load())",
+      "blank": true
+    },
+    {
+      "name": "terminal_hooks_applied_at",
+      "type": "DateTimeField",
+      "null": true,
+      "blank": true
+    },
+    {
+      "name": "terminal_capacity_released_at",
+      "type": "DateTimeField",
+      "null": true,
+      "blank": true
+    },
+    {
+      "name": "prompt",
+      "type": "TextField",
+      "blank": true,
+      "default": ""
+    },
+    {
+      "name": "trigger",
+      "type": "CharField",
+      "max_length": 24,
+      "choices": "Attribute(value=Name(id='AgentRunTrigger', ctx=Load()), attr='choices', ctx=Load())",
+      "default": "Attribute(value=Name(id='AgentRunTrigger', ctx=Load()), attr='DIRECT', ctx=Load())",
+      "db_index": true
+    },
+    {
+      "name": "prompt_manifest",
+      "type": "JSONField",
+      "null": true,
+      "blank": true
+    },
+    {
+      "name": "phase_kind",
+      "type": "CharField",
+      "max_length": 32,
+      "blank": true,
+      "default": "",
+      "db_index": true
+    },
+    {
+      "name": "run_config",
+      "type": "JSONField",
+      "default": "Name(id='dict', ctx=Load())",
+      "blank": true
+    },
+    {
+      "name": "required_capabilities",
+      "type": "JSONField",
+      "default": "Name(id='list', ctx=Load())",
+      "blank": true
+    },
+    {
+      "name": "thread_id",
+      "type": "CharField",
+      "max_length": 128,
+      "blank": true,
+      "default": ""
+    },
+    {
+      "name": "agent_metadata",
+      "type": "JSONField",
+      "default": "Name(id='dict', ctx=Load())",
+      "blank": true
+    },
+    {
+      "name": "lease_expires_at",
+      "type": "DateTimeField",
+      "null": true,
+      "blank": true
+    },
+    {
+      "name": "done_payload",
+      "type": "JSONField",
+      "null": true,
+      "blank": true
+    },
+    {
+      "name": "error",
+      "type": "TextField",
+      "blank": true,
+      "default": ""
+    },
+    {
+      "name": "refusal_category",
+      "type": "CharField",
+      "max_length": 32,
+      "choices": "Attribute(value=Name(id='RefusalCategory', ctx=Load()), attr='choices', ctx=Load())",
+      "blank": true,
+      "default": ""
+    },
+    {
+      "name": "llm_model",
+      "type": "CharField",
+      "max_length": 128,
+      "blank": true,
+      "default": ""
+    },
+    {
+      "name": "usage",
+      "type": "JSONField",
+      "default": "Name(id='dict', ctx=Load())",
+      "blank": true
+    },
+    {
+      "name": "input_tokens",
+      "type": "JSONKeyBigIntegerField",
+      "source": "usage",
+      "key": "input"
+    },
+    {
+      "name": "output_tokens",
+      "type": "JSONKeyBigIntegerField",
+      "source": "usage",
+      "key": "output"
+    },
+    {
+      "name": "total_tokens",
+      "type": "JSONKeyBigIntegerField",
+      "source": "usage",
+      "key": "total"
+    },
+    {
+      "name": "created_at",
+      "type": "DateTimeField"
+    },
+    {
+      "name": "assigned_at",
+      "type": "DateTimeField",
+      "null": true,
+      "blank": true
+    },
+    {
+      "name": "queue_position",
+      "type": "PositiveSmallIntegerField",
+      "null": true,
+      "blank": true
+    },
+    {
+      "name": "started_at",
+      "type": "DateTimeField",
+      "null": true,
+      "blank": true
+    },
+    {
+      "name": "ended_at",
+      "type": "DateTimeField",
+      "null": true,
+      "blank": true
+    }
+  ],
+  "agent_run_meta": {
+    "db_table": "agent_run",
+    "ordering": [
+      "-created_at"
+    ],
+    "indexes": "List(elts=[Call(func=Attribute(value=Name(id='models', ctx=Load()), attr='Index', ctx=Load()), args=[], keywords=[keyword(arg='fields', value=List(elts=[Constant(value='runner'), Constant(value='statu",
+    "constraints": "List(elts=[Call(func=Attribute(value=Name(id='models', ctx=Load()), attr='CheckConstraint', ctx=Load()), args=[], keywords=[keyword(arg='check', value=BinOp(left=Call(func=Attribute(value=Name(id='mod"
+  },
+  "agent_run_event_columns": [
+    {
+      "name": "id",
+      "type": "BigAutoField",
+      "primary_key": true
+    },
+    {
+      "name": "agent_run",
+      "type": "ForeignKey",
+      "on_delete": "Attribute(value=Name(id='models', ctx=Load()), attr='CASCADE', ctx=Load())",
+      "related_name": "events"
+    },
+    {
+      "name": "seq",
+      "type": "PositiveIntegerField"
+    },
+    {
+      "name": "kind",
+      "type": "CharField",
+      "max_length": 64
+    },
+    {
+      "name": "payload",
+      "type": "JSONField",
+      "default": "Name(id='dict', ctx=Load())",
+      "blank": true
+    },
+    {
+      "name": "created_at",
+      "type": "DateTimeField"
+    }
+  ],
+  "agent_run_event_meta": {
+    "db_table": "agent_run_event",
+    "unique_together": [
+      [
+        "agent_run",
+        "seq"
+      ]
+    ],
+    "ordering": [
+      "agent_run",
+      "seq"
+    ]
+  },
+  "agent_run_tool_call_columns": [
+    {
+      "name": "id",
+      "type": "UUIDField",
+      "primary_key": true,
+      "default": "Attribute(value=Name(id='uuid', ctx=Load()), attr='uuid4', ctx=Load())",
+      "editable": false
+    },
+    {
+      "name": "agent_run",
+      "type": "ForeignKey",
+      "on_delete": "Attribute(value=Name(id='models', ctx=Load()), attr='CASCADE', ctx=Load())",
+      "related_name": "tool_calls"
+    },
+    {
+      "name": "tool_call_id",
+      "type": "CharField",
+      "max_length": 255
+    },
+    {
+      "name": "source",
+      "type": "CharField",
+      "max_length": 16
+    },
+    {
+      "name": "server_key",
+      "type": "CharField",
+      "max_length": 64,
+      "blank": true,
+      "default": ""
+    },
+    {
+      "name": "tool_name",
+      "type": "CharField",
+      "max_length": 255
+    },
+    {
+      "name": "risk",
+      "type": "CharField",
+      "max_length": 16
+    },
+    {
+      "name": "status",
+      "type": "CharField",
+      "max_length": 16,
+      "choices": "Attribute(value=Name(id='ToolCallStatus', ctx=Load()), attr='choices', ctx=Load())",
+      "default": "Attribute(value=Name(id='ToolCallStatus', ctx=Load()), attr='PREPARED', ctx=Load())"
+    },
+    {
+      "name": "request_fingerprint",
+      "type": "CharField",
+      "max_length": 64
+    },
+    {
+      "name": "result_fingerprint",
+      "type": "CharField",
+      "max_length": 64,
+      "blank": true,
+      "default": ""
+    },
+    {
+      "name": "idempotency_key_hash",
+      "type": "CharField",
+      "max_length": 64,
+      "blank": true,
+      "default": ""
+    },
+    {
+      "name": "external_operation_id",
+      "type": "CharField",
+      "max_length": 255,
+      "blank": true,
+      "default": ""
+    },
+    {
+      "name": "safe_replay_result",
+      "type": "JSONField",
+      "null": true,
+      "blank": true
+    },
+    {
+      "name": "error_code",
+      "type": "CharField",
+      "max_length": 64,
+      "blank": true,
+      "default": ""
+    },
+    {
+      "name": "prepared_at",
+      "type": "DateTimeField"
+    },
+    {
+      "name": "submitted_at",
+      "type": "DateTimeField",
+      "null": true,
+      "blank": true
+    },
+    {
+      "name": "completed_at",
+      "type": "DateTimeField",
+      "null": true,
+      "blank": true
+    }
+  ],
+  "agent_run_tool_call_meta": {
+    "db_table": "agent_run_tool_call",
+    "constraints": "List(elts=[Call(func=Attribute(value=Name(id='models', ctx=Load()), attr='UniqueConstraint', ctx=Load()), args=[], keywords=[keyword(arg='fields', value=List(elts=[Constant(value='agent_run'), Constan",
+    "indexes": "List(elts=[Call(func=Attribute(value=Name(id='models', ctx=Load()), attr='Index', ctx=Load()), args=[], keywords=[keyword(arg='fields', value=List(elts=[Constant(value='agent_run'), Constant(value='st"
+  }
+}
