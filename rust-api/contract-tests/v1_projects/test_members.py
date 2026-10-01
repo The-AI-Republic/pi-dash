@@ -135,3 +135,36 @@ def test_isolation_other_workspace(seed):
     assert {u["id"] for u in body} == {seed["owner_b"]["id"]}
     # ... and cannot reach ws_a's project members at all.
     http.get(seed["keys"]["owner_b"], proj_base(seed) + "/members/", expect=403)
+
+
+def test_null_email_member_shapes(seed, conn):
+    # users.email is nullable (db/models/user.py:61); the serializer renders
+    # null — a NULL row must not 500 any UserLite path (PIDASHCONV-513).
+    tag = db.new_tag()
+    user = db.create_user(conn, tag, first_name="CtNull", email=None)
+    assert user["email"] is None
+    db.add_workspace_member(conn, seed["ws_a"]["id"], user["id"], db.MEMBER)
+
+    ws_body = http.get(
+        seed["keys"][KEY],
+        f"/api/v1/workspaces/{seed['ws_a']['slug']}/members/").json()
+    ws_entry = next(u for u in ws_body if u["id"] == user["id"])
+    assert set(ws_entry.keys()) == USER_KEYS | {"role"}
+    assert ws_entry["email"] is None
+    assert ws_entry["role"] == db.MEMBER
+
+    created = http.post(seed["keys"][KEY], proj_base(seed) + "/members/",
+                        json={"member": user["id"], "role": db.MEMBER},
+                        expect=201).json()
+    for suffix in ("/members/", "/project-members/"):
+        listed = http.get(seed["keys"][KEY], proj_base(seed) + suffix).json()
+        entry = next(u for u in listed if u["id"] == user["id"])
+        assert set(entry.keys()) == USER_KEYS
+        assert entry["email"] is None
+    # Detail GET returns the user profile on both aliases.
+    for suffix in ("/members/", "/project-members/"):
+        got = http.get(seed["keys"][KEY],
+                       f"{proj_base(seed)}{suffix}{created['id']}/").json()
+        assert set(got.keys()) == USER_KEYS
+        assert got["id"] == user["id"]
+        assert got["email"] is None
