@@ -1461,7 +1461,7 @@ export async function createWorkspace(
 
 /** Shell-preference reads and writes for the chrome/tabs scenarios (NEWFRONT-126). */
 
-async function authedJson(
+async function cookieAuthedJson(
   path: string,
   sessionCookie: string,
   init: { method?: string; body?: unknown } = {},
@@ -1486,7 +1486,7 @@ export async function getSidebarPreferences(
   sessionCookie: string,
   apiBase: string = apiBaseFromEnv()
 ): Promise<Record<string, { is_pinned?: boolean; sort_order?: number }>> {
-  return (await authedJson(
+  return (await cookieAuthedJson(
     `/api/workspaces/${workspaceSlug}/sidebar-preferences/`,
     sessionCookie,
     {},
@@ -1501,7 +1501,7 @@ export async function patchSidebarPreferences(
   entries: Array<{ key: string; is_pinned: boolean; sort_order: number }>,
   apiBase: string = apiBaseFromEnv()
 ): Promise<void> {
-  await authedJson(
+  await cookieAuthedJson(
     `/api/workspaces/${workspaceSlug}/sidebar-preferences/`,
     sessionCookie,
     { method: "PATCH", body: entries },
@@ -1515,10 +1515,12 @@ export async function getWorkspaceUserProperties(
   sessionCookie: string,
   apiBase: string = apiBaseFromEnv()
 ): Promise<Record<string, unknown>> {
-  return (await authedJson(`/api/workspaces/${workspaceSlug}/user-properties/`, sessionCookie, {}, apiBase)) as Record<
-    string,
-    unknown
-  >;
+  return (await cookieAuthedJson(
+    `/api/workspaces/${workspaceSlug}/user-properties/`,
+    sessionCookie,
+    {},
+    apiBase
+  )) as Record<string, unknown>;
 }
 
 /** Patch workspace-level user properties; used to restore state after a scenario. */
@@ -1528,7 +1530,7 @@ export async function patchWorkspaceUserProperties(
   body: Record<string, unknown>,
   apiBase: string = apiBaseFromEnv()
 ): Promise<Record<string, unknown>> {
-  return (await authedJson(
+  return (await cookieAuthedJson(
     `/api/workspaces/${workspaceSlug}/user-properties/`,
     sessionCookie,
     { method: "PATCH", body },
@@ -1543,7 +1545,7 @@ export async function getProjectUserProperties(
   sessionCookie: string,
   apiBase: string = apiBaseFromEnv()
 ): Promise<Record<string, unknown>> {
-  return (await authedJson(
+  return (await cookieAuthedJson(
     `/api/workspaces/${workspaceSlug}/projects/${projectId}/user-properties/`,
     sessionCookie,
     {},
@@ -1559,7 +1561,7 @@ export async function patchProjectUserProperties(
   body: Record<string, unknown>,
   apiBase: string = apiBaseFromEnv()
 ): Promise<Record<string, unknown>> {
-  return (await authedJson(
+  return (await cookieAuthedJson(
     `/api/workspaces/${workspaceSlug}/projects/${projectId}/user-properties/`,
     sessionCookie,
     { method: "PATCH", body },
@@ -1574,7 +1576,7 @@ export async function createProject(
   body: Record<string, unknown>,
   apiBase: string = apiBaseFromEnv()
 ): Promise<Record<string, unknown>> {
-  return (await authedJson(
+  return (await cookieAuthedJson(
     `/api/workspaces/${workspaceSlug}/projects/`,
     sessionCookie,
     { method: "POST", body },
@@ -1589,7 +1591,7 @@ export async function getProject(
   sessionCookie: string,
   apiBase: string = apiBaseFromEnv()
 ): Promise<Record<string, unknown>> {
-  return (await authedJson(
+  return (await cookieAuthedJson(
     `/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
     sessionCookie,
     {},
@@ -1605,7 +1607,7 @@ export async function patchProject(
   body: Record<string, unknown>,
   apiBase: string = apiBaseFromEnv()
 ): Promise<Record<string, unknown>> {
-  return (await authedJson(
+  return (await cookieAuthedJson(
     `/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
     sessionCookie,
     { method: "PATCH", body },
@@ -1620,7 +1622,7 @@ export async function deleteProject(
   sessionCookie: string,
   apiBase: string = apiBaseFromEnv()
 ): Promise<void> {
-  await authedJson(
+  await cookieAuthedJson(
     `/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
     sessionCookie,
     { method: "DELETE" },
