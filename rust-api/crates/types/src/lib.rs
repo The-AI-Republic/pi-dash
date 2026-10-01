@@ -6,6 +6,7 @@
 //! no I/O: no database, no network, no filesystem.
 
 pub mod assistant;
+pub mod dispatch;
 pub mod error;
 pub mod health;
 pub mod ids;
