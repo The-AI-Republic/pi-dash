@@ -1,10 +1,26 @@
 #![forbid(unsafe_code)]
 
-//! App page favorites + description + state-op handlers (D-30, stage 5,
-//! PIDASHCONV-332 and PIDASHCONV-328).
+//! App page favorites + description + state-op + write handlers (D-30,
+//! stage 5, PIDASHCONV-332, PIDASHCONV-328 and PIDASHCONV-322).
 //!
-//! Ports nine endpoints from `apps/api/pi_dash/app/views/page/base.py`
+//! Ports twelve endpoints from `apps/api/pi_dash/app/views/page/base.py`
 //! (routes in `apps/api/pi_dash/app/urls/page.py`):
+//!
+//! * `POST .../pages/` (`PageViewSet.create`, `base.py:129-152`,
+//!   PIDASHCONV-322): `PageSerializer` validation over the request body
+//!   with `description_*` from the raw body (context), the `ProjectPage`
+//!   bridge plus `PageLabel` bulk rows, an unconditional
+//!   `page_transaction` publish, a re-read through `get_queryset`, and a
+//!   `PageDetailSerializer` 201.
+//! * `PATCH .../pages/<page_id>/` (`partial_update`, `base.py:154-200`,
+//!   PIDASHCONV-322): the scoped fetch, the lock guard, the scoped parent
+//!   re-fetch, the owner-only access rule (whose body the `DoesNotExist`
+//!   branch reuses), the partial `PageDetailSerializer` save with the
+//!   conditional `page_transaction` publish, 200.
+//! * `DELETE .../pages/<page_id>/` (`destroy`, `base.py:368-419`,
+//!   PIDASHCONV-322): must-be-archived, owner-or-admin-20, children
+//!   detach, the soft page delete, favorite soft-delete plus recent-visit
+//!   hard-delete cleanup, 204.
 //!
 //! * `POST .../favorite-pages/<page_id>/` (`PageFavoriteViewSet.create`,
 //!   `base.py:472-483`): `@allow_permission([ADMIN, MEMBER])`, creates a
@@ -151,6 +167,9 @@ pub const PAGE_LOCKED_BODY: &str = r#"{"error_code":4701,"error_message":"PAGE_L
 pub const PAGE_ARCHIVED_BODY: &str = r#"{"error_code":4702,"error_message":"PAGE_ARCHIVED"}"#;
 /// Description PATCH success (`base.py:573`).
 pub const DESCRIPTION_UPDATED_BODY: &str = r#"{"message":"Updated successfully"}"#;
+/// Django `ValidationError` branch (`app/views/base.py:126-130`): what
+/// non-UUID parent lookups render on the write paths.
+pub const VALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 /// Streaming GET content type (`base.py:517`).
 pub const DESCRIPTION_CONTENT_TYPE: &str = "application/octet-stream";
 /// Streaming GET disposition (`base.py:518`).
@@ -212,6 +231,12 @@ pub enum Denial {
     PageLocked,
     /// 400, archived description PATCH.
     PageArchived,
+    /// 400, Django `ValidationError` branch (`handle_exception`,
+    /// `app/views/base.py:126-130`): non-UUID parent lookups and other ORM
+    /// validation failures on the write paths.
+    ValidDetail,
+    /// 403, `{"error": ...}` view-inline denials (destroy owner-or-admin).
+    ForbiddenError(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -240,6 +265,11 @@ impl Denial {
             ),
             Denial::PageLocked => (StatusCode::BAD_REQUEST, PAGE_LOCKED_BODY.to_owned()),
             Denial::PageArchived => (StatusCode::BAD_REQUEST, PAGE_ARCHIVED_BODY.to_owned()),
+            Denial::ValidDetail => (StatusCode::BAD_REQUEST, VALID_DETAIL_BODY.to_owned()),
+            Denial::ForbiddenError(message) => (
+                StatusCode::FORBIDDEN,
+                format!("{{\"error\":{}}}", json_string(message)),
+            ),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
@@ -298,7 +328,7 @@ fn owned(
     router
 }
 
-/// Register the favorites + description + state-op routes
+/// Register the favorites + description + state-op + write routes
 /// (`app/urls/page.py`). Sibling D-30 handler issues extend this router
 /// with their own paths; merges keep both sides.
 pub fn routes() -> Router<AppState> {
@@ -336,6 +366,20 @@ pub fn routes() -> Router<AppState> {
             owned(
                 axum::routing::post(access_page),
                 &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/pages/",
+            owned(
+                axum::routing::post(page_create),
+                &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/",
+            owned(
+                axum::routing::patch(page_partial_update).delete(page_destroy),
+                &["GET", "PUT", "POST", "OPTIONS"],
             ),
         )
 }
@@ -1702,6 +1746,1800 @@ pub async fn description_partial_update(
     json_response(StatusCode::OK, DESCRIPTION_UPDATED_BODY.to_owned())
 }
 
+// ---------------------------------------------------------------------------
+// Page writes: validation (`PageSerializer` / `PageDetailSerializer`,
+// `app/serializers/page.py:25-133` against DRF 3.15.2 `fields.py` +
+// `relations.py`)
+// ---------------------------------------------------------------------------
+
+/// One field's write errors: a flat message list, or per-index message lists
+/// for the `labels` / `label_ids` / `project_ids` list fields (DRF renders
+/// those as `{"0": [...], ...}` objects, never arrays).
+#[derive(Debug, Clone, PartialEq)]
+pub enum FieldError {
+    Flat(Vec<String>),
+    Indexed(Vec<(usize, Vec<String>)>),
+}
+
+/// Serializer errors in `Meta.fields` declaration order (`page.py:38-58`,
+/// plus `description_html` for the detail serializer): the 400 body preserves
+/// this order.
+pub type OrderedErrors = Vec<(String, FieldError)>;
+
+/// Why page-write validation fails: collected field errors (400
+/// serializer-errors body), or the Django-`ValidationError` short-circuit
+/// (400 [`VALID_DETAIL_BODY`]) when an ORM lookup itself rejects the value
+/// — float/list/dict parent or label items, out-of-range int PKs — exactly
+/// like the exception propagating out of `to_internal_value` in DRF.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WriteRejection {
+    Fields(OrderedErrors),
+    ValidDetail,
+}
+
+/// Validation outcome including the database: field-level rejections render
+/// 400s, row-fetch failures 500.
+#[derive(Debug)]
+pub enum PageFailure {
+    Invalid(WriteRejection),
+    Db(Denial),
+}
+
+impl From<Denial> for PageFailure {
+    fn from(denial: Denial) -> Self {
+        PageFailure::Db(denial)
+    }
+}
+
+fn failure_response(failure: PageFailure) -> Response {
+    match failure {
+        PageFailure::Invalid(rejection) => rejection_response(rejection),
+        PageFailure::Db(denial) => denial.into_response(),
+    }
+}
+
+fn push_flat(errors: &mut OrderedErrors, field: &str, message: String) {
+    match errors.iter_mut().find(|(name, _)| name == field) {
+        Some((_, FieldError::Flat(messages))) => messages.push(message),
+        _ => errors.push((field.to_owned(), FieldError::Flat(vec![message]))),
+    }
+}
+
+fn push_indexed(errors: &mut OrderedErrors, field: &str, index: usize, message: String) {
+    match errors.iter_mut().find(|(name, _)| name == field) {
+        Some((_, FieldError::Indexed(items))) => {
+            match items.iter_mut().find(|(i, _)| *i == index) {
+                Some((_, messages)) => messages.push(message),
+                None => items.push((index, vec![message])),
+            }
+        }
+        _ => errors.push((
+            field.to_owned(),
+            FieldError::Indexed(vec![(index, vec![message])]),
+        )),
+    }
+}
+
+fn escape_into(out: &mut String, value: &str) {
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+}
+
+fn quoted(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    escape_into(&mut out, value);
+    out.push('"');
+    out
+}
+
+/// Render the collected serializer errors byte-identically: `{"field":
+/// ["message"]}` flat arms, `{"field": {"0": ["message"]}}` indexed arms,
+/// fields in declaration order, compact separators, literal UTF-8 (DRF
+/// `JSONRenderer` with `ensure_ascii=False`).
+pub fn write_errors_body(errors: &[(String, FieldError)]) -> String {
+    let mut out = String::from("{");
+    for (index, (field, error)) in errors.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&quoted(field));
+        out.push(':');
+        match error {
+            FieldError::Flat(messages) => {
+                out.push('[');
+                for (i, message) in messages.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&quoted(message));
+                }
+                out.push(']');
+            }
+            FieldError::Indexed(items) => {
+                out.push('{');
+                for (i, (position, messages)) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&quoted(&position.to_string()));
+                    out.push_str(":[");
+                    for (j, message) in messages.iter().enumerate() {
+                        if j > 0 {
+                            out.push(',');
+                        }
+                        out.push_str(&quoted(message));
+                    }
+                    out.push(']');
+                }
+                out.push('}');
+            }
+        }
+    }
+    out.push('}');
+    out
+}
+
+/// Python `str()` of a JSON scalar for `invalid_choice` messages
+/// (`'"%s" is not a valid choice' % value`): bools render `True`/`False`,
+/// ints plainly, floats Python-style, strings as-is. Compounds never reach
+/// these messages in the suites; they fall back to compact JSON.
+fn py_scalar(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_owned(),
+        Value::Bool(true) => "True".to_owned(),
+        Value::Bool(false) => "False".to_owned(),
+        Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                int.to_string()
+            } else if let Some(uint) = number.as_u64() {
+                uint.to_string()
+            } else if let Some(float) = number.as_f64() {
+                crate::paginator::py_float_str(float)
+            } else {
+                number.to_string()
+            }
+        }
+        Value::String(text) => text.clone(),
+        other => serde_json::to_string(other).unwrap_or("null".to_owned()),
+    }
+}
+
+/// Parse like `uuid.UUID(hex=value)` (`relations.py` delegates there for
+/// `str` PKs): optional `urn:`/`uuid:` prefixes stripped, braces trimmed,
+/// dashes removed, then exactly 32 hex chars. Uppercase accepted.
+fn parse_uuid_hex(raw: &str) -> Option<uuid::Uuid> {
+    let mut text = raw.replace("urn:", "").replace("uuid:", "");
+    if text.starts_with('{') && text.ends_with('}') && text.len() > 2 {
+        text = text[1..text.len() - 1].to_owned();
+    }
+    let compact: String = text.chars().filter(|c| *c != '-').collect();
+    if compact.len() != 32 || !compact.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    uuid::Uuid::parse_str(&compact).ok()
+}
+
+/// `"..." is not a valid UUID.` with DRF's curly quotes (`relations.py` via
+/// the `Label`/user PK fields; the `labels`/`parent`/`created_by` path).
+fn curly_uuid_error(raw: &str) -> String {
+    format!("\u{201c}{raw}\u{201d} is not a valid UUID.")
+}
+
+/// `Invalid pk "..." - object does not exist.` (`relations.py`).
+fn invalid_pk_error(raw: &str) -> String {
+    format!("Invalid pk \"{raw}\" - object does not exist.")
+}
+
+/// Field names of `PageSerializer.Meta.fields` (`page.py:38-58`) that accept
+/// writes, in declaration order; error objects follow this order.
+pub const WRITE_VALIDATION_ORDER: &[&str] = &[
+    "name",
+    "access",
+    "color",
+    "labels",
+    "parent",
+    "is_locked",
+    "archived_at",
+    "created_by",
+    "updated_by",
+    "view_props",
+    "logo_props",
+    "label_ids",
+    "project_ids",
+    "description_html",
+];
+
+/// `PageSerializer` `CharField` coercion (`fields.py` `CharField`: bools and
+/// composites fail, numbers stringify, strings trim): `allow_blank`
+/// decides whether the trimmed-empty value passes or fails `blank`.
+fn coerce_char(value: &Value, allow_blank: bool) -> Result<String, &'static str> {
+    match value {
+        Value::Null => Err("This field may not be null."),
+        Value::Bool(_) | Value::Array(_) | Value::Object(_) => Err("Not a valid string."),
+        Value::Number(_) => {
+            let text = py_scalar(value);
+            let trimmed = text.trim().to_owned();
+            if trimmed.is_empty() && !allow_blank {
+                return Err("This field may not be blank.");
+            }
+            Ok(trimmed)
+        }
+        Value::String(text) => {
+            let trimmed = text.trim().to_owned();
+            if trimmed.is_empty() && !allow_blank {
+                return Err("This field may not be blank.");
+            }
+            Ok(trimmed)
+        }
+    }
+}
+
+/// `access` ChoiceField (`((0, "Public"), (1, "Private"))`,
+/// `fields.py` `ChoiceField.to_internal_value`): `choice_strings_to_values`
+/// lookup over `str(data)`, failure renders the Python-`str` input.
+fn coerce_access(value: &Value) -> Result<i32, String> {
+    if matches!(value, Value::Null) {
+        return Err("This field may not be null.".to_owned());
+    }
+    let key = match value {
+        Value::Bool(flag) => {
+            if *flag {
+                "True".to_owned()
+            } else {
+                "False".to_owned()
+            }
+        }
+        Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                int.to_string()
+            } else if let Some(uint) = number.as_u64() {
+                uint.to_string()
+            } else if let Some(float) = number.as_f64() {
+                crate::paginator::py_float_str(float)
+            } else {
+                number.to_string()
+            }
+        }
+        Value::String(text) => text.clone(),
+        _ => py_scalar(value),
+    };
+    match key.as_str() {
+        "0" => Ok(0),
+        "1" => Ok(1),
+        _ => Err(format!("\"{}\" is not a valid choice.", py_scalar(value))),
+    }
+}
+
+/// `is_locked` BooleanField (`fields.py`, lower-cased string sets; numeric
+/// `1`/`1.0` truthy and `0`/`0.0` falsy via `==` set membership).
+fn coerce_bool(value: &Value) -> Result<bool, &'static str> {
+    const INVALID: &str = "Must be a valid boolean.";
+    match value {
+        Value::Null => Err("This field may not be null."),
+        Value::Bool(flag) => Ok(*flag),
+        Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                return match int {
+                    1 => Ok(true),
+                    0 => Ok(false),
+                    _ => Err(INVALID),
+                };
+            }
+            if let Some(uint) = number.as_u64() {
+                return match uint {
+                    1 => Ok(true),
+                    0 => Ok(false),
+                    _ => Err(INVALID),
+                };
+            }
+            if let Some(float) = number.as_f64() {
+                if float == 1.0 {
+                    return Ok(true);
+                }
+                if float == 0.0 {
+                    return Ok(false);
+                }
+            }
+            Err(INVALID)
+        }
+        Value::String(text) => match text.to_lowercase().as_str() {
+            "t" | "y" | "yes" | "true" | "on" | "1" => Ok(true),
+            "f" | "n" | "no" | "false" | "off" | "0" => Ok(false),
+            _ => Err(INVALID),
+        },
+        Value::Array(_) | Value::Object(_) => Err(INVALID),
+    }
+}
+
+/// `archived_at` DateField (`YYYY-MM-DD`, `allow_null` from `null=True`):
+/// `""` falls through to the parser and fails `invalid` (never `blank`).
+fn coerce_date(value: &Value) -> Result<Option<chrono::NaiveDate>, &'static str> {
+    const INVALID: &str = "Date has wrong format. Use one of these formats instead: YYYY-MM-DD.";
+    match value {
+        Value::Null => Ok(None),
+        Value::String(text) => chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+            .map(Some)
+            .map_err(|_| INVALID),
+        _ => Err(INVALID),
+    }
+}
+
+/// `label_ids` / `project_ids` UUID items (`fields.py` `UUIDField`: ints —
+/// including bools — go through `UUID(int=)`, everything else non-string
+/// fails `invalid`; only `ValueError` is caught, and `int` overflow raises
+/// it). Renders dashed (`hex_verbose`).
+fn coerce_uuid_item(value: &Value) -> Result<uuid::Uuid, &'static str> {
+    const INVALID: &str = "Must be a valid UUID.";
+    match value {
+        Value::Null => Err("This field may not be null."),
+        // `bool` is an `int` subclass: `UUID(int=True)` is `...0001`.
+        Value::Bool(flag) => Ok(uuid::Uuid::from_u128(u128::from(*flag as u8))),
+        Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                if int < 0 {
+                    return Err(INVALID);
+                }
+                return Ok(uuid::Uuid::from_u128(int as u128));
+            }
+            if let Some(uint) = number.as_u64() {
+                return Ok(uuid::Uuid::from_u128(u128::from(uint)));
+            }
+            Err(INVALID)
+        }
+        Value::String(text) => parse_uuid_hex(text).ok_or(INVALID),
+        Value::Array(_) | Value::Object(_) => Err(INVALID),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Page writes: validated shape, row SQL, response rendering
+// ---------------------------------------------------------------------------
+
+/// Validated `PageSerializer` / `PageDetailSerializer` writes: `None` arms
+/// are absent keys (defaults on create, untouched on patch);
+/// `parent`/`archived_at`/`created_by` nest a second `Option` because an
+/// explicit `null` writes `NULL` (detach). `label_ids` / `project_ids` /
+/// `description_html` only exist on the detail (PATCH) shape.
+#[derive(Debug, Default, Clone)]
+pub struct ValidPage {
+    pub name: Option<String>,
+    pub access: Option<i32>,
+    pub color: Option<String>,
+    pub labels: Option<Vec<uuid::Uuid>>,
+    pub parent: Option<Option<uuid::Uuid>>,
+    pub is_locked: Option<bool>,
+    pub archived_at: Option<Option<chrono::NaiveDate>>,
+    pub created_by: Option<Option<uuid::Uuid>>,
+    pub view_props: Option<Value>,
+    pub logo_props: Option<Value>,
+    pub label_ids: Option<Vec<uuid::Uuid>>,
+    pub project_ids: Option<Vec<uuid::Uuid>>,
+    pub description_html: Option<String>,
+}
+
+/// PK existence scope for relational validation.
+#[derive(Debug, Clone, Copy)]
+enum PkTable {
+    Pages,
+    Labels,
+    Users,
+}
+
+async fn pk_exists(pool: &PgPool, table: PkTable, id: &uuid::Uuid) -> Result<bool, Denial> {
+    let found: Option<(uuid::Uuid,)> = match table {
+        PkTable::Pages => {
+            sqlx::query_as(r#"SELECT p.id FROM pages p WHERE p.id = $1 AND p.deleted_at IS NULL"#)
+        }
+        PkTable::Labels => {
+            sqlx::query_as(r#"SELECT l.id FROM labels l WHERE l.id = $1 AND l.deleted_at IS NULL"#)
+        }
+        PkTable::Users => sqlx::query_as(r#"SELECT u.id FROM users u WHERE u.id = $1"#),
+    }
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(found.is_some())
+}
+
+/// DRF `type(data).__name__` for the `incorrect_type` / `not_a_list`
+/// messages (`relations.py`, `fields.py`).
+fn pk_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(number) if number.is_i64() || number.is_u64() => "int",
+        Value::Number(_) => "float",
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+
+fn incorrect_type_error(value: &Value) -> String {
+    format!(
+        "Incorrect type. Expected pk value, received {}.",
+        pk_type_name(value)
+    )
+}
+
+/// One relational PK item's failure: a field message, the ORM-level
+/// short-circuit, or a row-fetch failure.
+#[derive(Debug)]
+enum PkFailure {
+    Field(String),
+    Reject(WriteRejection),
+    Db(Denial),
+}
+
+impl From<Denial> for PkFailure {
+    fn from(denial: Denial) -> Self {
+        PkFailure::Db(denial)
+    }
+}
+
+impl PkFailure {
+    /// Field messages are pushed and validation continues (DRF collects
+    /// every field's errors); ORM-level and database failures return.
+    fn push_or_return(self, field: &str, errors: &mut OrderedErrors) -> Result<(), PageFailure> {
+        match self {
+            PkFailure::Field(message) => {
+                push_flat(errors, field, message);
+                Ok(())
+            }
+            PkFailure::Reject(rejection) => Err(PageFailure::Invalid(rejection)),
+            PkFailure::Db(denial) => Err(PageFailure::Db(denial)),
+        }
+    }
+}
+
+/// Validate one relational PK item (`relations.py`
+/// `PrimaryKeyRelatedField.to_internal_value` over the live manager):
+/// `""` coerces to `None` (`RelatedField.run_validation`), bools fail
+/// `incorrect_type`, ints go through `UUID(int=)` (out-of-range is the
+/// Django-`ValidationError` short-circuit), strings through `UUID(hex=)`
+/// (curly-quotes error), then the live-row existence check. Floats, lists
+/// and dicts raise inside the ORM `get` — the [`WriteRejection::ValidDetail`]
+/// short-circuit, exactly like the propagating exception.
+async fn validate_pk_item(
+    pool: &PgPool,
+    value: &Value,
+    table: PkTable,
+) -> Result<Option<uuid::Uuid>, PkFailure> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(text) if text.is_empty() => Ok(None),
+        Value::String(text) => {
+            let id =
+                parse_uuid_hex(text).ok_or_else(|| PkFailure::Field(curly_uuid_error(text)))?;
+            if pk_exists(pool, table, &id).await? {
+                Ok(Some(id))
+            } else {
+                Err(PkFailure::Field(invalid_pk_error(text)))
+            }
+        }
+        Value::Bool(_) => Err(PkFailure::Field(incorrect_type_error(value))),
+        Value::Number(number) => {
+            let raw = if let Some(int) = number.as_i64() {
+                if int < 0 {
+                    return Err(PkFailure::Reject(WriteRejection::ValidDetail));
+                }
+                int.to_string()
+            } else if let Some(uint) = number.as_u64() {
+                uint.to_string()
+            } else {
+                return Err(PkFailure::Reject(WriteRejection::ValidDetail));
+            };
+            let as_int: u128 = raw
+                .parse()
+                .map_err(|_| PkFailure::Reject(WriteRejection::ValidDetail))?;
+            let id = uuid::Uuid::from_u128(as_int);
+            if pk_exists(pool, table, &id).await? {
+                Ok(Some(id))
+            } else {
+                Err(PkFailure::Field(invalid_pk_error(&raw)))
+            }
+        }
+        Value::Array(_) | Value::Object(_) => Err(PkFailure::Reject(WriteRejection::ValidDetail)),
+    }
+}
+
+/// Validate a `labels`-style PK list into live ids: `null` and non-lists
+/// fail flat, items fail indexed (`fields.py` `ListField` plus the child
+/// relation). ORM-level rejections short-circuit the whole body.
+async fn validate_pk_list(
+    pool: &PgPool,
+    field: &str,
+    value: &Value,
+    table: PkTable,
+    errors: &mut OrderedErrors,
+) -> Result<Option<Vec<uuid::Uuid>>, PageFailure> {
+    match value {
+        Value::Null => {
+            push_flat(errors, field, "This field may not be null.".to_owned());
+            Ok(None)
+        }
+        Value::Array(items) => {
+            let mut ids = Vec::with_capacity(items.len());
+            let mut failed = false;
+            for (index, item) in items.iter().enumerate() {
+                match validate_pk_item(pool, item, table).await {
+                    Ok(Some(id)) => ids.push(id),
+                    Ok(None) => {
+                        push_indexed(
+                            errors,
+                            field,
+                            index,
+                            "This field may not be null.".to_owned(),
+                        );
+                        failed = true;
+                    }
+                    Err(PkFailure::Field(message)) => {
+                        push_indexed(errors, field, index, message);
+                        failed = true;
+                    }
+                    Err(PkFailure::Reject(rejection)) => {
+                        return Err(PageFailure::Invalid(rejection));
+                    }
+                    Err(PkFailure::Db(denial)) => return Err(PageFailure::Db(denial)),
+                }
+            }
+            if failed {
+                Ok(None)
+            } else {
+                Ok(Some(ids))
+            }
+        }
+        other => {
+            push_flat(
+                errors,
+                field,
+                format!(
+                    "Expected a list of items but got type \"{}\".",
+                    pk_type_name(other)
+                ),
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// Validate a `label_ids`-style UUID list (`fields.py` `ListField` +
+/// `UUIDField`, `hex_verbose` rendering).
+fn validate_uuid_list(
+    field: &str,
+    value: &Value,
+    errors: &mut OrderedErrors,
+) -> Option<Vec<uuid::Uuid>> {
+    match value {
+        Value::Null => {
+            push_flat(errors, field, "This field may not be null.".to_owned());
+            None
+        }
+        Value::Array(items) => {
+            let mut ids = Vec::with_capacity(items.len());
+            let mut failed = false;
+            for (index, item) in items.iter().enumerate() {
+                match coerce_uuid_item(item) {
+                    Ok(id) => ids.push(id),
+                    Err(message) => {
+                        push_indexed(errors, field, index, message.to_owned());
+                        failed = true;
+                    }
+                }
+            }
+            if failed {
+                None
+            } else {
+                Some(ids)
+            }
+        }
+        other => {
+            push_flat(
+                errors,
+                field,
+                format!(
+                    "Expected a list of items but got type \"{}\".",
+                    pk_type_name(other)
+                ),
+            );
+            None
+        }
+    }
+}
+
+/// Validate one page-write body in `Meta.fields` order (`page.py:38-58`):
+/// unknown and read-only keys ignored, absent keys untouched (defaults fill
+/// them on create), every declared key validated independently with all
+/// field errors collected. `detail` selects the `PageDetailSerializer`
+/// shape (PATCH): `description_html` becomes a declared field.
+pub async fn validate_page_fields(
+    pool: &PgPool,
+    body: &Map<String, Value>,
+    detail: bool,
+) -> Result<ValidPage, PageFailure> {
+    let mut errors: OrderedErrors = Vec::new();
+    let mut valid = ValidPage::default();
+    if let Some(value) = body.get("name") {
+        match coerce_char(value, true) {
+            Ok(name) => valid.name = Some(name),
+            Err(message) => push_flat(&mut errors, "name", message.to_owned()),
+        }
+    }
+    if let Some(value) = body.get("access") {
+        match coerce_access(value) {
+            Ok(access) => valid.access = Some(access),
+            Err(message) => push_flat(&mut errors, "access", message),
+        }
+    }
+    if let Some(value) = body.get("color") {
+        match coerce_char(value, true) {
+            Ok(color) => {
+                if color.chars().count() > 255 {
+                    push_flat(
+                        &mut errors,
+                        "color",
+                        "Ensure this field has no more than 255 characters.".to_owned(),
+                    );
+                } else {
+                    valid.color = Some(color);
+                }
+            }
+            Err(message) => push_flat(&mut errors, "color", message.to_owned()),
+        }
+    }
+    if let Some(value) = body.get("labels") {
+        valid.labels =
+            validate_pk_list(pool, "labels", value, PkTable::Labels, &mut errors).await?;
+    }
+    if let Some(value) = body.get("parent") {
+        match validate_pk_item(pool, value, PkTable::Pages).await {
+            Ok(parent) => valid.parent = Some(parent),
+            Err(failure) => failure.push_or_return("parent", &mut errors)?,
+        }
+    }
+    if let Some(value) = body.get("is_locked") {
+        match coerce_bool(value) {
+            Ok(locked) => valid.is_locked = Some(locked),
+            Err(message) => push_flat(&mut errors, "is_locked", message.to_owned()),
+        }
+    }
+    if let Some(value) = body.get("archived_at") {
+        match coerce_date(value) {
+            Ok(date) => valid.archived_at = Some(date),
+            Err(message) => push_flat(&mut errors, "archived_at", message.to_owned()),
+        }
+    }
+    if let Some(value) = body.get("created_by") {
+        match validate_pk_item(pool, value, PkTable::Users).await {
+            Ok(owner) => valid.created_by = Some(owner),
+            Err(failure) => failure.push_or_return("created_by", &mut errors)?,
+        }
+    }
+    // `updated_by` validates like any user PK (`page.py` declares the
+    // audit pair) but `BaseModel.save` overwrites it with the request user
+    // on every update — and on create with `None` — so the value is never
+    // stored; only its errors render.
+    if let Some(value) = body.get("updated_by") {
+        match validate_pk_item(pool, value, PkTable::Users).await {
+            Ok(_) => {}
+            Err(failure) => failure.push_or_return("updated_by", &mut errors)?,
+        }
+    }
+    for field in ["view_props", "logo_props"] {
+        if let Some(value) = body.get(field) {
+            if value.is_null() {
+                push_flat(&mut errors, field, "This field may not be null.".to_owned());
+            } else if field == "view_props" {
+                valid.view_props = Some(value.clone());
+            } else {
+                valid.logo_props = Some(value.clone());
+            }
+        }
+    }
+    // `validate_uuid_list` returns `None` exactly when it pushed errors.
+    if let Some(value) = body.get("label_ids") {
+        valid.label_ids = validate_uuid_list("label_ids", value, &mut errors);
+    }
+    if let Some(value) = body.get("project_ids") {
+        valid.project_ids = validate_uuid_list("project_ids", value, &mut errors);
+    }
+    if detail {
+        if let Some(value) = body.get("description_html") {
+            match coerce_char(value, false) {
+                Ok(html) => valid.description_html = Some(html),
+                Err(message) => push_flat(&mut errors, "description_html", message.to_owned()),
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(valid)
+    } else {
+        Err(PageFailure::Invalid(WriteRejection::Fields(errors)))
+    }
+}
+
+/// One workspace+project+bridge scoped page row: the `partial_update`
+/// (`base.py:156-161`) and `destroy` (`:369-374`) fetches plus every column
+/// the PATCH render needs. The default manager hides soft-deleted rows.
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct ScopedPage {
+    id: uuid::Uuid,
+    name: String,
+    owned_by_id: uuid::Uuid,
+    access: i16,
+    color: String,
+    parent_id: Option<uuid::Uuid>,
+    is_locked: bool,
+    archived_at: Option<chrono::NaiveDate>,
+    workspace_id: uuid::Uuid,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    created_by_id: Option<uuid::Uuid>,
+    updated_by_id: Option<uuid::Uuid>,
+    view_props: Value,
+    logo_props: Value,
+    description_html: String,
+}
+
+/// The `PageViewSet.get_queryset` re-read row for create (`base.py:81-127`
+/// narrowed to one `pk`): the scope predicates that can still miss
+/// (`parent__isnull`, owner-or-public, project bridge) plus the
+/// `is_favorite` / `label_ids` / `project_ids` annotations. `project_ids`
+/// keeps the ported `~Q(projects__id=True)` no-op shape: Django compiles
+/// the `True` through `UUIDField.get_prep_value` into `UUID(int=1)`, so the
+/// predicate below compares against the zero-`1` UUID, never boolean `TRUE`.
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct DetailRow {
+    #[sqlx(flatten)]
+    page: ScopedPage,
+    is_favorite: bool,
+    label_ids: Vec<uuid::Uuid>,
+    project_ids: Vec<uuid::Uuid>,
+}
+
+const SCOPED_PAGE_COLUMNS: &str = "p.id, p.name, p.owned_by_id, p.access, p.color, p.parent_id, \
+    p.is_locked, p.archived_at, p.workspace_id, p.created_at, p.updated_at, p.created_by_id, \
+    p.updated_by_id, p.view_props, p.logo_props, p.description_html";
+
+/// The scoped page fetch (`partial_update` `:156-161`, `destroy` `:369-374`):
+/// `pk` + workspace slug + URL-project bridge (live rows only). A miss is
+/// `DoesNotExist`: the PATCH maps it to the owner-access 400 body
+/// (`:196-200`), the DELETE lets it 404 through `handle_exception`.
+async fn fetch_scoped_page(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    page_id: &uuid::Uuid,
+) -> Result<Option<ScopedPage>, Denial> {
+    sqlx::query_as(&format!(
+        r#"SELECT {SCOPED_PAGE_COLUMNS} FROM pages p
+           JOIN workspaces w ON w.id = p.workspace_id
+           JOIN project_pages pp ON pp.page_id = p.id
+               AND pp.project_id = $2 AND pp.deleted_at IS NULL
+           WHERE p.id = $1 AND w.slug = $3 AND p.deleted_at IS NULL"#
+    ))
+    .bind(page_id)
+    .bind(project_id)
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)
+}
+
+/// The create re-read (`base.py:149`: `self.get_queryset().get(pk=...)`):
+/// the full detail scope — top-level only (`:97`), owner-or-public (`:98`),
+/// the URL-project bridge (`:125`) — with the three annotations. A child
+/// page (or any row the queryset hides) misses here and answers 404 through
+/// `handle_exception`, exactly like Django.
+async fn fetch_detail_row(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    page_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> Result<Option<DetailRow>, Denial> {
+    sqlx::query_as(&format!(
+        r#"SELECT {SCOPED_PAGE_COLUMNS},
+           EXISTS(SELECT 1 FROM user_favorites uf
+                  WHERE uf.user_id = $4 AND uf.entity_type = 'page'
+                  AND uf.entity_identifier = p.id AND uf.workspace_id = p.workspace_id
+                  AND uf.deleted_at IS NULL) AS is_favorite,
+           COALESCE((SELECT ARRAY_AGG(DISTINCT pl.label_id) FROM page_labels pl
+                     WHERE pl.page_id = p.id AND pl.label_id IS NOT NULL
+                     AND pl.deleted_at IS NULL), '{{}}') AS label_ids,
+           COALESCE((SELECT ARRAY_AGG(DISTINCT pp2.project_id) FROM project_pages pp2
+                     WHERE pp2.page_id = p.id
+                     AND NOT (pp2.project_id = '00000000-0000-0000-0000-000000000001')
+                     AND pp2.deleted_at IS NULL), '{{}}') AS project_ids
+           FROM pages p
+           JOIN workspaces w ON w.id = p.workspace_id
+           JOIN project_pages pp ON pp.page_id = p.id
+               AND pp.project_id = $2 AND pp.deleted_at IS NULL
+           WHERE p.id = $1 AND w.slug = $3 AND p.deleted_at IS NULL
+           AND p.parent_id IS NULL AND (p.owned_by_id = $4 OR p.access = 0)"#
+    ))
+    .bind(page_id)
+    .bind(project_id)
+    .bind(slug)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)
+}
+
+/// The actor's render zone (`TimezoneMixin.initial`, `app/views/base.py:44`):
+/// datetimes render in the request user's `user_timezone`, like DRF's
+/// `iso-8601` (`+00:00` rewritten to `Z`).
+async fn actor_timezone(pool: &PgPool, user_id: &uuid::Uuid) -> Result<chrono_tz::Tz, Denial> {
+    let row: Option<(String,)> =
+        sqlx::query_as(r#"SELECT u.user_timezone FROM users u WHERE u.id = $1"#)
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    let (name,) = row.ok_or(Denial::ServerError)?;
+    name.parse().map_err(|_| Denial::ServerError)
+}
+
+fn render_dt(dt: &chrono::DateTime<chrono::Utc>, tz: &chrono_tz::Tz) -> String {
+    quoted(&crate::serializer::render_datetime_in(dt, tz))
+}
+
+fn render_uuid(id: &uuid::Uuid) -> String {
+    quoted(&id.to_string())
+}
+
+fn render_opt_uuid(id: &Option<uuid::Uuid>) -> String {
+    id.as_ref()
+        .map(render_uuid)
+        .unwrap_or_else(|| "null".to_owned())
+}
+
+fn render_date(date: &Option<chrono::NaiveDate>) -> String {
+    date.map(|day| quoted(&day.format("%Y-%m-%d").to_string()))
+        .unwrap_or_else(|| "null".to_owned())
+}
+
+fn render_json(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or("null".to_owned())
+}
+
+/// The create 201 shape: `PageDetailSerializer` over the re-read row —
+/// `Meta.fields` order minus write-only `labels` plus `description_html`
+/// (`page.py:129-133`), 19 keys.
+fn render_create_row(row: &DetailRow, tz: &chrono_tz::Tz) -> String {
+    let page = &row.page;
+    let mut out = String::from("{");
+    out.push_str(&format!("\"id\":{},", render_uuid(&page.id)));
+    out.push_str(&format!("\"name\":{},", quoted(&page.name)));
+    out.push_str(&format!("\"owned_by\":{},", render_uuid(&page.owned_by_id)));
+    out.push_str(&format!("\"access\":{},", i32::from(page.access)));
+    out.push_str(&format!("\"color\":{},", quoted(&page.color)));
+    out.push_str(&format!("\"parent\":{},", render_opt_uuid(&page.parent_id)));
+    out.push_str(&format!(
+        "\"is_favorite\":{},",
+        if row.is_favorite { "true" } else { "false" }
+    ));
+    out.push_str(&format!(
+        "\"is_locked\":{},",
+        if page.is_locked { "true" } else { "false" }
+    ));
+    out.push_str(&format!(
+        "\"archived_at\":{},",
+        render_date(&page.archived_at)
+    ));
+    out.push_str(&format!(
+        "\"workspace\":{},",
+        render_uuid(&page.workspace_id)
+    ));
+    out.push_str(&format!(
+        "\"created_at\":{},",
+        render_dt(&page.created_at, tz)
+    ));
+    out.push_str(&format!(
+        "\"updated_at\":{},",
+        render_dt(&page.updated_at, tz)
+    ));
+    out.push_str(&format!(
+        "\"created_by\":{},",
+        render_opt_uuid(&page.created_by_id)
+    ));
+    out.push_str(&format!(
+        "\"updated_by\":{},",
+        render_opt_uuid(&page.updated_by_id)
+    ));
+    out.push_str(&format!(
+        "\"view_props\":{},",
+        render_json(&page.view_props)
+    ));
+    out.push_str(&format!(
+        "\"logo_props\":{},",
+        render_json(&page.logo_props)
+    ));
+    out.push_str(&format!(
+        "\"label_ids\":[{}],",
+        row.label_ids
+            .iter()
+            .map(|id| quoted(&id.to_string()))
+            .collect::<Vec<_>>()
+            .join(",")
+    ));
+    out.push_str(&format!(
+        "\"project_ids\":[{}],",
+        row.project_ids
+            .iter()
+            .map(|id| quoted(&id.to_string()))
+            .collect::<Vec<_>>()
+            .join(",")
+    ));
+    out.push_str(&format!(
+        "\"description_html\":{}}}",
+        quoted(&page.description_html)
+    ));
+    out
+}
+
+/// The PATCH 200 shape: the update-bound `PageDetailSerializer` over the
+/// plain instance — the annotation-backed keys (`is_favorite`,
+/// `label_ids`, `project_ids`) have no attribute and DRF drops them
+/// (`SkipField`), except `label_ids` / `project_ids` render when the
+/// request body set them as ad-hoc attributes (16 base keys).
+#[derive(Debug, Clone, Default)]
+pub struct PatchRender {
+    pub page: RenderPage,
+    pub label_ids: Option<Vec<uuid::Uuid>>,
+    pub project_ids: Option<Vec<uuid::Uuid>>,
+}
+
+/// Owned render values for one PATCH response.
+#[derive(Debug, Clone, Default)]
+pub struct RenderPage {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub owned_by_id: uuid::Uuid,
+    pub access: i32,
+    pub color: String,
+    pub parent_id: Option<uuid::Uuid>,
+    pub is_locked: bool,
+    pub archived_at: Option<chrono::NaiveDate>,
+    pub workspace_id: uuid::Uuid,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_by_id: Option<uuid::Uuid>,
+    pub updated_by_id: Option<uuid::Uuid>,
+    pub view_props: Value,
+    pub logo_props: Value,
+    pub description_html: String,
+}
+
+fn render_patch_row(render: &PatchRender, tz: &chrono_tz::Tz) -> String {
+    let page = &render.page;
+    let mut out = String::from("{");
+    out.push_str(&format!("\"id\":{},", render_uuid(&page.id)));
+    out.push_str(&format!("\"name\":{},", quoted(&page.name)));
+    out.push_str(&format!("\"owned_by\":{},", render_uuid(&page.owned_by_id)));
+    out.push_str(&format!("\"access\":{},", page.access));
+    out.push_str(&format!("\"color\":{},", quoted(&page.color)));
+    out.push_str(&format!("\"parent\":{},", render_opt_uuid(&page.parent_id)));
+    out.push_str(&format!(
+        "\"is_locked\":{},",
+        if page.is_locked { "true" } else { "false" }
+    ));
+    out.push_str(&format!(
+        "\"archived_at\":{},",
+        render_date(&page.archived_at)
+    ));
+    out.push_str(&format!(
+        "\"workspace\":{},",
+        render_uuid(&page.workspace_id)
+    ));
+    out.push_str(&format!(
+        "\"created_at\":{},",
+        render_dt(&page.created_at, tz)
+    ));
+    out.push_str(&format!(
+        "\"updated_at\":{},",
+        render_dt(&page.updated_at, tz)
+    ));
+    out.push_str(&format!(
+        "\"created_by\":{},",
+        render_opt_uuid(&page.created_by_id)
+    ));
+    out.push_str(&format!(
+        "\"updated_by\":{},",
+        render_opt_uuid(&page.updated_by_id)
+    ));
+    out.push_str(&format!(
+        "\"view_props\":{},",
+        render_json(&page.view_props)
+    ));
+    out.push_str(&format!(
+        "\"logo_props\":{},",
+        render_json(&page.logo_props)
+    ));
+    if let Some(ids) = &render.label_ids {
+        out.push_str(&format!(
+            "\"label_ids\":[{}],",
+            ids.iter()
+                .map(|id| quoted(&id.to_string()))
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    if let Some(ids) = &render.project_ids {
+        out.push_str(&format!(
+            "\"project_ids\":[{}],",
+            ids.iter()
+                .map(|id| quoted(&id.to_string()))
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    out.push_str(&format!(
+        "\"description_html\":{}}}",
+        quoted(&page.description_html)
+    ));
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Page writes: handlers
+// ---------------------------------------------------------------------------
+
+/// Read the request body as DRF `request.data` (`base.py` reads it lazily
+/// per handler): empty bodies validate as `{}`; malformed JSON answers the
+/// 400 `ParseError` detail; a well-formed non-object answers the 500
+/// generic branch — every handler calls `.get(...)` on the data, and that
+/// `AttributeError` is what Django renders for lists, strings and `null`.
+async fn read_write_body(req: Request) -> Result<Map<String, Value>, Denial> {
+    let (_parts, body) = req.into_parts();
+    let bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return Err(Denial::ServerError),
+    };
+    if bytes.is_empty() {
+        return Ok(Map::new());
+    }
+    let parsed: Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(error) => {
+            return Err(Denial::BadDetail(format!("JSON parse error - {error}")));
+        }
+    };
+    match parsed {
+        Value::Object(map) => Ok(map),
+        _ => Err(Denial::ServerError),
+    }
+}
+
+fn rejection_response(rejection: WriteRejection) -> Response {
+    match rejection {
+        WriteRejection::Fields(errors) => Denial::BadJson(
+            serde_json::from_str(&write_errors_body(&errors)).expect("rendered errors parse"),
+        )
+        .into_response(),
+        WriteRejection::ValidDetail => Denial::ValidDetail.into_response(),
+    }
+}
+
+/// `POST .../pages/` (`PageViewSet.create`, `base.py:129-152`).
+pub async fn page_create(
+    State(state): State<AppState>,
+    Path((slug, project_raw)): Path<(String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    let user_id = match actor_user_id(extension.clone()) {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    let project_id = match resolve_project_id(pool, &slug, &project_raw).await {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    if let Err(denial) =
+        gate::resolve_gate(&state, "POST", &slug, &project_id, None, extension).await
+    {
+        return denial.into_response();
+    }
+    let body = match read_write_body(req).await {
+        Ok(body) => body,
+        Err(denial) => return denial.into_response(),
+    };
+    // `PageSerializer` validation first (`:130-131`); the ported `TypeError`
+    // bug follows: supplied `label_ids` / `project_ids` validate as UUID
+    // lists, then blow up inside `Page.objects.create(**validated_data)`
+    // — the 500 generic branch, never a field error.
+    let valid = match validate_page_fields(pool, &body, false).await {
+        Ok(valid) => valid,
+        Err(failure) => return failure_response(failure),
+    };
+    if valid.label_ids.is_some() || valid.project_ids.is_some() {
+        return Denial::ServerError.into_response();
+    }
+    // Serializer context (`:132-138`): `description_*` come from the RAW
+    // body, never from `validated_data` (the F30-01 ported bug). `null`
+    // JSON values fail the `NOT NULL` columns (`page.py` never validates
+    // them) — the `IntegrityError` 400 branch; non-string HTML and any
+    // non-null binary fail earlier (`strip_tags` / the driver) — the 500
+    // branch.
+    enum Html {
+        Default,
+        Text(String),
+    }
+    let html = match body.get("description_html") {
+        None => Html::Default,
+        Some(Value::Null) => {
+            return Denial::BadError("The payload is not valid".to_owned()).into_response()
+        }
+        Some(Value::String(text)) => Html::Text(text.clone()),
+        Some(_) => return Denial::ServerError.into_response(),
+    };
+    let description_json = match body.get("description_json") {
+        None => Value::Object(Map::new()),
+        Some(Value::Null) => {
+            return Denial::BadError("The payload is not valid".to_owned()).into_response();
+        }
+        Some(value) => value.clone(),
+    };
+    if body
+        .get("description_binary")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Denial::ServerError.into_response();
+    }
+    let workspace_id: uuid::Uuid =
+        match sqlx::query_as(r#"SELECT p.workspace_id FROM projects p WHERE p.id = $1"#)
+            .bind(project_id)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(Some((id,))) => id,
+            Ok(None) => return Denial::ProjectNotFound.into_response(),
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+    let timezone = match actor_timezone(pool, &user_id).await {
+        Ok(tz) => tz,
+        Err(denial) => return denial.into_response(),
+    };
+    let stored_html = match &html {
+        Html::Default => "<p></p>".to_owned(),
+        Html::Text(text) => text.clone(),
+    };
+    let stored_stripped: Option<String> = if stored_html.is_empty() {
+        None
+    } else {
+        Some(crate::space::sanitize::strip_tags(stored_html.as_str()))
+    };
+    let stored_json = serde_json::to_string(&description_json).expect("json serializes");
+    let page_id = uuid::Uuid::new_v4();
+    // `auto_now_add` / `auto_now` are two Python `now()` calls (the
+    // response usually shows `created_at != updated_at` microseconds
+    // apart), never one database timestamp.
+    let created_at = chrono::Utc::now();
+    let updated_at = chrono::Utc::now();
+    // `Page.objects.create` (`page.py:73-80`) + the `ProjectPage` bridge
+    // (`:83-89`) + the label bulk rows (`:92-105`, no-op when `None`) run
+    // as one write unit; `created_by` is the request user and `updated_by`
+    // stays null (`BaseModel.save` via crum).
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let inserted = sqlx::query(
+        r#"INSERT INTO pages
+           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
+            workspace_id, name, description_json, description_binary, description_html,
+            description_stripped, owned_by_id, access, color, parent_id, archived_at,
+            is_locked, view_props, logo_props, is_global, sort_order,
+            moved_to_page, moved_to_project, external_id, external_source)
+           VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, CAST($7 AS jsonb), NULL,
+               $8, $9, $4, $10, $11, $12, $13, $14, CAST($15 AS jsonb), CAST($16 AS jsonb),
+               false, 65535, NULL, NULL, NULL, NULL)"#,
+    )
+    .bind(page_id)
+    .bind(created_at)
+    .bind(updated_at)
+    .bind(user_id)
+    .bind(workspace_id)
+    .bind(valid.name.as_deref().unwrap_or(""))
+    .bind(stored_json)
+    .bind(stored_html.as_str())
+    .bind(stored_stripped)
+    .bind(valid.access.unwrap_or(0) as i16)
+    .bind(valid.color.as_deref().unwrap_or(""))
+    .bind(valid.parent.unwrap_or(None))
+    .bind(valid.archived_at.unwrap_or(None))
+    .bind(valid.is_locked.unwrap_or(false))
+    .bind(
+        serde_json::to_string(valid.view_props.as_ref().unwrap_or(&default_view_props()))
+            .expect("json serializes"),
+    )
+    .bind(
+        serde_json::to_string(
+            valid
+                .logo_props
+                .as_ref()
+                .unwrap_or(&Value::Object(Map::new())),
+        )
+        .expect("json serializes"),
+    )
+    .execute(&mut *tx)
+    .await;
+    if let Err(error) = inserted {
+        let _ = tx.rollback().await;
+        return db_write_denial(&error);
+    }
+    if sqlx::query(
+        r#"INSERT INTO project_pages
+           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
+            workspace_id, project_id, page_id)
+           VALUES ($1, now(), now(), $2, NULL, NULL, $3, $4, $5)"#,
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(user_id)
+    .bind(workspace_id)
+    .bind(project_id)
+    .bind(page_id)
+    .execute(&mut *tx)
+    .await
+    .is_err()
+    {
+        let _ = tx.rollback().await;
+        return Denial::ServerError.into_response();
+    }
+    if let Some(labels) = valid.labels.clone() {
+        for chunk in labels.chunks(10) {
+            for label_id in chunk {
+                if sqlx::query(
+                    r#"INSERT INTO page_labels
+                       (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
+                        label_id, page_id, workspace_id)
+                       VALUES ($1, now(), now(), $2, NULL, NULL, $3, $4, $5)"#,
+                )
+                .bind(uuid::Uuid::new_v4())
+                .bind(user_id)
+                .bind(label_id)
+                .bind(page_id)
+                .bind(workspace_id)
+                .execute(&mut *tx)
+                .await
+                .is_err()
+                {
+                    let _ = tx.rollback().await;
+                    return Denial::ServerError.into_response();
+                }
+            }
+        }
+    }
+    if tx.commit().await.is_err() {
+        return Denial::ServerError.into_response();
+    }
+    // Unconditional `page_transaction` after the save (`:144-148`), with
+    // the raw HTML (default `<p></p>` when absent) and no old snapshot. A
+    // present non-string HTML never reaches here (500 above), so the
+    // `as_str` projection is exact.
+    enqueue_best_effort(
+        pool,
+        &pidash_jobs::app_pages::page_transaction_create_job(
+            &page_id.to_string(),
+            body.get("description_html").and_then(Value::as_str),
+        ),
+    )
+    .await;
+    // Re-read through the annotated queryset (`:149-150`); a miss (a child
+    // page, or any other row the queryset hides) 404s through
+    // `handle_exception`, exactly like the propagating `DoesNotExist`.
+    match fetch_detail_row(pool, &slug, &project_id, &page_id, &user_id).await {
+        Ok(Some(row)) => json_response(StatusCode::CREATED, render_create_row(&row, &timezone)),
+        Ok(None) => Denial::ObjectNotFound.into_response(),
+        Err(denial) => denial.into_response(),
+    }
+}
+
+/// Map a write-path DB error like `handle_exception`
+/// (`app/views/base.py:120-124`): integrity violations (including the
+/// `NOT NULL` failures the unvalidated context values hit) answer the 400
+/// payload body, everything else the 500 branch.
+fn db_write_denial(error: &sqlx::Error) -> Response {
+    let integrity = error
+        .as_database_error()
+        .and_then(|db| db.code())
+        .is_some_and(|code| code.starts_with("23"));
+    if integrity {
+        Denial::BadError("The payload is not valid".to_owned()).into_response()
+    } else {
+        Denial::ServerError.into_response()
+    }
+}
+
+/// `view_props` model default (`db/models/page.py:19-20`, `get_view_props`).
+fn default_view_props() -> Value {
+    Value::Object(Map::from_iter([(
+        "full_width".to_owned(),
+        Value::Bool(false),
+    )]))
+}
+
+/// Scoped existence for the `partial_update` parent re-fetch
+/// (`base.py:166-173`): the same workspace+project+bridge scope as the page
+/// fetch. A miss is `DoesNotExist` → the owner-access 400 (`:196-200`).
+async fn scoped_page_exists(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    page_id: &uuid::Uuid,
+) -> Result<bool, Denial> {
+    let found: Option<(uuid::Uuid,)> = sqlx::query_as(
+        r#"SELECT p.id FROM pages p
+           JOIN workspaces w ON w.id = p.workspace_id
+           JOIN project_pages pp ON pp.page_id = p.id
+               AND pp.project_id = $2 AND pp.deleted_at IS NULL
+           WHERE p.id = $1 AND w.slug = $3 AND p.deleted_at IS NULL"#,
+    )
+    .bind(page_id)
+    .bind(project_id)
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(found.is_some())
+}
+
+/// `PATCH .../pages/<page_id>/` (`PageViewSet.partial_update`,
+/// `base.py:154-200`).
+pub async fn page_partial_update(
+    State(state): State<AppState>,
+    Path((slug, project_raw, page_raw)): Path<(String, String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    let Ok(page_id) = parse_page_id(&page_raw) else {
+        return crate::edge::proxy(State(state), req).await;
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    let user_id = match actor_user_id(extension.clone()) {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    let project_id = match resolve_project_id(pool, &slug, &project_raw).await {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    let gate = match gate::resolve_gate(
+        &state,
+        "PATCH",
+        &slug,
+        &project_id,
+        Some(page_id),
+        extension,
+    )
+    .await
+    {
+        Ok(gate) => gate,
+        Err(denial) => return denial.into_response(),
+    };
+    let body = match read_write_body(req).await {
+        Ok(body) => body,
+        Err(denial) => return denial.into_response(),
+    };
+    // The scoped fetch (`:156-161`): a miss is `DoesNotExist`, which the
+    // `except` branch (`:196-200`) renders as the owner-access 400 — never
+    // a 404 (a fully unknown id never reaches here: the class lookup 404s
+    // first).
+    let page = match fetch_scoped_page(pool, &slug, &project_id, &page_id).await {
+        Ok(Some(page)) => page,
+        Ok(None) => {
+            return json_response(StatusCode::BAD_REQUEST, gate::ACCESS_OWNER_BODY.to_owned());
+        }
+        Err(denial) => return denial.into_response(),
+    };
+    if page.is_locked {
+        return json_response(StatusCode::BAD_REQUEST, gate::PAGE_LOCKED_BODY.to_owned());
+    }
+    // The parent re-fetch (`:166-173`): only when the raw value is truthy
+    // (`request.data.get("parent")`), through the same scope; a miss — or
+    // an ORM-level rejection — lands in the same `except` body.
+    if body.get("parent").is_some_and(python_truthy) {
+        let parent_id = match &body["parent"] {
+            Value::String(text) => match parse_uuid_hex(text) {
+                Some(id) => id,
+                None => return Denial::ValidDetail.into_response(),
+            },
+            Value::Bool(flag) => uuid::Uuid::from_u128(u128::from(*flag as u8)),
+            Value::Number(number) => {
+                let raw = if let Some(int) = number.as_i64() {
+                    if int < 0 {
+                        return Denial::ValidDetail.into_response();
+                    }
+                    int as u128
+                } else if let Some(uint) = number.as_u64() {
+                    u128::from(uint)
+                } else {
+                    return Denial::ValidDetail.into_response();
+                };
+                uuid::Uuid::from_u128(raw)
+            }
+            _ => return Denial::ValidDetail.into_response(),
+        };
+        match scoped_page_exists(pool, &slug, &project_id, &parent_id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return json_response(StatusCode::BAD_REQUEST, gate::ACCESS_OWNER_BODY.to_owned());
+            }
+            Err(denial) => return denial.into_response(),
+        }
+    }
+    // Owner-only access change (`:176-180`): the RAW request value compares
+    // against the stored one with Python equality (`"0" != 0`,
+    // `False == 0`), before any serializer runs.
+    let stored_access = i32::from(page.access);
+    let access_changed = match body.get("access") {
+        None => false,
+        Some(Value::Number(number)) => {
+            let same = number
+                .as_i64()
+                .is_some_and(|value| value == i64::from(stored_access))
+                || number
+                    .as_u64()
+                    .is_some_and(|value| value == u64::from(stored_access as u16))
+                || number
+                    .as_f64()
+                    .is_some_and(|value| value == f64::from(stored_access));
+            !same
+        }
+        Some(Value::Bool(flag)) => i32::from(*flag) != stored_access,
+        Some(_) => true,
+    };
+    if access_changed && page.owned_by_id != user_id {
+        return json_response(StatusCode::BAD_REQUEST, gate::ACCESS_OWNER_BODY.to_owned());
+    }
+    let valid = match validate_page_fields(pool, &body, true).await {
+        Ok(valid) => valid,
+        Err(failure) => return failure_response(failure),
+    };
+    let old_html = page.description_html.clone();
+    // `update()` label replacement (`page.py:108-126`): wipe the live
+    // `PageLabel` rows, then bulk-create the new set (`batch_size=10`)
+    // with the page's own audit ids — never the requester's.
+    if let Some(labels) = &valid.labels {
+        if sqlx::query(r#"DELETE FROM page_labels WHERE page_id = $1 AND deleted_at IS NULL"#)
+            .bind(page_id)
+            .execute(pool)
+            .await
+            .is_err()
+        {
+            return Denial::ServerError.into_response();
+        }
+        for chunk in labels.chunks(10) {
+            for label_id in chunk {
+                if sqlx::query(
+                    r#"INSERT INTO page_labels
+                       (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
+                        label_id, page_id, workspace_id)
+                       VALUES ($1, now(), now(), $2, $3, NULL, $4, $5, $6)"#,
+                )
+                .bind(uuid::Uuid::new_v4())
+                .bind(page.created_by_id)
+                .bind(page.updated_by_id)
+                .bind(label_id)
+                .bind(page_id)
+                .bind(page.workspace_id)
+                .execute(pool)
+                .await
+                .is_err()
+                {
+                    return Denial::ServerError.into_response();
+                }
+            }
+        }
+    }
+    // `super().update(instance, validated_data)` plus `Page.save()`: the
+    // validated columns, always `updated_at`/`updated_by` (even `{}`), and
+    // the unconditional `description_stripped` recompute.
+    let final_html = valid
+        .description_html
+        .clone()
+        .unwrap_or(page.description_html);
+    let final_stripped: Option<String> = if final_html.is_empty() {
+        None
+    } else {
+        Some(crate::space::sanitize::strip_tags(final_html.as_str()))
+    };
+    let mut sql = String::from("UPDATE pages SET updated_at = now(), updated_by_id = $1");
+    let mut tail = 2u32;
+    macro_rules! column {
+        ($name:literal) => {{
+            sql.push_str(&format!(", {} = ${}", $name, tail));
+            tail += 1;
+        }};
+    }
+    if valid.name.is_some() {
+        column!("name");
+    }
+    if valid.access.is_some() {
+        column!("access");
+    }
+    if valid.color.is_some() {
+        column!("color");
+    }
+    if valid.parent.is_some() {
+        column!("parent_id");
+    }
+    if valid.is_locked.is_some() {
+        column!("is_locked");
+    }
+    if valid.archived_at.is_some() {
+        column!("archived_at");
+    }
+    if valid.created_by.is_some() {
+        column!("created_by_id");
+    }
+    if valid.view_props.is_some() {
+        column!("view_props");
+    }
+    if valid.logo_props.is_some() {
+        column!("logo_props");
+    }
+    if valid.description_html.is_some() {
+        column!("description_html");
+    }
+    column!("description_stripped");
+    sql.push_str(&format!(" WHERE id = ${tail}"));
+    let mut query = sqlx::query(&sql).bind(user_id);
+    if let Some(name) = &valid.name {
+        query = query.bind(name);
+    }
+    if let Some(access) = valid.access {
+        query = query.bind(access as i16);
+    }
+    if let Some(color) = &valid.color {
+        query = query.bind(color);
+    }
+    if let Some(parent) = &valid.parent {
+        query = query.bind(parent);
+    }
+    if let Some(locked) = valid.is_locked {
+        query = query.bind(locked);
+    }
+    if let Some(archived) = &valid.archived_at {
+        query = query.bind(archived);
+    }
+    if let Some(created_by) = &valid.created_by {
+        query = query.bind(created_by);
+    }
+    if let Some(props) = &valid.view_props {
+        query = query.bind(props.clone());
+    }
+    if let Some(props) = &valid.logo_props {
+        query = query.bind(props.clone());
+    }
+    if valid.description_html.is_some() {
+        query = query.bind(final_html.as_str());
+    }
+    query = query.bind(&final_stripped).bind(page_id);
+    if let Err(error) = query.execute(pool).await {
+        return db_write_denial(&error);
+    }
+    // The conditional `page_transaction` (`:187-192`): only when the RAW
+    // `description_html` is truthy, with the pre-save snapshot as old and
+    // the URL id — the same gate and shape as the description PATCH, so
+    // the shared helper serves both.
+    let page_id_text = page_id.to_string();
+    if let Some(job) = description_page_txn_job(
+        &page_id_text,
+        Some(old_html.as_str()),
+        body.get("description_html"),
+    ) {
+        enqueue_best_effort(pool, &job).await;
+    }
+    let timezone = match actor_timezone(pool, &gate.user_id).await {
+        Ok(tz) => tz,
+        Err(denial) => return denial.into_response(),
+    };
+    let render = PatchRender {
+        page: RenderPage {
+            id: page.id,
+            name: valid.name.unwrap_or(page.name),
+            owned_by_id: page.owned_by_id,
+            access: valid.access.unwrap_or(stored_access),
+            color: valid.color.unwrap_or(page.color),
+            parent_id: valid.parent.unwrap_or(page.parent_id),
+            is_locked: valid.is_locked.unwrap_or(page.is_locked),
+            archived_at: valid.archived_at.unwrap_or(page.archived_at),
+            workspace_id: page.workspace_id,
+            created_at: page.created_at,
+            updated_at: chrono::Utc::now(),
+            created_by_id: valid.created_by.unwrap_or(page.created_by_id),
+            updated_by_id: Some(user_id),
+            view_props: valid.view_props.unwrap_or(page.view_props),
+            logo_props: valid.logo_props.unwrap_or(page.logo_props),
+            description_html: final_html,
+        },
+        label_ids: valid.label_ids,
+        project_ids: valid.project_ids,
+    };
+    json_response(StatusCode::OK, render_patch_row(&render, &timezone))
+}
+
+/// `DELETE .../pages/<page_id>/` (`PageViewSet.destroy`, `base.py:368-419`).
+pub async fn page_destroy(
+    State(state): State<AppState>,
+    Path((slug, project_raw, page_raw)): Path<(String, String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    let Ok(page_id) = parse_page_id(&page_raw) else {
+        return crate::edge::proxy(State(state), req).await;
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    let user_id = match actor_user_id(extension.clone()) {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    let project_id = match resolve_project_id(pool, &slug, &project_raw).await {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    if let Err(denial) = gate::resolve_gate(
+        &state,
+        "DELETE",
+        &slug,
+        &project_id,
+        Some(page_id),
+        extension,
+    )
+    .await
+    {
+        return denial.into_response();
+    }
+    // The scoped fetch (`:369-374`): no `try` here, so a miss 404s through
+    // `handle_exception` (an unlinked page for a member, or a second
+    // DELETE after the soft delete hid the row).
+    let page = match fetch_scoped_page(pool, &slug, &project_id, &page_id).await {
+        Ok(Some(page)) => page,
+        Ok(None) => return Denial::ObjectNotFound.into_response(),
+        Err(denial) => return denial.into_response(),
+    };
+    if page.archived_at.is_none() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            gate::DESTROY_MUST_ARCHIVE_BODY.to_owned(),
+        );
+    }
+    // Owner-or-admin-20 (`:382-394`): the requester passes as the owner, or
+    // with an active `role == 20` project row — anything else 403s.
+    if page.owned_by_id != user_id {
+        let admin: Option<(i16,)> = match sqlx::query_as(
+            r#"SELECT pm.role FROM project_members pm
+               JOIN workspaces w ON w.id = pm.workspace_id
+               WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
+               AND pm.role = 20 AND pm.is_active AND pm.deleted_at IS NULL"#,
+        )
+        .bind(user_id)
+        .bind(project_id)
+        .bind(slug.as_str())
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(admin) => admin,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        if admin.is_none() {
+            return json_response(
+                StatusCode::FORBIDDEN,
+                gate::DESTROY_OWNER_ADMIN_BODY.to_owned(),
+            );
+        }
+    }
+    // Children lose their parent (`:397-402`): a queryset `update`, so only
+    // the one column moves — `updated_at` stays.
+    if sqlx::query(
+        r#"UPDATE pages child SET parent_id = NULL FROM project_pages pp, workspaces w
+           WHERE child.parent_id = $1 AND child.workspace_id = w.id AND w.slug = $2
+           AND pp.page_id = child.id AND pp.project_id = $3 AND pp.deleted_at IS NULL
+           AND child.deleted_at IS NULL"#,
+    )
+    .bind(page_id)
+    .bind(slug.as_str())
+    .bind(project_id)
+    .execute(pool)
+    .await
+    .is_err()
+    {
+        return Denial::ServerError.into_response();
+    }
+    // `page.delete()` (`:404`): the soft delete — `deleted_at` plus the
+    // full-save `updated_at`/`updated_by` (`BaseModel.save` via crum); the
+    // related-objects sweep enqueues best-effort below.
+    if sqlx::query(
+        r#"UPDATE pages SET deleted_at = now(), updated_at = now(), updated_by_id = $1
+           WHERE id = $2"#,
+    )
+    .bind(user_id)
+    .bind(page_id)
+    .execute(pool)
+    .await
+    .is_err()
+    {
+        return Denial::ServerError.into_response();
+    }
+    let sweep = pidash_jobs::celery::CeleryTaskMessage::new(
+        pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
+        vec![
+            Value::String("db".to_owned()),
+            Value::String("page".to_owned()),
+            Value::String(page_id.to_string()),
+            Value::Null,
+        ],
+        Default::default(),
+    );
+    enqueue_best_effort(
+        pool,
+        &pidash_jobs::queue::NewJob::new(
+            sweep.task.clone(),
+            Value::Array(sweep.args.clone()),
+            Value::Object(sweep.kwargs.clone()),
+        ),
+    )
+    .await;
+    // Favorite cleanup (`:406-411`): the same scoped filter, soft — only
+    // `deleted_at` moves. Recent-visit cleanup (`:413-418`): hard
+    // (`delete(soft=False)`), live rows only like the filtered queryset.
+    if sqlx::query(
+        r#"UPDATE user_favorites SET deleted_at = now() FROM workspaces w
+           WHERE user_favorites.project_id = $1 AND user_favorites.workspace_id = w.id
+           AND w.slug = $2 AND user_favorites.entity_identifier = $3
+           AND user_favorites.entity_type = 'page' AND user_favorites.deleted_at IS NULL"#,
+    )
+    .bind(project_id)
+    .bind(slug.as_str())
+    .bind(page_id)
+    .execute(pool)
+    .await
+    .is_err()
+    {
+        return Denial::ServerError.into_response();
+    }
+    if sqlx::query(
+        r#"DELETE FROM user_recent_visits USING workspaces w
+           WHERE user_recent_visits.project_id = $1 AND user_recent_visits.workspace_id = w.id
+           AND w.slug = $2 AND user_recent_visits.entity_identifier = $3
+           AND user_recent_visits.entity_name = 'page' AND user_recent_visits.deleted_at IS NULL"#,
+    )
+    .bind(project_id)
+    .bind(slug.as_str())
+    .bind(page_id)
+    .execute(pool)
+    .await
+    .is_err()
+    {
+        return Denial::ServerError.into_response();
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1721,6 +3559,10 @@ mod tests {
     const F30_11: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../fixtures/app_pages/handlers/io.golden.json"
+    );
+    const F30_01: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/app_pages/serializers/page_serializers.golden.json"
     );
 
     fn golden(path: &str) -> Value {
@@ -2308,6 +4150,379 @@ mod tests {
         assert!(bugs
             .iter()
             .any(|bug| bug.as_str().unwrap_or("").contains("datetime.now")));
+    }
+
+    /// Page writes: the create 201 shape is the detail field list
+    /// (F30-01 `field_list` + `description_html`), in order.
+    #[test]
+    fn write_create_shape_matches_f30_01() {
+        let parsed = golden(F30_01);
+        let mut expected: Vec<String> = parsed["field_list"]
+            .as_array()
+            .expect("golden carries field_list")
+            .iter()
+            .map(|field| field.as_str().expect("field names are strings").to_owned())
+            .collect();
+        expected.retain(|field| field.as_str() != "labels");
+        expected.push("description_html".to_owned());
+        let row = sample_detail_row();
+        let rendered = render_create_row(&row, &chrono_tz::UTC);
+        let body: Value = serde_json::from_str(&rendered).expect("renders JSON");
+        let keys: Vec<String> = body
+            .as_object()
+            .expect("object body")
+            .keys()
+            .cloned()
+            .collect();
+        // `serde_json` keeps insertion order (`preserve_order`), so the
+        // parsed key order is the render order.
+        assert_eq!(keys, expected);
+        assert_eq!(keys.len(), 19);
+        // Spot values: FKs render as PK strings, annotations render, the
+        // default HTML survives.
+        assert_eq!(body["name"], serde_json::json!("Created page"));
+        assert_eq!(body["description_html"], serde_json::json!("<p></p>"));
+        assert_eq!(body["is_favorite"], serde_json::json!(false));
+        assert_eq!(body["label_ids"], serde_json::json!([]));
+        assert_eq!(
+            body["project_ids"],
+            serde_json::json!(["33333333-3333-3333-3333-333333333333"])
+        );
+        assert_eq!(
+            body["created_at"],
+            serde_json::json!("2026-09-30T23:09:27.150286Z")
+        );
+    }
+
+    /// Page writes: the PATCH 200 shape is the detail list minus the three
+    /// annotation-backed keys (F30 `PATCH_ROW_KEYS` in `test_pages.py`),
+    /// with `label_ids` / `project_ids` rendered only when the request set
+    /// them.
+    #[test]
+    fn write_patch_shape_matches_contract_keys() {
+        let row = sample_detail_row();
+        let base = PatchRender {
+            page: render_page_from(&row),
+            label_ids: None,
+            project_ids: None,
+        };
+        let keys = rendered_keys(&render_patch_row(&base, &chrono_tz::UTC));
+        assert_eq!(keys.len(), 16);
+        assert!(!keys.contains(&"is_favorite".to_owned()));
+        assert!(!keys.contains(&"label_ids".to_owned()));
+        assert!(!keys.contains(&"project_ids".to_owned()));
+        assert_eq!(keys.last().unwrap(), "description_html");
+        // Ad-hoc attributes render in field position when present.
+        let with_ids = PatchRender {
+            label_ids: Some(vec![]),
+            project_ids: Some(vec![uuid::Uuid::parse_str(
+                "33333333-3333-3333-3333-333333333333",
+            )
+            .unwrap()]),
+            ..base
+        };
+        let keys = rendered_keys(&render_patch_row(&with_ids, &chrono_tz::UTC));
+        assert_eq!(keys.len(), 18);
+        let logo = keys.iter().position(|key| key == "logo_props").unwrap();
+        assert_eq!(keys[logo + 1], "label_ids");
+        assert_eq!(keys[logo + 2], "project_ids");
+        assert_eq!(keys.last().unwrap(), "description_html");
+    }
+
+    /// Page writes: every probed validation vector through the pure field
+    /// path (F30-01 error shapes, DRF 3.15.2 `fields.py` / `relations.py`).
+    #[test]
+    fn write_field_vectors() {
+        // Char coercion: null fails, bools/composites fail, numbers
+        // stringify, strings trim.
+        assert_eq!(
+            coerce_char(&Value::Null, true),
+            Err("This field may not be null.")
+        );
+        assert_eq!(
+            coerce_char(&serde_json::json!(true), true),
+            Err("Not a valid string.")
+        );
+        assert_eq!(coerce_char(&serde_json::json!(5), true), Ok("5".to_owned()));
+        assert_eq!(
+            coerce_char(&serde_json::json!("  x  "), true),
+            Ok("x".to_owned())
+        );
+        // Detail HTML rejects blank (allow_blank=False), even whitespace.
+        assert_eq!(
+            coerce_char(&serde_json::json!(""), false),
+            Err("This field may not be blank.")
+        );
+        assert_eq!(
+            coerce_char(&serde_json::json!("   "), false),
+            Err("This field may not be blank.")
+        );
+        // Access choices: "0"/0 pass, True renders Python-style.
+        assert_eq!(coerce_access(&serde_json::json!(0)), Ok(0));
+        assert_eq!(coerce_access(&serde_json::json!("1")), Ok(1));
+        assert_eq!(
+            coerce_access(&serde_json::json!(7)),
+            Err("\"7\" is not a valid choice.".to_owned())
+        );
+        assert_eq!(
+            coerce_access(&serde_json::json!(true)),
+            Err("\"True\" is not a valid choice.".to_owned())
+        );
+        // Booleans: case-insensitive sets, numeric 1/0 (and 1.0/0.0).
+        assert_eq!(coerce_bool(&serde_json::json!("TRUE")), Ok(true));
+        assert_eq!(coerce_bool(&serde_json::json!("yes")), Ok(true));
+        assert_eq!(coerce_bool(&serde_json::json!(1)), Ok(true));
+        assert_eq!(coerce_bool(&serde_json::json!(0.0)), Ok(false));
+        assert_eq!(
+            coerce_bool(&serde_json::json!("maybe")),
+            Err("Must be a valid boolean.")
+        );
+        // Dates: strict YYYY-MM-DD, null allowed, "" is invalid.
+        assert_eq!(
+            coerce_date(&serde_json::json!("2026-01-02")),
+            Ok(Some(chrono::NaiveDate::from_ymd_opt(2026, 1, 2).unwrap()))
+        );
+        assert_eq!(coerce_date(&Value::Null), Ok(None));
+        assert!(coerce_date(&serde_json::json!("")).is_err());
+        assert!(coerce_date(&serde_json::json!("not-a-date")).is_err());
+        // UUID items: dashed/simple/braced/urn parse, ints via UUID(int),
+        // bools included, anything else invalid.
+        let dashed = "f135d694-e5f7-40a2-a12f-40f55e2dd5a5";
+        assert_eq!(
+            coerce_uuid_item(&serde_json::json!(dashed)),
+            Ok(uuid::Uuid::parse_str(dashed).unwrap())
+        );
+        assert_eq!(
+            coerce_uuid_item(&serde_json::json!(5)),
+            Ok(uuid::Uuid::from_u128(5))
+        );
+        assert!(coerce_uuid_item(&serde_json::json!("x")).is_err());
+        assert_eq!(
+            coerce_uuid_item(&serde_json::json!("x")),
+            Err("Must be a valid UUID.")
+        );
+        // Curly-quote PK errors and Invalid-pk bodies.
+        assert_eq!(
+            curly_uuid_error("not-a-uuid"),
+            "\u{201c}not-a-uuid\u{201d} is not a valid UUID."
+        );
+        assert_eq!(
+            invalid_pk_error("not-a-uuid"),
+            "Invalid pk \"not-a-uuid\" - object does not exist."
+        );
+        // UUID(hex=) forms.
+        assert!(parse_uuid_hex(dashed).is_some());
+        assert!(parse_uuid_hex(&dashed.replace('-', "")).is_some());
+        assert!(parse_uuid_hex(&format!("{{{dashed}}}")).is_some());
+        assert!(parse_uuid_hex("not-a-uuid").is_none());
+    }
+
+    /// Page writes: the 400 error-body renderer (flat + indexed arms,
+    /// declaration order, compact, literal UTF-8).
+    #[test]
+    fn write_error_bodies_render() {
+        let errors: OrderedErrors = vec![
+            (
+                "name".to_owned(),
+                FieldError::Flat(vec!["This field may not be null.".to_owned()]),
+            ),
+            (
+                "labels".to_owned(),
+                FieldError::Indexed(vec![(
+                    0,
+                    vec!["\u{201c}nope\u{201d} is not a valid UUID.".to_owned()],
+                )]),
+            ),
+        ];
+        assert_eq!(
+            write_errors_body(&errors),
+            "{\"name\":[\"This field may not be null.\"],\"labels\":{\"0\":[\"\u{201c}nope\u{201d} is not a valid UUID.\"]}}"
+        );
+        assert_eq!(
+            write_errors_body(&[(
+                "access".to_owned(),
+                FieldError::Flat(vec!["\"7\" is not a valid choice.".to_owned()])
+            )]),
+            "{\"access\":[\"\\\"7\\\" is not a valid choice.\"]}"
+        );
+        // Declaration order follows Meta.fields, detail appends HTML last.
+        assert_eq!(WRITE_VALIDATION_ORDER.last(), Some(&"description_html"));
+        assert!(
+            WRITE_VALIDATION_ORDER
+                .iter()
+                .position(|field| *field == "labels")
+                .unwrap()
+                < WRITE_VALIDATION_ORDER
+                    .iter()
+                    .position(|field| *field == "parent")
+                    .unwrap()
+        );
+    }
+
+    /// Page writes: denial bodies and statuses (F30-11 write actions +
+    /// the gate inline guards they share).
+    #[test]
+    fn write_denial_bodies() {
+        assert_eq!(
+            VALID_DETAIL_BODY,
+            r#"{"error":"Please provide valid detail"}"#
+        );
+        let (status, _) = Denial::ValidDetail.status_and_body();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, body) =
+            Denial::ForbiddenError("Only admin or owner can delete the page".to_owned())
+                .status_and_body();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body,
+            r#"{"error":"Only admin or owner can delete the page"}"#
+        );
+        assert_eq!(
+            gate::ACCESS_OWNER_BODY,
+            r#"{"error":"Access cannot be updated since this page is owned by someone else"}"#
+        );
+        assert_eq!(
+            gate::DESTROY_MUST_ARCHIVE_BODY,
+            r#"{"error":"The page should be archived before deleting"}"#
+        );
+        // F30-11 write-action statuses the handlers answer.
+        let parsed = golden(F30_11);
+        let action = |name: &str| {
+            parsed["actions"]
+                .as_array()
+                .expect("golden carries actions")
+                .iter()
+                .find(|action| action["action"] == name)
+                .unwrap_or_else(|| panic!("golden carries {name}"))
+        };
+        assert_eq!(action("create")["valid"]["status"], 201);
+        assert_eq!(action("create")["invalid"]["status"], 400);
+        assert_eq!(action("partial_update")["valid"]["status"], 200);
+        assert_eq!(
+            action("partial_update")["missing_or_parent_missing"]["body"],
+            serde_json::json!({
+                "error": "Access cannot be updated since this page is owned by someone else"
+            })
+        );
+        assert_eq!(action("destroy")["valid"]["status"], 204);
+        assert_eq!(action("destroy")["not_archived"]["status"], 400);
+        assert_eq!(action("destroy")["not_owner_not_admin20"]["status"], 403);
+    }
+
+    /// Page writes: publish gates (F30-10 `page_transaction` call sites):
+    /// create always publishes with the raw-or-default HTML, partial_update
+    /// only on truthy raw HTML with the pre-save snapshot as old.
+    #[test]
+    fn write_publishes_match_f30_10() {
+        let parsed = golden(F30_10);
+        let calls = parsed["calls"].as_array().expect("golden carries calls");
+        assert!(calls.iter().any(|call| call["source"]
+            .as_str()
+            .expect("source")
+            .contains("base.py:144-148")));
+        assert!(calls.iter().any(|call| call["source"]
+            .as_str()
+            .expect("source")
+            .contains("base.py:187-192")));
+        // Create: unconditional; absent HTML defaults, present passes raw.
+        let job = pidash_jobs::app_pages::page_transaction_create_job("new-id", None);
+        assert_eq!(
+            job.kwargs["new_description_html"],
+            serde_json::json!("<p></p>")
+        );
+        let job = pidash_jobs::app_pages::page_transaction_create_job("new-id", Some("<p>Hi</p>"));
+        assert_eq!(
+            job.kwargs["new_description_html"],
+            serde_json::json!("<p>Hi</p>")
+        );
+        assert_eq!(job.kwargs["old_description_html"], Value::Null);
+        // Partial update: the shared raw-truthiness helper serves the
+        // `:187` gate — whitespace-only still publishes raw, empty does not.
+        assert!(
+            description_page_txn_job("p", Some("<p>o</p>"), Some(&serde_json::json!("   ")))
+                .is_some()
+        );
+        assert!(
+            description_page_txn_job("p", Some("<p>o</p>"), Some(&serde_json::json!(""))).is_none()
+        );
+        assert!(description_page_txn_job("p", Some("<p>o</p>"), None).is_none());
+        let job = description_page_txn_job(
+            "p",
+            Some("<p>old</p>"),
+            Some(&serde_json::json!("<p>n</p>")),
+        )
+        .expect("truthy publishes");
+        assert_eq!(
+            job.kwargs["old_description_html"],
+            serde_json::json!("<p>old</p>")
+        );
+    }
+
+    fn sample_detail_row() -> DetailRow {
+        let page_id = uuid::Uuid::parse_str("f135d694-e5f7-40a2-a12f-40f55e2dd5a5").unwrap();
+        let owner_id = uuid::Uuid::parse_str("7eb6c4a8-5eb0-474c-9393-407970825d66").unwrap();
+        let workspace_id = uuid::Uuid::parse_str("1b5a21c1-a5d7-4fc8-a9f5-806bb4e5fde6").unwrap();
+        let project_id = uuid::Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
+        let created_at = chrono::DateTime::parse_from_rfc3339("2026-09-30T23:09:27.150286Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let updated_at = chrono::DateTime::parse_from_rfc3339("2026-09-30T23:09:27.150294Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        DetailRow {
+            page: ScopedPage {
+                id: page_id,
+                name: "Created page".to_owned(),
+                owned_by_id: owner_id,
+                access: 0,
+                color: String::new(),
+                parent_id: None,
+                is_locked: false,
+                archived_at: None,
+                workspace_id,
+                created_at,
+                updated_at,
+                created_by_id: Some(owner_id),
+                updated_by_id: None,
+                view_props: serde_json::json!({"full_width": false}),
+                logo_props: serde_json::json!({}),
+                description_html: "<p></p>".to_owned(),
+            },
+            is_favorite: false,
+            label_ids: vec![],
+            project_ids: vec![project_id],
+        }
+    }
+
+    fn render_page_from(row: &DetailRow) -> RenderPage {
+        RenderPage {
+            id: row.page.id,
+            name: row.page.name.clone(),
+            owned_by_id: row.page.owned_by_id,
+            access: i32::from(row.page.access),
+            color: row.page.color.clone(),
+            parent_id: row.page.parent_id,
+            is_locked: row.page.is_locked,
+            archived_at: row.page.archived_at,
+            workspace_id: row.page.workspace_id,
+            created_at: row.page.created_at,
+            updated_at: row.page.updated_at,
+            created_by_id: row.page.created_by_id,
+            updated_by_id: row.page.updated_by_id,
+            view_props: row.page.view_props.clone(),
+            logo_props: row.page.logo_props.clone(),
+            description_html: row.page.description_html.clone(),
+        }
+    }
+
+    fn rendered_keys(rendered: &str) -> Vec<String> {
+        serde_json::from_str::<Value>(rendered)
+            .expect("renders JSON")
+            .as_object()
+            .expect("object body")
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// The streaming transport (`base.py:509-518`): one chunk per response —
