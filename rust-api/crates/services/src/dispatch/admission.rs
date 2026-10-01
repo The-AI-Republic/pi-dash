@@ -44,7 +44,7 @@
 //!   explicitly; dropping the sink without running it is the rollback path,
 //!   which burns no quota exactly as Python's does.
 //! * EE-overlayable seams arrive as inputs, never reimplemented:
-//!   `request_is_desktop` (F-10, `ee/authentication/desktop.py:30-38`) and the
+//!   `request_is_desktop` (F-10, `ee/authentication/desktop.py:25-33`) and the
 //!   model profile (`managed_llm_profile`, `ee/assistant/model_provider.py:71`)
 //!   arrive as an `FnOnce` closure / verdict so the Python short-circuit
 //!   structure (seam consulted only when reached) is preserved and provable.
@@ -450,7 +450,7 @@ impl Default for DesktopSessionRequiredBody {
 ///
 /// `authenticated` folds the three Python deny branches (missing `user` attr,
 /// `user` None, `is_authenticated` false); the `request_is_desktop` EE seam
-/// (F-10, `ee/authentication/desktop.py:30-38`) is consulted only for
+/// (F-10, `ee/authentication/desktop.py:25-33`) is consulted only for
 /// authenticated callers, never reimplemented.
 pub fn is_desktop_session<F>(authenticated: bool, request_is_desktop: F) -> bool
 where
