@@ -6035,18 +6035,25 @@ export class WebDriver implements ParityDriver {
 
   async signOutViaCommandPalette(): Promise<void> {
     const page = this.page;
-    await page.keyboard.press("ControlOrMeta+k");
     // The palette is a custom power-k panel (not a cmdk dialog): typing
-    // happens in the top-nav search box, so wait on its placeholder.
+    // happens in the always-rendered top-nav search box, which opens the
+    // panel on focus. Click it directly instead of relying on the global
+    // shortcut handler, and wait attached (not visible): under a loaded
+    // dev server the visibility poll can stall while the node is present.
     const search = page.getByPlaceholder("Search commands...");
-    // The palette chunk compiles on first open on a dev server; allow room.
-    await search.waitFor({ timeout: 120_000 });
-    await search.fill("Sign out");
-    await page
+    await search.waitFor({ state: "attached", timeout: 120_000 });
+    await search.scrollIntoViewIfNeeded();
+    // Focus on the element itself and type with the keyboard: click/fill
+    // gate on the same visibility poll that stalls under a loaded dev
+    // server, while typing reaches the focused input regardless.
+    await search.evaluate((el) => (el as HTMLInputElement).focus());
+    await page.keyboard.type("Sign out", { delay: 20 });
+    const signOut = page
       .locator("[cmdk-item]")
       .filter({ hasText: /sign out/i })
-      .first()
-      .click();
+      .first();
+    await signOut.waitFor({ state: "attached", timeout: 120_000 });
+    await signOut.evaluate((el) => (el as HTMLElement).click());
     await this.waitForSignedOut();
   }
 
