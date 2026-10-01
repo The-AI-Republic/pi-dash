@@ -2524,4 +2524,128 @@ export class WebNewDriver implements ParityDriver {
   async sidebarProjectPlaceholderCount(): Promise<number> {
     return todo("sidebarProjectPlaceholderCount");
   }
+
+  async openDisplayOptions(): Promise<void> {
+    return todo("openDisplayOptions");
+  }
+
+  async closeDisplayOptions(): Promise<void> {
+    return todo("closeDisplayOptions");
+  }
+
+  async displayPanelText(): Promise<string> {
+    return todo("displayPanelText");
+  }
+
+  async setDisplayGroupBy(_option: string): Promise<void> {
+    return todo("setDisplayGroupBy");
+  }
+
+  async setDisplayOrderBy(_option: string): Promise<void> {
+    return todo("setDisplayOrderBy");
+  }
+
+  async setDisplayExtraOption(_option: string, _enabled: boolean): Promise<void> {
+    return todo("setDisplayExtraOption");
+  }
+
+  async isDisplayOptionChecked(_option: string): Promise<boolean> {
+    return todo("isDisplayOptionChecked");
+  }
+
+  async toggleDisplayProperty(_option: string): Promise<void> {
+    return todo("toggleDisplayProperty");
+  }
+
+  async isDisplayPropertyActive(_option: string): Promise<boolean> {
+    return todo("isDisplayPropertyActive");
+  }
+
+  async toggleRichFilterRow(): Promise<void> {
+    return todo("toggleRichFilterRow");
+  }
+
+  async isRichFilterRowVisible(): Promise<boolean> {
+    return todo("isRichFilterRowVisible");
+  }
+
+  async richFilterRowText(): Promise<string> {
+    return todo("richFilterRowText");
+  }
+
+  async addRichCondition(_property: string): Promise<void> {
+    return todo("addRichCondition");
+  }
+
+  async pickRichValues(_values: string[]): Promise<void> {
+    return todo("pickRichValues");
+  }
+
+  async pickRichValuesContaining(_values: string[]): Promise<void> {
+    return todo("pickRichValuesContaining");
+  }
+
+  async listRichPickerOptions(): Promise<string[]> {
+    return todo("listRichPickerOptions");
+  }
+
+  async richValueOptions(): Promise<string[]> {
+    return todo("richValueOptions");
+  }
+
+  async richOperatorOptions(): Promise<string[]> {
+    return todo("richOperatorOptions");
+  }
+
+  async pickRichOperator(_option: string): Promise<void> {
+    return todo("pickRichOperator");
+  }
+
+  async isSingleRichOperatorLocked(): Promise<boolean> {
+    return todo("isSingleRichOperatorLocked");
+  }
+
+  async isRichCalendarOpen(): Promise<boolean> {
+    return todo("isRichCalendarOpen");
+  }
+
+  async pickRichDay(_day: string): Promise<void> {
+    return todo("pickRichDay");
+  }
+
+  async richConditionCount(): Promise<number> {
+    return todo("richConditionCount");
+  }
+
+  async removeRichCondition(_index: number): Promise<void> {
+    return todo("removeRichCondition");
+  }
+
+  async clearRichFilters(): Promise<void> {
+    return todo("clearRichFilters");
+  }
+
+  async openProjectView(_workspaceSlug: string, _projectId: string, _viewId: string): Promise<void> {
+    return todo("openProjectView");
+  }
+
+  async saveRichViewAs(_name: string): Promise<void> {
+    return todo("saveRichViewAs");
+  }
+
+  async updateRichView(): Promise<void> {
+    return todo("updateRichView");
+  }
+
+  async openAnalytics(): Promise<void> {
+    return todo("openAnalytics");
+  }
+
+  async closeAnalytics(): Promise<void> {
+    return todo("closeAnalytics");
+  }
+
+  async analyticsDialogText(): Promise<string> {
+    return todo("analyticsDialogText");
+  }
 }
