@@ -1737,12 +1737,29 @@ pub async fn file_asset_url(
     }
 }
 
+/// `avatar_url` property, text arm (`db/models/user.py:149-151`): the
+/// `avatar` text when non-empty, else null. (The asset arm is DB-bound and
+/// covered by the live differential battery, not unit tests.)
+pub fn render_avatar_text(avatar: &str) -> Value {
+    if avatar.is_empty() {
+        Value::Null
+    } else {
+        Value::String(avatar.to_owned())
+    }
+}
+
 /// `UserLiteSerializer` (`api/serializers/user.py`): `id`, `first_name`,
 /// `last_name`, `email`, `avatar`, `avatar_url`, `display_name` (the
 /// duplicated `email` in `Meta.fields` renders once).
+///
+/// `avatar_url` is a model property, not a column
+/// (`db/models/user.py:142-151`): the asset URL when `avatar_asset` is set
+/// (returned as-is, even when the asset type maps to no URL), else the
+/// `avatar` text when non-empty, else null. `email` is nullable
+/// (`CharField(null=True)`).
 pub async fn expand_user(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Value, Denial> {
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT "id", "first_name", "last_name", "email", "avatar", "avatar_url", "avatar_asset_id", "display_name" FROM "users" WHERE "id" = $1"#,
+        r#"SELECT "id", "first_name", "last_name", "email", "avatar", "avatar_asset_id", "display_name" FROM "users" WHERE "id" = $1"#,
     )
     .bind(user_id)
     .fetch_optional(pool)
@@ -1752,19 +1769,14 @@ pub async fn expand_user(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Value, D
         return Ok(Value::Object(serde_json::Map::new()));
     };
     let avatar_asset_id = row_uuid_opt(&row, "avatar_asset_id", "expand-user")?;
-    let avatar_url_raw = row_string_opt(&row, "avatar_url", "expand-user")?;
-    let mut avatar_url = avatar_url_raw
-        .clone()
-        .map(Value::String)
-        .unwrap_or(Value::Null);
-    if avatar_url == Value::Null {
-        if let Some(asset_id) = avatar_asset_id {
-            avatar_url = file_asset_url(pool, &asset_id)
-                .await?
-                .map(Value::String)
-                .unwrap_or(Value::Null);
-        }
-    }
+    let avatar = row_string(&row, "avatar", "expand-user")?;
+    let avatar_url = match avatar_asset_id {
+        Some(asset_id) => file_asset_url(pool, &asset_id)
+            .await?
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+        None => render_avatar_text(&avatar),
+    };
     let mut map = serde_json::Map::with_capacity(7);
     map.insert(
         "id".to_owned(),
@@ -1780,7 +1792,7 @@ pub async fn expand_user(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Value, D
     );
     map.insert(
         "email".to_owned(),
-        Value::String(row_string(&row, "email", "expand-user")?),
+        render_string_opt(&row_string_opt(&row, "email", "expand-user")?),
     );
     map.insert(
         "avatar".to_owned(),
@@ -2036,7 +2048,7 @@ pub async fn expand_issue_lite_opt(
     );
     map.insert(
         "sequence_id".to_owned(),
-        Value::from(row_i64(&row, "sequence_id", "expand-issuelite")?),
+        Value::from(row_i32(&row, "sequence_id", "expand-issuelite")?),
     );
     map.insert(
         "project_id".to_owned(),
@@ -5192,6 +5204,18 @@ mod tests {
             serde_json::to_string(&estimate_point_none()).expect("json"),
             r#"{"deleted_at":null,"key":null,"description":"","value":"","created_by":null,"updated_by":null}"#
         );
+    }
+
+    #[test]
+    fn avatar_text_arm_edges() {
+        // `db/models/user.py:149-151`: `if self.avatar:` — only the empty
+        // string is falsy; whitespace-only text renders as-is.
+        assert_eq!(render_avatar_text(""), Value::Null);
+        assert_eq!(
+            render_avatar_text("https://cdn.example/x.png"),
+            Value::String("https://cdn.example/x.png".to_owned())
+        );
+        assert_eq!(render_avatar_text("   "), Value::String("   ".to_owned()));
     }
 
     #[test]
