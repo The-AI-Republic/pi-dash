@@ -41,6 +41,19 @@
 //! * QUIRK-pop-mutates (`:330,371`): `skip_activity` and `issue` are
 //!   popped off `request.data`, so the intake-branch `requested_data`
 //!   dump never contains them (the create path pops nothing).
+//! * QUIRK-create-sync-v1 (PIDASHCONV-500, option (a1), signed off
+//!   2026-09-30): Django only enqueues the v1 description-version task
+//!   (`base.py:286-291` `.delay(is_creating=True)`); its slow ~300ms
+//!   re-fetch plus serialize hides the async gap. The Rust port answers
+//!   in ~35ms, so
+//!   the contract suite's POST → GET versions ~2ms later raced the ~30ms
+//!   claim→insert tail and failed deterministically. The create handler
+//!   inserts the v1 row synchronously BEFORE the enqueue (same builder,
+//!   columns and bind order as the worker's create branch) and KEEPS the
+//!   enqueue, so the async task still runs and coalesces onto this row
+//!   (same owner + young age → same-content update): identical wire
+//!   messages, converging final state. A failed sync insert is ignored —
+//!   the enqueued task stays the backstop.
 
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
@@ -52,8 +65,10 @@ use pidash_db::app_intake::queries;
 use pidash_db::issue_filters::{
     issue_filters_get, FilterValue, IssueFilterError, ISSUE_FILTER_KEYS,
 };
+use pidash_db::tasks_cleanup::version_queries as version_q;
 use pidash_services::app_intake::permissions as guards;
 use pidash_services::app_intake::tasks as intake_tasks;
+use pidash_services::tasks_cleanup::versions as version_v;
 
 use crate::app_issues::resolve_gate;
 use crate::middleware::SessionHandle;
@@ -4576,6 +4591,15 @@ pub async fn collection_create(
         ),
     )
     .await;
+    // QUIRK-create-sync-v1 (PIDASHCONV-500, option (a1)): insert the
+    // v1 row synchronously FIRST — before the enqueue — so it is
+    // committed and visible before POST returns. The enqueue below is
+    // KEPT, so the async task still runs and coalesces onto this row.
+    // Order matters: enqueue-first would let a fast worker insert v1
+    // first and this insert would add a second row. A failed sync insert
+    // is ignored — the enqueued task stays the backstop (today's
+    // async-only behavior).
+    let _ = insert_created_description_version(pool, issue_id, gate.user_id).await;
     let version = intake_tasks::intake_create_description_version(
         dump,
         issue_id.to_string(),
@@ -4592,6 +4616,72 @@ pub async fn collection_create(
         Ok(body) => raw_json_response(body),
         Err(response) => response,
     }
+}
+
+// ---------------------------------------------------------------------------
+// create: synchronous v1 description-version insert (PIDASHCONV-500)
+// ---------------------------------------------------------------------------
+
+/// Synchronous v1 `issue_description_versions` insert for the create path
+/// (QUIRK-create-sync-v1, PIDASHCONV-500 option (a1)).
+///
+/// Mirrors the worker's create branch
+/// (`jobs::tasks_cleanup::versions::run_description_task` with
+/// `is_creating=True` and no latest row): re-read the live issue row,
+/// snapshot it, and insert exactly the row the task would insert — same
+/// builder (`build_description_version`), same column list and bind order
+/// as the worker's `insert_description_version_rows`. The kept enqueue
+/// then coalesces onto this row instead of inserting a second one.
+///
+/// Errors are the caller's to ignore: the enqueued task is the backstop.
+async fn insert_created_description_version(
+    pool: &PgPool,
+    issue_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let row = version_q::fetch_issue_row(pool, issue_id).await?;
+    let Some(row) = row else {
+        return Ok(());
+    };
+    let snapshot = version_v::DescriptionSnapshot {
+        workspace_id: row.try_get("workspace_id")?,
+        project_id: row.try_get("project_id")?,
+        created_by: row.try_get("created_by_id")?,
+        updated_by: row.try_get("updated_by_id")?,
+        issue_id: row.try_get("id")?,
+        binary: row.try_get("description_binary")?,
+        html: row.try_get("description_html")?,
+        stripped: row.try_get("description_stripped")?,
+        json: row
+            .try_get::<Option<serde_json::Value>, _>("description_json")?
+            .unwrap_or(serde_json::Value::Null),
+    };
+    let now = Utc::now();
+    let version = version_v::build_description_version(&snapshot, user_id, now, Uuid::new_v4());
+    let sql = version_q::bulk_insert_sql(
+        "issue_description_versions",
+        &version_q::ISSUE_DESCRIPTION_VERSION_COLUMNS,
+        1,
+    );
+    sqlx::query(&sql)
+        .bind(version.created_at)
+        .bind(version.updated_at)
+        .bind(version.created_by)
+        .bind(version.updated_by)
+        .bind(None::<DateTime<Utc>>)
+        .bind(version.id)
+        .bind(version.project_id)
+        .bind(version.workspace_id)
+        .bind(version.issue_id)
+        .bind(version.binary.clone())
+        .bind(version.html.clone())
+        .bind(version.stripped.clone())
+        .bind(sqlx::types::Json(version.json.clone()))
+        .bind(version.last_saved_at)
+        .bind(version.owned_by_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
