@@ -1,0 +1,456 @@
+{
+  "_trace": "apps/api/pi_dash/utils/openapi/hooks.py:14-23 (preprocess_filter_api_v1_paths), :26-56 (generate_operation_summary, DEAD CODE: defined + re-exported, never called), :59-94 (postprocess_project_id_dual_form)",
+  "_method": "imported hooks.py by file path (zero imports, no Django needed) and executed each function over the vectors below; postprocessor run over a synthetic doc fragment (generator/request/public args unused by the implementation, passed None/None/True)",
+  "_dead_code_note": "generate_operation_summary has zero call sites repo-wide (only hooks.py:26 def + __init__.py:196,366 re-export); vectors recorded for the verbatim port anyway.",
+  "_server_rule_note": "No served /api/v1/ route contains 'server' today (assistant mcp-servers/* live under /api/, rejected by the prefix rule; verified: zero 'server' paths in routes_golden.json), so the substring clause currently drops nothing beyond the prefix rule. It is over-broad by construction ('observer' contains 'server') \u2014 ported verbatim per translate-don't-redesign.",
+  "preprocess_filter_api_v1_paths": {
+    "rule": "keep iff path.startswith(\"/api/v1/\") AND method.upper() != \"PUT\" AND \"server\" not in path.lower(); surviving tuples pass through identical",
+    "vectors": [
+      {
+        "path": "/api/v1/issues/",
+        "method": "GET",
+        "kept": true,
+        "reason": "plain v1 GET"
+      },
+      {
+        "path": "/api/v1/issues/",
+        "method": "POST",
+        "kept": true,
+        "reason": "plain v1 POST"
+      },
+      {
+        "path": "/api/v1/issues/",
+        "method": "PATCH",
+        "kept": true,
+        "reason": "plain v1 PATCH"
+      },
+      {
+        "path": "/api/v1/issues/",
+        "method": "DELETE",
+        "kept": true,
+        "reason": "plain v1 DELETE"
+      },
+      {
+        "path": "/api/v1/issues/",
+        "method": "PUT",
+        "kept": false,
+        "reason": "PUT excluded even on v1"
+      },
+      {
+        "path": "/api/v1/issues/",
+        "method": "put",
+        "kept": false,
+        "reason": "lowercase put also excluded (method.upper())"
+      },
+      {
+        "path": "/api/v1/issues/",
+        "method": "Put",
+        "kept": false,
+        "reason": "mixed-case put also excluded"
+      },
+      {
+        "path": "/api/v1/issues/",
+        "method": "OPTIONS",
+        "kept": true,
+        "reason": "no method filter besides PUT"
+      },
+      {
+        "path": "/api/schema/",
+        "method": "GET",
+        "kept": false,
+        "reason": "non-v1 path rejected"
+      },
+      {
+        "path": "/api/v1beta/issues/",
+        "method": "GET",
+        "kept": false,
+        "reason": "prefix is '/api/v1/' with trailing slash"
+      },
+      {
+        "path": "/api/v1",
+        "method": "GET",
+        "kept": false,
+        "reason": "slashless v1 root rejected (no trailing slash)"
+      },
+      {
+        "path": "/api/v1/servers/",
+        "method": "GET",
+        "kept": false,
+        "reason": "'server' substring rejected"
+      },
+      {
+        "path": "/api/v1/SERVERS/",
+        "method": "GET",
+        "kept": false,
+        "reason": "case-insensitive: SERVERS rejected"
+      },
+      {
+        "path": "/api/v1/Server/status/",
+        "method": "GET",
+        "kept": false,
+        "reason": "case-insensitive: Server rejected"
+      },
+      {
+        "path": "/api/v1/file-server/config/",
+        "method": "POST",
+        "kept": false,
+        "reason": "mid-path 'server' rejected"
+      },
+      {
+        "path": "/api/v1/observer/",
+        "method": "GET",
+        "kept": false,
+        "reason": "'observer' CONTAINS 'server' (ob+server): over-broad substring drops it"
+      },
+      {
+        "path": "/api/v1/observe/",
+        "method": "GET",
+        "kept": true,
+        "reason": "control: 'observe' has no 'server' substring, kept"
+      },
+      {
+        "path": "/api/v1/file-servers/",
+        "method": "GET",
+        "kept": false,
+        "reason": "plausible innocent path dropped by the substring rule"
+      },
+      {
+        "path": "/api/v1/issues/?server=1",
+        "method": "GET",
+        "kept": false,
+        "reason": "query-looking suffix still part of path string"
+      }
+    ],
+    "batch_order_note": "one call over the mixed 18-tuple list preserves survivor order"
+  },
+  "generate_operation_summary": {
+    "dead_code": true,
+    "rule": "resource = last non-{param} path segment, '-' -> ' ', title-cased (fallback: tag); archive+POST/DELETE and any-method transfer special cases use tag.rstrip('s'); else GET/POST/PATCH/DELETE map, unknown method falls back",
+    "vectors": [
+      {
+        "method": "GET",
+        "path": "/api/v1/issues/",
+        "tag": "Work Items",
+        "summary": "Retrieve Issues",
+        "reason": "plain GET"
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/issues/",
+        "tag": "Work Items",
+        "summary": "Create Issues",
+        "reason": "plain POST"
+      },
+      {
+        "method": "PATCH",
+        "path": "/api/v1/issues/",
+        "tag": "Work Items",
+        "summary": "Update Issues",
+        "reason": "plain PATCH"
+      },
+      {
+        "method": "DELETE",
+        "path": "/api/v1/issues/",
+        "tag": "Work Items",
+        "summary": "Delete Issues",
+        "reason": "plain DELETE"
+      },
+      {
+        "method": "PUT",
+        "path": "/api/v1/issues/",
+        "tag": "Work Items",
+        "summary": "PUT Issues",
+        "reason": "unknown method falls back to '{method} {resource}'"
+      },
+      {
+        "method": "OPTIONS",
+        "path": "/api/v1/issues/",
+        "tag": "Work Items",
+        "summary": "OPTIONS Issues",
+        "reason": "unknown method fallback"
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/cycles/123/archive/",
+        "tag": "Cycles",
+        "summary": "Archive Cycle",
+        "reason": "archive+POST, tag singularized via rstrip('s')"
+      },
+      {
+        "method": "DELETE",
+        "path": "/api/v1/cycles/123/archive/",
+        "tag": "Cycles",
+        "summary": "Unarchive Cycle",
+        "reason": "archive+DELETE"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/cycles/123/archive/",
+        "tag": "Cycles",
+        "summary": "Retrieve Archive",
+        "reason": "archive+GET ignores archive branch, generic summary"
+      },
+      {
+        "method": "PATCH",
+        "path": "/api/v1/cycles/123/archive/",
+        "tag": "Cycles",
+        "summary": "Update Archive",
+        "reason": "archive+PATCH generic"
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/cycles/transfer/",
+        "tag": "Cycles",
+        "summary": "Transfer Cycle",
+        "reason": "transfer+POST (any method)"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/cycles/transfer/",
+        "tag": "Cycles",
+        "summary": "Transfer Cycle",
+        "reason": "transfer+GET still Transfer"
+      },
+      {
+        "method": "DELETE",
+        "path": "/api/v1/cycles/transfer/",
+        "tag": "Cycles",
+        "summary": "Transfer Cycle",
+        "reason": "transfer+DELETE still Transfer"
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/ARCHIVE/items/",
+        "tag": "Work Items",
+        "summary": "Archive Work Item",
+        "reason": "archive match is case-insensitive; tag 'Work Items'.rstrip('s')"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/work-items/",
+        "tag": "Work Items",
+        "summary": "Retrieve Work Items",
+        "reason": "hyphenated resource title-cased"
+      },
+      {
+        "method": "GET",
+        "path": "/api/v1/workspaces/{slug}/projects/{project_id}/issues/",
+        "tag": "Work Items",
+        "summary": "Retrieve Issues",
+        "reason": "{param} segments skipped"
+      },
+      {
+        "method": "GET",
+        "path": "/{a}/{b}/",
+        "tag": "Work Items",
+        "summary": "Retrieve Work Items",
+        "reason": "all-param path: resource falls back to tag"
+      },
+      {
+        "method": "GET",
+        "path": "/",
+        "tag": "Work Items",
+        "summary": "Retrieve Work Items",
+        "reason": "empty path: resource falls back to tag"
+      }
+    ]
+  },
+  "postprocess_project_id_dual_form": {
+    "rule": "only paths containing '{project_id}' or '/projects/{pk}/'; only dict operations; only in:path params named project_id (any such path) or pk (only on /projects/{pk}/ paths): description + schema {type string}, format removed, uuid/slug examples",
+    "description_verbatim": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+    "examples_verbatim": {
+      "uuid": {
+        "value": "00000000-0000-0000-0000-000000000000",
+        "summary": "UUID form"
+      },
+      "slug": {
+        "value": "ENG",
+        "summary": "Workspace-scoped identifier"
+      }
+    },
+    "before": {
+      "openapi": "3.0.3",
+      "paths": {
+        "/api/v1/workspaces/{slug}/projects/{project_id}/issues/": {
+          "get": {
+            "operationId": "list_issues",
+            "parameters": [
+              {
+                "name": "slug",
+                "in": "path",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              {
+                "name": "project_id",
+                "in": "path",
+                "required": true,
+                "description": "Project ID",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              {
+                "name": "project_id",
+                "in": "query",
+                "required": false,
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            ]
+          },
+          "parameters": [
+            {
+              "name": "shared",
+              "in": "query"
+            }
+          ]
+        },
+        "/api/v1/workspaces/{slug}/projects/{pk}/": {
+          "get": {
+            "operationId": "get_project",
+            "parameters": [
+              {
+                "name": "pk",
+                "in": "path",
+                "required": true,
+                "description": "Project ID",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            ]
+          },
+          "patch": {
+            "operationId": "patch_project",
+            "parameters": null
+          }
+        },
+        "/api/v1/workspaces/{slug}/cycles/": {
+          "get": {
+            "operationId": "list_cycles",
+            "parameters": [
+              {
+                "name": "pk",
+                "in": "path",
+                "required": true,
+                "description": "Cycle ID",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "after": {
+      "openapi": "3.0.3",
+      "paths": {
+        "/api/v1/workspaces/{slug}/projects/{project_id}/issues/": {
+          "get": {
+            "operationId": "list_issues",
+            "parameters": [
+              {
+                "name": "slug",
+                "in": "path",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              {
+                "name": "project_id",
+                "in": "path",
+                "required": true,
+                "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+                "schema": {
+                  "type": "string"
+                },
+                "examples": {
+                  "uuid": {
+                    "value": "00000000-0000-0000-0000-000000000000",
+                    "summary": "UUID form"
+                  },
+                  "slug": {
+                    "value": "ENG",
+                    "summary": "Workspace-scoped identifier"
+                  }
+                }
+              },
+              {
+                "name": "project_id",
+                "in": "query",
+                "required": false,
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            ]
+          },
+          "parameters": [
+            {
+              "name": "shared",
+              "in": "query"
+            }
+          ]
+        },
+        "/api/v1/workspaces/{slug}/projects/{pk}/": {
+          "get": {
+            "operationId": "get_project",
+            "parameters": [
+              {
+                "name": "pk",
+                "in": "path",
+                "required": true,
+                "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+                "schema": {
+                  "type": "string"
+                },
+                "examples": {
+                  "uuid": {
+                    "value": "00000000-0000-0000-0000-000000000000",
+                    "summary": "UUID form"
+                  },
+                  "slug": {
+                    "value": "ENG",
+                    "summary": "Workspace-scoped identifier"
+                  }
+                }
+              }
+            ]
+          },
+          "patch": {
+            "operationId": "patch_project",
+            "parameters": null
+          }
+        },
+        "/api/v1/workspaces/{slug}/cycles/": {
+          "get": {
+            "operationId": "list_cycles",
+            "parameters": [
+              {
+                "name": "pk",
+                "in": "path",
+                "required": true,
+                "description": "Cycle ID",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

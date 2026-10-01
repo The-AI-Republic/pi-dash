@@ -1,0 +1,433 @@
+{
+  "/api/v1/assets/user-assets/": [
+    "post"
+  ],
+  "/api/v1/assets/user-assets/{asset_id}/": [
+    "delete",
+    "patch"
+  ],
+  "/api/v1/auth/device/approve/": [
+    "post"
+  ],
+  "/api/v1/auth/device/start/": [
+    "post"
+  ],
+  "/api/v1/auth/device/token/": [
+    "post"
+  ],
+  "/api/v1/auth/machine-token/": [
+    "post"
+  ],
+  "/api/v1/auth/revoke/": [
+    "post"
+  ],
+  "/api/v1/auth/workspaces/": [
+    "get"
+  ],
+  "/api/v1/runner/chat/sessions/{session_id}/approvals/": [
+    "post"
+  ],
+  "/api/v1/runner/chat/sessions/{session_id}/closed/": [
+    "post"
+  ],
+  "/api/v1/runner/chat/sessions/{session_id}/events/": [
+    "post"
+  ],
+  "/api/v1/runner/chat/sessions/{session_id}/failed/": [
+    "post"
+  ],
+  "/api/v1/runner/chat/sessions/{session_id}/messages/{message_id}/complete/": [
+    "post"
+  ],
+  "/api/v1/runner/chat/sessions/{session_id}/messages/{message_id}/started/": [
+    "post"
+  ],
+  "/api/v1/runner/chat/sessions/{session_id}/started/": [
+    "post"
+  ],
+  "/api/v1/runner/dev-machines/desktop-enroll/": [
+    "delete",
+    "post"
+  ],
+  "/api/v1/runner/dev-machines/{dev_machine_id}/commands/{request_id}/result/": [
+    "post"
+  ],
+  "/api/v1/runner/dev-machines/{dev_machine_id}/sessions/": [
+    "post"
+  ],
+  "/api/v1/runner/dev-machines/{dev_machine_id}/sessions/{sid}/": [
+    "delete"
+  ],
+  "/api/v1/runner/health/": [
+    "get"
+  ],
+  "/api/v1/runner/machine-tokens/": [
+    "post"
+  ],
+  "/api/v1/runner/metrics/": [
+    "get"
+  ],
+  "/api/v1/runner/projects/": [
+    "get"
+  ],
+  "/api/v1/runner/runners/": [
+    "post"
+  ],
+  "/api/v1/runner/runners/enroll/": [
+    "post"
+  ],
+  "/api/v1/runner/runners/{runner_id}/": [
+    "delete"
+  ],
+  "/api/v1/runner/runners/{runner_id}/refresh/": [
+    "post"
+  ],
+  "/api/v1/runner/runners/{runner_id}/sessions/": [
+    "post"
+  ],
+  "/api/v1/runner/runners/{runner_id}/sessions/{sid}/": [
+    "delete"
+  ],
+  "/api/v1/runner/runs/{run_id}/accept/": [
+    "post"
+  ],
+  "/api/v1/runner/runs/{run_id}/approvals/": [
+    "post"
+  ],
+  "/api/v1/runner/runs/{run_id}/awaiting-reauth/": [
+    "post"
+  ],
+  "/api/v1/runner/runs/{run_id}/cancelled/": [
+    "post"
+  ],
+  "/api/v1/runner/runs/{run_id}/complete/": [
+    "post"
+  ],
+  "/api/v1/runner/runs/{run_id}/events/": [
+    "post"
+  ],
+  "/api/v1/runner/runs/{run_id}/fail/": [
+    "post"
+  ],
+  "/api/v1/runner/runs/{run_id}/pause/": [
+    "post"
+  ],
+  "/api/v1/runner/runs/{run_id}/queued/": [
+    "post"
+  ],
+  "/api/v1/runner/runs/{run_id}/resumed/": [
+    "post"
+  ],
+  "/api/v1/runner/runs/{run_id}/started/": [
+    "post"
+  ],
+  "/api/v1/runner/runs/{run_id}/stream/upgrade/": [
+    "post"
+  ],
+  "/api/v1/runners/{runner_id}/": [
+    "delete"
+  ],
+  "/api/v1/users/me/": [
+    "get"
+  ],
+  "/api/v1/workspaces/{slug}/agent-runs/{run_id}/yield/": [
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/assets/": [
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/assets/{asset_id}/": [
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/invitations/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/invitations/{pk}/": [
+    "delete",
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/issues/search/": [
+    "get"
+  ],
+  "/api/v1/workspaces/{slug}/issues/{project_identifier}-{issue_identifier}/": [
+    "get"
+  ],
+  "/api/v1/workspaces/{slug}/members/": [
+    "get"
+  ],
+  "/api/v1/workspaces/{slug}/projects/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{pk}/": [
+    "delete",
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/archive/": [
+    "delete",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/archived-cycles/": [
+    "get"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/archived-cycles/{cycle_id}/unarchive/": [
+    "delete"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/archived-modules/": [
+    "get"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/archived-modules/{pk}/unarchive/": [
+    "delete"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/cycles/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/archive/": [
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/{issue_id}/": [
+    "delete",
+    "get"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/transfer-issues/": [
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/cycles/{pk}/": [
+    "delete",
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/{issue_id}/": [
+    "delete",
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/issues/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/activities/": [
+    "get"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/activities/{pk}/": [
+    "get"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/comments/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/comments/{pk}/": [
+    "delete",
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/issue-attachments/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/issue-attachments/{pk}/": [
+    "delete",
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/links/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/links/{pk}/": [
+    "delete",
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/": [
+    "delete",
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/labels/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/labels/{pk}/": [
+    "delete",
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/members/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/members/{pk}/": [
+    "delete",
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/modules/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/modules/{module_id}/module-issues/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/modules/{module_id}/module-issues/{issue_id}/": [
+    "delete"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/modules/{pk}/": [
+    "delete",
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/modules/{pk}/archive/": [
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/pages/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/pages/{page_id}/": [
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/pages/{page_id}/archive/": [
+    "delete",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/project-members/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/project-members/{pk}/": [
+    "delete",
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/states/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/states/{state_id}/": [
+    "delete",
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/summary/": [
+    "get"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/activities/": [
+    "get"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/activities/{pk}/": [
+    "get"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/attachments/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/attachments/{pk}/": [
+    "delete",
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/code-reviews/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/code-reviews/{pk}/": [
+    "delete"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/comments/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/comments/{pk}/": [
+    "delete",
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/github/pull-requests/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/github/pull-requests/{pk}/": [
+    "delete"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/links/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/links/{pk}/": [
+    "delete",
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/relations/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/relations/grouped/": [
+    "get"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/relations/relate/": [
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/relations/unrelate/": [
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/workpad/": [
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/": [
+    "delete",
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/move/": [
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/re-tick/": [
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/run-ai/": [
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/wait/": [
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/stickies/": [
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/stickies/{pk}/": [
+    "delete",
+    "get",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/work-items/search/": [
+    "get"
+  ],
+  "/api/v1/workspaces/{slug}/work-items/search/advanced/": [
+    "get"
+  ],
+  "/api/v1/workspaces/{slug}/work-items/{project_identifier}-{issue_identifier}/": [
+    "get"
+  ]
+}
