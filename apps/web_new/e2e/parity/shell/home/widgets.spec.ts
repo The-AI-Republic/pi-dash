@@ -91,35 +91,59 @@ test(specTitle(ROWS, "widget drag ordering persists"), { tag: specTags(ROWS) }, 
   await serverSetTourCompleted(session, true);
   await serverEnsureWidgets(seed.workspaceSlug, session, ["quick_links", "recents"]);
   const snapshot = await serverWidgets(seed.workspaceSlug, session);
-
-  await serverSetWidget(seed.workspaceSlug, session, "recents", { is_enabled: true });
-  await signedInHome(driver, seed);
-  await expect
-    .poll(() => driver.homeWidgetTitles(), { timeout: 60_000 })
-    .toEqual(expect.arrayContaining(["Quicklinks", "Recents"]));
-  const before = await driver.homeWidgetTitles();
-
-  await driver.homeOpenManageWidgets();
-  const names = await driver.homeManageWidgetNames();
-  expect(names.join("\n")).toContain("Quicklinks");
-  // Moving the first widget below the last visibly changes the stack.
-  await driver.homeDragWidget("Quicklinks", "Recents");
-  await expect.poll(() => driver.homeLastToast(), { timeout: 15_000 }).not.toBeNull();
-  const toast = await driver.homeLastToast();
-  expect(`${toast?.title ?? ""} ${toast?.message ?? ""}`.trim().length).toBeGreaterThan(0);
-  await driver.homeCloseManageWidgets();
-
-  await test.step("the stack reflects the new order after reload", async () => {
-    await driver.homeReload();
-    const after = await driver.homeWaitForWidgets();
-    expect(after).toEqual(expect.arrayContaining(["Quicklinks", "Recents"]));
-    expect(after).not.toEqual(before);
+  const serverOrder = async (): Promise<string[]> => {
     const stored = await serverWidgets(seed.workspaceSlug, session);
-    const order = [...stored].sort((a, b) => (b.sort_order ?? 0) - (a.sort_order ?? 0)).map((w) => w.key);
-    expect(order.indexOf("quick_links")).toBeGreaterThan(order.indexOf("recents"));
-  });
+    return [...stored].sort((a, b) => (b.sort_order ?? 0) - (a.sort_order ?? 0)).map((w) => w.key);
+  };
+  try {
+    // Deterministic start: only the two widgets on, Quicklinks first. An
+    // interrupted earlier run may have persisted the swapped order, which
+    // would make the drag below a no-op. The retired stickies key never
+    // renders, so it is left alone (its endpoint refuses writes).
+    for (const widget of snapshot) {
+      if (widget.key !== "quick_links" && widget.key !== "recents" && widget.key !== "my_stickies") {
+        await serverSetWidget(seed.workspaceSlug, session, widget.key, { is_enabled: false });
+      }
+    }
+    await serverSetWidget(seed.workspaceSlug, session, "quick_links", { is_enabled: true, sort_order: 100 });
+    await serverSetWidget(seed.workspaceSlug, session, "recents", { is_enabled: true, sort_order: 99 });
 
-  await restoreWidgets(seed.workspaceSlug, session, snapshot);
+    await signedInHome(driver, seed);
+    await expect.poll(() => driver.homeWidgetTitles(), { timeout: 60_000 }).toEqual(["Quicklinks", "Recents"]);
+    const before = await driver.homeWidgetTitles();
+
+    await driver.homeOpenManageWidgets();
+    const names = await driver.homeManageWidgetNames();
+    expect(names.join("\n")).toContain("Quicklinks");
+    // Moving the first widget below the last visibly changes the stack.
+    // The reorder PATCH can be throttled under concurrent runs while the
+    // dialog still toasts, so repeat the drag until the server agrees.
+    for (let round = 0; round < 3; round += 1) {
+      await driver.homeDragWidget("Quicklinks", "Recents");
+      await expect.poll(() => driver.homeLastToast(), { timeout: 15_000 }).not.toBeNull();
+      const toast = await driver.homeLastToast();
+      expect(`${toast?.title ?? ""} ${toast?.message ?? ""}`.trim().length).toBeGreaterThan(0);
+      const order = await serverOrder();
+      if (order.indexOf("quick_links") > order.indexOf("recents")) break;
+      if (round === 2) throw new Error("[parity] reorder drag never reached the server.");
+      // Reopen from server state: an optimistic client swap would make a
+      // repeated drag a no-op.
+      await driver.homeCloseManageWidgets();
+      await driver.homeOpenManageWidgets();
+    }
+    await driver.homeCloseManageWidgets();
+
+    await test.step("the stack reflects the new order after reload", async () => {
+      await driver.homeReload();
+      const after = await driver.homeWaitForWidgets();
+      expect(after).toEqual(expect.arrayContaining(["Quicklinks", "Recents"]));
+      expect(after).not.toEqual(before);
+      const order = await serverOrder();
+      expect(order.indexOf("quick_links")).toBeGreaterThan(order.indexOf("recents"));
+    });
+  } finally {
+    await restoreWidgets(seed.workspaceSlug, session, snapshot);
+  }
 });
 
 test(
