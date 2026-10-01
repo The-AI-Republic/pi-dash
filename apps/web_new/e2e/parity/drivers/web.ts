@@ -6063,11 +6063,15 @@ export class WebDriver implements ParityDriver {
 
   async openSwitchAccount(): Promise<void> {
     const page = this.page;
-    // The onboarding header names the signed-in account; its menu carries
-    // the "Wrong e-mail address?" switch-account entry.
-    await page.getByText("Wrong e-mail address?", { exact: true }).waitFor({ state: "attached" });
-    const headerButton = page.locator("header").getByRole("button").first();
-    await headerButton.click();
+    // The onboarding header names the signed-in account in a dropdown
+    // trigger (avatar + display name, which is the email for a fresh
+    // account). The menu items mount only once the trigger opens the menu,
+    // so wait for the trigger — never the item — then open it. Match on
+    // "@": the header is a plain div (no header landmark), and its back
+    // button (present from step two on) carries no accessible name.
+    const trigger = page.getByRole("button", { name: /@/ }).first();
+    await trigger.waitFor();
+    await trigger.click();
     await page.getByText("Wrong e-mail address?", { exact: true }).click();
     await page.getByRole("heading", { name: "Switch account" }).waitFor();
   }
