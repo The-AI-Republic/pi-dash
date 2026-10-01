@@ -201,7 +201,8 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // cycles + archive/unarchive (PIDASHCONV-377) in
         // `app_cycles`; D-28 module CRUD (PIDASHCONV-391) in
         // `app_modules` (siblings 397/407 extend that merge, keeping
-        // both sides); D-35 workspace advance analytics
+        // both sides); D-35 analytics + analytic-view viewset
+        // (PIDASHCONV-389) + workspace advance analytics
         // (PIDASHCONV-414) + analytic handlers-B — saved-analytic-view,
         // export-analytics, default-analytics, project-stats
         // (PIDASHCONV-399; gates: PIDASHCONV-358) in `app_analytics`;
