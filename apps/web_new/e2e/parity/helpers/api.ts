@@ -1569,21 +1569,6 @@ export async function patchProjectUserProperties(
   )) as Record<string, unknown>;
 }
 
-/** Create a project; scenarios that need a second project clean it up after. */
-export async function createProject(
-  workspaceSlug: string,
-  sessionCookie: string,
-  body: Record<string, unknown>,
-  apiBase: string = apiBaseFromEnv()
-): Promise<Record<string, unknown>> {
-  return (await cookieAuthedJson(
-    `/api/workspaces/${workspaceSlug}/projects/`,
-    sessionCookie,
-    { method: "POST", body },
-    apiBase
-  )) as Record<string, unknown>;
-}
-
 /** One project as the server reports it (feature flags live here). */
 export async function getProject(
   workspaceSlug: string,
@@ -1598,37 +1583,11 @@ export async function getProject(
     apiBase
   )) as Record<string, unknown>;
 }
-
-/** Patch a project; scenarios restore every flag they flip. */
-export async function patchProject(
-  workspaceSlug: string,
-  projectId: string,
-  sessionCookie: string,
-  body: Record<string, unknown>,
-  apiBase: string = apiBaseFromEnv()
-): Promise<Record<string, unknown>> {
-  return (await cookieAuthedJson(
-    `/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
-    sessionCookie,
-    { method: "PATCH", body },
-    apiBase
-  )) as Record<string, unknown>;
-}
-
-/** Delete a project created by a scenario. */
-export async function deleteProject(
-  workspaceSlug: string,
-  projectId: string,
-  sessionCookie: string,
-  apiBase: string = apiBaseFromEnv()
-): Promise<void> {
-  await cookieAuthedJson(
-    `/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
-    sessionCookie,
-    { method: "DELETE" },
-    apiBase
-  );
-}
+// NOTE (NEWFRONT-126 rebase): our WIP createProject/patchProject/deleteProject
+// duplicates were removed here — the sibling in-spec trio below (same endpoint
+// shapes; create takes name plus identifier) covers the same calls, and our
+// two create call sites were repointed to it. getProject stays: no sibling
+// equivalent exists.
 
 /** Raw issue rows as the server reports them, in API order. */
 async function serverIssueRows(

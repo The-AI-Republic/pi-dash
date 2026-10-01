@@ -66,11 +66,8 @@ test(
         .toUpperCase()
         .replace(/[^A-Z0-9]/g, "")
         .slice(-4);
-      const created = await createProject(seed.workspaceSlug, session, {
-        name: SECOND_NAME,
-        identifier: `CTS${tag}`,
-      });
-      const secondId = created["id"] as string;
+      const created = await createProject(seed.workspaceSlug, session, SECOND_NAME, `CTS${tag}`);
+      const secondId = created.id;
       try {
         // The switcher renders the project list loaded with the page, so a
         // fresh load picks up the project created above.
@@ -144,11 +141,8 @@ test(
         .toUpperCase()
         .replace(/[^A-Z0-9]/g, "")
         .slice(-4);
-      const created = await createProject(seed.workspaceSlug, session, {
-        name: SECOND_NAME,
-        identifier: `CTH${tag}`,
-      });
-      const secondId = created["id"] as string;
+      const created = await createProject(seed.workspaceSlug, session, SECOND_NAME, `CTH${tag}`);
+      const secondId = created.id;
       try {
         await driver.openProjectTab(seed.workspaceSlug, secondId, "issues");
         await expect.poll(() => driver.projectHeaderText(), { timeout: 30_000 }).toContain(SECOND_NAME);
