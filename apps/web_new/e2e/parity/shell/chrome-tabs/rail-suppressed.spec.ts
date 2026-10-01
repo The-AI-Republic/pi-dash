@@ -31,6 +31,7 @@ test(
         expect(await driver.railPresent()).toBe(false);
         const settingsLinks = await driver.page.getByRole("link", { name: "Settings", exact: true }).count();
         expect(settingsLinks).toBe(0);
+        expect(await driver.contentPaddingLeft()).toBeGreaterThan(0);
       });
     }
 

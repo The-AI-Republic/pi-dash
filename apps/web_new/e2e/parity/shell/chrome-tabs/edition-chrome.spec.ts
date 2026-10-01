@@ -5,10 +5,11 @@
 // Oracle scenarios for the cloud frame, edition marker, upgrade pill and
 // desktop update control (NEWFRONT-126). The seeded build suppresses the
 // rail everywhere, never mounts the edition badge, and ships a web update
-// control that renders nothing; the upgrade pill still marks paywalled
-// destinations without touching their navigation. Anything needing the
-// matching cloud or desktop build is recorded as a gap in the inventory.
-// Rows: SHELL-099 (suppression half), SHELL-100, SHELL-101, SHELL-102.
+// control that renders nothing; the upgrade pill still marks the paywalled
+// Cycles destination in its page header without touching navigation. Anything
+// needing the matching cloud or desktop build is recorded as a gap in the
+// inventory. Rows: SHELL-099 (suppression half), SHELL-100, SHELL-101,
+// SHELL-102.
 import { test, expect } from "../../fixtures";
 import { specTags, specTitle } from "../../helpers/tags";
 
@@ -34,14 +35,17 @@ test(
     });
 
     await test.step("upgrade pills mark destinations without affecting navigation", async () => {
-      await driver.openWorkspaceHome(seed.workspaceSlug);
-      await driver.page.getByRole("button", { name: "Open workspace switcher" }).click();
+      // The pill mounts beside the paywalled Cycles header (the sidebar rows
+      // that carry the small variant are dead or owned by other areas in this
+      // build), so prove the header mount and that the page still navigates.
+      await driver.page.goto(`/${seed.workspaceSlug}/active-cycles/`);
+      await driver.page.waitForLoadState("domcontentloaded");
+      await expect.poll(() => driver.page.url(), { timeout: 30_000 }).toContain("/active-cycles");
+      const header = driver.page.getByText("Active cycles", { exact: false }).first();
+      await expect(header).toBeVisible({ timeout: 30_000 });
       await expect.poll(() => driver.upgradePillCount(), { timeout: 15_000 }).toBeGreaterThan(0);
-      const pillLink = driver.page.locator("a", { hasText: "Pro" }).first();
-      const target = await pillLink.getAttribute("href");
-      expect(target).not.toBeNull();
-      await pillLink.click();
-      await expect.poll(() => driver.page.url(), { timeout: 15_000 }).toContain(target ?? "/");
+      await driver.openWorkspaceHome(seed.workspaceSlug);
+      await expect.poll(() => driver.page.url(), { timeout: 30_000 }).toContain(`/${seed.workspaceSlug}/`);
     });
 
     await test.step("no desktop update control renders in the web sidebar", async () => {

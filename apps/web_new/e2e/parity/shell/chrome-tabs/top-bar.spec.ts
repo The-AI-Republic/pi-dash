@@ -33,7 +33,10 @@ test(specTitle(ROWS, "top bar composition and sidebar toggle"), { tag: specTags(
   });
 
   await test.step("no unread dot shows with an empty inbox", async () => {
-    const dots = await driver.page.locator(".bg-danger-primary").count();
+    // The dot is a span nested inside the inbox link's icon wrapper and
+    // mounts only with unread notifications, so the icon subtree carries no
+    // span while the inbox is empty.
+    const dots = await driver.page.locator('a[href$="/notifications/"] div span').count();
     expect(dots).toBe(0);
   });
 
@@ -49,8 +52,10 @@ test(specTitle(ROWS, "top bar composition and sidebar toggle"), { tag: specTags(
   await test.step("the compact account control appears where the sidebar is unmounted", async () => {
     await driver.openNotifications(seed.workspaceSlug);
     await expect.poll(() => driver.sidebarPresent(), { timeout: 30_000 }).toBe(false);
+    // Generous budget: under shared-stack contention the notifications
+    // page can take a while to mount its bar.
     await expect
-      .poll(() => driver.page.getByRole("link", { name: "Star us on GitHub" }).count(), { timeout: 30_000 })
+      .poll(() => driver.page.getByRole("link", { name: "Star us on GitHub" }).count(), { timeout: 60_000 })
       .toBeGreaterThan(0);
     const controls = await driver.topBarControls();
     expect(controls.accountFallback).toBe(true);

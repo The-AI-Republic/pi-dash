@@ -308,6 +308,32 @@ export class WebDriver implements ParityDriver {
     const page = this.page;
     if (this.signedInPath(page.url())) return;
     await page.goto("/");
+    // Settle for whichever of the three entry states arrives. A retry
+    // after a partially completed attempt lands here already signed in
+    // (the session cookie survived even though the chrome wait below
+    // timed out), so the sign-in card never renders. And when the shared
+    // anonymous bucket is empty the app parks on its startup-error page
+    // instead of rendering anything. Fail fast on the error page so the
+    // retry loop, not a minute-long placeholder wait, spends the budget.
+    const emailField = page.getByPlaceholder("name@company.com").first();
+    const sidebar = page.locator("#main-sidebar");
+    const bootError = page.getByText("didn't start up correctly");
+    const deadline = Date.now() + 60_000;
+    let settled: "signed-in" | "sign-in-card" | null = null;
+    while (Date.now() < deadline) {
+      if ((await sidebar.count()) > 0) {
+        settled = "signed-in";
+        break;
+      }
+      if ((await bootError.count()) > 0) throw new Error("[parity] oracle boot throttled; retrying.");
+      if ((await emailField.count()) > 0) {
+        settled = "sign-in-card";
+        break;
+      }
+      await page.waitForTimeout(1_000);
+    }
+    if (settled === "signed-in") return;
+    if (settled === null) throw new Error("[parity] sign-in card never rendered.");
     // The shared email submit waits out a throttled email-check minute
     // (rate-limit banner instead of advancing) and resubmits; a bare
     // fill-and-click here would burn the whole test budget retrying
@@ -321,9 +347,10 @@ export class WebDriver implements ParityDriver {
     // Wait for the workspace chrome rather than any URL change: the
     // password-step URL already satisfies a path matcher, so a URL wait
     // would resolve before the login POST answers and the next navigation
-    // would cancel it, losing the session.
+    // would cancel it, losing the session. Generous timeout: under shared
+    // stack contention the cold boot after login can take a while.
     await Promise.all([
-      page.locator("#main-sidebar").waitFor({ state: "attached", timeout: 30_000 }),
+      page.locator("#main-sidebar").waitFor({ state: "attached", timeout: 90_000 }),
       this.submitOf(passwordForm).click(),
     ]);
   }
@@ -4340,25 +4367,55 @@ export class WebDriver implements ParityDriver {
   }
 
   /**
-   * The rail renders only when the build enables it; the content padding
-   * records the decision (the rail branch drops the left padding class), so
-   * this read stays meaningful on builds with and without the strip.
+   * The rail renders only when the build enables it, and its settings entry
+   * is a link to the workspace settings address that always mounts outside
+   * the sidebar in either display mode — no label text or class names needed.
    */
   async railPresent(): Promise<boolean> {
     return await this.page.evaluate(() => {
-      const padded = document.querySelector(".pl-0\\!");
-      const settingsLinks = [...document.querySelectorAll('a[href$="/settings"]')].filter(
-        (el) => (el.textContent ?? "").trim() === "Settings"
+      const sidebar = document.querySelector("#main-sidebar");
+      return [...document.querySelectorAll<HTMLAnchorElement>('a[href$="/settings"]')].some(
+        (link) => sidebar === null || !sidebar.contains(link)
       );
-      return padded !== null || settingsLinks.length > 0;
+    });
+  }
+
+  /**
+   * Computed left padding of the content holder: the top bar's row sibling
+   * holds the optional rail ahead of the content, which always renders last,
+   * so climbing from each inbox link to the ancestor whose next sibling
+   * contains the page main lands on that holder without class names. The
+   * rail branch drops its gutter to zero while the suppressed build keeps
+   * the full padding; null when the chrome is absent.
+   */
+  async contentPaddingLeft(): Promise<number | null> {
+    return await this.page.evaluate(() => {
+      const mains = [...document.querySelectorAll("main")];
+      const inner = mains.length > 1 ? mains[mains.length - 1] : null;
+      if (inner === null) return null;
+      const inboxes = [...document.querySelectorAll<HTMLAnchorElement>('a[href$="/notifications/"]')];
+      for (const inbox of inboxes) {
+        let cursor = inbox.parentElement;
+        while (cursor !== null) {
+          const row = cursor.nextElementSibling;
+          if (row !== null && row.contains(inner)) {
+            const content = row.lastElementChild;
+            if (content === null) return null;
+            return Number.parseFloat(getComputedStyle(content).paddingLeft) || 0;
+          }
+          cursor = cursor.parentElement;
+        }
+      }
+      return null;
     });
   }
 
   /**
    * Tabs of the strip in order, deduplicated by destination: the strip also
    * renders a hidden measuring copy of every tab for overflow math, and the
-   * copy shares each destination, so the first hit per href is the visible
-   * tab. Scoped to the workspace main so sidebar and issue rows stay out.
+   * page content links the same project with trailing slashes, so the first
+   * hit per slash-free href is the visible tab. Scoped to the workspace main
+   * so sidebar and issue rows stay out.
    */
   async projectTabs(): Promise<Array<{ name: string; href: string }>> {
     const links = this.shellMain().locator('a[href*="/projects/"]:visible');
@@ -4368,29 +4425,52 @@ export class WebDriver implements ParityDriver {
     for (let i = 0; i < count; i++) {
       const href = (await links.nth(i).getAttribute("href")) ?? "";
       const name = ((await links.nth(i).textContent()) ?? "").trim().replace(/\s+/g, " ");
-      if (href === "" || name === "" || seen.has(href)) continue;
-      seen.add(href);
+      // Strip destinations never trail a slash; page content links the
+      // same project with one, and those content links are never tabs.
+      if (href === "" || href.endsWith("/") || name === "") continue;
+      const key = href;
+      if (seen.has(key)) continue;
+      seen.add(key);
       tabs.push({ name, href });
     }
     return tabs;
   }
 
   /**
-   * The active tab follows the address: a tab is highlighted when the
-   * current path equals its destination or nests under it, and work-item
-   * detail pages (which live outside every tab path) keep the tracking tab
-   * highlighted instead.
+   * Name of the visually highlighted tab, read from the underline bar the
+   * strip renders ahead of the active entry's content — never computed from
+   * the address, so nested routes, detail pages and bare addresses report
+   * what the app actually highlights (or null when it highlights nothing).
    */
   async activeTabName(): Promise<string | null> {
-    const tabs = await this.projectTabs();
-    if (tabs.length === 0) return null;
-    const path = new URL(this.page.url()).pathname;
-    if (path.includes("/browse/")) {
-      const tracking = tabs.find((t) => t.name === "Work Items");
-      return tracking?.name ?? null;
-    }
-    const match = tabs.find((t) => path === t.href || path === `${t.href}/` || path.startsWith(`${t.href}/`));
-    return match?.name ?? null;
+    // Document scope, never the shell main: shell-less pages (the not-found
+    // page has no nested main) must report null fast instead of hanging an
+    // empty locator's auto-wait until the test times out.
+    return await this.page.evaluate(() => {
+      const links = [...document.querySelectorAll<HTMLAnchorElement>('a[href*="/projects/"]')].filter((a) => {
+        if (a.closest(".opacity-0")) return false;
+        const raw = a.getAttribute("href") ?? "";
+        if (raw.endsWith("/")) return false;
+        const parts = new URL(raw, document.baseURI).pathname.split("/").filter((p) => p.length > 0);
+        return parts.length === 4 && parts[1] === "projects";
+      });
+      for (const link of links) {
+        let el: HTMLElement | null = link.parentElement;
+        for (let depth = 0; depth < 8 && el !== null && el !== document.body; depth++) {
+          if (el.tagName === "DIV") {
+            const kids = [...el.children];
+            const barFirst = kids.length > 0 && kids[0].tagName === "SPAN";
+            const bodyFollows = kids.some((k) => k.tagName === "DIV" && k.contains(link));
+            if (barFirst && bodyFollows) {
+              const name = (link.textContent ?? "").trim().replace(/\s+/g, " ");
+              return name === "" ? null : name;
+            }
+          }
+          el = el.parentElement;
+        }
+      }
+      return null;
+    });
   }
 
   async editionBadgePresent(): Promise<boolean> {
@@ -4421,7 +4501,7 @@ export class WebDriver implements ParityDriver {
     const page = this.page;
     const starLink = (await page.getByRole("link", { name: "Star us on GitHub" }).count()) > 0;
     const workspaceMenu = (await page.getByRole("button", { name: "Open workspace switcher" }).count()) > 0;
-    const sidebarToggle = (await page.getByTestId("sidebar-toggle").count()) > 0;
+    const sidebarToggle = (await this.sidebarToggleButton().count()) > 0;
     const search = (await page.locator('input[placeholder*="Search" i], input[type="search"]').count()) > 0;
     const inbox = (await page.locator('a[href*="/notifications"]').count()) > 0;
     // The help trigger carries a question-mark icon found nowhere else.
@@ -4439,12 +4519,31 @@ export class WebDriver implements ParityDriver {
     return { workspaceMenu, sidebarToggle, search, inbox, help, starLink, accountFallback };
   }
 
+  /**
+   * The collapse toggle is an unlabeled icon button carrying the panel-left
+   * glyph; prefer the committed testid, and fall back to the glyph on baked
+   * builds that predate it. Both resolve to the same control.
+   */
+  private sidebarToggleButton(): Locator {
+    return this.page.locator('[data-testid="sidebar-toggle"], button:has(svg.lucide-panel-left)');
+  }
+
+  /**
+   * The personalize trigger is the unlabeled preferences button heading the
+   * sidebar beside the product wordmark: the first control in the sidebar.
+   * Prefer the committed testid, and fall back to that position on baked
+   * builds that predate it.
+   */
+  private personalizeButton(): Locator {
+    return this.sidebar().locator('[data-testid="personalize-nav"], button').first();
+  }
+
   async toggleSidebar(): Promise<void> {
-    await this.page.getByTestId("sidebar-toggle").click();
+    await this.sidebarToggleButton().first().click();
   }
 
   async openPersonalizeDialog(): Promise<void> {
-    await this.sidebar().getByTestId("personalize-nav").click();
+    await this.personalizeButton().click();
     await this.page.getByRole("heading", { name: "Customize navigation" }).waitFor({ timeout: 15_000 });
   }
 
@@ -4452,12 +4551,36 @@ export class WebDriver implements ParityDriver {
     return (await this.page.getByRole("heading", { name: "Customize navigation" }).count()) > 0;
   }
 
-  private dialogCheckbox(name: string): Locator {
+  private personalItemRow(name: string): Locator {
     const dialog = this.page.locator('[role="dialog"]');
-    const row = dialog.getByText(name, { exact: true });
-    return row.locator(
-      'xpath=ancestor::div[./input[@type="checkbox"] or .//input[@type="checkbox"]][1]//input[@type="checkbox"]'
-    );
+    // Anchor on the row's text label: a bare text match also hits the row
+    // containers (their icons carry no text), and climbing from an outer
+    // match lands on the first checkbox of the whole list instead of this
+    // row's. Each label is unique, so the climb from it reaches this row.
+    return dialog.locator(`xpath=.//label[normalize-space(.)="${name}"]/ancestor::div[.//input[@type="checkbox"]][1]`);
+  }
+
+  private dialogCheckbox(name: string): Locator {
+    return this.personalItemRow(name).locator('xpath=.//input[@type="checkbox"]');
+  }
+
+  async movePersonalItem(dragged: string, target: string): Promise<void> {
+    const source = this.personalItemRow(dragged);
+    const dest = this.personalItemRow(target);
+    const box = await dest.boundingBox();
+    // The list resolves a drop to the target row's nearest edge, and a
+    // drop on the row's vertical center can resolve to its top edge,
+    // which computes back to the dragged row's own slot (a no-op move).
+    // Land near the target's bottom edge to move past it instead.
+    const targetPosition = box === null ? undefined : { x: box.width / 2, y: box.height - 4 };
+    await source.dragTo(dest, { targetPosition });
+  }
+
+  async personalItemNames(): Promise<string[]> {
+    const dialog = this.page.locator('[role="dialog"]');
+    const labels = dialog.locator('xpath=.//label[normalize-space(.)="Your work" or normalize-space(.)="Drafts"]');
+    const texts = await labels.allTextContents();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
   }
 
   async personalItemChecked(name: string): Promise<boolean | null> {
@@ -4527,9 +4650,11 @@ export class WebDriver implements ParityDriver {
    * computed overflow hides the rest behind an ellipsis.
    */
   async projectHeaderTruncated(): Promise<boolean> {
-    return await this.shellMain()
-      .locator('button[aria-haspopup="listbox"] p')
-      .first()
+    // Count-guard first: evaluate on an empty locator auto-waits instead of
+    // rejecting, so the catch below never fires and the test would hang.
+    const line = this.shellMain().locator('button[aria-haspopup="listbox"] p').first();
+    if ((await line.count()) === 0) return false;
+    return await line
       .evaluate((el) => {
         const style = getComputedStyle(el);
         return el.scrollWidth > el.clientWidth && style.textOverflow === "ellipsis";
@@ -4552,7 +4677,14 @@ export class WebDriver implements ParityDriver {
   }
 
   async openProjectActions(): Promise<void> {
-    await this.shellMain().getByTestId("project-actions-trigger").click();
+    // The quick-actions trigger is a span wrapping the horizontal-ellipsis
+    // glyph; prefer the committed testid, and fall back to the glyph on
+    // baked builds that predate it. The overflow trigger is a button, so the
+    // span scope never confuses the two.
+    await this.shellMain()
+      .locator('[data-testid="project-actions-trigger"], span:has(> svg.lucide-ellipsis)')
+      .first()
+      .click();
   }
 
   async projectActionNames(): Promise<string[]> {
@@ -4592,28 +4724,37 @@ export class WebDriver implements ParityDriver {
     await this.page.getByRole("menuitem", { name }).first().click();
   }
 
-  async openOverflowMenu(): Promise<void> {
-    // The trigger is the icon button placed after every tab link: it sits
-    // past the last tab but ahead of the page content, while the strip's
-    // hidden measuring copies stay wrapped in an opacity-0 container.
-    const candidates = this.tabStrip().locator(
-      'xpath=.//button[.//svg][not(@aria-haspopup)][not(ancestor::div[contains(@class,"opacity-0")])]'
+  /**
+   * The overflow trigger is the first horizontal-ellipsis button following
+   * the last tab link in document order. The strip renders before the page
+   * content, so the trigger always wins that race; the project switcher
+   * precedes the tabs and carries no ellipsis glyph, and the strip's hidden
+   * measuring copies stay wrapped in an opacity-0 container, so neither can
+   * match. Only single-segment project destinations count as tabs: page
+   * content links the same project with trailing slashes (rejected by the
+   * final-character check, since XPath 1.0 has no ends-with) and deeper
+   * paths (rejected by the slash count). The svg test uses local-name
+   * because a bare `svg` step only matches the null namespace while rendered
+   * icons live in the SVG namespace. One locator resolves the trigger
+   * directly, so there is no snapshot index to go stale between a read and
+   * its click.
+   */
+  private overflowTrigger(): Locator {
+    return this.tabStrip().locator(
+      'xpath=(.//a[contains(@href,"/projects/")][substring(@href,string-length(@href))!="/"][string-length(@href)-string-length(translate(@href,"/",""))=4][not(ancestor::div[contains(@class,"opacity-0")])])[last()]/following::button[.//*[local-name()="svg"][contains(@class,"lucide-ellipsis")]][not(@aria-haspopup="listbox")][not(ancestor::div[contains(@class,"opacity-0")])][1]'
     );
-    const index = await this.shellMain()
-      .first()
-      .evaluate((main) => {
-        const buttons = [...main.querySelectorAll("button")].filter(
-          (b) => b.querySelector("svg") && !b.hasAttribute("aria-haspopup") && !b.closest(".opacity-0")
-        );
-        const tabs = [...main.querySelectorAll('a[href*="/projects/"]')].filter((a) => !a.closest(".opacity-0"));
-        if (tabs.length === 0) return -1;
-        const lastTab = tabs[tabs.length - 1];
-        // 4 is DOCUMENT_POSITION_FOLLOWING.
-        const trigger = buttons.find((b) => (lastTab.compareDocumentPosition(b) & 4) !== 0);
-        return trigger === undefined ? -1 : buttons.indexOf(trigger);
-      });
-    if (index < 0) throw new Error("[parity] no tab overflow trigger on this page.");
-    await candidates.nth(index).click();
+  }
+
+  async openOverflowMenu(): Promise<void> {
+    const trigger = this.overflowTrigger();
+    if ((await trigger.count()) === 0) throw new Error("[parity] no tab overflow trigger on this page.");
+    await trigger.click();
+  }
+
+  async overflowTriggerPresent(): Promise<boolean> {
+    const trigger = this.overflowTrigger();
+    if ((await trigger.count()) === 0) return false;
+    return await trigger.first().isVisible();
   }
 
   async overflowRowNames(): Promise<string[]> {

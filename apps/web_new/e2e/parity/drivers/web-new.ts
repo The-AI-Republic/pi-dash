@@ -470,6 +470,10 @@ export class WebNewDriver implements ParityDriver {
     return todo("railPresent");
   }
 
+  async contentPaddingLeft(): Promise<number | null> {
+    return todo("contentPaddingLeft");
+  }
+
   async projectTabs(): Promise<Array<{ name: string; href: string }>> {
     return todo("projectTabs");
   }
@@ -520,6 +524,14 @@ export class WebNewDriver implements ParityDriver {
 
   async setPersonalItemEnabled(): Promise<void> {
     return todo("setPersonalItemEnabled");
+  }
+
+  async movePersonalItem(): Promise<void> {
+    return todo("movePersonalItem");
+  }
+
+  async personalItemNames(): Promise<string[]> {
+    return todo("personalItemNames");
   }
 
   async projectNavMode(): Promise<"ACCORDION" | "TABBED" | null> {
@@ -596,6 +608,10 @@ export class WebNewDriver implements ParityDriver {
 
   async openOverflowMenu(): Promise<void> {
     return todo("openOverflowMenu");
+  }
+
+  async overflowTriggerPresent(): Promise<boolean> {
+    return todo("overflowTriggerPresent");
   }
 
   async overflowRowNames(): Promise<string[]> {

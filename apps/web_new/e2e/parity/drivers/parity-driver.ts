@@ -1240,6 +1240,8 @@ export interface ParityDriver {
   portalPresent(): Promise<boolean>;
   /** True while the far-left app rail strip is rendered. */
   railPresent(): Promise<boolean>;
+  /** Computed left padding in pixels of the content holder, or null without the chrome. */
+  contentPaddingLeft(): Promise<number | null>;
   /** Names plus hrefs of the project tabs rendered in the tab strip, in order. */
   projectTabs(): Promise<Array<{ name: string; href: string }>>;
   /** Name of the currently highlighted project tab, or null when none is. */
@@ -1274,6 +1276,10 @@ export interface ParityDriver {
   personalItemChecked(name: string): Promise<boolean | null>;
   /** Flip a personal entry checkbox in the open dialog. */
   setPersonalItemEnabled(name: string, enabled: boolean): Promise<void>;
+  /** Drag one personal entry onto another to reorder them in the open dialog. */
+  movePersonalItem(dragged: string, target: string): Promise<void>;
+  /** Names of the personal entries in dialog order. */
+  personalItemNames(): Promise<string[]>;
   /** Which project-list rendering mode ("ACCORDION" or "TABBED") is selected. */
   projectNavMode(): Promise<"ACCORDION" | "TABBED" | null>;
   /** Select a project-list rendering mode in the open dialog. */
@@ -1312,6 +1318,8 @@ export interface ParityDriver {
   clickContextMenuItem(name: string): Promise<void>;
   /** Open the tab strip overflow menu. */
   openOverflowMenu(): Promise<void>;
+  /** True while the tab strip overflow trigger is laid out on the page. */
+  overflowTriggerPresent(): Promise<boolean>;
   /** Rows listed in the open overflow menu. */
   overflowRowNames(): Promise<string[]>;
   /** Restore a user-hidden tab from the open overflow menu. */

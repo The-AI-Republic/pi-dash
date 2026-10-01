@@ -1628,6 +1628,21 @@ export async function deleteProject(
   );
 }
 
+/** Raw issue rows as the server reports them, in API order. */
+async function serverIssueRows(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<unknown[]> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] issues read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  return Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+}
+
 /** Names of the project's issues as the server reports them, in API order. */
 /** Paginated-or-array list readback shared by the widget collections. */
 async function collectionRows(res: Response, what: string): Promise<Record<string, unknown>[]> {
@@ -1861,12 +1876,7 @@ export async function serverIssueNames(
   sessionCookie: string,
   apiBase: string = apiBaseFromEnv()
 ): Promise<string[]> {
-  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/`, {
-    headers: { cookie: sessionCookie },
-  });
-  if (!res.ok) throw new Error(`[parity] issues read failed with HTTP ${res.status}.`);
-  const payload: unknown = await res.json();
-  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  const rows = await serverIssueRows(workspaceSlug, projectId, sessionCookie, apiBase);
   return rows.map((row) => {
     const name = (row as { name?: unknown }).name;
     if (typeof name !== "string") throw new Error("[parity] issue row carried no string name.");
@@ -5263,4 +5273,20 @@ export async function serverCleanupIssueWithSession(
     sessionCookie
   );
   if (!res.ok) console.log(`[parity] issue cleanup DELETE returned HTTP ${res.status}; leaving it for reseed.`);
+}
+
+/** Issue keys (name plus per-project sequence) for building detail addresses. */
+export async function serverIssueKeys(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Array<{ name: string; sequence_id: number }>> {
+  const rows = await serverIssueRows(workspaceSlug, projectId, sessionCookie, apiBase);
+  return rows.flatMap((row) => {
+    const record = row as { name?: unknown; sequence_id?: unknown };
+    return typeof record.name === "string" && typeof record.sequence_id === "number"
+      ? [{ name: record.name, sequence_id: record.sequence_id }]
+      : [];
+  });
 }
