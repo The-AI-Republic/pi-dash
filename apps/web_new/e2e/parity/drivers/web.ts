@@ -293,10 +293,11 @@ export class WebDriver implements ParityDriver {
     const page = this.page;
     if (this.signedInPath(page.url())) return;
     await page.goto("/");
-    const emailField = page.getByPlaceholder("name@company.com").first();
-    await emailField.fill(email);
-    const emailForm = page.locator("form", { has: emailField });
-    await this.submitOf(emailForm).click();
+    // The shared email submit waits out a throttled email-check minute
+    // (rate-limit banner instead of advancing) and resubmits; a bare
+    // fill-and-click here would burn the whole test budget retrying
+    // into 429s under concurrent parity runs.
+    await this.submitAuthEmail(email);
     const passwordField = page.getByPlaceholder("Enter password");
     await passwordField.waitFor({ timeout: WebDriver.WAIT_MS });
     await passwordField.fill(password);
