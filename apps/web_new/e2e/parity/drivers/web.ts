@@ -1306,16 +1306,22 @@ export class WebDriver implements ParityDriver {
   async layoutsActiveLayout(): Promise<LayoutsLayoutKey> {
     const buttons = this.layoutsSwitcherButtons();
     await buttons.first().waitFor({ timeout: WebDriver.LAYOUTS_FIRST_WAIT_MS });
-    const count = await buttons.count();
-    for (let i = 0; i < count; i++) {
-      const cls = (await buttons.nth(i).getAttribute("class")) ?? "";
-      if (cls.includes("bg-layer-transparent-active")) {
-        const key = WebDriver.LAYOUTS_ORDER[i];
-        if (key === undefined) throw new Error(`[parity] switcher has no layout key at index ${i}.`);
-        return key;
+    // The buttons render before the stored selection applies (filters
+    // still fetching), so the marker scan polls instead of reading once.
+    const deadline = Date.now() + 120_000;
+    for (;;) {
+      const count = await buttons.count();
+      for (let i = 0; i < count; i++) {
+        const cls = (await buttons.nth(i).getAttribute("class")) ?? "";
+        if (cls.includes("bg-layer-transparent-active")) {
+          const key = WebDriver.LAYOUTS_ORDER[i];
+          if (key === undefined) throw new Error(`[parity] switcher has no layout key at index ${i}.`);
+          return key;
+        }
       }
+      if (Date.now() >= deadline) throw new Error("[parity] no switcher button carries the active marker.");
+      await this.page.waitForTimeout(500);
     }
-    throw new Error("[parity] no switcher button carries the active marker.");
   }
 
   private async layoutsWaitForLayout(layout: LayoutsLayoutKey): Promise<void> {

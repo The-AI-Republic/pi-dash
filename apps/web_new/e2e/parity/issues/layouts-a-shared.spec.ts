@@ -127,7 +127,7 @@ test(
       await driver.layoutsSwitchTo("spreadsheet");
       await driver.layoutsReloadIssues();
       expect(await driver.layoutsActiveLayout()).toEqual("spreadsheet");
-      expect(await driver.layoutsSpreadsheetVisible()).toEqual(true);
+      await expect.poll(async () => driver.layoutsSpreadsheetVisible(), { timeout: 120_000 }).toEqual(true);
       const props = await serverProjectUserProperties(seed.workspaceSlug, seed.projectId, session);
       expect(props.displayFilters["layout"]).toEqual("spreadsheet");
     });
