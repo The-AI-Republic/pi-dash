@@ -1257,8 +1257,11 @@ export class WebDriver implements ParityDriver {
 
   // First contact with a freshly loaded issues page waits longer than the
   // shared budget: route compile plus the filter/issue fetch chains take
-  // 45s+ on the loaded shared host.
-  private static readonly LAYOUTS_FIRST_WAIT_MS = 90_000;
+  // 90-180s on the loaded shared host (8GB box, ~25 containers, several
+  // dev servers), and header chrome plus rows appear together only after
+  // both settle. Sized for failure latency, not pass time: passes resolve
+  // as soon as the chrome renders.
+  private static readonly LAYOUTS_FIRST_WAIT_MS = 300_000;
 
   private layoutsSwitcherButtons(): Locator {
     return this.page.locator("div.flex.items-center.gap-1.rounded-md.bg-layer-3.p-1 > button");
@@ -1411,7 +1414,7 @@ export class WebDriver implements ParityDriver {
     // The list body (sections) renders after the header chrome the page
     // waits settle on, so a fresh open/reload needs a bounded wait here
     // instead of an immediate throw.
-    const deadline = Date.now() + 60_000;
+    const deadline = Date.now() + 120_000;
     for (;;) {
       const found = await this.layoutsGroupSectionFast(title);
       if (found) return found;
@@ -1491,7 +1494,7 @@ export class WebDriver implements ParityDriver {
     await field.press("Enter");
     // The row appearing proves the save landed; the title is unique per
     // scenario run, so this cannot match a stale row.
-    await this.page.locator('a[id^="issue-"]', { hasText: title }).first().waitFor({ timeout: 60_000 });
+    await this.page.locator('a[id^="issue-"]', { hasText: title }).first().waitFor({ timeout: 120_000 });
   }
 
   async layoutsRowCanEditState(issueName: string): Promise<boolean> {
@@ -1520,15 +1523,15 @@ export class WebDriver implements ParityDriver {
 
   async layoutsRowHref(issueName: string): Promise<string | null> {
     const row = this.layoutsIssueRow(issueName);
-    await row.waitFor({ timeout: 60_000 });
+    await row.waitFor({ timeout: 120_000 });
     return row.getAttribute("href");
   }
 
   async layoutsRowOpenPeek(issueName: string): Promise<void> {
     const row = this.layoutsIssueRow(issueName);
     await row.locator("p").first().click();
-    await this.page.waitForURL((url) => url.href.includes("peekIssueId"), { timeout: 60_000 });
-    await this.layoutsPeekPanel().waitFor({ timeout: 60_000 });
+    await this.page.waitForURL((url) => url.href.includes("peekIssueId"), { timeout: 120_000 });
+    await this.layoutsPeekPanel().waitFor({ timeout: 120_000 });
   }
 
   async layoutsPeekVisible(): Promise<boolean> {
@@ -1566,7 +1569,7 @@ export class WebDriver implements ParityDriver {
     // The leading cell is an empty grid slot without children and carries
     // the expander button once sub-issues exist.
     const row = this.layoutsIssueRow(issueName);
-    await row.waitFor({ timeout: 60_000 });
+    await row.waitFor({ timeout: 120_000 });
     const slot = row.locator("div.grid.size-4").first();
     if ((await slot.count()) === 0) return false;
     return (await slot.locator("button").count()) > 0;
@@ -1589,7 +1592,7 @@ export class WebDriver implements ParityDriver {
     // Expanded children render as nested rows inside the parent's block,
     // after the parent's own link.
     const row = this.layoutsIssueRow(issueName);
-    await row.waitFor({ timeout: 60_000 });
+    await row.waitFor({ timeout: 120_000 });
     const block = row.locator("xpath=..");
     const nested = block.locator('a[id^="issue-"]');
     const count = await nested.count();
@@ -1635,7 +1638,7 @@ export class WebDriver implements ParityDriver {
     // triggers carry the toggle name, and the mobile trigger is hidden on
     // desktop, so what remains first is the priority control.
     const row = this.layoutsIssueRow(issueName);
-    await row.waitFor({ timeout: 60_000 });
+    await row.waitFor({ timeout: 120_000 });
     const candidates = row.locator("button:not([disabled])").filter({ hasNot: row.locator("span") });
     const count = await candidates.count();
     for (let i = 0; i < count; i++) {
@@ -2070,5 +2073,37 @@ export class WebDriver implements ParityDriver {
 
   async layoutsSheetCellSetAssignee(_issueName: string, _memberName: string): Promise<void> {
     return this.layoutsTodo("layoutsSheetCellSetAssignee");
+  }
+
+  async layoutsCalDayAddExisting(_dayNumber: number): Promise<void> {
+    return this.layoutsTodo("layoutsCalDayAddExisting");
+  }
+
+  async layoutsAddExistingModalIssueNames(): Promise<string[]> {
+    return this.layoutsTodo("layoutsAddExistingModalIssueNames");
+  }
+
+  async layoutsMobileSwitchTo(_layout: LayoutsLayoutKey): Promise<void> {
+    return this.layoutsTodo("layoutsMobileSwitchTo");
+  }
+
+  async layoutsMobileDisplayCycleModuleDisabled(): Promise<{ cycleDisabled: boolean; moduleDisabled: boolean }> {
+    return this.layoutsTodo("layoutsMobileDisplayCycleModuleDisabled");
+  }
+
+  async layoutsRowMenuOpenNewTabUrl(_issueName: string): Promise<string> {
+    return this.layoutsTodo("layoutsRowMenuOpenNewTabUrl");
+  }
+
+  async layoutsWorkItemModalHasText(_text: string): Promise<boolean> {
+    return this.layoutsTodo("layoutsWorkItemModalHasText");
+  }
+
+  async layoutsListPageMenuChoose(_item: string): Promise<void> {
+    return this.layoutsTodo("layoutsListPageMenuChoose");
+  }
+
+  async layoutsGroupHeaderAddChoose(_groupTitle: string, _item: string | null): Promise<void> {
+    return this.layoutsTodo("layoutsGroupHeaderAddChoose");
   }
 }

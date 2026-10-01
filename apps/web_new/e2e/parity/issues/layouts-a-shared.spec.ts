@@ -47,7 +47,7 @@ test(
     await test.step("all five layouts are offered, list is active", async () => {
       expect(await driver.layoutsOfferedLayouts()).toEqual(["list", "kanban", "calendar", "spreadsheet", "gantt"]);
       expect(await driver.layoutsActiveLayout()).toEqual("list");
-      await expect.poll(async () => driver.layoutsListVisible(), { timeout: 60_000 }).toEqual(true);
+      await expect.poll(async () => driver.layoutsListVisible(), { timeout: 120_000 }).toEqual(true);
     });
 
     const switches = [
@@ -87,7 +87,7 @@ test(
 );
 
 test(specTitle(ROWS_001, "guests can switch layouts too"), { tag: specTags(ROWS_001) }, async ({ driver, seed }) => {
-  test.setTimeout(540_000);
+  test.setTimeout(720_000);
   if (!seed.guestEmail || !seed.guestPassword) {
     throw new Error("[parity] seed facts carry no guest; re-run the stack seed step (see stack/README.md).");
   }
@@ -109,7 +109,7 @@ test(
   specTitle(ROWS_002, "layout preferences persist per user and survive reload"),
   { tag: specTags(ROWS_002) },
   async ({ driver, seed }) => {
-    test.setTimeout(540_000);
+    test.setTimeout(720_000);
     const session = await signInSession(seed.email, seed.password);
     await resetPrefs(seed.workspaceSlug, seed.projectId, session);
     await driver.openAuthenticated(
@@ -131,8 +131,8 @@ test(
         display_filters: { layout: "list", group_by: "state", order_by: "sort_order" },
       });
       await driver.layoutsReloadIssues();
-      await expect.poll(async () => driver.layoutsListVisible(), { timeout: 60_000 }).toEqual(true);
-      await expect.poll(async () => driver.layoutsListGroups(), { timeout: 60_000 }).toEqual(["Todo"]);
+      await expect.poll(async () => driver.layoutsListVisible(), { timeout: 120_000 }).toEqual(true);
+      await expect.poll(async () => driver.layoutsListGroups(), { timeout: 120_000 }).toEqual(["Todo"]);
     });
 
     await test.step("sort order restores from the stored preferences", async () => {
@@ -141,14 +141,14 @@ test(
       });
       await driver.layoutsReloadIssues();
       await expect
-        .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 60_000 })
+        .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 120_000 })
         .toEqual([...seed.issueNames].reverse());
       await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
         display_filters: { layout: "list", group_by: null, order_by: "sort_order" },
       });
       await driver.layoutsReloadIssues();
       await expect
-        .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 60_000 })
+        .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 120_000 })
         .toEqual([...seed.issueNames]);
     });
 
@@ -159,9 +159,9 @@ test(
       });
       await driver.layoutsReloadIssues();
       await expect
-        .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 60_000 })
+        .poll(async () => driver.layoutsListGroupIssueNames("All work items"), { timeout: 120_000 })
         .toEqual([...seed.issueNames]);
-      await expect.poll(async () => driver.hasVisibleText("Todo"), { timeout: 60_000 }).toEqual(false);
+      await expect.poll(async () => driver.hasVisibleText("Todo"), { timeout: 120_000 }).toEqual(false);
     });
 
     await test.step("teardown restores the seeded preferences", async () => {

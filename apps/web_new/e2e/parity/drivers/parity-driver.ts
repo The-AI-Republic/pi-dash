@@ -396,6 +396,8 @@ export interface ParityDriver {
   layoutsRowMenuChoose(issueName: string, item: string): Promise<void>;
   /** Menu entries offered by right-clicking a row. */
   layoutsRowContextMenuItems(issueName: string): Promise<string[]>;
+  /** Open-in-new-tab from a row menu; returns the new tab's URL. */
+  layoutsRowMenuOpenNewTabUrl(issueName: string): Promise<string>;
 
   // --- Spreadsheet (ISS-015..020). ---
 
@@ -502,6 +504,8 @@ export interface ParityDriver {
   layoutsCalDayQuickAdd(dayNumber: number, title: string): Promise<void>;
   /** Add entries offered by a day tile's menu. */
   layoutsCalDayAddMenu(dayNumber: number): Promise<string[]>;
+  /** Open a day tile's add-existing flow; resolves once the modal shows. */
+  layoutsCalDayAddExisting(dayNumber: number): Promise<void>;
   /** Tap a day tile (mobile day-detail); resolves once the list settles. */
   layoutsCalTapDay(dayNumber: number): Promise<void>;
   /** Issue names in the mobile day-detail list under the grid. */
@@ -517,6 +521,8 @@ export interface ParityDriver {
   layoutsWorkItemModalVisible(): Promise<boolean>;
   /** Title text of the open work-item modal (null when closed). */
   layoutsWorkItemModalTitle(): Promise<string | null>;
+  /** Whether the open work-item modal shows a text (prefill assertion). */
+  layoutsWorkItemModalHasText(text: string): Promise<boolean>;
   /** Close the open work-item modal. */
   layoutsWorkItemModalClose(): Promise<void>;
   /** Whether the delete-confirm modal is currently open. */
@@ -533,6 +539,8 @@ export interface ParityDriver {
   layoutsMoveModalChoose(projectName: string): Promise<void>;
   /** Whether the add-existing-issues modal is currently open. */
   layoutsAddExistingModalVisible(): Promise<boolean>;
+  /** Issue names currently listed in the add-existing modal. */
+  layoutsAddExistingModalIssueNames(): Promise<string[]>;
   /** Pick an issue in the add-existing modal; resolves once it closes. */
   layoutsAddExistingModalChoose(issueName: string): Promise<void>;
   /** Menu entries in the issue detail/peek header menu. */
@@ -543,8 +551,12 @@ export interface ParityDriver {
   layoutsPeekCopyLinkVisible(): Promise<boolean>;
   /** Menu entries in the whole-list ellipsis menu. */
   layoutsListPageMenuItems(): Promise<string[]>;
+  /** Pick one entry of the whole-list ellipsis menu. */
+  layoutsListPageMenuChoose(item: string): Promise<void>;
   /** Group-header add entries in cycle/module context (null opens the modal directly). */
   layoutsGroupHeaderAddMenu(groupTitle: string): Promise<string[] | null>;
+  /** Activate a group-header add entry (null clicks the bare plus). */
+  layoutsGroupHeaderAddChoose(groupTitle: string, item: string | null): Promise<void>;
 
   // --- Empty states (ISS-068..074). ---
 
@@ -559,10 +571,14 @@ export interface ParityDriver {
 
   /** Layout keys the compact (mobile) layout selector offers. */
   layoutsMobileOfferedLayouts(): Promise<LayoutsLayoutKey[]>;
+  /** Switch layout through the compact (mobile) selector. */
+  layoutsMobileSwitchTo(layout: LayoutsLayoutKey): Promise<void>;
   /** Whether the mobile header's Display control is present. */
   layoutsMobileDisplayVisible(): Promise<boolean>;
   /** Whether the mobile header's Analytics button is present. */
   layoutsMobileAnalyticsVisible(): Promise<boolean>;
+  /** Whether the Display dropdown's cycle/module options are disabled. */
+  layoutsMobileDisplayCycleModuleDisabled(): Promise<{ cycleDisabled: boolean; moduleDisabled: boolean }>;
   /** Whether a layout skeleton is currently rendered. */
   layoutsSkeletonVisible(): Promise<boolean>;
   /** Whether the floating mutation spinner is currently shown. */

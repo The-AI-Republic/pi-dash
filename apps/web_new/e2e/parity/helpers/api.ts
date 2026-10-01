@@ -1721,13 +1721,18 @@ export async function serverProjectUserProperties(
 /**
  * Write the caller's project-level layout preferences (scenario setup and
  * teardown). Pass the full objects: the endpoint merges them over the
- * stored row.
+ * stored row. `filters` carries the issue filters (empty-state scenarios
+ * match nothing through it); the seed default is all nulls.
  */
 export async function serverPatchProjectUserProperties(
   workspaceSlug: string,
   projectId: string,
   sessionCookie: string,
-  patch: { display_filters?: Record<string, unknown>; display_properties?: Record<string, unknown> },
+  patch: {
+    filters?: Record<string, unknown>;
+    display_filters?: Record<string, unknown>;
+    display_properties?: Record<string, unknown>;
+  },
   apiBase: string = apiBaseFromEnv()
 ): Promise<void> {
   const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/user-properties/`, {
@@ -2031,4 +2036,160 @@ export async function serverProjectDetails(
     cycleView: record.cycle_view === true,
     moduleView: record.module_view === true,
   };
+}
+
+/** Issue ids currently attached to a cycle (bridge list, shape-tolerant). */
+export async function serverCycleIssueIds(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string[]> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/cycle-issues/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] cycle-issues read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  const ids: string[] = [];
+  for (const row of rows) {
+    const r = row as { id?: unknown; issue?: unknown };
+    if (typeof r.id === "string") ids.push(r.id);
+    else if (typeof r.issue === "string") ids.push(r.issue);
+    else if (r.issue !== null && typeof r.issue === "object" && typeof (r.issue as { id?: unknown }).id === "string") {
+      ids.push((r.issue as { id: string }).id);
+    }
+  }
+  return ids;
+}
+
+/** Issue ids currently attached to a module (shape-tolerant). */
+export async function serverModuleIssueIds(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string[]> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/module-issues/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] module-issues read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  const ids: string[] = [];
+  for (const row of rows) {
+    const r = row as { id?: unknown; issue?: unknown };
+    if (typeof r.id === "string") ids.push(r.id);
+    else if (typeof r.issue === "string") ids.push(r.issue);
+    else if (r.issue !== null && typeof r.issue === "object" && typeof (r.issue as { id?: unknown }).id === "string") {
+      ids.push((r.issue as { id: string }).id);
+    }
+  }
+  return ids;
+}
+
+/** Create a saved project view; returns its UUID. Query DSL is verified live (ISS-072). */
+export async function serverCreateView(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  name: string,
+  query: Record<string, unknown> = {},
+  filters: Record<string, unknown> = {},
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/views/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify({ name, query, filters }),
+  });
+  const body = (await res.json().catch(() => null)) as { id?: unknown } | null;
+  if (res.status !== 201 || !body || typeof body.id !== "string") {
+    throw new Error(`[parity] view create failed with HTTP ${res.status}: ${JSON.stringify(body)}`);
+  }
+  return body.id;
+}
+
+/** Delete a saved project view; throws unless the server accepts. */
+export async function serverDeleteView(
+  workspaceSlug: string,
+  projectId: string,
+  viewId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchTolerant(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/views/${viewId}/`, {
+    method: "DELETE",
+    headers: { cookie: sessionCookie },
+  });
+  if (res.status !== 200 && res.status !== 204) {
+    throw new Error(`[parity] view delete failed with HTTP ${res.status}.`);
+  }
+}
+
+/** Seed-equivalent issue filters (all nulls); empty-state scenarios restore these. */
+export function seedIssueFilters(): Record<string, unknown> {
+  return {
+    priority: null,
+    state: null,
+    state_group: null,
+    assignees: null,
+    created_by: null,
+    labels: null,
+    start_date: null,
+    target_date: null,
+    subscriber: null,
+  };
+}
+
+/** Write the caller's cycle-level preferences (filters/display shape as project). */
+export async function serverPatchCycleUserProperties(
+  workspaceSlug: string,
+  projectId: string,
+  cycleId: string,
+  sessionCookie: string,
+  patch: {
+    filters?: Record<string, unknown>;
+    display_filters?: Record<string, unknown>;
+    display_properties?: Record<string, unknown>;
+  },
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}/user-properties/`,
+    {
+      method: "PATCH",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    }
+  );
+  if (!res.ok) throw new Error(`[parity] cycle user-properties patch failed with HTTP ${res.status}.`);
+}
+
+/** Write the caller's module-level preferences (filters/display shape as project). */
+export async function serverPatchModuleUserProperties(
+  workspaceSlug: string,
+  projectId: string,
+  moduleId: string,
+  sessionCookie: string,
+  patch: {
+    filters?: Record<string, unknown>;
+    display_filters?: Record<string, unknown>;
+    display_properties?: Record<string, unknown>;
+  },
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/${moduleId}/user-properties/`,
+    {
+      method: "PATCH",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    }
+  );
+  if (!res.ok) throw new Error(`[parity] module user-properties patch failed with HTTP ${res.status}.`);
 }

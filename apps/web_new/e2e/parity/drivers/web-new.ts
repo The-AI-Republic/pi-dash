@@ -914,4 +914,36 @@ export class WebNewDriver implements ParityDriver {
   async layoutsSheetCellSetAssignee(_issueName: string, _memberName: string): Promise<void> {
     return todo("layoutsSheetCellSetAssignee");
   }
+
+  async layoutsCalDayAddExisting(_dayNumber: number): Promise<void> {
+    return todo("layoutsCalDayAddExisting");
+  }
+
+  async layoutsAddExistingModalIssueNames(): Promise<string[]> {
+    return todo("layoutsAddExistingModalIssueNames");
+  }
+
+  async layoutsMobileSwitchTo(_layout: LayoutsLayoutKey): Promise<void> {
+    return todo("layoutsMobileSwitchTo");
+  }
+
+  async layoutsMobileDisplayCycleModuleDisabled(): Promise<{ cycleDisabled: boolean; moduleDisabled: boolean }> {
+    return todo("layoutsMobileDisplayCycleModuleDisabled");
+  }
+
+  async layoutsRowMenuOpenNewTabUrl(_issueName: string): Promise<string> {
+    return todo("layoutsRowMenuOpenNewTabUrl");
+  }
+
+  async layoutsWorkItemModalHasText(_text: string): Promise<boolean> {
+    return todo("layoutsWorkItemModalHasText");
+  }
+
+  async layoutsListPageMenuChoose(_item: string): Promise<void> {
+    return todo("layoutsListPageMenuChoose");
+  }
+
+  async layoutsGroupHeaderAddChoose(_groupTitle: string, _item: string | null): Promise<void> {
+    return todo("layoutsGroupHeaderAddChoose");
+  }
 }

@@ -58,7 +58,7 @@ test(
   specTitle(["ISS-015"], "sheet structure: headers, sticky columns, sub-issues"),
   { tag: specTags(["ISS-015"]) },
   async ({ driver, seed }) => {
-    test.setTimeout(540_000);
+    test.setTimeout(720_000);
     const session = await signInSession(seed.email, seed.password);
     await openSheet(driver, seed, session);
     expect(await driver.layoutsSpreadsheetVisible()).toEqual(true);
@@ -109,7 +109,7 @@ test(
   specTitle(["ISS-015", "ISS-013"], "sheet sub-issue nesting stops at three levels"),
   { tag: specTags(["ISS-015", "ISS-013"]) },
   async ({ driver, seed }) => {
-    test.setTimeout(540_000);
+    test.setTimeout(720_000);
     const session = await signInSession(seed.email, seed.password);
     const suffix = uniqueSuffix();
     const names = [0, 1, 2, 3, 4].map((level) => `Parity nest L${level} ${suffix}`);
@@ -144,7 +144,7 @@ test(
   specTitle(["ISS-016"], "columns follow display properties and project features"),
   { tag: specTags(["ISS-016"]) },
   async ({ driver, seed }) => {
-    test.setTimeout(540_000);
+    test.setTimeout(720_000);
     const session = await signInSession(seed.email, seed.password);
     const flags = await serverProjectDetails(seed.workspaceSlug, seed.projectId, session);
     expect(flags.cycleView).toEqual(true);
@@ -198,7 +198,7 @@ test(
   specTitle(["ISS-017"], "edit state, priority, assignee, and due date cells"),
   { tag: specTags(["ISS-017"]) },
   async ({ driver, seed }) => {
-    test.setTimeout(540_000);
+    test.setTimeout(720_000);
     const session = await signInSession(seed.email, seed.password);
     const member = requireMentionMember(seed);
     const first = seed.issueNames[0] ?? "";
@@ -265,7 +265,7 @@ test(
   specTitle(["ISS-017"], "read-only cells, sub-issue navigation, guest cells"),
   { tag: specTags(["ISS-017"]) },
   async ({ driver, seed }) => {
-    test.setTimeout(540_000);
+    test.setTimeout(720_000);
     const session = await signInSession(seed.email, seed.password);
     const first = seed.issueNames[0] ?? "";
     const rows = await serverIssues(seed.workspaceSlug, seed.projectId, session);
@@ -317,7 +317,7 @@ test(
   specTitle(["ISS-018"], "sort by a column header, then clear the sort"),
   { tag: specTags(["ISS-018"]) },
   async ({ driver, seed }) => {
-    test.setTimeout(540_000);
+    test.setTimeout(720_000);
     const session = await signInSession(seed.email, seed.password);
     const stateName = `Parity Sort ${uniqueSuffix()}`;
     const stateId = await serverCreateState(seed.workspaceSlug, seed.projectId, session, stateName, "started");
@@ -371,7 +371,7 @@ test(
   specTitle(["ISS-019", "ISS-015"], "sheet quick-add and infinite pagination over a virtualized table"),
   { tag: specTags(["ISS-019", "ISS-015"]) },
   async ({ driver, seed }) => {
-    test.setTimeout(540_000);
+    test.setTimeout(720_000);
     const session = await signInSession(seed.email, seed.password);
     try {
       await openSheet(driver, seed, session);
@@ -430,7 +430,7 @@ test(
   specTitle(["ISS-020"], "move sheet focus with the arrow keys"),
   { tag: specTags(["ISS-020"]) },
   async ({ driver, seed }) => {
-    test.setTimeout(540_000);
+    test.setTimeout(720_000);
     const session = await signInSession(seed.email, seed.password);
     await openSheet(driver, seed, session);
     const first = seed.issueNames[0] ?? "";
