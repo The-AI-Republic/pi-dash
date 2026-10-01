@@ -18,13 +18,15 @@ SELECT COUNT(*) FROM "issues"
 -- (Q-01b) build_graph_plot issue_count branch (utils/analytics_plot.py:96-107):
 --   x_axis annotated as dimension (F(x_axis), or year||'-'||month Concat for
 --   created_at/start_date/target_date/completed_at via annotate_with_monthly_dimension);
---   NULL dimensions excluded only for date axes (:85-86).
---   Non-date: annotate is_null=Case(When(dimension__isnull → 'None') default 'not_null'),
---   dimension_ex=Coalesce(dimension,'null'); values(dimension[, segment]);
+--   NULL dimensions excluded for EVERY axis (:84-86: extract_axis always returns
+--   "dimension", so the exclude is unconditional). The is_null=Case(When
+--   (dimension__isnull → 'None')) / dimension_ex=Coalesce(dimension,'null')
+--   annotations at :97-104 are dead — a later .values("dimension") drops them.
 --   annotate(count=Count('*')).order_by(dimension).
 SELECT "dimension", COUNT(*) AS "count" FROM (
   SELECT <x_axis expr> AS "dimension"[, <segment expr> AS "segment"]
-    FROM "issues" <joins per x_axis> WHERE ("workspaces"."slug" = %s AND <filters>)
+    FROM "issues" <joins per x_axis>
+   WHERE ("workspaces"."slug" = %s AND <filters> AND <x_axis expr> IS NOT NULL)
 ) GROUP BY "dimension"[, "segment"] ORDER BY "dimension" ASC;
 -- Python regroups rows by str(dimension) and applies sort_data: priority axes
 -- sort low,medium,high,urgent,none (missing keys dropped); all other axes sort
