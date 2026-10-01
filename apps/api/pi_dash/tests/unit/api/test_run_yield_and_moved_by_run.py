@@ -524,6 +524,9 @@ def test_scheduler_run_outcome_survives_the_terminal_payload(api_key_client, wor
     must not erase it, and the binding's terminate hook still runs."""
     from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
 
+    binding = scheduler_run.scheduler_binding
+    binding.last_error = "previous tick failed"
+    binding.save(update_fields=["last_error"])
     resp = api_key_client.post(_yield_url(workspace, scheduler_run.id), {"outcome": "progressed"}, format="json")
     assert resp.status_code == http_status.HTTP_200_OK, resp.data
     assert finalize_agent_run(
@@ -533,6 +536,8 @@ def test_scheduler_run_outcome_survives_the_terminal_payload(api_key_client, wor
     assert scheduler_run.status == AgentRunStatus.COMPLETED
     assert scheduler_run.done_payload["status"] == "progressed"
     assert scheduler_run.done_payload["conclusion"] == "ok"
+    binding.refresh_from_db()
+    assert binding.last_error == ""
 
 
 @pytest.mark.unit
