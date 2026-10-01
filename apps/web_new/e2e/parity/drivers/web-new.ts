@@ -1983,10 +1983,6 @@ export class WebNewDriver implements ParityDriver {
     return todo("submitDeviceApproval");
   }
 
-  async pressKey(_key: string): Promise<void> {
-    return todo("pressKey");
-  }
-
   async typeText(_text: string): Promise<void> {
     return todo("typeText");
   }

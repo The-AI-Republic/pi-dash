@@ -1221,8 +1221,6 @@ export interface ParityDriver {
   deviceCodeFieldValue(): Promise<string>;
   /** Submit the device-approval form. */
   submitDeviceApproval(): Promise<void>;
-  /** Press a key for keyboard-only driving. */
-  pressKey(key: string): Promise<void>;
   /** Type text into the currently focused control. */
   typeText(text: string): Promise<void>;
   /** Accessible name of the currently focused control, or null. */

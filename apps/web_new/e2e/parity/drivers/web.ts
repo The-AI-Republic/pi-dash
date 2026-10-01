@@ -6142,10 +6142,6 @@ export class WebDriver implements ParityDriver {
     await form.getByRole("button", { name: /approve/i }).click();
   }
 
-  async pressKey(key: string): Promise<void> {
-    await this.page.keyboard.press(key);
-  }
-
   async typeText(text: string): Promise<void> {
     await this.page.keyboard.type(text);
   }
