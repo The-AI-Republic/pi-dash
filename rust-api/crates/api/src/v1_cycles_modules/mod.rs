@@ -16,3 +16,18 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod gates;
+pub mod module;
+
+use axum::Router;
+
+use crate::state::AppState;
+
+/// Domain router: module routes in [`module::routes`] (PIDASHCONV-406);
+/// PIDASHCONV-362 merges `cycle::routes()` here for the cycle endpoints.
+/// Owned D-20 api-v1 routes serve from Rust (cutover granularity);
+/// everything else keeps proxying to Django through the edge fallback.
+/// Sibling D-20 handler issues merge their routers here; merges keep both
+/// sides.
+pub fn routes() -> Router<AppState> {
+    module::routes()
+}
