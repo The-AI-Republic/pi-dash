@@ -11,8 +11,9 @@
 // Shell-chrome extension (NEWFRONT-126): every selector below was observed
 // on the running old app, never copied from its sources. Stable landmarks
 // come from element ids and accessible names; three icon-only controls
-// carry data-testid hooks added for this suite (sidebar-toggle,
-// personalize-nav, project-actions-trigger). Tab reads scope to the nested
+// prefer data-testid hooks when a build carries them and otherwise fall
+// back to structural reads (icon glyph, header position) proven
+// element-identical on the oracle. Tab reads scope to the nested
 // workspace main so sidebar rows and issue rows never leak in.
 import { expect, type Locator, type Page } from "@playwright/test";
 import type {

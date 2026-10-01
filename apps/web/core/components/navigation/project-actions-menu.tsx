@@ -49,7 +49,6 @@ export function ProjectActionsMenu({
         <span
           ref={actionSectionRef}
           className="grid place-items-center rounded-sm p-0.5 text-placeholder hover:bg-layer-1"
-          data-testid="project-actions-trigger"
           onClick={() => setIsMenuActive(!isMenuActive)}
         >
           <MoreHorizontal className="size-4" />

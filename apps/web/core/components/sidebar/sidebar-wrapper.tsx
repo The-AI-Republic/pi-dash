@@ -83,7 +83,6 @@ export const SidebarWrapper = observer(function SidebarWrapper(props: TSidebarWr
                   size="base"
                   variant="ghost"
                   icon={PreferencesIcon}
-                  data-testid="personalize-nav"
                   onClick={() => setIsCustomizeNavDialogOpen(true)}
                 />
               )}
