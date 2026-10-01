@@ -441,6 +441,8 @@ export class WebNewDriver implements ParityDriver {
 
   async rulesIntakeTriageVisible(): Promise<boolean> {
     return todo("rulesIntakeTriageVisible");
+  }
+
   // Shell chrome (NEWFRONT-126): skeleton throws until the shell area lands.
   async openWorkspaceHome(): Promise<void> {
     return todo("openWorkspaceHome");
