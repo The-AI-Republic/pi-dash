@@ -1793,112 +1793,350 @@ export class WebDriver implements ParityDriver {
     return this.layoutsTodo("layoutsSheetOpenSubIssueCount");
   }
 
+  // --- Calendar layout (ISS-021..026). Day tiles are a static month
+  // --- grid: positional reads are stable here (unlike list sections,
+  // --- which reorder as groups fetch), and every read scopes to the
+  // --- tile so the duplicated mobile blocks never leak in.
+  private layoutsCalTiles(): Locator {
+    return this.page.locator("div.group.relative.flex.h-full.w-full.flex-col");
+  }
+
+  private async layoutsCalTile(dayNumber: number): Promise<Locator> {
+    // The desktop header shows the bare day number (today's sits in a
+    // badge span); day-1 tiles carry a month prefix ("Oct 1"), and
+    // adjacent-month filler tiles share numbers but render tertiary —
+    // current-month tiles are font-medium. Parity specs only use days
+    // strictly inside the month, so the exact+medium match is unique.
+    const label = String(dayNumber);
+    const tiles = this.layoutsCalTiles();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      const count = await tiles.count();
+      for (let i = 0; i < count; i++) {
+        const header = tiles.nth(i).locator("div.hidden.flex-shrink-0.justify-end").first();
+        if ((await header.count()) === 0) continue;
+        const text = ((await header.innerText()) ?? "").trim().replace(/\s+/g, " ");
+        if (text !== label) continue;
+        if (!((await header.getAttribute("class")) ?? "").includes("font-medium")) continue;
+        return tiles.nth(i);
+      }
+      if (Date.now() >= deadline) throw new Error(`[parity] calendar tile for day ${label} not found.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  private layoutsCalTitleButton(): Locator {
+    return this.page.locator("button.text-18.font-semibold").first();
+  }
+
+  private layoutsCalStepButtons(): Locator {
+    // Prev/next are the two buttons beside the title popover in the
+    // header bar: the nearest gap-1.5 ancestor of the title button is
+    // that bar's left group, whose button children are prev then next.
+    return this.layoutsCalTitleButton().locator("xpath=ancestor::div[contains(@class, 'gap-1.5')][1]/button");
+  }
+
+  private layoutsCalWeekHeaderCells(): Locator {
+    return this.page.locator("div.sticky.top-0").locator("div.flex.h-11");
+  }
+
   async layoutsCalMode(): Promise<"month" | "week"> {
-    return this.layoutsTodo("layoutsCalMode");
+    // A month grid holds 28-35 tiles, a week row 5-7; the rows render
+    // together once the calendar payload lands, so the count separates
+    // the modes cleanly after the first tile appears.
+    await this.layoutsCalTiles().first().waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    return (await this.layoutsCalTiles().count()) > 10 ? "month" : "week";
   }
 
   async layoutsCalTitle(): Promise<string> {
-    return this.layoutsTodo("layoutsCalTitle");
+    const title = this.layoutsCalTitleButton();
+    await title.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    return ((await title.innerText()) ?? "").trim().replace(/\s+/g, " ");
   }
 
   async layoutsCalPrev(): Promise<void> {
-    return this.layoutsTodo("layoutsCalPrev");
+    const before = await this.layoutsCalTitle();
+    await this.layoutsCalStepButtons().nth(0).click();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsCalTitle()) !== before) return;
+      if (Date.now() >= deadline) throw new Error("[parity] calendar prev never changed the title.");
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsCalNext(): Promise<void> {
-    return this.layoutsTodo("layoutsCalNext");
+    const before = await this.layoutsCalTitle();
+    await this.layoutsCalStepButtons().nth(1).click();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsCalTitle()) !== before) return;
+      if (Date.now() >= deadline) throw new Error("[parity] calendar next never changed the title.");
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsCalToday(): Promise<void> {
-    return this.layoutsTodo("layoutsCalToday");
+    await this.page.getByRole("button", { name: "Today", exact: true }).click();
+  }
+
+  private async layoutsCalOpenMonthPicker(): Promise<Locator> {
+    await this.layoutsCalTitleButton().click();
+    const panel = this.page.locator("div.w-56");
+    await panel.waitFor({ timeout: 15_000 });
+    return panel;
   }
 
   async layoutsCalMonthPickerMonths(): Promise<string[]> {
-    return this.layoutsTodo("layoutsCalMonthPickerMonths");
+    const panel = await this.layoutsCalOpenMonthPicker();
+    try {
+      const buttons = panel.locator("div.grid.grid-cols-4 > button");
+      const count = await buttons.count();
+      const months: string[] = [];
+      for (let i = 0; i < count; i++) months.push((((await buttons.nth(i).innerText()) ?? "").trim()));
+      return months;
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
   }
 
   async layoutsCalMonthPickerYear(): Promise<number> {
-    return this.layoutsTodo("layoutsCalMonthPickerYear");
+    const panel = await this.layoutsCalOpenMonthPicker();
+    try {
+      const year = panel.locator("span.text-11").first();
+      await year.waitFor({ timeout: 15_000 });
+      return Number.parseInt((((await year.innerText()) ?? "").trim()), 10);
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
   }
 
-  async layoutsCalMonthPickerYearStep(_direction: "prev" | "next"): Promise<void> {
-    return this.layoutsTodo("layoutsCalMonthPickerYearStep");
+  async layoutsCalMonthPickerYearStep(direction: "prev" | "next"): Promise<void> {
+    const panel = await this.layoutsCalOpenMonthPicker();
+    try {
+      const year = panel.locator("span.text-11").first();
+      const before = (((await year.innerText()) ?? "").trim());
+      const header = year.locator("xpath=..");
+      const buttons = header.locator("button");
+      if (direction === "prev") await buttons.first().click();
+      else await buttons.last().click();
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        if ((((await year.innerText()) ?? "").trim()) !== before) return;
+        if (Date.now() >= deadline) throw new Error("[parity] month picker year never stepped.");
+        await this.page.waitForTimeout(300);
+      }
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
   }
 
-  async layoutsCalMonthPickerChoose(_month: string): Promise<void> {
-    return this.layoutsTodo("layoutsCalMonthPickerChoose");
+  async layoutsCalMonthPickerChoose(month: string): Promise<void> {
+    const panel = await this.layoutsCalOpenMonthPicker();
+    try {
+      const before = await this.layoutsCalTitle();
+      await panel.locator("div.grid.grid-cols-4 > button", { hasText: month }).first().click();
+      const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+      for (;;) {
+        if ((await this.layoutsCalTitle()) !== before) return;
+        if (Date.now() >= deadline) throw new Error(`[parity] month picker never applied "${month}".`);
+        await this.page.waitForTimeout(500);
+      }
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
   }
 
   async layoutsCalMonthPickerEnabled(): Promise<boolean> {
-    return this.layoutsTodo("layoutsCalMonthPickerEnabled");
+    return await this.layoutsCalTitleButton().isEnabled();
   }
 
-  async layoutsCalSetMode(_mode: "month" | "week"): Promise<void> {
-    return this.layoutsTodo("layoutsCalSetMode");
+  private async layoutsCalOpenOptions(): Promise<Locator> {
+    await this.page.getByRole("button", { name: "Options" }).first().click();
+    const panel = this.page.locator("div.min-w-\\[12rem\\]");
+    await panel.waitFor({ timeout: 15_000 });
+    return panel;
+  }
+
+  async layoutsCalSetMode(mode: "month" | "week"): Promise<void> {
+    const panel = await this.layoutsCalOpenOptions();
+    try {
+      await panel.locator("button", { hasText: mode === "month" ? "Month layout" : "Week layout" }).first().click();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsCalMode()) === mode) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] calendar never switched to ${mode} mode.`);
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsCalWeekendsVisible(): Promise<boolean> {
-    return this.layoutsTodo("layoutsCalWeekendsVisible");
+    await this.layoutsCalWeekHeaderCells().first().waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    const cells = this.layoutsCalWeekHeaderCells();
+    const count = await cells.count();
+    for (let i = 0; i < count; i++) {
+      if ((((await cells.nth(i).innerText()) ?? "").trim()) === "Sat") return true;
+    }
+    return false;
   }
 
-  async layoutsCalSetWeekends(_show: boolean): Promise<void> {
-    return this.layoutsTodo("layoutsCalSetWeekends");
+  async layoutsCalSetWeekends(show: boolean): Promise<void> {
+    if ((await this.layoutsCalWeekendsVisible()) === show) return;
+    const panel = await this.layoutsCalOpenOptions();
+    try {
+      await panel.locator("button", { hasText: "Show weekends" }).first().click();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsCalWeekendsVisible()) === show) return;
+      if (Date.now() >= deadline) throw new Error("[parity] calendar weekends toggle never applied.");
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsCalColumnCount(): Promise<number> {
-    return this.layoutsTodo("layoutsCalColumnCount");
+    await this.layoutsCalWeekHeaderCells().first().waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    return await this.layoutsCalWeekHeaderCells().count();
   }
 
-  async layoutsCalDayIssueNames(_dayNumber: number): Promise<string[]> {
-    return this.layoutsTodo("layoutsCalDayIssueNames");
+  private layoutsCalBlockName(block: Locator): Locator {
+    // The identifier chip carries no truncate class, so the truncate
+    // div inside a block is exactly the issue name.
+    return block.locator("div.truncate.text-13").first();
   }
 
-  async layoutsCalDayIsToday(_dayNumber: number): Promise<boolean> {
-    return this.layoutsTodo("layoutsCalDayIsToday");
+  async layoutsCalDayIssueNames(dayNumber: number): Promise<string[]> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    const blocks = tile.locator('a[id^="issue-"]');
+    const count = await blocks.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      names.push((((await this.layoutsCalBlockName(blocks.nth(i)).innerText()) ?? "").trim()));
+    }
+    return names;
   }
 
-  async layoutsCalDayHasLoadMore(_dayNumber: number): Promise<boolean> {
-    return this.layoutsTodo("layoutsCalDayHasLoadMore");
+  async layoutsCalDayIsToday(dayNumber: number): Promise<boolean> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    const header = tile.locator("div.hidden.flex-shrink-0.justify-end").first();
+    return (await header.locator("span.rounded-full").count()) > 0;
   }
 
-  async layoutsCalDayLoadMore(_dayNumber: number): Promise<void> {
-    return this.layoutsTodo("layoutsCalDayLoadMore");
+  async layoutsCalDayHasLoadMore(dayNumber: number): Promise<boolean> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    return (await tile.getByRole("button", { name: "Load more", exact: true }).count()) > 0;
   }
 
-  async layoutsCalDragBlock(_issueName: string, _toDayNumber: number): Promise<void> {
-    return this.layoutsTodo("layoutsCalDragBlock");
+  async layoutsCalDayLoadMore(dayNumber: number): Promise<void> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    await tile.getByRole("button", { name: "Load more", exact: true }).click();
   }
 
-  async layoutsCalBlockText(_issueName: string): Promise<string> {
-    return this.layoutsTodo("layoutsCalBlockText");
+  async layoutsCalDragBlock(issueName: string, toDayNumber: number): Promise<void> {
+    // Pragmatic drag-and-drop listens to pointer events, so a stepped
+    // mouse path (not dragTo) drives the drop target the app registers
+    // on the destination tile.
+    const block = this.layoutsIssueRow(issueName);
+    await block.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await block.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    const tile = await this.layoutsCalTile(toDayNumber);
+    await tile.scrollIntoViewIfNeeded({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    const from = await block.boundingBox();
+    const to = await tile.boundingBox();
+    if (!from || !to) throw new Error("[parity] calendar drag endpoints have no bounding box.");
+    const mouse = this.page.mouse;
+    await mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+    await mouse.down();
+    await mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 25 });
+    await mouse.up();
   }
 
-  async layoutsCalBlockHoverPreview(_issueName: string): Promise<boolean> {
-    return this.layoutsTodo("layoutsCalBlockHoverPreview");
+  async layoutsCalBlockText(issueName: string): Promise<string> {
+    const block = this.layoutsIssueRow(issueName);
+    await block.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    return ((await block.innerText()) ?? "").trim().replace(/\s+/g, " ");
   }
 
-  async layoutsCalBlockOpenPeek(_issueName: string): Promise<void> {
-    return this.layoutsTodo("layoutsCalBlockOpenPeek");
+  async layoutsCalBlockHoverPreview(issueName: string): Promise<boolean> {
+    const block = this.layoutsIssueRow(issueName);
+    await block.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await block.hover();
+    const card = this.page.locator("div.w-72.space-y-2");
+    try {
+      await card.waitFor({ timeout: 15_000 });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
-  async layoutsCalBlockQuickActions(_issueName: string): Promise<string[]> {
-    return this.layoutsTodo("layoutsCalBlockQuickActions");
+  async layoutsCalBlockOpenPeek(issueName: string): Promise<void> {
+    // A block is the same peek-link anchor a list row is; the shared
+    // row opener covers the click plus the peek wait.
+    await this.layoutsRowOpenPeek(issueName);
   }
 
-  async layoutsCalDayQuickAdd(_dayNumber: number, _title: string): Promise<void> {
-    return this.layoutsTodo("layoutsCalDayQuickAdd");
+  async layoutsCalBlockQuickActions(issueName: string): Promise<string[]> {
+    const block = this.layoutsIssueRow(issueName);
+    await block.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await block.hover();
+    await block.locator("div.cursor-pointer").first().click();
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
   }
 
-  async layoutsCalDayAddMenu(_dayNumber: number): Promise<string[]> {
-    return this.layoutsTodo("layoutsCalDayAddMenu");
+  private async layoutsCalOpenDayAddMenu(dayNumber: number): Promise<void> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    await tile.hover();
+    // The tile-level add control is hover-revealed (opacity-0 until the
+    // tile hovers), so the tile hover above precedes the click.
+    await tile.locator("div.flex.w-full.items-center", { hasText: "Add work item" }).first().click();
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
   }
 
-  async layoutsCalTapDay(_dayNumber: number): Promise<void> {
-    return this.layoutsTodo("layoutsCalTapDay");
+  async layoutsCalDayQuickAdd(dayNumber: number, title: string): Promise<void> {
+    await this.layoutsCalOpenDayAddMenu(dayNumber);
+    await this.page.getByRole("menuitem", { name: "Add work item", exact: true }).first().click();
+    const field = this.page.getByPlaceholder("Work item Title");
+    await field.waitFor({ timeout: 15_000 });
+    await field.fill(title);
+    await field.press("Enter");
+    await this.page.keyboard.press("Escape");
+  }
+
+  async layoutsCalDayAddMenu(dayNumber: number): Promise<string[]> {
+    await this.layoutsCalOpenDayAddMenu(dayNumber);
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  async layoutsCalTapDay(dayNumber: number): Promise<void> {
+    // The mobile tile face (hidden on desktop) selects the day whose
+    // blocks the mobile detail list below the grid renders.
+    const tile = await this.layoutsCalTile(dayNumber);
+    await tile.locator("div.mx-auto.cursor-pointer").first().click();
   }
 
   async layoutsCalDayDetailNames(): Promise<string[]> {
-    return this.layoutsTodo("layoutsCalDayDetailNames");
+    const blocks = this.page.locator("div.md\\:hidden a[id^='issue-']");
+    const count = await blocks.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      names.push((((await this.layoutsCalBlockName(blocks.nth(i)).innerText()) ?? "").trim()));
+    }
+    return names;
   }
 
   async layoutsRowMenuItemDisabled(_issueName: string, _item: string): Promise<boolean> {
@@ -1946,11 +2184,28 @@ export class WebDriver implements ParityDriver {
   }
 
   async layoutsAddExistingModalVisible(): Promise<boolean> {
-    return this.layoutsTodo("layoutsAddExistingModalVisible");
+    // The submit button ("Add selected work items") exists only while
+    // the modal is open; the search input placeholder is shared with
+    // other pickers, so the submit button is the marker.
+    return (
+      (await this.page.getByRole("button", { name: "Add selected work items", exact: true }).count()) > 0
+    );
   }
 
-  async layoutsAddExistingModalChoose(_issueName: string): Promise<void> {
-    return this.layoutsTodo("layoutsAddExistingModalChoose");
+  async layoutsAddExistingModalChoose(issueName: string): Promise<void> {
+    // Each option is a label (htmlFor issue-<id>) whose truncate span
+    // carries the name; clicking toggles selection, then submit dates
+    // every selected issue onto the tile and closes the modal.
+    const option = this.page.locator('label[for^="issue-"]', { hasText: issueName }).first();
+    await option.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    await option.click();
+    await this.page.getByRole("button", { name: "Add selected work items", exact: true }).click();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if (!(await this.layoutsAddExistingModalVisible())) return;
+      if (Date.now() >= deadline) throw new Error("[parity] add-existing modal never closed after submit.");
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsDetailMenuItems(): Promise<string[]> {
@@ -2005,8 +2260,18 @@ export class WebDriver implements ParityDriver {
     return this.layoutsTodo("layoutsMutationSpinnerVisible");
   }
 
-  async layoutsRowHighlighted(_issueName: string): Promise<boolean> {
-    return this.layoutsTodo("layoutsRowHighlighted");
+  async layoutsRowHighlighted(issueName: string): Promise<boolean> {
+    // Drops add the highlight class to the block anchor (id issue-<id>)
+    // ~200ms after release; poll briefly since callers read right after
+    // the drop lands.
+    const block = this.layoutsIssueRow(issueName);
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if ((await block.count()) > 0 && (((await block.first().getAttribute("class")) ?? "").includes("highlight")))
+        return true;
+      if (Date.now() >= deadline) return false;
+      await this.page.waitForTimeout(300);
+    }
   }
 
   async layoutsTempRowVisible(): Promise<boolean> {
@@ -2021,12 +2286,35 @@ export class WebDriver implements ParityDriver {
     return this.layoutsTodo("layoutsSheetCellSetAssignee");
   }
 
-  async layoutsCalDayAddExisting(_dayNumber: number): Promise<void> {
-    return this.layoutsTodo("layoutsCalDayAddExisting");
+  async layoutsCalDayAddExisting(dayNumber: number): Promise<void> {
+    await this.layoutsCalOpenDayAddMenu(dayNumber);
+    await this.page.getByRole("menuitem", { name: "Add existing work item", exact: true }).first().click();
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if (await this.layoutsAddExistingModalVisible()) return;
+      if (Date.now() >= deadline) throw new Error("[parity] add-existing modal never opened.");
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsAddExistingModalIssueNames(): Promise<string[]> {
-    return this.layoutsTodo("layoutsAddExistingModalIssueNames");
+    // The search fetch lands after the modal opens, so an empty list
+    // waits for options (or the empty state) instead of reading once.
+    const options = this.page.locator('label[for^="issue-"]');
+    const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
+    for (;;) {
+      if ((await options.count()) > 0) break;
+      if ((await this.page.getByText("No work items found").count()) > 0) return [];
+      if (!(await this.layoutsAddExistingModalVisible())) return [];
+      if (Date.now() >= deadline) throw new Error("[parity] add-existing modal never listed issues.");
+      await this.page.waitForTimeout(500);
+    }
+    const names: string[] = [];
+    const count = await options.count();
+    for (let i = 0; i < count; i++) {
+      names.push((((await options.nth(i).locator("span.truncate").first().innerText()) ?? "").trim()));
+    }
+    return names;
   }
 
   async layoutsMobileSwitchTo(_layout: LayoutsLayoutKey): Promise<void> {
