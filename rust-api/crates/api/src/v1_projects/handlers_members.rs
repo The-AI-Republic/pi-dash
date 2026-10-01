@@ -756,12 +756,14 @@ async fn require_workspace(pool: &sqlx::PgPool, slug: &str) -> Result<(), Denial
 
 /// One user row plus its derived `avatar_url`
 /// (`serializers/user.py:13-38`, `db/models/user.py:142-151`).
+/// `email` is nullable (`CharField(null=True)`, `db/models/user.py:61`);
+/// `None` renders `null` like the serializer.
 #[derive(Debug, Clone)]
 pub struct UserLite {
     pub id: uuid::Uuid,
     pub first_name: String,
     pub last_name: String,
-    pub email: String,
+    pub email: Option<String>,
     pub avatar: String,
     pub avatar_asset_id: Option<uuid::Uuid>,
     pub display_name: String,
@@ -781,12 +783,13 @@ pub fn render_user_lite(user: &UserLite, avatar_url: Option<String>) -> Value {
     })
 }
 
-/// `avatar_url` property: asset URL, else the avatar text, else null.
+/// `avatar_url` property (`db/models/user.py:142-151`): the asset URL
+/// as-is when `avatar_asset` is set (even when the asset type maps to no
+/// URL — no fall-through to the avatar text), else the avatar text when
+/// non-empty, else null.
 pub fn avatar_url_for(user: &UserLite, assets: &HashMap<uuid::Uuid, String>) -> Option<String> {
     if let Some(asset_id) = user.avatar_asset_id {
-        if let Some(url) = assets.get(&asset_id) {
-            return Some(url.clone());
-        }
+        return assets.get(&asset_id).cloned();
     }
     if user.avatar.is_empty() {
         None
@@ -1340,7 +1343,11 @@ fn map_user_lite(row: &sqlx::postgres::PgRow) -> Result<UserLite, Denial> {
         id: row.try_get("id").map_err(|_| Denial::ServerError)?,
         first_name: row.try_get("first_name").map_err(|_| Denial::ServerError)?,
         last_name: row.try_get("last_name").map_err(|_| Denial::ServerError)?,
-        email: row.try_get("email").map_err(|_| Denial::ServerError)?,
+        // `email` is nullable (`db/models/user.py:61`); a non-opt decode
+        // 500s the whole list on one NULL row.
+        email: row
+            .try_get::<Option<String>, _>("email")
+            .map_err(|_| Denial::ServerError)?,
         avatar: row
             .try_get::<Option<String>, _>("avatar")
             .map_err(|_| Denial::ServerError)?
@@ -2373,7 +2380,7 @@ mod tests {
             id: id.parse().expect("uuid"),
             first_name: "Ct".into(),
             last_name: "User".into(),
-            email: "ct@example.com".into(),
+            email: Some("ct@example.com".into()),
             avatar: String::new(),
             avatar_asset_id: None,
             display_name: "Ct User".into(),
@@ -2405,6 +2412,32 @@ mod tests {
     }
 
     #[test]
+    fn user_lite_null_email_renders_null() {
+        let mut user = lite("11111111-1111-1111-1111-111111111111");
+        user.email = None;
+        let rendered = render_user_lite(&user, None);
+        assert_eq!(rendered["email"], Value::Null);
+        let keys: Vec<&str> = rendered
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                "id",
+                "first_name",
+                "last_name",
+                "email",
+                "avatar",
+                "avatar_url",
+                "display_name",
+            ]
+        );
+    }
+
+    #[test]
     fn avatar_url_prefers_asset_then_avatar_then_null() {
         let mut user = lite("11111111-1111-1111-1111-111111111111");
         let assets = HashMap::new();
@@ -2427,6 +2460,21 @@ mod tests {
             avatar_url_for(&user, &assets),
             Some("/api/assets/v2/static/22222222-2222-2222-2222-222222222222/".into())
         );
+    }
+
+    #[test]
+    fn avatar_url_no_fallthrough_when_asset_unresolvable() {
+        // `db/models/user.py:145-146`: the asset arm returns as-is, even
+        // when the asset type maps to no URL — non-empty avatar text must
+        // not leak into `avatar_url`.
+        let mut user = lite("11111111-1111-1111-1111-111111111111");
+        user.avatar = "https://example.com/a.png".into();
+        user.avatar_asset_id = Some(
+            "22222222-2222-2222-2222-222222222222"
+                .parse()
+                .expect("uuid"),
+        );
+        assert_eq!(avatar_url_for(&user, &HashMap::new()), None);
     }
 
     #[test]

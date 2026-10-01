@@ -916,9 +916,15 @@ def new_tag():
     return uuid.uuid4().hex[:8]
 
 
-def create_user(conn, tag, *, first_name="Ct", last_name="User", is_bot=False):
+#: Sentinel for ``create_user(email=...)``: generate the default address.
+GENERATE_EMAIL = object()
+
+
+def create_user(conn, tag, *, first_name="Ct", last_name="User", is_bot=False, email=GENERATE_EMAIL):
     uid = str(uuid.uuid4())
-    email = f"ct-{tag}@example.com"
+    if email is GENERATE_EMAIL:
+        email = f"ct-{tag}@example.com"
+    username = email if email is not None else f"ct-null-{tag}"
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -937,10 +943,38 @@ def create_user(conn, tag, *, first_name="Ct", last_name="User", is_bot=False):
                 '', %s, %s, true,
                 false)
             """,
-            (uid, email, email, first_name, last_name, is_bot, f"{first_name} {last_name}"),
+            (uid, username, email, first_name, last_name, is_bot, f"{first_name} {last_name}"),
         )
     conn.commit()
     return {"id": uid, "email": email}
+
+
+def create_file_asset(conn, entity_type):
+    """Minimal live ``file_assets`` row; returns its id (a str UUID)."""
+    aid = str(uuid.uuid4())
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO file_assets (id, attributes, asset, entity_type,
+                is_deleted, is_archived, size, is_uploaded,
+                created_at, updated_at)
+            VALUES (%s, '{}', 'ct/avatar.png', %s,
+                false, false, 0, false,
+                now(), now())
+            """,
+            (aid, entity_type),
+        )
+    conn.commit()
+    return aid
+
+
+def set_user_avatar(conn, user_id, *, asset_id=None, avatar=""):
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE users SET avatar_asset_id = %s, avatar = %s WHERE id = %s",
+            (asset_id, avatar, user_id),
+        )
+    conn.commit()
 
 
 def create_workspace(conn, tag, owner_id, *, name=None, slug=None):
