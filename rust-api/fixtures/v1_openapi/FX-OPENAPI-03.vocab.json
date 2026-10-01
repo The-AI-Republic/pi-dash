@@ -3984,8 +3984,26 @@
       "generate_operation_summary"
     ],
     "defined_but_not_exported": [
+      "SAMPLE_ACTIVITY",
+      "SAMPLE_COMMENT",
+      "SAMPLE_CYCLE",
+      "SAMPLE_CYCLE_ISSUE",
+      "SAMPLE_ESTIMATE",
+      "SAMPLE_ESTIMATE_POINT",
+      "SAMPLE_GENERIC",
+      "SAMPLE_INTAKE",
+      "SAMPLE_ISSUE",
+      "SAMPLE_LABEL",
+      "SAMPLE_LINK",
+      "SAMPLE_MODULE",
+      "SAMPLE_PAGE",
+      "SAMPLE_PROJECT",
+      "SAMPLE_STATE",
+      "SAMPLE_STICKY",
+      "SCHEMA_EXAMPLES",
       "postprocess_project_id_dual_form",
       "sticky_docs"
-    ]
+    ],
+    "defined_but_not_exported_note": "The 16 SAMPLE_* dicts + SCHEMA_EXAMPLES are module-internal sample data (examples.py only; consumed by get_sample_for_schema and the PAGE_* examples). sticky_docs is imported directly by api/views/sticky.py; postprocess_project_id_dual_form is wired by dotted path in SPECTACULAR_SETTINGS."
   }
 }

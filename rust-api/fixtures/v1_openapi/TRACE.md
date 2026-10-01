@@ -63,8 +63,10 @@ djangorestframework 3.15.2, Django 4.2.30.
   responses defaults — NOTE `sticky_docs` `:286-299` is defined but NOT
   re-exported in `__init__.py`; imported directly by
   `api/views/sticky.py`), `__init__.py:17-367` (159-name `__all__`
-  surface; defined-but-not-exported is exactly `sticky_docs` and
-  `postprocess_project_id_dual_form`, the latter wired by dotted path in
+  surface; defined-but-not-exported is exactly the 16 `SAMPLE_*` dicts
+  + `SCHEMA_EXAMPLES` (module-internal sample data, `examples.py` only)
+  plus `sticky_docs` (imported directly by `api/views/sticky.py`) and
+  `postprocess_project_id_dual_form` (wired by dotted path in
   `settings/openapi.py:44`).
   Method: AST parse for exact definition line spans + runtime
   introspection of the live objects (Django configured, no DB);
