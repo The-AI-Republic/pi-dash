@@ -443,6 +443,275 @@ export class WebNewDriver implements ParityDriver {
     return todo("rulesIntakeTriageVisible");
   }
 
+  // --- Issues bulk-ops / modal / drafts stubs (NEWFRONT-120).
+  async selectionCheckboxCount(): Promise<number> {
+    return todo("selectionCheckboxCount");
+  }
+
+  async bulkBarVisible(): Promise<boolean> {
+    return todo("bulkBarVisible");
+  }
+
+  async pressKey(_key: string, _shift?: boolean): Promise<void> {
+    return todo("pressKey");
+  }
+
+  async reloadSawDialog(): Promise<boolean> {
+    return todo("reloadSawDialog");
+  }
+
+  async dismissWelcomeDialog(): Promise<void> {
+    return todo("dismissWelcomeDialog");
+  }
+
+  async openCreateModal(): Promise<void> {
+    return todo("openCreateModal");
+  }
+
+  async createModalOpen(): Promise<boolean> {
+    return todo("createModalOpen");
+  }
+
+  async createModalHeading(): Promise<string> {
+    return todo("createModalHeading");
+  }
+
+  async fillCreateTitle(_title: string): Promise<void> {
+    return todo("fillCreateTitle");
+  }
+
+  async createTitleValue(): Promise<string> {
+    return todo("createTitleValue");
+  }
+
+  async createTitleError(): Promise<string> {
+    return todo("createTitleError");
+  }
+
+  async submitCreateModal(): Promise<void> {
+    return todo("submitCreateModal");
+  }
+
+  async clickModalDiscard(): Promise<void> {
+    return todo("clickModalDiscard");
+  }
+
+  async enableCreateMore(): Promise<void> {
+    return todo("enableCreateMore");
+  }
+
+  async modalPrimaryButtonLabel(): Promise<string> {
+    return todo("modalPrimaryButtonLabel");
+  }
+
+  async gitBranchValue(): Promise<string> {
+    return todo("gitBranchValue");
+  }
+
+  async createTitleFocused(): Promise<boolean> {
+    return todo("createTitleFocused");
+  }
+
+  async modalTextContains(_text: string): Promise<boolean> {
+    return todo("modalTextContains");
+  }
+
+  async confirmSaveDraft(): Promise<void> {
+    return todo("confirmSaveDraft");
+  }
+
+  async cancelDiscardDialog(): Promise<void> {
+    return todo("cancelDiscardDialog");
+  }
+
+  async discardDialogDiscard(): Promise<void> {
+    return todo("discardDialogDiscard");
+  }
+
+  async openDraftForEdit(_name: string): Promise<void> {
+    return todo("openDraftForEdit");
+  }
+
+  async publishDraft(): Promise<void> {
+    return todo("publishDraft");
+  }
+
+  async openRowMenuEntry(_issueName: string, _entry: string): Promise<void> {
+    return todo("openRowMenuEntry");
+  }
+
+  async modalButtonDisabled(_name: string): Promise<boolean> {
+    return todo("modalButtonDisabled");
+  }
+
+  async openParentPicker(): Promise<void> {
+    return todo("openParentPicker");
+  }
+
+  async searchParentInModal(_query: string): Promise<void> {
+    return todo("searchParentInModal");
+  }
+
+  async selectParentResult(_issueName: string): Promise<void> {
+    return todo("selectParentResult");
+  }
+
+  async parentResultNewTabLinks(): Promise<number> {
+    return todo("parentResultNewTabLinks");
+  }
+
+  async removeParentInModal(_issueName: string): Promise<void> {
+    return todo("removeParentInModal");
+  }
+
+  async openLabelsPicker(): Promise<void> {
+    return todo("openLabelsPicker");
+  }
+
+  async createLabelInModal(_name: string): Promise<void> {
+    return todo("createLabelInModal");
+  }
+
+  async selectedLabelVisible(_name: string): Promise<boolean> {
+    return todo("selectedLabelVisible");
+  }
+
+  async hoverIssueRow(_issueName: string): Promise<void> {
+    return todo("hoverIssueRow");
+  }
+
+  async openToastViewAction(): Promise<string> {
+    return todo("openToastViewAction");
+  }
+
+  async confirmArchive(): Promise<void> {
+    return todo("confirmArchive");
+  }
+
+  async confirmDeleteIssue(): Promise<void> {
+    return todo("confirmDeleteIssue");
+  }
+
+  async modalHasPlaceholder(_placeholder: string): Promise<boolean> {
+    return todo("modalHasPlaceholder");
+  }
+
+  async fillModalPlaceholder(_placeholder: string, _text: string): Promise<void> {
+    return todo("fillModalPlaceholder");
+  }
+
+  async expandListRows(): Promise<boolean> {
+    return todo("expandListRows");
+  }
+
+  async switchIssueLayout(_label: string): Promise<void> {
+    return todo("switchIssueLayout");
+  }
+
+  async ensureListLayout(): Promise<void> {
+    return todo("ensureListLayout");
+  }
+
+  async toggleAdvancedGit(): Promise<void> {
+    return todo("toggleAdvancedGit");
+  }
+
+  async fillGitBranch(_branch: string): Promise<void> {
+    return todo("fillGitBranch");
+  }
+
+  async gitBranchError(): Promise<string> {
+    return todo("gitBranchError");
+  }
+
+  async fillDescription(_text: string): Promise<void> {
+    return todo("fillDescription");
+  }
+
+  async countText(_text: string): Promise<number> {
+    return todo("countText");
+  }
+
+  async openDraftsPage(_workspaceSlug: string): Promise<void> {
+    return todo("openDraftsPage");
+  }
+
+  async visibleDraftNames(): Promise<string[]> {
+    return todo("visibleDraftNames");
+  }
+
+  async openCreateDraftModal(): Promise<void> {
+    return todo("openCreateDraftModal");
+  }
+
+  async draftBlockCount(): Promise<number> {
+    return todo("draftBlockCount");
+  }
+
+  async draftBlockText(_name: string): Promise<string> {
+    return todo("draftBlockText");
+  }
+
+  async settleDraftsPage(_workspaceSlug: string): Promise<"empty" | "list"> {
+    return todo("settleDraftsPage");
+  }
+
+  async pageTextContains(_text: string): Promise<boolean> {
+    return todo("pageTextContains");
+  }
+
+  async deleteDraftByName(_name: string): Promise<void> {
+    return todo("deleteDraftByName");
+  }
+
+  async signInWithPasswordRetry(_email: string, _password: string): Promise<void> {
+    return todo("signInWithPasswordRetry");
+  }
+
+  async openProjectIssuesSettled(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("openProjectIssuesSettled");
+  }
+
+  async copyDraftByName(_name: string): Promise<void> {
+    return todo("copyDraftByName");
+  }
+
+  async moveDraftToProject(_name: string): Promise<void> {
+    return todo("moveDraftToProject");
+  }
+
+  async confirmMoveToProject(): Promise<void> {
+    return todo("confirmMoveToProject");
+  }
+
+  async modalProjectName(): Promise<string> {
+    return todo("modalProjectName");
+  }
+
+  async selectModalProject(_name: string): Promise<void> {
+    return todo("selectModalProject");
+  }
+
+  async hoverCardRead(_issueName: string): Promise<{ text: string; priorityIcon: string; dateColor: string }> {
+    return todo("hoverCardRead");
+  }
+
+  async modalTabOrder(): Promise<string[]> {
+    return todo("modalTabOrder");
+  }
+
+  async focusCreateTitle(): Promise<void> {
+    return todo("focusCreateTitle");
+  }
+
+  async openCyclePage(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
+    return todo("openCyclePage");
+  }
+
+  async openModulePage(_workspaceSlug: string, _projectId: string, _moduleId: string): Promise<void> {
+    return todo("openModulePage");
+  }
+
   // --- NEWFRONT-123 (home) stubs: mirror of the oracle driver additions. ---
 
   async homeOpen(_workspaceSlug: string): Promise<void> {

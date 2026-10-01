@@ -1277,6 +1277,794 @@ export class WebDriver implements ParityDriver {
     await decline.waitFor({ timeout: 60_000 });
     return (await accept.isVisible()) && (await decline.isVisible());
   }
+
+  // --- Issues bulk-ops / modal / drafts driver methods (NEWFRONT-120).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract.
+
+  // Retry wrapper around the shared sign-in flow (NEWFRONT-120, ISS-108-141).
+  // The shared stack rate-limits credential posts under concurrent oracle
+  // runs; the shared signInWithPassword stays untouched for sibling areas.
+  async signInWithPasswordRetry(email: string, password: string): Promise<void> {
+    // The shared stack rate-limits credential posts under concurrent oracle
+    // runs, surfacing as an authentication error page; retry the flow a few
+    // times with a backoff before giving up.
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      try {
+        await this.trySignInOnce(email, password);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt < 4) await this.page.waitForTimeout(5000 * attempt);
+      }
+    }
+    throw lastError;
+  }
+
+  private async trySignInOnce(email: string, password: string): Promise<void> {
+    // Waits stay short on purpose: a stalled page must fail an attempt
+    // fast so the retry loop — not one hung wait — spends the budget.
+    // Slow-but-healthy loads still pass because the next attempt retries
+    // against an already-compiling page.
+    const page = this.page;
+    await page.goto("/");
+    const emailField = page.getByPlaceholder("name@company.com").first();
+    await emailField.waitFor({ timeout: 30_000 });
+    await emailField.fill(email);
+    const emailForm = page.locator("form", { has: emailField });
+    await this.submitOf(emailForm).click();
+    const passwordField = page.getByPlaceholder("Enter password");
+    await passwordField.waitFor({ timeout: 30_000 });
+    await passwordField.fill(password);
+    const passwordForm = page.locator("form", { has: passwordField });
+    // The old app posts the native form, so this ends in a full page load
+    // landing inside the workspace. Wait for the path to actually leave the
+    // entry route: the entry URL alone already satisfies looser patterns.
+    await Promise.all([
+      page.waitForURL((url) => url.pathname !== "/", { timeout: 30_000 }),
+      this.submitOf(passwordForm).click(),
+    ]);
+  }
+
+  /**
+   * Reload past the dev server's "Runtime Error" overlay. Under concurrent
+   * oracle load the dev server intermittently fails a dynamic chunk import
+   * ("Failed to fetch dynamically imported module"), leaving the page on an
+   * error boundary with the app detached; a reload re-serves it. Returns
+   * after the overlay clears or the attempts run out (callers then judge).
+   */
+  private async healRuntimeError(attempts: number = 2): Promise<void> {
+    for (let i = 0; i < attempts; i++) {
+      const crashed = await this.page
+        .getByText("Runtime Error", { exact: true })
+        .count()
+        .catch(() => 0);
+      if (crashed === 0) return;
+      await this.page.reload().catch(() => undefined);
+      await this.page.waitForLoadState("domcontentloaded").catch(() => undefined);
+      await this.page.waitForTimeout(3000);
+    }
+  }
+
+  // Settled list entry (NEWFRONT-120, ISS-108-141). Reloads past stalled
+  // fetches and the dev-server Runtime-Error overlay, returns to the list
+  // layout (it persists across navigation on the shared stack), and waits
+  // for signs of life. Separate from the shared openProjectIssues because
+  // forcing the list layout would disturb sibling layout scenarios.
+  async openProjectIssuesSettled(workspaceSlug: string, projectId: string): Promise<void> {
+    // The list fetch stalls under shared-stack load and the list does not
+    // retry on its own, so reload a few times instead of handing callers a
+    // dead page. Signs of life are the header action plus rendered
+    // paragraph text (issue rows and surrounding chrome). Every wait is
+    // bounded: an unbounded navigation hang would eat the whole test
+    // budget instead of letting the next attempt retry.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.page
+        .goto(`/${workspaceSlug}/projects/${projectId}/issues`, { timeout: 45_000 })
+        .catch(() => undefined);
+      await this.page.waitForLoadState("domcontentloaded").catch(() => undefined);
+      await this.healRuntimeError();
+      // The active layout persists across navigation on the shared stack; a
+      // non-list layout hides the rows list oracles assert on, so return to
+      // the list layout here before judging signs of life.
+      await this.ensureListLayout();
+      const alive = await this.page
+        .waitForFunction(
+          () => {
+            const main = document.querySelector("main");
+            const hasText = (main?.querySelectorAll("p")?.length ?? 0) > 0;
+            const hasAdd = Array.from(document.querySelectorAll("button")).some((button) =>
+              (button.textContent ?? "").includes("Add work item")
+            );
+            return hasText && hasAdd;
+          },
+          { timeout: 25_000 }
+        )
+        .then(() => true)
+        .catch(() => false);
+      if (alive) return;
+    }
+    // Leave the last page as-is for the caller's polling to judge.
+  }
+
+  // Issue multi-select and bulk operations (NEWFRONT-120). Observed on the
+  // running old app: with bulk operations unavailable, list rows render no
+  // selection checkbox and no sticky bar ever appears.
+  async selectionCheckboxCount(): Promise<number> {
+    return this.page.getByRole("checkbox").count();
+  }
+
+  async bulkBarVisible(): Promise<boolean> {
+    return (await this.page.getByText("Upgrade to One").count()) > 0;
+  }
+
+  async pressKey(key: string, shift?: boolean): Promise<void> {
+    if (shift) await this.page.keyboard.down("Shift");
+    try {
+      await this.page.keyboard.press(key);
+    } finally {
+      if (shift) await this.page.keyboard.up("Shift");
+    }
+  }
+
+  async reloadSawDialog(): Promise<boolean> {
+    let sawDialog = false;
+    const onDialog = async (dialog: import("@playwright/test").Dialog): Promise<void> => {
+      sawDialog = true;
+      await dialog.dismiss();
+    };
+    this.page.on("dialog", onDialog);
+    try {
+      await this.page.reload();
+      await this.page.waitForLoadState("domcontentloaded");
+      await this.page.waitForTimeout(2000);
+    } finally {
+      this.page.off("dialog", onDialog);
+    }
+    return sawDialog;
+  }
+
+  // Create/edit work-item modal (NEWFRONT-120). Observed on the running old
+  // app: the issues header offers an "Add work item" button opening a modal
+  // headed "Create new work item" with an autofocused "Title" field and
+  // Discard / Save actions plus a "Create more" toggle in the footer.
+  async dismissWelcomeDialog(): Promise<void> {
+    const noThanks = this.page.getByRole("button", { name: "No thanks, I will explore it myself" });
+    if ((await noThanks.count()) > 0) await noThanks.first().click();
+  }
+
+  async openCreateModal(): Promise<void> {
+    // Heal first: on a boundary-crashed page the button resolves but stays
+    // detached, hanging the click until the test times out.
+    await this.healRuntimeError();
+    const add = this.page.getByRole("button", { name: "Add work item" }).first();
+    await add.waitFor({ timeout: 60_000 });
+    await add.click({ timeout: 30_000 }).catch(async () => {
+      await this.healRuntimeError();
+      await this.page.getByRole("button", { name: "Add work item" }).first().click({ timeout: 30_000 });
+    });
+    await this.page.getByPlaceholder("Title").first().waitFor({ timeout: 60_000 });
+  }
+
+  async createModalOpen(): Promise<boolean> {
+    return (await this.page.getByPlaceholder("Title").count()) > 0;
+  }
+
+  async createModalHeading(): Promise<string> {
+    const texts = await this.modalScope().locator("h3").allTextContents();
+    const hit = texts.map((t) => t.trim()).find((t) => t.length > 0);
+    return hit ?? "";
+  }
+
+  async fillCreateTitle(title: string): Promise<void> {
+    // Type with the keyboard: the title field only reports changes from
+    // real keystrokes, so programmatic fills silently skip dirty tracking
+    // (verified against the discard guard). Assert the value stuck.
+    const field = this.page.getByPlaceholder("Title").first();
+    await field.click();
+    await this.page.keyboard.press("ControlOrMeta+a");
+    await this.page.keyboard.press("Backspace");
+    await this.page.keyboard.type(title);
+    const value = await field.inputValue().catch(() => null);
+    if (value !== title) throw new Error(`[parity] title field holds ${JSON.stringify(value)}.`);
+  }
+
+  async createTitleValue(): Promise<string> {
+    return this.page.getByPlaceholder("Title").first().inputValue();
+  }
+
+  async createTitleError(): Promise<string> {
+    const text = await this.page.locator("#name ~ span").first().textContent();
+    return (text ?? "").trim();
+  }
+
+  private modalSubmit(): Locator {
+    return this.page.locator("form").locator('button[type="submit"]').first();
+  }
+
+  async submitCreateModal(): Promise<void> {
+    await this.modalSubmit().click();
+  }
+
+  async clickModalDiscard(): Promise<void> {
+    await this.page.getByRole("button", { name: "Discard", exact: true }).first().click();
+  }
+
+  async enableCreateMore(): Promise<void> {
+    await this.page.locator("button", { hasText: "Create more" }).first().click();
+  }
+
+  async modalPrimaryButtonLabel(): Promise<string> {
+    return ((await this.modalSubmit().textContent()) ?? "").trim();
+  }
+
+  async gitBranchValue(): Promise<string> {
+    return this.page.locator("#git_work_branch").first().inputValue();
+  }
+
+  async createTitleFocused(): Promise<boolean> {
+    return this.page.evaluate(() => {
+      const active = document.activeElement;
+      return active instanceof HTMLInputElement && active.getAttribute("placeholder") === "Title";
+    });
+  }
+
+  private modalScope(): Locator {
+    return this.page.getByRole("dialog");
+  }
+
+  async modalTextContains(text: string): Promise<boolean> {
+    return (await this.modalScope().getByText(text, { exact: false }).count()) > 0;
+  }
+
+  async confirmSaveDraft(): Promise<void> {
+    await this.page.getByRole("button", { name: "Save to Drafts", exact: true }).last().click();
+  }
+
+  async cancelDiscardDialog(): Promise<void> {
+    await this.page.getByRole("button", { name: "Cancel", exact: true }).first().click();
+  }
+
+  async discardDialogDiscard(): Promise<void> {
+    const discard = this.page.getByRole("button", { name: "Discard", exact: true }).last();
+    try {
+      await discard.click({ timeout: 15_000 });
+    } catch {
+      // A stale modal overlay can keep covering the confirm while the
+      // button itself stays focused and enabled; keyboard-activate it the
+      // way a user would instead of failing on hit-testing.
+      await discard.focus();
+      await this.page.keyboard.press("Enter");
+    }
+  }
+
+  async openDraftForEdit(name: string): Promise<void> {
+    await this.page.getByText(name, { exact: true }).first().dblclick();
+    await this.page.getByPlaceholder("Title").first().waitFor({ timeout: 30_000 });
+  }
+
+  async publishDraft(): Promise<void> {
+    await this.page.getByRole("button", { name: "Publish issue", exact: true }).first().click();
+  }
+
+  /**
+   * Bring a row into the rendered list. Newly created rows sort last, so
+   * on a busy shared stack they hide behind group pagination: click
+   * through "Load more" rows and prod the intersection auto-loader until
+   * the name renders, then scroll it into view.
+   */
+  /** Scroll the list's own scroll container (not the main landmark). */
+  private async scrollListToBottom(): Promise<void> {
+    await this.page
+      .evaluate(() => {
+        const main = document.querySelector("main");
+        if (!main) return;
+        let deepest: HTMLElement | null = null;
+        main.querySelectorAll("div").forEach((el) => {
+          if (el.scrollHeight > el.clientHeight + 50) deepest = el;
+        });
+        (deepest ?? main).scrollTo(0, 999999);
+      })
+      .catch(() => undefined);
+  }
+
+  private async revealRowInList(issueName: string): Promise<void> {
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const name = this.page.getByText(issueName, { exact: true });
+      if ((await name.count()) > 0) {
+        await name.first().scrollIntoViewIfNeeded({ timeout: 10_000 });
+        return;
+      }
+      const more = this.page.getByText("Load more", { exact: false });
+      if ((await more.count()) > 0) {
+        await more
+          .first()
+          .click()
+          .catch(() => undefined);
+        await this.page.waitForTimeout(2000);
+        continue;
+      }
+      // New rows sort last behind group pagination; scrolling the list's
+      // own container trips the intersection auto-loader.
+      await this.scrollListToBottom();
+      await this.page.waitForTimeout(2500);
+    }
+    throw new Error(`[parity] row never rendered ${JSON.stringify(issueName)}.`);
+  }
+
+  async openRowMenuEntry(issueName: string, entry: string): Promise<void> {
+    // Every row carries a right-click context menu with the same entries
+    // as the hover-revealed ellipsis trigger (an icon-only button with no
+    // accessible name), so right-click the row name and pick the entry.
+    // Entries render as plain buttons once the menu opens. Retried: live
+    // list re-renders on the shared stack can detach the row mid-action.
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await this.revealRowInList(issueName);
+        const name = this.page.getByText(issueName, { exact: true }).first();
+        await name.click({ button: "right", timeout: 15_000 });
+        const item = this.page.getByRole("button", { name: entry, exact: true }).first();
+        await item.waitFor({ timeout: 15_000 });
+        await item.dispatchEvent("click");
+        return;
+      } catch (error) {
+        lastError = error;
+        await this.page.keyboard.press("Escape").catch(() => undefined);
+      }
+    }
+    throw lastError;
+  }
+
+  async modalButtonDisabled(name: string): Promise<boolean> {
+    const button = this.modalScope().getByRole("button", { name });
+    if ((await button.count()) === 0) return false;
+    return button.first().isDisabled();
+  }
+
+  async openParentPicker(): Promise<void> {
+    await this.modalScope().getByRole("button", { name: "Add parent" }).first().click();
+  }
+
+  async searchParentInModal(query: string): Promise<void> {
+    await this.page.getByPlaceholder("Type to search").first().fill(query);
+  }
+
+  async selectParentResult(issueName: string): Promise<void> {
+    // Results are combobox options (identifier + name + a hover-revealed
+    // new-tab link); click the name text inside the option so the option —
+    // not the link — receives the click and the picker closes selected.
+    const option = this.page.getByRole("option", { name: issueName }).first();
+    await option.waitFor({ timeout: 30_000 });
+    await option.getByText(issueName, { exact: true }).click();
+  }
+
+  async parentResultNewTabLinks(): Promise<number> {
+    return this.modalScope().locator('a[target="_blank"]').count();
+  }
+
+  async removeParentInModal(issueName: string): Promise<void> {
+    // The selected parent renders as a surface-2 tag (identifier + name)
+    // whose only button is the icon-only remove control. Substring text
+    // matching keeps working when the rendered name carries surrounding
+    // whitespace that exact matching rejects.
+    const tag = this.modalScope().locator("div.bg-surface-2").filter({ hasText: issueName }).last();
+    // The tag holds two buttons: the disabled identifier chip first and
+    // the remove control last.
+    await tag.getByRole("button").last().click();
+  }
+
+  async openLabelsPicker(): Promise<void> {
+    await this.modalScope().getByRole("button", { name: "Labels" }).first().click();
+  }
+
+  async createLabelInModal(name: string): Promise<void> {
+    // The label picker's search box is placeholder "Search"; typing a new
+    // name and pressing Enter creates the label inline, which then shows
+    // as a selected chip in the modal.
+    const box = this.modalScope().getByPlaceholder("Search").first();
+    await box.waitFor({ state: "visible", timeout: 8000 });
+    await box.fill(name);
+    await box.press("Enter");
+    await this.modalScope().getByText(name, { exact: true }).first().waitFor({ state: "visible", timeout: 30_000 });
+  }
+
+  async selectedLabelVisible(name: string): Promise<boolean> {
+    return (await this.modalScope().getByText(name, { exact: true }).count()) > 0;
+  }
+
+  async hoverIssueRow(issueName: string): Promise<void> {
+    // Let a stuck progress overlay clear first; bounded either way, so a
+    // hung hover fails fast instead of eating the test budget.
+    await this.page
+      .waitForFunction(() => !document.documentElement.classList.contains("bprogress-busy"), null, {
+        timeout: 15_000,
+      })
+      .catch(() => undefined);
+    await this.page.getByText(issueName, { exact: true }).first().hover({ timeout: 60_000 });
+  }
+
+  async openToastViewAction(): Promise<string> {
+    // The view action is a new-tab anchor, so capture the popup it opens.
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: 30_000 }),
+      this.page.getByText("View work item", { exact: true }).first().click(),
+    ]);
+    await popup.waitForLoadState("domcontentloaded").catch(() => undefined);
+    return popup.url();
+  }
+
+  async confirmArchive(): Promise<void> {
+    // Scope to the dialog: the still-open row menu behind it carries its
+    // own same-named entry.
+    await this.modalScope().getByRole("button", { name: "Archive", exact: true }).first().click();
+  }
+
+  async confirmDeleteIssue(): Promise<void> {
+    // Scope to the dialog: the still-open row menu behind it carries its
+    // own same-named entry.
+    await this.modalScope().getByRole("button", { name: "Delete", exact: true }).first().click();
+  }
+
+  async modalHasPlaceholder(placeholder: string): Promise<boolean> {
+    return (await this.modalScope().getByPlaceholder(placeholder).count()) > 0;
+  }
+
+  async fillModalPlaceholder(placeholder: string, text: string): Promise<void> {
+    const field = this.modalScope().getByPlaceholder(placeholder).first();
+    await field.waitFor({ timeout: 30_000 });
+    await field.click();
+    await this.page.keyboard.press("ControlOrMeta+a");
+    await this.page.keyboard.press("Backspace");
+    await this.page.keyboard.type(text);
+  }
+
+  async expandListRows(): Promise<boolean> {
+    // Scroll first: group pagination also loads through an intersection
+    // sentinel with no visible affordance.
+    await this.scrollListToBottom();
+    await this.page.waitForTimeout(2000);
+    const more = this.page.getByText("Load more", { exact: false });
+    const count = await more.count();
+    for (let i = 0; i < count; i++) {
+      await more
+        .nth(i)
+        .click()
+        .catch(() => undefined);
+      await this.page.waitForTimeout(1500);
+    }
+    return count > 0;
+  }
+
+  /** Buttons of the layout-switcher group, when the header rendered one. */
+  private async layoutSwitcherButtons(): Promise<Locator[]> {
+    const groups = this.page.locator("div.rounded-md.bg-layer-3").filter({ has: this.page.getByRole("button") });
+    const scoped: Locator[] = [];
+    for (let i = 0; i < (await groups.count()); i++) scoped.push(...(await groups.nth(i).getByRole("button").all()));
+    return scoped;
+  }
+
+  /** Hover-scan `buttons` for the one whose tooltip reads `label`; clicks it. */
+  private async clickButtonByTooltip(buttons: Locator[], label: string): Promise<boolean> {
+    // Park the mouse first: a tooltip left open by an earlier scan would
+    // otherwise read as a false appearance on the first button hovered.
+    await this.page.mouse.move(4, 4).catch(() => undefined);
+    await this.page.waitForTimeout(400);
+    for (const button of buttons) {
+      const before = await this.page.getByText(label, { exact: true }).count();
+      await button.hover({ timeout: 10_000 }).catch(() => undefined);
+      // Tooltips lag well past their nominal delay under load; dwell long
+      // enough that a slow appearance still reads as one.
+      await this.page.waitForTimeout(1000);
+      const after = await this.page.getByText(label, { exact: true }).count();
+      if (after > before) {
+        await button.click().catch(() => undefined);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async switchIssueLayout(label: string): Promise<void> {
+    // The layout switcher is icon-only; each button reveals its layout
+    // through a hover tooltip. Scan the switcher group a few times (a
+    // loaded run misses tooltips), then fall back once to every button on
+    // the page before giving up.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (await this.clickButtonByTooltip(await this.layoutSwitcherButtons(), label)) return;
+    }
+    if (await this.clickButtonByTooltip(await this.page.getByRole("button").all(), label)) return;
+    throw new Error(`[parity] no layout switcher tooltip read ${JSON.stringify(label)}.`);
+  }
+
+  async ensureListLayout(): Promise<void> {
+    // Best-effort only: a dead page or a header without the switcher
+    // leaves the layout alone for the caller's polling to judge. Waits
+    // briefly for the header so the first navigation already enforces
+    // the list instead of only healing on a later reload.
+    try {
+      for (let i = 0; i < 40; i++) {
+        if ((await this.page.locator("div.rounded-md.bg-layer-3").count()) > 0) break;
+        await this.page.waitForTimeout(500);
+      }
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (await this.clickButtonByTooltip(await this.layoutSwitcherButtons(), "List Layout")) return;
+      }
+    } catch {
+      // Leave the layout alone.
+    }
+  }
+
+  async toggleAdvancedGit(): Promise<void> {
+    await this.page.getByRole("button", { name: "Advanced — git" }).first().click();
+  }
+
+  async fillGitBranch(branch: string): Promise<void> {
+    const field = this.page.locator("#git_work_branch").first();
+    await field.click();
+    await this.page.keyboard.press("ControlOrMeta+a");
+    await this.page.keyboard.press("Backspace");
+    await this.page.keyboard.type(branch);
+  }
+
+  async gitBranchError(): Promise<string> {
+    const text = await this.page.locator("#git_work_branch ~ span").first().textContent();
+    return (text ?? "").trim();
+  }
+
+  async fillDescription(text: string): Promise<void> {
+    // The editor's "Click to add description" hint is CSS-generated
+    // placeholder text (a data-placeholder on the empty paragraph), so it
+    // is not a text node to click: click the editor box itself instead,
+    // exactly where the user clicks the hint, then type.
+    await this.modalScope().locator('[contenteditable="true"]').first().click();
+    await this.page.keyboard.type(text);
+  }
+
+  async countText(text: string): Promise<number> {
+    return this.page.getByText(text, { exact: true }).count();
+  }
+
+  // Workspace drafts (NEWFRONT-120). Observed on the running old app: the
+  // drafts route renders one block per draft, and the empty state offers a
+  // "Create draft work item" action opening the draft variant of the modal.
+  async openDraftsPage(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/drafts`, { timeout: 60_000 }).catch(() => undefined);
+    await this.page.waitForLoadState("domcontentloaded").catch(() => undefined);
+    await this.healRuntimeError();
+  }
+
+  async visibleDraftNames(): Promise<string[]> {
+    try {
+      const texts = await this.page.getByRole("main").locator("p").allTextContents();
+      return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+    } catch {
+      return [];
+    }
+  }
+
+  async openCreateDraftModal(): Promise<void> {
+    // The empty state offers "Create draft work item"; once drafts exist
+    // the header offers "Draft a work item". Either opens the draft modal.
+    const emptyAction = this.page.getByRole("button", { name: "Create draft work item" });
+    if ((await emptyAction.count()) > 0) await emptyAction.first().click();
+    else await this.page.getByRole("button", { name: "Draft a work item" }).first().click();
+    await this.page.getByPlaceholder("Title").first().waitFor({ timeout: 30_000 });
+  }
+
+  async draftBlockCount(): Promise<number> {
+    try {
+      return await this.page.locator('div[id^="issue-"]').count();
+    } catch {
+      return 0;
+    }
+  }
+
+  async draftBlockText(name: string): Promise<string> {
+    const text = await this.page.locator('div[id^="issue-"]', { hasText: name }).first().textContent();
+    return (text ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async pageTextContains(text: string): Promise<boolean> {
+    return (await this.page.getByText(text, { exact: false }).count()) > 0;
+  }
+
+  async deleteDraftByName(name: string): Promise<void> {
+    // The block's right-click menu renders its entries as plain buttons
+    // carrying the untranslated keys ("delete", …); the confirm alert
+    // carries the capitalized Delete. Right-click the block center: a
+    // corner click can land on the neighboring block (each block owns its
+    // menu, so a miss acts on the wrong draft).
+    const block = this.page.locator('div[id^="issue-"]', { hasText: name }).first();
+    await block.click({ button: "right" });
+    // The open menu intercepts pointer events at the item, so a real click
+    // never lands; dispatch it straight to the item instead.
+    const entry = this.page.getByRole("button", { name: "delete", exact: true }).first();
+    await entry.waitFor({ timeout: 30_000 });
+    await entry.dispatchEvent("click");
+    await this.page.getByRole("button", { name: "Delete", exact: true }).last().click();
+  }
+
+  async settleDraftsPage(workspaceSlug: string): Promise<"empty" | "list"> {
+    // The drafts fetch can be rate-limited on the shared stack; re-entering
+    // the route remounts the view and retries it.
+    const started = Date.now();
+    let revisits = 0;
+    for (;;) {
+      if ((await this.page.getByText("Half-written work items").count()) > 0) return "empty";
+      let blocks = 0;
+      try {
+        blocks = await this.page.locator('div[id^="issue-"]').count();
+      } catch {
+        blocks = 0;
+      }
+      if (blocks > 0) return "list";
+      if (Date.now() - started > 150_000) throw new Error("[parity] drafts page never settled");
+      if (Date.now() - started > 30_000 * (revisits + 1) && revisits < 4) {
+        revisits += 1;
+        await this.page.goto(`/${workspaceSlug}/drafts`);
+        await this.page.waitForLoadState("domcontentloaded");
+      }
+      await this.page.waitForTimeout(2000);
+    }
+  }
+
+  // Draft quick actions, continued (NEWFRONT-120, ISS-139). The block's
+  // right-click menu carries the same untranslated keys as the delete
+  // entry: copying opens the duplicated payload in the draft modal, moving
+  // opens the move-to-project modal for the draft.
+  async copyDraftByName(name: string): Promise<void> {
+    const block = this.page.locator('div[id^="issue-"]', { hasText: name }).first();
+    await block.click({ button: "right" });
+    const entry = this.page.getByRole("button", { name: "make_a_copy", exact: true }).first();
+    await entry.waitFor({ timeout: 30_000 });
+    await entry.dispatchEvent("click");
+  }
+
+  async moveDraftToProject(name: string): Promise<void> {
+    const block = this.page.locator('div[id^="issue-"]', { hasText: name }).first();
+    await block.click({ button: "right" });
+    const entry = this.page.getByRole("button", { name: "move_to_project", exact: true }).first();
+    await entry.waitFor({ timeout: 30_000 });
+    await entry.dispatchEvent("click");
+  }
+
+  async confirmMoveToProject(): Promise<void> {
+    await this.page.getByRole("button", { name: "Add to project", exact: true }).first().click();
+  }
+
+  private modalFormScope(): Locator {
+    // Scope to the dialog holding the modal form: toasts share the dialog
+    // role, so an unscoped .first() lands on a toast instead of the modal.
+    return this.page.getByRole("dialog").filter({ has: this.page.getByPlaceholder("Title") });
+  }
+
+  private modalProjectChip(): Locator {
+    // The project chip is the modal's first nested button (an outer button
+    // wrapping the clickable inner one); later nested buttons are the
+    // state/assignee/date rows. Structural on purpose: the chip shows
+    // whatever project the modal targeted, which on the shared stack is
+    // often not the seed project.
+    return this.modalFormScope()
+      .getByRole("button")
+      .filter({ has: this.page.getByRole("button") })
+      .first()
+      .getByRole("button");
+  }
+
+  async modalProjectName(): Promise<string> {
+    const chip = this.modalProjectChip();
+    await chip.waitFor({ timeout: 30_000 });
+    return ((await chip.textContent()) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async selectModalProject(name: string): Promise<void> {
+    await this.modalProjectChip().click();
+    const option = this.page.getByRole("option", { name, exact: true }).first();
+    await option.waitFor({ timeout: 30_000 });
+    await option.click();
+    // Confirm the chip flipped; callers save right after, so a missed
+    // selection must fail here instead of landing elsewhere.
+    const started = Date.now();
+    for (;;) {
+      const current = (
+        (await this.modalProjectChip()
+          .textContent()
+          .catch(() => null)) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (current === name) return;
+      if (Date.now() - started > 15_000) throw new Error(`[parity] project chip stuck at ${JSON.stringify(current)}.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  // Work-item preview card (NEWFRONT-120, ISS-133). Observed on the running
+  // old app: hovering a calendar block pops a card whose heading carries
+  // the title; the card root wraps an identifier/state row, the title, and
+  // a priority-plus-date row around it. One hover reads everything: each
+  // hover cycle risks a stuck progress overlay under shared-stack load,
+  // so the text, icon and color come from a single pop.
+  async hoverCardRead(issueName: string): Promise<{ text: string; priorityIcon: string; dateColor: string }> {
+    const empty = { text: "", priorityIcon: "", dateColor: "" };
+    // A failed hover propagates: only a successful hover with no card
+    // (undated rows) reports empty fields.
+    await this.hoverIssueRow(issueName);
+    try {
+      const heading = this.page.locator("h6", { hasText: issueName }).first();
+      await heading.waitFor({ timeout: 15_000 });
+      const read = await heading.evaluate((el) => {
+        // The heading sits in a title wrapper inside the card root.
+        const root = el.parentElement?.parentElement;
+        const text = (root?.textContent ?? "").replace(/\s+/g, " ").trim();
+        const row = root?.lastElementChild;
+        const svg = row?.querySelector("svg");
+        const classes = (svg?.getAttribute("class") ?? "").split(/\s+/);
+        const priorityIcon = classes.filter((name) => name.startsWith("lucide-") && name !== "lucide").join(" ");
+        const span = row?.querySelector("span");
+        const dateColor = !span || (span.textContent ?? "").trim() === "" ? "" : getComputedStyle(span).color;
+        return { text, priorityIcon, dateColor };
+      });
+      if (read.text.length <= issueName.length + 5) return empty;
+      return read;
+    } catch {
+      return empty;
+    } finally {
+      // Close the popover so an open card never covers the next hover
+      // target; a missing card leaves nothing to close.
+      await this.page.keyboard.press("Escape").catch(() => undefined);
+    }
+  }
+
+  // Modal keyboard contract (NEWFRONT-120, ISS-125). The modal carries an
+  // explicit tab order over its fields; read it back as triples so the
+  // scenario pins the order without depending on styling.
+  async modalTabOrder(): Promise<string[]> {
+    return this.modalScope().evaluate((scope: HTMLElement) => {
+      const labelOf = (el: Element): string => {
+        const labelled = el.getAttribute("placeholder") ?? el.getAttribute("id") ?? el.textContent ?? "";
+        return labelled.replace(/\s+/g, " ").trim().slice(0, 40);
+      };
+      return Array.from(scope.querySelectorAll("[tabindex]")).map(
+        (el) => `${el.tagName.toLowerCase()}#${el.getAttribute("tabindex")}:${labelOf(el)}`
+      );
+    });
+  }
+
+  async focusCreateTitle(): Promise<void> {
+    await this.page.getByPlaceholder("Title").first().click();
+  }
+
+  // Cycle/module page entry (NEWFRONT-120, ISS-124). These pages compile on
+  // first load and fetch their context over the throttled shared stack, so
+  // re-enter until the Add action shows instead of trusting one load.
+  private async openIssueContextPage(route: string, label: string): Promise<void> {
+    const started = Date.now();
+    for (;;) {
+      await this.page.goto(route, { timeout: 45_000 }).catch(() => undefined);
+      await this.page.waitForLoadState("domcontentloaded").catch(() => undefined);
+      await this.healRuntimeError();
+      const ready = await this.page
+        .getByRole("button", { name: "Add work item" })
+        .first()
+        .waitFor({ timeout: 30_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (ready) return;
+      if (Date.now() - started > 150_000) throw new Error(`[parity] ${label} page never offered its Add action.`);
+    }
+  }
+
+  async openCyclePage(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    await this.openIssueContextPage(`/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`, "cycle");
+  }
+
+  async openModulePage(workspaceSlug: string, projectId: string, moduleId: string): Promise<void> {
+    await this.openIssueContextPage(`/${workspaceSlug}/projects/${projectId}/modules/${moduleId}`, "module");
+  }
+
   // --- NEWFRONT-123 (home): selectors observed on the running old app. ---
   // The dashboard centers on a narrow column: a greeting heading carrying
   // the salutation plus the user name, a date-and-clock sub-line, an
