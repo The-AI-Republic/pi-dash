@@ -326,3 +326,77 @@ class TestArchiveModules:
 
     def test_unauthenticated_is_rejected(self, anon_client):
         assert anon_client.get(api.modules_url(SLUG, PROJ)).status_code == 401
+
+
+DATE_FORMAT_ERROR = {
+    "start_date": [
+        "Date has wrong format. Use one of these formats instead: YYYY-MM-DD."
+    ]
+}
+
+
+class TestModuleDateFormats:
+    """PIDASHCONV-512: Django's parse_date is fromisoformat-first, so ISO
+    week dates and basic YYYYMMDD validate and store as Gregorian dates;
+    ordinal dates do not."""
+
+    def test_create_week_date_extended(self, admin_client, db_conn):
+        r = admin_client.post(
+            api.modules_url(SLUG, PROJ),
+            json={
+                "name": _name("CT module"),
+                "start_date": "2024-W05-6",
+                "target_date": "2024-W06-1",
+            },
+        )
+        assert r.status_code == 201
+        assert r.json()["start_date"] == "2024-02-03"
+        assert r.json()["target_date"] == "2024-02-05"
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "SELECT start_date, target_date FROM modules WHERE id = %s",
+                [r.json()["id"]],
+            )
+            row = cur.fetchone()
+            assert (str(row[0]), str(row[1])) == ("2024-02-03", "2024-02-05")
+
+    def test_create_basic_format(self, admin_client):
+        r = admin_client.post(
+            api.modules_url(SLUG, PROJ),
+            json={
+                "name": _name("CT module"),
+                "start_date": "20240105",
+                "target_date": "20240203",
+            },
+        )
+        assert r.status_code == 201
+        assert r.json()["start_date"] == "2024-01-05"
+        assert r.json()["target_date"] == "2024-02-03"
+
+    def test_create_week_date_dayless_and_basic(self, admin_client):
+        # A missing day means Monday, extended and basic alike.
+        for raw, expected in (("2024-W05", "2024-01-29"), ("2024W056", "2024-02-03")):
+            r = admin_client.post(
+                api.modules_url(SLUG, PROJ),
+                json={"name": _name("CT module"), "start_date": raw},
+            )
+            assert r.status_code == 201
+            assert r.json()["start_date"] == expected
+
+    def test_patch_week_date(self, admin_client):
+        r = admin_client.patch(
+            api.module_detail_url(SLUG, PROJ, db.MODULE_ACTIVE_ID),
+            json={"start_date": "20240105", "target_date": "2024-W05-6"},
+        )
+        assert r.status_code == 200
+        assert r.json()["start_date"] == "2024-01-05"
+        assert r.json()["target_date"] == "2024-02-03"
+
+    def test_create_rejects_ordinal_and_bad_week(self, admin_client):
+        for raw in ("2024-036", "2021-W53-1"):
+            r = admin_client.post(
+                api.modules_url(SLUG, PROJ),
+                json={"name": _name("CT module"), "start_date": raw},
+            )
+            assert r.status_code == 400
+            assert r.json() == DATE_FORMAT_ERROR
