@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+// Copyright (c) Pi Dash contributors. All rights reserved.
+// License for this tree is pending the H-license decision (NEWFRONT-2,
+// owner: human). This placeholder grants no license and must be replaced
+// with the final header text by F-11 (NEWFRONT-22).
 /**
  * Coverage audit: every route, component, service method and shortcut of the
  * old frontends must appear in some feature inventory.
