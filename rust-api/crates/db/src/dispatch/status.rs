@@ -3,11 +3,11 @@
 //! Agent run status + trigger enums (D-11, stage 5).
 //!
 //! Port of the `TextChoices` behind the `AgentRun.status`
-//! (`models.py:947-952`) and `AgentRun.trigger` (`models.py:972-980`)
+//! (`models.py:947-952`) and `AgentRun.trigger` (`models.py:972-977`)
 //! columns:
 //!
 //! * `AgentRunStatus` (`models.py:207-235`) → [`AgentRunStatus`].
-//! * `AgentRunTrigger` (`models.py:237-250`) → [`AgentRunTrigger`].
+//! * `AgentRunTrigger` (`models.py:237-253`) → [`AgentRunTrigger`].
 //!
 //! Values are verbatim, in declaration order. `Display` renders the
 //! value, as `str(member)` does in Django; serde reads/writes the
@@ -139,7 +139,7 @@ impl AgentRunTrigger {
         }
     }
 
-    /// The human label (`models.py:244-249`).
+    /// The human label (`models.py:248-253`).
     pub fn label(&self) -> &'static str {
         match self {
             AgentRunTrigger::StateTransition => "State transition",

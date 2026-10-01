@@ -5,7 +5,7 @@
 //! Ports exactly the `AgentRun` columns dispatch touches
 //! (`apps/api/pi_dash/runner/models.py:872-1035`), as recorded in the
 //! fixture's `dispatch_touched_subset.agent_run`: 22 physical columns
-//! in fixture order. The full model carries 40 columns; the rest
+//! in fixture order. The full model carries 41 columns; the rest
 //! (`owner`, `runner`, `parent_run`, `terminal_*`, `prompt_manifest`,
 //! `phase_kind`, `run_config`, `required_capabilities`, `thread_id`,
 //! `agent_metadata`, `refusal_category`, the `*_tokens` generated
@@ -120,7 +120,7 @@ pub const CREATED_BY_ON_DELETE: OnDelete = OnDelete::Protect;
 pub const POD_ON_DELETE: OnDelete = OnDelete::Protect;
 /// `pinned_runner` FK: `SET_NULL`, nullable (`models.py:915-921`).
 pub const PINNED_RUNNER_ON_DELETE: OnDelete = OnDelete::SetNull;
-/// `work_item` FK: `SET_NULL`, nullable (`models.py:922-931`).
+/// `work_item` FK: `SET_NULL`, nullable (`models.py:922-928`).
 pub const WORK_ITEM_ON_DELETE: OnDelete = OnDelete::SetNull;
 /// `scheduler_binding` FK: `SET_NULL`, nullable (`models.py:932-938`).
 pub const SCHEDULER_BINDING_ON_DELETE: OnDelete = OnDelete::SetNull;

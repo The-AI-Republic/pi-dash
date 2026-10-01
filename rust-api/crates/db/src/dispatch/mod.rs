@@ -7,7 +7,7 @@
 //! owned by D-13…D-15; this sub-issue ports no writes):
 //!
 //! * [`status`] — `AgentRunStatus` (`models.py:207-235`) +
-//!   `AgentRunTrigger` (`models.py:237-250`), values verbatim.
+//!   `AgentRunTrigger` (`models.py:237-253`), values verbatim.
 //! * [`agent_run`] — `AgentRun` (`models.py:872-1035`) read shape:
 //!   exactly the 22 columns dispatch touches, with defaults.
 //! * [`event`] — `AgentRunEvent` (`models.py:1162-1175`) read shape.
