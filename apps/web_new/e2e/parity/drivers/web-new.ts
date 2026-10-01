@@ -442,4 +442,186 @@ export class WebNewDriver implements ParityDriver {
   async rulesIntakeTriageVisible(): Promise<boolean> {
     return todo("rulesIntakeTriageVisible");
   }
+
+  // --- NEWFRONT-123 (home) stubs: mirror of the oracle driver additions. ---
+
+  async homeOpen(_workspaceSlug: string): Promise<void> {
+    return todo("homeOpen");
+  }
+
+  async homeGreetingHeading(): Promise<string | null> {
+    return todo("homeGreetingHeading");
+  }
+
+  async homeDateLine(): Promise<string | null> {
+    return todo("homeDateLine");
+  }
+
+  async homeTourVisible(): Promise<boolean> {
+    return todo("homeTourVisible");
+  }
+
+  async homeTourAdvance(): Promise<void> {
+    return todo("homeTourAdvance");
+  }
+
+  async homeTourDismiss(): Promise<void> {
+    return todo("homeTourDismiss");
+  }
+
+  async homeAssistantState(): Promise<"hidden" | "setup" | "ready"> {
+    return todo("homeAssistantState");
+  }
+
+  async homeAssistantSuggestions(): Promise<string[]> {
+    return todo("homeAssistantSuggestions");
+  }
+
+  async homeQuickstartVisible(): Promise<boolean> {
+    return todo("homeQuickstartVisible");
+  }
+
+  async homeQuickstartTitles(): Promise<string[]> {
+    return todo("homeQuickstartTitles");
+  }
+
+  async homeQuickstartCreateEnabled(): Promise<boolean> {
+    return todo("homeQuickstartCreateEnabled");
+  }
+
+  async homeQuickstartDismiss(): Promise<void> {
+    return todo("homeQuickstartDismiss");
+  }
+
+  async homeQuickstartCardDone(_title: string): Promise<boolean> {
+    return todo("homeQuickstartCardDone");
+  }
+
+  async homeQuickstartActionTexts(): Promise<string[]> {
+    return todo("homeQuickstartActionTexts");
+  }
+
+  async homeWidgetTitles(): Promise<string[]> {
+    return todo("homeWidgetTitles");
+  }
+
+  async homeOpenManageWidgets(): Promise<void> {
+    return todo("homeOpenManageWidgets");
+  }
+
+  async homeCloseManageWidgets(): Promise<void> {
+    return todo("homeCloseManageWidgets");
+  }
+
+  async homeManageWidgetNames(): Promise<string[]> {
+    return todo("homeManageWidgetNames");
+  }
+
+  async homeManageWidgetEnabled(_name: string): Promise<boolean> {
+    return todo("homeManageWidgetEnabled");
+  }
+
+  async homeToggleManageWidget(_name: string): Promise<void> {
+    return todo("homeToggleManageWidget");
+  }
+
+  async homeDragWidget(_sourceName: string, _targetName: string): Promise<void> {
+    return todo("homeDragWidget");
+  }
+
+  async homeAllOffVisible(): Promise<boolean> {
+    return todo("homeAllOffVisible");
+  }
+
+  async homeQuickLinkNames(): Promise<string[]> {
+    return todo("homeQuickLinkNames");
+  }
+
+  async homeExpandQuickLinks(): Promise<void> {
+    return todo("homeExpandQuickLinks");
+  }
+
+  async homeQuickLinksCollapsed(): Promise<boolean> {
+    return todo("homeQuickLinksCollapsed");
+  }
+
+  async homeAddQuickLink(_title: string, _url: string): Promise<void> {
+    return todo("homeAddQuickLink");
+  }
+
+  async homeEditQuickLink(_currentTitle: string, _nextTitle: string, _nextUrl: string): Promise<void> {
+    return todo("homeEditQuickLink");
+  }
+
+  async homeDeleteQuickLink(_title: string): Promise<void> {
+    return todo("homeDeleteQuickLink");
+  }
+
+  async homeLinkDialogError(): Promise<string | null> {
+    return todo("homeLinkDialogError");
+  }
+
+  async homeCopyQuickLink(_title: string): Promise<void> {
+    return todo("homeCopyQuickLink");
+  }
+
+  async homeReadClipboard(): Promise<string> {
+    return todo("homeReadClipboard");
+  }
+
+  async homeOpenQuickLinkPopup(_title: string): Promise<string | null> {
+    return todo("homeOpenQuickLinkPopup");
+  }
+
+  async homeLinkDialogOpen(): Promise<boolean> {
+    return todo("homeLinkDialogOpen");
+  }
+
+  async homeCancelLinkDialog(): Promise<void> {
+    return todo("homeCancelLinkDialog");
+  }
+
+  async homeSetRecentsFilter(_name: "all" | "issue" | "page" | "project"): Promise<void> {
+    return todo("homeSetRecentsFilter");
+  }
+
+  async homeRecentRowTexts(): Promise<string[]> {
+    return todo("homeRecentRowTexts");
+  }
+
+  async homeOpenRecentRow(_text: string): Promise<void> {
+    return todo("homeOpenRecentRow");
+  }
+
+  async homeIssuePreviewVisible(): Promise<boolean> {
+    return todo("homeIssuePreviewVisible");
+  }
+
+  async homeIssuePreviewText(): Promise<string> {
+    return todo("homeIssuePreviewText");
+  }
+
+  async homeBreadcrumb(): Promise<string | null> {
+    return todo("homeBreadcrumb");
+  }
+
+  async homeLastToast(): Promise<{ title: string; message: string } | null> {
+    return todo("homeLastToast");
+  }
+
+  async homeReload(): Promise<void> {
+    return todo("homeReload");
+  }
+
+  async homeOpenIssueDetail(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
+    return todo("homeOpenIssueDetail");
+  }
+
+  async homeSkeletonVisible(): Promise<boolean> {
+    return todo("homeSkeletonVisible");
+  }
+
+  async homeWaitForWidgets(): Promise<string[]> {
+    return todo("homeWaitForWidgets");
+  }
 }

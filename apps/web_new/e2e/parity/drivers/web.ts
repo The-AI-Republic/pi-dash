@@ -29,6 +29,19 @@ export class WebDriver implements ParityDriver {
   private static readonly WAIT_MS = 30_000;
 
   async openEntry(): Promise<void> {
+    // The entry render occasionally never arrives under concurrent
+    // load; run the paint again instead of burning the whole test
+    // budget on one load. Each attempt settles on the card (any auth
+    // step or the no-methods notice), never on one field.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await this.page.goto("/");
+      try {
+        await this.waitForCard();
+        return;
+      } catch {
+        // One more paint before failing honestly.
+      }
+    }
     await this.page.goto("/");
     await this.waitForCard();
   }
@@ -263,11 +276,28 @@ export class WebDriver implements ParityDriver {
   }
 
   async signInWithPassword(email: string, password: string): Promise<void> {
+    // The dev server occasionally swallows a submit, so every pass is
+    // retried whole until the workspace landing is confirmed.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await this.signInAttempt(email, password);
+        return;
+      } catch {
+        // Still on entry or a swallowed submit: run the pass again.
+      }
+    }
+    await this.signInAttempt(email, password);
+  }
+
+  private async signInAttempt(email: string, password: string): Promise<void> {
     const page = this.page;
-    const emailField = page.getByPlaceholder("name@company.com").first();
-    await emailField.fill(email);
-    const emailForm = page.locator("form", { has: emailField });
-    await this.submitOf(emailForm).click();
+    if (this.signedInPath(page.url())) return;
+    await page.goto("/");
+    // The shared email submit waits out a throttled email-check minute
+    // (rate-limit banner instead of advancing) and resubmits; a bare
+    // fill-and-click here would burn the whole test budget retrying
+    // into 429s under concurrent parity runs.
+    await this.submitAuthEmail(email);
     const passwordField = page.getByPlaceholder("Enter password");
     await passwordField.waitFor({ timeout: WebDriver.WAIT_MS });
     await passwordField.fill(password);
@@ -277,6 +307,11 @@ export class WebDriver implements ParityDriver {
       page.waitForURL(/\/[^/]+\//, { timeout: WebDriver.WAIT_MS }),
       this.submitOf(passwordForm).click(),
     ]);
+  }
+
+  private signedInPath(url: string): boolean {
+    const pathname = new URL(url).pathname;
+    return pathname !== "/" && !pathname.startsWith("/auth") && !pathname.startsWith("/sign");
   }
 
   async openProjectIssues(workspaceSlug: string, projectId: string): Promise<void> {
@@ -1241,5 +1276,613 @@ export class WebDriver implements ParityDriver {
     await accept.waitFor({ timeout: 60_000 });
     await decline.waitFor({ timeout: 60_000 });
     return (await accept.isVisible()) && (await decline.isVisible());
+  }
+  // --- NEWFRONT-123 (home): selectors observed on the running old app. ---
+  // The dashboard centers on a narrow column: a greeting heading carrying
+  // the salutation plus the user name, a date-and-clock sub-line, an
+  // assistant card, then the widget stack titled per widget.
+
+  private homeMain(): Locator {
+    return this.page.getByRole("main");
+  }
+
+  private openDialog(): Locator {
+    // The open dialog wraps its panel in a zero-height mount (the panel
+    // itself is fixed-positioned), so visibility waits must target the
+    // visible content inside, never the container.
+    return this.page.locator('[role="dialog"][data-headlessui-state="open"]').first();
+  }
+
+  private async waitDialogSettled(): Promise<void> {
+    await this.openDialog().locator("div:visible").first().waitFor({ timeout: 30_000 });
+  }
+
+  private async needFirst(target: Locator, what: string): Promise<Locator> {
+    // Clicking a possibly-empty locator burns the whole test budget, so
+    // every action asserts presence first and fails fast with a name.
+    const first = target.first();
+    if ((await first.count()) === 0) throw new Error(`[parity] home ${what} is missing.`);
+    return first;
+  }
+
+  async homeOpen(workspaceSlug: string): Promise<void> {
+    // Settles when the greeting, the tour overlay, or a loading skeleton
+    // shows up; the dev server compiles the route on first visit, so the
+    // navigation itself is retried once on a slow first paint.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await this.page.goto(`/${workspaceSlug}/`);
+      await this.page.waitForLoadState("domcontentloaded");
+      const settled = await this.page
+        .locator("h2, h3, div.fixed")
+        .first()
+        .waitFor({ timeout: 90_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (settled) return;
+    }
+    throw new Error(`[parity] home dashboard never settled at ${this.page.url()}.`);
+  }
+
+  async homeGreetingHeading(): Promise<string | null> {
+    const heading = this.homeMain().locator("h2").first();
+    if ((await heading.count()) === 0) return null;
+    const text = (await heading.innerText()).trim();
+    return text === "" ? null : text;
+  }
+
+  async homeDateLine(): Promise<string | null> {
+    // The sub-line sits next to the greeting heading inside the same
+    // centered block; it carries the weekday, date and live clock.
+    const heading = this.homeMain().locator("h2").first();
+    if ((await heading.count()) === 0) return null;
+    const block = heading.locator("xpath=ancestor::div[./h2][1]");
+    const sub = block.locator("h5").first();
+    if ((await sub.count()) === 0) return null;
+    const text = (await sub.innerText()).trim();
+    return text === "" ? null : text;
+  }
+
+  private homeTourButtonScope(): Locator {
+    // The tour renders above the dashboard in a full-screen fixed overlay.
+    // The welcome card offers starting or declining; each step offers
+    // Back/Next; the last step offers finishing into project creation.
+    // Scoping on those controls keeps middle steps visible too.
+    return this.page.locator("div.fixed").filter({
+      has: this.page.getByRole("button", {
+        name: /take a product tour|no thanks|^next$|^back$|create your first project/i,
+      }),
+    });
+  }
+
+  async homeTourVisible(): Promise<boolean> {
+    return (await this.homeTourButtonScope().first().count()) > 0;
+  }
+
+  async homeTourAdvance(): Promise<void> {
+    const overlay = this.homeTourButtonScope().first();
+    const start = overlay.getByRole("button", { name: /take a product tour/i }).first();
+    if ((await start.count()) > 0) {
+      await start.click();
+      return;
+    }
+    const next = overlay.getByRole("button", { name: /^next$/i }).first();
+    if ((await next.count()) > 0) {
+      await next.click();
+      return;
+    }
+    await overlay
+      .getByRole("button", { name: /create your first project/i })
+      .first()
+      .click();
+  }
+
+  async homeTourDismiss(): Promise<void> {
+    const overlay = this.homeTourButtonScope().first();
+    const decline = overlay.getByRole("button", { name: /no thanks/i }).first();
+    if ((await decline.count()) > 0) {
+      await decline.click();
+      return;
+    }
+    // Mid-tour the overlay offers an icon-only close control instead.
+    await overlay.getByRole("button").filter({ hasNotText: /\S/ }).first().click();
+  }
+
+  private homeAssistantCard(): Locator {
+    return this.homeMain().locator("div").filter({ hasText: "Pi Dash AI" }).first();
+  }
+
+  async homeAssistantState(): Promise<"hidden" | "setup" | "ready"> {
+    if ((await this.homeAssistantCard().count()) === 0) return "hidden";
+    const text = (await this.homeAssistantCard().innerText()).toLowerCase();
+    if (text.includes("api key")) return "setup";
+    return "ready";
+  }
+
+  async homeAssistantSuggestions(): Promise<string[]> {
+    if ((await this.homeAssistantCard().count()) === 0) return [];
+    const texts = await this.homeAssistantCard().getByRole("button").allTextContents();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0 && t.toLowerCase() !== "ask");
+  }
+
+  private homeQuickstartHeader(): Locator {
+    return this.homeMain().getByText("Your quickstart guide").first();
+  }
+
+  private homeQuickstartPanel(): Locator {
+    // The header row's grandparent is the panel root: header text, then
+    // the flex row, then the panel container holding the card grid.
+    return this.homeQuickstartHeader().locator("xpath=ancestor::div[2]");
+  }
+
+  async homeQuickstartVisible(): Promise<boolean> {
+    return (await this.homeQuickstartHeader().count()) > 0;
+  }
+
+  async homeQuickstartTitles(): Promise<string[]> {
+    if (!(await this.homeQuickstartVisible())) return [];
+    const texts = await this.homeQuickstartPanel().locator("h3").allTextContents();
+    return [...new Set(texts.map((t) => t.trim()).filter((t) => t.length > 0))];
+  }
+
+  async homeQuickstartCreateEnabled(): Promise<boolean> {
+    if (!(await this.homeQuickstartVisible())) return false;
+    const actions = await this.homeQuickstartActionTexts();
+    return actions.some((text) => /get started/i.test(text));
+  }
+
+  async homeQuickstartDismiss(): Promise<void> {
+    const panel = this.homeQuickstartPanel();
+    await (
+      await this.needFirst(panel.getByRole("button", { name: /not right now/i }), "quickstart dismiss control")
+    ).click();
+  }
+
+  private homeQuickstartCard(title: string): Locator {
+    const panel = this.homeQuickstartPanel();
+    return panel
+      .locator("div")
+      .filter({ has: this.page.getByRole("heading", { name: title }) })
+      .last();
+  }
+
+  async homeQuickstartCardDone(title: string): Promise<boolean> {
+    // A finished card swaps its call-to-action for a green marker pill
+    // (the card keeps its icon, so icon presence alone proves nothing).
+    // Absence of any action is NOT done: forbidden actions also render
+    // nothing clickable, which the role-gating scenarios pin separately.
+    const card = this.homeQuickstartCard(title);
+    if ((await card.count()) === 0) return false;
+    return (await card.locator('[class*="17a34a"]').count()) > 0;
+  }
+
+  async homeQuickstartActionTexts(): Promise<string[]> {
+    if (!(await this.homeQuickstartVisible())) return [];
+    const panel = this.homeQuickstartPanel();
+    const links = await panel.getByRole("link").allTextContents();
+    const buttons = await panel.getByRole("button").allTextContents();
+    return [...links, ...buttons].map((t) => t.trim()).filter((t) => t.length > 0 && !/not right now/i.test(t));
+  }
+
+  async homeWidgetTitles(): Promise<string[]> {
+    // Section titles in render order, so reorder and refresh assertions
+    // observe the sequence the user actually sees.
+    const nodes = this.homeMain().locator(
+      "xpath=.//div[normalize-space()='Quicklinks' or normalize-space()='Recents']"
+    );
+    const texts = await nodes.allTextContents();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async homeOpenManageWidgets(): Promise<void> {
+    // The header control carries its label as its accessible name (an
+    // icon button with no text children), so the lookup is by name; the
+    // header-last-button fallback stays for older layouts.
+    const headerButton = this.page.getByRole("button", { name: /widget/i }).first();
+    if ((await headerButton.count()) > 0) {
+      await headerButton.click();
+    } else {
+      const fallback = this.page.locator("header").getByRole("button").last();
+      if ((await fallback.count()) === 0) throw new Error("[parity] home manage-widgets control is missing.");
+      await fallback.click();
+    }
+    await this.waitDialogSettled();
+  }
+
+  async homeCloseManageWidgets(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+  }
+
+  async homeManageWidgetNames(): Promise<string[]> {
+    const dialog = this.openDialog();
+    const texts = await dialog.locator("p, span, div").allTextContents();
+    return [...new Set(texts.map((t) => t.trim()).filter((t) => t.length > 0 && t.length < 60))];
+  }
+
+  private homeManageName(name: string): Locator {
+    return this.openDialog().getByText(name, { exact: true }).first();
+  }
+
+  private homeManageRow(name: string): Locator {
+    // The name cell's parent holds the drag handle for that widget.
+    return this.homeManageName(name).locator("xpath=ancestor::div[1]");
+  }
+
+  private homeManageSwitch(name: string): Locator {
+    // The toggle sits beside the name cell inside their shared wrapper.
+    return this.homeManageName(name).locator("xpath=ancestor::div[2]").getByRole("switch").first();
+  }
+
+  async homeManageWidgetEnabled(name: string): Promise<boolean> {
+    const toggle = await this.needFirst(this.homeManageSwitch(name), `widget toggle for ${name}`);
+    return (await toggle.getAttribute("aria-checked")) === "true";
+  }
+
+  async homeToggleManageWidget(name: string): Promise<void> {
+    await (await this.needFirst(this.homeManageSwitch(name), `widget toggle for ${name}`)).click();
+  }
+
+  async homeDragWidget(sourceName: string, targetName: string): Promise<void> {
+    // The drag listener lives on the row's handle button, so the handle
+    // starts the gesture; dropping near the target row's bottom edge
+    // asks for a below-drop, which visibly moves a first-row widget.
+    const source = this.homeManageRow(sourceName).getByRole("button").first();
+    const targetRow = this.homeManageRow(targetName);
+    const srcBox = await source.boundingBox();
+    if (!srcBox) throw new Error("[parity] widget drag source has no layout box.");
+    const dstBox = await targetRow.boundingBox();
+    if (!dstBox) throw new Error("[parity] widget drag target has no layout box.");
+    await this.page.mouse.move(srcBox.x + srcBox.width / 2, srcBox.y + srcBox.height / 2);
+    await this.page.mouse.down();
+    await this.page.mouse.move(dstBox.x + dstBox.width / 2, dstBox.y + dstBox.height - 6, { steps: 12 });
+    await this.page.mouse.up();
+  }
+
+  async homeAllOffVisible(): Promise<boolean> {
+    return (
+      (await this.homeMain()
+        .getByText(/without widgets/i)
+        .count()) > 0
+    );
+  }
+
+  private homeLinksTitle(): Locator {
+    return this.homeMain().getByText("Quicklinks", { exact: true }).first();
+  }
+
+  private homeLinksSection(): Locator {
+    // Title, then the header row, then the section holding the rows.
+    return this.homeLinksTitle().locator("xpath=ancestor::div[2]");
+  }
+
+  async homeQuickLinkNames(): Promise<string[]> {
+    if ((await this.homeLinksTitle().count()) === 0) return [];
+    // Rows render as plain cards (title line plus relative-age line),
+    // not anchors, so each row is recognized by that two-line shape.
+    return this.homeLinksSection().evaluate((root) => {
+      const age = /ago|just now|less than/i;
+      const titles = new Set<string>();
+      root.querySelectorAll("div").forEach((el) => {
+        const lines = (el.innerText ?? "")
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line !== "");
+        const [title, second] = lines;
+        if (lines.length === 2 && title !== undefined && second !== undefined && !age.test(title) && age.test(second)) {
+          titles.add(title);
+        }
+      });
+      return [...titles];
+    });
+  }
+
+  private homeLinkRow(title: string): Locator {
+    // The row card sits two levels above the title line: the title leaf
+    // lives in a text wrapper inside the clickable card, and the card
+    // also holds the hover-revealed menu trigger a sibling lookup needs.
+    const exact = title.replace(/"/g, "");
+    return this.homeLinksSection().locator(`xpath=.//div[normalize-space()="${exact}"]/../..`).first();
+  }
+
+  async homeExpandQuickLinks(): Promise<void> {
+    await (
+      await this.needFirst(this.homeLinksSection().getByRole("button", { name: /show all/i }), "link list expander")
+    ).click();
+  }
+
+  async homeQuickLinksCollapsed(): Promise<boolean> {
+    if ((await this.homeLinksTitle().count()) === 0) return false;
+    return (
+      (await this.homeLinksSection()
+        .getByRole("button", { name: /show all|show less/i })
+        .count()) > 0
+    );
+  }
+
+  private async homeLinkFormFill(title: string, url: string): Promise<void> {
+    // The dialog asks for the address first, then the display name.
+    const dialog = this.openDialog();
+    await (await this.needFirst(dialog.locator("#url"), "link address field")).fill(url);
+    await (await this.needFirst(dialog.locator("#title"), "link title field")).fill(title);
+  }
+
+  async homeAddQuickLink(title: string, url: string): Promise<void> {
+    await (await this.needFirst(this.homeLinksSection().getByRole("button"), "link add control")).click();
+    await this.waitDialogSettled();
+    await this.homeLinkFormFill(title, url);
+    const dialog = this.openDialog();
+    await dialog
+      .getByRole("button", { name: /save|create|add|submit/i })
+      .first()
+      .click();
+  }
+
+  private async homeLinkMenuPick(name: RegExp): Promise<void> {
+    // The row menu offers its options as menu items; button-shaped
+    // menus stay as a fallback. The open signal is the option itself,
+    // never the menu container (zero-size when open, like the recents
+    // filter).
+    const item = this.page.getByRole("menuitem", { name }).first();
+    try {
+      await item.waitFor({ state: "visible", timeout: 5_000 });
+      await item.click();
+      return;
+    } catch {
+      // Fall through to button-shaped menus.
+    }
+    await (await this.needFirst(this.page.getByRole("button", { name }), "link menu option")).click();
+  }
+
+  async homeEditQuickLink(currentTitle: string, nextTitle: string, nextUrl: string): Promise<void> {
+    await this.homeLinkRowMenu(currentTitle);
+    await this.homeLinkMenuPick(/edit/i);
+    await this.waitDialogSettled();
+    await this.homeLinkFormFill(nextTitle, nextUrl);
+    const dialog = this.openDialog();
+    await dialog
+      .getByRole("button", { name: /save|update/i })
+      .first()
+      .click();
+  }
+
+  async homeDeleteQuickLink(title: string): Promise<void> {
+    await this.homeLinkRowMenu(title);
+    await this.homeLinkMenuPick(/delete|remove/i);
+    const confirm = this.openDialog();
+    if ((await confirm.count()) > 0) {
+      await confirm
+        .getByRole("button", { name: /delete|remove|confirm/i })
+        .first()
+        .click();
+    }
+  }
+
+  async homeLinkDialogError(): Promise<string | null> {
+    const dialog = this.openDialog();
+    if ((await dialog.count()) === 0) return null;
+    const text = (await dialog.innerText()).trim();
+    if (/invalid|required|enter|address|url/i.test(text)) return text;
+    return null;
+  }
+
+  private async homeLinkRowMenu(title: string): Promise<void> {
+    // Rows expose open, copy, edit and delete through a context menu
+    // whose trigger reveals on hover (with an animation beat).
+    const row = await this.needFirst(this.homeLinkRow(title), `reference-link row for ${title}`);
+    await row.hover();
+    const trigger = row.getByRole("button").first();
+    try {
+      await trigger.waitFor({ state: "visible", timeout: 5_000 });
+      await trigger.click();
+      return;
+    } catch {
+      // No hover trigger: fall back to a context click.
+    }
+    await row.click({ button: "right" });
+  }
+
+  async homeCopyQuickLink(title: string): Promise<void> {
+    // The page writes through the async clipboard API, which needs the
+    // permission before the click, not just before the read.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.homeLinkRowMenu(title);
+    await this.homeLinkMenuPick(/copy/i);
+  }
+
+  async homeReadClipboard(): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async homeOpenQuickLinkPopup(title: string): Promise<string | null> {
+    // Clicking the row card opens the saved address in a new tab.
+    const row = await this.needFirst(this.homeLinkRow(title), `reference-link row for ${title}`);
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: 15_000 }).catch(() => null),
+      row.click(),
+    ]);
+    if (popup === null) return null;
+    await popup.waitForLoadState("domcontentloaded").catch(() => undefined);
+    return popup.url();
+  }
+
+  async homeLinkDialogOpen(): Promise<boolean> {
+    return (await this.page.locator('[role="dialog"] input:visible').count()) > 0;
+  }
+
+  async homeCancelLinkDialog(): Promise<void> {
+    await this.openDialog()
+      .getByRole("button", { name: /cancel/i })
+      .first()
+      .click();
+  }
+
+  private homeRecentsTitle(): Locator {
+    return this.homeMain().getByText("Recents", { exact: true }).first();
+  }
+
+  private homeRecentsSection(): Locator {
+    // Title, then the header row, then the section holding the rows.
+    return this.homeRecentsTitle().locator("xpath=ancestor::div[2]");
+  }
+
+  async homeSetRecentsFilter(name: "all" | "issue" | "page" | "project"): Promise<void> {
+    const section = this.homeRecentsSection();
+    const labels: Record<string, RegExp> = {
+      all: /^all$/i,
+      issue: /work item/i,
+      page: /^pages?$/i,
+      project: /^projects?$/i,
+    };
+    // The trigger nests the active-filter label as its own button, so a
+    // positional click lands on the label. Focusing the menu button and
+    // opening it from the keyboard reaches the real control instead.
+    // Proven by probe: the open menu container itself resolves hidden (a
+    // zero-size fixed box), so the open signal is the option, never the
+    // container — same class as the headlessui dialog root cause above.
+    const trigger = section.locator('button[aria-haspopup="menu"]').first();
+    if ((await trigger.count()) === 0) throw new Error("[parity] recents filter is missing.");
+    const options = this.page.getByRole("menuitem", { name: labels[name] });
+    // Open like the user: a plain click on the trigger (it lands on the
+    // nested label and bubbles to the toggle). Keyboard Enter stays as
+    // the fallback when the click does not open the menu. The option
+    // node is pinned before clicking so a re-render cannot swap the
+    // target between the wait and the click.
+    try {
+      await trigger.click({ timeout: 10_000 });
+      await options.first().waitFor({ state: "visible", timeout: 10_000 });
+    } catch {
+      await trigger.focus();
+      await this.page.keyboard.press("Enter");
+      await options.first().waitFor({ state: "visible", timeout: 10_000 });
+    }
+    const handle = await options.first().elementHandle();
+    if (handle === null) throw new Error("[parity] recents filter option never stabilized.");
+    // The feed loads async behind the open menu, so layout shifts keep
+    // the option off Playwright's stability bar even though a user can
+    // click it; dispatch on the pinned visible node instead (the inner
+    // button carries the selection handler). The specs prove the
+    // selection took by polling the refetched rows after.
+    const button = await handle.$("button");
+    await (button ?? handle).evaluate((element) => (element as HTMLElement).click());
+  }
+
+  async homeRecentRowTexts(): Promise<string[]> {
+    if ((await this.homeRecentsTitle().count()) === 0) return [];
+    const rows = await this.homeRecentsSection().getByRole("link").allTextContents();
+    return [...new Set(rows.map((t) => t.trim()).filter((t) => t.length > 0))];
+  }
+
+  async homeOpenRecentRow(text: string): Promise<void> {
+    const section = this.homeRecentsSection();
+    // The feed clips its overflow behind a fading gradient that swallows
+    // pointer events (a slimmer one lingers even expanded), and sibling
+    // suites share the owner's visit history, so the target row can sit
+    // anywhere in a long feed: expand, then center the row away from
+    // both edges before clicking.
+    const expander = section.getByRole("button", { name: /show all/i }).first();
+    if ((await expander.count()) > 0) {
+      await expander.click();
+    }
+    const row = await this.needFirst(
+      section.getByRole("link", { name: new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") }),
+      `recent row for ${text}`
+    );
+    await row.evaluate((element) => element.scrollIntoView({ block: "center" }));
+    await row.click();
+  }
+
+  async homeIssuePreviewVisible(): Promise<boolean> {
+    // The work-item preview mounts as a side panel inside the fullscreen
+    // portal without leaving home; absence is an honest negative signal.
+    const portal = this.page.locator("#full-screen-portal").first();
+    if ((await portal.count()) === 0) return false;
+    return (await portal.locator("div:visible").first().count()) > 0;
+  }
+
+  async homeIssuePreviewText(): Promise<string> {
+    // The preview mixes rendered text with editable fields (the title
+    // is an input), so both are combined for assertions.
+    const portal = this.page.locator("#full-screen-portal").first();
+    if ((await portal.count()) === 0) return "";
+    const text = await portal.innerText().catch(() => "");
+    const boxes = portal.getByRole("textbox");
+    const values: string[] = [];
+    for (let index = 0; index < (await boxes.count()); index += 1) {
+      values.push(
+        await boxes
+          .nth(index)
+          .inputValue()
+          .catch(() => "")
+      );
+    }
+    return [text, ...values].join("\n");
+  }
+
+  async homeBreadcrumb(): Promise<string | null> {
+    // The dashboard header pairs a home breadcrumb with the manage-widgets
+    // control (an icon button whose label is its accessible name, with no
+    // text children). The crumb is the exact Home label inside the same
+    // content landmark as the control (the sidebar carries its own Home
+    // link in a separate landmark).
+    const control = this.page.getByRole("button", { name: /manage widgets/i }).first();
+    if ((await control.count()) === 0) return null;
+    const scope = control.locator("xpath=ancestor::main[1]");
+    const crumb = scope.getByText("Home", { exact: true }).first();
+    if ((await crumb.count()) === 0) return null;
+    const text = (await crumb.innerText()).trim();
+    return text === "" ? null : text;
+  }
+
+  async homeLastToast(): Promise<{ title: string; message: string } | null> {
+    // Toasts stack bottom-right and dismiss after a few seconds, so
+    // callers poll this right after the triggering action.
+    const candidates = this.page.locator('[class*="right-3"][class*="bottom-3"], [role="status"], [role="alert"]');
+    const count = await candidates.count();
+    if (count === 0) return null;
+    const text = ((await candidates.last().innerText()).trim() || "")
+      .split("\n")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    if (text.length === 0) return null;
+    return { title: text[0] ?? "", message: text.slice(1).join(" ") };
+  }
+
+  async homeReload(): Promise<void> {
+    await this.page.reload();
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async homeOpenIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues/${issueId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async homeWaitForWidgets(): Promise<string[]> {
+    // A failed widget fetch leaves the loader mounted with no retry, so a
+    // scratch-stack hiccup bricks that paint until the next load.
+    const read = () => this.homeWidgetTitles();
+    const first = await read();
+    if (first.length > 0) return first;
+    await this.page.waitForTimeout(10_000);
+    const second = await read();
+    if (second.length > 0) return second;
+    await this.homeReload();
+    const settled = await this.page
+      .locator("h2, h3, div.fixed")
+      .first()
+      .waitFor({ timeout: 90_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!settled) return [];
+    await this.page.waitForTimeout(5_000);
+    return read();
+  }
+
+  async homeSkeletonVisible(): Promise<boolean> {
+    // Loaders render pulsing placeholder tiles; any animate-pulse node or
+    // skeleton-styled block while the dashboard settles counts.
+    const pulsing = this.page.locator(".animate-pulse, [data-testid*='skeleton' i], [aria-busy='true']").first();
+    if ((await pulsing.count()) > 0) return true;
+    return false;
   }
 }
