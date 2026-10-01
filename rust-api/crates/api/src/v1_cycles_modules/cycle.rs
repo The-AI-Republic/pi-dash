@@ -225,6 +225,24 @@ fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
     Denial::ServerError
 }
 
+/// Map a write-path database failure: SQLSTATE class 23 (integrity
+/// constraint violation — FK, not-null, unique, check, exclusion) is
+/// Django's `IntegrityError` → 400 `{"error":"The payload is not
+/// valid"}` (`handle_exception`, `api/views/base.py:136-141`); anything
+/// else (bad casts like `uuid_in`, driver faults) is the generic 500.
+fn db_write_error(error: sqlx::Error, site: &str) -> Denial {
+    let integrity = error
+        .as_database_error()
+        .and_then(|db| db.code())
+        .is_some_and(|code| code.starts_with("23"));
+    if integrity {
+        tracing::warn!(%error, site, "v1_cycles_modules integrity failure");
+        Denial::BadError("The payload is not valid".to_owned())
+    } else {
+        db_error(error, site)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Cutover wiring
 // ---------------------------------------------------------------------------
@@ -561,6 +579,10 @@ pub async fn rewrite_project_id(
     workspace_slug: &str,
     raw: &str,
 ) -> Result<uuid::Uuid, Denial> {
+    // Callers run this BEFORE the workspace-None 403: `_rewrite_project_kwarg`
+    // runs before permission checks (`api/views/base.py:104-111`), so an
+    // identifier lookup under an unknown slug 404s (`Project not found`)
+    // instead of 403ing. UUID inputs skip the lookup either way.
     // `uuid.UUID(str(raw))` accepts hyphenated, plain-hex, braced and
     // `urn:uuid:` forms; `parse_str` accepts the same set.
     if let Ok(id) = raw.parse::<uuid::Uuid>() {
@@ -1400,6 +1422,9 @@ pub async fn expand_issue_full(
     issue_id: &uuid::Uuid,
     timezone: &Tz,
 ) -> Result<Value, Denial> {
+    // No `deleted_at` filter: `getattr(instance, "issue")` resolves through
+    // `_base_manager` (unfiltered), so a soft-deleted issue still renders
+    // 200 here (verified live against Django).
     let row = sqlx::query(r#"SELECT * FROM "issues" WHERE "id" = $1"#)
         .bind(issue_id)
         .fetch_optional(pool)
@@ -1414,15 +1439,146 @@ pub async fn expand_issue_full(
     let project = fetch_project(pool, &detail.project_id, &detail.workspace_id).await?;
     let slug = workspace_slug(pool, &detail.workspace_id).await?;
     let url = issue_url(state, &slug, &project.identifier, detail.sequence_id);
-    render_issue(
+    let mut rendered = render_issue(
         pool, &detail, &assignees, &labels, url, timezone, None, None,
     )
+    .await?;
+    // Single-item `IssueSerializer` appends the blocker keys
+    // (`serializers/issue.py:474-481`; skipped only under `many=True`,
+    // which the list path uses — this expansion is always single, with no
+    // requested-fields gating and no relations viewer).
+    if let Value::Object(ref mut map) = rendered {
+        map.insert(
+            "relations_summary".to_owned(),
+            fetch_relations_summary(pool, issue_id).await?,
+        );
+        map.insert(
+            "has_open_blockers".to_owned(),
+            Value::Bool(has_open_blockers(pool, issue_id).await?),
+        );
+    }
+    Ok(rendered)
+}
+
+/// Per-direction cap on `relations_summary` lists
+/// (`orchestration/blockers.py:SUMMARY_LIMIT`).
+const SUMMARY_LIMIT: i64 = 100;
+
+/// `{"relations_summary": {"blocked_by": [...], "blocking": [...]}}`
+/// (`orchestration/blockers.py:relations_summary`): live targets ordered
+/// open-first, then project identifier, then sequence, capped per
+/// direction. Each item is `{identifier, state, state_group}`.
+pub async fn fetch_relations_summary(
+    pool: &PgPool,
+    issue_id: &uuid::Uuid,
+) -> Result<Value, Denial> {
+    let mut summary = serde_json::Map::with_capacity(2);
+    summary.insert(
+        "blocked_by".to_owned(),
+        Value::Array(fetch_summary_list(pool, issue_id, false).await?),
+    );
+    summary.insert(
+        "blocking".to_owned(),
+        Value::Array(fetch_summary_list(pool, issue_id, true).await?),
+    );
+    Ok(Value::Object(summary))
+}
+
+/// One direction of `relations_summary` (`_summary_list` over
+/// `blockers_queryset` / `dependents_queryset`): live relation rows
+/// (self-refs excluded), forward `blocked_by` plus stored-reversed
+/// `blocking` edges, targets in `Issue.issue_objects` (live, non-triage,
+/// unarchived issue and project, non-draft) in the relation's workspace.
+/// Open targets first (a stateless target is open), then project
+/// identifier, then sequence; capped at [`SUMMARY_LIMIT`].
+pub async fn fetch_summary_list(
+    pool: &PgPool,
+    issue_id: &uuid::Uuid,
+    blocking: bool,
+) -> Result<Vec<Value>, Denial> {
+    // `_blocked_by_edges` / `_blocking_edges`: in the forward rows the
+    // target sits on one end, in the stored-reversed rows on the other.
+    let edges = if blocking {
+        r#"(r."related_issue_id" = $1 AND r."relation_type" = 'blocked_by' AND t."id" = r."issue_id")
+        OR (r."issue_id" = $1 AND r."relation_type" = 'blocking' AND t."id" = r."related_issue_id")"#
+    } else {
+        r#"(r."issue_id" = $1 AND r."relation_type" = 'blocked_by' AND t."id" = r."related_issue_id")
+        OR (r."related_issue_id" = $1 AND r."relation_type" = 'blocking' AND t."id" = r."issue_id")"#
+    };
+    let sql = format!(
+        r#"SELECT DISTINCT p."identifier", t."sequence_id", s."name", s."group",
+                  CASE WHEN s."group" IN ('completed', 'cancelled') THEN 1 ELSE 0 END AS "resolved"
+           FROM "issue_relations" r
+           JOIN "issues" t ON ({edges})
+           JOIN "projects" p ON p."id" = t."project_id"
+           LEFT JOIN "states" s ON s."id" = t."state_id"
+           WHERE r."deleted_at" IS NULL AND r."issue_id" <> r."related_issue_id"
+             AND t."workspace_id" = r."workspace_id"
+             AND t."deleted_at" IS NULL AND t."archived_at" IS NULL AND NOT t."is_draft"
+             AND (s."id" IS NULL OR s."group" <> 'triage')
+             AND p."archived_at" IS NULL
+           ORDER BY "resolved", p."identifier", t."sequence_id"
+           LIMIT {SUMMARY_LIMIT}"#,
+    );
+    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
+        .bind(issue_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| db_error(error, "relations-summary"))?;
+    let mut items = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let identifier = row_string(row, "identifier", "relations-summary")?;
+        let sequence_id: i32 = row
+            .try_get("sequence_id")
+            .map_err(|error| db_error(error, "relations-summary"))?;
+        let mut item = serde_json::Map::with_capacity(3);
+        item.insert(
+            "identifier".to_owned(),
+            Value::String(format!("{identifier}-{sequence_id}")),
+        );
+        item.insert(
+            "state".to_owned(),
+            render_string_opt(&row_string_opt(row, "name", "relations-summary")?),
+        );
+        item.insert(
+            "state_group".to_owned(),
+            render_string_opt(&row_string_opt(row, "group", "relations-summary")?),
+        );
+        items.push(Value::Object(item));
+    }
+    Ok(items)
+}
+
+/// `has_open_blockers` over the FULL blocker set (never the capped list):
+/// a live `blocked_by` target whose state group is neither `completed`
+/// nor `cancelled` — a stateless target counts as open.
+pub async fn has_open_blockers(pool: &PgPool, issue_id: &uuid::Uuid) -> Result<bool, Denial> {
+    let open: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS(
+             SELECT 1 FROM "issue_relations" r
+             JOIN "issues" t ON ((r."issue_id" = $1 AND r."relation_type" = 'blocked_by' AND t."id" = r."related_issue_id")
+               OR (r."related_issue_id" = $1 AND r."relation_type" = 'blocking' AND t."id" = r."issue_id"))
+             JOIN "projects" p ON p."id" = t."project_id"
+             LEFT JOIN "states" s ON s."id" = t."state_id"
+             WHERE r."deleted_at" IS NULL AND r."issue_id" <> r."related_issue_id"
+               AND t."workspace_id" = r."workspace_id"
+               AND t."deleted_at" IS NULL AND t."archived_at" IS NULL AND NOT t."is_draft"
+               AND (s."id" IS NULL OR s."group" <> 'triage')
+               AND p."archived_at" IS NULL
+               AND (s."group" IS NULL OR s."group" NOT IN ('completed', 'cancelled')))"#,
+    )
+    .bind(issue_id)
+    .fetch_one(pool)
     .await
+    .map_err(|error| db_error(error, "has-open-blockers"))?;
+    Ok(open)
 }
 
 /// The workspace slug for `IssueSerializer.get_url`
 /// (`serializers/issue.py:126-137`): `instance.workspace.slug`.
 pub async fn workspace_slug(pool: &PgPool, workspace_id: &uuid::Uuid) -> Result<String, Denial> {
+    // Deliberately unfiltered: `instance.workspace` resolves through
+    // `_base_manager`, so a soft-deleted workspace still renders its slug.
     let slug: Option<String> =
         sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
             .bind(workspace_id)
@@ -2340,12 +2496,18 @@ pub async fn expand_labels(
     issue_id: &uuid::Uuid,
     timezone: &Tz,
 ) -> Result<Value, Denial> {
+    // `Label.objects.filter(...)` (`serializers/issue.py:456-461`) is an
+    // explicit `objects` query, so the soft-deletion filter applies and
+    // deleted labels are excluded (verified live; the id list in
+    // `fetch_issue_labels` keeps them, matching `values_list` on the
+    // bridge table alone).
     let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT l."id", l."created_at", l."updated_at", l."deleted_at", l."name", l."description", l."color",
                   l."sort_order", l."external_source", l."external_id", l."created_by_id", l."updated_by_id",
                   l."workspace_id", l."project_id", l."parent_id"
            FROM "labels" l
            WHERE l."id" IN (SELECT "label_id" FROM "issue_labels" WHERE "issue_id" = $1 AND "deleted_at" IS NULL)
+             AND l."deleted_at" IS NULL
            ORDER BY l."created_at" DESC"#,
     )
     .bind(issue_id)
@@ -3798,7 +3960,14 @@ pub fn enforce_user_timezone(
         }
         None => match user_tz.from_local_datetime(&parsed.naive) {
             LocalResult::Single(local) => Ok(local.with_timezone(&chrono::Utc)),
-            LocalResult::Ambiguous(_, _) => Err(EnforceFail::Ambiguous),
+            // Fold-hour walls PASS at fold 0 (the pre-transition offset):
+            // DRF's `valid_datetime` accepts them because CPython's
+            // `datetime_exists` (`dt.astimezone(utc) == dt`) is False for
+            // fold hours, so `datetime_ambiguous` is False and the value
+            // passes (`rest_framework/utils/timezone.py`; verified live:
+            // Django 201s `2026-11-01T01:30:00` in America/New_York).
+            // Chrono's `early` is the first occurrence = Python fold 0.
+            LocalResult::Ambiguous(early, _) => Ok(early.with_timezone(&chrono::Utc)),
             LocalResult::None => {
                 // Imaginary gap time: Python's `replace(tzinfo=zone)`
                 // keeps fold 0 (the pre-transition offset) and
@@ -4369,8 +4538,8 @@ pub async fn list_cycles_inner(
     use pidash_db::v1_cycles_modules::cycle_queries as queries;
     use pidash_services::v1_cycles_modules::cycle_queries as shapes;
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_gate(
         &pre.pool,
         &workspace_id,
@@ -4452,8 +4621,8 @@ pub async fn retrieve_cycle_inner(
 ) -> Result<Response, Denial> {
     use pidash_db::v1_cycles_modules::cycle_queries as queries;
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_gate(
         &pre.pool,
         &workspace_id,
@@ -4505,8 +4674,8 @@ pub async fn list_archived_cycles_inner(
 ) -> Result<Response, Denial> {
     use pidash_db::v1_cycles_modules::cycle_queries as queries;
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_gate(
         &pre.pool,
         &workspace_id,
@@ -4710,8 +4879,8 @@ pub async fn create_cycle_inner(
 ) -> Result<Response, Denial> {
     use pidash_services::v1_cycles_modules::cycle_shapes as shapes;
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_gate(
         &pre.pool,
         &workspace_id,
@@ -4839,7 +5008,7 @@ pub async fn create_cycle_inner(
     .bind(&timezone)
     .execute(&pre.pool)
     .await
-    .map_err(|error| db_error(error, "cycle-create-insert"))?;
+    .map_err(|error| db_write_error(error, "cycle-create-insert"))?;
     let job = pidash_jobs::v1_cycles_modules::publish::model_created_job(
         "cycle",
         &cycle_id.to_string(),
@@ -4890,8 +5059,8 @@ pub async fn patch_cycle_inner(
     body: &[u8],
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_gate(
         &pre.pool,
         &workspace_id,
@@ -5098,7 +5267,7 @@ pub async fn update_cycle_fields(
             .bind(pk)
             .execute(pool)
             .await
-            .map_err(|error| db_error(error, site))?;
+            .map_err(|error| db_write_error(error, site))?;
     }
     if let Some(ref description) = write.description {
         sqlx::query(r#"UPDATE "cycles" SET "description" = $1 WHERE "id" = $2"#)
@@ -5106,7 +5275,7 @@ pub async fn update_cycle_fields(
             .bind(pk)
             .execute(pool)
             .await
-            .map_err(|error| db_error(error, site))?;
+            .map_err(|error| db_write_error(error, site))?;
     }
     if write.start_date.is_some() {
         sqlx::query(r#"UPDATE "cycles" SET "start_date" = $1 WHERE "id" = $2"#)
@@ -5114,7 +5283,7 @@ pub async fn update_cycle_fields(
             .bind(pk)
             .execute(pool)
             .await
-            .map_err(|error| db_error(error, site))?;
+            .map_err(|error| db_write_error(error, site))?;
     }
     if write.end_date.is_some() {
         sqlx::query(r#"UPDATE "cycles" SET "end_date" = $1 WHERE "id" = $2"#)
@@ -5122,7 +5291,7 @@ pub async fn update_cycle_fields(
             .bind(pk)
             .execute(pool)
             .await
-            .map_err(|error| db_error(error, site))?;
+            .map_err(|error| db_write_error(error, site))?;
     }
     if let Some(ref external_source) = write.external_source {
         sqlx::query(r#"UPDATE "cycles" SET "external_source" = $1 WHERE "id" = $2"#)
@@ -5130,7 +5299,7 @@ pub async fn update_cycle_fields(
             .bind(pk)
             .execute(pool)
             .await
-            .map_err(|error| db_error(error, site))?;
+            .map_err(|error| db_write_error(error, site))?;
     }
     if let Some(ref external_id) = write.external_id {
         sqlx::query(r#"UPDATE "cycles" SET "external_id" = $1 WHERE "id" = $2"#)
@@ -5138,7 +5307,7 @@ pub async fn update_cycle_fields(
             .bind(pk)
             .execute(pool)
             .await
-            .map_err(|error| db_error(error, site))?;
+            .map_err(|error| db_write_error(error, site))?;
     }
     if let Some(ref timezone) = write.timezone {
         sqlx::query(r#"UPDATE "cycles" SET "timezone" = $1 WHERE "id" = $2"#)
@@ -5146,7 +5315,7 @@ pub async fn update_cycle_fields(
             .bind(pk)
             .execute(pool)
             .await
-            .map_err(|error| db_error(error, site))?;
+            .map_err(|error| db_write_error(error, site))?;
     }
     // `validate()` always sets `owned_by` (submitted or the requester), so
     // every PATCH re-stamps the owner (`serializers/cycle.py:103-104`).
@@ -5159,7 +5328,7 @@ pub async fn update_cycle_fields(
     .bind(pk)
     .execute(pool)
     .await
-    .map_err(|error| db_error(error, site))?;
+    .map_err(|error| db_write_error(error, site))?;
     Ok(())
 }
 
@@ -5175,8 +5344,8 @@ pub async fn delete_cycle_inner(
     pk: &uuid::Uuid,
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_gate(
         &pre.pool,
         &workspace_id,
@@ -5256,7 +5425,7 @@ pub async fn delete_cycle_inner(
     .bind(pk)
     .execute(&pre.pool)
     .await
-    .map_err(|error| db_error(error, "cycle-delete-soft"))?;
+    .map_err(|error| db_write_error(error, "cycle-delete-soft"))?;
     enqueue_soft_delete(&pre.pool, "cycle", pk).await;
     // Queryset deletes (`views/cycle.py:609-612`): `deleted_at` only
     // (`QuerySet.update` does not auto-stamp), each sampling `now()` fresh,
@@ -5269,7 +5438,7 @@ pub async fn delete_cycle_inner(
     .bind(project_id)
     .execute(&pre.pool)
     .await
-    .map_err(|error| db_error(error, "cycle-delete-bridges"))?;
+    .map_err(|error| db_write_error(error, "cycle-delete-bridges"))?;
     sqlx::query(
         r#"UPDATE "user_favorites" SET "deleted_at" = $1 WHERE "entity_type" = 'cycle' AND "entity_identifier" = $2 AND "project_id" = $3 AND "deleted_at" IS NULL"#,
     )
@@ -5278,7 +5447,7 @@ pub async fn delete_cycle_inner(
     .bind(project_id)
     .execute(&pre.pool)
     .await
-    .map_err(|error| db_error(error, "cycle-delete-favorites"))?;
+    .map_err(|error| db_write_error(error, "cycle-delete-favorites"))?;
     Ok(no_content())
 }
 
@@ -5300,8 +5469,8 @@ pub async fn list_cycle_issues_inner(
     query: &QueryMap,
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_gate(
         &pre.pool,
         &workspace_id,
@@ -5324,8 +5493,10 @@ pub async fn list_cycle_issues_inner(
         .fetch_all(&pre.pool)
         .await
         .map_err(|error| db_error(error, "cycle-issues-list"))?;
-    // The `url` needs the project identifier (plain fetch: the Q4 path
-    // never 404s on the project itself).
+    // The `url` needs the project identifier (plain fetch, deliberately
+    // unfiltered: the list queryset `select_related("project")` caches the
+    // row, so a soft-deleted project still renders its url — verified live
+    // 200 against Django).
     let identifier: Option<String> =
         sqlx::query_scalar(r#"SELECT "identifier" FROM "projects" WHERE "id" = $1"#)
             .bind(project_id)
@@ -5517,8 +5688,8 @@ pub async fn add_cycle_issues_inner(
     body: &[u8],
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_gate(
         &pre.pool,
         &workspace_id,
@@ -5553,7 +5724,9 @@ pub async fn add_cycle_issues_inner(
         return Err(Denial::FieldErrors(body));
     }
     let issues_value = issues_value.expect("truthy issues checked");
-    let candidates: Vec<IssueCandidate> = coerce_add_issues(issues_value)?;
+    // Order matters: Python runs `Cycle.objects.get` (404) and the
+    // completed gate BEFORE the `issue_id__in` filter validates UUIDs
+    // (400), so the coercion runs after both (`views/cycle.py:934-946`).
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT c."id", c."workspace_id", c."end_date" FROM "cycles" c
            INNER JOIN "workspaces" w ON c."workspace_id" = w."id"
@@ -5579,6 +5752,7 @@ pub async fn add_cycle_issues_inner(
             return Err(Denial::FieldErrors(body));
         }
     }
+    let candidates: Vec<IssueCandidate> = coerce_add_issues(issues_value)?;
     // Existing bridges anywhere but this cycle (`~Q(cycle_id)`, no
     // project/workspace scope, default `-created_at` order).
     let wanted: Vec<uuid::Uuid> = candidates
@@ -5686,7 +5860,7 @@ pub async fn add_cycle_issues_inner(
         .bind(&issue_texts)
         .execute(&pre.pool)
         .await
-        .map_err(|error| db_error(error, "cycle-issues-add-insert"))?;
+        .map_err(|error| db_write_error(error, "cycle-issues-add-insert"))?;
     }
     // The move: EVERY fetched bridge re-points at this cycle
     // (`bulk_update(["cycle_id"])` touches only `cycle_id`, not
@@ -5699,7 +5873,7 @@ pub async fn add_cycle_issues_inner(
             .bind(&move_ids)
             .execute(&pre.pool)
             .await
-            .map_err(|error| db_error(error, "cycle-issues-add-move"))?;
+            .map_err(|error| db_write_error(error, "cycle-issues-add-move"))?;
         for bridge in &existing {
             activity.push(format!(
                 "{{\"old_cycle_id\": {}, \"new_cycle_id\": {}, \"issue_id\": {}}}",
@@ -5843,8 +6017,8 @@ pub async fn get_cycle_issue_inner(
     query: &QueryMap,
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_gate(
         &pre.pool,
         &workspace_id,
@@ -5901,8 +6075,8 @@ pub async fn remove_cycle_issue_inner(
     issue_id: &uuid::Uuid,
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_gate(
         &pre.pool,
         &workspace_id,
@@ -5929,20 +6103,9 @@ pub async fn remove_cycle_issue_inner(
         return Err(Denial::NotFound);
     };
     let bridge_id = row_uuid(&row, "id", "cycle-issue-remove-get")?;
-    // `cycle_issue.cycle.name`: the FK descriptor re-reads the live
-    // cycle row (a miss 404s like `DoesNotExist`; the name itself never
-    // reaches the payload, which carries ids only).
-    let cycle_name: Option<String> = sqlx::query_scalar(
-        r#"SELECT "name" FROM "cycles" WHERE "id" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(cycle_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "cycle-issue-remove-cycle"))?
-    .flatten();
-    if cycle_name.is_none() {
-        return Err(Denial::NotFound);
-    }
+    // The view never touches `.cycle` (`views/cycle.py:1086-1114`): the
+    // activity payload carries URL kwargs only, so a missing or
+    // soft-deleted cycle row still 204s (verified live).
     // Instance `delete()`: `deleted_at = now()` then `save()` (whose
     // `auto_now` samples again) plus the CRUM `updated_by`.
     let deleted_at = micros_now();
@@ -5956,7 +6119,7 @@ pub async fn remove_cycle_issue_inner(
     .bind(bridge_id)
     .execute(&pre.pool)
     .await
-    .map_err(|error| db_error(error, "cycle-issue-remove-soft"))?;
+    .map_err(|error| db_write_error(error, "cycle-issue-remove-soft"))?;
     enqueue_soft_delete(&pre.pool, "cycleissue", &bridge_id).await;
     let job = pidash_jobs::v1_cycles_modules::publish::cycle_issue_removed_job(
         &cycle_id.to_string(),
@@ -5985,8 +6148,8 @@ pub async fn archive_cycle_inner(
     pk: &uuid::Uuid,
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_gate(
         &pre.pool,
         &workspace_id,
@@ -6036,7 +6199,7 @@ pub async fn archive_cycle_inner(
     .bind(pk)
     .execute(&pre.pool)
     .await
-    .map_err(|error| db_error(error, "cycle-archive-stamp"))?;
+    .map_err(|error| db_write_error(error, "cycle-archive-stamp"))?;
     sqlx::query(
         r#"UPDATE "user_favorites" SET "deleted_at" = $1
            WHERE "entity_type" = 'cycle' AND "entity_identifier" = $2 AND "project_id" = $3
@@ -6049,7 +6212,7 @@ pub async fn archive_cycle_inner(
     .bind(slug)
     .execute(&pre.pool)
     .await
-    .map_err(|error| db_error(error, "cycle-archive-favorites"))?;
+    .map_err(|error| db_write_error(error, "cycle-archive-favorites"))?;
     Ok(no_content())
 }
 
@@ -6065,8 +6228,8 @@ pub async fn unarchive_cycle_inner(
     pk: &uuid::Uuid,
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_gate(
         &pre.pool,
         &workspace_id,
@@ -6100,7 +6263,7 @@ pub async fn unarchive_cycle_inner(
     .bind(pk)
     .execute(&pre.pool)
     .await
-    .map_err(|error| db_error(error, "cycle-unarchive-stamp"))?;
+    .map_err(|error| db_write_error(error, "cycle-unarchive-stamp"))?;
     Ok(no_content())
 }
 
@@ -6343,8 +6506,8 @@ pub async fn transfer_cycle_issues_inner(
     use pidash_db::v1_cycles_modules::cycle_queries as queries;
     use pidash_services::v1_cycles_modules::cycle_queries as shapes;
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_gate(
         &pre.pool,
         &workspace_id,
@@ -6543,7 +6706,7 @@ pub async fn transfer_cycle_issues_inner(
         .bind(cycle_id)
         .execute(&pre.pool)
         .await
-        .map_err(|error| db_error(error, "transfer-snapshot"))?;
+        .map_err(|error| db_write_error(error, "transfer-snapshot"))?;
     // The move (`:437-456`): open-state bridges re-point at the target in
     // `-created_at` select order; `bulk_update(["cycle_id"])` touches only
     // `cycle_id`.
@@ -6573,7 +6736,7 @@ pub async fn transfer_cycle_issues_inner(
             .bind(&move_ids)
             .execute(&pre.pool)
             .await
-            .map_err(|error| db_error(error, "transfer-move-update"))?;
+            .map_err(|error| db_write_error(error, "transfer-move-update"))?;
     }
     let job = pidash_jobs::v1_cycles_modules::publish::cycle_issues_transferred_job(
         &pre.actor.id.to_string(),
@@ -7820,11 +7983,14 @@ mod tests {
                 .to_rfc3339(),
             "2026-09-30T19:00:00+00:00"
         );
-        // Ambiguous folds fail with the zone in the message.
+        // Ambiguous folds PASS at fold 0 (the pre-transition offset):
+        // 2026-11-01 01:30 in New York is EDT (-4) on first occurrence.
         let parsed = parse_iso_datetime("2026-11-01T01:30:00").expect("fold");
         assert_eq!(
-            enforce_user_timezone(&parsed, &eastern).expect_err("ambiguous"),
-            EnforceFail::Ambiguous
+            enforce_user_timezone(&parsed, &eastern)
+                .expect("fold-ok")
+                .to_rfc3339(),
+            "2026-11-01T05:30:00+00:00"
         );
         assert_eq!(
             datetime_make_aware_message(eastern.name()),
@@ -7876,6 +8042,72 @@ mod tests {
             out.as_slice(),
             [IssueCandidate::Id(id)] if *id == uuid::Uuid::from_u128(5)
         ));
+    }
+
+    /// Minimal `DatabaseError` carrying just a SQLSTATE code, for the
+    /// write-error mapping test.
+    #[derive(Debug)]
+    struct CodedDbError {
+        code: &'static str,
+    }
+
+    impl std::fmt::Display for CodedDbError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "coded {}", self.code)
+        }
+    }
+
+    impl std::error::Error for CodedDbError {}
+
+    impl sqlx::error::DatabaseError for CodedDbError {
+        fn message(&self) -> &str {
+            "coded"
+        }
+
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some(std::borrow::Cow::Borrowed(self.code))
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+    }
+
+    #[test]
+    fn write_error_integrity_mapping() {
+        // SQLSTATE class 23 (FK / not-null / unique) answers Django's
+        // `IntegrityError` branch: 400 "The payload is not valid".
+        for code in ["23503", "23502", "23505", "23514"] {
+            let denial = db_write_error(
+                sqlx::Error::Database(Box::new(CodedDbError { code })),
+                "test",
+            );
+            assert!(
+                matches!(denial, Denial::BadError(message) if message == "The payload is not valid"),
+                "code {code}"
+            );
+        }
+        // Anything else (bad casts, driver faults, un-coded errors) stays
+        // the generic 500.
+        let denial = db_write_error(
+            sqlx::Error::Database(Box::new(CodedDbError { code: "22P02" })),
+            "test",
+        );
+        assert!(matches!(denial, Denial::ServerError));
+        let denial = db_write_error(sqlx::Error::RowNotFound, "test");
+        assert!(matches!(denial, Denial::ServerError));
     }
 
     #[test]
