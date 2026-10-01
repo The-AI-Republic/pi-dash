@@ -127,17 +127,26 @@ function enumerateServicesFromFiles(root, files) {
       let body = text.slice(cm.index);
       const tail = body.slice(1).search(/\nexport\s/);
       if (tail >= 0) body = body.slice(0, tail + 1);
-      // Scan the class body for async method definitions.
-      const methods = [...body.matchAll(/(?:^|\n)\s*async\s+([A-Za-z_]\w*)\s*\(/g)]
-        .map((m) => m[1])
-        .filter((n) => n !== "constructor");
-      for (const name of new Set(methods)) {
-        const at = body.indexOf(`async ${name}(`);
+      // Scan the class body for public method definitions: `async name(`,
+      // sync `name(`, and arrow-property `name = async (` shapes. Sync and
+      // arrow-property methods were missed entirely before, and their endpoint
+      // literals bled into the preceding async method's slice (review
+      // NEWFRONT-103: `AssistantService.cancel` was evidenced by its
+      // neighbor `eventsUrl`'s URL). Private/protected members, the
+      // constructor, and data properties are not public methods.
+      const methodRe = /(?:^|\n) {2}(?:async\s+)?(?!private |protected |readonly |constructor\b)([A-Za-z_]\w*)\s*(?:=\s*(?:async\s*)?)?\(/g;
+      const found = [...body.matchAll(methodRe)];
+      const seen = new Set();
+      for (let mi = 0; mi < found.length; mi++) {
+        const name = found[mi][1];
+        if (seen.has(name)) continue;
+        seen.add(name);
+        const at = found[mi].index;
         // Bound the slice at the next method so literals/verbs cannot bleed
         // across methods (a bare method would otherwise inherit its neighbor's
         // endpoint and produce false evidence).
-        const next = body.indexOf("\n  async ", at + 1);
-        const slice = body.slice(at, next > 0 ? next : at + 1500);
+        const nextAt = mi + 1 < found.length ? found[mi + 1].index : at + 1500;
+        const slice = body.slice(at, Math.min(nextAt, at + 1500));
         const verb = (/this\.(get|post|put|patch|delete)\s*\(/.exec(slice) || [])[1] || "unknown";
         // Every '/'-bearing literal is a candidate endpoint fragment; the first
         // is shown in the id, all participate in matching. Closed
@@ -414,6 +423,7 @@ function parseInventory(path) {
   const rows = new Set();
   for (const m of text.matchAll(/^\|\s*([A-Z][A-Z0-9]*-\d+)\s*\|/gm)) rows.add(m[1]);
   const checklistCells = [];
+  const rowLines = [];
   const explained = [];
   const checkPaths = [];
   const explainedPaths = [];
@@ -529,6 +539,7 @@ function parseInventory(path) {
     } else if (/^\|\s*[A-Z][A-Z0-9]*-\d+\s*\|/.test(line)) {
       // Row-table entry ("Old entry point" cells name sources too).
       flushPara();
+      rowLines.push(line);
       harvest(line, "row");
     } else if (inExplained) {
       flushPara();
@@ -558,6 +569,7 @@ function parseInventory(path) {
     explained: explained.join("\n").toLowerCase(),
     full: text.toLowerCase(),
     folded: fold(text),
+    foldedRows: fold(rowLines.join("\n")),
   };
 }
 
@@ -634,26 +646,35 @@ function matchItem(item, inventories) {
     // Single-fragment notes (`.../restore/`) never disown on their own, and a
     // note naming one shape (`GET .../pods/{id}/`) never disowns another
     // (`GET .../pods/`): explained matches need equal segment counts.
-    for (const inv of inventories) {
-      const hit = (inv.explainedPaths || []).find((c) => {
-        if (!String(c.raw).includes("/")) return false;
-        const n = normEndpoint(c.raw);
-        const cn = n.split("/").filter(Boolean);
-        if (!endpointSolids(n).length) return false;
-        return eps.some((e) => {
-          const en = e.split("/").filter(Boolean);
-          if (en.length !== cn.length) return false;
-          const A = endpointSolids(e);
-          const B = endpointSolids(n);
-          const [shorter, longer] = A.length <= B.length ? [A, B] : [B, A];
-          if (shorter.length < 2) return false;
-          const tail = longer.slice(longer.length - shorter.length);
-          return shorter.every((g, i) => segEq(g, tail[i]));
+    // A method named in a row is rowed even when its endpoint is disowned
+    // elsewhere (review NEWFRONT-103: `WorkspaceService.workspaceMemberMe`
+    // shares its endpoint with the dead packages call it replaced).
+    const rowNamed = (item.keys || []).some((k) => {
+      const f = String(k).toLowerCase().replace(/[^a-z0-9]/g, "");
+      return f.length >= 8 && inventories.some((inv) => inv.foldedRows.includes(f));
+    });
+    if (!rowNamed) {
+      for (const inv of inventories) {
+        const hit = (inv.explainedPaths || []).find((c) => {
+          if (!String(c.raw).includes("/")) return false;
+          const n = normEndpoint(c.raw);
+          const cn = n.split("/").filter(Boolean);
+          if (!endpointSolids(n).length) return false;
+          return eps.some((e) => {
+            const en = e.split("/").filter(Boolean);
+            if (en.length !== cn.length) return false;
+            const A = endpointSolids(e);
+            const B = endpointSolids(n);
+            const [shorter, longer] = A.length <= B.length ? [A, B] : [B, A];
+            if (shorter.length < 2) return false;
+            const tail = longer.slice(longer.length - shorter.length);
+            return shorter.every((g, i) => segEq(g, tail[i]));
+          });
         });
-      });
-      if (hit) explained.push({ file: inv.file, evidence: `endpoint \`${hit.raw}\` disowned` });
+        if (hit) explained.push({ file: inv.file, evidence: `endpoint \`${hit.raw}\` disowned` });
+      }
+      if (explained.length) return { status: "explained", matches: explained };
     }
-    if (explained.length) return { status: "explained", matches: explained };
   }
   // Step 0c (paths): explicitly disowned checklist prose ("out of scope…").
   if (isPath) {

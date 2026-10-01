@@ -148,3 +148,4 @@ silently.
 | `DELETE /api/workspaces/{slug}/workspace-integrations/{id}/provider/` (`IntegrationService.deleteWorkspaceIntegration`) | — | dead code: same as above; no row, found by coverage audit |
 | `GET /api/workspaces/{slug}/importers/` (`IntegrationService.getImporterServicesList`) | — | dead code: no caller and no import UI (see the negative no-imports row above); no row, found by coverage audit |
 | `GET /api/workspaces/{slug}/workspace-members/me/` (packages `WorkspaceMemberService.myInfo`) | — | dead code: nothing imports the packages member service; the live self-membership read is WorkspaceService.workspaceMemberMe; no row, found by coverage audit |
+| `UserService.currentUserConfig` (self-record request config) | — | dead code: no caller in the surveyed tree (returns a request config for the self record that nothing consumes); no row, found by coverage audit |

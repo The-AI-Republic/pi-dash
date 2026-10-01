@@ -128,7 +128,7 @@ sites; exact paths are not reproduced as UI text.
 | Re-tick issue budget | RUN-048 |
 | List approvals; decide approval | RUN-023, RUN-024 |
 | Chat: list/create sessions (`RunnerService.listChatSessions`, `.createChatSession`, `.getChatSession`); list messages (`.listChatMessages`); warm (`.warmChatSession`); send (`.sendChatMessage`); cancel (`.cancelChat`); close (`.closeChat`) | RUN-026, RUN-027, RUN-028, RUN-029, RUN-030, RUN-031 |
-| Chat event stream (cloud SSE, resumable by sequence) | RUN-029 |
+| Chat event stream (cloud SSE, resumable by sequence; `RunnerService.chatEventsUrl`) | RUN-029 |
 | Chat approvals: list (`RunnerService.listChatApprovals`) / decide (`.decideChatApproval`) (chat-originated) | RUN-034 |
 | Local chat transport: warm/send/cancel/close/decide + local session/event store (Tauri) | RUN-034, RUN-035, RUN-036 |
 | Desktop agent-availability check | RUN-033 |
