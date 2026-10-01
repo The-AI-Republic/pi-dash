@@ -1389,17 +1389,24 @@ pub const PROJECT_STATES_SQL: &str = "SELECT id, name, states.group FROM states 
 /// clause (verified with the query compiler; a stable construct). `$1`
 /// project id, `$2` the `escape_icontains` output (assistant
 /// `tools_issues.rs`, same backslash escaping; `LIKE`'s default escape
-/// applies), `$3` the [`clamp_search_limit`] value. No `ORDER BY`:
-/// Python slices unordered.
+/// applies), `$3` the [`clamp_search_limit`] value. `ORDER BY
+/// issues.created_at DESC` from `Issue.Meta.ordering = ("-created_at",)`
+/// (`db/models/issue.py:253`): Python slices newest-first, so the limit
+/// keeps the newest matches. `issues.created_at` rides in the `SELECT`
+/// list only to satisfy `DISTINCT`'s order-by rule (every `ORDER BY`
+/// expression must appear in the select list); the caller ignores it —
+/// `_issue_data` consumes the other nine columns. `DISTINCT` never
+/// collapses rows (the PK is selected), as in Django's select-all.
 pub const SEARCH_ISSUES_SQL: &str =
     "SELECT DISTINCT issues.id, issues.project_id, issues.state_id, \
      issues.sequence_id, issues.name, issues.priority, states.name, states.group, \
-     projects.identifier FROM issues \
+     projects.identifier, issues.created_at FROM issues \
      INNER JOIN projects ON projects.id = issues.project_id \
      LEFT OUTER JOIN states ON states.id = issues.state_id \
      WHERE issues.project_id = $1 AND issues.deleted_at IS NULL \
      AND (UPPER(issues.name::text) LIKE UPPER('%' || $2 || '%') \
-     OR UPPER(issues.description_stripped::text) LIKE UPPER('%' || $2 || '%')) LIMIT $3";
+     OR UPPER(issues.description_stripped::text) LIKE UPPER('%' || $2 || '%')) \
+     ORDER BY issues.created_at DESC LIMIT $3";
 
 /// `pidash_get_project_issue` (`tools.py:243-251`):
 /// `Issue.objects.select_related("project", "state").get(pk=issue_id,
@@ -3141,7 +3148,8 @@ mod tests {
             .contains("UPPER(issues.description_stripped::text) LIKE UPPER('%' || $2 || '%')"));
         assert!(!SEARCH_ISSUES_SQL.contains("ILIKE"));
         assert!(SEARCH_ISSUES_SQL.contains("LIMIT $3"));
-        assert!(!SEARCH_ISSUES_SQL.contains("ORDER BY"));
+        assert!(SEARCH_ISSUES_SQL.contains("ORDER BY issues.created_at DESC LIMIT $3"));
+        assert!(SEARCH_ISSUES_SQL.contains("projects.identifier, issues.created_at FROM issues"));
         assert!(GET_PROJECT_ISSUE_SQL.contains("issues.id = $1 AND issues.project_id = $2"));
         assert!(LINKED_REVIEWS_SQL.contains("ORDER BY created_at DESC LIMIT 20"));
         assert!(COMMENT_INSERT_SQL.contains("'Pi Dash Cloud Agent'"));
