@@ -125,7 +125,7 @@ pub enum Denial {
     NotFound,
     /// 404, `{"detail":"Project not found"}` (identifier rewrite miss).
     ProjectNotFound,
-    /// 400, `{"Detail": ...}` (DRF `ParseError`: pagination, JSON).
+    /// 400, `{"detail": ...}` lowercase (DRF `ParseError`: pagination, JSON).
     BadDetail(String),
     /// 400, `{"error": ...}` (view-inline).
     BadError(String),
@@ -455,17 +455,9 @@ async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid,
     };
     pidash_auth::token::validate_api_token(Some(&row), presented, now_unix)
         .map_err(|_| Denial::InvalidToken)?;
-    // Inactive users cannot authenticate (the `users` table has no
-    // `deleted_at`; `is_active` is the only liveness signal).
-    let active: Option<bool> =
-        sqlx::query_scalar(r#"SELECT TRUE FROM "users" WHERE "id" = $1 AND "is_active""#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "api-token-user"))?;
-    if active != Some(true) {
-        return Err(Denial::InvalidToken);
-    }
+    // No `users.is_active` check: `validate_api_token` + permissions never
+    // consult it (stock `UserManager`, no filtering), so Django serves a
+    // deactivated user's token when membership passes — port the wart.
     Ok(user_id)
 }
 
@@ -513,14 +505,10 @@ async fn resolve_machine_token(
     .map_err(|error| db_error(error, "machine-token-member"))?
     .unwrap_or(false);
     if !member {
+        // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
+        // `last_used_at` is stamped on success only.
         let _ = sqlx::query(
             r#"UPDATE "machine_token" SET "revoked_at" = now() WHERE "token_hash" = $1"#,
-        )
-        .bind(&presented_hash)
-        .execute(pool)
-        .await;
-        let _ = sqlx::query(
-            r#"UPDATE "machine_token" SET "last_used_at" = now() WHERE "token_hash" = $1"#,
         )
         .bind(&presented_hash)
         .execute(pool)
@@ -822,6 +810,11 @@ fn row_date_opt(
 
 fn row_i64(row: &sqlx::postgres::PgRow, column: &str, site: &str) -> Result<i64, Denial> {
     row.try_get::<i64, _>(column)
+        .map_err(|error| db_error(error, site))
+}
+
+fn row_i32(row: &sqlx::postgres::PgRow, column: &str, site: &str) -> Result<i32, Denial> {
+    row.try_get::<i32, _>(column)
         .map_err(|error| db_error(error, site))
 }
 
@@ -1432,13 +1425,19 @@ pub async fn render_issue(
         "description_html".to_owned(),
         Value::String(detail.description_html.clone()),
     );
-    // `description_binary` maps to DRF's `ModelField`, which returns the
-    // raw bytes; the JSON renderer then raises `TypeError` (unserializable),
-    // surfacing as the generic 500. `None` renders null.
-    if detail.description_binary.is_some() {
-        return Err(Denial::ServerError);
-    }
-    map.insert("description_binary".to_owned(), Value::Null);
+    // `description_binary` maps to DRF's `ModelField`, whose
+    // `to_representation` answers `BinaryField.value_to_string` — standard
+    // base64 ASCII (verified live: 200, never a 500). `None` renders null.
+    map.insert(
+        "description_binary".to_owned(),
+        detail
+            .description_binary
+            .as_ref()
+            .map_or(Value::Null, |bytes| {
+                use base64::Engine as _;
+                Value::String(base64::engine::general_purpose::STANDARD.encode(bytes))
+            }),
+    );
     map.insert("priority".to_owned(), render_string_opt(&detail.priority));
     map.insert(
         "complexity_score".to_owned(),
@@ -1618,6 +1617,14 @@ pub async fn apply_issue_expand(
             "type" => {
                 // Fallthrough `getattr(instance, "type_id")`: the unchanged id.
                 map.insert("type".to_owned(), render_uuid_opt(&detail.type_id));
+            }
+            "assigned_pod" => {
+                // Fallthrough `getattr(instance, "assigned_pod_id")`: the
+                // column exists, so Django re-renders the unchanged id.
+                map.insert(
+                    "assigned_pod".to_owned(),
+                    render_uuid_opt(&detail.assigned_pod_id),
+                );
             }
             _ => {
                 map.insert(name.clone(), Value::Null);
@@ -2038,6 +2045,20 @@ pub async fn expand_issue_lite_opt(
     Ok(Value::Object(map))
 }
 
+/// `EstimatePointSerializer(None).data` (verified live): the null-FK
+/// expand renders these six fields in this order — `id`, the timestamps,
+/// and the relations are skipped.
+pub fn estimate_point_none() -> Value {
+    let mut map = serde_json::Map::with_capacity(6);
+    map.insert("deleted_at".to_owned(), Value::Null);
+    map.insert("key".to_owned(), Value::Null);
+    map.insert("description".to_owned(), Value::String(String::new()));
+    map.insert("value".to_owned(), Value::String(String::new()));
+    map.insert("created_by".to_owned(), Value::Null);
+    map.insert("updated_by".to_owned(), Value::Null);
+    Value::Object(map)
+}
+
 /// `EstimatePointSerializer` (`__all__`): full row, declared `id` first,
 /// then concrete fields, then forward relations.
 pub async fn expand_estimate_point_opt(
@@ -2046,11 +2067,14 @@ pub async fn expand_estimate_point_opt(
     timezone: &Tz,
 ) -> Result<Value, Denial> {
     let Some(estimate_point_id) = estimate_point_id else {
-        return Ok(Value::Object(serde_json::Map::new()));
+        // Unlike the Lite shapes (`{}`), the full `EstimatePointSerializer`
+        // over `None` renders the fields that survive `get_attribute`
+        // (verified live, in this order).
+        return Ok(estimate_point_none());
     };
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT "id", "created_at", "updated_at", "deleted_at", "key", "description",
-                  "value", "created_by_id", "updated_by_id", "workspace_id", "project_id"
+                  "value", "created_by_id", "updated_by_id", "workspace_id", "project_id", "estimate_id"
            FROM "estimate_points" WHERE "id" = $1"#,
     )
     .bind(estimate_point_id)
@@ -2060,7 +2084,7 @@ pub async fn expand_estimate_point_opt(
     let Some(row) = row else {
         return Ok(Value::Object(serde_json::Map::new()));
     };
-    let mut map = serde_json::Map::with_capacity(11);
+    let mut map = serde_json::Map::with_capacity(12);
     map.insert(
         "id".to_owned(),
         render_uuid(&row_uuid(&row, "id", "expand-estimate")?),
@@ -2086,9 +2110,11 @@ pub async fn expand_estimate_point_opt(
             timezone,
         ),
     );
+    // `key` is an `IntegerField` (`db/models/estimate.py:45`): a JSON
+    // number, never null (no `null=True`).
     map.insert(
         "key".to_owned(),
-        render_string_opt(&row_string_opt(&row, "key", "expand-estimate")?),
+        Value::from(row_i32(&row, "key", "expand-estimate")?),
     );
     map.insert(
         "description".to_owned(),
@@ -2106,13 +2132,20 @@ pub async fn expand_estimate_point_opt(
         "updated_by".to_owned(),
         render_uuid_opt(&row_uuid_opt(&row, "updated_by_id", "expand-estimate")?),
     );
+    // Relation order follows the model: `ProjectBaseModel` declares
+    // `project` before `workspace`, then the child's own `estimate` FK
+    // (`__all__` serializer order, verified live).
+    map.insert(
+        "project".to_owned(),
+        render_uuid(&row_uuid(&row, "project_id", "expand-estimate")?),
+    );
     map.insert(
         "workspace".to_owned(),
         render_uuid(&row_uuid(&row, "workspace_id", "expand-estimate")?),
     );
     map.insert(
-        "project".to_owned(),
-        render_uuid(&row_uuid(&row, "project_id", "expand-estimate")?),
+        "estimate".to_owned(),
+        render_uuid(&row_uuid(&row, "estimate_id", "expand-estimate")?),
     );
     Ok(Value::Object(map))
 }
@@ -2167,24 +2200,40 @@ pub async fn expand_labels(
 // ---------------------------------------------------------------------------
 
 /// Parse the request body (`is_valid()` input stage): an empty body is `{}`,
-/// anything unparseable or scalar is the DRF `ParseError`, and a non-object
-/// JSON value is the serializer `non_field_errors` (all verified live).
+/// malformed JSON is the DRF `ParseError` (with its `JSON parse error - `
+/// prefix), and any non-object JSON value is the serializer
+/// `non_field_errors` — with DRF's per-type names (`int`/`float`/`bool`/
+/// `str`/`list`) and `null` answering `No data provided` (all verified live).
 pub fn parse_body(raw: &[u8]) -> Result<serde_json::Map<String, Value>, Denial> {
     if raw.is_empty() {
         return Ok(serde_json::Map::new());
     }
-    let value: Value =
-        serde_json::from_slice(raw).map_err(|error| Denial::BadDetail(error.to_string()))?;
-    match value {
-        Value::Object(map) => Ok(map),
-        Value::Array(_) => Err(Denial::FieldErrors(
-            r#"{"non_field_errors":["Invalid data. Expected a dictionary, but got list."]}"#
-                .to_owned(),
+    match serde_json::from_slice::<Value>(raw) {
+        Ok(Value::Object(map)) => Ok(map),
+        Ok(Value::Null) => Err(Denial::FieldErrors(
+            r#"{"non_field_errors":["No data provided"]}"#.to_owned(),
         )),
-        _ => Err(Denial::FieldErrors(
-            r#"{"non_field_errors":["Invalid data. Expected a dictionary, but got str."]}"#
-                .to_owned(),
-        )),
+        Ok(other) => {
+            let kind = match &other {
+                Value::Array(_) => "list",
+                Value::String(_) => "str",
+                // `arbitrary_precision`: int-vs-float is `is_f64` — plain
+                // integer literals (even past u64) are Python `int`.
+                Value::Number(n) => {
+                    if n.is_f64() {
+                        "float"
+                    } else {
+                        "int"
+                    }
+                }
+                Value::Bool(_) => "bool",
+                Value::Null | Value::Object(_) => unreachable!("handled above"),
+            };
+            Err(Denial::FieldErrors(format!(
+                r#"{{"non_field_errors":["Invalid data. Expected a dictionary, but got {kind}."]}}"#
+            )))
+        }
+        Err(error) => Err(Denial::BadDetail(format!("JSON parse error - {error}"))),
     }
 }
 
@@ -2270,9 +2319,11 @@ fn py_repr_quoted(value: &Value) -> String {
 
 /// DRF `CharField` over one JSON value (verified live): `null` fails unless
 /// `allow_null`; bools and containers fail `Not a valid string.`; numbers
-/// stringify (`str(data)`); strings strip when non-blank fails (whitespace
-/// counts as blank for `allow_blank=False`); over-limit fails the max-length
-/// message. Returns the validated string, or `None` when explicitly null.
+/// stringify (`str(data)`); strings strip (`trim_whitespace`, the default —
+/// whitespace counts as blank for `allow_blank=False`) and the stripped value
+/// is stored, length-checked, and null-char guarded (the model
+/// `ProhibitNullCharactersValidator` runs through the `ModelSerializer`).
+/// Returns the validated string, or `None` when explicitly null.
 pub fn coerce_char(
     value: Option<&Value>,
     allow_blank: bool,
@@ -2308,8 +2359,12 @@ pub fn coerce_char(
                 }
                 return Ok(Some(String::new()));
             }
-            check_max_length(raw, max_length)?;
-            Ok(Some(raw.clone()))
+            let trimmed = raw.trim().to_owned();
+            check_max_length(&trimmed, max_length)?;
+            if trimmed.contains('\u{0}') {
+                return Err(fail(r#"["Null characters are not allowed."]"#));
+            }
+            Ok(Some(trimmed))
         }
     }
 }
@@ -2485,8 +2540,14 @@ pub fn coerce_members_shape(value: Option<&Value>) -> Result<Option<Vec<Value>>,
         Value::Bool(_) => Err(CoerceFail {
             body: r#"["Expected a list of items but got type \"bool\"."]"#.to_owned(),
         }),
-        Value::Number(_) => Err(CoerceFail {
-            body: r#"["Expected a list of items but got type \"int\"."]"#.to_owned(),
+        // `type(data).__name__`: ints (even past u64) are `int`, fraction /
+        // exponent literals are `float` — `is_f64`, not `as_i64`.
+        Value::Number(n) => Err(CoerceFail {
+            body: if n.is_f64() {
+                r#"["Expected a list of items but got type \"float\"."]"#.to_owned()
+            } else {
+                r#"["Expected a list of items but got type \"int\"."]"#.to_owned()
+            },
         }),
         Value::Object(_) => Err(CoerceFail {
             body: r#"["Expected a list of items but got type \"dict\"."]"#.to_owned(),
@@ -2513,17 +2574,29 @@ pub struct ModuleWrite {
     pub external_id: Option<Option<String>>,
 }
 
-/// Strict `%Y-%m-%d` calendar check (DRF's `DateField` parse, same rule
-/// as `services::...::module_shapes::is_calendar_date`): four-two-two
-/// digits plus a real calendar day. Returns the parsed date for writes.
+/// Django `parse_date` (`\d{4}-\d{1,2}-\d{1,2}`, the `iso-8601` input format
+/// DRF's `DateField` uses): 4-digit year, 1-2 digit ASCII month/day, plus a
+/// real calendar day. Returns the parsed date for writes.
 pub fn parse_module_date(text: &str) -> Option<chrono::NaiveDate> {
     let parts: Vec<&str> = text.split('-').collect();
-    if parts.len() != 3 || parts[0].len() != 4 || parts[1].len() != 2 || parts[2].len() != 2 {
+    if parts.len() != 3 {
         return None;
     }
-    let year: i32 = parts[0].parse().ok()?;
-    let month: u32 = parts[1].parse().ok()?;
-    let day: u32 = parts[2].parse().ok()?;
+    let (year, month, day) = (parts[0], parts[1], parts[2]);
+    if year.len() != 4
+        || month.is_empty()
+        || month.len() > 2
+        || day.is_empty()
+        || day.len() > 2
+        || !year.bytes().all(|b| b.is_ascii_digit())
+        || !month.bytes().all(|b| b.is_ascii_digit())
+        || !day.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let year: i32 = year.parse().ok()?;
+    let month: u32 = month.parse().ok()?;
+    let day: u32 = day.parse().ok()?;
     chrono::NaiveDate::from_ymd_opt(year, month, day)
 }
 
@@ -4071,8 +4144,8 @@ pub async fn add_module_issues_inner(
     let raw: serde_json::Map<String, Value> = if body.is_empty() {
         serde_json::Map::new()
     } else {
-        let value: Value =
-            serde_json::from_slice(body).map_err(|error| Denial::BadDetail(error.to_string()))?;
+        let value: Value = serde_json::from_slice(body)
+            .map_err(|error| Denial::BadDetail(format!("JSON parse error - {error}")))?;
         match value {
             Value::Object(map) => map,
             _ => return Err(Denial::ServerError),
@@ -4864,12 +4937,43 @@ mod tests {
         assert!(parse_body(b"").expect("empty").is_empty());
         let map = parse_body(br#"{"name":"x"}"#).expect("object");
         assert_eq!(map.get("name"), Some(&Value::String("x".to_owned())));
-        let denial = parse_body(b"[1]").expect_err("list");
-        assert!(matches!(denial, Denial::FieldErrors(_)));
-        let denial = parse_body(b"\"s\"").expect_err("str");
-        assert!(matches!(denial, Denial::FieldErrors(_)));
-        let denial = parse_body(b"{oops").expect_err("unparseable");
-        assert!(matches!(denial, Denial::BadDetail(_)));
+        // DRF per-type names, byte-exact (null has its own message).
+        for (raw, kind) in [
+            ("[1]", "list"),
+            ("\"s\"", "str"),
+            ("5", "int"),
+            ("5.5", "float"),
+            ("true", "bool"),
+            // Huge ints are still Python `int`, not `float`.
+            ("1361129467683753853853498429727072845824", "int"),
+            ("5e3", "float"),
+        ] {
+            let body = match parse_body(raw.as_bytes()).expect_err(raw) {
+                Denial::FieldErrors(body) => body,
+                denial => panic!("{raw}: expected FieldErrors, got {denial:?}"),
+            };
+            assert_eq!(
+                body,
+                format!(
+                    r#"{{"non_field_errors":["Invalid data. Expected a dictionary, but got {kind}."]}}"#
+                ),
+                "{raw}"
+            );
+        }
+        let body = match parse_body(b"null").expect_err("null") {
+            Denial::FieldErrors(body) => body,
+            denial => panic!("null: expected FieldErrors, got {denial:?}"),
+        };
+        assert_eq!(body, r#"{"non_field_errors":["No data provided"]}"#);
+        // Malformed JSON carries the DRF prefix.
+        let message = match parse_body(b"{oops").expect_err("unparseable") {
+            Denial::BadDetail(message) => message,
+            denial => panic!("expected BadDetail, got {denial:?}"),
+        };
+        assert!(
+            message.starts_with("JSON parse error - "),
+            "missing prefix: {message}"
+        );
     }
 
     #[test]
@@ -4936,6 +5040,39 @@ mod tests {
             .body,
             r#"["Ensure this field has no more than 255 characters."]"#
         );
+        // Values strip; max_length counts the stripped value.
+        assert_eq!(
+            coerce_char(
+                Some(&Value::String("  ENG  ".to_owned())),
+                false,
+                false,
+                Some(12)
+            )
+            .expect("trim"),
+            Some("ENG".to_owned())
+        );
+        assert_eq!(
+            coerce_char(
+                Some(&Value::String(format!("  {}  ", "n".repeat(255)))),
+                false,
+                false,
+                Some(255)
+            )
+            .expect("trimmed-fits"),
+            Some("n".repeat(255))
+        );
+        // Embedded null chars fail (model validator via ModelSerializer).
+        assert_eq!(
+            coerce_char(
+                Some(&Value::String("a\u{0}b".to_owned())),
+                false,
+                false,
+                Some(255)
+            )
+            .expect_err("null-char")
+            .body,
+            r#"["Null characters are not allowed."]"#
+        );
     }
 
     #[test]
@@ -4974,7 +5111,9 @@ mod tests {
                 .body,
             r#"["Incorrect type. Expected pk value, received bool."]"#
         );
-        // Empty string is None for lead, the null error for members children.
+        // Empty string is None for lead, the null error for members children
+        // (`RelatedField.run_validation` forces `''` to `None` before the
+        // `allow_null` check — verified live against the real field classes).
         assert_eq!(
             coerce_pk_value(&Value::String(String::new()), true).expect("lead-empty"),
             PkValue::Null
@@ -5029,8 +5168,50 @@ mod tests {
                 .body,
             r#"["Expected a list of items but got type \"dict\"."]"#
         );
+        // Numbers echo their Python type names.
+        assert_eq!(
+            coerce_members_shape(Some(&serde_json::json!(5)))
+                .expect_err("int")
+                .body,
+            r#"["Expected a list of items but got type \"int\"."]"#
+        );
+        assert_eq!(
+            coerce_members_shape(Some(&serde_json::json!(5.5)))
+                .expect_err("float")
+                .body,
+            r#"["Expected a list of items but got type \"float\"."]"#
+        );
         let items = coerce_members_shape(Some(&serde_json::json!(["a"]))).expect("list");
         assert_eq!(items, Some(vec![Value::String("a".to_owned())]));
+    }
+
+    #[test]
+    fn estimate_point_none_shape() {
+        // `EstimatePointSerializer(None).data`, byte-exact (key order kept).
+        assert_eq!(
+            serde_json::to_string(&estimate_point_none()).expect("json"),
+            r#"{"deleted_at":null,"key":null,"description":"","value":"","created_by":null,"updated_by":null}"#
+        );
+    }
+
+    #[test]
+    fn module_date_shapes() {
+        // Django `parse_date` allows 1-2 digit month/day.
+        assert_eq!(
+            parse_module_date("2024-1-5"),
+            chrono::NaiveDate::from_ymd_opt(2024, 1, 5)
+        );
+        assert_eq!(
+            parse_module_date("2024-01-05"),
+            chrono::NaiveDate::from_ymd_opt(2024, 1, 5)
+        );
+        // Calendar check + strict shape still apply.
+        assert_eq!(parse_module_date("2024-13-5"), None);
+        assert_eq!(parse_module_date("2024-02-30"), None);
+        assert_eq!(parse_module_date("2024-1-5x"), None);
+        assert_eq!(parse_module_date("24-01-05"), None);
+        assert_eq!(parse_module_date("2024-001-05"), None);
+        assert_eq!(parse_module_date("2024-01"), None);
     }
 
     #[test]
