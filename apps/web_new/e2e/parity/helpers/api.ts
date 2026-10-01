@@ -244,16 +244,6 @@ async function withThrottleRetry<T>(label: string, fn: () => Promise<T>, attempt
   throw last;
 }
 
-/** Fetch a CSRF token plus the cookies the form POST must carry back. */
-export async function fetchCsrf(apiBase: string = apiBaseFromEnv()): Promise<{ token: string; preCookies: string }> {
-  const tokenRes = await fetch(`${apiBase}/auth/get-csrf-token/`);
-  if (!tokenRes.ok) throw new Error(`[parity] CSRF token fetch failed with HTTP ${tokenRes.status}.`);
-  const tokenPayload = (await tokenRes.json()) as { csrf_token?: unknown };
-  const token = typeof tokenPayload.csrf_token === "string" ? tokenPayload.csrf_token : "";
-  if (token === "") throw new Error("[parity] CSRF token response carried no token.");
-  return { token, preCookies: cookieHeader(setCookieHeaders(tokenRes)) };
-}
-
 /** Sign in with email plus password; resolves with a session cookie header. */
 export async function signInSession(
   email: string,
@@ -1391,9 +1381,10 @@ export async function createAccountSession(
   password: string,
   apiBase: string = apiBaseFromEnv()
 ): Promise<string> {
-  const { token, preCookies } = await fetchCsrf(apiBase);
+  const csrf = await fetchCsrf(apiBase);
+  const preCookies = cookieHeader(csrf.setCookies);
   // The sign-up card's native form submits both password fields.
-  const body = new URLSearchParams({ email, password, confirm_password: password, csrfmiddlewaretoken: token });
+  const body = new URLSearchParams({ email, password, confirm_password: password, csrfmiddlewaretoken: csrf.token });
   const res = await fetch(`${apiBase}/auth/sign-up/`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded", cookie: preCookies },
