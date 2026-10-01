@@ -322,7 +322,84 @@ export interface ParityDriver {
   rulesCommentCardText(commentId: string): Promise<string>;
   /** Whether the intake triage chrome (Accept/Decline) is currently offered. */
   rulesIntakeTriageVisible(): Promise<boolean>;
+
+  // --- NEWFRONT-117 (layouts A): shared layout switching, list, spreadsheet,
+  // --- calendar, row actions, empty states. Appended; existing methods above
+  // --- are untouched per the shared driver contract.
+
+  /** Layout keys the header switcher offers, in display order. */
+  layoutsOfferedLayouts(): Promise<LayoutsLayoutKey[]>;
+  /** Which layout is currently active. */
+  layoutsActiveLayout(): Promise<LayoutsLayoutKey>;
+  /** Switch to a layout through the header switcher; resolves once it renders. */
+  layoutsSwitchTo(layout: LayoutsLayoutKey): Promise<void>;
+  /** Reload the page and wait for the issues area to settle. */
+  layoutsReloadIssues(): Promise<void>;
+  /** Whether the list layout is rendered. */
+  layoutsListVisible(): Promise<boolean>;
+  /** Whether the calendar layout is rendered. */
+  layoutsCalendarVisible(): Promise<boolean>;
+  /** Whether the spreadsheet layout is rendered. */
+  layoutsSpreadsheetVisible(): Promise<boolean>;
+  /** Whether the board layout is rendered. */
+  layoutsKanbanVisible(): Promise<boolean>;
+  /** Whether the timeline layout is rendered. */
+  layoutsGanttVisible(): Promise<boolean>;
+  /** Group section titles in display order. */
+  layoutsListGroups(): Promise<string[]>;
+  /** Whether a group section is currently expanded. */
+  layoutsListGroupExpanded(title: string): Promise<boolean>;
+  /** Toggle a group section collapsed/expanded; resolves once it settles. */
+  layoutsListToggleGroup(title: string): Promise<void>;
+  /** Issue names rendered inside one group section. */
+  layoutsListGroupIssueNames(title: string): Promise<string[]>;
+  /** Whether a group shows its explicit "load more" row. */
+  layoutsListGroupHasLoadMore(title: string): Promise<boolean>;
+  /** Activate a group's "load more" row; resolves once it settles. */
+  layoutsListGroupLoadMore(title: string): Promise<void>;
+  /** Scroll the flat list to its end so the next page auto-loads. */
+  layoutsListScrollEnd(): Promise<void>;
+  /**
+   * Create an issue through a list quick-add form (first group unless
+   * `groupTitle` names one); resolves once the row shows.
+   */
+  layoutsListQuickAdd(title: string, groupTitle?: string): Promise<void>;
+  /** Whether a row's state control opens its dropdown (edit gating). */
+  layoutsRowCanEditState(issueName: string): Promise<boolean>;
+  /** Href of a row link (null when the row is not a link). */
+  layoutsRowHref(issueName: string): Promise<string | null>;
+  /** Open peek by clicking a row; resolves once the peek panel shows the issue. */
+  layoutsRowOpenPeek(issueName: string): Promise<void>;
+  /** Whether the peek panel currently shows an issue. */
+  layoutsPeekVisible(): Promise<boolean>;
+  /** Title shown in the peek panel, or null when hidden. */
+  layoutsPeekTitle(): Promise<string | null>;
+  /** Close the peek panel. */
+  layoutsPeekClose(): Promise<void>;
+  /** Whether a row offers a sub-issue expander. */
+  layoutsRowHasSubIssueToggle(issueName: string): Promise<boolean>;
+  /** Expand a row's sub-issues; resolves once children render. */
+  layoutsRowExpandSubIssues(issueName: string): Promise<void>;
+  /** Names of the expanded sub-issues under a row. */
+  layoutsRowSubIssueNames(issueName: string): Promise<string[]>;
+  /** State label rendered on a row. */
+  layoutsRowState(issueName: string): Promise<string>;
+  /** Change a row's state through its inline dropdown. */
+  layoutsRowSetState(issueName: string, stateName: string): Promise<void>;
+  /** Priority label rendered on a row. */
+  layoutsRowPriority(issueName: string): Promise<string>;
+  /** Change a row's priority through its inline dropdown. */
+  layoutsRowSetPriority(issueName: string, priorityName: string): Promise<void>;
+  /** Menu entries offered by a row's quick-actions menu. */
+  layoutsRowMenuItems(issueName: string): Promise<string[]>;
+  /** Pick one entry of a row's quick-actions menu. */
+  layoutsRowMenuChoose(issueName: string, item: string): Promise<void>;
+  /** Menu entries offered by right-clicking a row. */
+  layoutsRowContextMenuItems(issueName: string): Promise<string[]>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */
 export type RulesCommentMenuOption = "edit" | "copy_link" | "access_switch" | "fold" | "unfold" | "delete";
+
+/** Canonical issue-layout keys shared by both frontend drivers. */
+export type LayoutsLayoutKey = "list" | "kanban" | "calendar" | "spreadsheet" | "gantt";

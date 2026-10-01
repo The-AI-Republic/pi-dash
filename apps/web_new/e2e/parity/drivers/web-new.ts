@@ -8,6 +8,7 @@
 // fill these in method by method; the oracle driver stays untouched.
 import type { Page } from "@playwright/test";
 import type {
+  LayoutsLayoutKey,
   ParityBrowserCookie,
   ParityDriver,
   ParityTarget,
@@ -441,5 +442,140 @@ export class WebNewDriver implements ParityDriver {
 
   async rulesIntakeTriageVisible(): Promise<boolean> {
     return todo("rulesIntakeTriageVisible");
+  }
+
+  // --- NEWFRONT-117 (layouts A). Throwing stubs per the shared driver
+  // --- contract; the layouts area fills these in when it lands.
+
+  async layoutsOfferedLayouts(): Promise<LayoutsLayoutKey[]> {
+    return todo("layoutsOfferedLayouts");
+  }
+
+  async layoutsActiveLayout(): Promise<LayoutsLayoutKey> {
+    return todo("layoutsActiveLayout");
+  }
+
+  async layoutsSwitchTo(_layout: LayoutsLayoutKey): Promise<void> {
+    return todo("layoutsSwitchTo");
+  }
+
+  async layoutsReloadIssues(): Promise<void> {
+    return todo("layoutsReloadIssues");
+  }
+
+  async layoutsListVisible(): Promise<boolean> {
+    return todo("layoutsListVisible");
+  }
+
+  async layoutsCalendarVisible(): Promise<boolean> {
+    return todo("layoutsCalendarVisible");
+  }
+
+  async layoutsSpreadsheetVisible(): Promise<boolean> {
+    return todo("layoutsSpreadsheetVisible");
+  }
+
+  async layoutsKanbanVisible(): Promise<boolean> {
+    return todo("layoutsKanbanVisible");
+  }
+
+  async layoutsGanttVisible(): Promise<boolean> {
+    return todo("layoutsGanttVisible");
+  }
+
+  async layoutsListGroups(): Promise<string[]> {
+    return todo("layoutsListGroups");
+  }
+
+  async layoutsListGroupExpanded(_title: string): Promise<boolean> {
+    return todo("layoutsListGroupExpanded");
+  }
+
+  async layoutsListToggleGroup(_title: string): Promise<void> {
+    return todo("layoutsListToggleGroup");
+  }
+
+  async layoutsListGroupIssueNames(_title: string): Promise<string[]> {
+    return todo("layoutsListGroupIssueNames");
+  }
+
+  async layoutsListGroupHasLoadMore(_title: string): Promise<boolean> {
+    return todo("layoutsListGroupHasLoadMore");
+  }
+
+  async layoutsListGroupLoadMore(_title: string): Promise<void> {
+    return todo("layoutsListGroupLoadMore");
+  }
+
+  async layoutsListScrollEnd(): Promise<void> {
+    return todo("layoutsListScrollEnd");
+  }
+
+  async layoutsListQuickAdd(_title: string, _groupTitle?: string): Promise<void> {
+    return todo("layoutsListQuickAdd");
+  }
+
+  async layoutsRowCanEditState(_issueName: string): Promise<boolean> {
+    return todo("layoutsRowCanEditState");
+  }
+
+  async layoutsRowHref(_issueName: string): Promise<string | null> {
+    return todo("layoutsRowHref");
+  }
+
+  async layoutsRowOpenPeek(_issueName: string): Promise<void> {
+    return todo("layoutsRowOpenPeek");
+  }
+
+  async layoutsPeekVisible(): Promise<boolean> {
+    return todo("layoutsPeekVisible");
+  }
+
+  async layoutsPeekTitle(): Promise<string | null> {
+    return todo("layoutsPeekTitle");
+  }
+
+  async layoutsPeekClose(): Promise<void> {
+    return todo("layoutsPeekClose");
+  }
+
+  async layoutsRowHasSubIssueToggle(_issueName: string): Promise<boolean> {
+    return todo("layoutsRowHasSubIssueToggle");
+  }
+
+  async layoutsRowExpandSubIssues(_issueName: string): Promise<void> {
+    return todo("layoutsRowExpandSubIssues");
+  }
+
+  async layoutsRowSubIssueNames(_issueName: string): Promise<string[]> {
+    return todo("layoutsRowSubIssueNames");
+  }
+
+  async layoutsRowState(_issueName: string): Promise<string> {
+    return todo("layoutsRowState");
+  }
+
+  async layoutsRowSetState(_issueName: string, _stateName: string): Promise<void> {
+    return todo("layoutsRowSetState");
+  }
+
+  async layoutsRowPriority(_issueName: string): Promise<string> {
+    return todo("layoutsRowPriority");
+  }
+
+  async layoutsRowSetPriority(_issueName: string, _priorityName: string): Promise<void> {
+    return todo("layoutsRowSetPriority");
+  }
+
+  async layoutsRowMenuItems(_issueName: string): Promise<string[]> {
+    return todo("layoutsRowMenuItems");
+  }
+
+  async layoutsRowMenuChoose(_issueName: string, _item: string): Promise<void> {
+    return todo("layoutsRowMenuChoose");
+  }
+
+  async layoutsRowContextMenuItems(_issueName: string): Promise<string[]> {
+    return todo("layoutsRowContextMenuItems");
   }
 }

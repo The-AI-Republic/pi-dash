@@ -10,6 +10,7 @@
 // (never fork it) as new areas need new actions.
 import type { Locator, Page } from "@playwright/test";
 import type {
+  LayoutsLayoutKey,
   ParityBrowserCookie,
   ParityDriver,
   ParityTarget,
@@ -1241,5 +1242,459 @@ export class WebDriver implements ParityDriver {
     await accept.waitFor({ timeout: 60_000 });
     await decline.waitFor({ timeout: 60_000 });
     return (await accept.isVisible()) && (await decline.isVisible());
+  }
+
+  // --- NEWFRONT-117 (layouts A): shared layout switching, list rows, quick
+  // --- actions. Selectors observed on the running old app (seeded stack):
+  // --- the header switcher is a five-button segmented control in fixed
+  // --- order (list, board, calendar, spreadsheet, timeline) with an active
+  // --- background marker; list sections hang group headers over anchors
+  // --- with id="issue-<uuid>"; the row quick-actions trigger is a hover
+  // --- control with an accessible toggle name; the peek panel is the
+  // --- absolute right-side panel plus a peekIssueId URL param.
+
+  private static readonly LAYOUTS_ORDER: LayoutsLayoutKey[] = ["list", "kanban", "calendar", "spreadsheet", "gantt"];
+
+  private layoutsSwitcherButtons(): Locator {
+    return this.page.locator("div.flex.items-center.gap-1.rounded-md.bg-layer-3.p-1 > button");
+  }
+
+  private layoutsIssueRow(issueName: string): Locator {
+    return this.page.locator('a[id^="issue-"]', { hasText: issueName }).first();
+  }
+
+  private layoutsGroupHeaders(): Locator {
+    return this.page.locator('div[class*="group/list-header"]');
+  }
+
+  private layoutsPeekPanel(): Locator {
+    return this.page.locator("div.absolute.top-0.right-0.bottom-0").first();
+  }
+
+  private static layoutsHeaderTitle(headerText: string): string {
+    // Headers render "Title <count>"; the count is a trailing bare number.
+    return headerText
+      .trim()
+      .replace(/\s+/g, " ")
+      .replace(/\s+\d+$/, "");
+  }
+
+  async layoutsOfferedLayouts(): Promise<LayoutsLayoutKey[]> {
+    const buttons = this.layoutsSwitcherButtons();
+    await buttons.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    const count = await buttons.count();
+    if (count !== WebDriver.LAYOUTS_ORDER.length) {
+      throw new Error(`[parity] layout switcher offers ${count} layouts, expected ${WebDriver.LAYOUTS_ORDER.length}.`);
+    }
+    return [...WebDriver.LAYOUTS_ORDER];
+  }
+
+  async layoutsActiveLayout(): Promise<LayoutsLayoutKey> {
+    const buttons = this.layoutsSwitcherButtons();
+    await buttons.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    const count = await buttons.count();
+    for (let i = 0; i < count; i++) {
+      const cls = (await buttons.nth(i).getAttribute("class")) ?? "";
+      if (cls.includes("bg-layer-transparent-active")) {
+        const key = WebDriver.LAYOUTS_ORDER[i];
+        if (key === undefined) throw new Error(`[parity] switcher has no layout key at index ${i}.`);
+        return key;
+      }
+    }
+    throw new Error("[parity] no switcher button carries the active marker.");
+  }
+
+  private async layoutsWaitForLayout(layout: LayoutsLayoutKey): Promise<void> {
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const visible =
+        layout === "list"
+          ? await this.layoutsListVisible()
+          : layout === "kanban"
+            ? await this.layoutsKanbanVisible()
+            : layout === "calendar"
+              ? await this.layoutsCalendarVisible()
+              : layout === "spreadsheet"
+                ? await this.layoutsSpreadsheetVisible()
+                : await this.layoutsGanttVisible();
+      if (visible) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] ${layout} layout never rendered after switching.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsSwitchTo(layout: LayoutsLayoutKey): Promise<void> {
+    const index = WebDriver.LAYOUTS_ORDER.indexOf(layout);
+    const buttons = this.layoutsSwitcherButtons();
+    await buttons.nth(index).waitFor({ timeout: WebDriver.WAIT_MS });
+    await buttons.nth(index).scrollIntoViewIfNeeded();
+    await buttons.nth(index).click();
+    // Clicking the active layout is a specified no-op; the marker is
+    // already visible then, so this wait resolves immediately.
+    await this.layoutsWaitForLayout(layout);
+  }
+
+  async layoutsReloadIssues(): Promise<void> {
+    await this.page.reload();
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.layoutsSwitcherButtons().first().waitFor({ timeout: 60_000 });
+  }
+
+  async layoutsListVisible(): Promise<boolean> {
+    // Immediate read, no waiting: switch assertions poll through
+    // layoutsSwitchTo, and absence must read fast.
+    return (await this.layoutsGroupHeaders().count()) > 0;
+  }
+
+  async layoutsCalendarVisible(): Promise<boolean> {
+    return (await this.page.getByRole("button", { name: "Options" }).count()) > 0;
+  }
+
+  async layoutsSpreadsheetVisible(): Promise<boolean> {
+    // The sheet's first-column header reads "Work items" (lowercase i);
+    // the breadcrumb elsewhere reads "Work Items", so the exact match is
+    // unambiguous.
+    return (await this.page.getByText("Work items", { exact: true }).count()) > 0;
+  }
+
+  async layoutsKanbanVisible(): Promise<boolean> {
+    // The board carries no exclusive text on the seed: it renders issue
+    // cards but none of the other layouts' markers. A fully collapsed
+    // board shows no cards, so the active switcher also counts (the
+    // switch scenario separately proves cards render when expanded).
+    const otherMarkers =
+      (await this.page.getByText("All work items", { exact: true }).count()) +
+      (await this.page.getByRole("button", { name: "Options" }).count()) +
+      (await this.page.getByText("Work items", { exact: true }).count()) +
+      (await this.page.getByRole("button", { name: "Quarter" }).count());
+    if (otherMarkers > 0) return false;
+    if ((await this.page.locator('a[id^="issue-"]').count()) > 0) return true;
+    return (await this.layoutsActiveLayout()) === "kanban";
+  }
+
+  async layoutsGanttVisible(): Promise<boolean> {
+    return (await this.page.getByRole("button", { name: "Quarter" }).count()) > 0;
+  }
+
+  async layoutsListGroups(): Promise<string[]> {
+    const headers = this.layoutsGroupHeaders();
+    const count = await headers.count();
+    const titles: string[] = [];
+    for (let i = 0; i < count; i++) {
+      titles.push(WebDriver.layoutsHeaderTitle((await headers.nth(i).innerText()) ?? ""));
+    }
+    return titles;
+  }
+
+  private async layoutsGroupSection(title: string): Promise<Locator> {
+    const sections = this.page.locator('div[data-drop-target-for-element="true"]');
+    const count = await sections.count();
+    for (let i = 0; i < count; i++) {
+      const header = sections.nth(i).locator('div[class*="group/list-header"]').first();
+      if ((await header.count()) === 0) continue;
+      if (WebDriver.layoutsHeaderTitle((await header.innerText()) ?? "") === title) return sections.nth(i);
+    }
+    throw new Error(`[parity] list group "${title}" not found.`);
+  }
+
+  async layoutsListGroupExpanded(title: string): Promise<boolean> {
+    // A collapsed section hides its rows and its quick-add; the sticky
+    // quick-add is present exactly when expanded (member+ view).
+    const section = await this.layoutsGroupSection(title);
+    return (await section.locator("div.sticky.bottom-0").count()) > 0;
+  }
+
+  async layoutsListToggleGroup(title: string): Promise<void> {
+    const section = await this.layoutsGroupSection(title);
+    const before = await this.layoutsListGroupExpanded(title);
+    await section.locator('div[class*="group/list-header"]').first().click();
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if ((await this.layoutsListGroupExpanded(title)) !== before) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] list group "${title}" never toggled.`);
+      await this.page.waitForTimeout(300);
+    }
+  }
+
+  async layoutsListGroupIssueNames(title: string): Promise<string[]> {
+    const section = await this.layoutsGroupSection(title);
+    const rows = section.locator('a[id^="issue-"]');
+    const count = await rows.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const text = await rows.nth(i).locator("p").first().innerText();
+      names.push(text.trim());
+    }
+    return names;
+  }
+
+  async layoutsListGroupHasLoadMore(title: string): Promise<boolean> {
+    const section = await this.layoutsGroupSection(title);
+    return (await section.getByText("Load more").count()) > 0;
+  }
+
+  async layoutsListGroupLoadMore(title: string): Promise<void> {
+    const section = await this.layoutsGroupSection(title);
+    const before = await this.layoutsListGroupIssueNames(title);
+    await section.getByText("Load more").first().click();
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      const after = await this.layoutsListGroupIssueNames(title);
+      if (after.length > before.length || !(await this.layoutsListGroupHasLoadMore(title))) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] group "${title}" never loaded more.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsListScrollEnd(): Promise<void> {
+    const rows = this.page.locator('a[id^="issue-"]');
+    const count = await rows.count();
+    if (count === 0) throw new Error("[parity] no list rows to scroll to.");
+    await rows.nth(count - 1).scrollIntoViewIfNeeded();
+  }
+
+  async layoutsListQuickAdd(title: string, groupTitle?: string): Promise<void> {
+    const scope = groupTitle === undefined ? this.page : await this.layoutsGroupSection(groupTitle);
+    const trigger = scope.locator("div.sticky.bottom-0", { hasText: "New work item" }).first();
+    await trigger.scrollIntoViewIfNeeded();
+    await trigger.click();
+    const field = this.page.getByPlaceholder("Work item title");
+    await field.waitFor({ timeout: WebDriver.WAIT_MS });
+    await field.fill(title);
+    await field.press("Enter");
+    // The row appearing proves the save landed; the title is unique per
+    // scenario run, so this cannot match a stale row.
+    await this.page.locator('a[id^="issue-"]', { hasText: title }).first().waitFor({ timeout: 60_000 });
+  }
+
+  async layoutsRowCanEditState(issueName: string): Promise<boolean> {
+    // Guests and other read-only viewers render the chip without the
+    // dropdown. The dropdown carries its own search field, but the page
+    // already holds one, so editability reads as the field count growing
+    // after the click rather than as mere presence.
+    const search = this.page.getByPlaceholder("Search", { exact: true });
+    const before = await search.count();
+    const chip = this.layoutsRowStateButton(issueName);
+    await chip.scrollIntoViewIfNeeded();
+    await chip.click();
+    const deadline = Date.now() + 5_000;
+    let opened = false;
+    for (;;) {
+      if ((await search.count()) > before) {
+        opened = true;
+        break;
+      }
+      if (Date.now() >= deadline) break;
+      await this.page.waitForTimeout(300);
+    }
+    await this.page.keyboard.press("Escape");
+    return opened;
+  }
+
+  async layoutsRowHref(issueName: string): Promise<string | null> {
+    const row = this.layoutsIssueRow(issueName);
+    if ((await row.count()) === 0) throw new Error(`[parity] no row renders "${issueName}".`);
+    return row.getAttribute("href");
+  }
+
+  async layoutsRowOpenPeek(issueName: string): Promise<void> {
+    const row = this.layoutsIssueRow(issueName);
+    await row.locator("p").first().click();
+    await this.page.waitForURL((url) => url.href.includes("peekIssueId"), { timeout: 60_000 });
+    await this.layoutsPeekPanel().waitFor({ timeout: 60_000 });
+  }
+
+  async layoutsPeekVisible(): Promise<boolean> {
+    if (!this.page.url().includes("peekIssueId")) return false;
+    const panel = this.layoutsPeekPanel();
+    return (await panel.count()) > 0 && (await panel.isVisible());
+  }
+
+  async layoutsPeekTitle(): Promise<string | null> {
+    // Seed issues carry no description, so the panel reads as the
+    // identifier line (PAR-1), the title line, then the description
+    // placeholder: the title is the line right after the identifier.
+    const panel = this.layoutsPeekPanel();
+    if ((await panel.count()) === 0) return null;
+    const lines = ((await panel.innerText()) ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    const at = lines.findIndex((line) => /^[A-Z]+-\d+$/.test(line));
+    if (at < 0 || at + 1 >= lines.length) return null;
+    return lines[at + 1] ?? null;
+  }
+
+  async layoutsPeekClose(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if (!this.page.url().includes("peekIssueId")) return;
+      if (Date.now() >= deadline) throw new Error("[parity] peek panel never closed.");
+      await this.page.waitForTimeout(300);
+    }
+  }
+
+  async layoutsRowHasSubIssueToggle(issueName: string): Promise<boolean> {
+    // The leading cell is an empty grid slot without children and carries
+    // the expander button once sub-issues exist.
+    const row = this.layoutsIssueRow(issueName);
+    const slot = row.locator("div.grid.size-4").first();
+    if ((await slot.count()) === 0) return false;
+    return (await slot.locator("button").count()) > 0;
+  }
+
+  async layoutsRowExpandSubIssues(issueName: string): Promise<void> {
+    const row = this.layoutsIssueRow(issueName);
+    const toggle = row.locator("div.grid.size-4 button").first();
+    await toggle.waitFor({ timeout: WebDriver.WAIT_MS });
+    await toggle.click();
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      if ((await this.layoutsRowSubIssueNames(issueName)).length > 0) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] sub-issues of "${issueName}" never rendered.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsRowSubIssueNames(issueName: string): Promise<string[]> {
+    // Expanded children render as nested rows inside the parent's block,
+    // after the parent's own link.
+    const row = this.layoutsIssueRow(issueName);
+    const block = row.locator("xpath=..");
+    const nested = block.locator('a[id^="issue-"]');
+    const count = await nested.count();
+    const names: string[] = [];
+    for (let i = 1; i < count; i++) {
+      names.push(((await nested.nth(i).locator("p").first().innerText()) ?? "").trim());
+    }
+    return names;
+  }
+
+  private layoutsRowStateButton(issueName: string): Locator {
+    // The state chip is the row's span-carrying button (the identifier is
+    // a bare button, the icon controls carry no span).
+    return this.layoutsIssueRow(issueName).locator("button:has(span)").first();
+  }
+
+  async layoutsRowState(issueName: string): Promise<string> {
+    const chip = this.layoutsRowStateButton(issueName);
+    await chip.waitFor({ timeout: WebDriver.WAIT_MS });
+    return ((await chip.innerText()) ?? "").trim();
+  }
+
+  async layoutsRowSetState(issueName: string, stateName: string): Promise<void> {
+    const chip = this.layoutsRowStateButton(issueName);
+    await chip.scrollIntoViewIfNeeded();
+    await chip.click();
+    // The option portal renders at the end of the document, after the
+    // row chips with the same text, so the last match is the option.
+    const option = this.page.getByRole("button", { name: stateName, exact: true }).last();
+    await option.waitFor({ timeout: WebDriver.WAIT_MS });
+    await option.click();
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      if ((await this.layoutsRowState(issueName)) === stateName) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] row "${issueName}" never showed state "${stateName}".`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  private async layoutsRowPriorityControl(issueName: string): Promise<Locator> {
+    // Priority is the first visible icon-only control in the strip: the
+    // identifier is disabled, the state chip carries a span, the menu
+    // triggers carry the toggle name, and the mobile trigger is hidden on
+    // desktop, so what remains first is the priority control.
+    const row = this.layoutsIssueRow(issueName);
+    const candidates = row.locator("button:not([disabled])").filter({ hasNot: row.locator("span") });
+    const count = await candidates.count();
+    for (let i = 0; i < count; i++) {
+      const candidate = candidates.nth(i);
+      if ((await candidate.getAttribute("aria-label")) === "Toggle quick actions menu") continue;
+      if (!(await candidate.isVisible())) continue;
+      return candidate;
+    }
+    throw new Error(`[parity] no priority control found on row "${issueName}".`);
+  }
+
+  async layoutsRowPriority(issueName: string): Promise<string> {
+    const control = await this.layoutsRowPriorityControl(issueName);
+    await control.waitFor({ timeout: WebDriver.WAIT_MS });
+    const text = ((await control.innerText()) ?? "").trim();
+    return text === "" ? "None" : text;
+  }
+
+  async layoutsRowSetPriority(issueName: string, priorityName: string): Promise<void> {
+    const control = await this.layoutsRowPriorityControl(issueName);
+    await control.scrollIntoViewIfNeeded();
+    await control.click();
+    const option = this.page.getByRole("button", { name: priorityName, exact: true }).last();
+    await option.waitFor({ timeout: WebDriver.WAIT_MS });
+    await option.click();
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      const current = await this.layoutsRowPriority(issueName);
+      if (current === priorityName || (priorityName === "None" && current === "None")) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] row "${issueName}" never showed priority "${priorityName}".`);
+      }
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  private async layoutsOpenRowMenu(issueName: string): Promise<void> {
+    const row = this.layoutsIssueRow(issueName);
+    const trigger = row.getByRole("button", { name: "Toggle quick actions menu" }).first();
+    await trigger.waitFor({ timeout: WebDriver.WAIT_MS });
+    // The trigger is hover-revealed and sits under the property strip for
+    // automation clicks, so hover it into its clickable state first; a
+    // keyboard activation covers the case where the strip still overlaps.
+    await trigger.hover();
+    await trigger.click({ timeout: 10_000 }).catch(async () => {
+      await trigger.focus();
+      await this.page.keyboard.press("Enter");
+    });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+  }
+
+  private async layoutsReadOpenMenuItems(): Promise<string[]> {
+    const items = this.page.getByRole("menuitem");
+    const count = await items.count();
+    const texts: string[] = [];
+    for (let i = 0; i < count; i++) {
+      texts.push(((await items.nth(i).innerText()) ?? "").trim().replace(/\s+/g, " "));
+    }
+    return texts;
+  }
+
+  async layoutsRowMenuItems(issueName: string): Promise<string[]> {
+    await this.layoutsOpenRowMenu(issueName);
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  async layoutsRowMenuChoose(issueName: string, item: string): Promise<void> {
+    await this.layoutsOpenRowMenu(issueName);
+    await this.page.getByRole("menuitem", { name: item, exact: true }).first().click();
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if ((await this.page.getByRole("menuitem").count()) === 0) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] row menu never closed after choosing "${item}".`);
+      await this.page.waitForTimeout(300);
+    }
+  }
+
+  async layoutsRowContextMenuItems(issueName: string): Promise<string[]> {
+    const row = this.layoutsIssueRow(issueName);
+    await row.locator("p").first().click({ button: "right" });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
   }
 }
