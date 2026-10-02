@@ -24,7 +24,7 @@ no-auth 500).
   `runner/services/usage.py:1-173` (coerce_token :69-79, normalize_usage
   :129-148, merge_usage :151-162, flat_token_fields :165-173); `runner/
   diagnostics.py:1-245` (infer_agent_label :103-128, enrich_run_error :149-170,
-  classify_run_error :173-245); consts `views/runs.py:35-36`,
+  classify_run_error :173-245); consts `views/runs.py:36-37`,
   `views/run_endpoints.py:45` + `:491-503`, `views/chat.py:64`,
   `services/chat.py:40-45`, `tasks.py:208,219`.
 
