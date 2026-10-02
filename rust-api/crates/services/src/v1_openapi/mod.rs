@@ -7,6 +7,8 @@
 //!
 //! * [`meta`] — doc-meta consts + API-key auth scheme (PIDASHCONV-530).
 //! * [`hooks`] — the 3 schema hook functions (PIDASHCONV-530).
+//! * [`routes`] — golden route table as static data (PIDASHCONV-532).
+//! * [`doc`] — OpenAPI 3.0.3 assembly + YAML/JSON rendering (PIDASHCONV-532).
 //!
 //! Wiring note: the crate root declares `pub mod v1_openapi;` (seam for
 //! this issue's new files); every file under this module is new. Sibling
@@ -14,5 +16,7 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
+pub mod doc;
 pub mod hooks;
 pub mod meta;
+pub mod routes;
