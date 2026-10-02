@@ -2586,10 +2586,20 @@ pub struct ModuleWrite {
     pub external_id: Option<Option<String>>,
 }
 
-/// Django `parse_date` (`\d{4}-\d{1,2}-\d{1,2}`, the `iso-8601` input format
-/// DRF's `DateField` uses): 4-digit year, 1-2 digit ASCII month/day, plus a
-/// real calendar day. Returns the parsed date for writes.
+/// Django `parse_date` (the `iso-8601` input format DRF's `DateField`
+/// uses): `date.fromisoformat` first, so besides `YYYY-MM-DD` it also
+/// accepts basic `YYYYMMDD` and ISO week dates (`YYYY-Www[-D]` /
+/// `YYYYWww[D]`, the day defaulting to Monday). Ordinal dates are rejected
+/// by CPython and stay rejected here. Returns the parsed date for writes.
 pub fn parse_module_date(text: &str) -> Option<chrono::NaiveDate> {
+    parse_calendar_date(text)
+        .or_else(|| parse_basic_date(text))
+        .or_else(|| parse_week_date(text))
+}
+
+/// Extended calendar `YYYY-M-D`: 4-digit year, 1-2 digit ASCII month/day,
+/// plus a real calendar day.
+fn parse_calendar_date(text: &str) -> Option<chrono::NaiveDate> {
     let parts: Vec<&str> = text.split('-').collect();
     if parts.len() != 3 {
         return None;
@@ -2610,6 +2620,70 @@ pub fn parse_module_date(text: &str) -> Option<chrono::NaiveDate> {
     let month: u32 = month.parse().ok()?;
     let day: u32 = day.parse().ok()?;
     chrono::NaiveDate::from_ymd_opt(year, month, day)
+}
+
+/// Basic calendar `YYYYMMDD`: exactly 8 ASCII digits (CPython rejects any
+/// other width), year 1-9999, plus a real calendar day.
+fn parse_basic_date(text: &str) -> Option<chrono::NaiveDate> {
+    if text.len() != 8 || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let year: i32 = text[0..4].parse().ok()?;
+    let month: u32 = text[4..6].parse().ok()?;
+    let day: u32 = text[6..8].parse().ok()?;
+    if !(1..=9999).contains(&year) {
+        return None;
+    }
+    chrono::NaiveDate::from_ymd_opt(year, month, day)
+}
+
+/// ISO week dates: `YYYY-Www[-D]` and `YYYYWww[D]` (uppercase `W`,
+/// zero-padded week, 1-digit day defaulting to Monday). Mixed dashes,
+/// week 00, day 0/8, year 0, week 53 in short years, and results past
+/// `9999-12-31` are all rejected, matching CPython.
+fn parse_week_date(text: &str) -> Option<chrono::NaiveDate> {
+    let bytes = text.as_bytes();
+    // Fixed shapes only; unpadded weeks, 2-digit days, lowercase `w` and
+    // mixed-dash forms fall out here.
+    let (year, week, day): (&[u8], &[u8], &[u8]) = match bytes.len() {
+        10 if bytes[4] == b'-' && bytes[5] == b'W' && bytes[8] == b'-' => {
+            (&bytes[0..4], &bytes[6..8], &bytes[9..10])
+        }
+        8 if bytes[4] == b'-' && bytes[5] == b'W' => (&bytes[0..4], &bytes[6..8], b"1"),
+        8 if bytes[4] == b'W' => (&bytes[0..4], &bytes[5..7], &bytes[7..8]),
+        7 if bytes[4] == b'W' => (&bytes[0..4], &bytes[5..7], b"1"),
+        _ => return None,
+    };
+    if !year.iter().all(|b| b.is_ascii_digit())
+        || !week.iter().all(|b| b.is_ascii_digit())
+        || !day.iter().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let year: i32 = std::str::from_utf8(year).ok()?.parse().ok()?;
+    let week: u32 = std::str::from_utf8(week).ok()?.parse().ok()?;
+    let day: u32 = std::str::from_utf8(day).ok()?.parse().ok()?;
+    if !(1..=9999).contains(&year) || !(1..=53).contains(&week) {
+        return None;
+    }
+    let weekday = match day {
+        1 => chrono::Weekday::Mon,
+        2 => chrono::Weekday::Tue,
+        3 => chrono::Weekday::Wed,
+        4 => chrono::Weekday::Thu,
+        5 => chrono::Weekday::Fri,
+        6 => chrono::Weekday::Sat,
+        7 => chrono::Weekday::Sun,
+        _ => return None,
+    };
+    let date = chrono::NaiveDate::from_isoywd_opt(year, week, weekday)?;
+    // CPython overflows past year 9999 (e.g. `9999-W52-7` is out of range
+    // for `date`); chrono's range is wider, so the cap is enforced here.
+    use chrono::Datelike;
+    if date.year() > 9999 {
+        return None;
+    }
+    Some(date)
 }
 
 /// Coerce the create/update body field by field (DRF field order =
@@ -5288,6 +5362,90 @@ mod tests {
         assert_eq!(parse_module_date("24-01-05"), None);
         assert_eq!(parse_module_date("2024-001-05"), None);
         assert_eq!(parse_module_date("2024-01"), None);
+    }
+
+    #[test]
+    fn module_date_iso_extras() {
+        // `fromisoformat` extras Django accepts (every value verified live
+        // vs Django 4.2.30): basic `YYYYMMDD`, week dates with and without
+        // the day (dayless means Monday), extended and basic.
+        let accepted = [
+            ("2024-W05-6", (2024, 2, 3)),
+            ("20240105", (2024, 1, 5)),
+            ("2024-W05", (2024, 1, 29)),
+            ("2024W05", (2024, 1, 29)),
+            ("2024W056", (2024, 2, 3)),
+            ("2024-W05-7", (2024, 2, 4)),
+            ("2024-W01-1", (2024, 1, 1)),
+            ("2023-W01-1", (2023, 1, 2)),
+            ("2019-W01-1", (2018, 12, 31)),
+            ("2021-W52-7", (2022, 1, 2)),
+            ("2015-W52-7", (2015, 12, 27)),
+            ("2020-W53-1", (2020, 12, 28)),
+            ("2020-W53-7", (2021, 1, 3)),
+            ("2015-W53-1", (2015, 12, 28)),
+            ("0001-W01-1", (1, 1, 1)),
+            ("0001W011", (1, 1, 1)),
+            ("00010101", (1, 1, 1)),
+            ("99991231", (9999, 12, 31)),
+            ("9999-W52-1", (9999, 12, 27)),
+            ("9999-W52-5", (9999, 12, 31)),
+            ("9999W521", (9999, 12, 27)),
+        ];
+        for (text, (year, month, day)) in accepted {
+            assert_eq!(
+                parse_module_date(text),
+                chrono::NaiveDate::from_ymd_opt(year, month, day),
+                "{}",
+                text
+            );
+        }
+        // Rejected on both sides (verified live): ordinals, week 53 in
+        // short years, week 00, day 0/8, unpadded or lowercase weeks,
+        // mixed dashes, bad widths, year 0, overflow past 9999-12-31.
+        let rejected = [
+            "2024-036",
+            "2024-060",
+            "2024056",
+            "2021-W53-1",
+            "2024-W53-7",
+            "9999W527",
+            "9999-W52-6",
+            "9999-W52-7",
+            "2024-W05-0",
+            "2024-W05-8",
+            "2024-W00-1",
+            "2024-W5-6",
+            "2024-w05-6",
+            "2024W05-6",
+            "2024-W056",
+            "2024-W05-06",
+            "2024-W05-",
+            "2024-W5",
+            "2024W5",
+            "2024-W",
+            "2024W",
+            "2024010",
+            "202402031",
+            "020240203",
+            "20240010",
+            "20240100",
+            "20240230",
+            "20241301",
+            "00000101",
+            "0000-W01-1",
+            "20244-W05-6",
+            "+2024-W05-6",
+            "20240105\n",
+            "2024-W05-6\n",
+            "20240105 ",
+            " 20240105",
+            "2024-02-03T00:00:00",
+            "",
+        ];
+        for text in rejected {
+            assert_eq!(parse_module_date(text), None, "{}", text);
+        }
     }
 
     #[test]
