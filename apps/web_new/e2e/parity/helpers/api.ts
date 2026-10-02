@@ -3508,3 +3508,110 @@ export async function deleteIssueStatus(
   );
   return res.status;
 }
+
+/** Activity-feed server reads (NEWFRONT-114). The old app merges two split
+ * history sources client-side: property-change entries
+ * (`activity_type=issue-property`) and comments
+ * (`activity_type=issue-comment`). The merged read without `activity_type`
+ * 500s (see NEWFRONT-128). Both sides support `created_at__gt` for
+ * incremental fetch. Appended additively; existing helpers are untouched. */
+
+/** One history row as the server reports it (property entry or comment). */
+
+export interface HistoryEntry {
+  id: string;
+  created_at: string;
+  activity_type?: unknown;
+  field?: unknown;
+  verb?: unknown;
+  comment?: unknown;
+  comment_html?: unknown;
+  actor?: unknown;
+  [key: string]: unknown;
+}
+
+export interface HistoryProbe {
+  status: number;
+  entries: HistoryEntry[];
+}
+
+/** Raw history read; `query` carries the leading `?` (e.g. `?activity_type=issue-property`). */
+
+export async function serverHistory(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  query = "",
+  apiBase: string = apiBaseFromEnv()
+): Promise<HistoryProbe> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/history/${query}`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (res.status !== 200) return { status: res.status, entries: [] };
+  const payload: unknown = await res.json();
+  const entries: HistoryEntry[] = (
+    Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? [])
+  ) as HistoryEntry[];
+  return { status: res.status, entries };
+}
+
+/** Delete one comment; resolves with the HTTP status (204 on success). */
+
+export async function serverCleanupIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  email: string,
+  password: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const attempt = async (cookie: string): Promise<number> => {
+    const comments = await serverHistory(
+      workspaceSlug,
+      projectId,
+      issueId,
+      cookie,
+      "?activity_type=issue-comment",
+      apiBase
+    );
+    for (const entry of comments.entries) {
+      // Best-effort: a comment already removed (reseed race) must not fail
+      // cleanup; the issue delete below is the real signal.
+      await serverDeleteComment(workspaceSlug, projectId, issueId, entry.id, cookie, apiBase).catch(() => {});
+    }
+    // Status via the shared deleteIssueStatus (merged #880/#905 contract);
+    // our status-returning serverDeleteIssue was dropped to avoid forking it.
+    return deleteIssueStatus(workspaceSlug, projectId, issueId, cookie, apiBase);
+  };
+  const first = await attempt(sessionCookie).catch(() => -1);
+  if (first === 204 || first === 404) return;
+  const fresh = await signInSessionWithRetry(email, password, apiBase);
+  const second = await attempt(fresh);
+  if (second !== 204 && second !== 404) throw new Error(`[parity] issue cleanup failed with HTTP ${second}.`);
+}
+
+/** Sign in with retries: the scratch API throttles the credential endpoints
+ * under concurrent parity runs, so server setup signs in defensively
+ * instead of failing the scenario on a 429/502. Untouched existing
+ * behavior; this wrapper is additive. */
+
+export async function signInSessionWithRetry(
+  email: string,
+  password: string,
+  apiBase: string = apiBaseFromEnv(),
+  tries = 6
+): Promise<string> {
+  let last: unknown = null;
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    try {
+      return await signInSession(email, password, apiBase);
+    } catch (error) {
+      last = error;
+      if (attempt < tries) await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+    }
+  }
+  throw last instanceof Error ? last : new Error(`[parity] sign-in failed after ${tries} tries.`);
+}

@@ -4209,4 +4209,234 @@ export class WebDriver implements ParityDriver {
     await btn.waitFor({ timeout: WebDriver.OPEN_MS });
     return btn.isDisabled().catch(() => true);
   }
+
+  // Activity feed (NEWFRONT-114). All reads scope from the user-visible
+  // "Activity" heading: its parent is the header row (title plus the
+  // worklog/sort/filter icon buttons, in that DOM order) and its
+  // grandparent is the section. Entries are the children of the feed
+  // container — the inner child without the composer editor.
+
+  private activityHeading(): Locator {
+    return this.page.getByText("Activity", { exact: true }).first();
+  }
+
+  private async activitySection(): Promise<Locator> {
+    const heading = this.activityHeading();
+    // Generous: the heading renders only after the whole detail page loads,
+    // which stalls under concurrent parity runs on the shared stack.
+    await heading.waitFor({ timeout: 120_000 });
+    return heading.locator("xpath=../..");
+  }
+
+  /**
+   * Header buttons decoded from the running app: the sort control is a
+   * plain icon button, while the filter control is a popover whose
+   * headless trigger button wraps an inner icon button plus the narrowed
+   * marker dot. An optional worklog button may precede both, so neither
+   * control is addressed by raw position.
+   */
+  private async activitySortButton(): Promise<Locator> {
+    const header = (await this.activitySection()).locator(":scope > div:nth-child(1)");
+    const buttons = header.getByRole("button");
+    const n = await buttons.count();
+    let sort: Locator | null = null;
+    for (let i = 0; i < n; i++) {
+      const candidate = buttons.nth(i);
+      if ((await candidate.locator(":scope button").count()) > 0) continue;
+      if (await candidate.evaluate((el) => el.parentElement?.tagName.toLowerCase() === "button")) continue;
+      sort = candidate;
+    }
+    if (sort === null) throw new Error("[parity] activity sort button not found");
+    return sort;
+  }
+
+  private async activityFilterButton(): Promise<Locator> {
+    const header = (await this.activitySection()).locator(":scope > div:nth-child(1)");
+    const buttons = header.getByRole("button");
+    const n = await buttons.count();
+    for (let i = 0; i < n; i++) {
+      const candidate = buttons.nth(i);
+      if ((await candidate.locator(":scope button").count()) > 0) return candidate;
+    }
+    throw new Error("[parity] activity filter button not found");
+  }
+
+  private async activityFeedRoot(section: Locator): Promise<Locator | null> {
+    const inner = section.locator(":scope > div:nth-child(2) > div > div");
+    if ((await inner.count()) === 0) return null;
+    const kids = inner.locator(":scope > div");
+    const n = await kids.count();
+    for (let i = 0; i < n; i++) {
+      const kid = kids.nth(i);
+      if ((await kid.locator('[contenteditable="true"]').count()) === 0) return kid;
+    }
+    return null;
+  }
+
+  /**
+   * Defensive sign-in for the shared scratch stack: the credential POST can
+   * be throttled (429) or land mid-reseed by a concurrent parity run, which
+   * leaves the page on the entry route with no session. Repeat the
+   * entry-plus-password flow until the workspace URL lands, then return;
+   * throw after three attempts. The base openEntry/signInWithPassword
+   * methods are untouched (parent contract: extend, never modify).
+   */
+  async activitySignIn(email: string, password: string, workspaceSlug: string): Promise<void> {
+    let lastUrl = "";
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await this.openEntry();
+      await this.signInWithPassword(email, password);
+      const start = Date.now();
+      while (Date.now() - start < 45_000) {
+        lastUrl = this.page.url();
+        if (lastUrl.includes(workspaceSlug)) return;
+        await this.page.waitForTimeout(1000);
+      }
+    }
+    throw new Error(`[parity] sign-in did not land in the workspace after 3 tries (last URL: ${lastUrl})`);
+  }
+
+  async activityOpenIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues/${issueId}`);
+    await this.activityHeading().waitFor();
+  }
+
+  async activityEntryTexts(): Promise<string[]> {
+    const section = await this.activitySection();
+    const feed = await this.activityFeedRoot(section);
+    if (feed === null) return [];
+    const entries = feed.locator(":scope > *");
+    const n = await entries.count();
+    const texts: string[] = [];
+    for (let i = 0; i < n; i++) {
+      texts.push(((await entries.nth(i).textContent()) ?? "").trim().replace(/\s+/g, " "));
+    }
+    return texts.filter((t) => t.length > 0);
+  }
+
+  async activityToggleSort(): Promise<void> {
+    await (await this.activitySortButton()).click();
+  }
+
+  /**
+   * The filter menu renders as an overlay without a menu role, next to the
+   * filter button. Among the visible exact-text matches for a label (the
+   * page itself can show the same words, e.g. a state control), the menu
+   * option is the one nearest the filter button.
+   */
+  private async activityMenuOption(label: string): Promise<Locator | null> {
+    const button = await this.activityFilterButton();
+    const box = await button.boundingBox();
+    if (box === null) throw new Error("[parity] filter button has no bounding box");
+    const centerX = box.x + box.width / 2;
+    const centerY = box.y + box.height / 2;
+    const candidates = this.page.getByText(label, { exact: true });
+    const n = await candidates.count();
+    let best: Locator | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < n; i++) {
+      const candidate = candidates.nth(i);
+      if (!(await candidate.isVisible())) continue;
+      const target = await candidate.boundingBox();
+      if (target === null) continue;
+      const distance = Math.hypot(target.x + target.width / 2 - centerX, target.y + target.height / 2 - centerY);
+      if (distance < bestDistance) {
+        best = candidate;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
+  async activityOpenFilterMenu(): Promise<void> {
+    if ((await this.activityMenuOption("Updates")) !== null) return;
+    await (await this.activityFilterButton()).click();
+    const start = Date.now();
+    while ((await this.activityMenuOption("Updates")) === null) {
+      if (Date.now() - start > 15_000) throw new Error("[parity] filter menu did not open");
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async activityFilterOptionLabels(): Promise<string[]> {
+    const found: string[] = [];
+    for (const label of ["Updates", "Comments", "State", "Assignee"]) {
+      if ((await this.activityMenuOption(label)) !== null) found.push(label);
+    }
+    return found;
+  }
+
+  async activityToggleFilterOption(label: string): Promise<void> {
+    const option = await this.activityMenuOption(label);
+    if (option === null) throw new Error(`[parity] filter option not found near the menu: ${label}`);
+    await option.click();
+  }
+
+  async activityFilterNarrowed(): Promise<boolean> {
+    const filter = await this.activityFilterButton();
+    return (await filter.locator(":scope > span").count()) > 0;
+  }
+
+  async activityComposerPosition(): Promise<"above" | "below" | "hidden"> {
+    const section = await this.activitySection();
+    const composer = section.locator('[contenteditable="true"]');
+    if ((await composer.count()) === 0) return "hidden";
+    const feed = await this.activityFeedRoot(section);
+    if (feed === null) throw new Error("[parity] composer is present but the feed is empty");
+    const composerHandle = await composer.first().elementHandle();
+    const feedHandle = await feed.elementHandle();
+    if (composerHandle === null || feedHandle === null) throw new Error("[parity] composer/feed handles missing");
+    // eslint-disable-next-line no-bitwise -- compareDocumentPosition is a bitmask by design.
+    const order = await composer
+      .first()
+      .evaluate(
+        (el, other) => el.compareDocumentPosition(other as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
+        feedHandle
+      );
+    return order !== 0 ? "above" : "below";
+  }
+
+  async activityComposerType(text: string): Promise<void> {
+    const section = await this.activitySection();
+    const editor = section.locator('[contenteditable="true"]').first();
+    await editor.click();
+    await editor.pressSequentially(text, { delay: 10 });
+  }
+
+  async activityComposerSubmit(): Promise<void> {
+    const section = await this.activitySection();
+    await section.getByRole("button", { name: "Comment", exact: true }).click();
+  }
+
+  async activityRenameTitle(title: string): Promise<void> {
+    const box = this.page.getByPlaceholder("Work item title");
+    await box.click();
+    await box.fill(title);
+    await box.press("Enter");
+    // The title commits on blur, so move focus back to the feed section.
+    await this.activityHeading().click();
+  }
+
+  async activityLoadingVisible(): Promise<boolean> {
+    const section = await this.activitySection();
+    return (await section.getByRole("status").count()) > 0;
+  }
+
+  async activityStoredSort(): Promise<string | null> {
+    return this.page.evaluate(() => window.localStorage.getItem("activity_sort_order"));
+  }
+
+  async activityStoredFilters(): Promise<string | null> {
+    return this.page.evaluate(() => window.localStorage.getItem("issue_activity_filters"));
+  }
+
+  async activityOpenFirstEntryLink(): Promise<string> {
+    const section = await this.activitySection();
+    const feed = await this.activityFeedRoot(section);
+    if (feed === null) throw new Error("[parity] feed is empty, no link to open");
+    const link = feed.locator("a").first();
+    await link.waitFor();
+    await Promise.all([this.page.waitForURL(/profile/), link.click()]);
+    return this.page.url();
+  }
 }
