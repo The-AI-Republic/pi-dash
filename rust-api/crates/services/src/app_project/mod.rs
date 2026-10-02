@@ -5,17 +5,19 @@
 //! Ports `apps/api/pi_dash/app/serializers/{state,estimate}.py` (this
 //! module) for the services layer, bottom-up:
 //!
+//! * [`ser_member`] — member / invite serializers (PIDASHCONV-564).
 //! * [`ser_workflow`] — state / estimate serializers (PIDASHCONV-565).
 //! * [`ser_shared`] — shared + nested serializers (PIDASHCONV-566).
 //!
 //! Wiring note: the crate root declares `pub mod app_project;`. Sibling
 //! issues add their own `ser_*` siblings to this file (`ser_project`
-//! PIDASHCONV-563, `ser_member` PIDASHCONV-564); on rebase keep both sides.
+//! PIDASHCONV-563); on rebase keep both sides.
 //!
 //! Fixture input: FX-APROJ-03 (`rust-api/fixtures/app_project/`
 //! `FX-APROJ-03.serializers_state_estimate.json` + `TRACE.md`); the golden
 //! is the Done-when oracle for this layer. Shared goldens: FX-APROJ-04
-//! (`FX-APROJ-04.serializers_shared.json`).
+//! (`FX-APROJ-04.serializers_shared.json`). Member/invite goldens:
+//! FX-APROJ-02 (`FX-APROJ-02.serializers_member_invite.json`).
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 //!
@@ -25,5 +27,6 @@
 //! 2026-09-23T08:30:31.434101Z, no rows for this domain); PIDASHCONV-1
 //! rulebook (updated 2026-10-02T22:09:36Z).
 
+pub mod ser_member;
 pub mod ser_shared;
 pub mod ser_workflow;
