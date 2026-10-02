@@ -1,0 +1,292 @@
+{
+ "_note": "FX-RUN-07 tasks. Sources: runner/tasks.py:1-358 (expire_stale_approvals :42-97, mark_offline_runners :100-111, sweep_idle_sessions :117-138, sweep_stale_runners :141-152, sweep_old_streams :155-202, sweep_run_message_dedupe :205-213, sweep_chat_message_dedupe :216-224, sweep_agent_chat_state :227-232, reconcile_stalled_runs :246-330, apply_agent_run_terminal_effects :333-337, reconcile_agent_run_terminal_effects :340-353); celery.py beat_schedule :27-134 + settings-backed :166-184; settings/common.py defaults (LONG_POLL :465-479, RUNNER_OFFLINE_THRESHOLD :481, STREAM_RETENTION :484, DEDUPE_TTL :487, STALL :520, OBS_STALE :525, RECONCILE_INTERVAL :557). Method: live rows in scratch PG pidash_549_fixtures inside rolled-back txns; celery .delay/on_commit + outbox + send_to_runner mocked and call-recorded; SQL via CaptureQueriesContext; beat entries read off the live celery app conf incl. an explicit run of the settings-backed registrar (probes /tmp/probe549_07a.py + /tmp/probe549_07b.py; venv py3.12 / Django 4.2.30 / DRF 3.15.2, pi_dash.settings.test).",
+ "HEARTBEAT_OFFLINE_GRACE_SECS": 90.0,
+ "expire_stale_approvals": {
+  "returned": 4,
+  "first_sql": [
+   "SELECT \"agent_run_approval\".\"id\" FROM \"agent_run_approval\" WHERE (\"agent_run_approval\".\"expires_at\" < '2026-10-02 22:53:29.048973+00:00'::timestamptz AND \"agent_run_approval\".\"status\" = 'pending') ORDER BY \"agent_run_approval\".\"requested_at\" DESC",
+   "SAVEPOINT \"s8518327680_x4\""
+  ],
+  "rows": {
+   "expired_wait": "expired",
+   "expired_running": "expired",
+   "expired_completed_run": "expired",
+   "fresh": "pending",
+   "expired_runnerless": "expired",
+   "decided": "accepted"
+  },
+  "cancelled_run": {
+   "status": "cancelled",
+   "error_code": "approval_timeout",
+   "error": "approval request expired",
+   "cancel_reason": "approval_timeout",
+   "ended_set": true
+  },
+  "cancelled_running_run_status": "cancelled",
+  "runnerless_cancelled": "cancelled",
+  "completed_run_status": "completed",
+  "sent": [
+   {
+    "runner_id": "6473049e-8c9c-45bb-af5c-e11165114e26",
+    "payload": {
+     "type": "cancel",
+     "run_id": "a9520630-40b7-4a64-9234-a396afd9447d",
+     "reason": "approval_timeout"
+    }
+   },
+   {
+    "runner_id": "6473049e-8c9c-45bb-af5c-e11165114e26",
+    "payload": {
+     "type": "cancel",
+     "run_id": "86bf92ae-074d-40d4-9996-46bc5a2b008e",
+     "reason": "approval_timeout"
+    }
+   }
+  ]
+ },
+ "expire_rule": "PENDING + expires_at<now -> EXPIRED + decided_at; run in {AWAITING_APPROVAL,RUNNING} -> CANCELLED via finalize (error_code/cancel_reason approval_timeout, error 'approval request expired', expected_runner_id=run.runner_id incl. None); cancel frame sent iff run.runner_id set (tasks.py:66-93)",
+ "mark_offline_runners": {
+  "returned": 2,
+  "sql": [
+   "UPDATE \"runner\" SET \"status\" = 'offline' WHERE (\"runner\".\"status\" = 'online' AND NOT (\"runner\".\"last_heartbeat_at\" >= '2026-10-02 22:51:59.094722+00:00'::timestamptz AND \"runner\".\"last_heartbeat_at\" IS NOT NULL))"
+  ],
+  "rows": {
+   "fresh10s": "online",
+   "stale100s": "offline",
+   "stale60s": "online",
+   "null_hb": "offline",
+   "already_offline": "offline"
+  }
+ },
+ "mark_offline_rule": "ONLINE + NOT(last_heartbeat_at >= now-90s) -> OFFLINE in one UPDATE; NULL heartbeat flips (NOT-gte excludes NULL from the keep set)",
+ "sweep_stale_runners": {
+  "returned": 4,
+  "sql": [
+   "UPDATE \"runner\" SET \"status\" = 'offline' WHERE (\"runner\".\"status\" = 'online' AND NOT (\"runner\".\"last_heartbeat_at\" >= '2026-10-02 22:52:39.099942+00:00'::timestamptz AND \"runner\".\"last_heartbeat_at\" IS NOT NULL))"
+  ],
+  "rows": {
+   "fresh10s": "online",
+   "stale100s": "offline",
+   "stale60s": "offline",
+   "null_hb": "offline",
+   "edge49s": "online",
+   "edge51s": "offline"
+  }
+ },
+ "sweep_stale_rule": "same shape with RUNNER_OFFLINE_THRESHOLD_SECS=50s; boundary is >= (49s kept, 51s flipped)",
+ "sweep_idle_sessions": {
+  "returned": 1,
+  "poll_secs_setting": 25,
+  "first_sql": [
+   "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\" FROM \"runner_session\" WHERE (\"runner_session\".\"last_seen_at\" < '2026-10-02 22:52:39.113009+00:00'::timestamptz AND \"runner_session\".\"revoked_at\" IS NULL) ORDER BY \"runner_session\".\"created_at",
+   "UPDATE \"runner_session\" SET \"revoked_at\" = '2026-10-02 22:53:29.114083+00:00'::timestamptz, \"revoked_reason\" = 'idle_timeout' WHERE \"runner_session\".\"id\" IN ('365b55bcd19a40b5bf1e065e5995a293'::uuid)"
+  ],
+  "rows": {
+   "idle51s": [
+    true,
+    "idle_timeout"
+   ],
+   "live49s": [
+    false,
+    ""
+   ],
+   "live5s": [
+    false,
+    ""
+   ],
+   "already_revoked": [
+    true,
+    "x"
+   ]
+  },
+  "outbox_calls": [
+   [
+    "clear",
+    "365b55bc-d19a-40b5-bf1e-065e5995a293"
+   ],
+   [
+    "evict",
+    "1ecbbe20-ed42-4bf0-89e8-f63a802f584e",
+    {
+     "old_session_id": "365b55bc-d19a-40b5-bf1e-065e5995a293",
+     "new_session_id": ""
+    }
+   ]
+  ]
+ },
+ "sweep_idle_rule": "unrevoked + last_seen_at < now-2*25s -> revoked_at + idle_timeout; per row clear_session_marker + publish_session_eviction(runner, old, new='')",
+ "sweep_old_streams": {
+  "returned": 7,
+  "retention_setting": 3600,
+  "calls": [
+   [
+    "cutoff",
+    3600
+   ],
+   [
+    "trim",
+    "cc0794ce-b611-41b9-b4c0-99f1aac00ae0",
+    "1700000000000-0"
+   ],
+   [
+    "reap",
+    "cc0794ce-b611-41b9-b4c0-99f1aac00ae0",
+    [
+     "consumer:41985f63-290b-4bb3-bd86-eff4c278072c"
+    ]
+   ],
+   [
+    "reap",
+    "529143c0-76d8-418e-ba22-ed61cee00977",
+    []
+   ],
+   [
+    "delete",
+    "529143c0-76d8-418e-ba22-ed61cee00977"
+   ],
+   [
+    "unmark",
+    "529143c0-76d8-418e-ba22-ed61cee00977"
+   ]
+  ],
+  "note": "returned == trimmed_count only (reaped/deleted only logged); r-none (no sessions) untouched"
+ },
+ "sweep_old_rule": "cutoff=id_for_secs_ago(3600); per runner with sessions: trim iff an active consumer exists, reap always (keep=active set, possibly empty); due runners: delete+unmark; returns trimmed_count only",
+ "dedupe_sweeps": {
+  "ttl_setting": 604800,
+  "run_returned": 1,
+  "chat_returned": 1,
+  "run_old_gone": true,
+  "run_new_kept": true,
+  "chat_old_gone": true,
+  "chat_new_kept": true
+ },
+ "dedupe_rule": "created_at < now-604800s deleted; both sweeps share RUN_MESSAGE_DEDUPE_TTL_SECS",
+ "sweep_agent_chat_state": {
+  "returned": 6,
+  "calls": [
+   true,
+   true
+  ]
+ },
+ "reconcile_stalled_runs": {
+  "returned": 3,
+  "stall_setting": 360,
+  "freshness_setting": 90,
+  "candidate_sql": [
+   "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\", \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"free_worktrees\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\" FROM \"agent_run\" INNER JOIN \"runner\" ON (\"agent_run\".\"runner_id\" = \"runner\".\"id\") INNER JOIN \"runner_live_state\" ON (\"runner\".\"id\" = \"runner_live_state\".\"runner_id\") WHERE (\"agent_run\".\"status\" IN ('assigned', 'running') AND \"runner_live_state\".\"last_event_at\" < '2026-10-02 22:48:09.124690+00:00'::timestamptz AND \"runner_live_state\".\"observed_run_id\" = (\"agent_run\".\"id\") AND \"runner_live_state\".\"updated_at\" >= '2026-10-02 22:52:39.124690+00:00'::timestamptz AND (\"runner_live_state\".\"approvals_pending\" = 0 OR \"runner_live_state\".\"approvals_pending\" IS NULL)) ORDER BY \"agent_run\".\"created_at\" DESC",
+   "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\" FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = 'd907c7c9e6f541cb89a6795575d15a7b'::uuid AND NOT (\"agent_run\".\"status\" IN ('cancelled', 'completed', 'refused', 'blocked', 'failed')) AND \"agent_run\".\"runner_id\" = '85057ad5347a4c47a3798145596cda22'::uuid) ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1 FOR UPDATE"
+  ],
+  "rows": {
+   "reap": {
+    "status": "failed",
+    "error": "agent stalled: no events for >360s"
+   },
+   "observed_mismatch": {
+    "status": "running",
+    "error": ""
+   },
+   "snapshot_stale": {
+    "status": "running",
+    "error": ""
+   },
+   "event_fresh": {
+    "status": "running",
+    "error": ""
+   },
+   "event_null": {
+    "status": "running",
+    "error": ""
+   },
+   "approvals_pending": {
+    "status": "running",
+    "error": ""
+   },
+   "approvals_zero": {
+    "status": "failed",
+    "error": "agent stalled: no events for >360s"
+   },
+   "awaiting_approval": {
+    "status": "awaiting_approval",
+    "error": ""
+   },
+   "assigned": {
+    "status": "failed",
+    "error": "agent stalled: no events for >360s"
+   },
+   "poison": {
+    "status": "running",
+    "error": ""
+   },
+   "completed": {
+    "status": "completed",
+    "error": ""
+   }
+  },
+  "note": "poison row raises inside per-row guard -> logged, sweep continues; poison stays running"
+ },
+ "reconcile_stalled_rule": "status in {ASSIGNED,RUNNING} + observed==id + snapshot updated>=now-90s + last_event<now-360s + approvals_pending in {0,NULL} -> FAILED 'agent stalled: no events for >360s' via finalize_run_terminal; per-row try/except (poison survives, sweep continues)",
+ "apply_terminal_effects_task": {
+  "returned": true,
+  "called_with": [
+   "some-id"
+  ]
+ },
+ "reconcile_terminal_effects": {
+  "returned": 100,
+  "delayed_count": 100,
+  "sql": [
+   "SELECT \"agent_run\".\"id\" FROM \"agent_run\" WHERE (\"agent_run\".\"status\" IN ('cancelled', 'completed', 'refused', 'blocked', 'failed') AND (\"agent_run\".\"terminal_hooks_applied_at\" IS NULL OR \"agent_run\".\"terminal_capacity_released_at\" IS NULL)) ORDER BY \"agent_run\".\"ended_at\" ASC LIMIT 100"
+  ],
+  "note": "batch-of-100 ordered by ended_at; full-marker + non-terminal rows excluded"
+ },
+ "reconcile_terminal_rule": "terminal + (hooks NULL OR capacity NULL), ORDER BY ended_at, LIMIT 100 -> .delay each; returns batch size",
+ "beat_runner_entries": {
+  "runner-expire-stale-approvals": {
+   "task": "runner.expire_stale_approvals",
+   "schedule_repr": "<crontab: */1 * * * * (m/h/dM/MY/d)>",
+   "source": "celery.py literal beat_schedule"
+  },
+  "runner-mark-offline-runners": {
+   "task": "runner.mark_offline_runners",
+   "schedule_repr": "<crontab: */1 * * * * (m/h/dM/MY/d)>",
+   "source": "celery.py literal beat_schedule"
+  },
+  "runner-reconcile-stalled-runs": {
+   "task": "runner.reconcile_stalled_runs",
+   "schedule_repr": "datetime.timedelta(seconds=30)",
+   "source": "celery.py literal beat_schedule"
+  },
+  "runner-sweep-agent-chat-state": {
+   "task": "runner.sweep_agent_chat_state",
+   "schedule_repr": "datetime.timedelta(seconds=30)",
+   "source": "celery.py literal beat_schedule"
+  },
+  "runner-sweep-chat-message-dedupe": {
+   "task": "runner.sweep_chat_message_dedupe",
+   "schedule_repr": "<crontab: 0 4 * * * (m/h/dM/MY/d)>",
+   "source": "celery.py literal beat_schedule"
+  },
+  "agent-run-reconcile-terminal-effects": {
+   "task": "runner.reconcile_agent_run_terminal_effects",
+   "schedule_repr": "datetime.timedelta(seconds=30)",
+   "source": "celery.py _register_settings_backed_beat_entries :180-183 (already registered at import/finalize time in the probe process; schedule value read live)"
+  }
+ },
+ "beat_not_scheduled": [
+  "runner.sweep_idle_sessions",
+  "runner.sweep_stale_runners",
+  "runner.sweep_old_streams",
+  "runner.sweep_run_message_dedupe",
+  "runner.apply_agent_run_terminal_effects (.delay only)"
+ ],
+ "settings": {
+  "AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS": 30,
+  "LONG_POLL_INTERVAL_SECS": 25,
+  "RUNNER_OFFLINE_THRESHOLD_SECS": 50,
+  "RUNNER_STREAM_MIN_RETENTION_SECS": 3600,
+  "RUN_MESSAGE_DEDUPE_TTL_SECS": 604800,
+  "RUNNER_AGENT_STALL_THRESHOLD_SECS": 360,
+  "RUNNER_AGENT_OBSERVABILITY_STALE_SECS": 90
+ }
+}

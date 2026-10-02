@@ -1,0 +1,574 @@
+{
+ "_note": "FX-RUN-05 lifecycle. Sources: runner/services/agent_run_finalization.py:1-199 (YIELD_KEYS :27, merge_done_payload :30-45, finalize_agent_run :48-86, _publish_effects :89-103, apply_terminal_effects :105-199); runner/services/run_lifecycle.py:1-463 (_normalize_model :56-57, _normalize_refusal_category :60-64, _usage_updates :80-100, apply_run_paused :158-244, apply_run_resume_unavailable :247-295, apply_assign_rejected_busy :298-322, _INFRA_FAILURE_DETAIL_PREFIXES :335-338, _post_failure_comment :341-399, finalize_run_terminal :402-463); runner/services/scheduler_hook.py:1-42. Method: live rows in scratch PG pidash_549_fixtures inside rolled-back transactions; transaction.on_commit captured (not executed) and cross-domain calls (orchestration, drains, handoff, dispatch, scheduler, failure comment) replaced with recording mocks; every row/cell below is the literal post-call state (probes /tmp/probe549_05a.py + /tmp/probe549_05b.py; venv py3.12 / Django 4.2.30 / DRF 3.15.2, pi_dash.settings.test).",
+ "YIELD_KEYS": [
+  "status",
+  "note",
+  "yielded_at"
+ ],
+ "LAST_ERROR_MAX_LEN": 1000,
+ "merge_done_payload": [
+  {
+   "case": "no-yield-plain-replace",
+   "existing": {
+    "status": "completed"
+   },
+   "incoming": {
+    "conclusion": "x"
+   },
+   "out": {
+    "conclusion": "x"
+   }
+  },
+  {
+   "case": "none-existing",
+   "existing": null,
+   "incoming": {
+    "conclusion": "success"
+   },
+   "out": {
+    "conclusion": "success"
+   }
+  },
+  {
+   "case": "yield-survives",
+   "existing": {
+    "status": "waiting_on_human",
+    "note": "asked",
+    "yielded_at": "2026-09-13T00:00:00Z"
+   },
+   "incoming": {
+    "conclusion": "success",
+    "result": "final message"
+   },
+   "out": {
+    "conclusion": "success",
+    "result": "final message",
+    "status": "waiting_on_human",
+    "note": "asked",
+    "yielded_at": "2026-09-13T00:00:00Z"
+   }
+  },
+  {
+   "case": "explicit-status-wins",
+   "existing": {
+    "status": "progressed",
+    "yielded_at": "x"
+   },
+   "incoming": {
+    "status": "blocked",
+    "summary": ".."
+   },
+   "out": {
+    "status": "blocked",
+    "summary": ".."
+   }
+  },
+  {
+   "case": "yield-plus-none-incoming",
+   "existing": {
+    "yielded_at": "x",
+    "status": "done"
+   },
+   "incoming": null,
+   "out": {
+    "status": "done",
+    "yielded_at": "x"
+   }
+  },
+  {
+   "case": "yield-plus-nondict-incoming",
+   "existing": {
+    "yielded_at": "x",
+    "status": "done",
+    "note": "n"
+   },
+   "incoming": [
+    1,
+    2
+   ],
+   "out": {
+    "status": "done",
+    "note": "n",
+    "yielded_at": "x"
+   }
+  },
+  {
+   "case": "existing-nondict",
+   "existing": [
+    1
+   ],
+   "incoming": {
+    "a": 1
+   },
+   "out": {
+    "a": 1
+   }
+  },
+  {
+   "case": "empty-existing",
+   "existing": {},
+   "incoming": {
+    "a": 1
+   },
+   "out": {
+    "a": 1
+   }
+  },
+  {
+   "case": "yielded_at-empty-string",
+   "existing": {
+    "yielded_at": "",
+    "status": "s"
+   },
+   "incoming": {
+    "a": 1
+   },
+   "out": {
+    "a": 1
+   }
+  },
+  {
+   "case": "partial-yield-keys",
+   "existing": {
+    "yielded_at": "x"
+   },
+   "incoming": {
+    "conclusion": "c"
+   },
+   "out": {
+    "conclusion": "c",
+    "yielded_at": "x"
+   }
+  },
+  {
+   "case": "incoming-status-none",
+   "existing": {
+    "yielded_at": "x",
+    "status": "s"
+   },
+   "incoming": {
+    "status": null
+   },
+   "out": {
+    "status": null
+   }
+  }
+ ],
+ "merge_rule": "no yielded_at in existing -> incoming wins wholesale; yielded + incoming without status -> yield keys (status/note/yielded_at) survive onto incoming (dict or {} for non-dict); incoming status (even None) suppresses the merge (finalization.py:38-45)",
+ "finalize_agent_run": {
+  "basic": {
+   "returned": true,
+   "row": {
+    "status": "completed",
+    "ended_at_set": true,
+    "queue_position": null,
+    "hooks": null,
+    "capacity": null,
+    "done_payload": {
+     "conclusion": "ok"
+    }
+   }
+  },
+  "second_call": {
+   "returned": false
+  },
+  "local_terminal_events": 0,
+  "expected_runner_match": true,
+  "expected_runner_mismatch": {
+   "returned": false,
+   "status_still": "running"
+  },
+  "expected_status_match": true,
+  "expected_status_mismatch": {
+   "returned": false,
+   "status_still": "assigned"
+  },
+  "nonterminal_new_status": "ValueError: new_status must be terminal",
+  "cloud": {
+   "returned": true,
+   "events": [
+    {
+     "seq": 1,
+     "kind": "terminal",
+     "payload": {
+      "status": "completed",
+      "error_code": "E1"
+     }
+    }
+   ],
+   "second_call": false,
+   "events_after_second": 1
+  },
+  "cloud_preexisting_terminal_events": 1,
+  "cloud_seq_after_gap": [
+   6
+  ],
+  "on_commit_registered": [
+   "finalize_agent_run.<locals>.<lambda>",
+   "finalize_agent_run.<locals>.<lambda>",
+   "finalize_agent_run.<locals>.<lambda>",
+   "finalize_agent_run.<locals>.<lambda>",
+   "finalize_agent_run.<locals>.<lambda>",
+   "finalize_agent_run.<locals>.<lambda>"
+  ]
+ },
+ "finalize_rule": "ValueError unless new_status terminal; SELECT..FOR UPDATE + exclude terminal + expected filters; first-writer-wins via .first() None check; done_payload merged; cloud-only terminal event row (seq = max+1) with {status, error_code}; on_commit _publish_effects (.delay + inline apply, each try/except)",
+ "apply_terminal_effects": [
+  {
+   "case": "completed-local-issue",
+   "returned": true,
+   "calls": [
+    "orchestration",
+    "drain_runner",
+    "drain_pod"
+   ],
+   "hooks_set": true,
+   "capacity_set": true,
+   "n_sql": 8,
+   "sql": [
+    "SAVEPOINT \"s8518327680_x5\"",
+    "SELECT \"agent_run\".\"work_item_id\" FROM \"agent_run\" WHERE \"agent_run\".\"id\" = '42d8c84a11524dbcaa7d837edbe8b34a'::uuid ORDER BY \"agent_run\".\"created_at\" DESC LIMI",
+    "SELECT \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"id\", \"issues\".\"project",
+    "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_",
+    "UPDATE \"agent_run\" SET \"terminal_hooks_applied_at\" = '2026-10-02 22:49:20.861765+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '42d8c84a11524dbcaa7d837edbe8b34a'",
+    "RELEASE SAVEPOINT \"s8518327680_x5\"",
+    "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_",
+    "UPDATE \"agent_run\" SET \"terminal_capacity_released_at\" = '2026-10-02 22:49:20.892596+00:00'::timestamptz WHERE (\"agent_run\".\"id\" = '42d8c84a11524dbcaa7d837edbe8"
+   ]
+  },
+  {
+   "case": "failed-local-issue",
+   "returned": true,
+   "calls": [
+    "failure_comment",
+    "orchestration",
+    "drain_runner",
+    "drain_pod"
+   ],
+   "hooks_set": true,
+   "capacity_set": true,
+   "n_sql": 10,
+   "sql": [
+    "SAVEPOINT \"s8518327680_x7\"",
+    "SELECT \"agent_run\".\"work_item_id\" FROM \"agent_run\" WHERE \"agent_run\".\"id\" = '4a1904a43479447a8aac2c83ad7554e8'::uuid ORDER BY \"agent_run\".\"created_at\" DESC LIMI",
+    "SELECT \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"id\", \"issues\".\"project",
+    "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_",
+    "SAVEPOINT \"s8518327680_x8\"",
+    "RELEASE SAVEPOINT \"s8518327680_x8\"",
+    "UPDATE \"agent_run\" SET \"terminal_hooks_applied_at\" = '2026-10-02 22:49:20.938657+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '4a1904a43479447a8aac2c83ad7554e8'",
+    "RELEASE SAVEPOINT \"s8518327680_x7\"",
+    "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_",
+    "UPDATE \"agent_run\" SET \"terminal_capacity_released_at\" = '2026-10-02 22:49:20.948152+00:00'::timestamptz WHERE (\"agent_run\".\"id\" = '4a1904a43479447a8aac2c83ad75"
+   ]
+  },
+  {
+   "case": "handoff",
+   "returned": true,
+   "calls": [
+    "handoff",
+    "drain_runner",
+    "drain_pod"
+   ],
+   "hooks_set": true,
+   "capacity_set": true,
+   "n_sql": 8,
+   "sql": [
+    "SAVEPOINT \"s8518327680_x10\"",
+    "SELECT \"agent_run\".\"work_item_id\" FROM \"agent_run\" WHERE \"agent_run\".\"id\" = '136d503760cf419ab4ba8173133bcfea'::uuid ORDER BY \"agent_run\".\"created_at\" DESC LIMI",
+    "SELECT \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"id\", \"issues\".\"project",
+    "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_",
+    "UPDATE \"agent_run\" SET \"terminal_hooks_applied_at\" = '2026-10-02 22:49:21.003894+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '136d503760cf419ab4ba8173133bcfea'",
+    "RELEASE SAVEPOINT \"s8518327680_x10\"",
+    "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_",
+    "UPDATE \"agent_run\" SET \"terminal_capacity_released_at\" = '2026-10-02 22:49:21.011613+00:00'::timestamptz WHERE (\"agent_run\".\"id\" = '136d503760cf419ab4ba8173133b"
+   ]
+  },
+  {
+   "case": "scheduler-binding",
+   "returned": true,
+   "calls": [
+    "orchestration",
+    "scheduler_hook",
+    "drain_runner",
+    "drain_pod"
+   ],
+   "hooks_set": true,
+   "capacity_set": true,
+   "n_sql": 9,
+   "sql": [
+    "SAVEPOINT \"s8518327680_x11\"",
+    "SELECT \"agent_run\".\"work_item_id\" FROM \"agent_run\" WHERE \"agent_run\".\"id\" = '724c301108204bd0a2134b40071a9d61'::uuid ORDER BY \"agent_run\".\"created_at\" DESC LIMI",
+    "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_",
+    "SAVEPOINT \"s8518327680_x12\"",
+    "RELEASE SAVEPOINT \"s8518327680_x12\"",
+    "UPDATE \"agent_run\" SET \"terminal_hooks_applied_at\" = '2026-10-02 22:49:21.034275+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '724c301108204bd0a2134b40071a9d61'",
+    "RELEASE SAVEPOINT \"s8518327680_x11\"",
+    "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_",
+    "UPDATE \"agent_run\" SET \"terminal_capacity_released_at\" = '2026-10-02 22:49:21.042356+00:00'::timestamptz WHERE (\"agent_run\".\"id\" = '724c301108204bd0a2134b40071a"
+   ]
+  },
+  {
+   "case": "cloud",
+   "returned": true,
+   "calls": [
+    "orchestration",
+    "dispatch_waiting"
+   ],
+   "hooks_set": true,
+   "capacity_set": true,
+   "n_sql": 7,
+   "sql": [
+    "SAVEPOINT \"s8518327680_x13\"",
+    "SELECT \"agent_run\".\"work_item_id\" FROM \"agent_run\" WHERE \"agent_run\".\"id\" = '529edfe43e554c0985d35905ba62217a'::uuid ORDER BY \"agent_run\".\"created_at\" DESC LIMI",
+    "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_",
+    "UPDATE \"agent_run\" SET \"terminal_hooks_applied_at\" = '2026-10-02 22:49:21.058057+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '529edfe43e554c0985d35905ba62217a'",
+    "RELEASE SAVEPOINT \"s8518327680_x13\"",
+    "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_",
+    "UPDATE \"agent_run\" SET \"terminal_capacity_released_at\" = '2026-10-02 22:49:21.066270+00:00'::timestamptz WHERE (\"agent_run\".\"id\" = '529edfe43e554c0985d35905ba62"
+   ]
+  },
+  {
+   "case": "hooks-already-applied",
+   "returned": true,
+   "calls": [
+    "drain_runner",
+    "drain_pod"
+   ],
+   "capacity_set": true
+  },
+  {
+   "case": "both-markers-set",
+   "returned": true,
+   "calls": []
+  },
+  {
+   "case": "non-terminal",
+   "returned": false,
+   "calls": []
+  }
+ ],
+ "apply_terminal_effects_rule": "lock order issue->run (finalization.py:115-131); non-terminal -> False; hooks-once (terminal_hooks_applied_at gate :134); FAILED w/o handoff -> failure comment in savepoint :136-147; handoff -> skip orchestration, complete_project_move_handoff AFTER txn :148-181; scheduler binding -> hook in savepoint :157-165; capacity at-least-once :184-198 (cloud: dispatch_waiting(workspace_id); local: drain runner + pod)",
+ "scheduler_hook": [
+  {
+   "case": "completed-clears",
+   "last_error_after": "",
+   "updated_at_changed": true
+  },
+  {
+   "case": "completed-already-empty",
+   "last_error_after": "",
+   "updated_at_changed": false
+  },
+  {
+   "case": "failed-sets",
+   "last_error_after": "kaboom",
+   "updated_at_changed": true
+  },
+  {
+   "case": "failed-empty-error-uses-status",
+   "last_error_after": "failed",
+   "updated_at_changed": true
+  },
+  {
+   "case": "cancelled-sets",
+   "last_error_after": "bye",
+   "updated_at_changed": true
+  },
+  {
+   "case": "refused-with-category+error",
+   "last_error_after": "refused (cyber): declined",
+   "updated_at_changed": true
+  },
+  {
+   "case": "refused-empty-category",
+   "last_error_after": "refused (unknown)",
+   "updated_at_changed": true
+  },
+  {
+   "case": "failed-truncates",
+   "last_error_after": "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE",
+   "updated_at_changed": true
+  },
+  {
+   "case": "truncated_len",
+   "len": 1000
+  },
+  {
+   "case": "no-binding",
+   "outcome": "returned-None-no-row-touched"
+  },
+  {
+   "case": "non-terminal",
+   "last_error_after": "keep"
+  }
+ ],
+ "apply_run_paused": {
+  "row": {
+   "status": "paused_awaiting_input",
+   "done_payload": {
+    "note": "n",
+    "usage": {
+     "input_tokens": 12
+    },
+    "status": "progressed",
+    "summary": "did things",
+    "autonomy": {
+     "question_for_human": "Which DB?"
+    },
+    "yielded_at": "t"
+   },
+   "usage": {
+    "raw": {
+     "input_tokens": 12
+    },
+    "input": 20,
+    "total": 15,
+    "output": 5
+   },
+   "llm_model": "frame-model"
+  },
+  "comments": [
+   {
+    "comment_html": "<p><strong>Agent paused \u2014 question:</strong></p><p>Which DB?</p><p><em>Summary so far:</em> did things</p>"
+   }
+  ],
+  "on_commit": [
+   "apply_run_paused.<locals>._pause_and_drain"
+  ],
+  "on_commit_exec_calls": [
+   "orchestration:441dce71-e1c0-4419-845d-718fc851b1a6",
+   "drain_runner:03e290f5-4141-4945-989f-d8ff4d842290"
+  ]
+ },
+ "apply_run_paused_noops": {
+  "terminal_still": "completed",
+  "cancel_requested_still": "cancel_requested",
+  "no_work_item_status": "paused_awaiting_input"
+ },
+ "apply_run_paused_rule": "live-state+payload+tokens usage merge; explicit model overrides live llm_model; lock run excl. terminal + CANCEL_REQUESTED; status=PAUSED + merged done_payload; question/summary comment HTML; on_commit _pause_and_drain (orchestration then drain runner)",
+ "resume_unavailable": {
+  "row": {
+   "status": "queued",
+   "runner": null,
+   "pinned": null,
+   "assigned_at": null,
+   "queue_position": null
+  },
+  "parent_thread_id": "''",
+  "on_commit": [
+   "apply_run_resume_unavailable.<locals>.<lambda>"
+  ],
+  "on_commit_exec_calls": [
+   "drain_pod:3a16c304-e397-409d-bbca-f86efbc51085"
+  ]
+ },
+ "resume_unavailable_extra": {
+  "locked_run_status": "queued",
+  "locked_run_runner": null,
+  "terminal_still": "failed"
+ },
+ "assign_rejected_busy": {
+  "run_status": "queued",
+  "run_runner": null,
+  "runner_status": "busy"
+ },
+ "requeue_rule": "status=QUEUED + runner/pinned/assigned_at/queue_position cleared + parent thread_id='' (when set) + on_commit drain pod; busy variant flips runner to BUSY first (run_lifecycle.py:321-322)",
+ "finalize_run_terminal": {
+  "completed": {
+   "status": "completed",
+   "done_payload": {
+    "usage": {
+     "input_tokens": 12
+    },
+    "conclusion": "ok"
+   },
+   "error": "''",
+   "usage": {
+    "raw": {
+     "input_tokens": 12
+    },
+    "input": 20,
+    "total": 15,
+    "output": 5
+   },
+   "llm_model": "frame-m",
+   "ended": true
+  },
+  "failed_enriched_head": "401 authentication_failed\nAI agent: AI agent auth appears expired or invalid. Go to the dev machine for runner \"r5b\" and",
+  "failed_enriched_has_marker": true,
+  "failed_truncated_len": 16000,
+  "refused": {
+   "category": "cyber",
+   "error": "declined hard"
+  },
+  "refused_bad_category": {
+   "category": "unknown",
+   "error": "''"
+  },
+  "cancelled": {
+   "status": "cancelled",
+   "done_payload": {
+    "old": true
+   },
+   "error": "'old-err'"
+  },
+  "late_terminal": {
+   "before": {
+    "status": "cancelled",
+    "ended_at": "2026-10-02 22:49:21.709066+00:00"
+   },
+   "after_status": "cancelled",
+   "after_ended": "2026-10-02 22:49:21.709066+00:00",
+   "error": "'old-err'"
+  },
+  "wrong_runner_status": "running",
+  "on_commit": [
+   "finalize_agent_run.<locals>.<lambda>",
+   "finalize_agent_run.<locals>.<lambda>",
+   "finalize_agent_run.<locals>.<lambda>",
+   "finalize_agent_run.<locals>.<lambda>",
+   "finalize_agent_run.<locals>.<lambda>",
+   "finalize_agent_run.<locals>.<lambda>"
+  ]
+ },
+ "finalize_run_terminal_rule": "COMPLETED: done_payload verbatim + error=''; FAILED: enrich_run_error + [:16000] (only when error_detail non-empty); REFUSED: category normalized (unknown fallback) + error [:16000] (only when non-empty); CANCELLED: no done_payload/error writes; all: 3-source usage merge + model override + first-writer-wins w/ expected_runner_id",
+ "post_failure_comment": [
+  {
+   "case": "normal",
+   "before": 0,
+   "after": 1,
+   "comment": {
+    "comment_html": "<p><strong>Run failed.</strong></p><pre>boom detail</pre>",
+    "speaker_type": "system",
+    "speaker_label": "Pi Dash",
+    "speaker_agent_run_id": "c6107aaa-2a1f-428e-8c3e-cc05018d24b6"
+   }
+  },
+  {
+   "case": "dedupe-second-call",
+   "count": 1
+  },
+  {
+   "case": "infra-prefixes-suppressed",
+   "count": 0
+  },
+  {
+   "case": "prefix-case-sensitive?",
+   "count": 1,
+   "html": "<p><strong>Run failed.</strong></p><pre>Daemon Shutdown Requested (caps)</pre>"
+  },
+  {
+   "case": "empty-detail",
+   "html": "<p><strong>Run failed.</strong> (no diagnostic detail)</p>"
+  },
+  {
+   "case": "no-work-item",
+   "outcome": "no comment (no issue to count)"
+  },
+  {
+   "case": "missing-run",
+   "outcome": "returned silently"
+  }
+ ],
+ "post_failure_comment_rule": "prefix match is case-sensitive startswith on the stripped detail (2 prefixes); dedupe on (issue, speaker_agent_run_id, SYSTEM); empty detail posts '(no diagnostic detail)'; no work_item / missing run -> silent"
+}
