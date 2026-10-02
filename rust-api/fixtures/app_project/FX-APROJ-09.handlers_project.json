@@ -1,0 +1,1970 @@
+{
+  "_trace": "Routes apps/api/pi_dash/app/urls/project.py:24-131 (20 paths); handlers apps/api/pi_dash/app/views/project/base.py:46-581, apps/api/pi_dash/app/views/project/invite.py:37-254, apps/api/pi_dash/app/views/project/member.py:27-385.",
+  "_method": "Live captures against Django runserver (pi_dash.settings.test) from this checkout on scratch Postgres pidash_562_fixtures (own cluster 127.0.0.1:5434), BASE_URL http://127.0.0.1:8460, SECRET_KEY=562-fixtures-secret-not-for-prod, CLOUD_AGENT_ENABLED unset (False), redis db 14 as Celery broker. Django 4.2.30, djangorestframework 3.15.2. IDs/datetimes are live values (volatile); key sets, key order, statuses and error bodies are the pins. Every route below was issued over HTTP against seeded users; DB before/after checked with SQL.",
+  "routes": [
+    {
+      "route": "api/workspaces/<str:slug>/projects/",
+      "name": "project",
+      "actions": {
+        "get": "list",
+        "post": "create"
+      },
+      "view": "ProjectViewSet"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/details/",
+      "name": "project",
+      "actions": {
+        "get": "list_detail"
+      },
+      "view": "ProjectViewSet"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:pk>/",
+      "name": "project",
+      "actions": {
+        "get": "retrieve",
+        "put": "update",
+        "patch": "partial_update",
+        "delete": "destroy"
+      },
+      "view": "ProjectViewSet"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/project-identifiers/",
+      "name": "project-identifiers",
+      "actions": null,
+      "view": "ProjectIdentifierEndpoint"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/invitations/",
+      "name": "project-member-invite",
+      "actions": {
+        "get": "list",
+        "post": "create"
+      },
+      "view": "ProjectInvitationsViewset"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/invitations/<uuid:pk>/",
+      "name": "project-member-invite",
+      "actions": {
+        "get": "retrieve",
+        "delete": "destroy"
+      },
+      "view": "ProjectInvitationsViewset"
+    },
+    {
+      "route": "api/users/me/workspaces/<str:slug>/projects/invitations/",
+      "name": "user-project-invitations",
+      "actions": {
+        "get": "list",
+        "post": "create"
+      },
+      "view": "UserProjectInvitationsViewset"
+    },
+    {
+      "route": "api/users/me/workspaces/<str:slug>/project-roles/",
+      "name": "user-project-roles",
+      "actions": null,
+      "view": "UserProjectRolesEndpoint"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/join/<uuid:pk>/",
+      "name": "project-join",
+      "actions": null,
+      "view": "ProjectJoinEndpoint"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/members/",
+      "name": "project-member",
+      "actions": {
+        "get": "list",
+        "post": "create"
+      },
+      "view": "ProjectMemberViewSet"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/members/<uuid:pk>/",
+      "name": "project-member",
+      "actions": {
+        "get": "retrieve",
+        "patch": "partial_update",
+        "delete": "destroy"
+      },
+      "view": "ProjectMemberViewSet"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/members/leave/",
+      "name": "project-member",
+      "actions": {
+        "post": "leave"
+      },
+      "view": "ProjectMemberViewSet"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/project-views/",
+      "name": "project-view",
+      "actions": null,
+      "view": "ProjectUserViewsEndpoint"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/project-members/me/",
+      "name": "project-member-view",
+      "actions": null,
+      "view": "ProjectMemberUserEndpoint"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/user-favorite-projects/",
+      "name": "project-favorite",
+      "actions": {
+        "get": "list",
+        "post": "create"
+      },
+      "view": "ProjectFavoritesViewSet"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/user-favorite-projects/<str:project_id>/",
+      "name": "project-favorite",
+      "actions": {
+        "delete": "destroy"
+      },
+      "view": "ProjectFavoritesViewSet"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/project-deploy-boards/",
+      "name": "project-deploy-board",
+      "actions": {
+        "get": "list",
+        "post": "create"
+      },
+      "view": "DeployBoardViewSet"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/project-deploy-boards/<uuid:pk>/",
+      "name": "project-deploy-board",
+      "actions": {
+        "get": "retrieve",
+        "patch": "partial_update",
+        "delete": "destroy"
+      },
+      "view": "DeployBoardViewSet"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/archive/",
+      "name": "project-archive-unarchive",
+      "actions": null,
+      "view": "ProjectArchiveUnarchiveEndpoint"
+    },
+    {
+      "route": "api/workspaces/<str:slug>/projects/<str:project_id>/preferences/member/<uuid:member_id>/",
+      "name": "project-member-preference",
+      "actions": null,
+      "view": "ProjectMemberPreferenceEndpoint"
+    }
+  ],
+  "project_core": {
+    "create": {
+      "status": 201,
+      "keys": [
+        "agent_default_interval_seconds",
+        "agent_default_max_ticks",
+        "agent_executor_options",
+        "agent_review_default_interval_seconds",
+        "agent_test_default_interval_seconds",
+        "agent_ticking_enabled",
+        "anchor",
+        "archive_in",
+        "archived_at",
+        "base_branch",
+        "close_in",
+        "cover_image",
+        "cover_image_asset",
+        "cover_image_url",
+        "created_at",
+        "created_by",
+        "cycle_view",
+        "default_agent_executor",
+        "default_assignee",
+        "default_state",
+        "deleted_at",
+        "description",
+        "description_html",
+        "description_text",
+        "emoji",
+        "estimate",
+        "external_id",
+        "external_source",
+        "guest_view_all_features",
+        "icon_prop",
+        "id",
+        "identifier",
+        "inbox_view",
+        "intake_view",
+        "is_default",
+        "is_favorite",
+        "is_issue_type_enabled",
+        "is_time_tracking_enabled",
+        "issue_views_view",
+        "logo_props",
+        "member_role",
+        "members",
+        "members_can_edit_states",
+        "module_view",
+        "name",
+        "network",
+        "next_work_item_sequence",
+        "page_view",
+        "project_lead",
+        "repo_url",
+        "sort_order",
+        "timezone",
+        "updated_at",
+        "updated_by",
+        "workspace"
+      ],
+      "body": {
+        "id": "f7db7c35-f211-4f70-b995-3f5d916555cf",
+        "is_favorite": false,
+        "sort_order": 65535.0,
+        "member_role": 20,
+        "anchor": null,
+        "members": [
+          "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
+          "018b320f-5095-415f-a49f-d142f56d58c3"
+        ],
+        "cover_image_url": null,
+        "inbox_view": false,
+        "next_work_item_sequence": 1,
+        "agent_executor_options": [
+          {
+            "kind": "cloud_agent",
+            "available": false,
+            "reason_code": "cloud_agent_unavailable"
+          },
+          {
+            "kind": "local_runner",
+            "available": false,
+            "reason_code": "no_local_runner"
+          },
+          {
+            "kind": "managed_runner",
+            "available": false,
+            "reason_code": "managed_runner_disabled"
+          }
+        ],
+        "created_at": "2026-10-02T22:22:36.124504Z",
+        "updated_at": "2026-10-02T22:22:36.124515Z",
+        "deleted_at": null,
+        "name": "Gold B2D9514E",
+        "description": "",
+        "description_text": null,
+        "description_html": null,
+        "network": 2,
+        "identifier": "GB2D9514",
+        "emoji": null,
+        "icon_prop": null,
+        "module_view": false,
+        "cycle_view": false,
+        "issue_views_view": false,
+        "page_view": true,
+        "intake_view": false,
+        "is_time_tracking_enabled": false,
+        "is_issue_type_enabled": false,
+        "is_default": true,
+        "guest_view_all_features": false,
+        "members_can_edit_states": true,
+        "cover_image": null,
+        "archive_in": 0,
+        "close_in": 0,
+        "logo_props": {},
+        "archived_at": null,
+        "timezone": "UTC",
+        "external_source": null,
+        "external_id": null,
+        "repo_url": "",
+        "base_branch": "main",
+        "agent_default_interval_seconds": 10800,
+        "agent_default_max_ticks": 10,
+        "agent_review_default_interval_seconds": 10800,
+        "agent_test_default_interval_seconds": 10800,
+        "agent_ticking_enabled": true,
+        "default_agent_executor": "local_runner",
+        "created_by": "018b320f-5095-415f-a49f-d142f56d58c3",
+        "updated_by": null,
+        "workspace": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
+        "default_assignee": null,
+        "project_lead": "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
+        "cover_image_asset": null,
+        "estimate": null,
+        "default_state": null
+      }
+    },
+    "create_side_effects": {
+      "members": [
+        {
+          "member_id": "018b320f-5095-415f-a49f-d142f56d58c3",
+          "role": 20
+        },
+        {
+          "member_id": "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
+          "role": 20
+        }
+      ],
+      "states": [
+        {
+          "name": "Backlog",
+          "group": "backlog",
+          "default": true
+        },
+        {
+          "name": "Todo",
+          "group": "unstarted",
+          "default": false
+        },
+        {
+          "name": "In Progress",
+          "group": "started",
+          "default": false
+        },
+        {
+          "name": "In Review",
+          "group": "review",
+          "default": false
+        },
+        {
+          "name": "In Test",
+          "group": "test",
+          "default": false
+        },
+        {
+          "name": "Done",
+          "group": "completed",
+          "default": false
+        },
+        {
+          "name": "Cancelled",
+          "group": "cancelled",
+          "default": false
+        },
+        {
+          "name": "Triage",
+          "group": "triage",
+          "default": false
+        }
+      ],
+      "identifier_rows": [
+        {
+          "name": "GB2D9514"
+        }
+      ]
+    },
+    "create_empty": {
+      "status": 400,
+      "body": {
+        "name": [
+          "This field is required."
+        ],
+        "identifier": [
+          "This field is required."
+        ]
+      }
+    },
+    "create_dup_identifier": {
+      "status": 400,
+      "body": {
+        "identifier": [
+          "PROJECT_IDENTIFIER_ALREADY_EXIST"
+        ]
+      }
+    },
+    "create_dup_name": {
+      "status": 400,
+      "body": {
+        "name": [
+          "PROJECT_NAME_ALREADY_EXIST"
+        ]
+      }
+    },
+    "create_special_name": {
+      "status": 400,
+      "body": {
+        "name": [
+          "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+        ]
+      }
+    },
+    "create_cloud_agent_409": {
+      "status": 409,
+      "body": {
+        "error": "Pi Dash Cloud Agent is not currently available",
+        "code": "cloud_agent_unavailable"
+      }
+    },
+    "list": {
+      "status": 200,
+      "body": [
+        {
+          "id": "f7db7c35-f211-4f70-b995-3f5d916555cf",
+          "name": "Gold B2D9514E",
+          "identifier": "GB2D9514",
+          "logo_props": {},
+          "archived_at": null,
+          "workspace": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
+          "cycle_view": false,
+          "issue_views_view": false,
+          "module_view": false,
+          "page_view": true,
+          "is_default": true,
+          "guest_view_all_features": false,
+          "project_lead": "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
+          "network": 2,
+          "created_at": "2026-10-02T22:22:36.124504Z",
+          "updated_at": "2026-10-02T22:22:36.124515Z",
+          "created_by": "018b320f-5095-415f-a49f-d142f56d58c3",
+          "updated_by": null,
+          "member_role": 20,
+          "intake_count": 0,
+          "inbox_view": false,
+          "sort_order": 65535.0
+        }
+      ]
+    },
+    "list_detail": {
+      "status": 200,
+      "body": [
+        {
+          "id": "f7db7c35-f211-4f70-b995-3f5d916555cf",
+          "is_favorite": false,
+          "sort_order": 65535.0,
+          "member_role": 20,
+          "anchor": null,
+          "members": [
+            "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
+            "018b320f-5095-415f-a49f-d142f56d58c3"
+          ],
+          "cover_image_url": null,
+          "inbox_view": false,
+          "next_work_item_sequence": 1,
+          "agent_executor_options": [
+            {
+              "kind": "cloud_agent",
+              "available": false,
+              "reason_code": "cloud_agent_unavailable"
+            },
+            {
+              "kind": "local_runner",
+              "available": false,
+              "reason_code": "no_local_runner"
+            },
+            {
+              "kind": "managed_runner",
+              "available": false,
+              "reason_code": "managed_runner_disabled"
+            }
+          ],
+          "created_at": "2026-10-02T22:22:36.124504Z",
+          "updated_at": "2026-10-02T22:22:36.124515Z",
+          "deleted_at": null,
+          "name": "Gold B2D9514E",
+          "description": "",
+          "description_text": null,
+          "description_html": null,
+          "network": 2,
+          "identifier": "GB2D9514",
+          "emoji": null,
+          "icon_prop": null,
+          "module_view": false,
+          "cycle_view": false,
+          "issue_views_view": false,
+          "page_view": true,
+          "intake_view": false,
+          "is_time_tracking_enabled": false,
+          "is_issue_type_enabled": false,
+          "is_default": true,
+          "guest_view_all_features": false,
+          "members_can_edit_states": true,
+          "cover_image": null,
+          "archive_in": 0,
+          "close_in": 0,
+          "logo_props": {},
+          "archived_at": null,
+          "timezone": "UTC",
+          "external_source": null,
+          "external_id": null,
+          "repo_url": "",
+          "base_branch": "main",
+          "agent_default_interval_seconds": 10800,
+          "agent_default_max_ticks": 10,
+          "agent_review_default_interval_seconds": 10800,
+          "agent_test_default_interval_seconds": 10800,
+          "agent_ticking_enabled": true,
+          "default_agent_executor": "local_runner",
+          "created_by": "018b320f-5095-415f-a49f-d142f56d58c3",
+          "updated_by": null,
+          "workspace": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
+          "default_assignee": null,
+          "project_lead": "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
+          "cover_image_asset": null,
+          "estimate": null,
+          "default_state": null
+        }
+      ]
+    },
+    "list_detail_fields": {
+      "status": 200,
+      "body": [
+        {
+          "id": "f7db7c35-f211-4f70-b995-3f5d916555cf",
+          "is_favorite": false,
+          "sort_order": 65535.0,
+          "member_role": 20,
+          "anchor": null,
+          "members": [
+            "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
+            "018b320f-5095-415f-a49f-d142f56d58c3"
+          ],
+          "cover_image_url": null,
+          "inbox_view": false,
+          "next_work_item_sequence": 1,
+          "agent_executor_options": [
+            {
+              "kind": "cloud_agent",
+              "available": false,
+              "reason_code": "cloud_agent_unavailable"
+            },
+            {
+              "kind": "local_runner",
+              "available": false,
+              "reason_code": "no_local_runner"
+            },
+            {
+              "kind": "managed_runner",
+              "available": false,
+              "reason_code": "managed_runner_disabled"
+            }
+          ],
+          "created_at": "2026-10-02T22:22:36.124504Z",
+          "updated_at": "2026-10-02T22:22:36.124515Z",
+          "deleted_at": null,
+          "name": "Gold B2D9514E",
+          "description": "",
+          "description_text": null,
+          "description_html": null,
+          "network": 2,
+          "identifier": "GB2D9514",
+          "emoji": null,
+          "icon_prop": null,
+          "module_view": false,
+          "cycle_view": false,
+          "issue_views_view": false,
+          "page_view": true,
+          "intake_view": false,
+          "is_time_tracking_enabled": false,
+          "is_issue_type_enabled": false,
+          "is_default": true,
+          "guest_view_all_features": false,
+          "members_can_edit_states": true,
+          "cover_image": null,
+          "archive_in": 0,
+          "close_in": 0,
+          "logo_props": {},
+          "archived_at": null,
+          "timezone": "UTC",
+          "external_source": null,
+          "external_id": null,
+          "repo_url": "",
+          "base_branch": "main",
+          "agent_default_interval_seconds": 10800,
+          "agent_default_max_ticks": 10,
+          "agent_review_default_interval_seconds": 10800,
+          "agent_test_default_interval_seconds": 10800,
+          "agent_ticking_enabled": true,
+          "default_agent_executor": "local_runner",
+          "created_by": "018b320f-5095-415f-a49f-d142f56d58c3",
+          "updated_by": null,
+          "workspace": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
+          "default_assignee": null,
+          "project_lead": "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
+          "cover_image_asset": null,
+          "estimate": null,
+          "default_state": null
+        }
+      ]
+    },
+    "list_detail_paginate": {
+      "status": 200,
+      "body": {
+        "grouped_by": null,
+        "sub_grouped_by": null,
+        "total_count": 1,
+        "next_cursor": "1:1:0",
+        "prev_cursor": "1:-1:1",
+        "next_page_results": false,
+        "prev_page_results": false,
+        "count": 1,
+        "total_pages": 1,
+        "total_results": 1,
+        "extra_stats": null,
+        "results": [
+          {
+            "id": "f7db7c35-f211-4f70-b995-3f5d916555cf",
+            "is_favorite": false,
+            "sort_order": 65535.0,
+            "member_role": 20,
+            "anchor": null,
+            "members": [
+              "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
+              "018b320f-5095-415f-a49f-d142f56d58c3"
+            ],
+            "cover_image_url": null,
+            "inbox_view": false,
+            "next_work_item_sequence": 1,
+            "agent_executor_options": [
+              {
+                "kind": "cloud_agent",
+                "available": false,
+                "reason_code": "cloud_agent_unavailable"
+              },
+              {
+                "kind": "local_runner",
+                "available": false,
+                "reason_code": "no_local_runner"
+              },
+              {
+                "kind": "managed_runner",
+                "available": false,
+                "reason_code": "managed_runner_disabled"
+              }
+            ],
+            "created_at": "2026-10-02T22:22:36.124504Z",
+            "updated_at": "2026-10-02T22:22:36.124515Z",
+            "deleted_at": null,
+            "name": "Gold B2D9514E",
+            "description": "",
+            "description_text": null,
+            "description_html": null,
+            "network": 2,
+            "identifier": "GB2D9514",
+            "emoji": null,
+            "icon_prop": null,
+            "module_view": false,
+            "cycle_view": false,
+            "issue_views_view": false,
+            "page_view": true,
+            "intake_view": false,
+            "is_time_tracking_enabled": false,
+            "is_issue_type_enabled": false,
+            "is_default": true,
+            "guest_view_all_features": false,
+            "members_can_edit_states": true,
+            "cover_image": null,
+            "archive_in": 0,
+            "close_in": 0,
+            "logo_props": {},
+            "archived_at": null,
+            "timezone": "UTC",
+            "external_source": null,
+            "external_id": null,
+            "repo_url": "",
+            "base_branch": "main",
+            "agent_default_interval_seconds": 10800,
+            "agent_default_max_ticks": 10,
+            "agent_review_default_interval_seconds": 10800,
+            "agent_test_default_interval_seconds": 10800,
+            "agent_ticking_enabled": true,
+            "default_agent_executor": "local_runner",
+            "created_by": "018b320f-5095-415f-a49f-d142f56d58c3",
+            "updated_by": null,
+            "workspace": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
+            "default_assignee": null,
+            "project_lead": "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
+            "cover_image_asset": null,
+            "estimate": null,
+            "default_state": null
+          }
+        ]
+      }
+    },
+    "retrieve": {
+      "status": 200,
+      "keys": [
+        "agent_default_interval_seconds",
+        "agent_default_max_ticks",
+        "agent_executor_options",
+        "agent_review_default_interval_seconds",
+        "agent_test_default_interval_seconds",
+        "agent_ticking_enabled",
+        "anchor",
+        "archive_in",
+        "archived_at",
+        "base_branch",
+        "close_in",
+        "cover_image",
+        "cover_image_asset",
+        "cover_image_url",
+        "created_at",
+        "created_by",
+        "cycle_view",
+        "default_agent_executor",
+        "default_assignee",
+        "default_state",
+        "deleted_at",
+        "description",
+        "description_html",
+        "description_text",
+        "emoji",
+        "estimate",
+        "external_id",
+        "external_source",
+        "guest_view_all_features",
+        "icon_prop",
+        "id",
+        "identifier",
+        "inbox_view",
+        "intake_view",
+        "is_default",
+        "is_favorite",
+        "is_issue_type_enabled",
+        "is_time_tracking_enabled",
+        "issue_views_view",
+        "logo_props",
+        "member_role",
+        "members",
+        "members_can_edit_states",
+        "module_view",
+        "name",
+        "network",
+        "next_work_item_sequence",
+        "page_view",
+        "project_lead",
+        "repo_url",
+        "sort_order",
+        "timezone",
+        "updated_at",
+        "updated_by",
+        "workspace"
+      ]
+    },
+    "retrieve_404": {
+      "status": 404,
+      "body": {
+        "error": "Project does not exist"
+      }
+    },
+    "retrieve_public_nonmember_409": {
+      "status": 409,
+      "body": {
+        "error": "You are not a member of this project"
+      }
+    },
+    "retrieve_secret_nonmember_403": {
+      "status": 403,
+      "body": {
+        "error": "You do not have permission"
+      }
+    },
+    "put_400": {
+      "status": 400,
+      "body": {
+        "deleted_at": [
+          "This field is required."
+        ],
+        "workspace": [
+          "This field is required."
+        ]
+      }
+    },
+    "patch": {
+      "status": 200,
+      "body": {
+        "id": "f7db7c35-f211-4f70-b995-3f5d916555cf",
+        "is_favorite": false,
+        "sort_order": 65535.0,
+        "member_role": 20,
+        "anchor": null,
+        "members": [
+          "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
+          "018b320f-5095-415f-a49f-d142f56d58c3"
+        ],
+        "cover_image_url": null,
+        "inbox_view": false,
+        "next_work_item_sequence": 1,
+        "agent_executor_options": [
+          {
+            "kind": "cloud_agent",
+            "available": false,
+            "reason_code": "cloud_agent_unavailable"
+          },
+          {
+            "kind": "local_runner",
+            "available": false,
+            "reason_code": "no_local_runner"
+          },
+          {
+            "kind": "managed_runner",
+            "available": false,
+            "reason_code": "managed_runner_disabled"
+          }
+        ],
+        "created_at": "2026-10-02T22:22:36.124504Z",
+        "updated_at": "2026-10-02T22:22:37.771323Z",
+        "deleted_at": null,
+        "name": "Gold B2D9514E",
+        "description": "patched desc",
+        "description_text": null,
+        "description_html": null,
+        "network": 2,
+        "identifier": "GB2D9514",
+        "emoji": null,
+        "icon_prop": null,
+        "module_view": false,
+        "cycle_view": false,
+        "issue_views_view": false,
+        "page_view": true,
+        "intake_view": false,
+        "is_time_tracking_enabled": false,
+        "is_issue_type_enabled": false,
+        "is_default": true,
+        "guest_view_all_features": false,
+        "members_can_edit_states": true,
+        "cover_image": null,
+        "archive_in": 0,
+        "close_in": 0,
+        "logo_props": {},
+        "archived_at": null,
+        "timezone": "UTC",
+        "external_source": null,
+        "external_id": null,
+        "repo_url": "",
+        "base_branch": "main",
+        "agent_default_interval_seconds": 10800,
+        "agent_default_max_ticks": 10,
+        "agent_review_default_interval_seconds": 10800,
+        "agent_test_default_interval_seconds": 10800,
+        "agent_ticking_enabled": true,
+        "default_agent_executor": "local_runner",
+        "created_by": "018b320f-5095-415f-a49f-d142f56d58c3",
+        "updated_by": "018b320f-5095-415f-a49f-d142f56d58c3",
+        "workspace": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
+        "default_assignee": null,
+        "project_lead": "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
+        "cover_image_asset": null,
+        "estimate": null,
+        "default_state": null
+      }
+    },
+    "patch_guest_403": {
+      "status": 403,
+      "body": {
+        "error": "You don't have the required permissions."
+      }
+    },
+    "patch_inbox_view": {
+      "status": 200,
+      "body": {
+        "id": "f7db7c35-f211-4f70-b995-3f5d916555cf",
+        "is_favorite": false,
+        "sort_order": 65535.0,
+        "member_role": 20,
+        "anchor": null,
+        "members": [
+          "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
+          "018b320f-5095-415f-a49f-d142f56d58c3"
+        ],
+        "cover_image_url": null,
+        "inbox_view": true,
+        "next_work_item_sequence": 1,
+        "agent_executor_options": [
+          {
+            "kind": "cloud_agent",
+            "available": false,
+            "reason_code": "cloud_agent_unavailable"
+          },
+          {
+            "kind": "local_runner",
+            "available": false,
+            "reason_code": "no_local_runner"
+          },
+          {
+            "kind": "managed_runner",
+            "available": false,
+            "reason_code": "managed_runner_disabled"
+          }
+        ],
+        "created_at": "2026-10-02T22:22:36.124504Z",
+        "updated_at": "2026-10-02T22:22:37.879497Z",
+        "deleted_at": null,
+        "name": "Gold B2D9514E",
+        "description": "patched desc",
+        "description_text": null,
+        "description_html": null,
+        "network": 2,
+        "identifier": "GB2D9514",
+        "emoji": null,
+        "icon_prop": null,
+        "module_view": false,
+        "cycle_view": false,
+        "issue_views_view": false,
+        "page_view": true,
+        "intake_view": true,
+        "is_time_tracking_enabled": false,
+        "is_issue_type_enabled": false,
+        "is_default": true,
+        "guest_view_all_features": false,
+        "members_can_edit_states": true,
+        "cover_image": null,
+        "archive_in": 0,
+        "close_in": 0,
+        "logo_props": {},
+        "archived_at": null,
+        "timezone": "UTC",
+        "external_source": null,
+        "external_id": null,
+        "repo_url": "",
+        "base_branch": "main",
+        "agent_default_interval_seconds": 10800,
+        "agent_default_max_ticks": 10,
+        "agent_review_default_interval_seconds": 10800,
+        "agent_test_default_interval_seconds": 10800,
+        "agent_ticking_enabled": true,
+        "default_agent_executor": "local_runner",
+        "created_by": "018b320f-5095-415f-a49f-d142f56d58c3",
+        "updated_by": "018b320f-5095-415f-a49f-d142f56d58c3",
+        "workspace": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
+        "default_assignee": null,
+        "project_lead": "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
+        "cover_image_asset": null,
+        "estimate": null,
+        "default_state": null
+      }
+    },
+    "patch_inbox_intake_row": [
+      {
+        "name": "Gold B2D9514E Intake",
+        "is_default": true
+      }
+    ],
+    "patch_cloud_agent_409": {
+      "status": 409,
+      "body": {
+        "error": "Pi Dash Cloud Agent is not currently available",
+        "code": "cloud_agent_unavailable"
+      }
+    },
+    "destroy_default_400": {
+      "status": 400,
+      "body": {
+        "error": "Default project cannot be deleted"
+      }
+    },
+    "destroy": {
+      "status": 204,
+      "body": ""
+    },
+    "destroy_cascades": {
+      "project_deleted_at": [
+        {
+          "gone": true
+        }
+      ],
+      "deploy_boards_left": [
+        {
+          "n": 1
+        }
+      ],
+      "favorites_left": [
+        {
+          "n": 1
+        }
+      ]
+    }
+  },
+  "destroy_cascade_note": "destroy soft-deletes the project row plus (soft) its deploy boards and user favorites (base.py:419-422); favorite cascade verified fav_gone=true, board cascade verified gone=true in members run.",
+  "archive_cycle": {
+    "archive": {
+      "status": 200,
+      "body": {
+        "archived_at": "2026-10-02 22:22:38.379224+00:00"
+      }
+    },
+    "retrieve_archived_404": {
+      "status": 404,
+      "body": {
+        "error": "Project does not exist"
+      }
+    },
+    "patch_archived_400": {
+      "status": 400,
+      "body": {
+        "error": "Archived projects cannot be updated"
+      }
+    },
+    "unarchive": {
+      "status": 204,
+      "body": ""
+    }
+  },
+  "identifiers": {
+    "identifiers_get": {
+      "status": 200,
+      "body": {
+        "exists": 1,
+        "identifiers": [
+          {
+            "id": 19,
+            "name": "GB2D9514",
+            "project": "f7db7c35-f211-4f70-b995-3f5d916555cf"
+          }
+        ]
+      }
+    },
+    "identifiers_missing_400": {
+      "status": 400,
+      "body": {
+        "error": "Name is required"
+      }
+    },
+    "identifiers_delete_unknown": {
+      "status": 204,
+      "body": ""
+    },
+    "identifiers_delete_live_400": {
+      "status": 400,
+      "body": {
+        "error": "Cannot delete an identifier of an existing project"
+      }
+    }
+  },
+  "user_views": {
+    "user_views": {
+      "status": 204,
+      "body": ""
+    },
+    "user_views_nonmember_403": {
+      "status": 403,
+      "body": {
+        "error": "Forbidden"
+      }
+    }
+  },
+  "favorites": {
+    "favorites_create": {
+      "status": 204,
+      "body": ""
+    },
+    "favorites_destroy": {
+      "status": 204,
+      "body": ""
+    }
+  },
+  "favorites_list_500": "see FX-APROJ-08 (generic 500).",
+  "deploy_boards": {
+    "boards_empty": {
+      "status": 200,
+      "body": {
+        "deleted_at": null,
+        "entity_identifier": null,
+        "entity_name": "",
+        "is_comments_enabled": false,
+        "is_reactions_enabled": false,
+        "is_votes_enabled": false,
+        "view_props": null,
+        "is_activity_enabled": false,
+        "is_disabled": false,
+        "created_by": null,
+        "updated_by": null,
+        "intake": null
+      }
+    },
+    "boards_create": {
+      "status": 200,
+      "body": {
+        "id": "394cca0d-3d78-4b0d-9435-685ee514e192",
+        "project_details": {
+          "id": "f7db7c35-f211-4f70-b995-3f5d916555cf",
+          "identifier": "GB2D9514",
+          "name": "Gold B2D9514E",
+          "cover_image": null,
+          "cover_image_url": null,
+          "logo_props": {},
+          "description": "patched desc",
+          "is_default": true
+        },
+        "workspace_detail": {
+          "name": "contract fx09w",
+          "slug": "fx09w-b4b55958",
+          "id": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
+          "logo_url": null
+        },
+        "created_at": "2026-10-02T22:22:39.069273Z",
+        "updated_at": "2026-10-02T22:22:39.086899Z",
+        "deleted_at": null,
+        "entity_identifier": "f7db7c35-f211-4f70-b995-3f5d916555cf",
+        "entity_name": "project",
+        "anchor": "a4b9a2a3eac245669ea96c36172468c0",
+        "is_comments_enabled": true,
+        "is_reactions_enabled": false,
+        "is_votes_enabled": true,
+        "view_props": {
+          "list": true,
+          "kanban": true,
+          "calendar": true,
+          "gantt": true,
+          "spreadsheet": true
+        },
+        "is_activity_enabled": true,
+        "is_disabled": false,
+        "created_by": "018b320f-5095-415f-a49f-d142f56d58c3",
+        "updated_by": "018b320f-5095-415f-a49f-d142f56d58c3",
+        "workspace": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
+        "project": "f7db7c35-f211-4f70-b995-3f5d916555cf",
+        "intake": null
+      }
+    },
+    "boards_list_after": {
+      "status": 200,
+      "keys": [
+        "anchor",
+        "created_at",
+        "created_by",
+        "deleted_at",
+        "entity_identifier",
+        "entity_name",
+        "id",
+        "intake",
+        "is_activity_enabled",
+        "is_comments_enabled",
+        "is_disabled",
+        "is_reactions_enabled",
+        "is_votes_enabled",
+        "project",
+        "project_details",
+        "updated_at",
+        "updated_by",
+        "view_props",
+        "workspace",
+        "workspace_detail"
+      ]
+    },
+    "boards_retrieve": {
+      "status": 200,
+      "body": {
+        "id": "394cca0d-3d78-4b0d-9435-685ee514e192",
+        "project_details": {
+          "id": "f7db7c35-f211-4f70-b995-3f5d916555cf",
+          "identifier": "GB2D9514",
+          "name": "Gold B2D9514E",
+          "cover_image": null,
+          "cover_image_url": null,
+          "logo_props": {},
+          "description": "patched desc",
+          "is_default": true
+        },
+        "workspace_detail": {
+          "name": "contract fx09w",
+          "slug": "fx09w-b4b55958",
+          "id": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
+          "logo_url": null
+        },
+        "created_at": "2026-10-02T22:22:39.069273Z",
+        "updated_at": "2026-10-02T22:22:39.086899Z",
+        "deleted_at": null,
+        "entity_identifier": "f7db7c35-f211-4f70-b995-3f5d916555cf",
+        "entity_name": "project",
+        "anchor": "a4b9a2a3eac245669ea96c36172468c0",
+        "is_comments_enabled": true,
+        "is_reactions_enabled": false,
+        "is_votes_enabled": true,
+        "view_props": {
+          "list": true,
+          "gantt": true,
+          "kanban": true,
+          "calendar": true,
+          "spreadsheet": true
+        },
+        "is_activity_enabled": true,
+        "is_disabled": false,
+        "created_by": "018b320f-5095-415f-a49f-d142f56d58c3",
+        "updated_by": "018b320f-5095-415f-a49f-d142f56d58c3",
+        "workspace": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
+        "project": "f7db7c35-f211-4f70-b995-3f5d916555cf",
+        "intake": null
+      }
+    },
+    "boards_patch": {
+      "status": 200,
+      "body": {
+        "id": "394cca0d-3d78-4b0d-9435-685ee514e192",
+        "project_details": {
+          "id": "f7db7c35-f211-4f70-b995-3f5d916555cf",
+          "identifier": "GB2D9514",
+          "name": "Gold B2D9514E",
+          "cover_image": null,
+          "cover_image_url": null,
+          "logo_props": {},
+          "description": "patched desc",
+          "is_default": true
+        },
+        "workspace_detail": {
+          "name": "contract fx09w",
+          "slug": "fx09w-b4b55958",
+          "id": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
+          "logo_url": null
+        },
+        "created_at": "2026-10-02T22:22:39.069273Z",
+        "updated_at": "2026-10-02T22:22:39.262504Z",
+        "deleted_at": null,
+        "entity_identifier": "f7db7c35-f211-4f70-b995-3f5d916555cf",
+        "entity_name": "project",
+        "anchor": "a4b9a2a3eac245669ea96c36172468c0",
+        "is_comments_enabled": true,
+        "is_reactions_enabled": true,
+        "is_votes_enabled": true,
+        "view_props": {
+          "list": true,
+          "gantt": true,
+          "kanban": true,
+          "calendar": true,
+          "spreadsheet": true
+        },
+        "is_activity_enabled": true,
+        "is_disabled": false,
+        "created_by": "018b320f-5095-415f-a49f-d142f56d58c3",
+        "updated_by": "018b320f-5095-415f-a49f-d142f56d58c3",
+        "workspace": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
+        "project": "f7db7c35-f211-4f70-b995-3f5d916555cf",
+        "intake": null
+      }
+    },
+    "boards_destroy": {
+      "status": 204,
+      "body": ""
+    }
+  },
+  "deploy_boards_note": "list with no row serializes None (12-key null shape); create is get_or_create with explicit 200; retrieve/partial_update/destroy are DRF defaults (DeployBoardViewSet only overrides list/create). create backfills workspace from project via WorkspaceBaseModel.save.",
+  "members": {
+    "member_list": {
+      "status": 200,
+      "body": [
+        {
+          "id": "716079c2-5cf7-4ed7-a94d-3c2c4ac06964",
+          "role": 20,
+          "member": "5d165b91-ad8c-4d47-8b86-09de10badd8d",
+          "project": "5952e951-baad-4770-8ee8-64faf7f753fd",
+          "original_role": 20,
+          "created_at": "2026-10-02T22:23:26.662756Z"
+        }
+      ]
+    },
+    "member_create": {
+      "status": 201,
+      "body": [
+        {
+          "id": "84d56e6a-61d2-4818-9076-bda6e286140a",
+          "role": 15,
+          "member": "ffe29306-4e75-4b5a-bbb3-8ca719f24347",
+          "project": "5952e951-baad-4770-8ee8-64faf7f753fd",
+          "original_role": 15,
+          "created_at": "2026-10-02T22:23:27.085735Z"
+        }
+      ]
+    },
+    "member_create_empty_400": {
+      "status": 400,
+      "body": {
+        "error": "At least one member is required"
+      }
+    },
+    "member_create_wsadmin_lower_400": {
+      "status": 400,
+      "body": {
+        "error": "You cannot add a user with role lower than the workspace role"
+      }
+    },
+    "member_create_wsguest_higher_400": {
+      "status": 400,
+      "body": {
+        "error": "You cannot add a user with role higher than the workspace role"
+      }
+    },
+    "member_create_guest_ok": {
+      "status": 201,
+      "body": [
+        {
+          "id": "2a2459a2-331b-434d-8dcf-d5d344618763",
+          "role": 5,
+          "member": "56c67091-6619-49a0-ad74-f24584d766e4",
+          "project": "5952e951-baad-4770-8ee8-64faf7f753fd",
+          "original_role": 5,
+          "created_at": "2026-10-02T22:23:27.765678Z"
+        }
+      ]
+    },
+    "member_retrieve_admin": {
+      "status": 200,
+      "keys": [
+        "comment",
+        "created_at",
+        "created_by",
+        "default_props",
+        "deleted_at",
+        "id",
+        "is_active",
+        "member",
+        "preferences",
+        "project",
+        "role",
+        "sort_order",
+        "updated_at",
+        "updated_by",
+        "view_props",
+        "workspace"
+      ],
+      "body": {
+        "id": "84d56e6a-61d2-4818-9076-bda6e286140a",
+        "workspace": {
+          "name": "contract fx09bw",
+          "slug": "fx09bw-7251eddd",
+          "id": "95c7ddaa-0221-47c1-8b25-fa699202c42e",
+          "logo_url": null
+        },
+        "project": {
+          "id": "5952e951-baad-4770-8ee8-64faf7f753fd",
+          "identifier": "M7DE496C",
+          "name": "M 7DE496CF",
+          "cover_image": null,
+          "cover_image_url": null,
+          "logo_props": {},
+          "description": "",
+          "is_default": true
+        },
+        "member": {
+          "id": "ffe29306-4e75-4b5a-bbb3-8ca719f24347",
+          "first_name": "",
+          "last_name": "",
+          "avatar": "",
+          "avatar_url": null,
+          "is_bot": false,
+          "display_name": "fx09m15",
+          "email": "fx09m15-a0673ef9@example.com",
+          "last_login_medium": "email"
+        },
+        "created_at": "2026-10-02T22:23:27.085735Z",
+        "updated_at": "2026-10-02T22:23:27.085743Z",
+        "deleted_at": null,
+        "comment": null,
+        "role": 15,
+        "view_props": {
+          "filters": {
+            "state": null,
+            "labels": null,
+            "priority": null,
+            "assignees": null,
+            "created_by": null,
+            "start_date": null,
+            "subscriber": null,
+            "state_group": null,
+            "target_date": null
+          },
+          "display_filters": {
+            "type": null,
+            "layout": "list",
+            "group_by": null,
+            "order_by": "-created_at",
+            "sub_issue": true,
+            "show_empty_groups": true,
+            "calendar_date_range": ""
+          }
+        },
+        "default_props": {
+          "filters": {
+            "state": null,
+            "labels": null,
+            "priority": null,
+            "assignees": null,
+            "created_by": null,
+            "start_date": null,
+            "subscriber": null,
+            "state_group": null,
+            "target_date": null
+          },
+          "display_filters": {
+            "type": null,
+            "layout": "list",
+            "group_by": null,
+            "order_by": "-created_at",
+            "sub_issue": true,
+            "show_empty_groups": true,
+            "calendar_date_range": ""
+          }
+        },
+        "preferences": {
+          "pages": {
+            "block_display": true
+          },
+          "navigation": {
+            "default_tab": "work_items",
+            "hide_in_more_menu": []
+          }
+        },
+        "sort_order": 65535.0,
+        "is_active": true,
+        "created_by": null,
+        "updated_by": null
+      }
+    },
+    "member_retrieve_guest_view": {
+      "status": 200,
+      "keys": [
+        "created_at",
+        "id",
+        "member",
+        "original_role",
+        "project",
+        "role"
+      ]
+    },
+    "member_retrieve_404": {
+      "status": 404,
+      "body": {
+        "error": "Project member not found"
+      }
+    },
+    "patch_role_by_admin": {
+      "status": 200,
+      "body": {
+        "id": "84d56e6a-61d2-4818-9076-bda6e286140a",
+        "workspace": {
+          "name": "contract fx09bw",
+          "slug": "fx09bw-7251eddd",
+          "id": "95c7ddaa-0221-47c1-8b25-fa699202c42e",
+          "logo_url": null
+        },
+        "project": {
+          "id": "5952e951-baad-4770-8ee8-64faf7f753fd",
+          "identifier": "M7DE496C",
+          "name": "M 7DE496CF",
+          "cover_image": null,
+          "cover_image_url": null,
+          "logo_props": {},
+          "description": "",
+          "is_default": true
+        },
+        "member": {
+          "id": "ffe29306-4e75-4b5a-bbb3-8ca719f24347",
+          "first_name": "",
+          "last_name": "",
+          "avatar": "",
+          "avatar_url": null,
+          "is_bot": false,
+          "display_name": "fx09m15"
+        },
+        "created_at": "2026-10-02T22:23:27.085735Z",
+        "updated_at": "2026-10-02T22:23:28.284496Z",
+        "deleted_at": null,
+        "comment": null,
+        "role": 5,
+        "view_props": {
+          "filters": {
+            "state": null,
+            "labels": null,
+            "priority": null,
+            "assignees": null,
+            "created_by": null,
+            "start_date": null,
+            "subscriber": null,
+            "state_group": null,
+            "target_date": null
+          },
+          "display_filters": {
+            "type": null,
+            "layout": "list",
+            "group_by": null,
+            "order_by": "-created_at",
+            "sub_issue": true,
+            "show_empty_groups": true,
+            "calendar_date_range": ""
+          }
+        },
+        "default_props": {
+          "filters": {
+            "state": null,
+            "labels": null,
+            "priority": null,
+            "assignees": null,
+            "created_by": null,
+            "start_date": null,
+            "subscriber": null,
+            "state_group": null,
+            "target_date": null
+          },
+          "display_filters": {
+            "type": null,
+            "layout": "list",
+            "group_by": null,
+            "order_by": "-created_at",
+            "sub_issue": true,
+            "show_empty_groups": true,
+            "calendar_date_range": ""
+          }
+        },
+        "preferences": {
+          "pages": {
+            "block_display": true
+          },
+          "navigation": {
+            "default_tab": "work_items",
+            "hide_in_more_menu": []
+          }
+        },
+        "sort_order": 65535.0,
+        "is_active": true,
+        "created_by": null,
+        "updated_by": "5d165b91-ad8c-4d47-8b86-09de10badd8d"
+      }
+    },
+    "patch_self_role_400": {
+      "status": 400,
+      "body": {
+        "error": "You cannot update your own role"
+      }
+    },
+    "patch_role_by_nonadmin_403": {
+      "status": 403,
+      "body": {
+        "error": "You do not have permission to update roles"
+      }
+    },
+    "patch_assign_higher_403": {
+      "status": 403,
+      "body": {
+        "error": "You cannot assign a role equal to or higher than your own"
+      }
+    },
+    "patch_ws_guest_higher_400": {
+      "status": 400,
+      "body": {
+        "error": "You cannot add a user with role higher than the workspace role"
+      }
+    },
+    "destroy_member": {
+      "status": 204,
+      "body": ""
+    },
+    "destroy_member_row": [
+      {
+        "is_active": false
+      }
+    ],
+    "destroy_self_400": {
+      "status": 400,
+      "body": {
+        "error": "You cannot remove yourself from the workspace. Please use leave workspace"
+      }
+    },
+    "destroy_higher_role": {
+      "status": 403,
+      "body": {
+        "error": "You don't have the required permissions."
+      }
+    },
+    "leave_member": {
+      "status": 204,
+      "body": ""
+    },
+    "leave_row": [
+      {
+        "is_active": false
+      }
+    ],
+    "leave_only_admin_400": {
+      "status": 400,
+      "body": {
+        "error": "You cannot leave the project as your the only admin of the project you will have to either delete the project or create an another admin"
+      }
+    },
+    "member_me": {
+      "status": 200,
+      "keys": [
+        "comment",
+        "created_at",
+        "created_by",
+        "default_props",
+        "deleted_at",
+        "id",
+        "is_active",
+        "member",
+        "preferences",
+        "project",
+        "role",
+        "sort_order",
+        "updated_at",
+        "updated_by",
+        "view_props",
+        "workspace"
+      ]
+    },
+    "roles": {
+      "status": 200,
+      "body": {
+        "5952e951-baad-4770-8ee8-64faf7f753fd": 20
+      }
+    },
+    "pref_patch": {
+      "status": 200,
+      "body": {
+        "preferences": {
+          "pages": {
+            "block_display": true
+          },
+          "navigation": {
+            "default_tab": "work_items",
+            "hide_in_more_menu": []
+          },
+          "theme": "dark"
+        }
+      }
+    },
+    "pref_get": {
+      "status": 200,
+      "keys": [
+        "member_id",
+        "preferences",
+        "project_id",
+        "workspace_id"
+      ],
+      "body": {
+        "preferences": {
+          "pages": {
+            "block_display": true
+          },
+          "theme": "dark",
+          "navigation": {
+            "default_tab": "work_items",
+            "hide_in_more_menu": []
+          }
+        },
+        "project_id": "5952e951-baad-4770-8ee8-64faf7f753fd",
+        "member_id": "5d165b91-ad8c-4d47-8b86-09de10badd8d",
+        "workspace_id": "95c7ddaa-0221-47c1-8b25-fa699202c42e"
+      }
+    },
+    "patch_self_comment_400": {
+      "status": 400,
+      "body": {
+        "error": "You cannot update your own role"
+      }
+    },
+    "patch_other_comment_200": {
+      "status": 200,
+      "body": {
+        "id": "90485fce-7cd5-4397-8939-2a9c780d8fd5",
+        "workspace": {
+          "name": "contract fx10w",
+          "slug": "fx10w-ad753009",
+          "id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "logo_url": null
+        },
+        "project": {
+          "id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "identifier": "S694743F",
+          "name": "ST 694743F6",
+          "cover_image": null,
+          "cover_image_url": null,
+          "logo_props": {},
+          "description": "",
+          "is_default": true
+        },
+        "member": {
+          "id": "0e1af2a6-a8ad-43ab-9683-963f493dec71",
+          "first_name": "",
+          "last_name": "",
+          "avatar": "",
+          "avatar_url": null,
+          "is_bot": false,
+          "display_name": "fx09c15"
+        },
+        "created_at": "2026-10-02T22:23:57.072447Z",
+        "updated_at": "2026-10-02T22:23:57.182650Z",
+        "deleted_at": null,
+        "comment": "note",
+        "role": 15,
+        "view_props": {
+          "filters": {
+            "state": null,
+            "labels": null,
+            "priority": null,
+            "assignees": null,
+            "created_by": null,
+            "start_date": null,
+            "subscriber": null,
+            "state_group": null,
+            "target_date": null
+          },
+          "display_filters": {
+            "type": null,
+            "layout": "list",
+            "group_by": null,
+            "order_by": "-created_at",
+            "sub_issue": true,
+            "show_empty_groups": true,
+            "calendar_date_range": ""
+          }
+        },
+        "default_props": {
+          "filters": {
+            "state": null,
+            "labels": null,
+            "priority": null,
+            "assignees": null,
+            "created_by": null,
+            "start_date": null,
+            "subscriber": null,
+            "state_group": null,
+            "target_date": null
+          },
+          "display_filters": {
+            "type": null,
+            "layout": "list",
+            "group_by": null,
+            "order_by": "-created_at",
+            "sub_issue": true,
+            "show_empty_groups": true,
+            "calendar_date_range": ""
+          }
+        },
+        "preferences": {
+          "pages": {
+            "block_display": true
+          },
+          "navigation": {
+            "default_tab": "work_items",
+            "hide_in_more_menu": []
+          }
+        },
+        "sort_order": 65535.0,
+        "is_active": true,
+        "created_by": null,
+        "updated_by": "acb103e9-7710-4be7-8f51-aa6a006fc2df"
+      }
+    },
+    "destroy_higher_role_inview_400": {
+      "status": 400,
+      "body": {
+        "error": "You cannot remove a user having role higher than you"
+      }
+    }
+  },
+  "members_notes": [
+    "member_list/retrieve-guest pass fields= to the role serializer; it is ignored (DynamicBaseSerializer bug) so the full 6-key shape renders (see FX-APROJ-02).",
+    "Self-patch guard (member.py:216) fires for ANY field, not just role: patching your own comment 400s (see patch_self_comment_400).",
+    "destroy by a project non-admin 403s at the [ADMIN] decorator; the in-view higher-role check (member.py:290) is reachable via the ws-admin override and returns 400 (not 403)."
+  ],
+  "invites": {
+    "invite_list": {
+      "status": 200,
+      "body": [
+        {
+          "id": "eeabfd06-51c3-4c96-bf23-f5c63c786ebc",
+          "project": {
+            "id": "5952e951-baad-4770-8ee8-64faf7f753fd",
+            "identifier": "M7DE496C",
+            "name": "M 7DE496CF",
+            "cover_image": null,
+            "cover_image_url": null,
+            "logo_props": {},
+            "description": "",
+            "is_default": true
+          },
+          "workspace": {
+            "name": "contract fx09bw",
+            "slug": "fx09bw-7251eddd",
+            "id": "95c7ddaa-0221-47c1-8b25-fa699202c42e",
+            "logo_url": null
+          },
+          "created_at": "2026-10-02T22:23:29.449007Z",
+          "updated_at": "2026-10-02T22:23:29.449020Z",
+          "deleted_at": null,
+          "email": "invite-95425d6f@example.com",
+          "accepted": false,
+          "token": "8c5cb2bee25b426cb9d56520d3ff2656",
+          "message": null,
+          "responded_at": null,
+          "role": 15,
+          "created_by": null,
+          "updated_by": null
+        }
+      ]
+    },
+    "invite_retrieve": {
+      "status": 200,
+      "keys": [
+        "accepted",
+        "created_at",
+        "created_by",
+        "deleted_at",
+        "email",
+        "id",
+        "message",
+        "project",
+        "responded_at",
+        "role",
+        "token",
+        "updated_at",
+        "updated_by",
+        "workspace"
+      ]
+    },
+    "invite_create_empty_400": {
+      "status": 400,
+      "body": {
+        "error": "Emails are required"
+      }
+    },
+    "invite_destroy": {
+      "status": 204,
+      "body": ""
+    }
+  },
+  "invites_note": "invite create with emails always 500s (see FX-APROJ-08); list/retrieve/destroy are DRF defaults.",
+  "user_invites": {
+    "user_invite_list_empty": {
+      "status": 200,
+      "body": []
+    },
+    "user_invite_list": {
+      "status": 200,
+      "body": [
+        {
+          "id": "ecd97faa-83e8-484e-bae6-d8ec6bbfb0e8",
+          "project": {
+            "id": "5952e951-baad-4770-8ee8-64faf7f753fd",
+            "identifier": "M7DE496C",
+            "name": "M 7DE496CF",
+            "cover_image": null,
+            "cover_image_url": null,
+            "logo_props": {},
+            "description": "",
+            "is_default": true
+          },
+          "workspace": {
+            "name": "contract fx09bw",
+            "slug": "fx09bw-7251eddd",
+            "id": "95c7ddaa-0221-47c1-8b25-fa699202c42e",
+            "logo_url": null
+          },
+          "created_at": "2026-10-02T22:23:29.723850Z",
+          "updated_at": "2026-10-02T22:23:29.723860Z",
+          "deleted_at": null,
+          "email": "fx09b-9dce85e8@example.com",
+          "accepted": false,
+          "token": "1de8882f631e491e9c03b5429c1771f3",
+          "message": null,
+          "responded_at": null,
+          "role": 15,
+          "created_by": null,
+          "updated_by": null
+        }
+      ]
+    },
+    "user_invite_join": {
+      "status": 201,
+      "body": {
+        "message": "Projects joined successfully"
+      }
+    },
+    "user_invite_join_row": [
+      {
+        "role": 15,
+        "is_active": true
+      }
+    ],
+    "user_invite_join_secret_403": {
+      "status": 403,
+      "body": {
+        "error": "Only workspace admins can join private project"
+      }
+    },
+    "user_invite_join_secret_admin_ok": {
+      "status": 201,
+      "body": {
+        "message": "Projects joined successfully"
+      }
+    }
+  },
+  "join": {
+    "join_get": {
+      "status": 200,
+      "keys": [
+        "accepted",
+        "created_at",
+        "created_by",
+        "deleted_at",
+        "email",
+        "id",
+        "message",
+        "project",
+        "responded_at",
+        "role",
+        "token",
+        "updated_at",
+        "updated_by",
+        "workspace"
+      ]
+    },
+    "join_accept": {
+      "status": 200,
+      "body": {
+        "message": "Project Invitation Accepted"
+      }
+    },
+    "join_accept_rows": {
+      "ws": [
+        {
+          "role": 15,
+          "is_active": true
+        }
+      ],
+      "proj": [
+        {
+          "role": 15,
+          "is_active": true
+        }
+      ]
+    },
+    "join_already_responded_400": {
+      "status": 400,
+      "body": {
+        "error": "You have already responded to the invitation request"
+      }
+    },
+    "join_decline": {
+      "status": 200,
+      "body": {
+        "message": "Project Invitation was not accepted"
+      }
+    },
+    "join_wrong_email_403": {
+      "status": 403,
+      "body": {
+        "error": "You do not have permission to join the project"
+      }
+    },
+    "join_empty_email_403": {
+      "status": 403,
+      "body": {
+        "error": "You do not have permission to join the project"
+      }
+    }
+  },
+  "join_notes": [
+    "AllowAny: no auth gate (see FX-APROJ-07).",
+    "Accepts creates/reactivates WorkspaceMember (role min(invite,15)... actually 15-if-invite>=15-else-invite, invite.py:213) and ProjectMember rows."
+  ],
+  "destroy_board_cascade_verified": [
+    {
+      "gone": true
+    }
+  ]
+}

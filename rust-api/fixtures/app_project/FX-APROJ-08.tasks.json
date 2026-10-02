@@ -1,0 +1,344 @@
+{
+  "_trace": "Call sites: project/base.py:246-252 (recent_visited_task), :300-308 (model_activity create), :369-377 (model_activity partial_update), :405-417 (webhook_activity destroy); member.py:143-150 (project_add_user_email); estimate/base.py:198-210,217-228 (issue_activity both branches); invite token invite.py:80-84; 500 paths invite.py:61-64 (:62 raises first), invite.py:104-111 (.delay on list, unreachable), favorites list (missing serializer_class, base.py:503-514); handle_exception apps/api/pi_dash/app/views/base.py:110-149 (viewset), :211-248 (apiview); dispatch outer-except :151-163/:250-262. Task signatures: bgtasks/recent_visited_task.py:18, bgtasks/webhook_task.py:378,464, bgtasks/project_add_user_email_task.py:25, bgtasks/issue_activities_task.py:1504.",
+  "_method": "Task payloads: Live captures against Django runserver (pi_dash.settings.test) from this checkout on scratch Postgres pidash_562_fixtures (own cluster 127.0.0.1:5434), BASE_URL http://127.0.0.1:8460, SECRET_KEY=562-fixtures-secret-not-for-prod, CLOUD_AGENT_ENABLED unset (False), redis db 14 as Celery broker. Django 4.2.30, djangorestframework 3.15.2. IDs/datetimes are live values (volatile); key sets, key order, statuses and error bodies are the pins. Each action was issued over HTTP with redis db 14 flushed first; the Celery protocol-v2 message was read off the 'celery' list (body is base64(json([args, kwargs, embed]))). UUIDs serialize as {__type__: uuid, __value__: {hex}}. JWT + 500-path proofs + handle_exception table: Django shell probes (pi_dash.settings.test) against scratch Postgres pidash_562_fixtures; ORM + serializer + queryset code executed directly. Django 4.2.30, djangorestframework 3.15.2.",
+  "recent_visited_on_retrieve": [
+    {
+      "task": "pi_dash.bgtasks.recent_visited_task.recent_visited_task",
+      "args": [],
+      "kwargs": {
+        "slug": "fx08w-6923273a",
+        "project_id": "063e5ab4-4fe7-4d95-894f-5b7a4443bab9",
+        "entity_name": "project",
+        "entity_identifier": "063e5ab4-4fe7-4d95-894f-5b7a4443bab9",
+        "user_id": {
+          "__type__": "uuid",
+          "__value__": {
+            "hex": "db5932edaebf48e28757499eb04dc52b"
+          }
+        }
+      },
+      "argsrepr": "()",
+      "kwargsrepr": "{'slug': 'fx08w-6923273a', 'project_id': '063e5ab4-4fe7-4d95-894f-5b7a4443bab9', 'entity_name': 'project', 'entity_identifier': '063e5ab4-4fe7-4d95-894f-5b7a4443bab9', 'user_id': UUID('db5932ed-aebf-48e2-8757-499eb04dc52b')}"
+    }
+  ],
+  "model_activity_on_create": [
+    {
+      "task": "pi_dash.bgtasks.webhook_task.model_activity",
+      "args": [],
+      "kwargs": {
+        "model_name": "project",
+        "model_id": "063e5ab4-4fe7-4d95-894f-5b7a4443bab9",
+        "requested_data": {
+          "name": "Task 350A7091",
+          "identifier": "T350A709"
+        },
+        "current_instance": null,
+        "actor_id": {
+          "__type__": "uuid",
+          "__value__": {
+            "hex": "db5932edaebf48e28757499eb04dc52b"
+          }
+        },
+        "slug": "fx08w-6923273a",
+        "origin": "http://127.0.0.1:8460"
+      },
+      "argsrepr": "()",
+      "kwargsrepr": "{'model_name': 'project', 'model_id': '063e5ab4-4fe7-4d95-894f-5b7a4443bab9', 'requested_data': {'name': 'Task 350A7091', 'identifier': 'T350A709'}, 'current_instance': None, 'actor_id': UUID('db5932ed-aebf-48e2-8757-499eb04dc52b'), 'slug': 'fx08w-6923273a', 'origin': 'http://127.0.0.1:8460'}"
+    }
+  ],
+  "model_activity_on_partial_update": [
+    {
+      "task": "pi_dash.bgtasks.webhook_task.model_activity",
+      "args": [],
+      "kwargs": {
+        "model_name": "project",
+        "model_id": "063e5ab4-4fe7-4d95-894f-5b7a4443bab9",
+        "requested_data": {
+          "description": "upd"
+        },
+        "current_instance": "{\"id\": \"063e5ab4-4fe7-4d95-894f-5b7a4443bab9\", \"workspace_detail\": {\"name\": \"contract fx08w\", \"slug\": \"fx08w-6923273a\", \"id\": \"53854b42-9c02-4f31-b532-088d95507117\", \"logo_url\": null}, \"inbox_view\": false, \"agent_executor_options\": [{\"kind\": \"cloud_agent\", \"available\": false, \"reason_code\": \"cloud_agent_unavailable\"}, {\"kind\": \"local_runner\", \"available\": false, \"reason_code\": \"no_local_runner\"}, {\"kind\": \"managed_runner\", \"available\": false, \"reason_code\": \"managed_runner_disabled\"}], \"created_at\": \"2026-10-02T22:18:55.255173Z\", \"updated_at\": \"2026-10-02T22:18:55.255183Z\", \"deleted_at\": null, \"name\": \"Task 350A7091\", \"description\": \"\", \"description_text\": null, \"description_html\": null, \"network\": 2, \"identifier\": \"T350A709\", \"emoji\": null, \"icon_prop\": null, \"module_view\": false, \"cycle_view\": false, \"issue_views_view\": false, \"page_view\": true, \"intake_view\": false, \"is_time_tracking_enabled\": false, \"is_issue_type_enabled\": false, \"is_default\": true, \"guest_view_all_features\": false, \"members_can_edit_states\": true, \"cover_image\": null, \"archive_in\": 0, \"close_in\": 0, \"logo_props\": {}, \"archived_at\": null, \"timezone\": \"UTC\", \"external_source\": null, \"external_id\": null, \"repo_url\": \"\", \"base_branch\": \"main\", \"agent_default_interval_seconds\": 10800, \"agent_default_max_ticks\": 10, \"agent_review_default_interval_seconds\": 10800, \"agent_test_default_interval_seconds\": 10800, \"agent_ticking_enabled\": true, \"default_agent_executor\": \"local_runner\", \"created_by\": \"db5932ed-aebf-48e2-8757-499eb04dc52b\", \"updated_by\": null, \"workspace\": \"53854b42-9c02-4f31-b532-088d95507117\", \"default_assignee\": null, \"project_lead\": null, \"cover_image_asset\": null, \"estimate\": null, \"default_state\": null}",
+        "actor_id": {
+          "__type__": "uuid",
+          "__value__": {
+            "hex": "db5932edaebf48e28757499eb04dc52b"
+          }
+        },
+        "slug": "fx08w-6923273a",
+        "origin": "http://127.0.0.1:8460"
+      },
+      "argsrepr": "()",
+      "kwargsrepr": "{'model_name': 'project', 'model_id': '063e5ab4-4fe7-4d95-894f-5b7a4443bab9', 'requested_data': {'description': 'upd'}, 'current_instance': '{\"id\": \"063e5ab4-4fe7-4d95-894f-5b7a4443bab9\", \"workspace_detail\": {\"name\": \"contract fx08w\", \"slug\": \"fx08w-6923273a\", \"id\": \"53854b42-9c02-4f31-b532-088d95507117\", \"logo_url\": null}, \"inbox_view\": false, \"agent_executor_options\": [{\"kind\": \"cloud_agent\", \"available\": false, \"reason_code\": \"cloud_agent_unavailable\"}, {\"kind\": \"local_runner\", \"available\": false, \"reason_code\": \"no_local_runner\"}, {\"kind\": \"managed_runner\", \"available\": false, \"reason_code\": \"managed_runner_disabled\"}], \"created_at\": \"2026-10-02T22:18:55.255173Z\", \"updated_at\": \"2026-10-02T22:18:55.255183Z\", \"deleted_at\": null, \"name\": \"Task 350A7091\", \"description\": \"\", \"description_text\": null, \"description_html\": null, \"network\": 2, \"identifier\": \"T350A709\", \"emoji\": null, \"icon_prop\": null, \"module_view\": false, \"cycle_view\": false, \"issue_views_view\": false, \"page_view\": true, \"intake_view\": false,...', ...}"
+    }
+  ],
+  "project_add_user_email_on_member_create": [
+    {
+      "task": "pi_dash.bgtasks.project_add_user_email_task.project_add_user_email",
+      "args": [
+        "http://127.0.0.1:8460",
+        {
+          "__type__": "uuid",
+          "__value__": {
+            "hex": "057513c5bd234706a0eab063d95b08b7"
+          }
+        },
+        {
+          "__type__": "uuid",
+          "__value__": {
+            "hex": "db5932edaebf48e28757499eb04dc52b"
+          }
+        }
+      ],
+      "kwargs": {},
+      "argsrepr": "('http://127.0.0.1:8460', UUID('057513c5-bd23-4706-a0ea-b063d95b08b7'), UUID('db5932ed-aebf-48e2-8757-499eb04dc52b'))",
+      "kwargsrepr": "{}"
+    }
+  ],
+  "webhook_activity_on_destroy": {
+    "status": 204,
+    "tasks": [
+      {
+        "task": "pi_dash.bgtasks.webhook_task.webhook_activity",
+        "args": [],
+        "kwargs": {
+          "event": "project",
+          "verb": "deleted",
+          "field": null,
+          "old_value": null,
+          "new_value": null,
+          "actor_id": {
+            "__type__": "uuid",
+            "__value__": {
+              "hex": "db5932edaebf48e28757499eb04dc52b"
+            }
+          },
+          "slug": "fx08w-6923273a",
+          "current_site": "http://127.0.0.1:8460",
+          "event_id": {
+            "__type__": "uuid",
+            "__value__": {
+              "hex": "16afe627602941fcbd594a6dcd8870ba"
+            }
+          },
+          "old_identifier": null,
+          "new_identifier": null
+        },
+        "argsrepr": "()",
+        "kwargsrepr": "{'event': 'project', 'verb': 'deleted', 'field': None, 'old_value': None, 'new_value': None, 'actor_id': UUID('db5932ed-aebf-48e2-8757-499eb04dc52b'), 'slug': 'fx08w-6923273a', 'current_site': 'http://127.0.0.1:8460', 'event_id': UUID('16afe627-6029-41fc-bd59-4a6dcd8870ba'), 'old_identifier': None, 'new_identifier': None}"
+      },
+      {
+        "task": "pi_dash.bgtasks.deletion_task.soft_delete_related_objects",
+        "args": [
+          "db",
+          "project",
+          {
+            "__type__": "uuid",
+            "__value__": {
+              "hex": "16afe627602941fcbd594a6dcd8870ba"
+            }
+          }
+        ],
+        "kwargs": {
+          "using": null
+        },
+        "argsrepr": "('db', 'project', UUID('16afe627-6029-41fc-bd59-4a6dcd8870ba'))",
+        "kwargsrepr": "{'using': None}"
+      }
+    ]
+  },
+  "issue_activity_on_point_destroy": {
+    "without_new_estimate_id": {
+      "status": 200,
+      "body": [
+        {
+          "id": "88bd172f-e7ce-4500-aec6-341ce3f51970",
+          "created_at": "2026-10-02T22:18:55.872108Z",
+          "updated_at": "2026-10-02T22:18:55.872112Z",
+          "deleted_at": null,
+          "key": 1,
+          "description": "",
+          "value": "2",
+          "created_by": "db5932ed-aebf-48e2-8757-499eb04dc52b",
+          "updated_by": "db5932ed-aebf-48e2-8757-499eb04dc52b",
+          "project": "063e5ab4-4fe7-4d95-894f-5b7a4443bab9",
+          "workspace": "53854b42-9c02-4f31-b532-088d95507117",
+          "estimate": "8f711973-6d82-457d-9878-f1729bbea05a"
+        }
+      ],
+      "tasks": [
+        {
+          "task": "pi_dash.bgtasks.deletion_task.soft_delete_related_objects",
+          "args": [
+            "db",
+            "estimatepoint",
+            {
+              "__type__": "uuid",
+              "__value__": {
+                "hex": "c4e32397132a487c80fa725c7a766ea9"
+              }
+            }
+          ],
+          "kwargs": {
+            "using": null
+          },
+          "argsrepr": "('db', 'estimatepoint', UUID('c4e32397-132a-487c-80fa-725c7a766ea9'))",
+          "kwargsrepr": "{'using': None}"
+        }
+      ]
+    },
+    "with_new_estimate_id": {
+      "status": 200,
+      "body_keys": [],
+      "body": [],
+      "tasks": [
+        {
+          "task": "pi_dash.bgtasks.deletion_task.soft_delete_related_objects",
+          "args": [
+            "db",
+            "estimatepoint",
+            {
+              "__type__": "uuid",
+              "__value__": {
+                "hex": "88bd172fe7ce4500aec6341ce3f51970"
+              }
+            }
+          ],
+          "kwargs": {
+            "using": null
+          },
+          "argsrepr": "('db', 'estimatepoint', UUID('88bd172f-e7ce-4500-aec6-341ce3f51970'))",
+          "kwargsrepr": "{'using': None}"
+        },
+        {
+          "task": "pi_dash.bgtasks.issue_activities_task.issue_activity",
+          "args": [],
+          "kwargs": {
+            "type": "issue.activity.updated",
+            "requested_data": "{\"estimate_point\": \"c4e32397-132a-487c-80fa-725c7a766ea9\"}",
+            "actor_id": "db5932ed-aebf-48e2-8757-499eb04dc52b",
+            "issue_id": {
+              "__type__": "uuid",
+              "__value__": {
+                "hex": "31af88702aaf4fa78b3be20f0d61b6af"
+              }
+            },
+            "project_id": "063e5ab4-4fe7-4d95-894f-5b7a4443bab9",
+            "current_instance": "{\"estimate_point\": \"88bd172f-e7ce-4500-aec6-341ce3f51970\"}",
+            "epoch": 1790979535
+          },
+          "argsrepr": "()",
+          "kwargsrepr": "{'type': 'issue.activity.updated', 'requested_data': '{\"estimate_point\": \"c4e32397-132a-487c-80fa-725c7a766ea9\"}', 'actor_id': 'db5932ed-aebf-48e2-8757-499eb04dc52b', 'issue_id': UUID('31af8870-2aaf-4fa7-8b3b-e20f0d61b6af'), 'project_id': '063e5ab4-4fe7-4d95-894f-5b7a4443bab9', 'current_instance': '{\"estimate_point\": \"88bd172f-e7ce-4500-aec6-341ce3f51970\"}', 'epoch': 1790979535}"
+        }
+      ]
+    },
+    "note": "Both destroys also enqueue deletion_task.soft_delete_related_objects from the model delete signal (not a D-25 call site; recorded as observed)."
+  },
+  "invite_create_500": {
+    "status": 500,
+    "body": {
+      "error": "Something went wrong please try again later"
+    }
+  },
+  "invite_rows_persisted": 0,
+  "which_raises_first": {
+    "invite_py_62": {
+      "raised": "AttributeError: 'SoftDeletionQuerySet' object has no attribute 'role'"
+    },
+    "invite_py_104": {
+      "raised": "AttributeError: 'list' object has no attribute 'delay'"
+    },
+    "verdict": ":62 raises first (AttributeError on the QuerySet, before bulk_create), so 0 rows persist and :104 is unreachable in practice. Either way the wire result is the generic 500 body below."
+  },
+  "invite_jwt": {
+    "token_type": "str",
+    "header": {
+      "alg": "HS256",
+      "typ": "JWT"
+    },
+    "payload": {
+      "email": {
+        "email": "e@x.y",
+        "role": 15
+      },
+      "timestamp": 1720000000.123
+    },
+    "segments": 3
+  },
+  "invite_jwt_note": "py:80-84 encodes {'email': <the whole email dict>, 'timestamp': datetime.now().timestamp()} with SECRET_KEY/HS256. Verified round-trip decode with the test secret; production secret never recorded.",
+  "favorites_list_500": {
+    "status": 500,
+    "body": {
+      "error": "Something went wrong please try again later"
+    }
+  },
+  "generic_500_body": {
+    "error": "Something went wrong please try again later"
+  },
+  "handle_exception_viewset": {
+    "IntegrityError": {
+      "status": 400,
+      "body": {
+        "error": "The payload is not valid"
+      }
+    },
+    "ValidationError": {
+      "status": 400,
+      "body": {
+        "error": "Please provide valid detail"
+      }
+    },
+    "ObjectDoesNotExist": {
+      "status": 404,
+      "body": {
+        "error": "The required object does not exist."
+      }
+    },
+    "DjangoHttp404": {
+      "status": 404,
+      "body": {
+        "detail": "Project not found"
+      }
+    },
+    "KeyError": {
+      "status": 400,
+      "body": {
+        "error": "The required key does not exist."
+      }
+    },
+    "AttributeError": {
+      "status": 500,
+      "body": {
+        "error": "Something went wrong please try again later"
+      }
+    },
+    "APIException_custom": {
+      "status": 500,
+      "body": {
+        "detail": "boom"
+      }
+    },
+    "NotFound": {
+      "status": 404,
+      "body": {
+        "detail": "nope"
+      }
+    },
+    "PermissionDenied": {
+      "status": 403,
+      "body": {
+        "detail": "denied"
+      }
+    }
+  },
+  "handle_exception_apiview": {
+    "AttributeError": {
+      "status": 500,
+      "body": {
+        "error": "Something went wrong please try again later"
+      }
+    }
+  },
+  "dispatch_outer_except": {
+    "code": "base.py:161-163 returns 'exc' instead of 'response'",
+    "observable_wire_behavior": "Unreachable from view errors: BaseViewSet.handle_exception never returns None and never re-raises (broad except \u2192 500 Response), so DRF's dispatch never propagates to the outer try. Every error path in this domain renders JSON via the inner handler (evidence: invite-create and favorites-list 500s above). Port the inner table; the outer 'return exc' has no wire effect."
+  }
+}

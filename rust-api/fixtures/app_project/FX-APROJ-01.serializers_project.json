@@ -1,0 +1,895 @@
+{
+  "_trace": "apps/api/pi_dash/app/serializers/project.py:30-117 (ProjectSerializer), :120-133 (ProjectLiteSerializer), :136-168 (ProjectListSerializer), :171-190 (ProjectDetailSerializer), :259-266 (DeployBoardSerializer); FORBIDDEN_IDENTIFIER_CHARS_PATTERN apps/api/pi_dash/db/models/project.py:226; agent_executor_options/cloud_agent_is_configured apps/api/pi_dash/core/agent_execution.py:34-43,:83-130; CloudAgentUnavailableAPI apps/api/pi_dash/cloud_agent/api.py:5-8; validate_html_content apps/api/pi_dash/utils/content_validator.py:211-241",
+  "_method": "Django shell probes (pi_dash.settings.test) against scratch Postgres pidash_562_fixtures; ORM + serializer + queryset code executed directly. Django 4.2.30, djangorestframework 3.15.2. validate_* called directly + full is_valid() envelopes; create() via serializer.save(); list/detail/lite/board goldens serialized from rows fetched through ProjectViewSet.get_queryset().",
+  "forbidden_pattern": "^.*[&+,:;$^}{*=?@#|'<>.()%!-].*$",
+  "validate_name": {
+    "plain": {
+      "ok": true,
+      "value": "Beta 962c4176"
+    },
+    "with_space": {
+      "ok": true,
+      "value": "My Project 962c4176"
+    },
+    "ampersand": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "plus": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "comma": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "colon": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "semicolon": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "dollar": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "caret": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "lbrace": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "rbrace": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "star": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "equals": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "question": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "at": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "hash": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "pipe": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "squote": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "lt": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "gt": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "dot": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "lparen": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "rparen": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "percent": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "bang": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "dash": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "underscore_ok": {
+      "ok": true,
+      "value": "A_B_962c4176"
+    },
+    "slash_ok": {
+      "ok": true,
+      "value": "A/B 962c4176"
+    },
+    "dup_same_workspace": {
+      "ok": false,
+      "detail": [
+        "PROJECT_NAME_ALREADY_EXIST"
+      ]
+    },
+    "self_exclude_on_update": {
+      "ok": true,
+      "value": "Alpha 962c4176"
+    },
+    "dup_other_workspace": {
+      "ok": true,
+      "value": "Alpha 962c4176"
+    }
+  },
+  "validate_identifier": {
+    "plain": {
+      "ok": true,
+      "value": "Z9Q"
+    },
+    "lowercase_kept": {
+      "ok": true,
+      "value": "ab12"
+    },
+    "special": {
+      "ok": false,
+      "detail": [
+        "PROJECT_IDENTIFIER_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "dot": {
+      "ok": false,
+      "detail": [
+        "PROJECT_IDENTIFIER_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "dash": {
+      "ok": false,
+      "detail": [
+        "PROJECT_IDENTIFIER_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "dup_same_workspace": {
+      "ok": false,
+      "detail": [
+        "PROJECT_IDENTIFIER_ALREADY_EXIST"
+      ]
+    },
+    "self_exclude_on_update": {
+      "ok": true,
+      "value": "A962C417"
+    }
+  },
+  "validate": {
+    "cloud_agent_unconfigured": {
+      "ok": false,
+      "exc": "CloudAgentUnavailableAPI",
+      "status_code": 409,
+      "detail": {
+        "error": "Pi Dash Cloud Agent is not currently available",
+        "code": "cloud_agent_unavailable"
+      },
+      "default_code": null
+    },
+    "local_runner_ok": {
+      "ok": true,
+      "data": {
+        "default_agent_executor": "local_runner"
+      }
+    },
+    "no_executor_ok": {
+      "ok": true,
+      "data": {
+        "name": "x"
+      }
+    },
+    "is_default_unset_guard": {
+      "ok": false,
+      "exc": "ValidationError",
+      "detail": [
+        "Default project cannot be unset without assigning another default project."
+      ]
+    },
+    "is_default_unset_other_ok": {
+      "ok": true,
+      "data": {
+        "is_default": false
+      }
+    },
+    "description_html_clean": {
+      "ok": true,
+      "data": {
+        "description_html": "<p>hello</p>"
+      }
+    },
+    "description_html_script": {
+      "ok": true,
+      "data": {
+        "description_html": "<p>x</p>"
+      }
+    },
+    "description_html_empty_string": {
+      "ok": true,
+      "data": {
+        "description_html": ""
+      }
+    },
+    "description_html_absent": {
+      "ok": true,
+      "data": {
+        "name": "x"
+      }
+    },
+    "is_default_second_project_value": false
+  },
+  "validate_cloud_setting": false,
+  "cloud_exception": {
+    "class": "CloudAgentUnavailableAPI",
+    "status_code": 409,
+    "detail": {
+      "error": "Pi Dash Cloud Agent is not currently available",
+      "code": "cloud_agent_unavailable"
+    },
+    "default_code": "cloud_agent_unavailable"
+  },
+  "html_size_boundary": {
+    "over_10MB": {
+      "is_valid": false,
+      "errors": {
+        "error": [
+          "html content is not valid"
+        ]
+      }
+    },
+    "exactly_10MB": {
+      "is_valid": true,
+      "errors": {}
+    }
+  },
+  "is_valid_envelopes": {
+    "dup_name": {
+      "name": [
+        "PROJECT_NAME_ALREADY_EXIST"
+      ]
+    },
+    "special_name": {
+      "name": [
+        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
+      ]
+    },
+    "empty": {
+      "name": [
+        "This field is required."
+      ],
+      "identifier": [
+        "This field is required."
+      ]
+    }
+  },
+  "create": {
+    "project_row": {
+      "id": "7913a52c-bc35-4db1-ab27-153547e78ce6",
+      "name": "Alpha 962c4176",
+      "identifier": "A962C417",
+      "workspace_id": "1157cc12-8235-41c1-8dea-0f5892d0c692",
+      "is_default": true,
+      "timezone": "UTC"
+    },
+    "identifier_rows": [
+      {
+        "name": "A962C417",
+        "workspace_id": "1157cc12-8235-41c1-8dea-0f5892d0c692"
+      }
+    ]
+  },
+  "create_lowercase_identifier": {
+    "sent": "dcf69a8f",
+    "stored_project_identifier": "DCF69A8F",
+    "stored_identifier_row": [
+      {
+        "name": "DCF69A8F"
+      }
+    ]
+  },
+  "project_serializer": {
+    "key_order": [
+      "id",
+      "workspace_detail",
+      "inbox_view",
+      "agent_executor_options",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+      "name",
+      "description",
+      "description_text",
+      "description_html",
+      "network",
+      "identifier",
+      "emoji",
+      "icon_prop",
+      "module_view",
+      "cycle_view",
+      "issue_views_view",
+      "page_view",
+      "intake_view",
+      "is_time_tracking_enabled",
+      "is_issue_type_enabled",
+      "is_default",
+      "guest_view_all_features",
+      "members_can_edit_states",
+      "cover_image",
+      "archive_in",
+      "close_in",
+      "logo_props",
+      "archived_at",
+      "timezone",
+      "external_source",
+      "external_id",
+      "repo_url",
+      "base_branch",
+      "agent_default_interval_seconds",
+      "agent_default_max_ticks",
+      "agent_review_default_interval_seconds",
+      "agent_test_default_interval_seconds",
+      "agent_ticking_enabled",
+      "default_agent_executor",
+      "created_by",
+      "updated_by",
+      "workspace",
+      "default_assignee",
+      "project_lead",
+      "cover_image_asset",
+      "estimate",
+      "default_state"
+    ],
+    "golden": {
+      "id": "c99f8a01-966a-49b3-b1c9-b867196dd9cd",
+      "workspace_detail": {
+        "name": "fx01b cf69a8fb",
+        "slug": "fx01bw-cf69a8fb",
+        "id": "6cf5d012-6225-4afb-88e7-5e39be396c38",
+        "logo_url": null
+      },
+      "inbox_view": false,
+      "agent_executor_options": [
+        {
+          "kind": "cloud_agent",
+          "available": false,
+          "reason_code": "cloud_agent_unavailable"
+        },
+        {
+          "kind": "local_runner",
+          "available": false,
+          "reason_code": "no_local_runner"
+        },
+        {
+          "kind": "managed_runner",
+          "available": false,
+          "reason_code": "managed_runner_disabled"
+        }
+      ],
+      "created_at": "2026-10-02T22:13:27.197846Z",
+      "updated_at": "2026-10-02T22:13:27.197855Z",
+      "deleted_at": null,
+      "name": "Dcf69a8fb",
+      "description": "",
+      "description_text": null,
+      "description_html": null,
+      "network": 2,
+      "identifier": "DCF69A8F",
+      "emoji": null,
+      "icon_prop": null,
+      "module_view": false,
+      "cycle_view": false,
+      "issue_views_view": false,
+      "page_view": true,
+      "intake_view": false,
+      "is_time_tracking_enabled": false,
+      "is_issue_type_enabled": false,
+      "is_default": true,
+      "guest_view_all_features": false,
+      "members_can_edit_states": true,
+      "cover_image": null,
+      "archive_in": 0,
+      "close_in": 0,
+      "logo_props": {},
+      "archived_at": null,
+      "timezone": "UTC",
+      "external_source": null,
+      "external_id": null,
+      "repo_url": "",
+      "base_branch": "main",
+      "agent_default_interval_seconds": 10800,
+      "agent_default_max_ticks": 10,
+      "agent_review_default_interval_seconds": 10800,
+      "agent_test_default_interval_seconds": 10800,
+      "agent_ticking_enabled": true,
+      "default_agent_executor": "local_runner",
+      "created_by": null,
+      "updated_by": null,
+      "workspace": "6cf5d012-6225-4afb-88e7-5e39be396c38",
+      "default_assignee": null,
+      "project_lead": null,
+      "cover_image_asset": null,
+      "estimate": null,
+      "default_state": null
+    }
+  },
+  "list_serializer": {
+    "full": {
+      "id": "7913a52c-bc35-4db1-ab27-153547e78ce6",
+      "is_favorite": false,
+      "sort_order": 65535.0,
+      "member_role": 20,
+      "anchor": null,
+      "members": [
+        "c5545f98-21b6-4fac-88e7-af418831335d"
+      ],
+      "cover_image_url": null,
+      "inbox_view": false,
+      "next_work_item_sequence": 1,
+      "agent_executor_options": [
+        {
+          "kind": "cloud_agent",
+          "available": false,
+          "reason_code": "cloud_agent_unavailable"
+        },
+        {
+          "kind": "local_runner",
+          "available": false,
+          "reason_code": "no_local_runner"
+        },
+        {
+          "kind": "managed_runner",
+          "available": false,
+          "reason_code": "managed_runner_disabled"
+        }
+      ],
+      "created_at": "2026-10-02T22:12:41.558592Z",
+      "updated_at": "2026-10-02T22:12:41.558601Z",
+      "deleted_at": null,
+      "name": "Alpha 962c4176",
+      "description": "",
+      "description_text": null,
+      "description_html": null,
+      "network": 2,
+      "identifier": "A962C417",
+      "emoji": null,
+      "icon_prop": null,
+      "module_view": false,
+      "cycle_view": false,
+      "issue_views_view": false,
+      "page_view": true,
+      "intake_view": false,
+      "is_time_tracking_enabled": false,
+      "is_issue_type_enabled": false,
+      "is_default": true,
+      "guest_view_all_features": false,
+      "members_can_edit_states": true,
+      "cover_image": null,
+      "archive_in": 0,
+      "close_in": 0,
+      "logo_props": {},
+      "archived_at": null,
+      "timezone": "UTC",
+      "external_source": null,
+      "external_id": null,
+      "repo_url": "",
+      "base_branch": "main",
+      "agent_default_interval_seconds": 10800,
+      "agent_default_max_ticks": 10,
+      "agent_review_default_interval_seconds": 10800,
+      "agent_test_default_interval_seconds": 10800,
+      "agent_ticking_enabled": true,
+      "default_agent_executor": "local_runner",
+      "created_by": null,
+      "updated_by": null,
+      "workspace": "1157cc12-8235-41c1-8dea-0f5892d0c692",
+      "default_assignee": null,
+      "project_lead": null,
+      "cover_image_asset": null,
+      "estimate": null,
+      "default_state": null
+    },
+    "key_order": [
+      "id",
+      "is_favorite",
+      "sort_order",
+      "member_role",
+      "anchor",
+      "members",
+      "cover_image_url",
+      "inbox_view",
+      "next_work_item_sequence",
+      "agent_executor_options",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+      "name",
+      "description",
+      "description_text",
+      "description_html",
+      "network",
+      "identifier",
+      "emoji",
+      "icon_prop",
+      "module_view",
+      "cycle_view",
+      "issue_views_view",
+      "page_view",
+      "intake_view",
+      "is_time_tracking_enabled",
+      "is_issue_type_enabled",
+      "is_default",
+      "guest_view_all_features",
+      "members_can_edit_states",
+      "cover_image",
+      "archive_in",
+      "close_in",
+      "logo_props",
+      "archived_at",
+      "timezone",
+      "external_source",
+      "external_id",
+      "repo_url",
+      "base_branch",
+      "agent_default_interval_seconds",
+      "agent_default_max_ticks",
+      "agent_review_default_interval_seconds",
+      "agent_test_default_interval_seconds",
+      "agent_ticking_enabled",
+      "default_agent_executor",
+      "created_by",
+      "updated_by",
+      "workspace",
+      "default_assignee",
+      "project_lead",
+      "cover_image_asset",
+      "estimate",
+      "default_state"
+    ],
+    "members": [
+      "c5545f98-21b6-4fac-88e7-af418831335d"
+    ],
+    "next_seq_empty": 1,
+    "inbox_view": false,
+    "intake_view": false,
+    "next_seq_after_rows": 8,
+    "agent_options_unauthenticated": [
+      {
+        "kind": "cloud_agent",
+        "available": false,
+        "reason_code": "cloud_agent_unavailable"
+      },
+      {
+        "kind": "local_runner",
+        "available": false,
+        "reason_code": "no_local_runner"
+      },
+      {
+        "kind": "managed_runner",
+        "available": false,
+        "reason_code": "managed_runner_disabled"
+      }
+    ],
+    "agent_options_authenticated": [
+      {
+        "kind": "cloud_agent",
+        "available": false,
+        "reason_code": "cloud_agent_unavailable"
+      },
+      {
+        "kind": "local_runner",
+        "available": false,
+        "reason_code": "no_local_runner"
+      },
+      {
+        "kind": "managed_runner",
+        "available": false,
+        "reason_code": "managed_runner_disabled"
+      }
+    ],
+    "agent_options_no_request": [
+      {
+        "kind": "cloud_agent",
+        "available": false,
+        "reason_code": "cloud_agent_unavailable"
+      },
+      {
+        "kind": "local_runner",
+        "available": false,
+        "reason_code": "no_local_runner"
+      },
+      {
+        "kind": "managed_runner",
+        "available": false,
+        "reason_code": "managed_runner_disabled"
+      }
+    ]
+  },
+  "lite": {
+    "data": {
+      "id": "7913a52c-bc35-4db1-ab27-153547e78ce6",
+      "identifier": "A962C417",
+      "name": "Alpha 962c4176",
+      "cover_image": null,
+      "cover_image_url": null,
+      "logo_props": {},
+      "description": "",
+      "is_default": true
+    },
+    "key_order": [
+      "id",
+      "identifier",
+      "name",
+      "cover_image",
+      "cover_image_url",
+      "logo_props",
+      "description",
+      "is_default"
+    ]
+  },
+  "detail": {
+    "data": {
+      "id": "7913a52c-bc35-4db1-ab27-153547e78ce6",
+      "default_assignee": null,
+      "project_lead": null,
+      "is_favorite": false,
+      "sort_order": 65535.0,
+      "member_role": 20,
+      "anchor": null,
+      "agent_executor_options": [
+        {
+          "kind": "cloud_agent",
+          "available": false,
+          "reason_code": "cloud_agent_unavailable"
+        },
+        {
+          "kind": "local_runner",
+          "available": false,
+          "reason_code": "no_local_runner"
+        },
+        {
+          "kind": "managed_runner",
+          "available": false,
+          "reason_code": "managed_runner_disabled"
+        }
+      ],
+      "created_at": "2026-10-02T22:12:41.558592Z",
+      "updated_at": "2026-10-02T22:12:41.558601Z",
+      "deleted_at": null,
+      "name": "Alpha 962c4176",
+      "description": "",
+      "description_text": null,
+      "description_html": null,
+      "network": 2,
+      "identifier": "A962C417",
+      "emoji": null,
+      "icon_prop": null,
+      "module_view": false,
+      "cycle_view": false,
+      "issue_views_view": false,
+      "page_view": true,
+      "intake_view": false,
+      "is_time_tracking_enabled": false,
+      "is_issue_type_enabled": false,
+      "is_default": true,
+      "guest_view_all_features": false,
+      "members_can_edit_states": true,
+      "cover_image": null,
+      "archive_in": 0,
+      "close_in": 0,
+      "logo_props": {},
+      "archived_at": null,
+      "timezone": "UTC",
+      "external_source": null,
+      "external_id": null,
+      "repo_url": "",
+      "base_branch": "main",
+      "agent_default_interval_seconds": 10800,
+      "agent_default_max_ticks": 10,
+      "agent_review_default_interval_seconds": 10800,
+      "agent_test_default_interval_seconds": 10800,
+      "agent_ticking_enabled": true,
+      "default_agent_executor": "local_runner",
+      "created_by": null,
+      "updated_by": null,
+      "workspace": "1157cc12-8235-41c1-8dea-0f5892d0c692",
+      "cover_image_asset": null,
+      "estimate": null,
+      "default_state": null
+    },
+    "key_order": [
+      "id",
+      "default_assignee",
+      "project_lead",
+      "is_favorite",
+      "sort_order",
+      "member_role",
+      "anchor",
+      "agent_executor_options",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+      "name",
+      "description",
+      "description_text",
+      "description_html",
+      "network",
+      "identifier",
+      "emoji",
+      "icon_prop",
+      "module_view",
+      "cycle_view",
+      "issue_views_view",
+      "page_view",
+      "intake_view",
+      "is_time_tracking_enabled",
+      "is_issue_type_enabled",
+      "is_default",
+      "guest_view_all_features",
+      "members_can_edit_states",
+      "cover_image",
+      "archive_in",
+      "close_in",
+      "logo_props",
+      "archived_at",
+      "timezone",
+      "external_source",
+      "external_id",
+      "repo_url",
+      "base_branch",
+      "agent_default_interval_seconds",
+      "agent_default_max_ticks",
+      "agent_review_default_interval_seconds",
+      "agent_test_default_interval_seconds",
+      "agent_ticking_enabled",
+      "default_agent_executor",
+      "created_by",
+      "updated_by",
+      "workspace",
+      "cover_image_asset",
+      "estimate",
+      "default_state"
+    ]
+  },
+  "deploy_board": {
+    "data": {
+      "id": "dab335c7-feb1-46b8-9578-46235f5ed69a",
+      "project_details": null,
+      "workspace_detail": {
+        "name": "fx01 ws 962c4176",
+        "slug": "fx01ws-962c4176",
+        "id": "1157cc12-8235-41c1-8dea-0f5892d0c692",
+        "logo_url": null
+      },
+      "created_at": "2026-10-02T22:12:42.923582Z",
+      "updated_at": "2026-10-02T22:12:42.923591Z",
+      "deleted_at": null,
+      "entity_identifier": "7913a52c-bc35-4db1-ab27-153547e78ce6",
+      "entity_name": "project",
+      "anchor": "5403f13c8f264694a932a87e4742a31e",
+      "is_comments_enabled": false,
+      "is_reactions_enabled": false,
+      "is_votes_enabled": false,
+      "view_props": {},
+      "is_activity_enabled": true,
+      "is_disabled": false,
+      "created_by": null,
+      "updated_by": null,
+      "workspace": "1157cc12-8235-41c1-8dea-0f5892d0c692",
+      "project": null,
+      "intake": null
+    },
+    "key_order": [
+      "id",
+      "project_details",
+      "workspace_detail",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+      "entity_identifier",
+      "entity_name",
+      "anchor",
+      "is_comments_enabled",
+      "is_reactions_enabled",
+      "is_votes_enabled",
+      "view_props",
+      "is_activity_enabled",
+      "is_disabled",
+      "created_by",
+      "updated_by",
+      "workspace",
+      "project",
+      "intake"
+    ]
+  },
+  "deploy_board_none_instance": {
+    "data": {
+      "deleted_at": null,
+      "entity_identifier": null,
+      "entity_name": "",
+      "is_comments_enabled": false,
+      "is_reactions_enabled": false,
+      "is_votes_enabled": false,
+      "view_props": null,
+      "is_activity_enabled": false,
+      "is_disabled": false,
+      "created_by": null,
+      "updated_by": null,
+      "intake": null
+    },
+    "key_order": [
+      "deleted_at",
+      "entity_identifier",
+      "entity_name",
+      "is_comments_enabled",
+      "is_reactions_enabled",
+      "is_votes_enabled",
+      "view_props",
+      "is_activity_enabled",
+      "is_disabled",
+      "created_by",
+      "updated_by",
+      "intake"
+    ],
+    "repr_type": "ReturnDict"
+  }
+}
