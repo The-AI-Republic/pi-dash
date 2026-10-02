@@ -229,8 +229,12 @@ place, naming both paths; never a parallel copy):
 6. `IssueVersionDetailSerializer` lists `name` twice (`:1459`+`:1476`).
 7. Retrieve/archive-retrieve omit `is_intake` (unannotated → SkipField,
    35 keys) while identifier renders it (36 keys).
-8. Retrieve's label/assignee/module/cycle annotations lack `deleted_at`
-   guards the sibling paths have (`base.py:489-558`).
+8. RETRACTED in review (2026-10-02): retrieve's subqueries DO emit
+   `deleted_at IS NULL` via the default `SoftDeletionManager`
+   (`db/mixins.py:53-54,66-67`; none of the four link models overrides
+   `.objects`). Siblings' explicit guards are behaviorally redundant —
+   same rows. Port KEEPS the guard (pilot-2 `annotation_selects`
+   already emits it).
 9. History default branch 500s (`instance["created_at"]` on models,
    `activity.py:81-84`; pinned by `test_history_default_500s`).
 10. Lite `is_synced` is git-only (`base.py:1303-1309` + `:1238`).
