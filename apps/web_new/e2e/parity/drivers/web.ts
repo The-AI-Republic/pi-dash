@@ -1254,8 +1254,11 @@ export class WebDriver implements ParityDriver {
   // --- DOM as observed during oracle recon; they carry no old-app code.
 
   private static readonly BOARD_ORDER: BoardLayoutKey[] = ["list", "kanban", "calendar", "spreadsheet", "gantt"];
-  private static readonly BOARD_FIRST_WAIT_MS = 90_000;
-  private static readonly BOARD_SETTLE_WAIT_MS = 150_000;
+  // Generous cold ceilings: the oracle dev server compiles routes on first
+  // load, which takes minutes on a loaded host. CI binds tighter through
+  // the per-test timeout, so these only extend the local ceiling.
+  private static readonly BOARD_FIRST_WAIT_MS = 240_000;
+  private static readonly BOARD_SETTLE_WAIT_MS = 240_000;
   private static readonly BOARD_POLL_STEP_MS = 2_000;
 
   private boardSwitcherButtons(): Locator {
@@ -1272,7 +1275,8 @@ export class WebDriver implements ParityDriver {
     const buttons = this.boardSwitcherButtons();
     await buttons.first().waitFor({ timeout: WebDriver.BOARD_FIRST_WAIT_MS });
     const index = WebDriver.BOARD_ORDER.indexOf(layout);
-    await buttons.nth(index).click({ timeout: WebDriver.BOARD_FIRST_WAIT_MS });
+    // Re-click while the layout is wrong: a click that lands mid-hydration
+    // can be swallowed, leaving the previous layout active.
     const deadline = Date.now() + WebDriver.BOARD_SETTLE_WAIT_MS;
     for (;;) {
       if ((await this.boardActiveLayout()) === layout) {
@@ -1281,6 +1285,10 @@ export class WebDriver implements ParityDriver {
         if (layout !== "kanban" && layout !== "gantt") return;
       }
       if (Date.now() > deadline) throw new Error(`[parity] timed out waiting for the ${layout} layout to render.`);
+      await buttons
+        .nth(index)
+        .click({ timeout: WebDriver.BOARD_FIRST_WAIT_MS })
+        .catch(() => undefined);
       await this.page.waitForTimeout(WebDriver.BOARD_POLL_STEP_MS);
     }
   }
@@ -1363,24 +1371,25 @@ export class WebDriver implements ParityDriver {
   }
 
   private async kanbanSwimlaneGroupColumns(): Promise<KanbanColumn[]> {
-    // Swimlane mode renders the group headers in a top row; their value
-    // ids come positionally from the first lane's column drop targets,
-    // which share the same group order.
+    // Swimlane mode renders the group headers in a top row (one container
+    // holding one cell per group); their value ids come positionally from
+    // the first lane's column drop targets, which share the same group
+    // order. Trailing columns mount lazily, so cells past the mounted
+    // prefix carry no id yet.
     const headerRow = this.boardMain().locator('div.sticky.top-0[class*="z-[4]"]').first();
     await headerRow.waitFor({ timeout: WebDriver.WAIT_MS });
-    const headers = headerRow.locator(":scope > div");
+    let headers = headerRow.locator(":scope > div > div");
+    if ((await headers.count()) === 0) headers = headerRow.locator(":scope > div");
     const headerCount = await headers.count();
     const firstLane = await this.kanbanLaneWrapper(0);
     const inners = firstLane.locator('div[id*="__"]');
     const innerCount = await inners.count();
-    if (headerCount !== innerCount) {
-      throw new Error(`[parity] swimlane group headers (${headerCount}) and columns (${innerCount}) disagree.`);
-    }
     const columns: KanbanColumn[] = [];
     for (let index = 0; index < headerCount; index += 1) {
       const { name, count } = WebDriver.splitHeaderCount(await headers.nth(index).innerText());
-      const id = ((await inners.nth(index).getAttribute("id")) ?? "").split("__")[0] ?? "";
-      columns.push({ id, name, count, rendered: true });
+      const mounted = index < innerCount;
+      const id = mounted ? (((await inners.nth(index).getAttribute("id")) ?? "").split("__")[0] ?? "") : "";
+      columns.push({ id, name, count, rendered: mounted });
     }
     return columns;
   }
@@ -1518,7 +1527,9 @@ export class WebDriver implements ParityDriver {
   async kanbanToggleSwimlane(laneName: string): Promise<void> {
     const bar = await this.kanbanLaneBarByName(laneName);
     const before = await this.kanbanSwimlaneCollapsed(laneName);
-    await bar.click({ timeout: WebDriver.WAIT_MS });
+    // The toggle handler lives on the header card: clicking the empty
+    // full-width bar area does nothing.
+    await bar.locator("div.cursor-pointer").first().click({ timeout: WebDriver.WAIT_MS });
     const deadline = Date.now() + WebDriver.WAIT_MS;
     for (;;) {
       if ((await this.kanbanSwimlaneCollapsed(laneName)) !== before) return;
@@ -1759,6 +1770,18 @@ export class WebDriver implements ParityDriver {
     });
   }
 
+  async kanbanAttemptCardBefore(sourceName: string, targetName: string): Promise<void> {
+    const source = await this.boardCardByName(sourceName);
+    const target = await this.boardCardByName(targetName);
+    const sourceBox = await source.boundingBox();
+    const targetBox = await target.boundingBox();
+    if (!sourceBox || !targetBox) throw new Error("[parity] drag card has no box.");
+    const from = WebDriver.boxCenter(sourceBox);
+    const onto = { x: targetBox.x + targetBox.width / 2, y: targetBox.y + 8 };
+    await this.boardMouseDrag([from, onto]);
+    await this.page.waitForTimeout(3_000);
+  }
+
   async kanbanDragCardToColumnEnd(sourceName: string, columnName: string): Promise<void> {
     const source = await this.boardCardByName(sourceName);
     const outer = await this.boardFlatColumnOuterByName(columnName);
@@ -1885,6 +1908,48 @@ export class WebDriver implements ParityDriver {
   async kanbanColumnLoading(columnName: string): Promise<boolean> {
     const outer = await this.boardFlatColumnOuterByName(columnName);
     return (await outer.locator('div[class*="animate-pulse"]').count()) > 0;
+  }
+
+  private async kanbanSwimlaneCell(columnName: string, laneName: string): Promise<Locator> {
+    // Swimlane cells share the group order of the header row: resolve the
+    // column positionally, then take that cell of the named lane.
+    const columns = await this.kanbanSwimlaneGroupColumns();
+    const index = columns.findIndex((column) => column.name === columnName);
+    if (index < 0) throw new Error(`[parity] no swimlane group column named ${JSON.stringify(columnName)}.`);
+    const wrapper = await this.kanbanLaneWrapperByName(laneName);
+    const cells = wrapper.locator('div[id*="__"]');
+    if ((await cells.count()) <= index) {
+      throw new Error(`[parity] swimlane ${JSON.stringify(laneName)} has no cell for ${JSON.stringify(columnName)}.`);
+    }
+    return cells.nth(index);
+  }
+
+  async kanbanCellCards(columnName: string, laneName: string): Promise<string[]> {
+    const cell = await this.kanbanSwimlaneCell(columnName, laneName);
+    const cards = cell.locator('a[id^="issue_"]');
+    const count = await cards.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      names.push(await this.boardCardName(cards.nth(index)).innerText());
+    }
+    return names;
+  }
+
+  async kanbanCellHasLoadMore(columnName: string, laneName: string): Promise<boolean> {
+    const cell = await this.kanbanSwimlaneCell(columnName, laneName);
+    const link = cell.getByText("Load more", { exact: false });
+    if ((await link.count()) === 0) return false;
+    return await link.first().isVisible();
+  }
+
+  async kanbanCellLoadMore(columnName: string, laneName: string): Promise<void> {
+    const cell = await this.kanbanSwimlaneCell(columnName, laneName);
+    const before = await this.kanbanCellCards(columnName, laneName);
+    await cell.getByText("Load more", { exact: false }).first().click({ timeout: WebDriver.WAIT_MS });
+    await this.boardSettle(
+      "cell load more",
+      async () => (await this.kanbanCellCards(columnName, laneName)).length > before.length
+    );
   }
 
   async kanbanBoardScroll(): Promise<{ x: number; y: number }> {
@@ -2219,6 +2284,18 @@ export class WebDriver implements ParityDriver {
     });
   }
 
+  async ganttAttemptRowBefore(sourceName: string, targetName: string): Promise<void> {
+    const source = await this.ganttSidebarLinkByName(sourceName);
+    const target = await this.ganttSidebarLinkByName(targetName);
+    const sourceBox = await source.boundingBox();
+    const targetBox = await target.boundingBox();
+    if (!sourceBox || !targetBox) throw new Error("[parity] sidebar row has no box.");
+    const from = WebDriver.boxCenter(sourceBox);
+    const onto = { x: targetBox.x + targetBox.width / 2, y: targetBox.y + 6 };
+    await this.boardMouseDrag([from, onto]);
+    await this.page.waitForTimeout(3_000);
+  }
+
   private async ganttIssueIdByName(issueName: string): Promise<string> {
     const link = await this.ganttSidebarLinkByName(issueName);
     const id = (await link.getAttribute("id")) ?? "";
@@ -2432,5 +2509,24 @@ export class WebDriver implements ParityDriver {
     const pulses = this.ganttSidebar().locator('div[class*="animate-pulse"]');
     if ((await pulses.count()) === 0) return false;
     return await pulses.last().isVisible();
+  }
+
+  async ganttLoadingObservedOnReload(): Promise<boolean> {
+    const pattern = "**/api/**/issues**";
+    await this.page.route(pattern, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+      await route.continue();
+    });
+    try {
+      await this.page.reload();
+      const deadline = Date.now() + 60_000;
+      for (;;) {
+        if (await this.ganttSidebarLoading()) return true;
+        if (Date.now() > deadline) return false;
+        await this.page.waitForTimeout(250);
+      }
+    } finally {
+      await this.page.unroute(pattern);
+    }
   }
 }
