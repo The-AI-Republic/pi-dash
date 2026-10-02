@@ -248,7 +248,8 @@
             "parent": "<Issue:a7509d00-345f-47fb-bee3-6bcf7d3339e2>",
             "assignees": "None",
             "labels": "None"
-          }
+          },
+          "note": "Key name is a misnomer (review fix): this probe passed a same-project parent, so it is valid \u2014 same as parent_same_project_ok. The wrong-project error string is pinned by parent_other_project."
         },
         "parent_same_project_ok": {
           "valid": true,

@@ -1692,6 +1692,17 @@
       "method": "DELETE",
       "status": 204,
       "body": ""
+    },
+    "put_405": {
+      "method": "PUT",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a7509d00-345f-47fb-bee3-6bcf7d3339e2/",
+      "request": {
+        "name": "x"
+      },
+      "status": 405,
+      "body": {
+        "detail": "Method \"PUT\" not allowed."
+      }
     }
   },
   "deprecated_twins": {
@@ -1750,6 +1761,35 @@
       "same_status": true,
       "same_body": true,
       "old_body_head": "[{\"id\":\"6e20ee8b-c300-4689-8f6f-c84eda4c9766\",\"created_at\":\"2026-10-02T23:39:05.535652Z\",\"updated_at\":\"2026-10-02T23:39:05.535652Z\",\"deleted_at\":null,\"attributes\":{},\"asset\":\"contract-asset\",\"entity_t"
+    },
+    "link_detail": {
+      "new_status": 200,
+      "old_status": 200,
+      "same_status": true,
+      "same_body": true,
+      "old_body_head": "{\"id\":\"22fae1bb-6847-4e33-b3ab-9cd45b6ada9b\",\"created_at\":\"2026-10-02T23:23:54.220351Z\",\"updated_at\":\"2026-10-02T23:23:54.237486Z\",\"deleted_at\":null,\"title\":\"renamed\",\"url\":\"https://example.com/other\""
+    },
+    "comment_detail": {
+      "new_status": 200,
+      "old_status": 200,
+      "same_status": true,
+      "same_body": true,
+      "old_body_head": "{\"id\":\"6353d7bf-012d-45ba-82a1-d2ff209af168\",\"is_member\":true,\"url\":\"http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-1\",\"created_at\":\"2026-10-02T23:17:12.036469Z\",\"updated_at\":\"2026-10-02T23:17:12."
+    },
+    "activity_detail": {
+      "new_status": 200,
+      "old_status": 200,
+      "same_status": true,
+      "same_body": true,
+      "old_body_head": "{\"id\":\"4d99c67e-1059-4d9d-a205-0c0af7779c96\",\"created_at\":\"2026-10-02T23:24:29.095428Z\",\"updated_at\":\"2026-10-02T23:24:29.095428Z\",\"deleted_at\":null,\"verb\":\"created\",\"field\":null,\"old_value\":null,\"new"
+    },
+    "attachment_detail": {
+      "new_status": 302,
+      "old_status": 302,
+      "same_status": true,
+      "same_body": true,
+      "old_body_head": "",
+      "note": "Both sides 302 with empty body; Location is a per-request presigned URL (volatile signature), so only status+body are pinned."
     }
   },
   "move_endpoint": {

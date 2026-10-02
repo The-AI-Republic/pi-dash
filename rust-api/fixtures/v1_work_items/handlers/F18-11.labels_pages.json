@@ -240,6 +240,93 @@
       "body": {
         "<non-json>": ""
       }
+    },
+    "page_patch": {
+      "method": "PATCH",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/pages/255f3646-9ace-4f46-9620-788071f7a05e/",
+      "request": {
+        "name": "Fixture page review"
+      },
+      "status": 200,
+      "body": {
+        "id": "255f3646-9ace-4f46-9620-788071f7a05e",
+        "name": "Fixture page review",
+        "parent": null,
+        "owned_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "access": 0,
+        "is_locked": false,
+        "archived_at": null,
+        "created_at": "2026-10-02T23:17:12.040770Z",
+        "updated_at": "2026-10-02T23:49:27.704199Z",
+        "description_html": "<h1>Title</h1><p>para with <strong>bold</strong></p><ul><li>a</li><li>b</li></ul>",
+        "description_stripped": "Titlepara with boldab",
+        "description_markdown": "# Title\n\npara with **bold**\n\n- a\n- b"
+      }
+    },
+    "archive_forbidden": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/pages/255f3646-9ace-4f46-9620-788071f7a05e/archive/",
+      "status": 403,
+      "body": {
+        "detail": "You do not have permission to perform this action."
+      }
+    },
+    "archive_post": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/pages/255f3646-9ace-4f46-9620-788071f7a05e/archive/",
+      "status": 200,
+      "body": {
+        "id": "255f3646-9ace-4f46-9620-788071f7a05e",
+        "name": "Fixture page review",
+        "parent": null,
+        "owned_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "access": 0,
+        "is_locked": false,
+        "archived_at": "2026-10-02",
+        "created_at": "2026-10-02T23:17:12.040770Z",
+        "updated_at": "2026-10-02T23:49:27.704199Z",
+        "description_html": "<h1>Title</h1><p>para with <strong>bold</strong></p><ul><li>a</li><li>b</li></ul>",
+        "description_stripped": "Titlepara with boldab",
+        "description_markdown": "# Title\n\npara with **bold**\n\n- a\n- b"
+      }
+    },
+    "archive_post_noop": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/pages/255f3646-9ace-4f46-9620-788071f7a05e/archive/",
+      "status": 200,
+      "body": {
+        "id": "255f3646-9ace-4f46-9620-788071f7a05e",
+        "name": "Fixture page review",
+        "parent": null,
+        "owned_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "access": 0,
+        "is_locked": false,
+        "archived_at": "2026-10-02",
+        "created_at": "2026-10-02T23:17:12.040770Z",
+        "updated_at": "2026-10-02T23:49:27.704199Z",
+        "description_html": "<h1>Title</h1><p>para with <strong>bold</strong></p><ul><li>a</li><li>b</li></ul>",
+        "description_stripped": "Titlepara with boldab",
+        "description_markdown": "# Title\n\npara with **bold**\n\n- a\n- b"
+      }
+    },
+    "archive_delete": {
+      "method": "DELETE",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/pages/255f3646-9ace-4f46-9620-788071f7a05e/archive/",
+      "status": 200,
+      "body": {
+        "id": "255f3646-9ace-4f46-9620-788071f7a05e",
+        "name": "Fixture page review",
+        "parent": null,
+        "owned_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "access": 0,
+        "is_locked": false,
+        "archived_at": null,
+        "created_at": "2026-10-02T23:17:12.040770Z",
+        "updated_at": "2026-10-02T23:49:27.704199Z",
+        "description_html": "<h1>Title</h1><p>para with <strong>bold</strong></p><ul><li>a</li><li>b</li></ul>",
+        "description_stripped": "Titlepara with boldab",
+        "description_markdown": "# Title\n\npara with **bold**\n\n- a\n- b"
+      }
     }
   },
   "page_write_note": "POST /pages/ returns 503 in this env (no live-document server: 'LIVE_URL is not configured...'); serializer validation (400s) runs BEFORE the document call, so invalid bodies still 400. Page body-write tasks are pinned in F18-10 page_body_write_tasks."
