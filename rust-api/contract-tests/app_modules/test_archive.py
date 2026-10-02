@@ -92,7 +92,7 @@ def test_archived_list_shape(api, seed, tenant_a, project_a, auth_a):
 
 
 def test_archived_detail_shape(api, seed, tenant_a, project_a, auth_a):
-    from conftest import MODULE_DETAIL_KEYS as DETAIL_KEYS
+    from app_modules.conftest import MODULE_DETAIL_KEYS as DETAIL_KEYS
     mid = seed.module(
         tenant_a["workspace"]["id"], project_a, name="Archived detail",
         status="completed",
