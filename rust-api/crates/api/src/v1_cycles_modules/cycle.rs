@@ -59,17 +59,14 @@
 //!   cross-project moves keep the bridge's old `project_id`
 //!   (`views/cycle.py:946-987`).
 //!
-//! KNOWN GAPS (one root cause: serde's acceptance envelope is smaller
-//! than CPython `json`'s, so these need a custom JSON parser — tracked
-//! in PIDASHCONV-626, not fixable in a message table):
+//! Request bodies parse through [`super::json_cpython`] (PIDASHCONV-626),
+//! the shared CPython-envelope JSON layer:
 //!
-//! * Bodies carrying `NaN`/`Infinity`/`-Infinity` or lone `\uD800-\uDFFF`
-//!   surrogates: CPython accepts them (the views proceed), serde rejects
-//!   them (this port 400s, keeping serde's text via the fallback).
-//! * Nesting past serde's 128-deep cap: balanced deep input 500s (CPython
-//!   accepts it); a mismatched closer past the cap keeps the 400 status
-//!   but its text may differ (truncated deep input still recovers its
-//!   exact EOF error).
+//! * `NaN`/`Infinity`/`-Infinity` in value position are strict-constant
+//!   400s under DRF's `STRICT_JSON` (the default); lone `\uD800-\uDFFF`
+//!   surrogates are accepted and flow through the `JStr` units.
+//! * Nesting parses to the measured 9939-deep cap (past it Django's JSON
+//!   500); `str()` echoes render to 9937-deep (past it the same).
 //!
 //! Fixture: `FX-CYCMOD-08`
 //! (`rust-api/fixtures/v1_cycles_modules/handlers/cycle.golden.json`).
@@ -89,6 +86,12 @@ use sqlx::{PgPool, Row};
 
 use pidash_auth::permissions::project;
 
+#[cfg(test)]
+use super::json_cpython::JNum;
+use super::json_cpython::{
+    to_serde_publish, to_serde_publish_map, JObject, JStr, JVal, JsonFail, PLAIN_CRASH_BODY,
+    PLAIN_CRASH_CONTENT_TYPE,
+};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -147,9 +150,20 @@ pub enum Denial {
     Conflict(String),
     /// 500, generic branch.
     ServerError,
+    /// 500, the DRF renderer crashed encoding a top-level surrogate echo
+    /// (the double fault escapes to wsgiref's plain 500 — exact bytes,
+    /// `text/plain`, no JSON envelope).
+    RendererCrash,
 }
 
 impl Denial {
+    fn content_type(&self) -> &'static str {
+        match self {
+            Denial::RendererCrash => PLAIN_CRASH_CONTENT_TYPE,
+            _ => "application/json",
+        }
+    }
+
     fn status_and_body(&self) -> (StatusCode, String) {
         match self {
             Denial::Unauthorized => (StatusCode::UNAUTHORIZED, UNAUTHENTICATED_BODY.to_owned()),
@@ -178,16 +192,21 @@ impl Denial {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
             ),
+            Denial::RendererCrash => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                PLAIN_CRASH_BODY.to_owned(),
+            ),
         }
     }
 }
 
 impl IntoResponse for Denial {
     fn into_response(self) -> Response {
+        let content_type = self.content_type();
         let (status, body) = self.status_and_body();
         Response::builder()
             .status(status)
-            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(axum::http::header::CONTENT_TYPE, content_type)
             .body(axum::body::Body::from(body))
             .expect("static denial response")
     }
@@ -2550,23 +2569,27 @@ pub async fn expand_labels(
 // Request bodies + DRF field coercion
 // ---------------------------------------------------------------------------
 
-/// Parse the request body into `request.data`: an empty body is `{}`
+/// Parse the request body into `request.data` through the shared
+/// CPython-envelope layer ([`super::json_cpython`]): an empty body is `{}`
 /// (DRF's empty-stream default); malformed JSON is the DRF `ParseError`
-/// whose suffix is CPython's `json` error text ([`json_parse_denial`]).
-pub fn parse_body_value(raw: &[u8]) -> Result<Value, Denial> {
-    if raw.is_empty() {
-        return Ok(Value::Object(serde_json::Map::new()));
-    }
-    serde_json::from_slice::<Value>(raw).map_err(|error| json_parse_denial(raw, &error))
+/// with CPython's error text; past the depth cap is Django's JSON 500.
+pub fn parse_body_value(raw: &[u8]) -> Result<JVal, Denial> {
+    super::json_cpython::parse_request_data(raw).map_err(|fail| match fail {
+        JsonFail::Message(detail) => Denial::BadDetail(format!(
+            "{}{detail}",
+            super::json_cpython::JSON_PARSE_PREFIX
+        )),
+        JsonFail::Recursion => Denial::ServerError,
+    })
 }
 
 /// Raw `request.data` object for the serializer-free views (create/add/
 /// transfer): empty is `{}`, unparseable is the DRF `ParseError`, and a
 /// non-object body 500s on `.get` (`AttributeError` — verified live for
 /// `[]`/`null`/`"x"`/`5`/`true` on all three paths).
-pub fn parse_object_or_500(raw: &[u8]) -> Result<serde_json::Map<String, Value>, Denial> {
+pub fn parse_object_or_500(raw: &[u8]) -> Result<JObject, Denial> {
     match parse_body_value(raw)? {
-        Value::Object(map) => Ok(map),
+        JVal::Object(map) => Ok(map),
         _ => Err(Denial::ServerError),
     }
 }
@@ -2575,7 +2598,7 @@ pub fn parse_object_or_500(raw: &[u8]) -> Result<serde_json::Map<String, Value>,
 /// plus the serializer `non_field_errors` for non-object JSON values —
 /// with DRF's per-type names (`int`/`float`/`bool`/`str`/`list`) and
 /// `null` answering `No data provided` (all verified live).
-pub fn parse_body(raw: &[u8]) -> Result<serde_json::Map<String, Value>, Denial> {
+pub fn parse_body(raw: &[u8]) -> Result<JObject, Denial> {
     coerce_body_object(parse_body_value(raw)?)
 }
 
@@ -2583,619 +2606,32 @@ pub fn parse_body(raw: &[u8]) -> Result<serde_json::Map<String, Value>, Denial> 
 /// through, every other JSON type is its DRF `non_field_errors` shape.
 /// (Split from [`parse_body`] so PATCH can run the completed gate on the
 /// raw value first — `views/cycle.py:512-520`.)
-pub fn coerce_body_object(value: Value) -> Result<serde_json::Map<String, Value>, Denial> {
+pub fn coerce_body_object(value: JVal) -> Result<JObject, Denial> {
     match value {
-        Value::Object(map) => Ok(map),
-        Value::Null => Err(Denial::FieldErrors(
+        JVal::Object(map) => Ok(map),
+        JVal::Null => Err(Denial::FieldErrors(
             r#"{"non_field_errors":["No data provided"]}"#.to_owned(),
         )),
         other => {
             let kind = match &other {
-                Value::Array(_) => "list",
-                Value::String(_) => "str",
-                // `arbitrary_precision`: int-vs-float is `is_f64` — plain
-                // integer literals (even past u64) are Python `int`.
-                Value::Number(n) => {
-                    if n.is_f64() {
+                JVal::Array(_) => "list",
+                JVal::Str(_) => "str",
+                // Int-vs-float is grammatical (the parser splits them):
+                // plain integer literals (even past u64) are Python `int`.
+                JVal::Num(number) => {
+                    if number.is_float() {
                         "float"
                     } else {
                         "int"
                     }
                 }
-                Value::Bool(_) => "bool",
-                Value::Null | Value::Object(_) => unreachable!("handled above"),
+                JVal::Bool(_) => "bool",
+                JVal::Null | JVal::Object(_) => unreachable!("handled above"),
             };
             Err(Denial::FieldErrors(format!(
                 r#"{{"non_field_errors":["Invalid data. Expected a dictionary, but got {kind}."]}}"#
             )))
         }
-    }
-}
-
-/// Prefix of every DRF `ParseError` detail (`rest_framework/parsers.py`).
-const JSON_PARSE_PREFIX: &str = "JSON parse error - ";
-
-/// Map a body-parse failure to DRF's `ParseError` shape. The suffix is
-/// CPython's `json` error text, not serde's: Django answers e.g.
-/// `Expecting property name enclosed in double quotes: line 1 column 2
-/// (char 1)` where serde says `key must be a string at line 1 column 2`.
-/// Positions are recomputed as char (not byte) offsets, since serde
-/// columns count bytes. Past serde's 128-deep recursion cap a truncated
-/// input still recovers its plain EOF error; a balanced deep input takes
-/// the generic 500 (CPython accepts it, or `RecursionError`s — not a
-/// `ValueError`, so DRF does not catch it — at extreme depths).
-/// (Fuzzed against CPython 3.12 over structured mutations + random bytes;
-/// see `json_parse_cpython_parity`. serde_json 1.0.151 message texts —
-/// the battery pins them.)
-pub fn json_parse_denial(raw: &[u8], error: &serde_json::Error) -> Denial {
-    // DRF decodes the stream before parsing, so a codec failure wins over
-    // any syntax error.
-    if std::str::from_utf8(raw).is_err() {
-        return Denial::BadDetail(format!("{JSON_PARSE_PREFIX}{}", utf8_decode_detail(raw)));
-    }
-    let text = std::str::from_utf8(raw).expect("UTF-8 checked");
-    let message = error.to_string();
-    if message.starts_with("recursion limit exceeded") {
-        // Serde caps nesting at 128; CPython goes far deeper. Past the cap
-        // a TRUNCATED input is still a plain EOF error (recover it); a
-        // balanced deep input is beyond serde (CPython accepts it, or
-        // RecursionErrors to Django's 500 at extreme depths — the generic
-        // 500 is the closest single answer).
-        if bracket_depth(text) > 0 {
-            let (template, pos) = eof_detail(text);
-            let (line, column, char) = cpython_pos(text, pos);
-            return Denial::BadDetail(format!(
-                "{JSON_PARSE_PREFIX}{template}: line {line} column {column} (char {char})"
-            ));
-        }
-        return Denial::ServerError;
-    }
-    match cpython_json_detail(text, &message, error.line(), error.column()) {
-        Some(detail) => Denial::BadDetail(format!("{JSON_PARSE_PREFIX}{detail}")),
-        // Unmapped arm (lone-surrogate / NaN accept-divergences, future
-        // serde codes): serde text. CPython ACCEPTS those inputs, so no
-        // 400 text is right; see KNOWN GAPS in the module docs.
-        None => Denial::BadDetail(format!("{JSON_PARSE_PREFIX}{message}")),
-    }
-}
-
-/// CPython's `UnicodeDecodeError` text for the first bad sequence
-/// (`codecs.getreader("utf-8")`, strict): the lead byte selects the
-/// reason, the valid-continuation run selects the byte/bytes form.
-fn utf8_decode_detail(raw: &[u8]) -> String {
-    let start = std::str::from_utf8(raw)
-        .expect_err("invalid UTF-8 checked")
-        .valid_up_to();
-    let lead = raw[start];
-    let expected: Option<usize> = match lead {
-        0xC2..=0xDF => Some(2),
-        0xE0..=0xEF => Some(3),
-        0xF0..=0xF4 => Some(4),
-        _ => None,
-    };
-    let Some(expected) = expected else {
-        // Stray continuation, overlong C0/C1, or F5-FF lead.
-        return format!(
-            "'utf-8' codec can't decode byte 0x{lead:02x} in position {start}: invalid start byte"
-        );
-    };
-    let mut run = 1;
-    while run < expected && start + run < raw.len() && (0x80..=0xBF).contains(&raw[start + run]) {
-        run += 1;
-    }
-    // The second byte has range checks (overlong E0/F0, surrogate ED,
-    // above-maximum F4): out of range fails at the lead even when
-    // truncated (`\xed\xa0` + EOF → invalid continuation, not end of
-    // data).
-    if run >= 2 {
-        let second = raw[start + 1];
-        let in_range = match lead {
-            0xE0 => (0xA0..=0xBF).contains(&second),
-            0xED => (0x80..=0x9F).contains(&second),
-            0xF0 => (0x90..=0xBF).contains(&second),
-            0xF4 => (0x80..=0x8F).contains(&second),
-            _ => true,
-        };
-        if !in_range {
-            return format!("'utf-8' codec can't decode byte 0x{lead:02x} in position {start}: invalid continuation byte");
-        }
-    }
-    if run == expected {
-        // Full-length but range-invalid (overlong E0/F0, surrogate ED,
-        // above-maximum F4): reported at the lead byte.
-        return format!("'utf-8' codec can't decode byte 0x{lead:02x} in position {start}: invalid continuation byte");
-    }
-    if start + run == raw.len() {
-        if run == 1 {
-            return format!("'utf-8' codec can't decode byte 0x{lead:02x} in position {start}: unexpected end of data");
-        }
-        return format!(
-            "'utf-8' codec can't decode bytes in position {start}-{}: unexpected end of data",
-            start + run - 1
-        );
-    }
-    if run == 1 {
-        return format!("'utf-8' codec can't decode byte 0x{lead:02x} in position {start}: invalid continuation byte");
-    }
-    format!(
-        "'utf-8' codec can't decode bytes in position {start}-{}: invalid continuation byte",
-        start + run - 1
-    )
-}
-
-/// CPython `json` error text for a serde failure: the template plus the
-/// char-based `(line, column, char)` triple. `None` marks an arm with no
-/// CPython error (lone surrogates, NaN/Infinity — all accepted) or an
-/// unknown serde code.
-fn cpython_json_detail(text: &str, message: &str, line: usize, column: usize) -> Option<String> {
-    // A leading BOM is CPython's one special case (anywhere else it is an
-    // ordinary char, and inside strings a literal).
-    if text.starts_with('\u{FEFF}') {
-        return Some(
-            "Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)".to_owned(),
-        );
-    }
-    let offset = json_byte_offset(text, line, column);
-    let prefix = message.split(" at line ").next().unwrap_or(message);
-    let (template, pos) = match prefix {
-        "key must be a string" => ("Expecting property name enclosed in double quotes", offset),
-        "expected `:`" => ("Expecting ':' delimiter", offset),
-        "expected `,` or `]`" | "expected `,` or `}`" => ("Expecting ',' delimiter", offset),
-        "trailing characters" => ("Extra data", offset),
-        "expected value" => ("Expecting value", offset),
-        "trailing comma" => match innermost_bracket(text, offset) {
-            Some(b'[') => ("Expecting value", offset),
-            Some(b'{') => ("Expecting property name enclosed in double quotes", offset),
-            _ => ("Extra data", offset),
-        },
-        "expected ident" => ("Expecting value", json_token_start(text, offset)),
-        "invalid number" => invalid_number_detail(text, offset),
-        "control character (\\u0000-\\u001F) found while parsing a string" => {
-            ("Invalid control character at", offset)
-        }
-        "invalid escape" => invalid_escape_detail(text, offset)?,
-        "EOF while parsing a string" => eof_string_detail(text)?,
-        "EOF while parsing a value"
-        | "EOF while parsing a list"
-        | "EOF while parsing an object" => eof_detail(text),
-        // Surrogate escapes: terminated ones CPython accepts (known gap),
-        // but an UNCLOSED string after them is still an unterminated (or
-        // truncated-escape) error, handled like EOF-in-string.
-        "unexpected end of hex escape"
-        | "lone leading surrogate in hex escape"
-        | "invalid unicode code point" => {
-            if string_closed_after(text, offset) {
-                return None;
-            }
-            eof_string_detail(text)?
-        }
-        _ => return None,
-    };
-    let (line, column, char) = cpython_pos(text, pos);
-    Some(format!(
-        "{template}: line {line} column {column} (char {char})"
-    ))
-}
-
-/// Byte offset of serde's 1-based `(line, column)` (columns count bytes).
-/// Column 0 reports the `\n` itself (serde advances the line before
-/// resetting the column), so it maps to the previous byte.
-fn json_byte_offset(text: &str, line: usize, column: usize) -> usize {
-    let mut start = 0;
-    for _ in 1..line.max(1) {
-        match text[start..].find('\n') {
-            Some(index) => start += index + 1,
-            None => return text.len(),
-        }
-    }
-    if column == 0 {
-        return start.saturating_sub(1);
-    }
-    start.saturating_add(column - 1).min(text.len())
-}
-
-/// CPython's 1-based `(line, column)` + 0-based char index for a byte
-/// offset (chars, not bytes, past any multibyte text).
-fn cpython_pos(text: &str, pos: usize) -> (usize, usize, usize) {
-    let pos = pos.min(text.len());
-    let prefix = &text[..pos];
-    let line = prefix.bytes().filter(|b| *b == b'\n').count() + 1;
-    let column = prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1;
-    (line, column, prefix.chars().count())
-}
-
-/// Whether a byte continues a broken token when scanning back from a
-/// serde offset: anything but structure, quotes and whitespace.
-fn is_token_byte(byte: u8) -> bool {
-    !matches!(byte, b'[' | b']' | b'{' | b'}' | b',' | b':' | b'"')
-        && !matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
-}
-
-/// Start of the broken token containing `offset` (partial idents,
-/// broken numbers): scan back over token bytes.
-fn json_token_start(text: &str, offset: usize) -> usize {
-    let bytes = text.as_bytes();
-    let mut start = offset.min(bytes.len());
-    while start > 0 && is_token_byte(bytes[start - 1]) {
-        start -= 1;
-    }
-    start
-}
-
-/// Net unclosed-bracket depth (string-aware; closers saturate at zero):
-/// tells truncated deep input (plain EOF error) from balanced deep input
-/// (past serde's recursion cap).
-fn bracket_depth(text: &str) -> usize {
-    let bytes = text.as_bytes();
-    let mut depth: usize = 0;
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'"' => {
-                index += 1;
-                while index < bytes.len() && bytes[index] != b'"' {
-                    if bytes[index] == b'\\' {
-                        index += 1;
-                    }
-                    index += 1;
-                }
-                index += 1;
-            }
-            b'{' | b'[' => {
-                depth += 1;
-                index += 1;
-            }
-            b'}' | b']' => {
-                depth = depth.saturating_sub(1);
-                index += 1;
-            }
-            _ => index += 1,
-        }
-    }
-    depth
-}
-
-/// Innermost unclosed bracket before `offset` (string-aware): the
-/// trailing-comma context and the top-level test.
-fn innermost_bracket(text: &str, offset: usize) -> Option<u8> {
-    let bytes = text.as_bytes();
-    let end = offset.min(bytes.len());
-    let mut stack: Vec<u8> = Vec::new();
-    let mut index = 0;
-    while index < end {
-        match bytes[index] {
-            b'"' => {
-                index += 1;
-                while index < end && bytes[index] != b'"' {
-                    if bytes[index] == b'\\' {
-                        index += 1;
-                    }
-                    index += 1;
-                }
-                index += 1;
-            }
-            b'{' | b'[' => {
-                stack.push(bytes[index]);
-                index += 1;
-            }
-            b'}' | b']' => {
-                stack.pop();
-                index += 1;
-            }
-            _ => index += 1,
-        }
-    }
-    stack.pop()
-}
-
-/// Match CPython's `number_re` at `start`: the valid-prefix end, if any
-/// (`-?(0|[1-9]\d*)(\.\d+)?([eE][-+]?\d+)?`).
-fn number_prefix_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut index = start;
-    if bytes.get(index) == Some(&b'-') {
-        index += 1;
-    }
-    match bytes.get(index) {
-        Some(b'0') => index += 1,
-        Some(b'1'..=b'9') => {
-            while matches!(bytes.get(index), Some(b'0'..=b'9')) {
-                index += 1;
-            }
-        }
-        _ => return None,
-    }
-    if bytes.get(index) == Some(&b'.') && matches!(bytes.get(index + 1), Some(b'0'..=b'9')) {
-        index += 2;
-        while matches!(bytes.get(index), Some(b'0'..=b'9')) {
-            index += 1;
-        }
-    }
-    if matches!(bytes.get(index), Some(b'e' | b'E')) {
-        let mut end = index + 1;
-        if matches!(bytes.get(end), Some(b'+' | b'-')) {
-            end += 1;
-        }
-        if matches!(bytes.get(end), Some(b'0'..=b'9')) {
-            end += 1;
-            while matches!(bytes.get(end), Some(b'0'..=b'9')) {
-                end += 1;
-            }
-            index = end;
-        }
-    }
-    Some(index)
-}
-
-/// CPython text for serde's `invalid number`: with no valid prefix the
-/// token start wants a value (`-x`); else CPython consumed the prefix
-/// and wants a delimiter — `Extra data` at top level, `Expecting ','`
-/// inside (CPython says `,` even in objects).
-fn invalid_number_detail(text: &str, offset: usize) -> (&'static str, usize) {
-    let start = json_token_start(text, offset);
-    match number_prefix_end(text.as_bytes(), start) {
-        Some(end) if end > start => {
-            if innermost_bracket(text, start).is_none() {
-                ("Extra data", end)
-            } else {
-                ("Expecting ',' delimiter", end)
-            }
-        }
-        _ => ("Expecting value", start),
-    }
-}
-
-/// `Invalid \escape` vs `Invalid \uXXXX escape`: the culprit backslash is
-/// the nearest `\` before the offset; `\u` reports the `u` index.
-fn invalid_escape_detail(text: &str, offset: usize) -> Option<(&'static str, usize)> {
-    let bytes = text.as_bytes();
-    let mut index = offset.min(bytes.len());
-    for _ in 0..16 {
-        if index == 0 {
-            return None;
-        }
-        index -= 1;
-        if bytes[index] == b'\\' {
-            if bytes.get(index + 1) == Some(&b'u') {
-                return Some(("Invalid \\uXXXX escape", index + 1));
-            }
-            return Some(("Invalid \\escape", index));
-        }
-    }
-    None
-}
-
-/// Opening quote of the string unterminated at `offset`: the nearest `"`
-/// with an even run of preceding backslashes.
-fn json_opening_quote(text: &str, offset: usize) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let mut index = offset.min(bytes.len());
-    while index > 0 {
-        index -= 1;
-        if bytes[index] == b'"' {
-            let mut slashes = 0;
-            let mut cursor = index;
-            while cursor > 0 && bytes[cursor - 1] == b'\\' {
-                slashes += 1;
-                cursor -= 1;
-            }
-            if slashes % 2 == 0 {
-                return Some(index);
-            }
-        }
-    }
-    None
-}
-
-/// Whether an unescaped `"` follows `offset` (escape-aware): tells a
-/// terminated lone surrogate (CPython accepts) from an unterminated
-/// string (CPython reports it).
-fn string_closed_after(text: &str, offset: usize) -> bool {
-    let bytes = text.as_bytes();
-    let mut index = offset.min(bytes.len());
-    while index < bytes.len() {
-        if bytes[index] == b'\\' {
-            index += 2;
-        } else if bytes[index] == b'"' {
-            return true;
-        } else {
-            index += 1;
-        }
-    }
-    false
-}
-
-/// `Unterminated string starting at` the opening quote — unless the tail
-/// holds a truncated `\u` escape, which CPython reports instead. (Serde
-/// misreports a bad `\u` escape in a CLOSED string as EOF-in-string —
-/// `"\ud800\u12"` — so a quote at the very end is content-checked as a
-/// closer first: with no bad escape it is a genuine opener, `"a""`.)
-fn eof_string_detail(text: &str) -> Option<(&'static str, usize)> {
-    let bytes = text.as_bytes();
-    let open = json_opening_quote(text, bytes.len())?;
-    if open + 1 == bytes.len() {
-        if let Some(inner) = json_opening_quote(text, open) {
-            if let Some(pos) = truncated_hex_escape(text, inner, open) {
-                return Some(("Invalid \\uXXXX escape", pos));
-            }
-        }
-        return Some(("Unterminated string starting at", open));
-    }
-    if let Some(pos) = truncated_hex_escape(text, open, bytes.len()) {
-        return Some(("Invalid \\uXXXX escape", pos));
-    }
-    Some(("Unterminated string starting at", open))
-}
-
-/// Index of the `u` when the string content's last `\u` escape is
-/// truncated: fewer than 4 hex digits — or a complete escape ending
-/// exactly at `end` (the C scanner reads past it: `"\u0041` →
-/// `Invalid \uXXXX escape`).
-fn truncated_hex_escape(text: &str, open: usize, end: usize) -> Option<usize> {
-    let bytes = text.as_bytes();
-    // Last unescaped `\u` in the string content.
-    let mut last_u: Option<usize> = None;
-    let mut index = open + 1;
-    while index < end {
-        if bytes[index] == b'\\' {
-            if bytes.get(index + 1) == Some(&b'u') {
-                last_u = Some(index + 1);
-            }
-            index += 2;
-        } else {
-            index += 1;
-        }
-    }
-    let u = last_u?;
-    let mut hex = 0;
-    while hex < 4 && bytes.get(u + 1 + hex).is_some_and(u8::is_ascii_hexdigit) {
-        hex += 1;
-    }
-    if hex < 4 || u + 5 == end {
-        return Some(u);
-    }
-    None
-}
-
-/// JSON whitespace for the EOF region scan (`\x0c` is not JSON
-/// whitespace — neither engine skips it).
-fn is_json_ws(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
-}
-
-/// Whether the string ending at `end` (exclusive) is an object key: its
-/// opening quote follows `{` or `,` (else it is a value). The scan
-/// excludes the closing quote itself, which is the nearest quote back.
-fn is_key_string(text: &str, end: usize) -> bool {
-    let bytes = text.as_bytes();
-    if end == 0 {
-        return false;
-    }
-    let Some(open) = json_opening_quote(text, end - 1) else {
-        return false;
-    };
-    let mut index = open;
-    while index > 0 && is_json_ws(bytes[index - 1]) {
-        index -= 1;
-    }
-    index > 0 && matches!(bytes[index - 1], b'{' | b',')
-}
-
-/// End-of-input failures: CPython reports what it wanted next (a value,
-/// a key, a colon, a delimiter) at the token start or the end.
-fn eof_detail(text: &str) -> (&'static str, usize) {
-    let bytes = text.as_bytes();
-    let end = bytes.len();
-    let mut start = end;
-    while start > 0 && (is_token_byte(bytes[start - 1]) || is_json_ws(bytes[start - 1])) {
-        start -= 1;
-    }
-    let first = bytes[start..end]
-        .iter()
-        .position(|byte| !is_json_ws(*byte))
-        .map_or(end, |offset| start + offset);
-    if first == end {
-        return eof_after_char(text, start, end);
-    }
-    // A token trails: the context before it decides.
-    if start == 0 {
-        return eof_value_token(text, first, end, true);
-    }
-    match bytes[start - 1] {
-        b'[' | b':' => eof_value_token(text, first, end, false),
-        b'{' => ("Expecting property name enclosed in double quotes", first),
-        b',' => match innermost_bracket(text, start - 1) {
-            Some(b'[') => eof_value_token(text, first, end, false),
-            _ => ("Expecting property name enclosed in double quotes", first),
-        },
-        b'"' => {
-            // A complete string precedes the token (an opening quote here
-            // would be an EOF-string error instead): after a key CPython
-            // wants the colon, after a value the delimiter.
-            if is_key_string(text, start) {
-                ("Expecting ':' delimiter", first)
-            } else {
-                ("Expecting ',' delimiter", first)
-            }
-        }
-        _ => ("Expecting ',' delimiter", first),
-    }
-}
-
-/// Nothing but whitespace trails: the last structural char (or the whole
-/// input) decides what CPython wanted at the end.
-fn eof_after_char(text: &str, start: usize, end: usize) -> (&'static str, usize) {
-    if start == 0 {
-        return ("Expecting value", end);
-    }
-    let bytes = text.as_bytes();
-    match bytes[start - 1] {
-        b'[' => ("Expecting value", end),
-        b'{' => ("Expecting property name enclosed in double quotes", end),
-        b',' => match innermost_bracket(text, start - 1) {
-            Some(b'[') => ("Expecting value", end),
-            _ => ("Expecting property name enclosed in double quotes", end),
-        },
-        b':' => {
-            if colon_after_key(text, start - 1) {
-                ("Expecting value", end)
-            } else {
-                // A stray colon after a value: CPython wants the
-                // delimiter at the colon itself.
-                ("Expecting ',' delimiter", start - 1)
-            }
-        }
-        b'"' => {
-            if is_key_string(text, start) {
-                ("Expecting ':' delimiter", end)
-            } else {
-                ("Expecting ',' delimiter", end)
-            }
-        }
-        _ => ("Expecting ',' delimiter", end),
-    }
-}
-
-/// Whether the colon at `pos` follows an object key (else it is stray).
-fn colon_after_key(text: &str, pos: usize) -> bool {
-    let bytes = text.as_bytes();
-    let mut index = pos;
-    while index > 0 && is_json_ws(bytes[index - 1]) {
-        index -= 1;
-    }
-    index > 0 && bytes[index - 1] == b'"' && is_key_string(text, index)
-}
-
-/// A value-position token at end of input: a valid number prefix plus
-/// trailing garbage wants the delimiter at the prefix end (`Extra data`
-/// at top level); a complete value wants the delimiter at the end; a
-/// partial token wants a value at its start.
-fn eof_value_token(text: &str, first: usize, end: usize, top: bool) -> (&'static str, usize) {
-    let bytes = text.as_bytes();
-    // Complete literals (`true`/`false`/`null`) behave like complete
-    // numbers; a literal plus trailing garbage delimits after it.
-    for literal in [b"true".as_slice(), b"false".as_slice(), b"null".as_slice()] {
-        if bytes[first..end].starts_with(literal) {
-            let after = first + literal.len();
-            if bytes[after..end].iter().all(|b| is_json_ws(*b)) {
-                return ("Expecting ',' delimiter", end);
-            }
-            if top {
-                return ("Extra data", after);
-            }
-            return ("Expecting ',' delimiter", after);
-        }
-    }
-    match number_prefix_end(bytes, first) {
-        Some(prefix_end) if prefix_end > first => {
-            if bytes[prefix_end..end].iter().all(|b| is_json_ws(*b)) {
-                ("Expecting ',' delimiter", end)
-            } else if top {
-                ("Extra data", prefix_end)
-            } else {
-                ("Expecting ',' delimiter", prefix_end)
-            }
-        }
-        _ => ("Expecting value", first),
     }
 }
 
@@ -3207,87 +2643,25 @@ pub struct CoerceFail {
     pub body: String,
 }
 
-/// Python `str(value)` for error echoes, over JSON values: strings verbatim,
-/// bools as `True`/`False`, null as `None`, floats via
-/// `paginator::py_float_str`, containers recursively with single-quoted
-/// strings (verified: `"['a']" is not a valid choice.`,
-/// `"[]" is not a valid UUID.`).
-pub fn py_repr(value: &Value) -> String {
-    match value {
-        Value::Null => "None".to_owned(),
-        Value::Bool(true) => "True".to_owned(),
-        Value::Bool(false) => "False".to_owned(),
-        Value::Number(n) => {
-            if n.is_i64() {
-                n.as_i64().expect("i64").to_string()
-            } else if n.is_u64() {
-                n.as_u64().expect("u64").to_string()
-            } else {
-                // `arbitrary_precision`: integer literals beyond u64 keep
-                // their exact text (Python ints are unbounded); fraction /
-                // exponent literals render as floats.
-                let text = n.as_str();
-                if text.bytes().any(|b| b == b'.' || b == b'e' || b == b'E') {
-                    crate::paginator::py_float_str(n.as_f64().unwrap_or(f64::NAN))
-                } else {
-                    text.to_owned()
-                }
-            }
-        }
-        Value::String(s) => s.clone(),
-        Value::Array(items) => {
-            let parts: Vec<String> = items.iter().map(py_repr_quoted).collect();
-            format!("[{}]", parts.join(", "))
-        }
-        Value::Object(map) => {
-            let parts: Vec<String> = map
-                .iter()
-                .map(|(k, v)| {
-                    format!(
-                        "{}: {}",
-                        py_repr_quoted(&Value::String(k.clone())),
-                        py_repr_quoted(v)
-                    )
-                })
-                .collect();
-            format!("{{{}}}", parts.join(", "))
-        }
-    }
-}
-
-/// Python `repr()` for a value nested inside a container echo: strings gain
-/// single quotes (with `\'`/`\\` escapes); everything else is `py_repr`.
-fn py_repr_quoted(value: &Value) -> String {
-    match value {
-        Value::String(s) => {
-            let mut out = String::with_capacity(s.len() + 2);
-            out.push('\'');
-            for ch in s.chars() {
-                match ch {
-                    '\'' => out.push_str("\\'"),
-                    '\\' => out.push_str("\\\\"),
-                    '\n' => out.push_str("\\n"),
-                    '\r' => out.push_str("\\r"),
-                    '\t' => out.push_str("\\t"),
-                    c => out.push(c),
-                }
-            }
-            out.push('\'');
-            out
-        }
-        other => py_repr(other),
-    }
+/// Python `str(value)` for error echoes, over parsed values: the shared
+/// layer's [`super::json_cpython::py_str`] (strings verbatim with raw
+/// surrogates, true `repr()` quoting nested, depth-capped); a render past
+/// the depth cap is Django's JSON 500. (Callers divert top-level dirty
+/// echoes to [`Denial::RendererCrash`] before formatting.)
+pub fn py_repr(value: &JVal) -> Result<JStr, Denial> {
+    super::json_cpython::py_str(value).map_err(|_| Denial::ServerError)
 }
 
 /// DRF `CharField` over one JSON value (verified live): `null` fails unless
 /// `allow_null`; bools and containers fail `Not a valid string.`; numbers
 /// stringify (`str(data)`); strings strip (`trim_whitespace`, the default —
 /// whitespace counts as blank for `allow_blank=False`) and the stripped value
-/// is stored, length-checked, and null-char guarded (the model
-/// `ProhibitNullCharactersValidator` runs through the `ModelSerializer`).
-/// Returns the validated string, or `None` when explicitly null.
+/// is stored. The validators then run in append order — max-length, null
+/// characters, surrogates — COLLECTING every failure into one `["e1","e2"]`
+/// body (verified live). Returns the validated string, or `None` when
+/// explicitly null.
 pub fn coerce_char(
-    value: Option<&Value>,
+    value: Option<&JVal>,
     allow_blank: bool,
     allow_null: bool,
     max_length: Option<usize>,
@@ -3299,34 +2673,33 @@ pub fn coerce_char(
         return Err(fail(r#"["This field is required."]"#));
     };
     match value {
-        Value::Null => {
+        JVal::Null => {
             if allow_null {
                 Ok(None)
             } else {
                 Err(fail(r#"["This field may not be null."]"#))
             }
         }
-        Value::Bool(_) | Value::Array(_) | Value::Object(_) => {
-            Err(fail(r#"["Not a valid string."]"#))
-        }
-        Value::Number(n) => {
-            let text = py_repr(&Value::Number(n.clone()));
+        JVal::Bool(_) | JVal::Array(_) | JVal::Object(_) => Err(fail(r#"["Not a valid string."]"#)),
+        JVal::Num(number) => {
+            let text = number.py_string();
             check_max_length(&text, max_length)?;
             Ok(Some(text))
         }
-        Value::String(raw) => {
-            if raw.is_empty() || raw.trim().is_empty() {
+        JVal::Str(raw) => {
+            if raw.trim().is_empty() {
                 if !allow_blank {
                     return Err(fail(r#"["This field may not be blank."]"#));
                 }
                 return Ok(Some(String::new()));
             }
-            let trimmed = raw.trim().to_owned();
-            check_max_length(&trimmed, max_length)?;
-            if trimmed.contains('\u{0}') {
-                return Err(fail(r#"["Null characters are not allowed."]"#));
-            }
-            Ok(Some(trimmed))
+            let trimmed = raw.trim();
+            char_validators(&trimmed, max_length)?;
+            Ok(Some(
+                trimmed
+                    .to_clean_string()
+                    .expect("surrogate validator rejects dirty strings"),
+            ))
         }
     }
 }
@@ -3343,29 +2716,71 @@ fn check_max_length(text: &str, max_length: Option<usize>) -> Result<(), CoerceF
     Ok(())
 }
 
+/// DRF `CharField` validators in append order (`fields.py` `CharField` plus
+/// DRF's `CharField.__init__`): max-length, null characters, surrogates —
+/// collecting EVERY failure (verified live: a long surrogate-bearing name
+/// answers both messages, compact `["e1","e2"]` separators).
+fn char_validators(trimmed: &JStr, max_length: Option<usize>) -> Result<(), CoerceFail> {
+    let mut errors: Vec<String> = Vec::new();
+    if let Some(max) = max_length {
+        // DRF counts `len(str)` — surrogates are one char each.
+        if trimmed.len_chars() > max {
+            errors.push(format!(
+                "Ensure this field has no more than {max} characters."
+            ));
+        }
+    }
+    if trimmed.contains_nul() {
+        errors.push("Null characters are not allowed.".to_owned());
+    }
+    if let Some(unit) = trimmed.first_surrogate() {
+        errors.push(format!("Surrogate characters are not allowed: U+{unit:X}."));
+    }
+    if errors.is_empty() {
+        return Ok(());
+    }
+    // Fixed texts (digits + uppercase hex only) need no escaping.
+    let body = errors
+        .iter()
+        .map(|message| format!("\"{message}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    Err(CoerceFail {
+        body: format!("[{body}]"),
+    })
+}
+
 /// DRF `ChoiceField` over one JSON value (verified live): `null` fails
 /// unless `allow_null`; anything whose `str()` is not a valid choice fails
 /// `"{input}" is not a valid choice.` with the Python rendering (not JSON:
-/// `"['a']"`, `"True"`, `"1.5"`).
+/// `"['a']"`, `"True"`, `"1.5"`). A top-level surrogate echo crashes the
+/// renderer ([`Denial::RendererCrash`]); past the `str()` depth cap is
+/// Django's JSON 500 — both abort the request instead of collecting,
+/// hence the nested result.
 pub fn coerce_choice(
-    value: Option<&Value>,
+    value: Option<&JVal>,
     choices: &[&str],
-) -> Result<Option<String>, CoerceFail> {
+) -> Result<Result<Option<String>, CoerceFail>, Denial> {
     let fail = |body: String| CoerceFail { body };
     let Some(value) = value else {
-        return Err(fail(r#"["This field is required."]"#.to_owned()));
+        return Ok(Err(fail(r#"["This field is required."]"#.to_owned())));
     };
-    if value.is_null() {
-        return Err(fail(r#"["This field may not be null."]"#.to_owned()));
+    if matches!(value, JVal::Null) {
+        return Ok(Err(fail(r#"["This field may not be null."]"#.to_owned())));
     }
-    let text = py_repr(value);
-    if choices.contains(&text.as_str()) {
-        Ok(Some(text))
+    let rendered = py_repr(value)?;
+    let Some(clean) = rendered.to_clean_string() else {
+        // Raw surrogates survive only in top-level string echoes (nested
+        // ones repr-escape): the renderer crashes encoding them.
+        return Err(Denial::RendererCrash);
+    };
+    if choices.contains(&clean.as_str()) {
+        Ok(Ok(Some(clean)))
     } else {
-        Err(fail(format!(
+        Ok(Err(fail(format!(
             "[{}]",
-            json_string(&format!(r#""{text}" is not a valid choice."#))
-        )))
+            json_string(&format!(r#""{clean}" is not a valid choice."#))
+        ))))
     }
 }
 
@@ -3391,43 +2806,62 @@ pub enum PkValue {
 /// * float/list/dict/str → the UUID parse, failing
 ///   `“<value>” is not a valid UUID.` (DRF's curly quotes) with the Python
 ///   rendering, else the existence check with the raw echo.
-pub fn coerce_pk_shape(value: &Value, allow_null: bool) -> Result<PkValue, CoerceFail> {
+///
+/// The nested result aborts the request on a renderer crash (dirty
+/// strings) or past the `str()` depth cap, like [`coerce_choice`].
+pub fn coerce_pk_shape(
+    value: &JVal,
+    allow_null: bool,
+) -> Result<Result<PkValue, CoerceFail>, Denial> {
     let fail = |body: String| CoerceFail { body };
     match value {
-        Value::Null => {
+        JVal::Null => {
             if allow_null {
-                Ok(PkValue::Null)
+                Ok(Ok(PkValue::Null))
             } else {
-                Err(fail(r#"["This field may not be null."]"#.to_owned()))
+                Ok(Err(fail(r#"["This field may not be null."]"#.to_owned())))
             }
         }
-        Value::Bool(_) => Err(fail(format!(
+        JVal::Bool(_) => Ok(Err(fail(format!(
             "[{}]",
             json_string("Incorrect type. Expected pk value, received bool.")
-        ))),
-        Value::Number(n) => {
+        )))),
+        JVal::Num(number) => {
             // `UUID(int=...)` accepts the u128 range (negatives and huge
-            // values fail); the digit echo is exact even past u64 thanks to
-            // `arbitrary_precision`.
-            let digits = py_repr(&Value::Number(n.clone()));
+            // values fail); the digit echo is exact (Python ints are
+            // unbounded). Floats never reach here (`coerce_pk_value`
+            // diverts them first).
+            debug_assert!(!number.is_float());
+            let digits = number.py_string();
             match digits.parse::<u128>().map(uuid::Uuid::from_u128) {
-                Ok(id) => Ok(PkValue::Id(id)),
-                Err(_) => Err(fail(invalid_uuid_message(&digits))),
+                Ok(id) => Ok(Ok(PkValue::Id(id))),
+                Err(_) => Ok(Err(fail(invalid_uuid_message(&digits)))),
             }
         }
-        Value::String(raw) => {
-            if raw.is_empty() {
+        JVal::Str(raw) => {
+            let Some(clean) = raw.to_clean_string() else {
+                // A dirty `request.data` string echoes raw into the UUID
+                // message and crashes the renderer (verified live).
+                return Err(Denial::RendererCrash);
+            };
+            if clean.is_empty() {
                 if allow_null {
-                    return Ok(PkValue::Null);
+                    return Ok(Ok(PkValue::Null));
                 }
-                return Err(fail(r#"["This field may not be null."]"#.to_owned()));
+                return Ok(Err(fail(r#"["This field may not be null."]"#.to_owned())));
             }
-            match raw.parse::<uuid::Uuid>() {
-                Ok(id) => Ok(PkValue::Id(id)),
-                Err(_) => Err(fail(invalid_uuid_message(raw))),
+            match clean.parse::<uuid::Uuid>() {
+                Ok(id) => Ok(Ok(PkValue::Id(id))),
+                Err(_) => Ok(Err(fail(invalid_uuid_message(&clean)))),
             }
         }
-        Value::Array(_) | Value::Object(_) => Err(fail(invalid_uuid_message(&py_repr(value)))),
+        JVal::Array(_) | JVal::Object(_) => {
+            let rendered = py_repr(value)?;
+            let clean = rendered
+                .to_clean_string()
+                .expect("container echoes escape surrogates");
+            Ok(Err(fail(invalid_uuid_message(&clean))))
+        }
     }
 }
 
@@ -3442,13 +2876,16 @@ pub fn invalid_uuid_message(rendered: &str) -> String {
 /// Float UUID echo check: a float always fails the UUID parse (verified
 /// live: `“1.5” is not a valid UUID.`). `coerce_pk_shape` routes numbers
 /// through the int path, so floats need their own arm — handled by testing
-/// `is_f64` before calling it. This helper keeps that decision in one place.
-pub fn coerce_pk_value(value: &Value, allow_null: bool) -> Result<PkValue, CoerceFail> {
-    if let Value::Number(n) = value {
-        if n.is_f64() {
-            return Err(CoerceFail {
-                body: invalid_uuid_message(&py_repr(value)),
-            });
+/// `is_float` before calling it. This helper keeps that decision in one place.
+pub fn coerce_pk_value(
+    value: &JVal,
+    allow_null: bool,
+) -> Result<Result<PkValue, CoerceFail>, Denial> {
+    if let JVal::Num(number) = value {
+        if number.is_float() {
+            return Ok(Err(CoerceFail {
+                body: invalid_uuid_message(&number.py_string()),
+            }));
         }
     }
     coerce_pk_shape(value, allow_null)
@@ -4658,7 +4095,7 @@ fn shift_wall_to_utc(
 /// keys are ignored exactly like DRF.
 pub async fn coerce_write(
     pool: &PgPool,
-    body: &serde_json::Map<String, Value>,
+    body: &JObject,
     partial: bool,
     user_timezone: &Tz,
 ) -> Result<CycleWrite, Denial> {
@@ -4677,7 +4114,7 @@ pub async fn coerce_write(
     // description: TextField(blank=True, null=False); missing absent.
     match body.get("description") {
         None => {}
-        Some(Value::Null) => errors.push((
+        Some(JVal::Null) => errors.push((
             "description".to_owned(),
             r#"["This field may not be null."]"#.to_owned(),
         )),
@@ -4694,14 +4131,19 @@ pub async fn coerce_write(
     for key in ["start_date", "end_date"] {
         match body.get(key) {
             None => {}
-            Some(Value::Null) => {
+            Some(JVal::Null) => {
                 if key == "start_date" {
                     write.start_date = Some(None);
                 } else {
                     write.end_date = Some(None);
                 }
             }
-            Some(Value::String(text)) => match parse_iso_datetime(text) {
+            // Dirty strings never parse (the invalid message has no echo,
+            // so they share the garbage-string arm — verified live).
+            Some(JVal::Str(raw)) => match raw
+                .to_clean_string()
+                .and_then(|text| parse_iso_datetime(&text))
+            {
                 Some(parsed) => match enforce_user_timezone(&parsed, user_timezone) {
                     Ok(instant) => {
                         if key == "start_date" {
@@ -4738,12 +4180,14 @@ pub async fn coerce_write(
     match body.get("owned_by") {
         None => {}
         Some(value) => match coerce_pk_value(value, true) {
-            Ok(PkValue::Null) => write.owned_by = Some(None),
-            Ok(PkValue::Id(id)) => {
+            Ok(Ok(PkValue::Null)) => write.owned_by = Some(None),
+            Ok(Ok(PkValue::Id(id))) => {
                 let echo = match value {
-                    Value::Number(_) => py_repr(value),
-                    Value::String(s) => s.clone(),
-                    _ => py_repr(value),
+                    JVal::Num(number) => number.py_string(),
+                    JVal::Str(raw) => raw
+                        .to_clean_string()
+                        .expect("validated PK ids are surrogate-free"),
+                    _ => unreachable!("only numbers and strings validate as ids"),
                 };
                 match check_user_exists(pool, &id, &echo, "owned-by-exists").await {
                     Ok(()) => write.owned_by = Some(Some(id)),
@@ -4755,14 +4199,15 @@ pub async fn coerce_write(
                     }
                 }
             }
-            Err(fail) => errors.push(("owned_by".to_owned(), fail.body)),
+            Ok(Err(fail)) => errors.push(("owned_by".to_owned(), fail.body)),
+            Err(denial) => return Err(denial),
         },
     }
     // external_source / external_id: CharField(max 255, blank+null).
     for key in ["external_source", "external_id"] {
         match body.get(key) {
             None => {}
-            Some(Value::Null) => {
+            Some(JVal::Null) => {
                 if key == "external_source" {
                     write.external_source = Some(None);
                 } else {
@@ -4787,9 +4232,10 @@ pub async fn coerce_write(
     match body.get("timezone") {
         None => {}
         value => match coerce_choice(value, PYTZ_COMMON_TIMEZONES) {
-            Ok(Some(timezone)) => write.timezone = Some(timezone),
-            Ok(None) => {}
-            Err(fail) => errors.push(("timezone".to_owned(), fail.body)),
+            Ok(Ok(Some(timezone))) => write.timezone = Some(timezone),
+            Ok(Ok(None)) => {}
+            Ok(Err(fail)) => errors.push(("timezone".to_owned(), fail.body)),
+            Err(denial) => return Err(denial),
         },
     }
 
@@ -5367,33 +4813,33 @@ pub async fn list_archived_cycles_inner(
 
 /// Python truthiness over raw JSON request values (the external-dup checks
 /// read `request.data`, not the coerced fields).
-pub fn py_truthy(value: &Value) -> bool {
+pub fn py_truthy(value: &JVal) -> bool {
     match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
+        JVal::Null => false,
+        JVal::Bool(flag) => *flag,
+        JVal::Num(number) => {
+            if let Some(i) = number.as_i64() {
                 i != 0
-            } else if let Some(u) = n.as_u64() {
+            } else if let Some(u) = number.as_u64() {
                 u != 0
-            } else if let Some(f) = n.as_f64() {
-                f != 0.0
             } else {
-                true
+                number.as_f64() != 0.0
             }
         }
-        Value::String(s) => !s.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(map) => !map.is_empty(),
+        JVal::Str(text) => !text.is_empty(),
+        JVal::Array(items) => !items.is_empty(),
+        JVal::Object(object) => !object.is_empty(),
     }
 }
 
 /// Django `CharField.get_prep_value` for filter values: only str/int/float
 /// survive field coercion, and each stringifies.
-pub fn prep_text(value: &Value) -> Option<String> {
+pub fn prep_text(value: &JVal) -> Option<String> {
     match value {
-        Value::String(s) => Some(s.clone()),
-        Value::Number(_) => Some(py_repr(value)),
+        // Dirty strings never reach here (the dup check runs post-`is_valid`,
+        // and dirty `CharField` inputs fail validation) — fail closed.
+        JVal::Str(raw) => raw.to_clean_string(),
+        JVal::Num(number) => Some(number.py_string()),
         _ => None,
     }
 }
@@ -5552,8 +4998,12 @@ pub async fn create_cycle_inner(
     let raw = parse_object_or_500(body)?;
     // Both-or-neither shape gate on the RAW body (`views/cycle.py:305-356`):
     // present means the key exists with a non-null value.
-    let start_present = raw.get("start_date").is_some_and(|v| !v.is_null());
-    let end_present = raw.get("end_date").is_some_and(|v| !v.is_null());
+    let start_present = raw
+        .get("start_date")
+        .is_some_and(|v| !matches!(v, JVal::Null));
+    let end_present = raw
+        .get("end_date")
+        .is_some_and(|v| !matches!(v, JVal::Null));
     if !shapes::create_dates_shape_ok(start_present, end_present) {
         return Err(Denial::BadError(
             shapes::CREATE_DATES_SHAPE_MESSAGE.to_owned(),
@@ -5573,7 +5023,13 @@ pub async fn create_cycle_inner(
     .map_err(|error| db_error(error, "cycle-create-project"))?
     .map(|row| ProjectRow::decode(&row, "cycle-create-project"))
     .transpose()?;
-    let body_project_id = raw.get("project_id").and_then(|v| v.as_str());
+    // A dirty body id falls through the `or` chain exactly like a missing
+    // one (the legacy path is dead past the gate anyway — context wins).
+    let body_project_id_owned = raw.get("project_id").and_then(|v| match v {
+        JVal::Str(raw) => raw.to_clean_string(),
+        _ => None,
+    });
+    let body_project_id = body_project_id_owned.as_deref();
     let now = micros_now();
     let validated = run_validate(
         &project_id,
@@ -5670,7 +5126,7 @@ pub async fn create_cycle_inner(
     let job = pidash_jobs::v1_cycles_modules::publish::model_created_job(
         "cycle",
         &cycle_id.to_string(),
-        &raw,
+        to_serde_publish_map(&raw),
         &pre.actor.id.to_string(),
         slug,
         &app_origin(state),
@@ -5714,35 +5170,37 @@ pub async fn create_cycle_inner(
 /// substring — and a hit on a list/str 500s on the narrowing `.get`
 /// (neither type has one). `in` on null/number/bool raises `TypeError` →
 /// 500. (All six non-dict shapes verified live against Django.)
-pub fn completed_gate(value: &Value) -> Result<(), Denial> {
+pub fn completed_gate(value: &JVal) -> Result<(), Denial> {
     const MESSAGE: &str = "The Cycle has already been completed so it cannot be edited";
     let reject = || Denial::BadError(MESSAGE.to_owned());
     match value {
-        Value::Object(map) => {
+        JVal::Object(map) => {
             if map.contains_key("sort_order") {
                 Ok(())
             } else {
                 Err(reject())
             }
         }
-        Value::Array(items) => {
-            if items
-                .iter()
-                .any(|item| item == &Value::String("sort_order".to_owned()))
-            {
+        JVal::Array(items) => {
+            // Python `==` against `"sort_order"`: only a clean equal string
+            // hits (dirty strings never equal, verified live).
+            if items.iter().any(|item| match item {
+                JVal::Str(text) => text.eq_str("sort_order"),
+                _ => false,
+            }) {
                 Err(Denial::ServerError)
             } else {
                 Err(reject())
             }
         }
-        Value::String(text) => {
-            if text.contains("sort_order") {
+        JVal::Str(text) => {
+            if text.contains_str("sort_order") {
                 Err(Denial::ServerError)
             } else {
                 Err(reject())
             }
         }
-        Value::Null | Value::Number(_) | Value::Bool(_) => Err(Denial::ServerError),
+        JVal::Null | JVal::Num(_) | JVal::Bool(_) => Err(Denial::ServerError),
     }
 }
 
@@ -5818,7 +5276,11 @@ pub async fn patch_cycle_inner(
     .map_err(|error| db_error(error, "cycle-patch-project"))?
     .map(|row| ProjectRow::decode(&row, "cycle-patch-project"))
     .transpose()?;
-    let body_project_id = raw.get("project_id").and_then(|v| v.as_str());
+    let body_project_id_owned = raw.get("project_id").and_then(|v| match v {
+        JVal::Str(raw) => raw.to_clean_string(),
+        _ => None,
+    });
+    let body_project_id = body_project_id_owned.as_deref();
     let instance_project_id = before.project_id.to_string();
     let now = micros_now();
     let validated = run_validate(
@@ -5843,7 +5305,7 @@ pub async fn patch_cycle_inner(
         if py_truthy(raw_id) && !py_equals_stored(&before.external_id, raw_id) {
             let source: Option<String> = match raw.get("external_source") {
                 None => before.external_source.clone(),
-                Some(Value::Null) => None,
+                Some(JVal::Null) => None,
                 Some(value) => prep_text(value),
             };
             let clash: bool = match (prep_text(raw_id), source) {
@@ -5902,7 +5364,7 @@ pub async fn patch_cycle_inner(
     let job = pidash_jobs::v1_cycles_modules::publish::model_updated_job(
         "cycle",
         &pk.to_string(),
-        &raw,
+        to_serde_publish_map(&raw),
         &snapshot_text,
         &pre.actor.id.to_string(),
         slug,
@@ -5933,10 +5395,10 @@ pub async fn patch_cycle_inner(
 
 /// Python `==` between a stored `Option<String>` and a raw JSON value: only
 /// equal-type strings compare equal (`"5" != 5`).
-pub fn py_equals_stored(stored: &Option<String>, raw: &Value) -> bool {
+pub fn py_equals_stored(stored: &Option<String>, raw: &JVal) -> bool {
     match (stored, raw) {
-        (None, Value::Null) => true,
-        (Some(current), Value::String(next)) => current == next,
+        (None, JVal::Null) => true,
+        (Some(current), JVal::Str(next)) => next.eq_str(current),
         _ => false,
     }
 }
@@ -6247,17 +5709,18 @@ pub enum IssueCandidate {
 /// chars and dicts into keys, where an invalid UUID answers
 /// `"Please provide valid detail"`. The falsy gate (missing/empty/null/
 /// 0/false → the two-key 400) runs in the caller.
-pub fn coerce_add_issues(value: &Value) -> Result<Vec<IssueCandidate>, Denial> {
+pub fn coerce_add_issues(value: &JVal) -> Result<Vec<IssueCandidate>, Denial> {
     match value {
-        Value::Null | Value::Number(_) | Value::Bool(_) => Err(Denial::ServerError),
-        Value::String(s) => s
-            .chars()
-            .map(|ch| coerce_issue_candidate(&Value::String(ch.to_string())))
+        JVal::Null | JVal::Num(_) | JVal::Bool(_) => Err(Denial::ServerError),
+        JVal::Str(text) => text
+            .singletons()
+            .iter()
+            .map(|unit| coerce_issue_candidate(&JVal::Str(unit.clone())))
             .collect(),
-        Value::Array(items) => items.iter().map(coerce_issue_candidate).collect(),
-        Value::Object(map) => map
-            .keys()
-            .map(|key| coerce_issue_candidate(&Value::String(key.clone())))
+        JVal::Array(items) => items.iter().map(coerce_issue_candidate).collect(),
+        JVal::Object(object) => object
+            .iter()
+            .map(|(key, _)| coerce_issue_candidate(&JVal::Str(key.clone())))
             .collect(),
     }
 }
@@ -6268,27 +5731,32 @@ const INVALID_DETAIL_BODY_TRIMMED: &str = "Please provide valid detail";
 /// Validate one `pk__in` item: strings parse as UUIDs, ints/bools coerce
 /// via `UUID(int=...)`, nulls pass through as NULL, floats and containers
 /// fail the UUID parse (all verified live).
-pub fn coerce_issue_candidate(value: &Value) -> Result<IssueCandidate, Denial> {
+pub fn coerce_issue_candidate(value: &JVal) -> Result<IssueCandidate, Denial> {
     let invalid = || Denial::BadError(INVALID_DETAIL_BODY_TRIMMED.to_owned());
     match value {
-        Value::Null => Ok(IssueCandidate::Null),
-        Value::Bool(b) => Ok(IssueCandidate::Id(uuid::Uuid::from_u128(u128::from(
-            *b as u8,
+        JVal::Null => Ok(IssueCandidate::Null),
+        JVal::Bool(flag) => Ok(IssueCandidate::Id(uuid::Uuid::from_u128(u128::from(
+            *flag as u8,
         )))),
-        Value::Number(n) => {
-            if n.is_f64() {
+        JVal::Num(number) => {
+            if number.is_float() {
                 return Err(invalid());
             }
-            match py_repr(value).parse::<u128>().map(uuid::Uuid::from_u128) {
-                Ok(id) => Ok(IssueCandidate::Id(id)),
-                Err(_) => Err(invalid()),
+            match number.to_u128().map(uuid::Uuid::from_u128) {
+                Some(id) => Ok(IssueCandidate::Id(id)),
+                None => Err(invalid()),
             }
         }
-        Value::String(raw) => match raw.parse::<uuid::Uuid>() {
-            Ok(id) => Ok(IssueCandidate::Id(id)),
-            Err(_) => Err(invalid()),
+        // Dirty strings never parse as UUIDs (the invalid message has no
+        // echo, so they share the garbage-string arm — verified live).
+        JVal::Str(raw) => match raw
+            .to_clean_string()
+            .and_then(|text| text.parse::<uuid::Uuid>().ok())
+        {
+            Some(id) => Ok(IssueCandidate::Id(id)),
+            None => Err(invalid()),
         },
-        Value::Array(_) | Value::Object(_) => Err(invalid()),
+        JVal::Array(_) | JVal::Object(_) => Err(invalid()),
     }
 }
 
@@ -6310,7 +5778,10 @@ pub fn render_bridge_dump(bridges: &[CreatedBridge]) -> String {
         if index > 0 {
             out.push_str(", ");
         }
-        let issue = serde_json::to_string(&bridge.issue_raw).unwrap_or_else(|_| "null".to_owned());
+        // Only validated candidates reach here (null/bool/int/clean-string
+        // render exactly as before; anything else fails validation first).
+        let issue = serde_json::to_string(&to_serde_publish(&bridge.issue_raw))
+            .unwrap_or_else(|_| "null".to_owned());
         out.push_str(&format!(
             "{{\"model\": \"db.cycleissue\", \"pk\": \"{}\", \"fields\": {{\"created_at\": {}, \"updated_at\": {}, \"created_by\": {}, \"updated_by\": {}, \"deleted_at\": null, \"project\": \"{}\", \"workspace\": \"{}\", \"issue\": {}, \"cycle\": \"{}\"}}}}",
             bridge.id,
@@ -6356,7 +5827,7 @@ pub struct CreatedBridge {
     pub workspace_id: uuid::Uuid,
     pub cycle_id: uuid::Uuid,
     pub issue_id: uuid::Uuid,
-    pub issue_raw: Value,
+    pub issue_raw: JVal,
 }
 
 /// One live bridge fetched for the move path (`views/cycle.py:946`).
@@ -6491,20 +5962,23 @@ pub async fn add_cycle_issues_inner(
     // `new_issues`: the raw values minus the existing strings, deduped in
     // first-seen order (Django's `set()` order is hash-random per process).
     // Dict `issues` iterate into KEYS for the set difference too.
-    let raw_items: Vec<Value> = match issues_value {
-        Value::Array(items) => items.clone(),
-        Value::Object(map) => map.keys().map(|key| Value::String(key.clone())).collect(),
+    let raw_items: Vec<JVal> = match issues_value {
+        JVal::Array(items) => items.clone(),
+        JVal::Object(object) => object
+            .iter()
+            .map(|(key, _)| JVal::Str(key.clone()))
+            .collect(),
         _ => Vec::new(),
     };
-    let mut seen: Vec<&Value> = Vec::new();
-    let mut new_values: Vec<&Value> = Vec::new();
+    let mut seen: Vec<&JVal> = Vec::new();
+    let mut new_values: Vec<&JVal> = Vec::new();
     for value in &raw_items {
         if seen.iter().any(|known| json_value_eq(known, value)) {
             continue;
         }
         seen.push(value);
         let dropped = match value {
-            Value::String(text) => existing_ids.iter().any(|known| known == text),
+            JVal::Str(text) => existing_ids.iter().any(|known| text.eq_str(known)),
             _ => false,
         };
         if !dropped {
@@ -6544,7 +6018,7 @@ pub async fn add_cycle_issues_inner(
         let issue_ids: Vec<Option<uuid::Uuid>> = batch
             .iter()
             .map(|b| match &b.issue_raw {
-                Value::Null => None,
+                JVal::Null => None,
                 _ => Some(b.issue_id),
             })
             .collect();
@@ -6592,7 +6066,7 @@ pub async fn add_cycle_issues_inner(
     let now = micros_now();
     let requested_text =
         pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&serde_json::json!({
-            "cycles_list": issues_value,
+            "cycles_list": to_serde_publish(issues_value),
         }));
     let dump_text = render_bridge_dump(&bridges);
     let current_text =
@@ -6636,13 +6110,13 @@ pub async fn add_cycle_issues_inner(
 
 /// Python `in` of a `str()` bridge id against the raw `issues` value:
 /// list elements (type-strict `==`), dict keys, or string substring.
-pub fn raw_contains(issues: &Value, text: &str) -> bool {
+pub fn raw_contains(issues: &JVal, text: &str) -> bool {
     match issues {
-        Value::Array(items) => items
+        JVal::Array(items) => items
             .iter()
-            .any(|item| matches!(item, Value::String(s) if s == text)),
-        Value::Object(map) => map.contains_key(text),
-        Value::String(s) => s.contains(text),
+            .any(|item| matches!(item, JVal::Str(s) if s.eq_str(text))),
+        JVal::Object(object) => object.contains_key(text),
+        JVal::Str(raw) => raw.contains_str(text),
         _ => false,
     }
 }
@@ -6651,23 +6125,23 @@ pub fn raw_contains(issues: &Value, text: &str) -> bool {
 /// dedupe): `True == 1` and `1 == 1.0` in Python, but JSON ints and
 /// floats stay distinct here — the only dedupe that matters in practice
 /// is string identity, and Python string equality is exact equality.
-pub fn json_value_eq(left: &Value, right: &Value) -> bool {
+pub fn json_value_eq(left: &JVal, right: &JVal) -> bool {
     match (left, right) {
-        (Value::Null, Value::Null) => true,
-        (Value::Bool(a), Value::Bool(b)) => a == b,
-        (Value::Bool(a), Value::Number(n)) | (Value::Number(n), Value::Bool(a)) => {
+        (JVal::Null, JVal::Null) => true,
+        (JVal::Bool(a), JVal::Bool(b)) => a == b,
+        (JVal::Bool(a), JVal::Num(n)) | (JVal::Num(n), JVal::Bool(a)) => {
             let bit = i64::from(*a);
             n.as_i64().is_some_and(|v| v == bit)
                 || n.as_u64().is_some_and(|v| v == bit as u64)
-                || n.as_f64().is_some_and(|v| v == bit as f64)
+                || n.as_f64() == bit as f64
         }
-        (Value::Number(a), Value::Number(b)) => {
+        (JVal::Num(a), JVal::Num(b)) => {
             a.as_i64().zip(b.as_i64()).is_some_and(|(x, y)| x == y)
                 || a.as_u64().zip(b.as_u64()).is_some_and(|(x, y)| x == y)
-                || a.as_f64().zip(b.as_f64()).is_some_and(|(x, y)| x == y)
+                || a.as_f64() == b.as_f64()
         }
-        (Value::String(a), Value::String(b)) => a == b,
-        (Value::Array(a), Value::Array(b)) => {
+        (JVal::Str(a), JVal::Str(b)) => a == b,
+        (JVal::Array(a), JVal::Array(b)) => {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| json_value_eq(x, y))
         }
         _ => false,
@@ -6677,7 +6151,7 @@ pub fn json_value_eq(left: &Value, right: &Value) -> bool {
 /// The coerced issue id for a new raw value (the filter already validated
 /// every value: strings parse, ints/bools fold via `UUID(int=...)`, null
 /// stays null — but null never reaches the dump, it fails the insert).
-pub fn coerce_new_issue_id(value: &Value) -> Result<uuid::Uuid, Denial> {
+pub fn coerce_new_issue_id(value: &JVal) -> Result<uuid::Uuid, Denial> {
     match coerce_issue_candidate(value)? {
         IssueCandidate::Id(id) => Ok(id),
         IssueCandidate::Null => Ok(uuid::Uuid::nil()),
@@ -6688,13 +6162,19 @@ pub fn coerce_new_issue_id(value: &Value) -> Result<uuid::Uuid, Denial> {
 /// the request value rather than the folded id (`str(new_cycle_id)` in the
 /// transfer move entries): strings verbatim, ints/bools in `str()` form
 /// (`True`, not `true`).
-pub fn raw_id_text(value: &Value) -> String {
+pub fn raw_id_text(value: &JVal) -> Result<String, Denial> {
     match value {
-        Value::Null => "None".to_owned(),
-        Value::String(s) => s.clone(),
-        Value::Bool(true) => "True".to_owned(),
-        Value::Bool(false) => "False".to_owned(),
-        Value::Number(_) | Value::Array(_) | Value::Object(_) => py_repr(value),
+        JVal::Null => Ok("None".to_owned()),
+        // Dirty strings fail validation first (the transfer 400); the move
+        // entries only ever stringify validated targets — fail closed.
+        JVal::Str(raw) => raw.to_clean_string().ok_or(Denial::ServerError),
+        JVal::Bool(true) => Ok("True".to_owned()),
+        JVal::Bool(false) => Ok("False".to_owned()),
+        JVal::Num(number) => Ok(number.py_string()),
+        // Containers never validate as targets either.
+        JVal::Array(_) | JVal::Object(_) => Ok(py_repr(value)?
+            .to_clean_string()
+            .ok_or(Denial::ServerError)?),
     }
 }
 
@@ -7264,7 +6744,7 @@ pub async fn transfer_cycle_issues_inner(
     // The move activity stringifies the RAW request value
     // (`str(new_cycle_id)`), not the folded lookup id: an uppercase UUID
     // stays uppercase, an int/bool renders in `str()` form.
-    let new_cycle_text = raw_id_text(new_raw);
+    let new_cycle_text = raw_id_text(new_raw)?;
     // Target lookup + guard (`:59-66`): missing → 500 (ported bug T1),
     // ended → 400, dateless → proceeds.
     let target: Option<sqlx::postgres::PgRow> = sqlx::query(queries::TRANSFER_CYCLE_LOOKUP_SQL)
@@ -7457,7 +6937,7 @@ pub async fn transfer_cycle_issues_inner(
 /// Coerce the raw `new_cycle_id` like the `pk=new_cycle_id` lookup:
 /// strings parse as UUIDs, ints/bools fold via `UUID(int=...)`,
 /// everything else 400s through the `ValidationError` branch.
-pub fn coerce_transfer_target(value: &Value) -> Result<Option<uuid::Uuid>, Denial> {
+pub fn coerce_transfer_target(value: &JVal) -> Result<Option<uuid::Uuid>, Denial> {
     match coerce_issue_candidate(value)? {
         IssueCandidate::Id(id) => Ok(Some(id)),
         IssueCandidate::Null => Err(Denial::BadError(INVALID_DETAIL_BODY_TRIMMED.to_owned())),
@@ -8103,7 +7583,9 @@ mod tests {
     fn parse_body_shapes() {
         assert!(parse_body(b"").expect("empty").is_empty());
         let map = parse_body(br#"{"name":"x"}"#).expect("object");
-        assert_eq!(map.get("name"), Some(&Value::String("x".to_owned())));
+        assert!(map
+            .get("name")
+            .is_some_and(|value| matches!(value, JVal::Str(text) if text.eq_str("x"))));
         // DRF per-type names, byte-exact (null has its own message).
         for (raw, kind) in [
             ("[1]", "list"),
@@ -8198,34 +7680,39 @@ mod tests {
     #[test]
     fn completed_gate_shapes() {
         const GATE: &str = "The Cycle has already been completed so it cannot be edited";
-        assert!(completed_gate(&serde_json::json!({"sort_order": 1})).is_ok());
-        for value in [
-            serde_json::json!({}),
-            serde_json::json!({"name": "x"}),
-            serde_json::json!(["x"]),
-            serde_json::json!([["sort_order"]]),
+        fn gate_value(raw: &[u8]) -> JVal {
+            parse_body_value(raw).expect("gate value")
+        }
+        assert!(completed_gate(&gate_value(br#"{"sort_order": 1}"#)).is_ok());
+        for raw in [
+            br#"{}"#.as_slice(),
+            br#"{"name": "x"}"#,
+            br#"["x"]"#,
+            br#"[["sort_order"]]"#,
         ] {
+            let value = gate_value(raw);
             match completed_gate(&value).expect_err("gate rejects") {
                 Denial::BadError(message) => assert_eq!(message, GATE),
-                denial => panic!("{value}: expected gate 400, got {denial:?}"),
+                denial => panic!("{raw:?}: expected gate 400, got {denial:?}"),
             }
         }
-        for value in [
-            serde_json::json!(["sort_order"]),
-            serde_json::json!(["sort_order", 0]),
-            serde_json::json!("sort_order"),
-            serde_json::json!("xxsort_orderxx"),
-            serde_json::Value::Null,
-            serde_json::json!(5),
-            serde_json::json!(5.5),
-            serde_json::json!(true),
+        for raw in [
+            br#"["sort_order"]"#.as_slice(),
+            br#"["sort_order", 0]"#,
+            br#""sort_order""#,
+            br#""xxsort_orderxx""#,
+            br#"null"#,
+            br#"5"#,
+            br#"5.5"#,
+            br#"true"#,
         ] {
+            let value = gate_value(raw);
             assert!(
                 matches!(completed_gate(&value), Err(Denial::ServerError)),
-                "{value}: expected 500"
+                "{raw:?}: expected 500"
             );
         }
-        match completed_gate(&serde_json::json!("x")).expect_err("miss rejects") {
+        match completed_gate(&gate_value(br#""x""#)).expect_err("miss rejects") {
             Denial::BadError(message) => assert_eq!(message, GATE),
             denial => panic!("expected gate 400, got {denial:?}"),
         }
@@ -8448,80 +7935,189 @@ mod tests {
             (b"{\xef\xbb\xbf\"a\":1}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
             (b"1\xef\xbb\xbf" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
             (b"\xff\xfe" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"),
-            (b"\xc3" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc3 in position 0: unexpected end of data"),
+            (b"\xc3" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
             (b"\xc3(" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc3 in position 0: invalid continuation byte"),
             (b"\xe2(\xa1" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xe2 in position 0: invalid continuation byte"),
             (b"\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0x80 in position 0: invalid start byte"),
             (b"\xed\xa0\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 0: invalid continuation byte"),
-            (b"\xf0\x9f\x98" as &[u8], "JSON parse error - 'utf-8' codec can't decode bytes in position 0-2: unexpected end of data"),
+            (b"\xf0\x9f\x98" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
             (b"\xe2\x82(" as &[u8], "JSON parse error - 'utf-8' codec can't decode bytes in position 0-1: invalid continuation byte"),
-            (b"\xe2\x82" as &[u8], "JSON parse error - 'utf-8' codec can't decode bytes in position 0-1: unexpected end of data"),
+            (b"\xe2\x82" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
             (b"\xc0\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc0 in position 0: invalid start byte"),
             (b"\xed\xbf\xbf" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 0: invalid continuation byte"),
             (b"\xf4\x90\x80\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xf4 in position 0: invalid continuation byte"),
-            (b"\xdf" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xdf in position 0: unexpected end of data"),
-            (b"\xef\xbf" as &[u8], "JSON parse error - 'utf-8' codec can't decode bytes in position 0-1: unexpected end of data"),
+            (b"\xdf" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
+            (b"\xef\xbf" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
             (b"{\"a\": \"\xed\xa0\x80\"}" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 7: invalid continuation byte"),
             (b"\xe0\x80\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xe0 in position 0: invalid continuation byte"),
             (b"a\x80b" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0x80 in position 1: invalid start byte"),
             (b"\xc2\xc2" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc2 in position 0: invalid continuation byte"),
+            // The codecs tail-drop: a trailing incomplete sequence parses
+            // as the truncated text (even when the tail could never be
+            // valid, like `\xed\xa0`); impossible bytes still fail.
+            (b"\xed\xa0" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
+            (b"[\xc3" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
+            (b"\"\xc3" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
+            (b"\xc0" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc0 in position 0: invalid start byte"),
+            (b"\xf5" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xf5 in position 0: invalid start byte"),
+            (b"\xe0\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xe0 in position 0: invalid continuation byte"),
+            (b"\xf0\x80\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xf0 in position 0: invalid continuation byte"),
+            (b"\xf4\xbf\xbf" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xf4 in position 0: invalid continuation byte"),
+            (b"\xc3\xc3" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc3 in position 0: invalid continuation byte"),
+            (b"\xed\xa0X" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 0: invalid continuation byte"),
         ] {
             let raw: &[u8] = raw;
-            let error = serde_json::from_slice::<Value>(raw).expect_err("battery is errors-only");
-            match json_parse_denial(raw, &error) {
+            match parse_body_value(raw).expect_err("battery is errors-only") {
                 Denial::BadDetail(message) => assert_eq!(message, want, "{raw:?}"),
                 denial => panic!("{raw:?}: expected BadDetail, got {denial:?}"),
             }
         }
-        // Past serde's 128-deep cap a truncated input still recovers its
-        // plain EOF error; a balanced deep input takes the generic 500
-        // (CPython accepts it — PIDASHCONV-626, same as surrogates).
+        // Strict constants reject under DRF's STRICT_JSON with the fixed
+        // text (no position), exactly when first in scan order.
+        for (raw, token) in [
+            (b"NaN".as_slice(), "NaN"),
+            (b"[Infinity]", "Infinity"),
+            (b"{\"a\": -Infinity}", "-Infinity"),
+            (b"{\"a\": NaNx}", "NaN"),
+        ] {
+            match parse_body_value(raw).expect_err("strict rejects") {
+                Denial::BadDetail(message) => assert_eq!(
+                    message,
+                    format!("JSON parse error - Out of range float values are not JSON compliant: '{token}'"),
+                    "{raw:?}"
+                ),
+                denial => panic!("{raw:?}: expected strict 400, got {denial:?}"),
+            }
+        }
+        // The digit limit rejects long int tokens with the fixed text.
+        let over = format!("{{\"a\": {}}}", "1".repeat(4301));
+        match parse_body_value(over.as_bytes()).expect_err("int limit") {
+            Denial::BadDetail(message) => assert_eq!(
+                message,
+                "JSON parse error - Exceeds the limit (4300 digits) for integer string conversion: \
+                 value has 4301 digits; use sys.set_int_max_str_digits() to increase the limit"
+            ),
+            denial => panic!("expected int-limit 400, got {denial:?}"),
+        }
+        // A truncated deep input recovers its plain EOF error; balanced
+        // deep input parses to the measured cap, then takes the generic
+        // 500 exactly where Django's RecursionError does.
         let deep_open = "[".repeat(129);
-        let error =
-            serde_json::from_slice::<Value>(deep_open.as_bytes()).expect_err("truncated deep");
-        match json_parse_denial(deep_open.as_bytes(), &error) {
+        match parse_body_value(deep_open.as_bytes()).expect_err("truncated deep") {
             Denial::BadDetail(message) => assert_eq!(
                 message,
                 "JSON parse error - Expecting value: line 1 column 130 (char 129)"
             ),
             denial => panic!("expected EOF recovery, got {denial:?}"),
         }
-        let deep_shut = format!("{}1{}", "[".repeat(200), "]".repeat(200));
-        let error =
-            serde_json::from_slice::<Value>(deep_shut.as_bytes()).expect_err("balanced deep");
-        assert!(matches!(
-            json_parse_denial(deep_shut.as_bytes(), &error),
-            Denial::ServerError
-        ));
-        // Terminated lone surrogates: CPython ACCEPTS them, so no 400 text
-        // is right — the fallback keeps serde text (known gap, pinned).
-        let error =
-            serde_json::from_slice::<Value>(br#"{"a": "\ud800"}"#).expect_err("lone surrogate");
-        match json_parse_denial(br#"{"a": "\ud800"}"#, &error) {
+        let deep_shut = format!("{{\"a\": {}1{}}}", "[".repeat(9938), "]".repeat(9938));
+        assert!(
+            parse_body_value(deep_shut.as_bytes()).is_ok(),
+            "9939-deep parses"
+        );
+        let too_deep = format!("{{\"a\": {}1{}}}", "[".repeat(9939), "]".repeat(9939));
+        assert!(
+            matches!(
+                parse_body_value(too_deep.as_bytes()).expect_err("past the cap"),
+                Denial::ServerError
+            ),
+            "9940-deep is Django's JSON 500"
+        );
+        // A mismatched closer past the old 128 cap keeps byte-exact text.
+        let mismatch = format!("{{\"a\": {}}}", "[".repeat(200).as_str());
+        match parse_body_value(mismatch.as_bytes()).expect_err("deep mismatch") {
             Denial::BadDetail(message) => assert_eq!(
                 message,
-                "JSON parse error - unexpected end of hex escape at line 1 column 14"
+                "JSON parse error - Expecting value: line 1 column 207 (char 206)"
             ),
-            denial => panic!("expected fallback, got {denial:?}"),
+            denial => panic!("expected deep mismatch text, got {denial:?}"),
+        }
+        // The tail-drop can leave a VALID document: `{"a":1}\xc3`
+        // parses as `{"a":1}` (verified live through the oracle).
+        match parse_body_value(b"{\"a\":1}\xc3").expect("tail-drop valid") {
+            JVal::Object(object) => assert!(object.get("a").is_some()),
+            value => panic!("expected object, got {value:?}"),
+        }
+        // An empty body is `{}`, never a parse error (DRF's
+        // content-length short-circuit, verified live).
+        match parse_body_value(b"").expect("empty body") {
+            JVal::Object(object) => assert!(object.is_empty()),
+            value => panic!("expected empty object, got {value:?}"),
+        }
+        // Error margins at the cap (every flip verified live through
+        // Django): the value family surfaces to depth 9938, the
+        // string/object/delimiter/strict family to 9935.
+        let at_margin = |depth: usize, inner: &str| {
+            let mut raw = vec![b'['; depth];
+            raw.extend_from_slice(inner.as_bytes());
+            parse_body_value(&raw)
+        };
+        assert!(matches!(at_margin(9938, ","), Err(Denial::BadDetail(_))));
+        assert!(matches!(at_margin(9939, ","), Err(Denial::ServerError)));
+        assert!(matches!(at_margin(9935, "NaN"), Err(Denial::BadDetail(_))));
+        assert!(matches!(at_margin(9936, "NaN"), Err(Denial::ServerError)));
+        assert!(matches!(at_margin(9935, "1}"), Err(Denial::BadDetail(_))));
+        assert!(matches!(at_margin(9936, "1}"), Err(Denial::ServerError)));
+        // Terminated lone surrogates parse (CPython accepts them): the
+        // field holds the exact surrogate units.
+        match parse_body_value(br#"{"a": "\ud800"}"#).expect("lone surrogate") {
+            JVal::Object(object) => match object.get("a") {
+                Some(JVal::Str(text)) => {
+                    assert!(text.has_surrogate());
+                    assert_eq!(text.first_surrogate(), Some(0xD800));
+                    assert_eq!(text.len_chars(), 1);
+                }
+                other => panic!("expected dirty string, got {other:?}"),
+            },
+            value => panic!("expected object, got {value:?}"),
         }
     }
 
     #[test]
     fn python_repr_echoes() {
-        assert_eq!(py_repr(&Value::Null), "None");
-        assert_eq!(py_repr(&Value::Bool(true)), "True");
-        assert_eq!(py_repr(&serde_json::json!(5)), "5");
-        assert_eq!(py_repr(&serde_json::json!(1.5)), "1.5");
-        assert_eq!(py_repr(&serde_json::json!(["a"])), "['a']");
-        assert_eq!(py_repr(&serde_json::json!([])), "[]");
-        assert_eq!(py_repr(&serde_json::json!({"a": 1})), "{'a': 1}");
-        let huge: Value =
-            serde_json::from_str("1361129467683753853853498429727072845824").expect("big int");
-        assert_eq!(py_repr(&huge), "1361129467683753853853498429727072845824");
+        fn rendered(raw: &[u8]) -> String {
+            let value = parse_body_value(raw).expect("echo value");
+            py_repr(&value)
+                .expect("shallow")
+                .to_clean_string()
+                .expect("clean echo")
+        }
+        assert_eq!(rendered(b"null"), "None");
+        assert_eq!(rendered(b"true"), "True");
+        assert_eq!(rendered(b"5"), "5");
+        assert_eq!(rendered(b"1.5"), "1.5");
+        assert_eq!(rendered(br#"["a"]"#), "['a']");
+        assert_eq!(rendered(b"[]"), "[]");
+        assert_eq!(rendered(br#"{"a": 1}"#), "{'a': 1}");
+        assert_eq!(
+            rendered(b"1361129467683753853853498429727072845824"),
+            "1361129467683753853853498429727072845824"
+        );
+        // True `repr()` quoting: `'`-only strings take double quotes,
+        // controls take `\xXX`, astral stays verbatim (all verified live).
+        assert_eq!(rendered(br#"["a'b"]"#), "[\"a'b\"]");
+        assert_eq!(rendered(br#"["a'b\"c"]"#), "['a\\'b\"c']");
+        assert_eq!(rendered(b"[\"\\u0001\"]"), "['\\x01']");
+        assert_eq!(rendered(r#"["é"]"#.as_bytes()), "['é']");
+        // Nested surrogates repr-escape (clean output); top-level ones
+        // stay raw for the renderer-crash rule.
+        let nested = parse_body_value(b"[\"\\ud800\"]").expect("nested surrogate");
+        assert_eq!(
+            py_repr(&nested)
+                .expect("shallow")
+                .to_clean_string()
+                .expect("nested escapes clean"),
+            "['\\ud800']"
+        );
+        let top = parse_body_value(b"\"\\ud800\"").expect("top surrogate");
+        assert!(py_repr(&top).expect("shallow").to_clean_string().is_none());
     }
 
     #[test]
     fn char_coercion_edges() {
+        fn jstr(text: &str) -> JVal {
+            JVal::Str(JStr::from_text(text))
+        }
         // Required.
         assert_eq!(
             coerce_char(None, false, false, Some(255))
@@ -8531,59 +8127,48 @@ mod tests {
         );
         // Blank.
         assert_eq!(
-            coerce_char(
-                Some(&Value::String("   ".to_owned())),
-                false,
-                false,
-                Some(255)
-            )
-            .expect_err("blank")
-            .body,
+            coerce_char(Some(&jstr("   ")), false, false, Some(255))
+                .expect_err("blank")
+                .body,
             r#"["This field may not be blank."]"#
         );
         // Blank allowed collapses to "".
         assert_eq!(
-            coerce_char(Some(&Value::String("  ".to_owned())), true, false, None)
-                .expect("blank-ok"),
+            coerce_char(Some(&jstr("  ")), true, false, None).expect("blank-ok"),
             Some(String::new())
         );
         // Numbers stringify; bools fail.
         assert_eq!(
-            coerce_char(Some(&serde_json::json!(123)), false, false, Some(255)).expect("int"),
+            coerce_char(
+                Some(&JVal::Num(JNum::int("123".to_owned()))),
+                false,
+                false,
+                Some(255)
+            )
+            .expect("int"),
             Some("123".to_owned())
         );
         assert_eq!(
-            coerce_char(Some(&Value::Bool(true)), false, false, Some(255))
+            coerce_char(Some(&JVal::Bool(true)), false, false, Some(255))
                 .expect_err("bool")
                 .body,
             r#"["Not a valid string."]"#
         );
         // Max length counts chars.
         assert_eq!(
-            coerce_char(
-                Some(&Value::String("n".repeat(256))),
-                false,
-                false,
-                Some(255)
-            )
-            .expect_err("long")
-            .body,
+            coerce_char(Some(&jstr(&"n".repeat(256))), false, false, Some(255))
+                .expect_err("long")
+                .body,
             r#"["Ensure this field has no more than 255 characters."]"#
         );
         // Values strip; max_length counts the stripped value.
         assert_eq!(
-            coerce_char(
-                Some(&Value::String("  ENG  ".to_owned())),
-                false,
-                false,
-                Some(12)
-            )
-            .expect("trim"),
+            coerce_char(Some(&jstr("  ENG  ")), false, false, Some(12)).expect("trim"),
             Some("ENG".to_owned())
         );
         assert_eq!(
             coerce_char(
-                Some(&Value::String(format!("  {}  ", "n".repeat(255)))),
+                Some(&jstr(&format!("  {}  ", "n".repeat(255)))),
                 false,
                 false,
                 Some(255)
@@ -8593,15 +8178,27 @@ mod tests {
         );
         // Embedded null chars fail (model validator via ModelSerializer).
         assert_eq!(
-            coerce_char(
-                Some(&Value::String("a\u{0}b".to_owned())),
-                false,
-                false,
-                Some(255)
-            )
-            .expect_err("null-char")
-            .body,
+            coerce_char(Some(&jstr("a\u{0}b")), false, false, Some(255))
+                .expect_err("null-char")
+                .body,
             r#"["Null characters are not allowed."]"#
+        );
+        // Lone surrogates fail the surrogate validator with the code point.
+        let dirty = parse_body_value(b"\"\\ud800\"").expect("dirty value");
+        assert_eq!(
+            coerce_char(Some(&dirty), false, false, Some(255))
+                .expect_err("surrogate")
+                .body,
+            r#"["Surrogate characters are not allowed: U+D800."]"#
+        );
+        // Validators collect: a long dirty name answers both messages.
+        let both = format!("\"{}\\ud800\"", "n".repeat(300));
+        let both = parse_body_value(both.as_bytes()).expect("long dirty");
+        assert_eq!(
+            coerce_char(Some(&both), false, false, Some(255))
+                .expect_err("collect")
+                .body,
+            r#"["Ensure this field has no more than 255 characters.","Surrogate characters are not allowed: U+D800."]"#
         );
     }
 
@@ -8609,26 +8206,50 @@ mod tests {
     fn choice_coercion_echoes_python() {
         let choices = ["planned", "in-progress"];
         assert_eq!(
-            coerce_choice(Some(&serde_json::json!(["a"])), &choices)
-                .expect_err("list")
-                .body,
+            coerce_choice(
+                Some(&JVal::Array(vec![JVal::Str(JStr::from_text("a"))])),
+                &choices
+            )
+            .expect("shallow")
+            .expect_err("list")
+            .body,
             r#"["\"['a']\" is not a valid choice."]"#
         );
         assert_eq!(
-            coerce_choice(Some(&Value::Bool(true)), &choices)
+            coerce_choice(Some(&JVal::Bool(true)), &choices)
+                .expect("shallow")
                 .expect_err("bool")
                 .body,
             r#"["\"True\" is not a valid choice."]"#
         );
         assert_eq!(
-            coerce_choice(Some(&Value::Null), &choices)
+            coerce_choice(Some(&JVal::Null), &choices)
+                .expect("shallow")
                 .expect_err("null")
                 .body,
             r#"["This field may not be null."]"#
         );
         assert_eq!(
-            coerce_choice(Some(&Value::String("planned".to_owned())), &choices).expect("ok"),
+            coerce_choice(Some(&JVal::Str(JStr::from_text("planned"))), &choices)
+                .expect("shallow")
+                .expect("ok"),
             Some("planned".to_owned())
+        );
+        // A top-level dirty string echoes raw into the choice message,
+        // which crashes the renderer (the oracle's plain 500); only nested
+        // members repr-escape into a clean 400.
+        let dirty = parse_body_value(b"\"\\ud800\"").expect("dirty value");
+        assert!(matches!(
+            coerce_choice(Some(&dirty), &choices),
+            Err(Denial::RendererCrash)
+        ));
+        let nested = parse_body_value(b"[\"\\ud800\"]").expect("nested dirty");
+        assert_eq!(
+            coerce_choice(Some(&nested), &choices)
+                .expect("shallow")
+                .expect_err("nested")
+                .body,
+            r#"["\"['\\ud800']\" is not a valid choice."]"#
         );
     }
 
@@ -8651,9 +8272,10 @@ mod tests {
         }
         assert_eq!(
             coerce_choice(
-                Some(&Value::String("Etc/UTC".to_owned())),
+                Some(&JVal::Str(JStr::from_text("Etc/UTC"))),
                 PYTZ_COMMON_TIMEZONES
             )
+            .expect("shallow")
             .expect_err("invalid-choice")
             .body,
             r#"["\"Etc/UTC\" is not a valid choice."]"#
@@ -8664,7 +8286,8 @@ mod tests {
     fn pk_coercion_edges() {
         // Bool is the only incorrect_type.
         assert_eq!(
-            coerce_pk_value(&Value::Bool(true), true)
+            coerce_pk_value(&JVal::Bool(true), true)
+                .expect("shallow")
                 .expect_err("bool")
                 .body,
             r#"["Incorrect type. Expected pk value, received bool."]"#
@@ -8672,40 +8295,57 @@ mod tests {
         // Empty string is None when nulls are allowed (owned_by), the null
         // error otherwise.
         assert_eq!(
-            coerce_pk_value(&Value::String(String::new()), true).expect("owned-by-empty"),
+            coerce_pk_value(&JVal::Str(JStr::from_text("")), true)
+                .expect("shallow")
+                .expect("owned-by-empty"),
             PkValue::Null
         );
         assert_eq!(
-            coerce_pk_value(&Value::String(String::new()), false)
+            coerce_pk_value(&JVal::Str(JStr::from_text("")), false)
+                .expect("shallow")
                 .expect_err("no-null")
                 .body,
             r#"["This field may not be null."]"#
         );
         // Curly quotes on invalid UUIDs.
         assert_eq!(
-            coerce_pk_value(&Value::String("not-a-uuid".to_owned()), true)
+            coerce_pk_value(&JVal::Str(JStr::from_text("not-a-uuid")), true)
+                .expect("shallow")
                 .expect_err("bad-uuid")
                 .body,
             "[\"\u{201c}not-a-uuid\u{201d} is not a valid UUID.\"]"
         );
         assert_eq!(
-            coerce_pk_value(&serde_json::json!([]), true)
+            coerce_pk_value(&JVal::Array(Vec::new()), true)
+                .expect("shallow")
                 .expect_err("list")
                 .body,
             "[\"\u{201c}[]\u{201d} is not a valid UUID.\"]"
         );
         // Ints coerce via UUID(int=...).
         assert_eq!(
-            coerce_pk_value(&serde_json::json!(5), true).expect("int"),
+            coerce_pk_value(&JVal::Num(JNum::int("5".to_owned())), true)
+                .expect("shallow")
+                .expect("int"),
             PkValue::Id(uuid::Uuid::from_u128(5))
         );
-        assert!(coerce_pk_value(&serde_json::json!(-5), true).is_err());
+        assert!(
+            coerce_pk_value(&JVal::Num(JNum::int("-5".to_owned())), true)
+                .expect("shallow")
+                .is_err()
+        );
         // Floats always fail.
-        assert!(coerce_pk_value(&serde_json::json!(1.5), true).is_err());
+        assert!(
+            coerce_pk_value(&JVal::Num(JNum::float("1.5".to_owned())), true)
+                .expect("shallow")
+                .is_err()
+        );
         // Valid UUIDs pass through.
         let id = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
         assert_eq!(
-            coerce_pk_value(&Value::String(id.to_string()), true).expect("uuid"),
+            coerce_pk_value(&JVal::Str(JStr::from_text(&id.to_string())), true)
+                .expect("shallow")
+                .expect("uuid"),
             PkValue::Id(id)
         );
     }
@@ -9084,26 +8724,29 @@ mod tests {
     fn add_issues_coercion_edges() {
         // Truthy scalars 500 (the `__in` iteration raises `TypeError`).
         assert!(matches!(
-            coerce_add_issues(&serde_json::json!(5)).expect_err("int"),
+            coerce_add_issues(&JVal::Num(JNum::int("5".to_owned()))).expect_err("int"),
             Denial::ServerError
         ));
         assert!(matches!(
-            coerce_add_issues(&Value::Bool(true)).expect_err("bool"),
+            coerce_add_issues(&JVal::Bool(true)).expect_err("bool"),
             Denial::ServerError
         ));
         // Bad UUIDs 400.
         assert!(matches!(
-            coerce_add_issues(&serde_json::json!(["nope"])).expect_err("bad"),
+            coerce_add_issues(&JVal::Array(vec![JVal::Str(JStr::from_text("nope"))]))
+                .expect_err("bad"),
             Denial::BadError(_)
         ));
         // Null items pass through; dicts iterate keys; strings iterate
         // chars (each fails UUID → 400).
-        let out = coerce_add_issues(&Value::Array(vec![Value::Null])).expect("null-item");
+        let out = coerce_add_issues(&JVal::Array(vec![JVal::Null])).expect("null-item");
         assert!(matches!(out.as_slice(), [IssueCandidate::Null]));
-        assert!(coerce_add_issues(&serde_json::json!({"nope": 1})).is_err());
-        assert!(coerce_add_issues(&serde_json::json!("abc")).is_err());
+        let dict = parse_body_value(br#"{"nope": 1}"#).expect("dict value");
+        assert!(coerce_add_issues(&dict).is_err());
+        assert!(coerce_add_issues(&JVal::Str(JStr::from_text("abc"))).is_err());
         // Ints fold via UUID(int=...), like Django's `to_python`.
-        let out = coerce_add_issues(&serde_json::json!([5])).expect("int-item");
+        let out = coerce_add_issues(&JVal::Array(vec![JVal::Num(JNum::int("5".to_owned()))]))
+            .expect("int-item");
         assert!(matches!(
             out.as_slice(),
             [IssueCandidate::Id(id)] if *id == uuid::Uuid::from_u128(5)
@@ -9356,7 +8999,7 @@ mod tests {
             workspace_id: id,
             cycle_id: id,
             issue_id: id,
-            issue_raw: Value::String(id.to_string()),
+            issue_raw: JVal::Str(JStr::from_text(&id.to_string())),
         };
         let dump = render_bridge_dump(&[bridge]);
         assert!(dump.contains(r#""model": "db.cycleissue""#), "{dump}");
@@ -9382,7 +9025,7 @@ mod tests {
     fn bridge_dump_renders_raw_issue_value() {
         // The dump stringifies the RAW request value, not the folded id:
         // protected types pass through as-is, strings verbatim.
-        let mk = |raw: Value| CreatedBridge {
+        let mk = |raw: JVal| CreatedBridge {
             id: uuid::Uuid::nil(),
             created_at: chrono::DateTime::from_timestamp(0, 0)
                 .expect("epoch")
@@ -9398,13 +9041,13 @@ mod tests {
             issue_id: uuid::Uuid::from_u128(5),
             issue_raw: raw,
         };
-        let dump = render_bridge_dump(&[mk(Value::from(5))]);
+        let dump = render_bridge_dump(&[mk(JVal::Num(JNum::int("5".to_owned())))]);
         assert!(dump.contains(r#""issue": 5"#), "{dump}");
-        let dump = render_bridge_dump(&[mk(Value::Bool(true))]);
+        let dump = render_bridge_dump(&[mk(JVal::Bool(true))]);
         assert!(dump.contains(r#""issue": true"#), "{dump}");
-        let dump = render_bridge_dump(&[mk(Value::String(
-            "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA".to_owned(),
-        ))]);
+        let dump = render_bridge_dump(&[mk(JVal::Str(JStr::from_text(
+            "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+        )))]);
         assert!(
             dump.contains(r#""issue": "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA""#),
             "{dump}"
@@ -9413,12 +9056,15 @@ mod tests {
 
     #[test]
     fn raw_id_text_matches_python_str() {
-        assert_eq!(raw_id_text(&Value::from(5)), "5");
-        assert_eq!(raw_id_text(&Value::Bool(true)), "True");
-        assert_eq!(raw_id_text(&Value::Bool(false)), "False");
-        assert_eq!(raw_id_text(&Value::Null), "None");
         assert_eq!(
-            raw_id_text(&Value::String("C000-URL".to_owned())),
+            raw_id_text(&JVal::Num(JNum::int("5".to_owned()))).expect("int"),
+            "5"
+        );
+        assert_eq!(raw_id_text(&JVal::Bool(true)).expect("true"), "True");
+        assert_eq!(raw_id_text(&JVal::Bool(false)).expect("false"), "False");
+        assert_eq!(raw_id_text(&JVal::Null).expect("null"), "None");
+        assert_eq!(
+            raw_id_text(&JVal::Str(JStr::from_text("C000-URL"))).expect("str"),
             "C000-URL"
         );
     }
@@ -9459,37 +9105,47 @@ mod tests {
 
     #[test]
     fn python_truthiness_and_raw_membership() {
-        assert!(!py_truthy(&Value::Null));
-        assert!(!py_truthy(&serde_json::json!("")));
-        assert!(!py_truthy(&serde_json::json!(0)));
-        assert!(!py_truthy(&serde_json::json!([])));
-        assert!(!py_truthy(&serde_json::json!({})));
-        assert!(py_truthy(&serde_json::json!(5)));
-        assert!(py_truthy(&serde_json::json!("x")));
+        assert!(!py_truthy(&JVal::Null));
+        assert!(!py_truthy(&JVal::Str(JStr::from_text(""))));
+        assert!(!py_truthy(&JVal::Num(JNum::int("0".to_owned()))));
+        assert!(!py_truthy(&JVal::Array(Vec::new())));
+        assert!(!py_truthy(&JVal::Object(JObject::default())));
+        assert!(py_truthy(&JVal::Num(JNum::int("5".to_owned()))));
+        assert!(py_truthy(&JVal::Str(JStr::from_text("x"))));
         assert!(py_equals_stored(
             &Some("5".to_owned()),
-            &serde_json::json!("5")
+            &JVal::Str(JStr::from_text("5"))
         ));
         assert!(!py_equals_stored(
             &Some("5".to_owned()),
-            &serde_json::json!(5)
+            &JVal::Num(JNum::int("5".to_owned()))
         ));
-        assert!(py_equals_stored(&None, &Value::Null));
+        assert!(py_equals_stored(&None, &JVal::Null));
         // `str(issue_id) in issues`: type-strict list membership, dict keys,
         // string substring. A raw `5` never matches its UUID text.
         let id = "00000000-0000-0000-0000-000000000005";
-        assert!(raw_contains(&serde_json::json!([id]), id));
-        assert!(!raw_contains(&serde_json::json!([5]), id));
-        assert!(raw_contains(&serde_json::json!({"a": 1}), "a"));
+        assert!(raw_contains(
+            &JVal::Array(vec![JVal::Str(JStr::from_text(id))]),
+            id
+        ));
+        assert!(!raw_contains(
+            &JVal::Array(vec![JVal::Num(JNum::int("5".to_owned()))]),
+            id
+        ));
+        let dict = parse_body_value(br#"{"a": 1}"#).expect("dict value");
+        assert!(raw_contains(&dict, "a"));
         // JSON dedupe follows Python equality (True == 1, 1 == 1.0).
-        assert!(json_value_eq(&Value::Bool(true), &serde_json::json!(1)));
         assert!(json_value_eq(
-            &serde_json::json!(1),
-            &serde_json::json!(1.0)
+            &JVal::Bool(true),
+            &JVal::Num(JNum::int("1".to_owned()))
+        ));
+        assert!(json_value_eq(
+            &JVal::Num(JNum::int("1".to_owned())),
+            &JVal::Num(JNum::float("1.0".to_owned()))
         ));
         assert!(!json_value_eq(
-            &serde_json::json!("5"),
-            &serde_json::json!(5)
+            &JVal::Str(JStr::from_text("5")),
+            &JVal::Num(JNum::int("5".to_owned()))
         ));
     }
 

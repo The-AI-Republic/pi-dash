@@ -28,9 +28,10 @@
 //! tested against a Postgres-dialect SQL parser instead.
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sqlx::{FromRow, PgPool};
 
+use crate::json_compact;
 use pidash_db::tx::Transaction;
 
 /// Table holding queued, running and failed jobs.
@@ -106,6 +107,37 @@ impl NewJob {
     pub fn delayed(mut self, delay_secs: u64, now: DateTime<Utc>) -> Self {
         self.visible_at = Some(now + ChronoDuration::seconds(delay_secs as i64));
         self
+    }
+
+    /// Split out the Celery wire parts, mirroring the worker forward-path
+    /// mapping (array args pass through, anything else wraps; object
+    /// kwargs pass through, anything else empties). Fields move out via
+    /// `replace` because [`NewJob`] implements [`Drop`].
+    pub fn into_message_parts(mut self) -> (Vec<Value>, Map<String, Value>) {
+        let args = match std::mem::replace(&mut self.args, Value::Null) {
+            Value::Array(items) => items,
+            other => vec![other],
+        };
+        let kwargs = match std::mem::replace(&mut self.kwargs, Value::Null) {
+            Value::Object(map) => map,
+            _ => Map::new(),
+        };
+        (args, kwargs)
+    }
+}
+
+impl Drop for NewJob {
+    fn drop(&mut self) {
+        // Iterative: payloads nest ~9900 deep and serde's `Map` drop
+        // recurses through IndexMap/hashbrown glue (~8 frames per level),
+        // overflowing 2MB workers past ~4000 levels (PIDASHCONV-626: the
+        // exotic differential's PATCH deep-ok aborted here, after a
+        // successful iterative bind). Fields are swapped out so the
+        // derived remainder drops trivial scalars only.
+        let args = std::mem::replace(&mut self.args, Value::Null);
+        let kwargs = std::mem::replace(&mut self.kwargs, Value::Null);
+        crate::json_compact::drop_value_deep(args);
+        crate::json_compact::drop_value_deep(kwargs);
     }
 }
 
@@ -220,14 +252,39 @@ where
     let id: i64 = sqlx::query_scalar(enqueue_sql())
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(&job.task)
-        .bind(&job.args)
-        .bind(&job.kwargs)
+        .bind(DeepJson(&job.args))
+        .bind(DeepJson(&job.kwargs))
         .bind(&job.queue)
         .bind(job.visible_at)
         .bind(job.max_retries)
         .fetch_one(executor)
         .await?;
     Ok(id)
+}
+
+/// A `serde_json::Value` bind that serializes iteratively
+/// (PIDASHCONV-626): sqlx's stock `Value` encoding recurses through
+/// `serde_json::to_writer` and aborts the worker thread past ~4000
+/// nesting levels, while ports may legitimately enqueue ~9900-deep
+/// payloads. The bytes are identical to stock encoding (JSONB version
+/// byte + compact text) for every input.
+struct DeepJson<'a>(&'a Value);
+
+impl sqlx::Type<sqlx::Postgres> for DeepJson<'_> {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <serde_json::Value as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+}
+
+impl<'q> sqlx::Encode<'q, sqlx::Postgres> for DeepJson<'q> {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        buf.push(1);
+        buf.extend(json_compact::to_compact_vec(self.0));
+        Ok(sqlx::encode::IsNull::No)
+    }
 }
 
 fn claim_select_sql() -> &'static str {

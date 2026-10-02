@@ -3562,7 +3562,7 @@ pub async fn create_module_inner(
     let job = pidash_jobs::v1_cycles_modules::publish::model_created_job(
         "module",
         &module_id.to_string(),
-        &raw,
+        raw,
         &pre.actor.id.to_string(),
         slug,
         &app_origin(state),
@@ -3795,7 +3795,7 @@ pub async fn patch_module_inner(
     let job = pidash_jobs::v1_cycles_modules::publish::model_updated_job(
         "module",
         &pk.to_string(),
-        &raw,
+        raw,
         &snapshot_text,
         &pre.actor.id.to_string(),
         slug,

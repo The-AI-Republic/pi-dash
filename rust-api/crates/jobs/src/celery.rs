@@ -181,7 +181,22 @@ impl CeleryTaskMessage {
 
     /// The full wire payload: headers plus the serialized body.
     pub fn to_wire(&self) -> (Map<String, Value>, Vec<u8>) {
-        let body = serde_json::to_vec(&self.body()).expect("body is JSON");
+        // Composed without cloning and serialized iteratively: kwargs may
+        // nest ~9900 deep and both `Map::clone` and `serde_json::to_vec`
+        // recurse per level (PIDASHCONV-626 stack-overflow fix). The bytes
+        // are identical to stock encoding of [`Self::body`].
+        let mut body = Vec::from(b"[" as &[u8]);
+        crate::json_compact::write_compact_array(&mut body, &self.args);
+        body.push(b',');
+        crate::json_compact::write_compact_map(&mut body, &self.kwargs);
+        body.push(b',');
+        let mut embed = Map::new();
+        embed.insert("callbacks".to_owned(), Value::Null);
+        embed.insert("errbacks".to_owned(), Value::Null);
+        embed.insert("chain".to_owned(), Value::Null);
+        embed.insert("chord".to_owned(), Value::Null);
+        crate::json_compact::write_compact_map(&mut body, &embed);
+        body.push(b']');
         (self.headers(), body)
     }
 }
@@ -399,6 +414,34 @@ mod tests {
         assert_eq!(headers["id"], "task-id-1");
         let body: Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(body, embed_triple());
+        // Byte-identical to stock encoding of `body()`.
+        assert_eq!(bytes, serde_json::to_vec(&message().body()).expect("serde"));
+    }
+
+    #[test]
+    fn wire_body_survives_queue_deep_kwargs() {
+        // Reachable worst case: `to_wire` inputs always come from a queue
+        // row decoded with serde's 128-deep cap (`worker::forward`), so the
+        // kwargs it ever sees are at most 128 deep. Deeper values abort in
+        // the recursive `kwargsrepr` header — by construction unreachable.
+        // Object nesting: the real `requested_data` shape (and the fatter
+        // drop/encode path — arrays would under-test it).
+        let mut deep = json!(1);
+        for _ in 0..128 {
+            deep = Value::Object(serde_json::Map::from_iter([("a".to_owned(), deep)]));
+        }
+        let mut message = message();
+        message.kwargs.insert("requested_data".to_owned(), deep);
+        let bytes = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                let _headers = message.headers();
+                message.to_wire().1
+            })
+            .expect("spawn")
+            .join()
+            .expect("no stack overflow");
+        assert!(bytes.len() > 300);
     }
 
     #[test]

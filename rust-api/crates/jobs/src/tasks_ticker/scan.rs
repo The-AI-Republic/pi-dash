@@ -208,15 +208,7 @@ fn fire_job(task: &str, id: &Uuid) -> NewJob {
 /// the runtime source of truth; this one exists so tests and the fire-task
 /// ports in PIDASHCONV-208/209 can assert the wire contract without a broker).
 pub fn fire_message(task: &str, id: &Uuid) -> CeleryTaskMessage {
-    let job = fire_job(task, id);
-    let args = match job.args {
-        serde_json::Value::Array(items) => items,
-        other => vec![other],
-    };
-    let kwargs = match job.kwargs {
-        serde_json::Value::Object(map) => map,
-        _ => serde_json::Map::new(),
-    };
+    let (args, kwargs) = fire_job(task, id).into_message_parts();
     CeleryTaskMessage::new(task, args, kwargs)
 }
 
