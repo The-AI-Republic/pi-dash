@@ -59,9 +59,12 @@
 //!   renders `PermissionDenied.default_detail`:
 //!   `{"detail":"You do not have permission to perform this action."}`
 //!   (403); see [`crate::permissions::DEFAULT_DENIED_BODY`].
-//! - Anonymous: `{"detail":"Authentication credentials were not provided."}`
+//! - Anonymous: `{"Detail":"Authentication credentials were not provided."}`
 //!   (401) on every route except the two `AllowAny` join actions; see
-//!   [`ANON_BODY`].
+//!   [`ANON_BODY`]. (Capital `Detail`: DRF's default `exception_handler`
+//!   renders `{'Detail': exc.detail}`; the fixture's live captures and
+//!   `contract-tests/app_project/test_permissions.py` agree. The
+//!   fixture's `unauthenticated_401` lowercase entries are an erratum.)
 //! - State-mutation denial: [`MEMBERS_BLOCKED_BODY`] (403,
 //!   `state/base.py:24`).
 //!
@@ -133,7 +136,7 @@ pub const CLASS_DENIED_BODY: &str = crate::permissions::DEFAULT_DENIED_BODY;
 /// Exact bytes of the DRF `IsAuthenticated` / `NotAuthenticated` 401:
 /// what anonymous callers get on every D-25 route except the two
 /// `AllowAny` join actions, before any gate runs.
-pub const ANON_BODY: &str = r#"{"detail":"Authentication credentials were not provided."}"#;
+pub const ANON_BODY: &str = r#"{"Detail":"Authentication credentials were not provided."}"#;
 /// Exact bytes of the `can_mutate_states` 403
 /// (`_MEMBERS_BLOCKED_RESPONSE`, `state/base.py:24`): the inline denial
 /// on the four state writes, after the decorator gate passes.
@@ -1316,7 +1319,7 @@ mod tests {
         assert_eq!(CLASS_DENIED_BODY, crate::permissions::DEFAULT_DENIED_BODY);
         assert_eq!(
             ANON_BODY,
-            r#"{"detail":"Authentication credentials were not provided."}"#
+            r#"{"Detail":"Authentication credentials were not provided."}"#
         );
         assert_eq!(
             MEMBERS_BLOCKED_BODY,
