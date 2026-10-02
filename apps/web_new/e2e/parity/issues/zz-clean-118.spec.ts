@@ -2,7 +2,7 @@
 // License for this tree is pending the H-license decision (NEWFRONT-2,
 // owner: human). This placeholder grants no license and must be replaced
 // with the final header text by F-11 (NEWFRONT-22).
-// TEMPORARY CLEANUP — NEWFRONT-118. NOT COMMITTED. Deleted before PR.
+// TEMPORARY CLEANUP — NEWFRONT-118. Committed as a resume aid; deleted before PR.
 // Removes orphans left by failed scenarios: scratch projects, seed-project
 // states/labels/cycles/modules not in the seed, restores seed prefs/dates.
 import { test } from "../fixtures";
