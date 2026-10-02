@@ -1,0 +1,699 @@
+{
+ "_note": "FX-RUN-08 handlers-web. Sources: runner/views/runs.py:1-695 (_parse_pagination :67-85, _can_view_run :87-118, _can_cancel_run :120-122, list GET :131-219, post :221-345, _post_run_ai :347-388, _human_run_clock :390-418, _post_comment_and_run :420-466, re-tick :482-523, detail :530-542, cancel :549-639, release-pin :656-695); runner/views/approvals.py:1-105 (list :29-41, decide :48-105); runner/views/metrics.py:1-105 (ACTIVE_RUN_STATUSES :40-46, gauges :78-104); runner/signals.py:1-66 (create_default_pod_for_new_project :32-66); serializer shapes runner/serializers.py AgentRunSerializer :260-310, AgentRunEventSerializer :313-317, ApprovalRequestSerializer :320-335, ApprovalDecisionSerializer :338-339. Method: views invoked via as_view() with force_authenticate (full DRF cycle) against live rows in scratch PG pidash_549_fixtures inside rolled-back txns; on_commit captured (cancel/pin callbacks executed with mocked send_to_runner/drain); cross-domain orchestration (scheduling.*, is_ticking_state, execution_fields) mocked with the REAL exception classes; every status/body/row below literal (probes /tmp/probe549_08a.py + /tmp/probe549_08b.py; venv py3.12 / Django 4.2.30 / DRF 3.15.2, pi_dash.settings.test).",
+ "list": {
+  "default": {
+   "status": 200,
+   "envelope_keys": [
+    "results",
+    "count",
+    "total_count",
+    "total_pages",
+    "page",
+    "per_page"
+   ],
+   "count": 3,
+   "total_count": 3,
+   "total_pages": 1,
+   "page": 1,
+   "per_page": 30,
+   "result_ids": [
+    "8dbd5acc-b3ce-4259-91b2-570768a0b918",
+    "0cdfd679-573e-46b5-b797-6997fe38d82d",
+    "bda2552e-238d-4f53-ba9f-79ebb8247cc6"
+   ]
+  },
+  "sql": [
+   "SELECT COUNT(*) FROM (SELECT DISTINCT \"agent_run\".\"id\" AS \"col1\", \"agent_run\".\"workspace_id\" AS \"col2\", \"agent_run\".\"owner_id\" AS \"col3\", \"agent_run\".\"created_by_id\" AS \"col4\", \"agent_run\".\"pod_id\" AS \"col5\", \"agent_run\".\"runner_id\" AS \"col6\", \"agent_run\".\"pinned_runner_id\" AS \"col7\", \"agent_run\".\"work_item_id\" AS \"col8\", \"agent_run\".\"scheduler_binding_id\" AS \"col9\", \"agent_run\".\"parent_run_id\" AS \"col10\", \"agent_run\".\"status\" AS \"col11\", \"agent_run\".\"executor_kind\" AS \"col12\", \"agent_run\".\"dispatch_attempts\" AS \"col13\", \"agent_run\".\"cancel_requested_at\" AS \"col14\", \"agent_run\".\"cancel_reason\" AS \"col15\", \"agent_run\".\"error_code\" AS \"col16\", \"agent_run\".\"tool_plan\" AS \"col17\", \"agent_run\".\"terminal_hooks_applied_at\" AS \"col18\", \"agent_run\".\"terminal_capacity_released_at\" AS \"col19\", \"agent_run\".\"prompt\" AS \"col20\", \"agent_run\".\"trigger\" AS \"col21\", \"agent_run\".\"prompt_manifest\" AS \"col22\", \"agent_run\".\"phase_kind\" AS \"col23\", \"agent_run\".\"run_config\" AS \"col24\", \"agent_run\".\"required_capabilities\" AS \"col25\", \"agent_run\".\"thread_id\" AS \"col26\", \"agent_run\".\"agent_metadata\" AS \"col27\", \"agent_run\".\"lease_expires_at\" AS \"col28\", \"agent_run\".\"done_payload\" AS \"col29\", \"agent_run\".\"error\" AS \"col30\", \"agent_run\".\"refusal_category\" AS \"col31\", \"agent_run\".\"llm_model\" AS \"col32\", \"agent_run\".\"usage\" AS \"col33\", \"agent_run\".\"input_tokens\" AS \"col34\", \"agent_run\".\"output_tokens\" AS \"col35\", \"agent_run\".\"total_tokens\" AS \"col36\", \"agent_run\".\"created_at\" AS \"col37\", \"agent_run\".\"assigned_at\" AS \"col38\", \"agent_run\".\"queue_position\" AS \"col39\", \"agent_run\".\"started_at\" AS \"col40\", \"agent_run\".\"ended_at\" AS \"col41\" FROM \"agent_run\" LEFT OUTER JOIN \"runner\" ON (\"agent_run\".\"runner_id\" = \"runner\".\"id\") LEFT OUTER JOIN \"issues\" ON (\"agent_run\".\"work_item_id\" = \"issues\".\"id\") LEFT OUTER JOIN \"issue_assignees\" ON (\"issues\".\"id\" = \"issue_assignees\".\"issue_id\") WHERE (\"agent_run\".\"workspace_id\" IN (SELECT U0.\"workspace_id\" FROM \"workspace_members\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"member_id\" = 'f4a445406e754f14824cb4a6affdd04c'::uuid)) AND (\"agent_run\".\"created_by_id\" = 'f4a445406e754f14824cb4a6affdd04c'::uuid OR \"runner\".\"owner_id\" = 'f4a445406e754f14824cb4a6affdd04c'::uuid OR \"issues\".\"created_by_id\" = 'f4a445406e754f14824cb4a6affdd04c'::uuid OR (\"issue_assignees\".\"assignee_id\" = 'f4a445406e754f14824cb4a6affdd04c'::uuid AND \"issue_assignees\".\"deleted_at\" IS NULL) OR \"agent_run\".\"workspace_id\" IN (SELECT U0.\"workspace_id\" FROM \"workspace_members\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"member_id\" = 'f4a445406e754f14824cb4a6affdd04c'::uuid AND U0.\"role\" = 20))) AND (\"agent_run\".\"runner_id\" IS NULL OR \"runner\".\"owner_id\" = 'f4a445406e754f14824cb4a6affdd04c'::uuid OR \"agent_run\".\"created_by_id\" = 'f4a445406e754f14824cb4a6affdd04c'::uuid))) subquery",
+   "SELECT DISTINCT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\", \"pod\".\"id\", \"pod\".\"workspace_id\", \"pod\".\"project_id\", \"pod\".\"name\", \"pod\".\"description\", \"pod\".\"created_by_id\", \"pod\".\"is_default\", \"pod\".\"deleted_at\", \"pod\".\"created_at\", \"pod\".\"updated_at\", \"projects\".\"created_at\", \"projects\".\"updated_at\", \"projects\".\"created_by_id\", \"projects\".\"updated_by_id\", \"projects\".\"deleted_at\", \"projects\".\"id\", \"projects\".\"name\", \"projects\".\"description\", \"projects\".\"description_text\", \"projects\".\"description_html\", \"projects\".\"network\", \"projects\".\"workspace_id\", \"projects\".\"identifier\", \"projects\".\"default_assignee_id\", \"projects\".\"project_lead_id\", \"projects\".\"emoji\", \"projects\".\"icon_prop\", \"projects\".\"module_view\", \"projects\".\"cycle_view\", \"projects\".\"issue_views_view\", \"projects\".\"page_view\", \"projects\".\"intake_view\", \"projects\".\"is_time_tracking_enabled\", \"projects\".\"is_issue_type_enabled\", \"projects\".\"is_default\", \"projects\".\"guest_view_all_features\", \"projects\".\"members_can_edit_states\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"estimate_id\", \"projects\".\"archive_in\", \"projects\".\"close_in\", \"projects\".\"logo_props\", \"projects\".\"default_state_id\", \"projects\".\"archived_at\", \"projects\".\"timezone\", \"projects\".\"external_source\", \"projects\".\"external_id\", \"projects\".\"repo_url\", \"projects\".\"base_branch\", \"projects\".\"agent_default_interval_seconds\", \"projects\".\"agent_default_max_ticks\", \"projects\".\"agent_review_default_interval_seconds\", \"projects\".\"agent_test_default_interval_seconds\", \"projects\".\"agent_ticking_enabled\", \"projects\".\"default_agent_executor\" FROM \"agent_run\" LEFT OUTER JOIN \"runner\" ON (\"agent_run\".\"runner_id\" = \"runner\".\"id\") LEFT OUTER JOIN \"issues\" ON (\"agent_run\".\"work_item_id\" = \"issues\".\"id\") LEFT OUTER JOIN \"issue_assignees\" ON (\"issues\".\"id\" = \"issue_assignees\".\"issue_id\") INNER JOIN \"pod\" ON (\"agent_run\".\"pod_id\" = \"pod\".\"id\") INNER JOIN \"projects\" ON (\"pod\".\"project_id\" = \"projects\".\"id\") WHERE (\"agent_run\".\"workspace_id\" IN (SELECT U0.\"workspace_id\" FROM \"workspace_members\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"member_id\" = 'f4a445406e754f14824cb4a6affdd04c'::uuid)) AND (\"agent_run\".\"created_by_id\" = 'f4a445406e754f14824cb4a6affdd04c'::uuid OR \"runner\".\"owner_id\" = 'f4a445406e754f14824cb4a6affdd04c'::uuid OR \"issues\".\"created_by_id\" = 'f4a445406e754f14824cb4a6affdd04c'::uuid OR (\"issue_assignees\".\"assignee_id\" = 'f4a445406e754f14824cb4a6affdd04c'::uuid AND \"issue_assignees\".\"deleted_at\" IS NULL) OR \"agent_run\".\"workspace_id\" IN (SELECT U0.\"workspace_id\" FROM \"workspace_members\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"member_id\" = 'f4a445406e754f14824cb4a6affdd04c'::uuid AND U0.\"role\" = 20))) AND (\"agent_run\".\"runner_id\" IS NULL OR \"runner\".\"owner_id\" = 'f4a445406e754f14824cb4a6affdd04c'::uuid OR \"agent_run\".\"created_by_id\" = 'f4a445406e754f14824cb4a6affdd04c'::uuid)) ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 30"
+  ],
+  "golden_row": {
+   "id": "8dbd5acc-b3ce-4259-91b2-570768a0b918",
+   "status": "completed",
+   "executor_kind": "local_runner",
+   "dispatch_attempts": 0,
+   "cancel_requested_at": null,
+   "cancel_reason": "",
+   "prompt": "p5",
+   "thread_id": "",
+   "agent_metadata": {},
+   "runner": null,
+   "work_item": "1f27eef2-7715-4a8a-9ef5-6c37dff01bdd",
+   "pod": "0d56022e-5c01-4b6d-8d9b-99a53b470e86",
+   "pod_detail": {
+    "id": "0d56022e-5c01-4b6d-8d9b-99a53b470e86",
+    "name": "FX8_pod_1",
+    "is_default": true,
+    "project": "8880c6c9-8e91-4fb2-b374-b0b63b7451be",
+    "project_identifier": "FX8"
+   },
+   "created_by": "a77eb45e-07a9-48b3-aa50-267c1151ea59",
+   "owner": null,
+   "created_at": "2026-10-02T22:56:36.453246Z",
+   "assigned_at": null,
+   "queue_position": null,
+   "started_at": null,
+   "ended_at": null,
+   "done_payload": null,
+   "error": "",
+   "error_code": "",
+   "error_diagnostic": null,
+   "refusal_category": "",
+   "llm_model": "",
+   "input_tokens": null,
+   "output_tokens": null,
+   "total_tokens": null,
+   "usage": {},
+   "tool_plan": {},
+   "tool_calls": []
+  },
+  "page2_per1": {
+   "status": 200,
+   "body": {
+    "results": [
+     "0cdfd679-573e-46b5-b797-6997fe38d82d"
+    ],
+    "count": 1,
+    "total_count": 3,
+    "total_pages": 3,
+    "page": 2,
+    "per_page": 1
+   }
+  },
+  "page0": {
+   "page": 1,
+   "per_page": 30,
+   "count": 3,
+   "total_pages": 1
+  },
+  "page_abc": {
+   "page": 1,
+   "per_page": 30,
+   "count": 3,
+   "total_pages": 1
+  },
+  "per0": {
+   "page": 1,
+   "per_page": 1,
+   "count": 1,
+   "total_pages": 3
+  },
+  "per_abc": {
+   "page": 1,
+   "per_page": 30,
+   "count": 3,
+   "total_pages": 1
+  },
+  "per500": {
+   "page": 1,
+   "per_page": 200,
+   "count": 3,
+   "total_pages": 1
+  },
+  "per_neg": {
+   "page": 1,
+   "per_page": 1,
+   "count": 1,
+   "total_pages": 3
+  },
+  "page99": {
+   "page": 99,
+   "per_page": 30,
+   "count": 0,
+   "total_pages": 1
+  },
+  "workspace_scope": [
+   "8dbd5acc-b3ce-4259-91b2-570768a0b918",
+   "0cdfd679-573e-46b5-b797-6997fe38d82d",
+   "bda2552e-238d-4f53-ba9f-79ebb8247cc6"
+  ],
+  "project_scope": [
+   "0cdfd679-573e-46b5-b797-6997fe38d82d"
+  ],
+  "as_other": [
+   "8dbd5acc-b3ce-4259-91b2-570768a0b918",
+   "393b6bed-a7a4-4be8-b793-ad5a45d7189c",
+   "b49b1947-1d2d-438f-85d0-e32044d5fbfb"
+  ],
+  "as_admin": [
+   "8dbd5acc-b3ce-4259-91b2-570768a0b918",
+   "0cdfd679-573e-46b5-b797-6997fe38d82d",
+   "393b6bed-a7a4-4be8-b793-ad5a45d7189c"
+  ],
+  "row_ids": {
+   "r1": "bda2552e-238d-4f53-ba9f-79ebb8247cc6",
+   "r2": "b49b1947-1d2d-438f-85d0-e32044d5fbfb",
+   "r3": "393b6bed-a7a4-4be8-b793-ad5a45d7189c",
+   "r4": "0cdfd679-573e-46b5-b797-6997fe38d82d",
+   "r5": "8dbd5acc-b3ce-4259-91b2-570768a0b918"
+  },
+  "expectation": "creator sees r1(own+runner), r3(runnerless, admin? no\u2014creator is member: r3 via admin? no. r3 runnerless created_by=other: creator sees it only via admin\u2014creator is NOT admin, so NOT r3), r4(own), r5(own issue via creator? issue2 created by creator \u2192 yes); r2 hidden (other's private runner). Verified by ids above."
+ },
+ "list_rule": "member-workspace scope AND (created_by|runner.owner|issue.creator|live-assignee|admin) AND private gate (runnerless|own-runner|own-created); project scope via pod__project; envelope {results,count,len(page),total_count,total_pages,max(1,ceil),page,per_page}; page>=1 fallback 1, per_page int-fallback 30 clamped [1,200]; list rows carry error_diagnostic=null (serializers.py:271)",
+ "create": {
+  "missing_prompt": {
+   "status": 400,
+   "body": {
+    "error": "prompt is required"
+   }
+  },
+  "missing_workspace": {
+   "status": 400,
+   "body": {
+    "error": "workspace is required",
+    "code": "workspace_required"
+   }
+  },
+  "bad_work_item": {
+   "status": 400,
+   "body": {
+    "error": "work_item does not exist",
+    "code": "work_item_missing"
+   }
+  },
+  "no_pod": {
+   "status": 409,
+   "body": {
+    "error": "no pod available; ensure the issue has a project with a default pod",
+    "code": "no_pod_available"
+   }
+  },
+  "ok_status": 201,
+  "ok_row": {
+   "executor_kind": "local_runner",
+   "prompt_head": "do the thing",
+   "prompt_manifest": null,
+   "owner": null,
+   "pod": "0d56022e-5c01-4b6d-8d9b-99a53b470e86",
+   "status": "queued",
+   "tool_plan": {},
+   "required_capabilities": []
+  },
+  "ok_body_keys": [
+   "id",
+   "status",
+   "executor_kind",
+   "dispatch_attempts",
+   "cancel_requested_at",
+   "cancel_reason",
+   "prompt",
+   "thread_id",
+   "agent_metadata",
+   "runner",
+   "work_item",
+   "pod",
+   "pod_detail",
+   "created_by",
+   "owner",
+   "created_at",
+   "assigned_at",
+   "queue_position",
+   "started_at",
+   "ended_at",
+   "done_payload",
+   "error",
+   "error_code",
+   "error_diagnostic",
+   "refusal_category",
+   "llm_model",
+   "input_tokens",
+   "output_tokens",
+   "total_tokens",
+   "usage",
+   "tool_plan",
+   "tool_calls"
+  ],
+  "ok_on_commit": [
+   "dispatch_after_commit.<locals>.<lambda>"
+  ],
+  "dup_active": {
+   "status": 409,
+   "body": {
+    "error": "work item already has an active run",
+    "code": "active_run_exists"
+   }
+  },
+  "errors": {
+   "quota": {
+    "status": 429,
+    "body": {
+     "error": "Cloud Agent queue is full for this workspace",
+     "code": "run_quota_exceeded",
+     "retry_after_seconds": 10
+    }
+   },
+   "admission": {
+    "status": 503,
+    "body": {
+     "error": "admission down",
+     "code": "admission_unavailable"
+    }
+   },
+   "capability": {
+    "status": 422,
+    "body": {
+     "error": "no gpu for you",
+     "code": "cloud_capability_unavailable"
+    }
+   },
+   "generic_value": {
+    "status": 409,
+    "body": {
+     "error": "plain weird",
+     "code": "plain weird"
+    }
+   },
+   "overflow": {
+    "status": 413,
+    "body": {
+     "error": "prompt exceeds Cloud Agent limit",
+     "code": "prompt_too_large"
+    }
+   }
+  },
+  "CLOUD_AGENT_MAX_PROMPT_BYTES": 262144
+ },
+ "create_rule": "prompt required; validate_run_creation errors pass through {error,code,status}; free-form runs need explicit pod (else 409 no_pod_available); local run: executor local_runner, prompt=composed verbatim, manifest null, owner NULL, tool_plan {}; quota 429 {error,code,retry_after_seconds>=1}; admission 503; capability 422; other ValueError/ RuntimeError 409 {str, code-or-str}; cloud prompt overflow 413 prompt_too_large; IntegrityError 409 active_run_exists; 201 serialized row",
+ "run_ai": {
+  "missing": {
+   "status": 400,
+   "body": {
+    "error": "work_item is required for run_ai"
+   }
+  },
+  "not_found": {
+   "status": 404,
+   "body": {
+    "error": "issue not found"
+   }
+  },
+  "nonmember": {
+   "status": 404,
+   "body": {
+    "error": "issue not found"
+   }
+  },
+  "queued": {
+   "status": 202,
+   "body": {
+    "queued": true,
+    "reason": "run active",
+    "detail": "a run is active on this work item; the next run is queued and starts when it ends"
+   },
+   "reconcile_trigger": "TickerEvent(kind='human_run_requested', moved_by_run=None, resume_parent=None, run=None, outcome=None, want_run=True, actor=<User: fx8-creator <fx8-creator@example.com>>, trigger='run_ai')"
+  },
+  "dispatch_none": {
+   "status": 409,
+   "body": {
+    "error": "could not dispatch \u2014 issue may already have an active run, or no pod is available"
+   },
+   "rollback_called": true
+  },
+  "ok": {
+   "status": 201,
+   "id": "bda2552e-238d-4f53-ba9f-79ebb8247cc6"
+  }
+ },
+ "comment_and_run": {
+  "missing": {
+   "status": 400,
+   "body": {
+    "error": "work_item is required for comment_and_run"
+   }
+  },
+  "queued": {
+   "status": 202,
+   "body": {
+    "queued": true,
+    "reason": "busy",
+    "detail": "a run is active on this work item; the next run is queued and starts when it ends"
+   }
+  },
+  "none": {
+   "status": 409,
+   "body": {
+    "error": "could not dispatch \u2014 issue may already have an active run, or no prior run / pod is available"
+   }
+  },
+  "ok": {
+   "status": 201,
+   "id": "bda2552e-238d-4f53-ba9f-79ebb8247cc6"
+  }
+ },
+ "human_run_rule": "non-ticking state -> dispatch directly; ticking + reconcile().queued -> 202 {queued,reason,detail}; dispatch None -> set_rollback(True) (clock untouched, verified called) + 409 (distinct messages per flow); else 201 serialized run",
+ "retick": {
+  "missing": {
+   "status": 400,
+   "body": {
+    "error": "work_item is required for re-tick"
+   }
+  },
+  "malformed": {
+   "status": 400,
+   "body": {
+    "error": "invalid work_item UUID format"
+   }
+  },
+  "not_found": {
+   "status": 404,
+   "body": {
+    "error": "issue not found"
+   }
+  },
+  "nonmember": {
+   "status": 404,
+   "body": {
+    "error": "issue not found"
+   }
+  },
+  "ok_no_ticker": {
+   "status": 200,
+   "body": {
+    "granted": 5,
+    "reason": "manual",
+    "run_id": "bda2552e-238d-4f53-ba9f-79ebb8247cc6"
+   }
+  },
+  "ok_ticker": {
+   "status": 200,
+   "body": {
+    "granted": 0,
+    "reason": "pool healthy",
+    "run_id": null,
+    "used": 7,
+    "tick_count": 7,
+    "max_ticks": 10,
+    "enabled": true,
+    "pending_entry": false,
+    "next_run_at": "2026-01-02T03:04:05+00:00"
+   }
+  }
+ },
+ "detail": {
+  "missing": {
+   "status": 404,
+   "body": {
+    "error": "not found"
+   }
+  },
+  "forbidden": {
+   "status": 404,
+   "body": {
+    "error": "not found"
+   }
+  },
+  "ok": {
+   "status": 200,
+   "body": {
+    "id": "c48da468-9ba9-4216-92bd-a190e1dda347",
+    "status": "running",
+    "executor_kind": "local_runner",
+    "dispatch_attempts": 0,
+    "cancel_requested_at": null,
+    "cancel_reason": "",
+    "prompt": "p",
+    "thread_id": "",
+    "agent_metadata": {},
+    "runner": "e39ef475-5212-4de8-a5d0-e5fe8fd01f7b",
+    "work_item": "0b52ade5-3aa5-45ac-a515-6e37a64b4b1a",
+    "pod": "dd43f0eb-d975-431d-b661-8925300ae608",
+    "pod_detail": {
+     "id": "dd43f0eb-d975-431d-b661-8925300ae608",
+     "name": "FX8B_pod_1",
+     "is_default": true,
+     "project": "eb0e9859-36d1-45e3-bcc7-cb2f112c3974",
+     "project_identifier": "FX8B"
+    },
+    "created_by": "dae0b0de-c448-4a8c-bb4b-a63e382c196f",
+    "owner": null,
+    "created_at": "2026-10-02T22:59:51.789134Z",
+    "assigned_at": null,
+    "queue_position": null,
+    "started_at": null,
+    "ended_at": null,
+    "done_payload": null,
+    "error": "boom x",
+    "error_code": "",
+    "error_diagnostic": {
+     "source": "unknown",
+     "source_label": "Unknown",
+     "kind": "unknown",
+     "summary": "boom x",
+     "action": ""
+    },
+    "refusal_category": "",
+    "llm_model": "",
+    "input_tokens": 5,
+    "output_tokens": 2,
+    "total_tokens": 7,
+    "usage": {
+     "input": 5,
+     "total": 7,
+     "output": 2
+    },
+    "tool_plan": {},
+    "tool_calls": []
+   }
+  },
+  "events": {
+   "status": 200,
+   "event_seqs": [
+    1,
+    2
+   ],
+   "event_keys": [
+    "id",
+    "seq",
+    "kind",
+    "payload",
+    "created_at"
+   ]
+  },
+  "events_0": {
+   "has_events_key": false
+  }
+ },
+ "detail_rule": "404 masks missing+forbidden; single-row carries error_diagnostic=classify_run_error; include_events=='1' appends events ordered by seq [:500] (any other value incl. '0' omits)",
+ "cancel": {
+  "missing": {
+   "status": 404,
+   "body": {
+    "error": "not found"
+   }
+  },
+  "forbidden": {
+   "status": 404,
+   "body": {
+    "error": "not found"
+   }
+  },
+  "terminal": {
+   "status": 409,
+   "body": {
+    "error": "run already terminal",
+    "code": "run_already_terminal"
+   }
+  },
+  "cloud_fast": {
+   "status": 202,
+   "requested_set": true,
+   "reason": "stop now",
+   "run_status": "running"
+  },
+  "cloud_dup": {
+   "status": 200,
+   "run_status": "running",
+   "reason": "stop now"
+  },
+  "local_assigned": {
+   "status": 200,
+   "run_status": "cancel_requested",
+   "queue_position": null,
+   "reason_len": 512,
+   "requested_set": true,
+   "on_commit": [
+    "AgentRunCancelEndpoint.post.<locals>.<lambda>"
+   ],
+   "sent": [
+    {
+     "runner_id": "e39ef475-5212-4de8-a5d0-e5fe8fd01f7b",
+     "payload": {
+      "v": 1,
+      "type": "cancel",
+      "run_id": "43b011bc-51f9-497d-86c2-22c412aba68d",
+      "reason": "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR"
+     }
+    }
+   ],
+   "sent_reason_full": "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR"
+  },
+  "local_queued": {
+   "status": 200,
+   "run_status": "cancelled",
+   "error": "cancelled by user",
+   "error_code": "cancelled",
+   "reason": "cancelled by user",
+   "sent": []
+  },
+  "already_requested": {
+   "status": 200,
+   "run_status": "cancel_requested"
+  },
+  "default_reason": "cancelled by user",
+  "offline_runner": "on_commit executed, no raise",
+  "send_blowup": "on_commit executed, no raise"
+ },
+ "cancel_rule": "reason=(body.reason or 'cancelled by user')[:512] for the ROW; cloud RUNNING + cancel_requested_at NULL -> 202 stamp-only fast path (dup -> 200 locked branch, worker finalizes); terminal -> 409 run_already_terminal; local w/ runner + not QUEUED/PAUSED -> CANCEL_REQUESTED (queue dropped) + on_commit {v:1,type:cancel,run_id,reason=FULL untruncated body}; else finalize CANCELLED {cancel_requested_at,cancel_reason,error_code:cancelled,error:reason}; send failures (RunnerOfflineError/generic) swallowed+logged",
+ "release_pin": {
+  "missing": {
+   "status": 404,
+   "body": {
+    "error": "not found"
+   }
+  },
+  "forbidden": {
+   "status": 404,
+   "body": {
+    "error": "not found"
+   }
+  },
+  "cloud": {
+   "status": 409,
+   "body": {
+    "error": "Cloud Agent runs cannot be pinned",
+    "code": "executor_not_local"
+   }
+  },
+  "not_queued": {
+   "status": 409,
+   "body": {
+    "error": "run not queued"
+   }
+  },
+  "not_pinned": {
+   "status": 409,
+   "body": {
+    "error": "run not pinned"
+   }
+  },
+  "ok": {
+   "status": 200,
+   "pinned": null,
+   "status_still": "queued",
+   "parent_thread": "''",
+   "on_commit": [
+    "AgentRunReleasePinEndpoint.post.<locals>.<lambda>"
+   ]
+  }
+ },
+ "release_pin_rule": "cloud -> 409 executor_not_local; non-QUEUED/unpinned -> 409; ok: pinned=None + parent thread_id='' (when set) + on_commit drain pod",
+ "approvals_list": {
+  "ok": {
+   "status": 200,
+   "count": 1,
+   "ids": [
+    "f4968397-a401-4b0e-b57c-bb64552c466b"
+   ],
+   "keys": [
+    "id",
+    "agent_run",
+    "kind",
+    "payload",
+    "reason",
+    "status",
+    "decision_source",
+    "requested_at",
+    "decided_at",
+    "expires_at"
+   ]
+  },
+  "anon": {
+   "status": 401,
+   "body": {
+    "detail": "Authentication credentials were not provided."
+   }
+  },
+  "project_count": 1,
+  "other_project_count": 0,
+  "sql": [
+   "SELECT \"agent_run_approval\".\"id\", \"agent_run_approval\".\"agent_run_id\", \"agent_run_approval\".\"kind\", \"agent_run_approval\".\"payload\", \"agent_run_approval\".\"reason\", \"agent_run_approval\".\"status\", \"agent_run_approval\".\"decision_source\", \"agent_run_approval\".\"decided_by_id\", \"agent_run_approval\".\"requested_at\", \"agent_run_approval\".\"expires_at\", \"agent_run_approval\".\"decided_at\" FROM \"agent_run_approval\" INNER JOIN \"agent_run\" ON (\"agent_run_approval\".\"agent_run_id\" = \"agent_run\".\"id\") WHERE (\"agent_run\".\"created_by_id\" = 'dae0b0dec4484a8cbb4ba63e382c196f'::uuid AND \"agent_run_approval\".\"status\" = 'pending') ORDER BY \"agent_run_approval\".\"requested_at\" DESC LIMIT 200"
+  ]
+ },
+ "approvals_list_rule": "creator-routed + PENDING + optional pod__project scope, ORDER requested_at DESC LIMIT 200; bare JSON array (no envelope); anon -> DRF 401 {detail}",
+ "decide": {
+  "bad_choice": {
+   "status": 400,
+   "body": {
+    "decision": [
+     "\"maybe\" is not a valid choice."
+    ]
+   }
+  },
+  "missing_field": {
+   "status": 400,
+   "body": {
+    "decision": [
+     "This field is required."
+    ]
+   }
+  },
+  "others": {
+   "raised": "django.db.utils.NotSupportedError: FOR UPDATE cannot be applied to the nullable side of an outer join"
+  },
+  "gone": {
+   "raised": "django.db.utils.NotSupportedError: FOR UPDATE cannot be applied to the nullable side of an outer join"
+  },
+  "accept": {
+   "raised": "django.db.utils.NotSupportedError: FOR UPDATE cannot be applied to the nullable side of an outer join",
+   "row_untouched": {
+    "approval_status": "pending",
+    "run_status": "awaiting_approval",
+    "sent": []
+   }
+  },
+  "again": {
+   "raised": "django.db.utils.NotSupportedError: FOR UPDATE cannot be applied to the nullable side of an outer join"
+  },
+  "lock_sql_tail": "roval\" INNER JOIN \"agent_run\" ON (\"agent_run_approval\".\"agent_run_id\" = \"agent_run\".\"id\") LEFT OUTER JOIN \"runner\" ON (\"agent_run\".\"runner_id\" = \"runner\".\"id\") ORDER BY \"agent_run_approval\".\"requested_at\" DESC FOR UPDATE"
+ },
+ "decide_bug": "Every valid decide POST raises before the created_by gate (approvals.py:60), so stranger-404, unknown-404, already-decided-409, the AWAITING->RUNNING flip (:88-90) and the decide fan-out (:93-104) are all unreachable on Postgres; the contract suite (test_web_approvals.py) pins 500 for accept/stranger/unknown and 400 for bad choice.",
+ "metrics": {
+  "status": 200,
+  "content_type": "text/plain; version=0.0.4",
+  "body": "# HELP pi_dash_runner_online Runners currently online.\n# TYPE pi_dash_runner_online gauge\npi_dash_runner_online 1\n# HELP pi_dash_runner_busy Runners currently executing a run.\n# TYPE pi_dash_runner_busy gauge\npi_dash_runner_busy 1\n# HELP pi_dash_runner_offline Runners that have dropped their heartbeat (excludes revoked).\n# TYPE pi_dash_runner_offline gauge\npi_dash_runner_offline 2\n# HELP pi_dash_runs_active AgentRuns in an in-flight status.\n# TYPE pi_dash_runs_active gauge\npi_dash_runs_active 8\n# HELP pi_dash_approvals_pending ApprovalRequests waiting for a decision.\n# TYPE pi_dash_approvals_pending gauge\npi_dash_approvals_pending 2\n",
+  "auth_classes": [],
+  "perm_classes": [
+   "AllowAny"
+  ]
+ },
+ "metrics_rule": "AllowAny + no authN; HttpResponse text/plain; version=0.0.4; 5 gauges (online/busy/offline-excl-revoked counts; active=assigned+running+cancel_requested+awaiting_approval+awaiting_reauth; pending approvals)",
+ "signals": {
+  "auto": {
+   "count": 1,
+   "row": {
+    "name": "SIG_pod_1",
+    "is_default": true,
+    "description": "Auto-created default pod. Add tier pods anytime.",
+    "created_by": null,
+    "workspace": "9b8f0696-72e7-4b03-a850-4856174a672c"
+   }
+  },
+  "resave_count": 1,
+  "preseeded_count": 1,
+  "fallback_attrs": {
+   "project_lead": "None",
+   "default_assignee": "None"
+  },
+  "fallback_positive": {
+   "lead_created_by": "dae0b0de-c448-4a8c-bb4b-a63e382c196f",
+   "assignee_created_by": "dae0b0de-c448-4a8c-bb4b-a63e382c196f",
+   "creator": "dae0b0de-c448-4a8c-bb4b-a63e382c196f"
+  },
+  "swallow": {
+   "raised": false,
+   "log": [
+    "runner.signals: failed to auto-create default pod for project 840be3be-1e30-4e87-97e3-da099680a478"
+   ]
+  }
+ },
+ "signals_rule": "create_default_pod_for_new_project (signals.py:32): created=False -> no-op; any active pod exists -> no-op; else create {identifier}_pod_1 {is_default, description verbatim, created_by=project_lead or default_assignee}; ANY exception swallowed + logged 'runner.signals: failed to auto-create default pod for project %s'"
+}

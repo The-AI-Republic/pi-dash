@@ -1,0 +1,1296 @@
+{
+ "_note": "FX-RUN-09 handlers-daemon (+ web chat + SSE). Sources: runner/views/run_endpoints.py:1-514 (_record_dedupe :52-72, _RunEndpointBase :75-105, accept :108-127, queued :130-150, started :153-191, event :194-235, approval :238-270, awaiting-reauth :273-287, completed :290-308, paused :311-338, failed :341-422, cancelled :425-442, resumed :445-458, stream-upgrade :461-514); runner/views/chat.py:1-857 (daemon base :513-524, started :527-552, message-started :555-583, event :586-628, approval :631-661, complete :664-714, failed :717-748, closed :751-778, SSE chat_event_stream :781-857; web: session list :131-210, detail :213-221, warm :224-261, message list :264-350, cancel :353-377, close :380-425, approval list :428-454, decide :457-510); runner/authentication.py RunnerAccessTokenAuthentication (D-13 token crypto stubbed; the D-15 auth_runner->resolve contract runs real). Web chat has no separate FX id in the split, so its goldens live here (whole-file coverage of views/chat.py). Method: endpoints via as_view() with stubbed runner-auth (full DRF cycle) + live rows in scratch PG pidash_549_fixtures inside rolled-back txns; on_commit captured and executed with mocked send_to_runner/drains/redis; SSE driven as a real async generator with fake pubsub (replay SQL real; session-cookie auth stubbed, can_read real; one real 403 branch) (probes /tmp/probe549_09{a,b,c,d}.py; venv py3.12 / Django 4.2.30 / DRF 3.15.2, pi_dash.settings.test).",
+ "daemon_runs": {
+  "resolve_404": {
+   "status": 404,
+   "body": {
+    "error": "run_not_found"
+   }
+  },
+  "resolve_403_mismatch": {
+   "status": 403,
+   "body": {
+    "error": "run_not_owned_by_runner"
+   }
+  },
+  "resolve_403_runnerless": {
+   "status": 403,
+   "body": {
+    "error": "run_not_owned_by_runner"
+   }
+  },
+  "resolve_403_noauth": {
+   "status": 403,
+   "body": {
+    "error": "run_not_owned_by_runner"
+   }
+  },
+  "accept_ok": {
+   "status": 200,
+   "body": {
+    "ok": true
+   },
+   "row": {
+    "status": "running",
+    "queue_position": null
+   }
+  },
+  "accept_dup": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "duplicate": true
+   }
+  },
+  "accept_terminal": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "terminal": true
+   }
+  },
+  "accept_cancel_pending": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "cancel_requested": true,
+    "ignored": true
+   }
+  },
+  "queued": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "ignored": true
+   },
+   "row_status": "assigned"
+  },
+  "started_ok": {
+   "status": 200,
+   "body": {
+    "ok": true
+   },
+   "row": {
+    "status": "running",
+    "thread_id": "thr-1",
+    "started_set": true,
+    "agent_metadata": {
+     "agent_kind": "codex",
+     "local_thread_id": "lt-1",
+     "local_session_id": "ls-9"
+    },
+    "llm_model": "gpt-x"
+   }
+  },
+  "started_legacy": {
+   "status": 200,
+   "body": {
+    "ok": true
+   },
+   "metadata": {
+    "agent_kind": "",
+    "local_thread_id": "only-thr",
+    "local_session_id": ""
+   },
+   "model": "''"
+  },
+  "started_trunc": {
+   "thread_len": 128,
+   "agent_kind_len": 24,
+   "model_len": 128
+  },
+  "events_batch": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "accepted": 3
+   },
+   "rows": [
+    {
+     "seq": 0,
+     "kind": "zero",
+     "payload": {}
+    },
+    {
+     "seq": 1,
+     "kind": "log",
+     "payload": {
+      "m": 1
+     }
+    },
+    {
+     "truncated_seq3": {
+      "kind": "big",
+      "payload": {
+       "_truncated": true,
+       "original_size_bytes": 65558
+      }
+     }
+    }
+   ]
+  },
+  "events_overwrite": {
+   "kind": "log2",
+   "payload": {
+    "m": 2
+   }
+  },
+  "events_dup_batch": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "duplicate": true
+   }
+  },
+  "events_seq9_absent": true,
+  "events_solo": {
+   "kind": "solo",
+   "payload": {
+    "s": 1
+   }
+  },
+  "events_terminal": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "terminal": true,
+    "accepted": 0
+   }
+  },
+  "events_terminal_rows": 0,
+  "approval_ok": {
+   "status": 200,
+   "body": {
+    "ok": true
+   },
+   "row": {
+    "kind": "command_execution",
+    "status": "pending",
+    "payload": {
+     "c": 1
+    },
+    "reason": "need it",
+    "expires_at": "2026-01-01 00:00:00+00:00",
+    "run_status": "awaiting_approval"
+   }
+  },
+  "approval_upsert": {
+   "status": 200,
+   "body": {
+    "ok": true
+   },
+   "row": {
+    "kind": "other",
+    "reason": "r2",
+    "count": 1
+   }
+  },
+  "approval_dup": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "duplicate": true
+   }
+  },
+  "reauth_ok": {
+   "status": 200,
+   "body": {
+    "ok": true
+   },
+   "row_status": "awaiting_reauth"
+  },
+  "completed_ok": {
+   "status": 200,
+   "body": {
+    "ok": true
+   },
+   "row": {
+    "status": "completed",
+    "done_payload": {
+     "usage": {
+      "input_tokens": 3
+     },
+     "conclusion": "ok"
+    },
+    "usage": {
+     "raw": {
+      "input_tokens": 3
+     },
+     "input": 5,
+     "total": 6,
+     "output": 1
+    },
+    "llm_model": "m1",
+    "ended_set": true
+   },
+   "on_commit": [
+    "finalize_agent_run.<locals>.<lambda>"
+   ]
+  },
+  "paused_ok": {
+   "status": 200,
+   "body": {
+    "ok": true
+   },
+   "row_status": "paused_awaiting_input",
+   "on_commit": [
+    "apply_run_paused.<locals>._pause_and_drain"
+   ]
+  },
+  "failed_plain": {
+   "status": 200,
+   "body": {
+    "ok": true
+   },
+   "row": {
+    "status": "failed",
+    "error": "it broke"
+   }
+  },
+  "failed_resume": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "rescheduled": true
+   },
+   "row": {
+    "status": "queued",
+    "runner": null,
+    "on_commit": [
+     "apply_run_resume_unavailable.<locals>.<lambda>"
+    ]
+   }
+  },
+  "failed_resume_cancel": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "cancelled": true
+   },
+   "row_status": "cancelled"
+  },
+  "failed_busy": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "rescheduled": true
+   },
+   "row": {
+    "status": "queued",
+    "runner_status": "busy"
+   }
+  },
+  "failed_busy_cancel": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "cancelled": true
+   },
+   "row_status": "cancelled"
+  },
+  "failed_refusal": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "refused": true
+   },
+   "row": {
+    "status": "refused",
+    "category": "bio",
+    "error": "no can do"
+   }
+  },
+  "failed_on_terminal": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "cancelled_ok": {
+   "status": 200,
+   "body": {
+    "ok": true
+   },
+   "row": {
+    "status": "cancelled",
+    "usage": {
+     "input": 2
+    }
+   }
+  },
+  "resumed_ok": {
+   "status": 200,
+   "body": {
+    "ok": true
+   },
+   "row_status": "running"
+  },
+  "resumed_terminal": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "terminal": true
+   }
+  },
+  "stream_bad": {
+   "status": 400,
+   "body": {
+    "error": "invalid_stream"
+   }
+  },
+  "stream_no_redis": {
+   "status": 503,
+   "body": {
+    "error": "redis_unavailable"
+   }
+  },
+  "stream_blowup": {
+   "status": 503,
+   "body": {
+    "error": "redis_unavailable"
+   }
+  },
+  "stream_ok": {
+   "status": 200,
+   "ticket_is_hex32": true,
+   "expires_in_secs": 60,
+   "stored": {
+    "key_prefix": "ws_upgrade_ticket",
+    "payload_keys": [
+     "expires_at",
+     "run_id",
+     "runner_id",
+     "stream"
+    ],
+    "stream": "log",
+    "runner_id": "a11f797c-8430-44f9-8ae2-d3aef1c2cffc",
+    "ex": 60
+   }
+  }
+ },
+ "daemon_runs_rule": "resolve: run_not_found 404, run_not_owned_by_runner 403 (mismatch, runnerless, or no-auth); fresh-key dedupe inside the transition txn -> {duplicate}; terminal lock -> {terminal}; CANCEL_REQUESTED -> {cancel_requested,ignored}; accept clears queue; started writes thread/local/agent-metadata/started_at(+model); queued retired (ack+ignore); events batch per-seq update_or_create (kindless skipped, 64KiB->truncated marker, missing seq->0), terminal batch acked with accepted:0; approval upserts (case-insensitive 3-kind map else other) + AWAITING flip; completed/paused/failed/cancelled delegate to run_lifecycle (tokens-or-usage); failed branches resume_unavailable/assign_rejected_busy (rescheduled vs cancelled:true on CANCEL_REQUESTED)/refusal(refused:true); stream-upgrade validates stream, 503 on redis None-or-exception, else hex32 ticket ex=60",
+ "daemon_chat": {
+  "resolve_404": {
+   "status": 404,
+   "body": {
+    "error": "chat_session_not_found"
+   }
+  },
+  "resolve_403": {
+   "status": 403,
+   "body": {
+    "error": "chat_session_not_owned_by_runner"
+   }
+  },
+  "resolve_noauth": {
+   "raised": "builtins.AttributeError: 'NoneType' object has no attribute 'id'"
+  },
+  "started_no_key": {
+   "status": 400,
+   "body": {
+    "error": "idempotency_key_required"
+   }
+  },
+  "started_ok": {
+   "status": 200,
+   "body": {
+    "ok": true
+   },
+   "row": {
+    "lt": "lt",
+    "ls": "ls",
+    "kind": "codex-extra-long-name-he"
+   },
+   "events": [
+    {
+     "kind": "chat_started",
+     "payload": {
+      "agent_kind": "codex-extra-long-name-he",
+      "local_thread_id": "lt",
+      "local_session_id": "ls"
+     }
+    }
+   ]
+  },
+  "started_dup": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "duplicate": true
+   },
+   "lt_still": "lt"
+  },
+  "msgstarted_ok": {
+   "status": 200,
+   "body": {
+    "ok": true
+   },
+   "rows": {
+    "user": {
+     "status": "sent",
+     "turn": "turn-7"
+    },
+    "assistant": {
+     "status": "streaming",
+     "turn": "turn-7"
+    },
+    "session_turn": "turn-7",
+    "events": [
+     {
+      "kind": "turn_started",
+      "source_key": "message_started:25a31ec2-7087-4e24-93c3-7bb316305245"
+     }
+    ]
+   }
+  },
+  "msgstarted_dup": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "duplicate": true
+   },
+   "asst_count": 1
+  },
+  "msgstarted_unknown_msg": {
+   "status": 200,
+   "body": {
+    "ok": true
+   },
+   "asst_created": true
+  },
+  "event_no_key": {
+   "status": 400,
+   "body": {
+    "error": "idempotency_key_required"
+   }
+  },
+  "event_delta": {
+   "status": 200,
+   "event": {
+    "id": 92,
+    "session": "b62ae621-4bb2-43da-9929-e5cc7b5c5485",
+    "message": "631ae080-efc3-4f35-be3d-ad7943873d5e",
+    "seq": 1,
+    "kind": "assistant_delta",
+    "payload": {
+     "params": {
+      "delta": {
+       "text": "Hello "
+      }
+     },
+     "bridge_seq": 41
+    },
+    "created_at": "2026-10-02T23:03:02.601800Z"
+   },
+   "assistant_content": "Hello "
+  },
+  "event_delta_append": {
+   "content": "Hello world",
+   "event_message": "631ae080-efc3-4f35-be3d-ad7943873d5e"
+  },
+  "event_delta_empty": {
+   "linked_message_set": true
+  },
+  "event_default_kind": "raw",
+  "event_nondict_bridge": {
+   "value": [
+    1,
+    2
+   ],
+   "bridge_seq": 7
+  },
+  "event_too_large": {
+   "status": 413,
+   "body": {
+    "error": "payload_too_large"
+   }
+  },
+  "event_edge_ok": 200,
+  "event_dup": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "duplicate": true,
+    "event": {
+     "id": 92,
+     "session": "b62ae621-4bb2-43da-9929-e5cc7b5c5485",
+     "message": "631ae080-efc3-4f35-be3d-ad7943873d5e",
+     "seq": 1,
+     "kind": "assistant_delta",
+     "payload": {
+      "params": {
+       "delta": {
+        "text": "Hello "
+       }
+      },
+      "bridge_seq": 41
+     },
+     "created_at": "2026-10-02T23:03:02.601800Z"
+    }
+   }
+  },
+  "event_dup_count": 6,
+  "approval_no_local_id": {
+   "status": 400,
+   "body": {
+    "error": "local_approval_id_required"
+   }
+  },
+  "approval_big": {
+   "status": 413,
+   "body": {
+    "error": "payload_too_large"
+   }
+  },
+  "approval_ok": {
+   "status": 200,
+   "approval": {
+    "id": "e5d6b291-be2b-40c0-8118-49c4b93b3dd4",
+    "session": "e1d30f62-36f0-4e36-ad91-5e2ee1243804",
+    "local_approval_id": "la-1",
+    "kind": "file_change",
+    "payload": {
+     "f": 1
+    },
+    "reason": "edit",
+    "status": "pending",
+    "decision_source": "",
+    "decided_by": null,
+    "requested_at": "2026-10-02T23:03:03.020738Z",
+    "expires_at": "2026-05-05T05:05:05Z",
+    "decided_at": null
+   }
+  },
+  "approval_upsert": {
+   "status": 200,
+   "kind": "other",
+   "reason": "r2",
+   "count": 1
+  },
+  "approval_events": [
+   {
+    "kind": "approval_requested",
+    "source_key": "approval_requested:la-1",
+    "payload": {
+     "approval_id": "e5d6b291-be2b-40c0-8118-49c4b93b3dd4",
+     "local_approval_id": "la-1"
+    }
+   }
+  ],
+  "complete_ok": {
+   "status": 200,
+   "session": {
+    "active_cleared": true,
+    "status": "open",
+    "last_set": true
+   },
+   "user_msg": "completed",
+   "assistant": {
+    "status": "completed",
+    "content": "final text"
+   },
+   "events": [
+    {
+     "kind": "turn_completed",
+     "payload": {
+      "status": "completed",
+      "message_id": "c0f26c3d-cdd0-40e7-9575-a9b9d10736c7"
+     }
+    },
+    {
+     "kind": "raw",
+     "payload": {
+      "kind": "message_complete"
+     }
+    }
+   ],
+   "on_commit": [
+    "append_event_locked.<locals>.<lambda>",
+    "drain_tasks_after_chat_release.<locals>._drain",
+    "append_event_locked.<locals>.<lambda>"
+   ]
+  },
+  "complete_dup": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "duplicate": true
+   }
+  },
+  "complete_bogus_status": {
+   "status": 200,
+   "user_msg": "sent",
+   "turn_completed": {
+    "payload": {
+     "status": "completed",
+     "message_id": "be2fcb7c-02c1-44ce-bcf9-c767e7a8a88d"
+    }
+   }
+  },
+  "complete_close_requested": {
+   "status": "closed",
+   "closed_set": true
+  },
+  "failed_no_key": {
+   "status": 400,
+   "body": {
+    "error": "idempotency_key_required"
+   }
+  },
+  "failed_ok": {
+   "status": 200,
+   "error": "segfault",
+   "user_msg": "failed",
+   "events": [
+    {
+     "kind": "chat_failed",
+     "payload": {
+      "code": "agent_crash",
+      "detail": "segfault"
+     }
+    }
+   ],
+   "on_commit": [
+    "append_event_locked.<locals>.<lambda>",
+    "drain_tasks_after_chat_release.<locals>._drain"
+   ]
+  },
+  "failed_dup": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "duplicate": true
+   }
+  },
+  "failed_default_code": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "failed_close_requested": {
+   "status": "closed"
+  },
+  "closed_no_key": {
+   "status": 400,
+   "body": {
+    "error": "idempotency_key_required"
+   }
+  },
+  "closed_ok": {
+   "status": 200,
+   "session_status": "closed",
+   "closed_set": true,
+   "user_msg": "cancelled",
+   "events": [
+    {
+     "kind": "chat_closed",
+     "payload": {
+      "reason": "runner_idle"
+     }
+    }
+   ],
+   "on_commit": [
+    "append_event_locked.<locals>.<lambda>",
+    "drain_tasks_after_chat_release.<locals>._drain"
+   ]
+  },
+  "closed_dup": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "duplicate": true
+   }
+  },
+  "closed_idle": {
+   "status": 200,
+   "session_status": "closed",
+   "events": [
+    {
+     "kind": "chat_closed",
+     "payload": {
+      "reason": "runner_closed"
+     }
+    }
+   ],
+   "on_commit": [
+    "append_event_locked.<locals>.<lambda>"
+   ]
+  }
+ },
+ "daemon_chat_rule": "resolve: chat_session_not_found 404 / chat_session_not_owned_by_runner 403; NO-AUTH CALLS RAISE AttributeError (None.id at chat.py:522 -> live 500, port as-is); started/event/failed/closed REQUIRE Idempotency-Key (400 idempotency_key_required); message-started/complete dedupe on derived source_keys (no key needed); unknown message ids still create assistants; delta appends link event.message (empty delta links only); bridge_seq merges (non-dict->value wrap); 256KiB cap -> 413; bogus final coerces to completed; failed/closed close on close_requested + drain iff was_active",
+ "daemon_chat_bug": "_ChatRunnerEndpointBase._resolve does getattr(request,'auth_runner',None).id with no None guard (chat.py:522): any daemon chat POST without valid runner auth raises AttributeError -> HTTP 500. Recorded from a live call (resolve_noauth).",
+ "web_chat": {
+  "sess_list_owner": {
+   "status": 200,
+   "count": 3,
+   "keys": [
+    "id",
+    "workspace",
+    "runner",
+    "runner_detail",
+    "created_by",
+    "pod",
+    "status",
+    "agent_kind",
+    "local_thread_id",
+    "local_session_id",
+    "cwd",
+    "model",
+    "active_turn_id",
+    "active_message_id",
+    "close_requested",
+    "last_message_at",
+    "closed_at",
+    "error",
+    "created_at",
+    "updated_at"
+   ]
+  },
+  "sess_list_admin_ws": {
+   "count": 0
+  },
+  "sess_list_owner_ws": {
+   "count": 3
+  },
+  "sess_list_forbidden_ws": {
+   "status": 403,
+   "body": {
+    "error": "forbidden"
+   }
+  },
+  "sess_list_runner": {
+   "count": 2
+  },
+  "sess_list_runner_gone": [],
+  "sess_list_runner_stranger": [],
+  "sess_list_project": {
+   "count": 3
+  },
+  "sess_list_sql": [
+   "reated_by_id\" = '0f34fe99926846d8b2365900e848e9be'::uuid) ORDER BY \"agent_chat_session\".\"last_message_at\" DESC, \"agent_chat_session\".\"created_at\" DESC LIMIT 100"
+  ],
+  "sess_list_stranger": {
+   "count": 0
+  },
+  "sess_create_missing": {
+   "status": 400,
+   "body": {
+    "error": "workspace and runner are required"
+   }
+  },
+  "sess_create_forbidden": {
+   "status": 403,
+   "body": {
+    "error": "forbidden"
+   }
+  },
+  "sess_create_runner_gone": {
+   "status": 404,
+   "body": {
+    "error": "runner_not_found"
+   }
+  },
+  "sess_create_runner_unowned": {
+   "status": 404,
+   "body": {
+    "error": "runner_not_found"
+   }
+  },
+  "sess_create_offline": {
+   "status": 409,
+   "body": {
+    "error": "runner_unavailable"
+   }
+  },
+  "sess_create_revoked": {
+   "status": 409,
+   "body": {
+    "error": "runner_unavailable"
+   }
+  },
+  "sess_create_reuse": {
+   "status": 200,
+   "id": "a98581b6-efc9-4c6c-ab68-dc61db2ebe0a",
+   "reused_empty": true
+  },
+  "sess_create_new": {
+   "status": 201,
+   "model_len": 128,
+   "cwd": "''",
+   "pod": "74459bb4-61b2-4726-a4f1-eb0ed4a3fb44"
+  },
+  "detail_ok": 200,
+  "detail_gone": {
+   "status": 404,
+   "body": {
+    "error": "not found"
+   }
+  },
+  "detail_stranger": {
+   "status": 404,
+   "body": {
+    "error": "not found"
+   }
+  },
+  "warm_gone": {
+   "status": 404,
+   "body": {
+    "error": "not found"
+   }
+  },
+  "warm_closed": {
+   "status": 409,
+   "body": {
+    "error": "chat_session_closed"
+   }
+  },
+  "warm_offline": {
+   "status": 409,
+   "body": {
+    "error": "runner_unavailable"
+   }
+  },
+  "warm_active_skip": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "skipped": "chat_turn_active"
+   }
+  },
+  "warm_ok": {
+   "status": 202,
+   "body": {
+    "ok": true
+   },
+   "sent": [
+    {
+     "type": "chat_warm",
+     "chat_session_id": "cf1acff9-01d2-4fe1-a1dd-ca597142b7ab",
+     "local_thread_id": "ltw",
+     "local_session_id": null,
+     "cwd": null,
+     "model": "mm"
+    }
+   ]
+  },
+  "msg_list": {
+   "status": 200,
+   "count": 1,
+   "keys": [
+    "id",
+    "session",
+    "role",
+    "content",
+    "content_parts",
+    "status",
+    "local_item_id",
+    "local_turn_id",
+    "seq",
+    "created_at",
+    "completed_at"
+   ]
+  },
+  "msg_list_stranger": {
+   "status": 404,
+   "body": {
+    "error": "not found"
+   }
+  },
+  "msg_post_empty": {
+   "status": 400,
+   "body": {
+    "error": "content is required"
+   }
+  },
+  "msg_post_big": {
+   "status": 413,
+   "body": {
+    "error": "payload_too_large"
+   }
+  },
+  "msg_post_closed": {
+   "status": 409,
+   "body": {
+    "error": "chat_session_closed"
+   }
+  },
+  "msg_post_offline": {
+   "status": 409,
+   "body": {
+    "error": "runner_unavailable"
+   }
+  },
+  "msg_post_active": {
+   "status": 409,
+   "body": {
+    "error": "chat_turn_active"
+   }
+  },
+  "msg_post_stranger": {
+   "status": 404,
+   "body": {
+    "error": "not found"
+   }
+  },
+  "msg_post_ok": {
+   "status": 201,
+   "msg": {
+    "id": "21a4c91a-449a-4c61-a118-31db35c3fc11",
+    "session": "ba8f55bc-9306-4175-8ac9-839992652bd4",
+    "role": "user",
+    "content": "hello",
+    "content_parts": [
+     {
+      "t": "x"
+     }
+    ],
+    "status": "queued",
+    "local_item_id": "",
+    "local_turn_id": "",
+    "seq": 1,
+    "created_at": "2026-10-02T23:03:54.579295Z",
+    "completed_at": null
+   },
+   "session_active": true,
+   "last_set": true,
+   "events": [
+    {
+     "kind": "chat_timing",
+     "payload": {
+      "stage": "web_send_accepted",
+      "message_id": "21a4c91a-449a-4c61-a118-31db35c3fc11",
+      "recorded_at": "2026-10-02T23:03:54.590192+00:00"
+     }
+    }
+   ],
+   "sent": [
+    {
+     "type": "chat_user_message",
+     "chat_session_id": "ba8f55bc-9306-4175-8ac9-839992652bd4",
+     "message_id": "21a4c91a-449a-4c61-a118-31db35c3fc11",
+     "content": "hello",
+     "content_parts": [
+      {
+       "t": "x"
+      }
+     ],
+     "local_thread_id": null,
+     "local_session_id": null,
+     "cwd": null,
+     "model": null
+    }
+   ]
+  },
+  "cancel_gone": {
+   "status": 404,
+   "body": {
+    "error": "not found"
+   }
+  },
+  "cancel_noop": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "noop": true
+   }
+  },
+  "cancel_ok": {
+   "status": 200,
+   "body": {
+    "ok": true
+   },
+   "sent": [
+    {
+     "type": "chat_cancel",
+     "chat_session_id": "e82465d7-d8f7-479c-86fd-2832e1a28e9a",
+     "reason": "stop"
+    }
+   ]
+  },
+  "cancel_default_reason": "user_cancelled",
+  "close_active": {
+   "status": 200,
+   "close_requested": true,
+   "status_still": "open",
+   "sent": [
+    {
+     "type": "chat_cancel",
+     "chat_session_id": "d681e0d6-9a39-4713-b0b7-3e25c7a34654",
+     "reason": "close_requested"
+    }
+   ]
+  },
+  "close_idle": {
+   "status": 200,
+   "session_status": "closed",
+   "closed_set": true,
+   "events": [
+    {
+     "kind": "chat_closed",
+     "payload": {
+      "reason": "bye"
+     }
+    }
+   ],
+   "sent": [
+    {
+     "type": "chat_close",
+     "chat_session_id": "21d930d0-2426-4d2f-acbb-c24dec2e96d4",
+     "reason": "bye"
+    }
+   ]
+  },
+  "cappr_list": {
+   "status": 200,
+   "count": 1,
+   "local_ids": [
+    "w1"
+   ]
+  },
+  "cappr_list_ws_admin": {
+   "count": 0
+  },
+  "cappr_list_ws_owner": {
+   "count": 1
+  },
+  "cappr_list_ws_forbidden": {
+   "status": 403,
+   "body": {
+    "error": "forbidden"
+   }
+  },
+  "cappr_decide_bad": {
+   "status": 400,
+   "body": {
+    "decision": [
+     "\"maybe\" is not a valid choice."
+    ]
+   }
+  },
+  "cappr_decide_gone": {
+   "status": 404,
+   "body": {
+    "error": "not found"
+   }
+  },
+  "cappr_decide_stranger": {
+   "status": 404,
+   "body": {
+    "error": "not found"
+   }
+  },
+  "cappr_decide_ok": {
+   "status": 200,
+   "approval": {
+    "id": "f7dc8344-f98b-4cd4-a8f6-30644c4a692e",
+    "session": "d8415f9c-35f5-48ca-8e93-d6d249611b48",
+    "local_approval_id": "w1",
+    "kind": "command_execution",
+    "payload": {},
+    "reason": "",
+    "status": "accepted",
+    "decision_source": "web",
+    "decided_by": "0f34fe99-9268-46d8-b236-5900e848e9be",
+    "requested_at": "2026-10-02T23:03:54.739663Z",
+    "expires_at": null,
+    "decided_at": "2026-10-02T23:03:54.868410Z"
+   },
+   "row": {
+    "source": "web",
+    "decided_by": "0f34fe99-9268-46d8-b236-5900e848e9be"
+   },
+   "events": [
+    {
+     "kind": "approval_decided",
+     "payload": {
+      "decision": "accept",
+      "approval_id": "f7dc8344-f98b-4cd4-a8f6-30644c4a692e"
+     }
+    }
+   ],
+   "sent": [
+    {
+     "type": "chat_decide",
+     "chat_session_id": "d8415f9c-35f5-48ca-8e93-d6d249611b48",
+     "approval_id": "f7dc8344-f98b-4cd4-a8f6-30644c4a692e",
+     "local_approval_id": "w1",
+     "decision": "accept",
+     "decided_by": "0f34fe99-9268-46d8-b236-5900e848e9be"
+    }
+   ]
+  },
+  "cappr_decide_again": {
+   "status": 409,
+   "body": {
+    "error": "already decided"
+   }
+  },
+  "sess_list_runner_stranger_noscope": {
+   "status": 200,
+   "body": []
+  }
+ },
+ "web_chat_rule": "session list: workspace 403 unless member; runner gone/mismatch/unowned -> []; project scope; runner visibility + creator-only unless workspace admin; [:100]; create: 400/403/404x2/409 offline+revoked, empty-open reuse 200, else 201 (model[:128], cwd always '', pod=runner.pod); warm: 404/409s/active-skip/202 + chat_warm frame; message POST: 400 content-required, 413, 409s, 201 USER/QUEUED + chat_timing event + chat_user_message frame; cancel: noop vs chat_cancel frame (default user_cancelled); close: active->close_requested + chat_cancel vs idle->CLOSED + chat_closed event + chat_close frame; chat approvals: workspace/admin/creator branches [:200]; chat decide: 400/404/409 + accepted + approval_decided event + chat_decide frame (chat decide has NO select_for_update join bug)",
+ "sse": {
+  "auth_403": {
+   "status": 403,
+   "body": {
+    "error": "authentication required"
+   }
+  },
+  "gone_404": {
+   "status": 404,
+   "body": {
+    "error": "not found"
+   }
+  },
+  "forbidden_404": {
+   "status": 404,
+   "body": {
+    "error": "not found"
+   }
+  },
+  "replay_all": {
+   "status": 200,
+   "content_type": "text/event-stream",
+   "frames": [
+    "event: chat.event\nid: 1\ndata: {\"id\": 121, \"session\": \"0a4b4a35-efae-4d39-a9e1-713211c11d74\", \"message\": null, \"seq\": 1, \"kind\": \"k1\", \"payload\": {\"n\": 1}, \"created_at\": \"2026-10-02T23:10:04.602929+00:00\"}\n\n",
+    "event: chat.event\nid: 2\ndata: {\"id\": 122, \"session\": \"0a4b4a35-efae-4d39-a9e1-713211c11d74\", \"message\": null, \"seq\": 2, \"kind\": \"k2\", \"payload\": {\"n\": 2}, \"created_at\": \"2026-10-02T23:10:04.605913+00:00\"}\n\n",
+    "event: chat.event\nid: 3\ndata: {\"id\": 123, \"session\": \"0a4b4a35-efae-4d39-a9e1-713211c11d74\", \"message\": null, \"seq\": 3, \"kind\": \"k3\", \"payload\": {\"n\": 3}, \"created_at\": \"2026-10-02T23:10:04.606590+00:00\"}\n\n"
+   ],
+   "pubsub": {
+    "subscribed": [
+     "agent_chat_session:0a4b4a35-efae-4d39-a9e1-713211c11d74"
+    ],
+    "unsubscribed": [
+     "agent_chat_session:0a4b4a35-efae-4d39-a9e1-713211c11d74"
+    ],
+    "closed": true,
+    "ctor_kwargs": {
+     "ignore_subscribe_messages": true
+    }
+   }
+  },
+  "replay_after": {
+   "status": 200,
+   "content_type": "text/event-stream",
+   "frames": [
+    "event: chat.event\nid: 3\ndata: {\"id\": 123, \"session\": \"0a4b4a35-efae-4d39-a9e1-713211c11d74\", \"message\": null, \"seq\": 3, \"kind\": \"k3\", \"payload\": {\"n\": 3}, \"created_at\": \"2026-10-02T23:10:04.606590+00:00\"}\n\n"
+   ],
+   "pubsub": {
+    "subscribed": [
+     "agent_chat_session:0a4b4a35-efae-4d39-a9e1-713211c11d74"
+    ],
+    "unsubscribed": [
+     "agent_chat_session:0a4b4a35-efae-4d39-a9e1-713211c11d74"
+    ],
+    "closed": true,
+    "ctor_kwargs": {
+     "ignore_subscribe_messages": true
+    }
+   }
+  },
+  "replay_lei": {
+   "status": 200,
+   "content_type": "text/event-stream",
+   "frames": [
+    "event: chat.event\nid: 2\ndata: {\"id\": 122, \"session\": \"0a4b4a35-efae-4d39-a9e1-713211c11d74\", \"message\": null, \"seq\": 2, \"kind\": \"k2\", \"payload\": {\"n\": 2}, \"created_at\": \"2026-10-02T23:10:04.605913+00:00\"}\n\n",
+    "event: chat.event\nid: 3\ndata: {\"id\": 123, \"session\": \"0a4b4a35-efae-4d39-a9e1-713211c11d74\", \"message\": null, \"seq\": 3, \"kind\": \"k3\", \"payload\": {\"n\": 3}, \"created_at\": \"2026-10-02T23:10:04.606590+00:00\"}\n\n"
+   ],
+   "pubsub": {
+    "subscribed": [
+     "agent_chat_session:0a4b4a35-efae-4d39-a9e1-713211c11d74"
+    ],
+    "unsubscribed": [
+     "agent_chat_session:0a4b4a35-efae-4d39-a9e1-713211c11d74"
+    ],
+    "closed": true,
+    "ctor_kwargs": {
+     "ignore_subscribe_messages": true
+    }
+   }
+  },
+  "replay_after_beats_header": {
+   "status": 200,
+   "content_type": "text/event-stream",
+   "frames": [],
+   "pubsub": {
+    "subscribed": [
+     "agent_chat_session:0a4b4a35-efae-4d39-a9e1-713211c11d74"
+    ],
+    "unsubscribed": [
+     "agent_chat_session:0a4b4a35-efae-4d39-a9e1-713211c11d74"
+    ],
+    "closed": true,
+    "ctor_kwargs": {
+     "ignore_subscribe_messages": true
+    }
+   }
+  },
+  "replay_bad_after": {
+   "status": 200,
+   "content_type": "text/event-stream",
+   "frames": [
+    "event: chat.event\nid: 1\ndata: {\"id\": 121, \"session\": \"0a4b4a35-efae-4d39-a9e1-713211c11d74\", \"message\": null, \"seq\": 1, \"kind\": \"k1\", \"payload\": {\"n\": 1}, \"created_at\": \"2026-10-02T23:10:04.602929+00:00\"}\n\n",
+    "event: chat.event\nid: 2\ndata: {\"id\": 122, \"session\": \"0a4b4a35-efae-4d39-a9e1-713211c11d74\", \"message\": null, \"seq\": 2, \"kind\": \"k2\", \"payload\": {\"n\": 2}, \"created_at\": \"2026-10-02T23:10:04.605913+00:00\"}\n\n",
+    "event: chat.event\nid: 3\ndata: {\"id\": 123, \"session\": \"0a4b4a35-efae-4d39-a9e1-713211c11d74\", \"message\": null, \"seq\": 3, \"kind\": \"k3\", \"payload\": {\"n\": 3}, \"created_at\": \"2026-10-02T23:10:04.606590+00:00\"}\n\n"
+   ],
+   "pubsub": {
+    "subscribed": [
+     "agent_chat_session:0a4b4a35-efae-4d39-a9e1-713211c11d74"
+    ],
+    "unsubscribed": [
+     "agent_chat_session:0a4b4a35-efae-4d39-a9e1-713211c11d74"
+    ],
+    "closed": true,
+    "ctor_kwargs": {
+     "ignore_subscribe_messages": true
+    }
+   }
+  },
+  "live": {
+   "status": 200,
+   "content_type": "text/event-stream",
+   "frames": [
+    "event: chat.event\nid: 9\ndata: {\"seq\": 9, \"kind\": \"live\", \"payload\": {}}\n\n"
+   ],
+   "pubsub": {
+    "subscribed": [
+     "agent_chat_session:0a4b4a35-efae-4d39-a9e1-713211c11d74"
+    ],
+    "unsubscribed": [
+     "agent_chat_session:0a4b4a35-efae-4d39-a9e1-713211c11d74"
+    ],
+    "closed": true,
+    "ctor_kwargs": {
+     "ignore_subscribe_messages": true
+    }
+   }
+  },
+  "heartbeat": {
+   "status": 200,
+   "content_type": "text/event-stream",
+   "frames": [
+    ": heartbeat\n\n",
+    ": heartbeat\n\n",
+    ": heartbeat\n\n",
+    ": heartbeat\n\n",
+    ": heartbeat\n\n"
+   ],
+   "pubsub": {
+    "subscribed": [
+     "agent_chat_session:0a4b4a35-efae-4d39-a9e1-713211c11d74"
+    ],
+    "unsubscribed": [
+     "agent_chat_session:0a4b4a35-efae-4d39-a9e1-713211c11d74"
+    ],
+    "closed": true,
+    "ctor_kwargs": {
+     "ignore_subscribe_messages": true
+    }
+   }
+  }
+ },
+ "sse_rule": "no session -> 403 {authentication required}; bad id/unreadable -> 404; after=N (query beats Last-Event-ID header; unparsable->0) replays seq>N ordered; frame 'event: chat.event\\nid: <seq>\\ndata: <serialize_event>\\n\\n'; live pubsub messages with seq>last_seq re-emitted (malformed/invalid-seq skipped+warned, stale skipped); ': heartbeat\\n\\n' every >=15s; close unsubscribes + closes pubsub + close_old_connections; content-type text/event-stream"
+}
