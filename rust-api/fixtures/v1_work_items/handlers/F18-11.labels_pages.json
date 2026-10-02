@@ -1,0 +1,246 @@
+{
+  "$schema_note": "Static behaviour record. No code is executed by this file.",
+  "fixture": "F18-11",
+  "_method": "Live HTTP (httpx, member X-Api-Key) against Django runserver (pi_dash.settings.test) on scratch pidash_conv659. One recorded request -> status + body per route. IDs, datetimes, cursors, presigned URLs and signatures are live values (volatile); statuses, key sets, key order and error bodies are the pins.",
+  "_source": "apps/api/pi_dash/api/urls/work_item.py (38 routes); api/urls/label.py (2); api/urls/page.py (3)",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "routes": "2 label + 3 page routes",
+  "calls": {
+    "label_create": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/labels/",
+      "request": {
+        "name": "handler-label",
+        "color": "#00ff00"
+      },
+      "status": 201,
+      "body": {
+        "id": "72c4dd40-bcf0-4e29-ab90-d892c72228ca",
+        "created_at": "2026-10-02T23:39:06.511485Z",
+        "updated_at": "2026-10-02T23:39:06.511494Z",
+        "deleted_at": null,
+        "name": "handler-label",
+        "description": "",
+        "color": "#00ff00",
+        "sort_order": 75535.0,
+        "external_source": null,
+        "external_id": null,
+        "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "updated_by": null,
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "parent": null
+      }
+    },
+    "label_create_dup": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/labels/",
+      "request": {
+        "name": "handler-label"
+      },
+      "status": 409,
+      "body": {
+        "error": "Label with the same name already exists in the project",
+        "id": "72c4dd40-bcf0-4e29-ab90-d892c72228ca"
+      }
+    },
+    "label_list": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/labels/",
+      "status": 200,
+      "envelope": {
+        "grouped_by": null,
+        "sub_grouped_by": null,
+        "total_count": 3,
+        "next_cursor": "1000:1:0",
+        "prev_cursor": "1000:-1:1",
+        "next_page_results": false,
+        "prev_page_results": false,
+        "count": 3,
+        "total_pages": 1,
+        "total_results": 3,
+        "extra_stats": null
+      },
+      "results_full": [
+        {
+          "id": "72c4dd40-bcf0-4e29-ab90-d892c72228ca",
+          "created_at": "2026-10-02T23:39:06.511485Z",
+          "updated_at": "2026-10-02T23:39:06.511494Z",
+          "deleted_at": null,
+          "name": "handler-label",
+          "description": "",
+          "color": "#00ff00",
+          "sort_order": 75535.0,
+          "external_source": null,
+          "external_id": null,
+          "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+          "updated_by": null,
+          "workspace": "92989e99-51c6-4725-8069-45784951694f",
+          "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "parent": null
+        },
+        {
+          "id": "b4d98934-9159-4ac9-9e58-8a5b7b152ec3",
+          "created_at": "2026-10-02T23:17:12.023611Z",
+          "updated_at": "2026-10-02T23:17:12.023611Z",
+          "deleted_at": null,
+          "name": "feature",
+          "description": "",
+          "color": "",
+          "sort_order": 65535.0,
+          "external_source": null,
+          "external_id": null,
+          "created_by": null,
+          "updated_by": null,
+          "workspace": "92989e99-51c6-4725-8069-45784951694f",
+          "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "parent": null
+        }
+      ],
+      "results_rest_ids": [
+        "c833c492-fa3d-49f5-85a4-0ef810642731"
+      ]
+    },
+    "label_detail": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/labels/72c4dd40-bcf0-4e29-ab90-d892c72228ca/",
+      "status": 200,
+      "body": {
+        "id": "72c4dd40-bcf0-4e29-ab90-d892c72228ca",
+        "created_at": "2026-10-02T23:39:06.511485Z",
+        "updated_at": "2026-10-02T23:39:06.511494Z",
+        "deleted_at": null,
+        "name": "handler-label",
+        "description": "",
+        "color": "#00ff00",
+        "sort_order": 75535.0,
+        "external_source": null,
+        "external_id": null,
+        "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "updated_by": null,
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "parent": null
+      }
+    },
+    "label_patch": {
+      "method": "PATCH",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/labels/72c4dd40-bcf0-4e29-ab90-d892c72228ca/",
+      "request": {
+        "color": "#0000ff"
+      },
+      "status": 200,
+      "body": {
+        "id": "72c4dd40-bcf0-4e29-ab90-d892c72228ca",
+        "created_at": "2026-10-02T23:39:06.511485Z",
+        "updated_at": "2026-10-02T23:39:06.770174Z",
+        "deleted_at": null,
+        "name": "handler-label",
+        "description": "",
+        "color": "#0000ff",
+        "sort_order": 75535.0,
+        "external_source": null,
+        "external_id": null,
+        "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "updated_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "parent": null
+      }
+    },
+    "page_list": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/pages/",
+      "status": 200,
+      "envelope": {
+        "grouped_by": null,
+        "sub_grouped_by": null,
+        "total_count": 1,
+        "next_cursor": "1000:1:0",
+        "prev_cursor": "1000:-1:1",
+        "next_page_results": false,
+        "prev_page_results": false,
+        "count": 1,
+        "total_pages": 1,
+        "total_results": 1,
+        "extra_stats": null
+      },
+      "results_full": [
+        {
+          "id": "255f3646-9ace-4f46-9620-788071f7a05e",
+          "name": "Fixture page",
+          "parent": null,
+          "owned_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+          "access": 0,
+          "is_locked": false,
+          "archived_at": null,
+          "created_at": "2026-10-02T23:17:12.040770Z",
+          "updated_at": "2026-10-02T23:17:12.040770Z"
+        }
+      ],
+      "results_rest_ids": []
+    },
+    "page_detail": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/pages/255f3646-9ace-4f46-9620-788071f7a05e/",
+      "status": 200,
+      "body": {
+        "id": "255f3646-9ace-4f46-9620-788071f7a05e",
+        "name": "Fixture page",
+        "parent": null,
+        "owned_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "access": 0,
+        "is_locked": false,
+        "archived_at": null,
+        "created_at": "2026-10-02T23:17:12.040770Z",
+        "updated_at": "2026-10-02T23:17:12.040770Z",
+        "description_html": "<h1>Title</h1><p>para with <strong>bold</strong></p><ul><li>a</li><li>b</li></ul>",
+        "description_stripped": "Titlepara with boldab",
+        "description_markdown": "# Title\n\npara with **bold**\n\n- a\n- b"
+      }
+    },
+    "page_detail_404": {
+      "method": "GET",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/pages/00000000-0000-0000-0000-000000000000/",
+      "status": 404,
+      "body": {
+        "error": "The requested resource does not exist."
+      }
+    },
+    "page_create": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/pages/",
+      "request": {
+        "name": "handler page",
+        "description_markdown": "# hi"
+      },
+      "status": 503,
+      "body": {
+        "error": "The page body could not be saved and nothing was written: LIVE_URL is not configured, so the page document cannot be regenerated."
+      }
+    },
+    "page_create_invalid": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/pages/",
+      "request": {
+        "description_markdown": "x",
+        "description_html": "<p>x</p>"
+      },
+      "status": 400,
+      "body": {
+        "name": [
+          "This field is required."
+        ]
+      }
+    },
+    "label_delete": {
+      "method": "DELETE",
+      "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/labels/72c4dd40-bcf0-4e29-ab90-d892c72228ca/",
+      "status": 204,
+      "body": {
+        "<non-json>": ""
+      }
+    }
+  },
+  "page_write_note": "POST /pages/ returns 503 in this env (no live-document server: 'LIVE_URL is not configured...'); serializer validation (400s) runs BEFORE the document call, so invalid bodies still 400. Page body-write tasks are pinned in F18-10 page_body_write_tasks."
+}

@@ -1,0 +1,395 @@
+{
+  "$schema_note": "Static behaviour record. No code is executed by this file.",
+  "fixture": "F18-06",
+  "_method": "View get_queryset() called with live kwargs (pi_dash.settings.test) on scratch pidash_conv659; str(queryset.query) + rows. Filters/orderings reconstructed exactly per view code. Paginator via live HTTP (httpx). IDs volatile; SQL shape + envelopes + errors pinned.",
+  "_source": "apps/api/pi_dash/api/views/issue.py:190-911",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "units": {
+    "workspace_get_queryset": {
+      "source": "api/views/issue.py:206-223",
+      "sql": "SELECT DISTINCT \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"id\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\", (SELECT Count(U0.\"id\") AS \"count\" FROM \"issues\" U0 LEFT OUTER JOIN \"states\" U1 ON (U0.\"state_id\" = U1.\"id\") INNER JOIN \"projects\" U2 ON (U0.\"project_id\" = U2.\"id\") WHERE (U0.\"deleted_at\" IS NULL AND NOT (U1.\"group\" = triage AND U1.\"group\" IS NOT NULL) AND NOT (U0.\"archived_at\" IS NOT NULL) AND NOT (U2.\"archived_at\" IS NOT NULL) AND NOT (U0.\"is_draft\") AND U0.\"parent_id\" = (\"issues\".\"id\"))) AS \"sub_issues_count\", \"projects\".\"created_at\", \"projects\".\"updated_at\", \"projects\".\"created_by_id\", \"projects\".\"updated_by_id\", \"projects\".\"deleted_at\", \"projects\".\"id\", \"projects\".\"name\", \"projects\".\"description\", \"projects\".\"description_text\", \"projects\".\"description_html\", \"projects\".\"network\", \"projects\".\"workspace_id\", \"projects\".\"identifier\", \"projects\".\"default_assignee_id\", \"projects\".\"project_lead_id\", \"projects\".\"emoji\", \"projects\".\"icon_prop\", \"projects\".\"module_view\", \"projects\".\"cycle_view\", \"projects\".\"issue_views_view\", \"projects\".\"page_view\", \"projects\".\"intake_view\", \"projects\".\"is_time_tracking_enabled\", \"projects\".\"is_issue_type_enabled\", \"projects\".\"is_default\", \"projects\".\"guest_view_all_features\", \"projects\".\"members_can_edit_states\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"estimate_id\", \"projects\".\"archive_in\", \"projects\".\"close_in\", \"projects\".\"logo_props\", \"projects\".\"default_state_id\", \"projects\".\"archived_at\", \"projects\".\"timezone\", \"projects\".\"external_source\", \"projects\".\"external_id\", \"projects\".\"repo_url\", \"projects\".\"base_branch\", \"projects\".\"agent_default_interval_seconds\", \"projects\".\"agent_default_max_ticks\", \"projects\".\"agent_review_default_interval_seconds\", \"projects\".\"agent_test_default_interval_seconds\", \"projects\".\"agent_ticking_enabled\", \"projects\".\"default_agent_executor\", \"workspaces\".\"created_at\", \"workspaces\".\"updated_at\", \"workspaces\".\"created_by_id\", \"workspaces\".\"updated_by_id\", \"workspaces\".\"deleted_at\", \"workspaces\".\"id\", \"workspaces\".\"name\", \"workspaces\".\"logo\", \"workspaces\".\"logo_asset_id\", \"workspaces\".\"owner_id\", \"workspaces\".\"slug\", \"workspaces\".\"organization_size\", \"workspaces\".\"timezone\", \"workspaces\".\"background_color\", T5.\"created_at\", T5.\"updated_at\", T5.\"created_by_id\", T5.\"updated_by_id\", T5.\"deleted_at\", T5.\"id\", T5.\"project_id\", T5.\"workspace_id\", T5.\"parent_id\", T5.\"state_id\", T5.\"point\", T5.\"estimate_point_id\", T5.\"name\", T5.\"description_json\", T5.\"description_html\", T5.\"description_stripped\", T5.\"description_binary\", T5.\"priority\", T5.\"complexity_score\", T5.\"start_date\", T5.\"target_date\", T5.\"sequence_id\", T5.\"sort_order\", T5.\"completed_at\", T5.\"archived_at\", T5.\"is_draft\", T5.\"external_source\", T5.\"external_id\", T5.\"type_id\", T5.\"git_work_branch\", T5.\"workpad\", T5.\"created_via\", T5.\"assigned_pod_id\", T5.\"agent_executor\", \"states\".\"created_at\", \"states\".\"updated_at\", \"states\".\"created_by_id\", \"states\".\"updated_by_id\", \"states\".\"deleted_at\", \"states\".\"id\", \"states\".\"project_id\", \"states\".\"workspace_id\", \"states\".\"name\", \"states\".\"description\", \"states\".\"color\", \"states\".\"slug\", \"states\".\"sequence\", \"states\".\"group\", \"states\".\"is_triage\", \"states\".\"default\", \"states\".\"external_source\", \"states\".\"external_id\" FROM \"issues\" LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") LEFT OUTER JOIN \"issues\" T5 ON (\"issues\".\"parent_id\" = T5.\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND NOT (\"states\".\"group\" = triage AND \"states\".\"group\" IS NOT NULL) AND NOT (\"issues\".\"archived_at\" IS NOT NULL) AND NOT (\"projects\".\"archived_at\" IS NOT NULL) AND NOT (\"issues\".\"is_draft\") AND \"workspaces\".\"slug\" = ws-conv659-2 AND \"projects\".\"identifier\" = CT00003) ORDER BY \"issues\".\"created_at\" DESC",
+      "rows": [
+        {
+          "id": "8cf74359-a898-48e9-95ac-0b6595ed4ff2",
+          "sequence_id": "5",
+          "name": "Bad-default probe",
+          "sub_issues_count": "0"
+        },
+        {
+          "id": "0c4a0be2-b19a-4fc2-acff-17c5eb36ffba",
+          "sequence_id": "4",
+          "name": "Default-assignee probe",
+          "sub_issues_count": "0"
+        },
+        {
+          "id": "a0481077-6fbd-47aa-9b27-ac2595085857",
+          "sequence_id": "3",
+          "name": "Renamed again",
+          "sub_issues_count": "0"
+        },
+        {
+          "id": "772ffddc-9da2-4b8d-a49e-d195778bfce7",
+          "sequence_id": "2",
+          "name": "pod issue",
+          "sub_issues_count": "0"
+        },
+        {
+          "id": "1431bba5-e025-4350-98c9-43d6cb58863f",
+          "sequence_id": "1",
+          "name": "pod issue",
+          "sub_issues_count": "0"
+        },
+        {
+          "id": "25ace52e-c64d-4043-a700-911b1e42bffc",
+          "sequence_id": "2",
+          "name": "Second issue",
+          "sub_issues_count": "0"
+        },
+        {
+          "id": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "sequence_id": "1",
+          "name": "First issue",
+          "sub_issues_count": "0"
+        }
+      ]
+    },
+    "list_get_queryset": {
+      "source": "api/views/issue.py:283-300",
+      "sql": "SELECT DISTINCT \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"id\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\", (SELECT Count(U0.\"id\") AS \"count\" FROM \"issues\" U0 LEFT OUTER JOIN \"states\" U1 ON (U0.\"state_id\" = U1.\"id\") INNER JOIN \"projects\" U2 ON (U0.\"project_id\" = U2.\"id\") WHERE (U0.\"deleted_at\" IS NULL AND NOT (U1.\"group\" = triage AND U1.\"group\" IS NOT NULL) AND NOT (U0.\"archived_at\" IS NOT NULL) AND NOT (U2.\"archived_at\" IS NOT NULL) AND NOT (U0.\"is_draft\") AND U0.\"parent_id\" = (\"issues\".\"id\"))) AS \"sub_issues_count\", \"projects\".\"created_at\", \"projects\".\"updated_at\", \"projects\".\"created_by_id\", \"projects\".\"updated_by_id\", \"projects\".\"deleted_at\", \"projects\".\"id\", \"projects\".\"name\", \"projects\".\"description\", \"projects\".\"description_text\", \"projects\".\"description_html\", \"projects\".\"network\", \"projects\".\"workspace_id\", \"projects\".\"identifier\", \"projects\".\"default_assignee_id\", \"projects\".\"project_lead_id\", \"projects\".\"emoji\", \"projects\".\"icon_prop\", \"projects\".\"module_view\", \"projects\".\"cycle_view\", \"projects\".\"issue_views_view\", \"projects\".\"page_view\", \"projects\".\"intake_view\", \"projects\".\"is_time_tracking_enabled\", \"projects\".\"is_issue_type_enabled\", \"projects\".\"is_default\", \"projects\".\"guest_view_all_features\", \"projects\".\"members_can_edit_states\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"estimate_id\", \"projects\".\"archive_in\", \"projects\".\"close_in\", \"projects\".\"logo_props\", \"projects\".\"default_state_id\", \"projects\".\"archived_at\", \"projects\".\"timezone\", \"projects\".\"external_source\", \"projects\".\"external_id\", \"projects\".\"repo_url\", \"projects\".\"base_branch\", \"projects\".\"agent_default_interval_seconds\", \"projects\".\"agent_default_max_ticks\", \"projects\".\"agent_review_default_interval_seconds\", \"projects\".\"agent_test_default_interval_seconds\", \"projects\".\"agent_ticking_enabled\", \"projects\".\"default_agent_executor\", \"workspaces\".\"created_at\", \"workspaces\".\"updated_at\", \"workspaces\".\"created_by_id\", \"workspaces\".\"updated_by_id\", \"workspaces\".\"deleted_at\", \"workspaces\".\"id\", \"workspaces\".\"name\", \"workspaces\".\"logo\", \"workspaces\".\"logo_asset_id\", \"workspaces\".\"owner_id\", \"workspaces\".\"slug\", \"workspaces\".\"organization_size\", \"workspaces\".\"timezone\", \"workspaces\".\"background_color\", T5.\"created_at\", T5.\"updated_at\", T5.\"created_by_id\", T5.\"updated_by_id\", T5.\"deleted_at\", T5.\"id\", T5.\"project_id\", T5.\"workspace_id\", T5.\"parent_id\", T5.\"state_id\", T5.\"point\", T5.\"estimate_point_id\", T5.\"name\", T5.\"description_json\", T5.\"description_html\", T5.\"description_stripped\", T5.\"description_binary\", T5.\"priority\", T5.\"complexity_score\", T5.\"start_date\", T5.\"target_date\", T5.\"sequence_id\", T5.\"sort_order\", T5.\"completed_at\", T5.\"archived_at\", T5.\"is_draft\", T5.\"external_source\", T5.\"external_id\", T5.\"type_id\", T5.\"git_work_branch\", T5.\"workpad\", T5.\"created_via\", T5.\"assigned_pod_id\", T5.\"agent_executor\", \"states\".\"created_at\", \"states\".\"updated_at\", \"states\".\"created_by_id\", \"states\".\"updated_by_id\", \"states\".\"deleted_at\", \"states\".\"id\", \"states\".\"project_id\", \"states\".\"workspace_id\", \"states\".\"name\", \"states\".\"description\", \"states\".\"color\", \"states\".\"slug\", \"states\".\"sequence\", \"states\".\"group\", \"states\".\"is_triage\", \"states\".\"default\", \"states\".\"external_source\", \"states\".\"external_id\" FROM \"issues\" LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") LEFT OUTER JOIN \"issues\" T5 ON (\"issues\".\"parent_id\" = T5.\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND NOT (\"states\".\"group\" = triage AND \"states\".\"group\" IS NOT NULL) AND NOT (\"issues\".\"archived_at\" IS NOT NULL) AND NOT (\"projects\".\"archived_at\" IS NOT NULL) AND NOT (\"issues\".\"is_draft\") AND \"issues\".\"project_id\" = d715be3d-234f-46ef-89a3-97f0c7c04b7e AND \"workspaces\".\"slug\" = ws-conv659-2) ORDER BY \"issues\".\"created_at\" DESC",
+      "rows": [
+        {
+          "id": "8cf74359-a898-48e9-95ac-0b6595ed4ff2",
+          "sequence_id": "5",
+          "name": "Bad-default probe",
+          "priority": "none",
+          "sub_issues_count": "0"
+        },
+        {
+          "id": "0c4a0be2-b19a-4fc2-acff-17c5eb36ffba",
+          "sequence_id": "4",
+          "name": "Default-assignee probe",
+          "priority": "none",
+          "sub_issues_count": "0"
+        },
+        {
+          "id": "a0481077-6fbd-47aa-9b27-ac2595085857",
+          "sequence_id": "3",
+          "name": "Renamed again",
+          "priority": "low",
+          "sub_issues_count": "0"
+        },
+        {
+          "id": "772ffddc-9da2-4b8d-a49e-d195778bfce7",
+          "sequence_id": "2",
+          "name": "pod issue",
+          "priority": "none",
+          "sub_issues_count": "0"
+        },
+        {
+          "id": "1431bba5-e025-4350-98c9-43d6cb58863f",
+          "sequence_id": "1",
+          "name": "pod issue",
+          "priority": "none",
+          "sub_issues_count": "0"
+        },
+        {
+          "id": "25ace52e-c64d-4043-a700-911b1e42bffc",
+          "sequence_id": "2",
+          "name": "Second issue",
+          "priority": "none",
+          "sub_issues_count": "0"
+        },
+        {
+          "id": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "sequence_id": "1",
+          "name": "First issue",
+          "priority": "high",
+          "sub_issues_count": "0"
+        }
+      ]
+    },
+    "work_item_list_filters": {
+      "source": "api/views/issue.py:368-370; utils/issue_filters.py:573-654",
+      "samples": {
+        "empty": {
+          "ok": true,
+          "filters": {}
+        },
+        "state_uuid": {
+          "ok": true,
+          "filters": {
+            "state__in": "[UUID('97b22834-b823-4109-a527-b39aa310ceae')]"
+          }
+        },
+        "state_name": {
+          "ok": true,
+          "filters": {
+            "state__in": "[UUID('97b22834-b823-4109-a527-b39aa310ceae')]"
+          }
+        },
+        "state_unknown": {
+          "ok": false,
+          "error": "Unknown state name(s): Nope. Valid states: Todo."
+        },
+        "state_group": {
+          "ok": true,
+          "filters": {
+            "state__group__in": "['unstarted', 'started']"
+          }
+        },
+        "state_group_bad": {
+          "ok": false,
+          "error": "Unknown state group(s): bogus. Valid groups: backlog, unstarted, started, review, test, completed, cancelled."
+        },
+        "priority": {
+          "ok": true,
+          "filters": {
+            "priority__in": "['high', 'low']"
+          }
+        },
+        "priority_bad": {
+          "ok": false,
+          "error": "Unknown priority value(s): critical. Valid priorities: urgent, high, medium, low, none."
+        },
+        "parent_null": {
+          "ok": true,
+          "filters": {
+            "parent__isnull": "True"
+          }
+        },
+        "parent_mixed": {
+          "ok": false,
+          "error": "parent=null cannot be combined with specific parent issues."
+        },
+        "parent_bad": {
+          "ok": false,
+          "error": "Invalid parent 'zzz': expected an issue UUID, an identifier like PROJ-123, or null."
+        },
+        "parent_unknown_ident": {
+          "ok": false,
+          "error": "Unknown parent issue 'ZZZ-999'."
+        },
+        "parent_ident": {
+          "ok": true,
+          "filters": {
+            "parent__in": "[UUID('1431bba5-e025-4350-98c9-43d6cb58863f')]"
+          }
+        },
+        "labels_name": {
+          "ok": true,
+          "filters": {
+            "label_issue__label_id__in": "['c833c492-fa3d-49f5-85a4-0ef810642731']",
+            "label_issue__deleted_at__isnull": "True"
+          }
+        },
+        "labels_unknown": {
+          "ok": false,
+          "error": "Unknown label name(s): nope. Valid labels: bug, feature."
+        },
+        "assignees_ok": {
+          "ok": true,
+          "filters": {
+            "issue_assignee__assignee_id__in": "['79c81d76-5a93-4d3d-894d-5935576834b6']",
+            "issue_assignee__deleted_at__isnull": "True"
+          }
+        },
+        "assignees_bad": {
+          "ok": false,
+          "error": "Invalid assignee id(s): zzz. Expected user UUIDs."
+        }
+      },
+      "state_group_order": [
+        "backlog",
+        "unstarted",
+        "started",
+        "review",
+        "test",
+        "completed",
+        "cancelled"
+      ]
+    },
+    "ordering": {
+      "source": "api/views/issue.py:361-437",
+      "variants": {
+        "default_-created_at": {
+          "order_by_sql": "ORDER BY U0.\"created_at\" DESC LIMIT 1) AS \"cycle_id\", (SELECT Count(U0.\"id\") AS \"count\" FROM \"issue_links\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\"))) AS \"link_count\", (SELECT Count(U0.\"id\") AS \"count\" FROM \"file_assets\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"entity_type\" = ISSUE_ATTACHMENT AND U0.\"issue_id\" = (\"issues\".\"id\"))) AS \"attachment_count\", \"projects\".\"created_at\", \"projects\".\"updated_at\", \"projects\".\"created_by_id\", \"projects\".\"updated_by_id\", \"projects\".\"deleted_at\", \"projects\".\"id\", \"projects\".\"name\", \"projects\".\"description\", \"projects\".\"description_text\", \"projects\".\"description_html\", \"projects\".\"network\", \"projects\".\"workspace_id\", \"projects\".\"identifier\", \"projects\".\"default_assignee_id\", \"projects\".\"project_lead_id\", \"projects\".\"emoji\", \"projects\".\"icon_prop\", \"projects\".\"module_view\", \"projects\".\"cycle_view\", \"projects\".\"issue_views_view\", \"projects\".\"page_view\", \"projects\".\"intake_view\", \"projects\".\"is_time_tracking_enabled\", \"projects\".\"is_issue_type_enabled\", \"projects\".\"is_default\", \"projects\".\"guest_view_all_features\", \"projects\".\"members_can_edit_states\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\"",
+          "ids": [
+            "8cf74359-a898-48e9-95ac-0b6595ed4ff2",
+            "0c4a0be2-b19a-4fc2-acff-17c5eb36ffba",
+            "a0481077-6fbd-47aa-9b27-ac2595085857",
+            "772ffddc-9da2-4b8d-a49e-d195778bfce7",
+            "1431bba5-e025-4350-98c9-43d6cb58863f",
+            "25ace52e-c64d-4043-a700-911b1e42bffc",
+            "a7509d00-345f-47fb-bee3-6bcf7d3339e2"
+          ]
+        },
+        "priority": {
+          "order_by_sql": "ORDER BY U0.\"created_at\" DESC LIMIT 1) AS \"cycle_id\", (SELECT Count(U0.\"id\") AS \"count\" FROM \"issue_links\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\"))) AS \"link_count\", (SELECT Count(U0.\"id\") AS \"count\" FROM \"file_assets\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"entity_type\" = ISSUE_ATTACHMENT AND U0.\"issue_id\" = (\"issues\".\"id\"))) AS \"attachment_count\", CASE WHEN \"issues\".\"priority\" = urgent THEN 0 WHEN \"issues\".\"priority\" = high THEN 1 WHEN \"issues\".\"priority\" = medium THEN 2 WHEN \"issues\".\"priority\" = low THEN 3 WHEN \"issues\".\"priority\" = none THEN 4 ELSE NULL END AS \"priority_order\", \"projects\".\"created_at\", \"projects\".\"updated_at\", \"projects\".\"created_by_id\", \"projects\".\"updated_by_id\", \"projects\".\"deleted_at\", \"projects\".\"id\", \"projects\".\"name\", \"projects\".\"description\", \"projects\".\"description_text\", \"projects\".\"description_html\", \"projects\".\"network\", \"projects\".\"workspace_id\", \"projects\".\"identifier\", \"projects\".\"default_assignee_id\", \"projects\".\"project_lead_id\", \"projects\".\"emoji\", \"projects\".\"icon_prop\", \"projects\".\"module_view\", \"projects\".\"cycle_view\", \"projects\".\"issue_views_view\", \"projects\".\"page_view\", \"projects\".\"intake_view\", \"projects",
+          "ids": [
+            "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+            "a0481077-6fbd-47aa-9b27-ac2595085857",
+            "0c4a0be2-b19a-4fc2-acff-17c5eb36ffba",
+            "1431bba5-e025-4350-98c9-43d6cb58863f",
+            "25ace52e-c64d-4043-a700-911b1e42bffc",
+            "772ffddc-9da2-4b8d-a49e-d195778bfce7",
+            "8cf74359-a898-48e9-95ac-0b6595ed4ff2"
+          ]
+        },
+        "-priority": {
+          "order_by_sql": "ORDER BY U0.\"created_at\" DESC LIMIT 1) AS \"cycle_id\", (SELECT Count(U0.\"id\") AS \"count\" FROM \"issue_links\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\"))) AS \"link_count\", (SELECT Count(U0.\"id\") AS \"count\" FROM \"file_assets\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"entity_type\" = ISSUE_ATTACHMENT AND U0.\"issue_id\" = (\"issues\".\"id\"))) AS \"attachment_count\", CASE WHEN \"issues\".\"priority\" = none THEN 0 WHEN \"issues\".\"priority\" = low THEN 1 WHEN \"issues\".\"priority\" = medium THEN 2 WHEN \"issues\".\"priority\" = high THEN 3 WHEN \"issues\".\"priority\" = urgent THEN 4 ELSE NULL END AS \"priority_order\", \"projects\".\"created_at\", \"projects\".\"updated_at\", \"projects\".\"created_by_id\", \"projects\".\"updated_by_id\", \"projects\".\"deleted_at\", \"projects\".\"id\", \"projects\".\"name\", \"projects\".\"description\", \"projects\".\"description_text\", \"projects\".\"description_html\", \"projects\".\"network\", \"projects\".\"workspace_id\", \"projects\".\"identifier\", \"projects\".\"default_assignee_id\", \"projects\".\"project_lead_id\", \"projects\".\"emoji\", \"projects\".\"icon_prop\", \"projects\".\"module_view\", \"projects\".\"cycle_view\", \"projects\".\"issue_views_view\", \"projects\".\"page_view\", \"projects\".\"intake_view\", \"projects",
+          "ids": [
+            "0c4a0be2-b19a-4fc2-acff-17c5eb36ffba",
+            "1431bba5-e025-4350-98c9-43d6cb58863f",
+            "25ace52e-c64d-4043-a700-911b1e42bffc",
+            "772ffddc-9da2-4b8d-a49e-d195778bfce7",
+            "8cf74359-a898-48e9-95ac-0b6595ed4ff2",
+            "a0481077-6fbd-47aa-9b27-ac2595085857",
+            "a7509d00-345f-47fb-bee3-6bcf7d3339e2"
+          ]
+        },
+        "state__group": {
+          "order_by_sql": "ORDER BY U0.\"created_at\" DESC LIMIT 1) AS \"cycle_id\", (SELECT Count(U0.\"id\") AS \"count\" FROM \"issue_links\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\"))) AS \"link_count\", (SELECT Count(U0.\"id\") AS \"count\" FROM \"file_assets\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"entity_type\" = ISSUE_ATTACHMENT AND U0.\"issue_id\" = (\"issues\".\"id\"))) AS \"attachment_count\", CASE WHEN \"states\".\"group\" = backlog THEN 0 WHEN \"states\".\"group\" = unstarted THEN 1 WHEN \"states\".\"group\" = started THEN 2 WHEN \"states\".\"group\" = review THEN 3 WHEN \"states\".\"group\" = test THEN 4 WHEN \"states\".\"group\" = completed THEN 5 WHEN \"states\".\"group\" = cancelled THEN 6 ELSE 7 END AS \"state_order\", \"projects\".\"created_at\", \"projects\".\"updated_at\", \"projects\".\"created_by_id\", \"projects\".\"updated_by_id\", \"projects\".\"deleted_at\", \"projects\".\"id\", \"projects\".\"name\", \"projects\".\"description\", \"projects\".\"description_text\", \"projects\".\"description_html\", \"projects\".\"network\", \"projects\".\"workspace_id\", \"projects\".\"identifier\", \"projects\".\"default_assignee_id\", \"projects\".\"project_lead_id\", \"projects\".\"emoji\", \"projects\".\"icon_prop\", \"projects\".\"module_view\", \"projects\".\"cycle_view\", \"projects\".\"issue_v",
+          "ids": [
+            "0c4a0be2-b19a-4fc2-acff-17c5eb36ffba",
+            "1431bba5-e025-4350-98c9-43d6cb58863f",
+            "25ace52e-c64d-4043-a700-911b1e42bffc",
+            "772ffddc-9da2-4b8d-a49e-d195778bfce7",
+            "8cf74359-a898-48e9-95ac-0b6595ed4ff2",
+            "a0481077-6fbd-47aa-9b27-ac2595085857",
+            "a7509d00-345f-47fb-bee3-6bcf7d3339e2"
+          ]
+        },
+        "labels__name": {
+          "order_by_sql": "ORDER BY U0.\"created_at\" DESC LIMIT 1) AS \"cycle_id\", (SELECT Count(U0.\"id\") AS \"count\" FROM \"issue_links\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\"))) AS \"link_count\", (SELECT Count(U0.\"id\") AS \"count\" FROM \"file_assets\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"entity_type\" = ISSUE_ATTACHMENT AND U0.\"issue_id\" = (\"issues\".\"id\"))) AS \"attachment_count\", MAX(\"labels\".\"name\") AS \"max_values\", \"projects\".\"created_at\", \"projects\".\"updated_at\", \"projects\".\"created_by_id\", \"projects\".\"updated_by_id\", \"projects\".\"deleted_at\", \"projects\".\"id\", \"projects\".\"name\", \"projects\".\"description\", \"projects\".\"description_text\", \"projects\".\"description_html\", \"projects\".\"network\", \"projects\".\"workspace_id\", \"projects\".\"identifier\", \"projects\".\"default_assignee_id\", \"projects\".\"project_lead_id\", \"projects\".\"emoji\", \"projects\".\"icon_prop\", \"projects\".\"module_view\", \"projects\".\"cycle_view\", \"projects\".\"issue_views_view\", \"projects\".\"page_view\", \"projects\".\"intake_view\", \"projects\".\"is_time_tracking_enabled\", \"projects\".\"is_issue_type_enabled\", \"projects\".\"is_default\", \"projects\".\"guest_view_all_features\", \"projects\".\"members_can_edit_states\", \"projects\".\"cover_image\", \"projec",
+          "ids": [
+            "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+            "a0481077-6fbd-47aa-9b27-ac2595085857",
+            "0c4a0be2-b19a-4fc2-acff-17c5eb36ffba",
+            "1431bba5-e025-4350-98c9-43d6cb58863f",
+            "25ace52e-c64d-4043-a700-911b1e42bffc",
+            "772ffddc-9da2-4b8d-a49e-d195778bfce7",
+            "8cf74359-a898-48e9-95ac-0b6595ed4ff2"
+          ]
+        }
+      }
+    },
+    "paginator": {
+      "source": "api/views/issue.py:439-444; utils/paginator.py:635-694 (BasePaginator)",
+      "status": 200,
+      "envelope_keys": [
+        "count",
+        "extra_stats",
+        "grouped_by",
+        "next_cursor",
+        "next_page_results",
+        "prev_cursor",
+        "prev_page_results",
+        "results",
+        "sub_grouped_by",
+        "total_count",
+        "total_pages",
+        "total_results"
+      ],
+      "page1": {
+        "count": 2,
+        "total_count": 7,
+        "total_pages": 4,
+        "total_results": 7,
+        "next_cursor": "2:1:0",
+        "prev_cursor": "2:-1:1",
+        "next_page_results": true,
+        "prev_page_results": false
+      },
+      "page1_ids": [
+        "8cf74359-a898-48e9-95ac-0b6595ed4ff2",
+        "0c4a0be2-b19a-4fc2-acff-17c5eb36ffba"
+      ],
+      "page2": {
+        "status": 200,
+        "prev_cursor": "2:0:1",
+        "next_cursor": "2:2:0",
+        "ids": [
+          "a0481077-6fbd-47aa-9b27-ac2595085857",
+          "772ffddc-9da2-4b8d-a49e-d195778bfce7"
+        ]
+      },
+      "per_page_invalid": {
+        "status": 400,
+        "body": {
+          "detail": "Invalid per_page parameter."
+        }
+      },
+      "per_page_over_max": {
+        "status": 400,
+        "body": {
+          "detail": "Invalid per_page value. Cannot exceed 1000."
+        }
+      }
+    },
+    "external_id_lookup": {
+      "source": "api/views/issue.py:346-359",
+      "sql": "SELECT \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"id\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"external_id\" = EXT-1 AND \"issues\".\"external_source\" = jira AND \"issues\".\"project_id\" = d715be3d-234f-46ef-89a3-97f0c7c04b7e AND \"workspaces\".\"slug\" = ws-conv659-2) ORDER BY \"issues\".\"created_at\" DESC",
+      "row_id": "8cf74359-a898-48e9-95ac-0b6595ed4ff2"
+    },
+    "detail_get_queryset": {
+      "source": "api/views/issue.py:552-569",
+      "sql": "SELECT DISTINCT \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"id\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\", (SELECT Count(U0.\"id\") AS \"count\" FROM \"issues\" U0 LEFT OUTER JOIN \"states\" U1 ON (U0.\"state_id\" = U1.\"id\") INNER JOIN \"projects\" U2 ON (U0.\"project_id\" = U2.\"id\") WHERE (U0.\"deleted_at\" IS NULL AND NOT (U1.\"group\" = triage AND U1.\"group\" IS NOT NULL) AND NOT (U0.\"archived_at\" IS NOT NULL) AND NOT (U2.\"archived_at\" IS NOT NULL) AND NOT (U0.\"is_draft\") AND U0.\"parent_id\" = (\"issues\".\"id\"))) AS \"sub_issues_count\", \"projects\".\"created_at\", \"projects\".\"updated_at\", \"projects\".\"created_by_id\", \"projects\".\"updated_by_id\", \"projects\".\"deleted_at\", \"projects\".\"id\", \"projects\".\"name\", \"projects\".\"description\", \"projects\".\"description_text\", \"projects\".\"description_html\", \"projects\".\"network\", \"projects\".\"workspace_id\", \"projects\".\"identifier\", \"projects\".\"default_assignee_id\", \"projects\".\"project_lead_id\", \"projects\".\"emoji\", \"projects\".\"icon_prop\", \"projects\".\"module_view\", \"projects\".\"cycle_view\", \"projects\".\"issue_views_view\", \"projects\".\"page_view\", \"projects\".\"intake_view\", \"projects\".\"is_time_tracking_enabled\", \"projects\".\"is_issue_type_enabled\", \"projects\".\"is_default\", \"projects\".\"guest_view_all_features\", \"projects\".\"members_can_edit_states\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"estimate_id\", \"projects\".\"archive_in\", \"projects\".\"close_in\", \"projects\".\"logo_props\", \"projects\".\"default_state_id\", \"projects\".\"archived_at\", \"projects\".\"timezone\", \"projects\".\"external_source\", \"projects\".\"external_id\", \"projects\".\"repo_url\", \"projects\".\"base_branch\", \"projects\".\"agent_default_interval_seconds\", \"projects\".\"agent_default_max_ticks\", \"projects\".\"agent_review_default_interval_seconds\", \"projects\".\"agent_test_default_interval_seconds\", \"projects\".\"agent_ticking_enabled\", \"projects\".\"default_agent_executor\", \"workspaces\".\"created_at\", \"workspaces\".\"updated_at\", \"workspaces\".\"created_by_id\", \"workspaces\".\"updated_by_id\", \"workspaces\".\"deleted_at\", \"workspaces\".\"id\", \"workspaces\".\"name\", \"workspaces\".\"logo\", \"workspaces\".\"logo_asset_id\", \"workspaces\".\"owner_id\", \"workspaces\".\"slug\", \"workspaces\".\"organization_size\", \"workspaces\".\"timezone\", \"workspaces\".\"background_color\", T5.\"created_at\", T5.\"updated_at\", T5.\"created_by_id\", T5.\"updated_by_id\", T5.\"deleted_at\", T5.\"id\", T5.\"project_id\", T5.\"workspace_id\", T5.\"parent_id\", T5.\"state_id\", T5.\"point\", T5.\"estimate_point_id\", T5.\"name\", T5.\"description_json\", T5.\"description_html\", T5.\"description_stripped\", T5.\"description_binary\", T5.\"priority\", T5.\"complexity_score\", T5.\"start_date\", T5.\"target_date\", T5.\"sequence_id\", T5.\"sort_order\", T5.\"completed_at\", T5.\"archived_at\", T5.\"is_draft\", T5.\"external_source\", T5.\"external_id\", T5.\"type_id\", T5.\"git_work_branch\", T5.\"workpad\", T5.\"created_via\", T5.\"assigned_pod_id\", T5.\"agent_executor\", \"states\".\"created_at\", \"states\".\"updated_at\", \"states\".\"created_by_id\", \"states\".\"updated_by_id\", \"states\".\"deleted_at\", \"states\".\"id\", \"states\".\"project_id\", \"states\".\"workspace_id\", \"states\".\"name\", \"states\".\"description\", \"states\".\"color\", \"states\".\"slug\", \"states\".\"sequence\", \"states\".\"group\", \"states\".\"is_triage\", \"states\".\"default\", \"states\".\"external_source\", \"states\".\"external_id\" FROM \"issues\" LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") LEFT OUTER JOIN \"issues\" T5 ON (\"issues\".\"parent_id\" = T5.\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND NOT (\"states\".\"group\" = triage AND \"states\".\"group\" IS NOT NULL) AND NOT (\"issues\".\"archived_at\" IS NOT NULL) AND NOT (\"projects\".\"archived_at\" IS NOT NULL) AND NOT (\"issues\".\"is_draft\") AND \"issues\".\"project_id\" = d715be3d-234f-46ef-89a3-97f0c7c04b7e AND \"workspaces\".\"slug\" = ws-conv659-2) ORDER BY \"issues\".\"created_at\" DESC",
+      "row_count": 7
+    },
+    "detail_get_lookup": {
+      "source": "api/views/issue.py:600-605",
+      "sql": "SELECT \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"id\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\", (SELECT Count(U0.\"id\") AS \"count\" FROM \"issues\" U0 LEFT OUTER JOIN \"states\" U1 ON (U0.\"state_id\" = U1.\"id\") INNER JOIN \"projects\" U2 ON (U0.\"project_id\" = U2.\"id\") WHERE (U0.\"deleted_at\" IS NULL AND NOT (U1.\"group\" = triage AND U1.\"group\" IS NOT NULL) AND NOT (U0.\"archived_at\" IS NOT NULL) AND NOT (U2.\"archived_at\" IS NOT NULL) AND NOT (U0.\"is_draft\") AND U0.\"parent_id\" = (\"issues\".\"id\"))) AS \"sub_issues_count\" FROM \"issues\" LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND NOT (\"states\".\"group\" = triage AND \"states\".\"group\" IS NOT NULL) AND NOT (\"issues\".\"archived_at\" IS NOT NULL) AND NOT (\"projects\".\"archived_at\" IS NOT NULL) AND NOT (\"issues\".\"is_draft\") AND \"issues\".\"id\" = a7509d00-345f-47fb-bee3-6bcf7d3339e2 AND \"issues\".\"project_id\" = d715be3d-234f-46ef-89a3-97f0c7c04b7e AND \"workspaces\".\"slug\" = ws-conv659-2) ORDER BY \"issues\".\"created_at\" DESC",
+      "row": [
+        {
+          "id": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "name": "First issue",
+          "sub_issues_count": "0"
+        }
+      ]
+    },
+    "put_upsert": {
+      "source": "api/views/issue.py:639-767",
+      "unrouted": "No route maps PUT (urls/work_item.py has no 'put' in http_method_names); live PUT returns 405. Code below is reachable only if routed.",
+      "lookup_sql": "SELECT \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"id\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"external_id\" = EXT-1 AND \"issues\".\"external_source\" = jira AND \"issues\".\"project_id\" = d715be3d-234f-46ef-89a3-97f0c7c04b7e AND \"workspaces\".\"slug\" = ws-conv659-2) ORDER BY \"issues\".\"created_at\" DESC",
+      "lookup_row": "8cf74359-a898-48e9-95ac-0b6595ed4ff2",
+      "missing_keys_body": {
+        "error": "external_id and external_source are required"
+      },
+      "missing_keys_status": 400
+    },
+    "patch_lookup": {
+      "source": "api/views/issue.py:796",
+      "sql": "SELECT \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"id\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"id\" = a7509d00-345f-47fb-bee3-6bcf7d3339e2 AND \"issues\".\"project_id\" = d715be3d-234f-46ef-89a3-97f0c7c04b7e AND \"workspaces\".\"slug\" = ws-conv659-2) ORDER BY \"issues\".\"created_at\" DESC",
+      "row_before": [
+        {
+          "id": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "name": "First issue",
+          "priority": "high"
+        }
+      ]
+    },
+    "delete_lookup": {
+      "source": "api/views/issue.py:884-897",
+      "sql": "SELECT \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"id\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"id\" = a7509d00-345f-47fb-bee3-6bcf7d3339e2 AND \"issues\".\"project_id\" = d715be3d-234f-46ef-89a3-97f0c7c04b7e AND \"workspaces\".\"slug\" = ws-conv659-2) ORDER BY \"issues\".\"created_at\" DESC",
+      "admin_or_creator_check": "issue.created_by_id == user.id OR active ProjectMember role=20; else 403 {'error': 'Only admin or creator can delete the work item'}"
+    },
+    "workspace_get_lookup": {
+      "source": "api/views/issue.py:250-260",
+      "sql": "SELECT \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"id\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\", (SELECT Count(U0.\"id\") AS \"count\" FROM \"issues\" U0 LEFT OUTER JOIN \"states\" U1 ON (U0.\"state_id\" = U1.\"id\") INNER JOIN \"projects\" U2 ON (U0.\"project_id\" = U2.\"id\") WHERE (U0.\"deleted_at\" IS NULL AND NOT (U1.\"group\" = triage AND U1.\"group\" IS NOT NULL) AND NOT (U0.\"archived_at\" IS NOT NULL) AND NOT (U2.\"archived_at\" IS NOT NULL) AND NOT (U0.\"is_draft\") AND U0.\"parent_id\" = (\"issues\".\"id\"))) AS \"sub_issues_count\" FROM \"issues\" LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND NOT (\"states\".\"group\" = triage AND \"states\".\"group\" IS NOT NULL) AND NOT (\"issues\".\"archived_at\" IS NOT NULL) AND NOT (\"projects\".\"archived_at\" IS NOT NULL) AND NOT (\"issues\".\"is_draft\") AND \"projects\".\"identifier\" = CT00003 AND \"issues\".\"sequence_id\" = 1 AND \"workspaces\".\"slug\" = ws-conv659-2) ORDER BY \"issues\".\"created_at\" DESC",
+      "row": [
+        {
+          "id": "1431bba5-e025-4350-98c9-43d6cb58863f",
+          "name": "pod issue",
+          "sequence_id": "1",
+          "sub_issues_count": "0"
+        },
+        {
+          "id": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+          "name": "First issue",
+          "sequence_id": "1",
+          "sub_issues_count": "0"
+        }
+      ]
+    }
+  }
+}
