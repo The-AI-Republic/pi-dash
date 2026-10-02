@@ -1,0 +1,197 @@
+{
+  "_trace": "apps/api/pi_dash/app/serializers/state.py:12-34 (StateSerializer), :37-41 (StateLiteSerializer); apps/api/pi_dash/app/serializers/estimate.py:13-17 (EstimateSerializer), :20-32 (EstimatePointSerializer), :35-41 (EstimateReadSerializer)",
+  "_method": "Django shell probes (pi_dash.settings.test) against scratch Postgres pidash_562_fixtures; ORM + serializer + queryset code executed directly. Django 4.2.30, djangorestframework 3.15.2. Serializers rendered from live rows; validate() vectors driven through is_valid().",
+  "state": {
+    "keys": [
+      "id",
+      "project_id",
+      "workspace_id",
+      "name",
+      "color",
+      "group",
+      "default",
+      "description",
+      "sequence"
+    ],
+    "data": {
+      "id": "df077c5d-d6d2-4265-a706-1255887b90bb",
+      "project_id": "8ddb0885-215e-4ae3-a772-bfa2b42d4295",
+      "workspace_id": "eec47df5-8eb2-4aae-9093-320975d58cd3",
+      "name": "S4e33a3a3",
+      "color": "#111111",
+      "group": "unstarted",
+      "default": false,
+      "description": "",
+      "sequence": 45000.0
+    }
+  },
+  "state_note": "Declared 'order' field (state.py:13) has no model column: it is SkipField'd on read, so the read shape has 9 keys; the list view injects order per row (see FX-APROJ-10).",
+  "state_lite": {
+    "keys": [
+      "id",
+      "name",
+      "color",
+      "group"
+    ],
+    "data": {
+      "id": "df077c5d-d6d2-4265-a706-1255887b90bb",
+      "name": "S4e33a3a3",
+      "color": "#111111",
+      "group": "unstarted"
+    }
+  },
+  "state_validate_triage_veto": {
+    "ok": false,
+    "errors": {
+      "non_field_errors": [
+        "Cannot create triage state"
+      ]
+    }
+  },
+  "state_validate_ok": {
+    "ok": true,
+    "errors": {}
+  },
+  "estimate": {
+    "keys": [
+      "id",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+      "name",
+      "description",
+      "type",
+      "last_used",
+      "created_by",
+      "updated_by",
+      "project",
+      "workspace"
+    ],
+    "data": {
+      "id": "8abc7daa-8714-49c0-a429-638f15a2c214",
+      "created_at": "2026-10-02T22:13:45.023126Z",
+      "updated_at": "2026-10-02T22:13:45.023134Z",
+      "deleted_at": null,
+      "name": "E4e33a3a3",
+      "description": "",
+      "type": "points",
+      "last_used": false,
+      "created_by": null,
+      "updated_by": null,
+      "project": "8ddb0885-215e-4ae3-a772-bfa2b42d4295",
+      "workspace": "eec47df5-8eb2-4aae-9093-320975d58cd3"
+    }
+  },
+  "estimate_point": {
+    "keys": [
+      "id",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+      "key",
+      "description",
+      "value",
+      "created_by",
+      "updated_by",
+      "project",
+      "workspace",
+      "estimate"
+    ],
+    "data": {
+      "id": "67b19688-40c5-47e0-b470-d5b25fbb467c",
+      "created_at": "2026-10-02T22:13:45.025804Z",
+      "updated_at": "2026-10-02T22:13:45.025810Z",
+      "deleted_at": null,
+      "key": 1,
+      "description": "one",
+      "value": "1",
+      "created_by": null,
+      "updated_by": null,
+      "project": "8ddb0885-215e-4ae3-a772-bfa2b42d4295",
+      "workspace": "eec47df5-8eb2-4aae-9093-320975d58cd3",
+      "estimate": "8abc7daa-8714-49c0-a429-638f15a2c214"
+    }
+  },
+  "estimate_read": {
+    "keys": [
+      "id",
+      "points",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+      "name",
+      "description",
+      "type",
+      "last_used",
+      "created_by",
+      "updated_by",
+      "project",
+      "workspace"
+    ],
+    "data": {
+      "id": "8abc7daa-8714-49c0-a429-638f15a2c214",
+      "points": [
+        {
+          "id": "67b19688-40c5-47e0-b470-d5b25fbb467c",
+          "created_at": "2026-10-02T22:13:45.025804Z",
+          "updated_at": "2026-10-02T22:13:45.025810Z",
+          "deleted_at": null,
+          "key": 1,
+          "description": "one",
+          "value": "1",
+          "created_by": null,
+          "updated_by": null,
+          "project": "8ddb0885-215e-4ae3-a772-bfa2b42d4295",
+          "workspace": "eec47df5-8eb2-4aae-9093-320975d58cd3",
+          "estimate": "8abc7daa-8714-49c0-a429-638f15a2c214"
+        }
+      ],
+      "created_at": "2026-10-02T22:13:45.023126Z",
+      "updated_at": "2026-10-02T22:13:45.023134Z",
+      "deleted_at": null,
+      "name": "E4e33a3a3",
+      "description": "",
+      "type": "points",
+      "last_used": false,
+      "created_by": null,
+      "updated_by": null,
+      "project": "8ddb0885-215e-4ae3-a772-bfa2b42d4295",
+      "workspace": "eec47df5-8eb2-4aae-9093-320975d58cd3"
+    }
+  },
+  "point_validate": {
+    "empty_dict": {
+      "ok": false,
+      "errors": {
+        "value": [
+          "This field is required."
+        ]
+      }
+    },
+    "missing_value": {
+      "ok": false,
+      "errors": {
+        "value": [
+          "This field is required."
+        ]
+      }
+    },
+    "value_21_chars": {
+      "ok": false,
+      "errors": {
+        "non_field_errors": [
+          "Value can't be more than 20 characters"
+        ]
+      }
+    },
+    "value_20_chars": {
+      "ok": true,
+      "errors": {}
+    },
+    "ok": {
+      "ok": true,
+      "errors": {}
+    },
+    "note": "'Estimate points are required' (estimate.py:23) is unreachable via is_valid(): field-level 'value is required' fails first, so object validate() never runs on {}. The bulk partial_update view enforces non-empty separately."
+  }
+}
