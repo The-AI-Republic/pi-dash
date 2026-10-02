@@ -240,6 +240,7 @@ pub(crate) fn actor_or_401(
 
 /// [`resolve_project_id`] with denials rendered as responses (the merged
 /// lowercase rewrite-miss body matches live Django).
+#[allow(clippy::result_large_err)]
 pub(crate) async fn resolve_project_or_404(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -640,14 +641,23 @@ fn valid_host_char(c: char) -> bool {
 }
 
 /// TLD (`[a-z\ul-]{2,63}` — no digits — or `xn--` punycode): leading and
-/// trailing dashes are already excluded by the caller.
+/// trailing dashes are already excluded by the caller. The punycode branch
+/// is `xn--[a-z0-9]{1,59}` — ASCII alphanumerics only, no hyphens — so a
+/// hyphenated `xn--` label with digits (e.g. `xn--a1-b`) is invalid even
+/// though the general branch allows hyphens (verified against Django's
+/// `URLValidator`).
 fn valid_top_label(label: &str) -> bool {
     if label.chars().count() < 2 {
         return false;
     }
     if label.len() >= 4 && label.as_bytes()[..4].eq_ignore_ascii_case(b"xn--") {
         let rest = &label[4..];
-        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+        if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return true;
+        }
+        // Else fall through to the general branch: a hyphenated `xn--`
+        // label without digits (e.g. `xn--a-b`) still matches
+        // `[a-z\ul-]{2,63}`.
     }
     label
         .chars()
@@ -1549,6 +1559,7 @@ async fn link_create(
 const LINK_NOT_FOUND_BODY: &str = r#"{"detail":"No ModuleLink matches the given query."}"#;
 
 /// Shared detail lookup: the scoped row or the DRF 404 body.
+#[allow(clippy::result_large_err)]
 async fn link_detail_row(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -2230,6 +2241,7 @@ struct UserPropsContext {
     timezone: chrono_tz::Tz,
 }
 
+#[allow(clippy::result_large_err)]
 async fn user_props_context(
     state: &AppState,
     slug: &str,
@@ -2396,12 +2408,15 @@ async fn user_props_patch(
         user_id,
         timezone,
     } = context;
-    let Some(map) = body.as_object() else {
-        return Err(Denial::ServerError);
-    };
+    // `.get()` before the body (`base.py:828` runs before `request.data`
+    // is touched at `:835` — DRF parses the body lazily), so a non-dict
+    // body 404s without a row and 500s with one.
     let row = fetch_user_props(&pool, &slug, &project_id, &module_id, &user_id)
         .await?
         .ok_or(Denial::NotFound)?;
+    let Some(map) = body.as_object() else {
+        return Err(Denial::ServerError);
+    };
     let id = row
         .get("id")
         .and_then(|value| value.as_str())
@@ -2732,6 +2747,16 @@ mod tests {
             ("http://1.2.3.4/a@b/c@d", true),
             ("http://a@b@c/", false),
             ("http://a/b@c/d@e", false),
+            // Punycode TLD branch (`xn--[a-z0-9]{1,59}`): hyphens fail it,
+            // so a hyphen can only survive via the general (digit-free)
+            // branch (review vectors, verified against Django).
+            ("http://example.xn--p1ai/", true),
+            ("http://example.XN--P1AI/", true),
+            ("http://example.xn--a-b/", true),
+            ("http://example.xn--a1-b/", false),
+            ("http://example.XN--A1-B/", false),
+            ("http://example.c0m/", false),
+            ("http://example.1a/", false),
         ] {
             assert_eq!(django_url_valid(url), expected, "{url:?}");
         }

@@ -140,3 +140,22 @@ def test_user_properties_patch_without_row(api, seed, tenant_a, project_a, auth_
     )
     assert r.status_code == 404, r.text
     assert r.json() == {"error": "The required object does not exist."}
+
+
+def test_user_properties_patch_body_shape_after_row_lookup(api, seed, tenant_a, project_a, auth_a):
+    """Order pin: PATCH runs `.get()` before touching `request.data` (DRF
+    parses the body lazily), so a non-dict body 404s without a row and
+    500s once the row exists."""
+    mid = seed.module(tenant_a["workspace"]["id"], project_a, name="Props order")
+    r = api.patch(
+        _props_url(tenant_a, project_a, mid), headers=auth_a, json=[1, 2],
+    )
+    assert r.status_code == 404, r.text
+    assert r.json() == {"error": "The required object does not exist."}
+    r = api.get(_props_url(tenant_a, project_a, mid), headers=auth_a)
+    assert r.status_code == 200, r.text
+    r = api.patch(
+        _props_url(tenant_a, project_a, mid), headers=auth_a, json=[1, 2],
+    )
+    assert r.status_code == 500, r.text
+    assert r.json() == SERVER_ERROR

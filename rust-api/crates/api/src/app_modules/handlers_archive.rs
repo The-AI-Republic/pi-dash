@@ -251,6 +251,7 @@ struct ArchiveContext {
     timezone: chrono_tz::Tz,
 }
 
+#[allow(clippy::result_large_err)]
 async fn archive_context(
     state: &AppState,
     slug: &str,
