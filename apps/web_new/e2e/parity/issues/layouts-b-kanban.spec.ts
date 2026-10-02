@@ -182,9 +182,14 @@ test(
       await serverPatchIssue(seed.workspaceSlug, projectId, secondId, { priority: "medium" }, owner.cookie);
       await serverPatchIssue(seed.workspaceSlug, projectId, thirdId, { priority: "low" }, owner.cookie);
       await setBoardFilters(driver, seed, projectId, ctx, { group_by: "priority" });
-      await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(3);
+      // Empty groups stay visible, so all five priority columns render.
+      await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(5);
       const columns = await driver.kanbanColumns();
-      for (const column of columns) expect(column.count).toBe(1);
+      expect(columns.find((entry) => entry.name === "High")?.count).toBe(1);
+      expect(columns.find((entry) => entry.name === "Medium")?.count).toBe(1);
+      expect(columns.find((entry) => entry.name === "Low")?.count).toBe(1);
+      expect(columns.find((entry) => entry.name === "Urgent")?.count).toBe(0);
+      expect(columns.find((entry) => entry.name === "None")?.count).toBe(0);
     });
 
     await test.step("cleanup removes the scratch project", async () => {
@@ -464,11 +469,14 @@ test(
     await test.step("created-by columns still offer quick-add", async () => {
       // The inventory claims created-by columns never allow quick-add, but
       // the old app renders the entry there; the row records the correction
-      // and the new app follows the app, not the row's first draft.
+      // and the new app follows the app, not the row's first draft. Every
+      // creator renders a column (empty groups stay visible), so assert the
+      // entry on each of them rather than a fixed column count.
       await setBoardFilters(driver, seed, seed.projectId, ctx, { group_by: "created_by" });
-      await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(1);
-      const column = (await driver.kanbanColumns())[0]?.name ?? "";
-      expect(await driver.kanbanColumnHasQuickAdd(column)).toBe(true);
+      await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).not.toHaveLength(0);
+      for (const column of await driver.kanbanColumns()) {
+        expect(await driver.kanbanColumnHasQuickAdd(column.name)).toBe(true);
+      }
     });
 
     await test.step("guests see no quick-add entry", async () => {
@@ -498,13 +506,14 @@ test(
   async ({ driver, seed }) => {
     const owner = await signInFreshUser(seed.email, seed.password);
     const suffix = uniqueSuffix().slice(0, 6);
+    // An active cycle: membership calls reject completed (past-dated) cycles.
     const cycle = await serverCreateCycle(
       seed.workspaceSlug,
       seed.projectId,
       owner.cookie,
       `KB cycle ${suffix}`,
-      "2026-01-05",
-      "2026-01-12"
+      "2026-10-20",
+      "2026-11-20"
     );
     const firstId = await issueIdByName(seed, seed.projectId, owner.cookie, seed.issueNames[0] ?? "");
     await serverAddIssuesToCycle(seed.workspaceSlug, seed.projectId, cycle.id, [firstId], owner.cookie);
@@ -539,8 +548,8 @@ test(
 );
 
 test(
-  specTitle(["ISS-037", "ISS-041"], "reorder a card within its column and the non-manual overlay"),
-  { tag: specTags(["ISS-037", "ISS-041"]) },
+  specTitle(["ISS-037"], "reorder a card within its column"),
+  { tag: specTags(["ISS-037"]) },
   async ({ driver, seed }) => {
     const ctx = await openBoard(driver, seed, seed.projectId, { group_by: "state" });
     await expect.poll(() => driver.kanbanCards(), { timeout: 120_000 }).toHaveLength(3);
@@ -567,16 +576,6 @@ test(
       expect(middle).toBeLessThan(await orderOf(first));
     });
 
-    await test.step("a non-manual order overlays and suppresses the move", async () => {
-      const placed = await driver.kanbanColumnCards(column);
-      await setBoardFilters(driver, seed, seed.projectId, ctx, { order_by: "priority" });
-      await expect.poll(() => driver.kanbanColumnCards(column), { timeout: 120_000 }).toHaveLength(3);
-      const { overlay } = await driver.kanbanDragHoldOverColumn(first, column);
-      expect(overlay).not.toBeNull();
-      expect(overlay ?? "").toMatch(/priorit/i);
-      expect(await driver.kanbanColumnCards(column)).toEqual(placed);
-    });
-
     await test.step("cleanup restores orders and preferences", async () => {
       const ids = await Promise.all(
         [first, second, third].map((name) => issueIdByName(seed, seed.projectId, ctx.user.cookie, name))
@@ -584,6 +583,55 @@ test(
       // Restore a stable manual order: the seed sorts by creation sequence.
       const ranks = [15000, 25000, 35000];
       for (const [index, id] of ids.entries()) {
+        await serverPatchIssue(
+          seed.workspaceSlug,
+          seed.projectId,
+          id,
+          { sort_order: ranks[index] ?? 0 },
+          ctx.user.cookie
+        );
+      }
+      await restoreBoard(seed, seed.projectId, ctx);
+    });
+  }
+);
+
+test(
+  specTitle(["ISS-037", "ISS-041"], "bug: non-manual order persists the drop without feedback (NEWFRONT-154)"),
+  { tag: specTags(["ISS-037", "ISS-041"]) },
+  async ({ driver, seed }) => {
+    // The inventory says a non-manual order overlays the current order and
+    // suppresses the move; the old app shows the generic drop hint and
+    // persists a new sort_order with no toast and no visible change. The new
+    // app implements the intended (suppressed) behavior; this scenario pins
+    // the old one until NEWFRONT-154 lands.
+    const ctx = await openBoard(driver, seed, seed.projectId, { group_by: "state", order_by: "priority" });
+    await expect.poll(() => driver.kanbanCards(), { timeout: 120_000 }).toHaveLength(3);
+    const column = (await driver.kanbanColumns())[0]?.name ?? "";
+    const placed = await driver.kanbanColumnCards(column);
+    const [top] = placed;
+    if (!top) throw new Error("[parity] seed column never filled.");
+    const orderOf = async (name: string): Promise<number> => {
+      const id = await issueIdByName(seed, seed.projectId, ctx.user.cookie, name);
+      return (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, ctx.user.cookie)).sortOrder;
+    };
+    const before = await orderOf(top);
+
+    await test.step("the hold shows the generic hint, not the current order", async () => {
+      const { overlay } = await driver.kanbanDragHoldOverColumn(top, column);
+      expect(overlay).toBe("Drop here to move the work item");
+    });
+
+    await test.step("the release persists server-side with no visible change", async () => {
+      expect(await driver.kanbanColumnCards(column)).toEqual(placed);
+      expect(await driver.boardLastToast()).toBeNull();
+      expect(await orderOf(top)).not.toBe(before);
+    });
+
+    await test.step("cleanup restores orders and preferences", async () => {
+      const ranks = [15000, 25000, 35000];
+      for (const [index, name] of seed.issueNames.entries()) {
+        const id = await issueIdByName(seed, seed.projectId, ctx.user.cookie, name);
         await serverPatchIssue(
           seed.workspaceSlug,
           seed.projectId,

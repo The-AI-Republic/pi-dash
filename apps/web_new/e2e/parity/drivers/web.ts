@@ -1461,16 +1461,20 @@ export class WebDriver implements ParityDriver {
   }
 
   async kanbanCards(): Promise<KanbanCard[]> {
-    const cards = this.boardCardLinks();
-    const count = await cards.count();
-    const out: KanbanCard[] = [];
-    for (let index = 0; index < count; index += 1) {
-      const card = cards.nth(index);
-      const id = (await card.getAttribute("id")) ?? "";
-      const { issueId, groupId, subGroupId } = WebDriver.splitCardId(id);
-      out.push({ issueId, name: await this.boardCardName(card).innerText(), groupId, subGroupId });
-    }
-    return out;
+    // One evaluate for the whole board: per-card round trips stall when a
+    // hundred virtualized cards mount, churn, and unmount mid-read.
+    return this.boardCardLinks().evaluateAll((cards) =>
+      cards.map((card) => {
+        const parts = (card.id ?? "").split("_");
+        const name = card.querySelector("div.text-body-sm-medium > span")?.textContent?.trim() ?? "";
+        return {
+          issueId: parts[1] ?? "",
+          name,
+          groupId: parts[2] ?? "",
+          subGroupId: parts.slice(3).join("_"),
+        };
+      })
+    );
   }
 
   private async boardFlatColumnOuterByName(columnName: string): Promise<Locator> {
@@ -1488,13 +1492,13 @@ export class WebDriver implements ParityDriver {
 
   async kanbanColumnCards(columnName: string): Promise<string[]> {
     const outer = await this.boardFlatColumnOuterByName(columnName);
-    const cards = outer.locator('a[id^="issue_"]');
-    const count = await cards.count();
-    const names: string[] = [];
-    for (let index = 0; index < count; index += 1) {
-      names.push(await this.boardCardName(cards.nth(index)).innerText());
-    }
-    return names;
+    // One evaluate for the whole column: per-card round trips stall when a
+    // hundred virtualized cards mount, churn, and unmount mid-read.
+    return outer
+      .locator('a[id^="issue_"]')
+      .evaluateAll((cards) =>
+        cards.map((card) => card.querySelector("div.text-body-sm-medium > span")?.textContent?.trim() ?? "")
+      );
   }
 
   private boardHeaderButtons(outer: Locator): Locator {
@@ -1608,6 +1612,13 @@ export class WebDriver implements ParityDriver {
 
   async issuePeekTitle(): Promise<string | null> {
     if (!(await this.issuePeekVisible())) return null;
+    // The title is an editable textarea (inputs never appear in innerText);
+    // the line after the identifier is only its character counter.
+    const title = this.issuePeekPanel().locator("textarea").first();
+    if ((await title.count()) > 0) {
+      const value = await title.inputValue().catch(() => null);
+      if (value !== null && value !== "") return value;
+    }
     const text = await this.issuePeekPanel().innerText();
     const lines = text
       .split("\n")
@@ -1817,14 +1828,11 @@ export class WebDriver implements ParityDriver {
   }
 
   async kanbanDeleteModalVisible(): Promise<boolean> {
-    const modal = this.boardDeleteModal();
-    if ((await modal.count()) === 0) {
-      // Fall back to the title text: some modal roots carry no dialog role.
-      const title = this.page.getByText("Delete Work item", { exact: true });
-      if ((await title.count()) === 0) return false;
-      return await title.first().isVisible();
-    }
-    return await modal.first().isVisible();
+    // The dialog-role wrapper is a zero-height portal anchor at the viewport
+    // edge (never "visible" itself); the title text carries visibility.
+    const title = this.page.getByText("Delete Work item", { exact: true });
+    if ((await title.count()) === 0) return false;
+    return await title.first().isVisible();
   }
 
   async kanbanConfirmDelete(): Promise<void> {
