@@ -32,6 +32,7 @@ pub mod tasks_cleanup;
 pub mod tasks_webhooks;
 pub mod user_settings;
 pub mod v1_cycles_modules;
+pub mod v1_openapi;
 pub mod v1_projects;
 
 pub use health::{db_summary, health_report};
