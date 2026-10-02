@@ -398,10 +398,14 @@ impl IssueActivityEmit {
 /// `json.dumps({"estimate_point": ...})` exactly as the estimate destroy
 /// branches render it: CPython *default* separators (`", "`, `": "`), so
 /// `{"estimate_point": "…"}`, and `{"estimate_point": null}` for `None`.
-/// Point ids are UUID strings, which need no JSON escaping.
+/// The id is the `str(...)`-ed value, escaped per `json.dumps`
+/// (`ensure_ascii`, a no-op for UUID-shaped ids).
 pub fn estimate_point_dumps(estimate_point_id: Option<&str>) -> String {
     match estimate_point_id {
-        Some(id) => format!(r#"{{"estimate_point": "{id}"}}"#),
+        Some(id) => format!(
+            r#"{{"estimate_point": {}}}"#,
+            ensure_ascii(&serde_json::to_string(id).expect("str serializes"))
+        ),
         None => r#"{"estimate_point": null}"#.to_owned(),
     }
 }
@@ -432,6 +436,10 @@ pub enum PointDestroyStep {
 /// into steps. With `new_estimate_id` each issue emits *then* updates
 /// (QUIRK-estimate-in-loop-update); without it each issue only emits with
 /// `requested_data={"estimate_point": null}` and no update runs.
+/// `new_estimate_id` is `Some` for truthy values only: Python branches on
+/// `if new_estimate_id:`, so falsy-but-present values (`""`, `0`) take the
+/// else branch — callers map those to `None`, carrying the `str()`-ed value
+/// in `Some`.
 pub fn point_destroy_plan(
     issues: &[IssuePointRef],
     actor_id: &str,
@@ -651,9 +659,13 @@ pub enum ViewError {
     ValidationError,
     /// `ObjectDoesNotExist` → 404.
     ObjectDoesNotExist,
-    /// Django `Http404(message)` → 404 `{"Detail": message}`.
+    /// Django `Http404(message)` → 404 `{"Detail": message}`. Arg-less
+    /// `Http404()` renders DRF's `NotFound.default_detail` (`"Not found."`)
+    /// — callers pass that text.
     Http404(String),
     /// Django `PermissionDenied(message)` → 403 `{"Detail": message}`.
+    /// Arg-less renders `"You do not have permission to perform this action."`
+    /// — callers pass that text.
     DjangoPermissionDenied(String),
     /// `KeyError` → 400.
     KeyError,
@@ -893,6 +905,19 @@ mod tests {
             r#"{"estimate_point": "c4e32397-132a-487c-80fa-725c7a766ea9"}"#
         );
         assert_eq!(estimate_point_dumps(None), r#"{"estimate_point": null}"#);
+    }
+
+    /// `estimate_point_dumps` escapes like `json.dumps` (`ensure_ascii`):
+    /// oracle `json.dumps({"estimate_point": 'a"bé\x01'})`. `new_estimate_id`
+    /// is unvalidated request data and the first-issue emit precedes the
+    /// `issues.update` that would reject garbage, so this shape is
+    /// wire-observable.
+    #[test]
+    fn estimate_point_dumps_escapes_like_cpython() {
+        assert_eq!(
+            estimate_point_dumps(Some("a\"bé\x01")),
+            "{\"estimate_point\": \"a\\\"b\\u00e9\\u0001\"}"
+        );
     }
 
     /// Fixture `issue_activity_on_point_destroy.with_new_estimate_id`
