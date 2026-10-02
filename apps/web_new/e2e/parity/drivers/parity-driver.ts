@@ -2356,6 +2356,12 @@ export interface ParityDriver {
   kanbanHeaderMenuChoose(columnName: string, item: string): Promise<void>;
   /** Reorder a card directly above another card; resolves once it settles. */
   kanbanDragCardBefore(sourceName: string, targetName: string): Promise<void>;
+  /**
+   * Attempt a card move the board may refuse; resolves after a fixed wait
+   * instead of settling. Refused drops move nothing: callers assert the
+   * card's final place via kanbanCards.
+   */
+  kanbanAttemptCardBefore(sourceName: string, targetName: string): Promise<void>;
   /** Drop a card at the end of a column; resolves once it settles. */
   kanbanDragCardToColumnEnd(sourceName: string, columnName: string): Promise<void>;
   /** Drop a card on the delete zone; resolves once the confirm modal shows. */
@@ -2381,6 +2387,12 @@ export interface ParityDriver {
   kanbanColumnLoadMore(columnName: string): Promise<void>;
   /** Whether one column currently shows skeleton loaders. */
   kanbanColumnLoading(columnName: string): Promise<boolean>;
+  /** Card titles in one swimlane cell, top to bottom. */
+  kanbanCellCards(columnName: string, laneName: string): Promise<string[]>;
+  /** Whether one swimlane cell shows its explicit load-more entry. */
+  kanbanCellHasLoadMore(columnName: string, laneName: string): Promise<boolean>;
+  /** Activate one swimlane cell's load-more entry; resolves once it settles. */
+  kanbanCellLoadMore(columnName: string, laneName: string): Promise<void>;
   /** Current scroll offsets of the board container. */
   kanbanBoardScroll(): Promise<{ x: number; y: number }>;
   /**
@@ -2425,6 +2437,12 @@ export interface ParityDriver {
   ganttSidebarOrder(): Promise<string[]>;
   /** Reorder a sidebar row directly above another; resolves once it settles. */
   ganttDragRowBefore(sourceName: string, targetName: string): Promise<void>;
+  /**
+   * Attempt a sidebar reorder the timeline may refuse; resolves after a
+   * fixed wait instead of settling. Refused drags move nothing: callers
+   * assert the order via ganttSidebarOrder.
+   */
+  ganttAttemptRowBefore(sourceName: string, targetName: string): Promise<void>;
   /** Whether an issue renders a dated bar (vs an empty row). */
   ganttBarExists(issueName: string): Promise<boolean>;
   /** Drag a bar body horizontally by whole days; resolves once it settles. */
@@ -2461,6 +2479,13 @@ export interface ParityDriver {
   ganttSidebarLoading(): Promise<boolean>;
   /** Whether the load-more sentinel currently shows. */
   ganttLoadMoreVisible(): Promise<boolean>;
+  /**
+   * Reload with the issues API delayed so the loading state is observable,
+   * and report whether sidebar skeletons showed before the timeline loaded.
+   * The delay is test-only network shaping; the skeleton itself is the
+   * behavior under test.
+   */
+  ganttLoadingObservedOnReload(): Promise<boolean>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */

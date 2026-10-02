@@ -6862,7 +6862,7 @@ export async function serverCreateState(
     body: JSON.stringify({ name, group, color }),
   });
   const body = (await res.json().catch(() => null)) as { id?: unknown } | null;
-  if (res.status !== 201 || !body || typeof body.id !== "string") {
+  if ((res.status !== 201 && res.status !== 200) || !body || typeof body.id !== "string") {
     throw new Error(`[parity] state create failed with HTTP ${res.status}: ${JSON.stringify(body)}`);
   }
   return body.id;
@@ -8089,4 +8089,24 @@ export async function serverPatchModuleUserProperties(
     }
   );
   if (!res.ok) throw new Error(`[parity] module user-properties patch failed with HTTP ${res.status}.`);
+}
+
+/**
+ * The signed-in user's week-start day (0 = Sunday) from the profile the
+ * timeline reads. Gantt scenarios cross-check the rendered week rows
+ * against it.
+ */
+export async function serverProfileStartOfWeek(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await fetchTolerant(`${apiBase}/api/users/me/profile/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] profile read failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as { start_of_the_week?: unknown };
+  if (typeof record.start_of_the_week !== "number") {
+    throw new Error("[parity] profile carried no numeric start_of_the_week.");
+  }
+  return record.start_of_the_week;
 }

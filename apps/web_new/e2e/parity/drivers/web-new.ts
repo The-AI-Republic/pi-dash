@@ -3844,6 +3844,10 @@ export class WebNewDriver implements ParityDriver {
     return todo("kanbanDragCardBefore");
   }
 
+  async kanbanAttemptCardBefore(_sourceName: string, _targetName: string): Promise<void> {
+    return todo("kanbanAttemptCardBefore");
+  }
+
   async kanbanDragCardToColumnEnd(_sourceName: string, _columnName: string): Promise<void> {
     return todo("kanbanDragCardToColumnEnd");
   }
@@ -3882,6 +3886,18 @@ export class WebNewDriver implements ParityDriver {
 
   async kanbanColumnLoading(_columnName: string): Promise<boolean> {
     return todo("kanbanColumnLoading");
+  }
+
+  async kanbanCellCards(_columnName: string, _laneName: string): Promise<string[]> {
+    return todo("kanbanCellCards");
+  }
+
+  async kanbanCellHasLoadMore(_columnName: string, _laneName: string): Promise<boolean> {
+    return todo("kanbanCellHasLoadMore");
+  }
+
+  async kanbanCellLoadMore(_columnName: string, _laneName: string): Promise<void> {
+    return todo("kanbanCellLoadMore");
   }
 
   async kanbanBoardScroll(): Promise<{ x: number; y: number }> {
@@ -3968,6 +3984,10 @@ export class WebNewDriver implements ParityDriver {
     return todo("ganttDragRowBefore");
   }
 
+  async ganttAttemptRowBefore(_sourceName: string, _targetName: string): Promise<void> {
+    return todo("ganttAttemptRowBefore");
+  }
+
   async ganttBarExists(_issueName: string): Promise<boolean> {
     return todo("ganttBarExists");
   }
@@ -4038,5 +4058,9 @@ export class WebNewDriver implements ParityDriver {
 
   async ganttLoadMoreVisible(): Promise<boolean> {
     return todo("ganttLoadMoreVisible");
+  }
+
+  async ganttLoadingObservedOnReload(): Promise<boolean> {
+    return todo("ganttLoadingObservedOnReload");
   }
 }
