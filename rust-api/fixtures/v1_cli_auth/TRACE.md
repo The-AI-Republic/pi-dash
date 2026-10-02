@@ -15,7 +15,7 @@ and is NOT re-recorded here.
   (`RunnerDeleteEndpoint.delete` :44-57: by-pk 404 :45-47, view-guard 404 :48-49,
   manage-guard 403 :50-51, flag-parse 400 :52-55, delete + 204 :56-57);
   `api/urls/runner.py:9-14` (route `runners/<uuid:runner_id>/`, DELETE-only via
-  `http_method_names=["delete"]` :12); `pi_dash/urls.py:24` (`api/v1/` include);
+  `http_method_names=["delete"]` :12); `urls.py:24` (`api/v1/` include);
   `runner/services/runner_delete.py:146-163` (`parse_purge_local` —
   handler-observable query→status/body mapping only; canonical golden belongs to D-13).
 
