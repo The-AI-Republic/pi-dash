@@ -373,15 +373,22 @@ pub mod project {
         raw.trim().to_uppercase()
     }
 
-    /// `Project.cover_image_url` (`project.py:175-185`): the cover-asset URL
-    /// wins when an asset row is attached, else the legacy `cover_image`
-    /// text, else `None`. Callers resolve `asset_url` from the `FileAsset`
-    /// row first.
+    /// `Project.cover_image_url` (`project.py:175-185`): when a cover-asset
+    /// row is attached its URL is returned as-is — even `None` (an asset
+    /// whose `entity_type` `FileAsset.asset_url` does not recognize yields
+    /// `None`, with *no* fallback to the legacy text). Otherwise the legacy
+    /// `cover_image` text wins only when non-empty (`if self.cover_image:`
+    /// is falsy for `""`), else `None`. Callers pass whether a
+    /// `cover_image_asset` row is attached plus the resolved `asset_url`.
     pub fn cover_image_url<'a>(
+        has_cover_asset: bool,
         asset_url: Option<&'a str>,
         cover_image: Option<&'a str>,
     ) -> Option<&'a str> {
-        asset_url.or(cover_image)
+        if has_cover_asset {
+            return asset_url;
+        }
+        cover_image.filter(|s| !s.is_empty())
     }
 
     /// `Project.__str__` (`project.py:187-189`): `"{name} <{workspace_name}>"`.
@@ -2290,11 +2297,15 @@ mod tests {
         assert_eq!(normalize_identifier("ENG"), "ENG");
         // cover_image_url precedence: asset > legacy text > None.
         assert_eq!(
-            cover_image_url(Some("https://cdn/a.png"), Some("legacy")),
+            cover_image_url(true, Some("https://cdn/a.png"), Some("legacy")),
             Some("https://cdn/a.png")
         );
-        assert_eq!(cover_image_url(None, Some("legacy")), Some("legacy"));
-        assert_eq!(cover_image_url(None, None), None);
+        assert_eq!(cover_image_url(false, None, Some("legacy")), Some("legacy"));
+        assert_eq!(cover_image_url(false, None, None), None);
+        // Empty-string legacy text is falsy, like Python (`if cover_image:`).
+        assert_eq!(cover_image_url(false, None, Some("")), None);
+        // Attached asset with no URL returns None without falling back.
+        assert_eq!(cover_image_url(true, None, Some("legacy")), None);
         assert_eq!(display_name("Eng", "Acme"), "Eng <Acme>");
         // timezone backfill on create.
         assert_eq!(
