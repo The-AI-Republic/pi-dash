@@ -225,7 +225,8 @@ pub(crate) fn parse_uuid_or_invalid(raw: &str) -> Result<uuid::Uuid, Denial> {
 /// The role list one allow-gate checks (`allow_facts_for` in `gates.rs`
 /// builds fixture facts the same way): `Project`/`ProjectCreator` check
 /// their own roles, `Open` checks none.
-fn gate_roles(gate: &gates::Gate) -> &[i32] {
+/// Shared with sibling handler issue 407 (user-properties gate).
+pub(crate) fn gate_roles(gate: &gates::Gate) -> &[i32] {
     match gate {
         gates::Gate::Project { roles } | gates::Gate::ProjectCreator { roles } => roles,
         gates::Gate::Open | gates::Gate::Entity | gates::Gate::Lite => &[],
@@ -321,7 +322,11 @@ pub(crate) async fn enqueue_task(pool: &sqlx::PgPool, task: &str, kwargs: Map<St
 
 /// `request.user.user_timezone` (`TimezoneMixin`): unknown zones 500
 /// through the same branch Django's `zoneinfo` activation raises into.
-async fn actor_timezone(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<Tz, Denial> {
+/// Shared with sibling handler issue 407 (same render path).
+pub(crate) async fn actor_timezone(
+    pool: &sqlx::PgPool,
+    user_id: &uuid::Uuid,
+) -> Result<Tz, Denial> {
     let row: Option<(String,)> =
         sqlx::query_as(r#"SELECT u.user_timezone FROM users u WHERE u.id = $1"#)
             .bind(user_id)
@@ -346,7 +351,8 @@ fn request_origin(state: &AppState) -> Result<String, Denial> {
 // ---------------------------------------------------------------------------
 
 /// Base module columns selected on every annotated read, in model order.
-const MODULE_BASE_COLUMNS: &[&str] = &[
+/// Shared with sibling handler issue 407 (archived-row fetch).
+pub(crate) const MODULE_BASE_COLUMNS: &[&str] = &[
     "m.id",
     "m.workspace_id",
     "m.project_id",
@@ -406,7 +412,8 @@ const SHARED_ROW_ORDER: &[&str] = &[
 
 /// Detail shell order: `ModuleSerializer.Meta.fields` + detail extras
 /// (`serializers/module.py:220-273`), then the view-appended blocks.
-const DETAIL_ROW_ORDER: &[&str] = shape::MODULE_LIST_FIELD_ORDER;
+/// Shared with sibling handler issue 407 (archived detail).
+pub(crate) const DETAIL_ROW_ORDER: &[&str] = shape::MODULE_LIST_FIELD_ORDER;
 
 /// Swap the services builders' symbolic placeholders for positional
 /// binds (`$1` project, `$2` slug, `$3` user, `$4` module) and re-point
@@ -421,8 +428,12 @@ fn bind_placeholders(fragment: String) -> String {
 }
 
 /// The Q1 annotation select list: `is_favorite`, the six `Count`s, the six
-/// estimate `Sum`s, `member_ids` (`base.py:216-290`).
-fn annotation_selects() -> String {
+/// estimate `Sum`s, `member_ids` (`base.py:216-290`). `member_deleted_guard`
+/// selects the `member_ids` deleted-at filter: the main queryset filters
+/// soft-deleted members (`base.py:217-222`) while the archive queryset does
+/// not (`archive.py:244-253`, ported bug). Shared with sibling handler
+/// issue 407 (archived-row fetch).
+pub(crate) fn annotation_selects(member_deleted_guard: bool) -> String {
     let mut selects = vec![bind_placeholders(format!(
         "{} AS is_favorite",
         queries::favorite_exists_sql()
@@ -458,7 +469,7 @@ fn annotation_selects() -> String {
     }
     selects.push(bind_placeholders(format!(
         "{} AS member_ids",
-        queries::member_ids_sql(true)
+        queries::member_ids_sql(member_deleted_guard)
     )));
     selects.join(", ")
 }
@@ -476,7 +487,7 @@ async fn fetch_module_rows(
 ) -> Result<Vec<Map<String, Value>>, Denial> {
     let mut columns = MODULE_BASE_COLUMNS.join(", ");
     columns.push_str(", ");
-    columns.push_str(&annotation_selects());
+    columns.push_str(&annotation_selects(true));
     let mut sql = format!(
         "SELECT row_to_json(__r)::text AS __row FROM (SELECT {columns} \
          FROM modules m JOIN workspaces w ON w.id = m.workspace_id \
@@ -523,16 +534,17 @@ trait Pipe: Sized {
 
 impl Pipe for String {}
 
-fn quote_json(rendered: String) -> String {
+pub(crate) fn quote_json(rendered: String) -> String {
     serde_json::to_string(&rendered).unwrap_or("null".to_owned())
 }
 
-fn json_string(value: &str) -> String {
+pub(crate) fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
 
 /// `user_timezone_converter` + DRF rendering for one value.
-fn shift_datetime(value: &Value, timezone: &Tz) -> String {
+/// Shared with sibling handler issue 407 (link/userprops/archive rows).
+pub(crate) fn shift_datetime(value: &Value, timezone: &Tz) -> String {
     let text = match value {
         Value::String(text) => text,
         _ => return serde_json::to_string(value).unwrap_or("null".to_owned()),
@@ -546,7 +558,8 @@ fn shift_datetime(value: &Value, timezone: &Tz) -> String {
 
 /// Render one float exactly like DRF `FloatField` (Postgres JSON drops the
 /// `.0`; `py_float_str` is the `app_issues` kernel for that).
-fn render_float(value: &Value) -> String {
+/// Shared with sibling handler issue 407 (archived-row floats).
+pub(crate) fn render_float(value: &Value) -> String {
     match value {
         Value::Number(number) => match number.as_f64() {
             Some(float) => crate::paginator::py_float_str(float),
@@ -570,7 +583,8 @@ fn is_float_field(field: &str) -> bool {
     )
 }
 
-fn shape_value(field: &str, value: &Value, timezone: &Tz) -> String {
+/// Shared with sibling handler issue 407 (archived detail shell).
+pub(crate) fn shape_value(field: &str, value: &Value, timezone: &Tz) -> String {
     if field == "created_at" || field == "updated_at" || field == "archived_at" {
         // `user_timezone_converter` covers created/updated; the detail
         // shell's `archived_at` renders through the same active zone.
@@ -1424,7 +1438,8 @@ async fn module_create(
 /// `link_module` rows (`link_module` prefetch, `ModuleLink` ordering
 /// `-created_at`): rendered in `LINK_KEY_ORDER` with datetimes in the
 /// active zone.
-async fn fetch_module_links(
+/// Shared with sibling handler issue 407 (archived detail `link_module`).
+pub(crate) async fn fetch_module_links(
     pool: &sqlx::PgPool,
     module_id: &uuid::Uuid,
 ) -> Result<Vec<Map<String, Value>>, Denial> {
@@ -1453,7 +1468,8 @@ async fn fetch_module_links(
     Ok(out)
 }
 
-fn shape_link(row: &Map<String, Value>, timezone: &Tz) -> String {
+/// Shared with sibling handler issue 407 (link rows + archived detail).
+pub(crate) fn shape_link(row: &Map<String, Value>, timezone: &Tz) -> String {
     let mut out = String::from("{");
     for (index, field) in shape::LINK_KEY_ORDER.iter().enumerate() {
         if index > 0 {
@@ -1475,7 +1491,8 @@ fn shape_link(row: &Map<String, Value>, timezone: &Tz) -> String {
 
 /// `sub_issues` annotation (`base.py:401-411`): `COUNT` over live module
 /// bridges of child issues under the `IssueManager` base.
-async fn fetch_sub_issues(
+/// Shared with sibling handler issue 407 (archived detail).
+pub(crate) async fn fetch_sub_issues(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
     module_id: &uuid::Uuid,
@@ -1494,7 +1511,8 @@ async fn fetch_sub_issues(
 
 /// `estimate_type` gate (`base.py:417-422`): a points estimate exists for
 /// the project.
-async fn fetch_estimate_type(
+/// Shared with sibling handler issue 407 (archived detail).
+pub(crate) async fn fetch_estimate_type(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
@@ -1546,7 +1564,8 @@ fn distribution_from_where(assignee_join: bool, label_join: bool) -> String {
     sql
 }
 
-async fn fetch_json_maps(
+/// Shared with sibling handler issue 407 (archive label-estimate query).
+pub(crate) async fn fetch_json_maps(
     pool: &sqlx::PgPool,
     sql: &str,
     slug: &str,
@@ -1574,7 +1593,8 @@ async fn fetch_json_maps(
 
 /// Assignee distribution rows (`base.py:430-490,538-589`):
 /// `estimate=true` sums estimates, else counts issues.
-async fn fetch_assignee_distribution(
+/// Shared with sibling handler issue 407 (archived detail).
+pub(crate) async fn fetch_assignee_distribution(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
@@ -1622,7 +1642,8 @@ async fn fetch_assignee_distribution(
 }
 
 /// Label distribution rows (`base.py:492-525,591-624`).
-async fn fetch_label_distribution(
+/// Shared with sibling handler issue 407 (archived detail).
+pub(crate) async fn fetch_label_distribution(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
@@ -1666,7 +1687,7 @@ async fn fetch_label_distribution(
 /// renders concrete fields first in call order and annotations after, so
 /// `display_name` precedes `avatar_url` on the wire (verified live;
 /// PIDASHCONV-503 filed for the services key consts).
-const ASSIGNEE_COUNT_ORDER: &[&str] = &[
+pub(crate) const ASSIGNEE_COUNT_ORDER: &[&str] = &[
     "first_name",
     "last_name",
     "assignee_id",
@@ -1676,7 +1697,7 @@ const ASSIGNEE_COUNT_ORDER: &[&str] = &[
     "completed_issues",
     "pending_issues",
 ];
-const ASSIGNEE_ESTIMATE_ORDER: &[&str] = &[
+pub(crate) const ASSIGNEE_ESTIMATE_ORDER: &[&str] = &[
     "first_name",
     "last_name",
     "assignee_id",
@@ -1708,7 +1729,8 @@ fn render_distribution_value(keys: &[&str], row: &Map<String, Value>) -> String 
     out
 }
 
-fn render_distribution_array(keys: &[&str], rows: &[Map<String, Value>]) -> String {
+/// Shared with sibling handler issue 407 (archived detail).
+pub(crate) fn render_distribution_array(keys: &[&str], rows: &[Map<String, Value>]) -> String {
     let mut out = String::from("[");
     for (index, row) in rows.iter().enumerate() {
         if index > 0 {
@@ -1723,8 +1745,9 @@ fn render_distribution_array(keys: &[&str], rows: &[Map<String, Value>]) -> Stri
 /// `burndown_plot` module branch (`utils/analytics_plot.py:198-264`,
 /// `plot_type="points"` or `"issues"`): per-day remaining over the
 /// module's date range, future days `null`.
+/// Shared with sibling handler issue 407 (archived detail).
 #[allow(clippy::too_many_arguments)]
-async fn fetch_burndown_chart(
+pub(crate) async fn fetch_burndown_chart(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
@@ -2719,7 +2742,7 @@ mod tests {
         // `base.py:86-135` annotates `completed` before `cancelled`;
         // the live wire counts a completed-group issue under
         // `completed_issues` (PIDASHCONV-504).
-        let selects = annotation_selects();
+        let selects = annotation_selects(true);
         let completed = selects.find("AS completed_issues").expect("alias");
         let cancelled = selects.find("AS cancelled_issues").expect("alias");
         let completed_group = selects[..completed]

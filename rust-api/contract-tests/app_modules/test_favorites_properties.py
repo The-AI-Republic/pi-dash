@@ -130,7 +130,7 @@ def test_user_properties_patch_without_row(api, seed, tenant_a, project_a, auth_
     seed.member(tenant_a["workspace"]["id"], other["id"], role=20)
     seed.project_member(project_a, tenant_a["workspace"]["id"], other["id"], role=20)
     import os
-    from conftest import session_headers
+    from app_modules.conftest import session_headers
     other_headers = session_headers(
         seed, other, other["password"], os.environ["CONTRACT_SECRET_KEY"]
     )
