@@ -13,8 +13,9 @@
 //! Nested shapes consumed verbatim:
 //!
 //! * `WorkspaceLiteSerializer` (`app/serializers/workspace.py:79-83`)
-//! * `UserLiteSerializer` / `UserAdminLiteSerializer`
-//!   (`app/serializers/user.py:141-170`)
+//! * `UserLiteSerializer` (`app/serializers/user.py:141-154`, owned by
+//!   [`super::ser_shared`]) / `UserAdminLiteSerializer`
+//!   (`app/serializers/user.py:157-170`)
 //! * `ProjectLiteSerializer` (`app/serializers/project.py:120-133`,
 //!   nested under `member.project` and `invite.project`)
 //!
@@ -28,15 +29,18 @@
 //! passthrough. JSON blobs (`view_props`, `default_props`, `preferences`,
 //! `logo_props`) pass through by reference.
 //!
-//! Single-owner notes (never fork a helper). The D-24 serializers that own
-//! the app workspace/user shapes (PIDASHCONV-600/603) have not landed, and
-//! neither has the L1 `ProjectLiteSerializer` port (PIDASHCONV-563), so the
-//! nested renders below are defined here from FX-APROJ-02; review picks the
-//! single owner and the loser is deleted, not forked. The one shared kernel
-//! that already exists is reused, not redefined: `User.avatar_url`
-//! resolution is [`crate::v1_projects::ser_collab::resolve_avatar_url`]
-//! (same `db/models/user.py` property both surfaces read); handlers resolve
-//! the app lite `avatar_url` through it.
+//! Single-owner notes (never fork a helper). The app `UserLiteSerializer`
+//! port is owned by [`super::ser_shared`] (PIDASHCONV-566, landed first)
+//! and reused here, not redefined. The D-24 serializers that own the app
+//! workspace/user-admin shapes (PIDASHCONV-600/603) have not landed, and
+//! neither has the L1 `ProjectLiteSerializer` port (PIDASHCONV-563), so
+//! those three nested renders are defined here from FX-APROJ-02; when the
+//! canonical owners land they reuse (or absorb) these, never fork. The one
+//! other shared kernel that already exists is reused, not redefined:
+//! `User.avatar_url` resolution is
+//! [`crate::v1_projects::ser_collab::resolve_avatar_url`] (same
+//! `db/models/user.py` property both surfaces read); handlers resolve the
+//! app lite `avatar_url` through it.
 //!
 //! Ported bugs (translate, don't redesign):
 //!
@@ -61,6 +65,7 @@
 //! (FX-APROJ-09); the JSONB key reorder visible on DB re-read
 //! (fixture `after_first_save`) — storage behaviour, not serializer output.
 
+use super::ser_shared::{user_lite_to_representation, UserLiteRow, UserLiteView};
 use serde::Serialize;
 
 /// `ProjectMemberSerializer` wire keys in output order
@@ -121,17 +126,6 @@ pub const PROJECT_MEMBER_PREFERENCE_WIRE_FIELDS: [&str; 4] =
 
 /// `WorkspaceLiteSerializer.Meta.fields` (`workspace.py:82`), wire order.
 pub const WORKSPACE_LITE_WIRE_FIELDS: [&str; 4] = ["name", "slug", "id", "logo_url"];
-
-/// `UserLiteSerializer.Meta.fields` (`user.py:144-152`), wire order.
-pub const USER_LITE_WIRE_FIELDS: [&str; 7] = [
-    "id",
-    "first_name",
-    "last_name",
-    "avatar",
-    "avatar_url",
-    "is_bot",
-    "display_name",
-];
 
 /// `UserAdminLiteSerializer.Meta.fields` (`user.py:158-168`), wire order.
 pub const USER_ADMIN_LITE_WIRE_FIELDS: [&str; 9] = [
@@ -231,46 +225,6 @@ pub fn workspace_lite_to_representation<'a>(
         slug: row.slug,
         id: row.id,
         logo_url: row.logo_url,
-    }
-}
-
-/// A `User` row for lite rendering (`user.py:141-154`): `avatar` is
-/// non-null text (`db/models/user.py:67`); `avatar_url` is the
-/// `avatar_url` property resolved by the caller via
-/// [`crate::v1_projects::ser_collab::resolve_avatar_url`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UserLiteRow<'a> {
-    pub id: &'a str,
-    pub first_name: &'a str,
-    pub last_name: &'a str,
-    pub avatar: &'a str,
-    pub avatar_url: Option<&'a str>,
-    pub is_bot: bool,
-    pub display_name: &'a str,
-}
-
-/// `UserLiteSerializer.to_representation` output, in wire order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct UserLiteView<'a> {
-    pub id: &'a str,
-    pub first_name: &'a str,
-    pub last_name: &'a str,
-    pub avatar: &'a str,
-    pub avatar_url: Option<&'a str>,
-    pub is_bot: bool,
-    pub display_name: &'a str,
-}
-
-/// Port of `UserLiteSerializer` (`user.py:141-154`).
-pub fn user_lite_to_representation<'a>(row: &'a UserLiteRow<'a>) -> UserLiteView<'a> {
-    UserLiteView {
-        id: row.id,
-        first_name: row.first_name,
-        last_name: row.last_name,
-        avatar: row.avatar,
-        avatar_url: row.avatar_url,
-        is_bot: row.is_bot,
-        display_name: row.display_name,
     }
 }
 
@@ -681,6 +635,7 @@ pub fn invite_to_representation<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_project::ser_shared::MEMBER_USER_WIRE_FIELDS;
     use serde_json::Value;
 
     fn fixture() -> Value {
@@ -841,7 +796,7 @@ mod tests {
             ),
             ("preference", &PROJECT_MEMBER_PREFERENCE_WIRE_FIELDS),
             ("invite", &PROJECT_MEMBER_INVITE_WIRE_FIELDS),
-            ("nested_user_lite", &USER_LITE_WIRE_FIELDS),
+            ("nested_user_lite", &MEMBER_USER_WIRE_FIELDS),
             ("nested_user_admin_lite", &USER_ADMIN_LITE_WIRE_FIELDS),
             ("nested_workspace_lite", &WORKSPACE_LITE_WIRE_FIELDS),
         ];
