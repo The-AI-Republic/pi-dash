@@ -45,4 +45,4 @@ UPDATE "schedulers" SET "deleted_at" = :now, "updated_at" = :now2, "updated_by_i
 COMMIT;
 
 -- R6 active_binding_count fallback (serializers/scheduler.py:108)
-SELECT COUNT(*) AS "__count" FROM "scheduler_bindings" WHERE ("scheduler_bindings"."deleted_at" IS NULL AND "scheduler_bindings"."deleted_at" IS NULL AND "scheduler_bindings"."scheduler_id" = :scheduler_id);
+SELECT COUNT(*) AS "__count" FROM "scheduler_bindings" WHERE ("scheduler_bindings"."deleted_at" IS NULL AND "scheduler_bindings"."scheduler_id" = :scheduler_id AND "scheduler_bindings"."deleted_at" IS NULL);
