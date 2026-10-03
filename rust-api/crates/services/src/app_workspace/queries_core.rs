@@ -9,7 +9,8 @@
 //! it executes. The services crate carries no `sea-query`/`sqlx`
 //! dependency, so placeholders stay symbolic — `:user`, `:slug`, `:month`,
 //! `:date`, `:user_id`, `:search`, `:owner`, `:iso_week`, `:today`,
-//! `:from_date` — exactly the notation the fixtures use; handlers bind them.
+//! `:from_date`, `:tzname` — exactly the notation the fixtures use;
+//! handlers bind them.
 //!
 //! Sources (drift baseline `01a93e17`; verified no drift at `c948ceaf`):
 //! - `app/views/workspace/base.py:60-81` — `WorkSpaceViewSet.get_queryset`
@@ -81,11 +82,22 @@
 //! `SoftDeleteModel`, `db/models/user.py:56`). Every guard below matches
 //! the live-compiled SQL predicate for predicate.
 //!
+//! Time zones, read carefully — Django's `__date` / `Extract*` shift by the
+//! ACTIVATED time zone (`get_current_timezone_name`), which `TimezoneMixin`
+//! (`app/views/base.py`) sets to `request.user.user_timezone` on every
+//! authenticated request. Production Q1/Q2/R5 SQL therefore carries the
+//! user's zone; `settings.TIME_ZONE` (`"UTC"`) is only the default when
+//! nothing is activated. The fragments bind it as `:tzname` (handlers bind
+//! `request.user.user_timezone`, default `"UTC"`, `db/models/user.py:120`).
+//! Unaffected: Q6 (`ExtractWeek` over a `DateField` — no shift), Q8/Q9 and
+//! `:iso_week`/`:today` (Python-side UTC dates, verified live).
+//!
 //! Out of scope (owned by sibling handler issues PIDASHCONV-615/620): the
-//! envelopes, response shaping, `fields=` parsing, the R2 member prefetch
-//! (a second query), CSV rendering, and `get()` 404/500 mapping. Their
-//! queryset-adjacent constants that ARE in scope here (value lists,
-//! orderings, limits, `.values()` key lists) are marked.
+//! envelopes, response shaping, `fields=` parsing, the R2 member-prefetch
+//! execution (a second query; its stable predicates are pinned in
+//! [`member_prefetch_where_sql`]), CSV rendering, and `get()` 404/500
+//! mapping. Their queryset-adjacent constants that ARE in scope here
+//! (value lists, orderings, limits, `.values()` key lists) are marked.
 
 use std::fmt::Write as _;
 
@@ -101,9 +113,14 @@ pub const CLOSED_STATE_GROUPS: &[&str] = &["completed", "cancelled"];
 /// (`db/models/issue.py:95-104`): triage lives under its own manager.
 pub const TRIAGE_GROUP: &str = "triage";
 
-/// Django `TIME_ZONE` (`settings/common.py:362`), baked into every
-/// `__date` / `ExtractMonth` / `ExtractDay` rendering as
-/// `AT TIME ZONE UTC`. `USE_TZ` is `True` (`:361`).
+/// Default `AT TIME ZONE` name: `settings.TIME_ZONE`
+/// (`settings/common.py:362`), which is also the `User.user_timezone`
+/// default (`db/models/user.py:120`). Django shifts `__date` / `Extract*`
+/// by the ACTIVATED zone (the request user's zone in production — see the
+/// module docs), so fragments bind `:tzname` and handlers bind
+/// `request.user.user_timezone`; this const is the bind value when no
+/// request user applies. `USE_TZ` is `True` (`:361`); with it off Django
+/// emits no shift at all.
 pub const DJANGO_TIME_ZONE_SQL: &str = "UTC";
 
 /// `UPPER("workspaces"."name"::text) LIKE UPPER(:search)` — DRF
@@ -231,6 +248,18 @@ pub const USER_WORKSPACES_DISTINCT: bool = true;
 /// R2 annotations in source order (`:229`).
 pub const USER_WORKSPACES_ANNOTATIONS: &[&str] = &["role", "total_members"];
 
+/// R2 member-prefetch stable predicates (`:223-228`): the `Prefetch` runs
+/// as a second query over `WorkspaceMember.objects` — manager-scoped
+/// (`deleted_at IS NULL`, unlike the join scope), filtered to the
+/// requester's live row, default-ordered (`-created_at`). Django appends
+/// the `workspace_id IN (...)` batch key at execution (handler machinery,
+/// not pinned).
+pub fn member_prefetch_where_sql() -> String {
+    "workspace_members.deleted_at IS NULL AND workspace_members.is_active \
+     AND workspace_members.member_id = :user"
+        .to_owned()
+}
+
 // ---------------------------------------------------------------------------
 // R3: dashboard bundle (:262-348)
 // ---------------------------------------------------------------------------
@@ -278,14 +307,20 @@ pub const ACTIVITY_DEFAULT_ORDER_SQL: &str = "issue_activities.created_at DESC";
 pub const DASHBOARD_Q1_SELECT_SQL: &str =
     "(issue_activities.created_at)::DATE AS created_date, COUNT((issue_activities.created_at)::DATE) AS activity_count";
 
+/// Q1 join (`:267`): `workspace__slug` over the non-nullable FK renders
+/// `INNER JOIN` (verified live). The `actor` predicate needs no join.
+pub const DASHBOARD_Q1_JOIN_SQL: &str =
+    "INNER JOIN workspaces ON (issue_activities.workspace_id = workspaces.id)";
+
 /// Q1 `WHERE`: actor + workspace slug + `created_at__date__gte`. The
-/// `__date` lookup renders `(created_at AT TIME ZONE UTC)::DATE`
-/// (`USE_TZ`, `TIME_ZONE="UTC"`). `:from_date` is bound to
+/// `__date` lookup renders `(created_at AT TIME ZONE :tzname)::DATE`
+/// (`USE_TZ`; `:tzname` is the request user's zone — see the module
+/// docs). `:from_date` is bound to
 /// `date.today() + relativedelta(months=-3)` — a NAIVE server-local
 /// date, not UTC-derived; ported as computed, not as "three months ago".
 pub fn dashboard_q1_where_sql() -> String {
     "issue_activities.deleted_at IS NULL AND issue_activities.actor_id = :user \
-     AND (issue_activities.created_at AT TIME ZONE UTC)::DATE >= :from_date \
+     AND (issue_activities.created_at AT TIME ZONE :tzname)::DATE >= :from_date \
      AND workspaces.slug = :slug"
         .to_owned()
 }
@@ -301,10 +336,12 @@ pub const DASHBOARD_MONTH_DEFAULT: i32 = 1;
 /// `WeekInMonth` (`:257-259`): `(((day - 1) / 7) + 1)::INTEGER`.
 /// `EXTRACT(DAY ...)` is `numeric`, so `/ 7` is exact division and the
 /// `::INTEGER` cast truncates — buckets 1-5 for days 1-31. The day
-/// extraction is time-zone shifted (`AT TIME ZONE UTC`, same as every
-/// datetime part extraction under `USE_TZ`).
+/// extraction is time-zone shifted (`AT TIME ZONE :tzname`, same as every
+/// datetime part extraction under `USE_TZ`; `:tzname` is the request
+/// user's zone — see the module docs).
 pub fn week_in_month_sql() -> String {
-    "(((EXTRACT(DAY FROM issues.completed_at AT TIME ZONE UTC) - 1) / 7) + 1)::INTEGER".to_owned()
+    "(((EXTRACT(DAY FROM issues.completed_at AT TIME ZONE :tzname) - 1) / 7) + 1)::INTEGER"
+        .to_owned()
 }
 
 /// Q2 select (`:285-288`): week bucket + `COUNT(issues.id)`.
@@ -316,12 +353,13 @@ pub fn dashboard_q2_select_sql() -> String {
 }
 
 /// Q2 `WHERE`: tenant scope + `completed_at__month=:month` (time-zone
-/// shifted like every datetime extraction) + `completed_at NOT NULL`.
+/// shifted like every datetime extraction; `:tzname` is the request
+/// user's zone — see the module docs) + `completed_at NOT NULL`.
 /// The month predicate binds `:month` (default [`DASHBOARD_MONTH_DEFAULT`]).
 pub fn dashboard_q2_where_sql() -> String {
     format!(
         "{} AND {} AND issues.completed_at IS NOT NULL \
-         AND EXTRACT(MONTH FROM issues.completed_at AT TIME ZONE UTC) = :month",
+         AND EXTRACT(MONTH FROM issues.completed_at AT TIME ZONE :tzname) = :month",
         issue_manager_where_sql(),
         issue_tenant_where_sql()
     )
@@ -509,7 +547,8 @@ pub const EXPORT_JOINS_SQL: &str = "INNER JOIN users ON (issue_activities.actor_
 
 /// R5 `WHERE` in Django predicate order (`:383-389`): base scope, field
 /// exclusion, actor, `created_at__date=:date` (time-zone shifted like
-/// Q1), requester's live project membership, workspace slug. NOTE: no
+/// Q1; `:tzname` is the request user's zone — see the module docs),
+/// requester's live project membership, workspace slug. NOTE: no
 /// `projects.archived_at` filter here, unlike the user-activity query in
 /// `profile.sql` R4 — ported as-is. `:user` is the REQUESTER (project
 /// membership); `:user_id` is the export target (actor).
@@ -517,7 +556,7 @@ pub fn export_where_sql() -> String {
     format!(
         "issue_activities.deleted_at IS NULL AND {} \
          AND issue_activities.actor_id = :user_id \
-         AND (issue_activities.created_at AT TIME ZONE UTC)::DATE = :date \
+         AND (issue_activities.created_at AT TIME ZONE :tzname)::DATE = :date \
          AND project_members.is_active AND project_members.member_id = :user \
          AND workspaces.slug = :slug",
         export_field_predicate_sql()
@@ -667,6 +706,16 @@ mod tests {
     }
 
     #[test]
+    fn member_prefetch_where_is_manager_scoped() {
+        // The Prefetch is a second query over WorkspaceMember.objects, so
+        // unlike the join scope it carries the manager's deleted_at guard.
+        let sql = member_prefetch_where_sql();
+        assert!(sql.contains("workspace_members.deleted_at IS NULL"));
+        assert!(sql.contains("workspace_members.is_active"));
+        assert!(sql.contains("workspace_members.member_id = :user"));
+    }
+
+    #[test]
     fn issue_manager_exclusions_match_django() {
         let sql = issue_manager_where_sql();
         assert!(sql.contains("issues.deleted_at IS NULL"));
@@ -707,7 +756,7 @@ mod tests {
         assert!(where_sql.contains("issue_activities.deleted_at IS NULL"));
         assert!(where_sql.contains("issue_activities.actor_id = :user"));
         assert!(where_sql
-            .contains("(issue_activities.created_at AT TIME ZONE UTC)::DATE >= :from_date"));
+            .contains("(issue_activities.created_at AT TIME ZONE :tzname)::DATE >= :from_date"));
         assert!(where_sql.contains("workspaces.slug = :slug"));
         assert_eq!(DASHBOARD_Q1_GROUP_ORDER_SQL, "GROUP BY 1 ORDER BY 1 ASC");
         assert_eq!(DJANGO_TIME_ZONE_SQL, "UTC");
@@ -719,19 +768,28 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_q1_join_scopes_workspace_slug() {
+        // workspace__slug needs this INNER JOIN; the actor predicate does not.
+        assert_eq!(
+            DASHBOARD_Q1_JOIN_SQL,
+            "INNER JOIN workspaces ON (issue_activities.workspace_id = workspaces.id)"
+        );
+        assert!(dashboard_q1_where_sql().contains("workspaces.slug = :slug"));
+    }
+
+    #[test]
     fn dashboard_q2_buckets_week_in_month() {
         assert_eq!(
             week_in_month_sql(),
-            "(((EXTRACT(DAY FROM issues.completed_at AT TIME ZONE UTC) - 1) / 7) + 1)::INTEGER"
+            "(((EXTRACT(DAY FROM issues.completed_at AT TIME ZONE :tzname) - 1) / 7) + 1)::INTEGER"
         );
         let select = dashboard_q2_select_sql();
         assert!(select.contains("AS week_in_month"));
         assert!(select.contains("COUNT(issues.id) AS completed_count"));
         let where_sql = dashboard_q2_where_sql();
         assert!(where_sql.contains("issues.completed_at IS NOT NULL"));
-        assert!(
-            where_sql.contains("EXTRACT(MONTH FROM issues.completed_at AT TIME ZONE UTC) = :month")
-        );
+        assert!(where_sql
+            .contains("EXTRACT(MONTH FROM issues.completed_at AT TIME ZONE :tzname) = :month"));
         assert!(where_sql.contains("\"states\".\"group\" = 'triage'"));
         assert_eq!(DASHBOARD_MONTH_DEFAULT, 1);
         assert_eq!(DASHBOARD_Q2_GROUP_ORDER_SQL, "GROUP BY 1 ORDER BY 1 ASC");
@@ -868,7 +926,9 @@ mod tests {
         assert!(where_sql.contains("issue_activities.actor_id = :user_id"));
         assert!(where_sql.contains("project_members.member_id = :user"));
         assert!(where_sql.contains("project_members.is_active"));
-        assert!(where_sql.contains("(issue_activities.created_at AT TIME ZONE UTC)::DATE = :date"));
+        assert!(
+            where_sql.contains("(issue_activities.created_at AT TIME ZONE :tzname)::DATE = :date")
+        );
         assert!(where_sql.contains("workspaces.slug = :slug"));
         // No archived-project filter on this path (unlike profile R4).
         assert!(!where_sql.contains("archived_at"));
