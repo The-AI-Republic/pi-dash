@@ -266,7 +266,16 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
             .merge(crate::auth_oauth::oauth_gitlab::routes())
             .merge(crate::auth_oauth::oauth_google::routes())
             .merge(crate::auth_session::routes()),
-        RouteGroup::Runner | RouteGroup::RunnerWeb => Router::new(),
+        // RunnerWeb handlers merge their routers here (D-15 runs +
+        // approvals, PIDASHCONV-542, via `runner_runs::routes`;
+        // sibling handler issues — L8 web chat — extend the merge;
+        // merges keep both sides).
+        RouteGroup::RunnerWeb => crate::runner_runs::routes(),
+        // Runner (daemon) handlers merge their routers here (D-15
+        // metrics, PIDASHCONV-542, via `runner_runs::daemon_routes`;
+        // L8 run/chat endpoints extend the merge; merges keep both
+        // sides).
+        RouteGroup::Runner => crate::runner_runs::daemon_routes(),
     }
 }
 
