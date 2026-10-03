@@ -474,3 +474,110 @@ Regeneration is byte-identical (verified).
   swallowed with counter `0→1` and the `ERROR` log record
   verbatim incl. exception), `:110-116` (`_lookup_state`:
   `None`/existing/missing → `None`).
+
+## FX-ORCH-08 dispatch (DB)
+
+Generator `/tmp/fx_orch_08.py` against `pidash_524_scratch` (frozen
+clock 2026-06-01T12:00Z, `random.seed(52408)` before
+reconcile-touching calls, `time.time` frozen at 1780000000.0 for
+wait-activity epochs, `fx8-` slugs, fixed seeded UUIDs, run.id
+normalized to `<run-id>`). Orchestration Issue signals stay CONNECTED
+(production truth for the `issue.save()` calls inside bounce /
+retick-paused / deferred-pause). Real matcher / builders / composer
+(migrate-seeded templates) except where a case stubs an out-of-scope
+seam (named per case); `dispatch_after_commit` + `on_commit` captured;
+creations under `impersonate(creator)`; guard/bounce reasons captured
+from the scheduling logger. Regeneration is byte-identical (verified).
+
+- `fx08_dispatch/preflight.matrix.json` —
+  `orchestration/scheduling.py:955-1026`
+  (`preflight_eligibility_or_bounce`): F1 cloud + LLM → `True`;
+  F2 cloud no-LLM → `False` + `no-llm-config` bounce; F3a–d
+  managed gates (`None` creator → `no-managed-runner`;
+  disabled → `managed_runner_disabled`; no profile →
+  `llm_config_missing`; not enrolled → `no-managed-runner`);
+  F3e all-pass → `True`; F4a local matcher `True`; F4b empty
+  pod → `False` + `no-eligible-runner` bounce. Reason codes
+  from the log records.
+- `fx08_dispatch/bounce.matrix.json` —
+  `orchestration/scheduling.py:1029-1125`
+  (`_bounce_issue_no_eligible_runner`): B1 `no-llm-config` body
+  verbatim; B2 default body verbatim (B2b: managed codes reuse
+  it); B3a `-default` beats `sequence`; B3b lowest `sequence`
+  wins; B4 `project.default_state` fallback (non-ticking);
+  B5 ticking fallback → stays + explicit disarm; B6 no target
+  → stays + explicit disarm; B7 already-Backlog → comment
+  only; B8 comment failure rolls the move back (exception
+  propagates, state + ticker + 0 comments); B9 comment-row
+  shape (system-user actor, `agent` speaker, linkage).
+- `fx08_dispatch/pod_resolve.matrix.json` —
+  `orchestration/scheduling.py:871-884`
+  (`_resolve_pod_for_issue`, a duplicate of the service copy):
+  assigned → pinned, dangling → default, unset → default, no
+  project → `None`.
+- `fx08_dispatch/creator.matrix.json` —
+  `orchestration/scheduling.py:860-868` (`TRIGGER_*`,
+  `_MACHINE_TRIGGERS = {tick}`), `:887-952`
+  (`_resolve_creator_for_trigger`): L1 local actor wins (even
+  on `tick`); L2 local tick → system user; L3/L4 local chain
+  (creator → `None`); C1 cloud `[actor]` fast path; C2 `tick`
+  ignores the explicit actor; C3a/b order + dedup + live-only
+  proven by the llm spy (`[lead]`, `[lead, live]` — bot
+  skipped silently, dup offered once, soft-deleted never);
+  C4 inactive skipped; C5 managed enrollment gate; C6 `None`.
+- `fx08_dispatch/continuation.matrix.json` —
+  `orchestration/scheduling.py:1128-1216`
+  (`dispatch_continuation_run`): A1 active → `None`; A2 no
+  prior → `None`; A3 same-stage continuation (parent + pin,
+  `tick`); A4 cross-stage fresh (no parent); A5 hand-back
+  parents off `resume_parent_run`; A6 local no-creator →
+  `None` with no bounce; A7 cloud no-creator → `None` +
+  `no-llm-config` bounce; A8 no-pod → `None`; A9 preflight
+  bounce → `None`.
+- `fx08_dispatch/run_ai.matrix.json` —
+  `orchestration/scheduling.py:1219-1225` (`RUN_AI_*` refusal
+  codes verbatim), `:1240-1322`
+  (`dispatch_run_ai_run_with_reason`): H1 active, H2 no-pod,
+  H3 no-creator (no bounce), H4 preflight bounce; H5 prior →
+  continuation; H6 no prior → fresh templated run (prompt
+  parity); `:1228-1237` thin wrapper (H7a refused → `None`,
+  H7b created → run); `:1325-1340` `run_ai_for_human` (H8
+  created + retimed clock, H9 refused + byte-identical
+  ticker rollback).
+- `fx08_dispatch/retick.matrix.json` —
+  `orchestration/scheduling.py:650-706` (`re_tick_ticker`):
+  R1 `no_issue`; R2 roomy pool → `budget_not_exhausted`, no
+  grant; R3 spent pool → `granted` + `run_ai` run (grant +10
+  but used still hits the new cap, so the re-time stops
+  `POOL_SPENT` — the run fires anyway); R3b 20-pool grants
+  +20; R4 paused → `granted-from-paused`, moved to
+  In Progress, run carries the retick actor; R5 no-pod →
+  `dispatch-failed` rollback (ticker untouched); R6 no
+  In Progress state → rollback; R7 infinite pool → guard.
+  `:709-726` (`_in_progress_state_for`): Q1 SQL + found, Q2
+  SQL + `None`, Q3 soft-deleted skipped.
+- `fx08_dispatch/wait.matrix.json` —
+  `orchestration/scheduling.py:741-763` (`WAIT_*` verbatim),
+  `:766-827` (`wait_ticker`): W1 applied (`waited` 0→1 +
+  activity `Waited on a blocker (1 of 10); run <label>`);
+  W10 second wait (→2); W2 cap; W3 infinite; W4 no ticker;
+  W5 `CAP_HIT` + room → re-armed (enabled, reason cleared,
+  `next_run_at` set); W6/W7/W8 no re-arm (user-disabled /
+  still-capped / `LEFT_TICKING_STATE` — `waited` still +1,
+  activity still written); W9 no run/actor (no suffix,
+  system-user actor). `:830-852` activity row golden
+  (`agent_wait`, pool/waited, frozen epoch).
+- `fx08_dispatch/deferred_pause.matrix.json` —
+  `orchestration/scheduling.py:1349-1469`
+  (`maybe_apply_deferred_pause`): U1 no work item, U2 no
+  ticker, U3 enabled, U4 pending entry, U5 `POOL_SPENT`, U6
+  no state, U7 non-ticking, U8 review (no auto-pause), U9
+  other active run, U10 no Paused state → all `False`; U11
+  happy path → `True` (moved to Paused; ticker flips to
+  `LEFT_TICKING_STATE` via the real leave-bucket signal) —
+  note `updated_by` stays `NULL`: the `= bot` assignment is
+  wiped by `BaseModel.save` (crum) and `update_fields`
+  excludes it; U12 self-active allowed. The three lock
+  re-checks (`:1442-1459`) are concurrency-only — U11 passes
+  them single-threaded; their `False` branches are noted in
+  the fixture, not injected.
