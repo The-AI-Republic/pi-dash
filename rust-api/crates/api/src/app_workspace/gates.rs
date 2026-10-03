@@ -1,11 +1,10 @@
 //! D-24 permission gates (stage 5, PIDASHCONV-613).
 //!
 //! Ports the L7 guard layer on all 64 D-24 routes (workspace 45, user 16,
-//! api 2, timezone 1 — 108 method+path rows: 37 `@allow_permission`
-//! actions (33 fixture rows plus 4 full-dispatch extras), 5 creator
-//! rows, 27 permission-class actions, 38 `IsAuthenticated`-only
-//! fallthroughs, 4 `AllowAny` actions, and the collection-list KeyError
-//! row), from:
+//! api 2, timezone 1 — 108 method+path rows: 31 plain `@allow_permission`
+//! rows, 5 creator rows, 27 permission-class rows, 38 `IsAuthenticated`-only
+//! fallthroughs, 4 `AllowAny` rows, 2 composed class+decorator rows, and
+//! the collection-list KeyError row), from:
 //!
 //! - `apps/api/pi_dash/app/permissions/base.py:13-16` (`ROLE`),
 //!   `:19-87` (`allow_permission`)
