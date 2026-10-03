@@ -114,7 +114,10 @@ fn is_truthy(value: &Value) -> bool {
 ///
 /// Containers never reach this position from a real call site (every
 /// Python caller passes a string mid or none); they render as compact
-/// JSON as a documented stand-in for `repr()`.
+/// JSON as a documented stand-in for `repr()`. Same for the decode
+/// body-fallback: a non-string body `mid` stringifies here where
+/// Python would keep the raw scalar (unreachable — `_serialize`
+/// always writes string mids to both field and body).
 fn python_str(value: &Value) -> String {
     match value {
         Value::Null => "None".to_string(),

@@ -139,10 +139,14 @@ fn render_number(n: &serde_json::Number) -> String {
 /// CPython `repr()` spelling for a finite float, with `json`-mode
 /// (`NaN`/`Infinity`) or `str()`-mode (`nan`/`inf`) non-finite words.
 ///
-/// Shortest digits come from Rust's `{:e}` (shortest round-trip, like
-/// `repr`); only the fixed/exponent choice (`-4 <= e10 <= 15` is
-/// fixed) and the exponent shape (`e±XX`, two digits minimum) are
-/// applied here, so no re-rounding occurs.
+/// Shortest digits come from Ryū (via `serde_json::Number`, already
+/// in the dep tree): the shortest spelling that round-trips, ties
+/// broken toward the true value — exactly `repr`'s rule. Rust's own
+/// `{:e}` is shortest too but breaks ties differently (it renders
+/// `153838026194641.13` where `repr` gives `...412`), so it cannot
+/// be the digit source. Only the fixed/exponent choice (`-4 <= e10
+/// <= 15` is fixed) and the exponent shape (`e±XX`, two digits
+/// minimum) are applied here, so no re-rounding occurs.
 pub(crate) fn render_float_py(f: f64, json: bool) -> String {
     if f.is_nan() {
         return if json { "NaN" } else { "nan" }.to_string();
@@ -156,16 +160,21 @@ pub(crate) fn render_float_py(f: f64, json: bool) -> String {
     if f == 0.0 {
         return if f.is_sign_negative() { "-0.0" } else { "0.0" }.to_string();
     }
-    let sci = format!("{:e}", f);
-    let (mant, exp) = sci.split_once('e').expect("scientific notation");
-    let exp: i32 = exp.parse().expect("decimal exponent");
+    let ryu = serde_json::Number::from_f64(f)
+        .expect("finite float")
+        .to_string();
     let neg = f.is_sign_negative();
-    let digits: String = mant
-        .trim_start_matches('-')
-        .chars()
-        .filter(|c| *c != '.')
-        .collect();
-    debug_assert!(!digits.is_empty() && digits.starts_with(|c: char| c != '0'));
+    let mant = ryu.trim_start_matches('-');
+    let (mant, exp10) = match mant.split_once('e') {
+        Some((m, e)) => (m, e.parse::<i32>().expect("ryu exponent")),
+        None => (mant, 0),
+    };
+    let frac_len = mant.split_once('.').map_or(0, |(_, fr)| fr.len() as i32);
+    let digits: String = mant.chars().filter(|c| *c != '.').collect();
+    let digits = digits.trim_start_matches('0').to_string();
+    // `f` is finite and nonzero, so a nonzero digit always survives.
+    debug_assert!(!digits.is_empty());
+    let exp = exp10 - frac_len + digits.len() as i32 - 1;
     let mut out = String::new();
     if neg {
         out.push('-');
@@ -292,6 +301,12 @@ mod tests {
             (1e15, "1000000000000000.0"),
             (1e16, "1e+16"),
             (1234567890123456.0, "1234567890123456.0"),
+            // Shortest-round-trip ties: two spellings parse back, and
+            // `repr` picks the one closest to the true value (Rust's
+            // `{:e}` picks the other — hence the Ryū digit source).
+            (153838026194641.12, "153838026194641.12"),
+            (-1108296573107658.2, "-1108296573107658.2"),
+            (1000000000000000.2, "1000000000000000.2"),
             (1.7976931348623157e308, "1.7976931348623157e+308"),
             (5e-324, "5e-324"),
             (f64::NAN, "NaN"),
