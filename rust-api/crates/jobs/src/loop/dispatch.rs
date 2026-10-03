@@ -136,15 +136,7 @@ pub fn run_turn_job(turn_id: &Uuid) -> NewJob {
 /// is the runtime source of truth; this one exists so tests and the fire
 /// port can assert the wire contract broker-free).
 pub fn run_turn_message(turn_id: &Uuid) -> crate::celery::CeleryTaskMessage {
-    let job = run_turn_job(turn_id);
-    let args = match job.args {
-        serde_json::Value::Array(items) => items,
-        other => vec![other],
-    };
-    let kwargs = match job.kwargs {
-        serde_json::Value::Object(map) => map,
-        _ => serde_json::Map::new(),
-    };
+    let (args, kwargs) = run_turn_job(turn_id).into_message_parts();
     crate::celery::CeleryTaskMessage::new(RUN_ASSISTANT_TURN_TASK, args, kwargs)
 }
 

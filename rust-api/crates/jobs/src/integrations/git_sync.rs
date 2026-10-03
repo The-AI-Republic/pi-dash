@@ -73,7 +73,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
@@ -755,15 +755,7 @@ pub fn fanout_job(binding_id: &Uuid) -> NewJob {
 /// of truth; this one exists so tests can assert the wire contract without
 /// a broker, following the `tasks_ticker::scan::fire_message` precedent).
 pub fn fanout_message(binding_id: &Uuid) -> CeleryTaskMessage {
-    let job = fanout_job(binding_id);
-    let args = match job.args {
-        Value::Array(items) => items,
-        other => vec![other],
-    };
-    let kwargs = match job.kwargs {
-        Value::Object(map) => map,
-        _ => Map::new(),
-    };
+    let (args, kwargs) = fanout_job(binding_id).into_message_parts();
     CeleryTaskMessage::new(SYNC_ONE_BINDING_TASK, args, kwargs)
 }
 

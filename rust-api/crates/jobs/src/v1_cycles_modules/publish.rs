@@ -113,11 +113,12 @@ fn opt_string(value: Option<&str>) -> Value {
 /// body whichever plane serves the task. Retry policy is the
 /// [`NewJob::new`] default (`max_retries = 3`, 180s delay), matching the
 /// plain `@shared_task` on both Python tasks.
-fn job_from_message(message: &CeleryTaskMessage) -> NewJob {
+fn job_from_message(message: CeleryTaskMessage) -> NewJob {
+    // Moved, never cloned (see `model_activity_kwargs`).
     NewJob::new(
-        message.task.clone(),
+        message.task,
         Value::Array(Vec::new()),
-        Value::Object(message.kwargs.clone()),
+        Value::Object(message.kwargs),
     )
 }
 
@@ -136,7 +137,7 @@ fn job_from_message(message: &CeleryTaskMessage) -> NewJob {
 fn model_activity_kwargs(
     model_name: &str,
     model_id: &str,
-    requested_data: &Map<String, Value>,
+    requested_data: Map<String, Value>,
     current_instance: Option<&str>,
     actor_id: &str,
     slug: &str,
@@ -148,10 +149,9 @@ fn model_activity_kwargs(
         Value::String(model_name.to_owned()),
     );
     kwargs.insert("model_id".to_owned(), Value::String(model_id.to_owned()));
-    kwargs.insert(
-        "requested_data".to_owned(),
-        Value::Object(requested_data.clone()),
-    );
+    // Moved, never cloned: the map can nest ~9900 deep and `Map::clone`
+    // recurses per level (PIDASHCONV-626 stack-overflow fix).
+    kwargs.insert("requested_data".to_owned(), Value::Object(requested_data));
     kwargs.insert("current_instance".to_owned(), opt_string(current_instance));
     kwargs.insert("actor_id".to_owned(), Value::String(actor_id.to_owned()));
     kwargs.insert("slug".to_owned(), Value::String(slug.to_owned()));
@@ -165,7 +165,7 @@ fn model_activity_kwargs(
 pub fn model_created_message(
     model_name: &str,
     model_id: &str,
-    requested_data: &Map<String, Value>,
+    requested_data: Map<String, Value>,
     actor_id: &str,
     slug: &str,
     origin: &str,
@@ -189,12 +189,12 @@ pub fn model_created_message(
 pub fn model_created_job(
     model_name: &str,
     model_id: &str,
-    requested_data: &Map<String, Value>,
+    requested_data: Map<String, Value>,
     actor_id: &str,
     slug: &str,
     origin: &str,
 ) -> NewJob {
-    job_from_message(&model_created_message(
+    job_from_message(model_created_message(
         model_name,
         model_id,
         requested_data,
@@ -213,7 +213,7 @@ pub fn model_created_job(
 pub fn model_updated_message(
     model_name: &str,
     model_id: &str,
-    requested_data: &Map<String, Value>,
+    requested_data: Map<String, Value>,
     current_instance: &str,
     actor_id: &str,
     slug: &str,
@@ -238,13 +238,13 @@ pub fn model_updated_message(
 pub fn model_updated_job(
     model_name: &str,
     model_id: &str,
-    requested_data: &Map<String, Value>,
+    requested_data: Map<String, Value>,
     current_instance: &str,
     actor_id: &str,
     slug: &str,
     origin: &str,
 ) -> NewJob {
-    job_from_message(&model_updated_message(
+    job_from_message(model_updated_message(
         model_name,
         model_id,
         requested_data,
@@ -412,7 +412,7 @@ pub fn cycle_deleted_job(
     project_id: &str,
     epoch: i64,
 ) -> NewJob {
-    job_from_message(&cycle_deleted_message(
+    job_from_message(cycle_deleted_message(
         cycle_id, cycle_name, issues, actor_id, project_id, epoch,
     ))
 }
@@ -452,7 +452,7 @@ pub fn cycle_issue_added_job(
     epoch: i64,
     origin: &str,
 ) -> NewJob {
-    job_from_message(&cycle_issue_added_message(
+    job_from_message(cycle_issue_added_message(
         requested_data,
         actor_id,
         project_id,
@@ -496,7 +496,7 @@ pub fn cycle_issue_removed_job(
     project_id: &str,
     epoch: i64,
 ) -> NewJob {
-    job_from_message(&cycle_issue_removed_message(
+    job_from_message(cycle_issue_removed_message(
         cycle_id, issue_id, actor_id, project_id, epoch,
     ))
 }
@@ -539,7 +539,7 @@ pub fn module_deleted_job(
     epoch: i64,
     origin: &str,
 ) -> NewJob {
-    job_from_message(&module_deleted_message(
+    job_from_message(module_deleted_message(
         module_id,
         module_name,
         issues,
@@ -586,7 +586,7 @@ pub fn module_issue_added_job(
     epoch: i64,
     origin: &str,
 ) -> NewJob {
-    job_from_message(&module_issue_added_message(
+    job_from_message(module_issue_added_message(
         requested_data,
         actor_id,
         project_id,
@@ -632,7 +632,7 @@ pub fn module_issue_removed_job(
     project_id: &str,
     epoch: i64,
 ) -> NewJob {
-    job_from_message(&module_issue_removed_message(
+    job_from_message(module_issue_removed_message(
         module_id,
         module_name,
         issue_id,
@@ -720,7 +720,7 @@ pub fn cycle_issues_transferred_job(
     epoch: i64,
     origin: &str,
 ) -> NewJob {
-    job_from_message(&cycle_issues_transferred_message(
+    job_from_message(cycle_issues_transferred_message(
         actor_id, project_id, moves, epoch, origin,
     ))
 }
@@ -882,7 +882,8 @@ mod tests {
     fn model_created_kwargs_order_and_wire() {
         let data = sample_data();
         for model in ["cycle", "module"] {
-            let message = model_created_message(model, "m1", &data, "a1", "ws", "https://app");
+            let message =
+                model_created_message(model, "m1", data.clone(), "a1", "ws", "https://app");
             assert_eq!(
                 kwargs_keys(&message),
                 [
@@ -907,7 +908,7 @@ mod tests {
             assert_eq!(bound.actor_id, "a1");
             assert_eq!(bound.slug, "ws");
             assert_eq!(bound.origin.as_deref(), Some("https://app"));
-            let job = model_created_job(model, "m1", &data, "a1", "ws", "https://app");
+            let job = model_created_job(model, "m1", data.clone(), "a1", "ws", "https://app");
             assert_eq!(job.task, MODEL_ACTIVITY_TASK_NAME);
             assert_eq!(job.args, json!([]));
             assert_eq!(job.kwargs, Value::Object(kwargs));
@@ -922,8 +923,15 @@ mod tests {
     fn model_updated_carries_snapshot() {
         let data = sample_data();
         let snapshot = r#"{"name": "Old"}"#;
-        let message =
-            model_updated_message("cycle", "m1", &data, snapshot, "a1", "ws", "https://app");
+        let message = model_updated_message(
+            "cycle",
+            "m1",
+            data.clone(),
+            snapshot,
+            "a1",
+            "ws",
+            "https://app",
+        );
         assert_eq!(
             kwargs_keys(&message),
             [
@@ -954,7 +962,7 @@ mod tests {
         model_updated_job(
             "module",
             "m9",
-            &sample_data(),
+            sample_data(),
             r#"{"name": "Old"}"#,
             "a1",
             "ws",

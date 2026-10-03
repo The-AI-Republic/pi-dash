@@ -33,6 +33,9 @@ pub mod celery;
 #[path = "dispatch/dispatch.rs"]
 pub mod dispatch;
 pub mod integrations;
+/// Iterative compact-JSON encoder (PIDASHCONV-626): stack-safe
+/// `serde_json::to_vec` for the ~9900-deep payloads ports may enqueue.
+pub mod json_compact;
 /// Loop turn dispatch: thread rotation + turn creation + run enqueue
 /// (D-03, PIDASHCONV-157): same explicit-path form as [`loop_scan`].
 #[path = "loop/dispatch.rs"]
