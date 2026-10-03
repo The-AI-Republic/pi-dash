@@ -160,10 +160,12 @@ pub fn member_list_sql() -> String {
 // R2 list / R3 retrieve requester + role branch (member.py:45-74)
 // ---------------------------------------------------------------------------
 
-/// R2/R3 requester lookup (`:47`, `:59`, also `:60` in `invite.py` and
-/// `:162` in `leave`): `.get(member=:user, workspace__slug=:slug,
-/// is_active=True)`. A bare `.get` — `DoesNotExist` bubbles past DRF's
-/// handler into a 500 (never a 404); handlers sequence that.
+/// R2/R3 requester lookup (`:47`, `:59`, also `:60` in `invite.py`,
+/// `:106-108` in `destroy`, `:162` in `leave` and `:210` in views post):
+/// `.get(member=:user, workspace__slug=:slug, is_active=True)`. A bare
+/// `.get` — `DoesNotExist` renders 404 `{"error": "The required object
+/// does not exist."}` via `BaseViewSet`/`BaseAPIView.handle_exception`
+/// (`app/views/base.py:110-150, 205-244`); handlers sequence that.
 pub fn member_requester_where() -> String {
     format!(
         "workspace_members.member_id = :user AND workspace_members.workspace_id = {} AND workspace_members.is_active = TRUE AND workspace_members.deleted_at IS NULL",
@@ -325,6 +327,19 @@ pub fn me_sql() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Views-post view_props save (member.py:208-214)
+// ---------------------------------------------------------------------------
+
+/// Views-post save (`:210-212`): `view_props = ...; save()` → full-row
+/// `UPDATE` stamping `updated_at` (`BaseModel.save` also stamps
+/// `updated_by` from the request user via crum, `db/models/base.py:23-44`
+/// — handler sequencing). The lookup is the [`member_requester_where`]
+/// predicate set (`:210`); the path answers 204.
+pub fn member_view_props_sql() -> String {
+    "UPDATE workspace_members SET view_props = :props, updated_at = :now WHERE id = :pk".to_owned()
+}
+
+// ---------------------------------------------------------------------------
 // R8 project-members dict (member.py:243-265)
 // ---------------------------------------------------------------------------
 
@@ -383,7 +398,7 @@ pub fn invite_list_sql() -> String {
 
 /// R10 role cap (`:63`): `int(email.get("role", 5)) > requesting_user.role`
 /// blocks with 400 — equal roles are OK. `requesting_user` is the
-/// [`member_requester_where`] lookup (bare `.get`, 500 for non-members).
+/// [`member_requester_where`] lookup (bare `.get`, 404 for non-members).
 pub fn invite_role_cap_blocks(invited_role: i32, requester_role: i32) -> bool {
     invited_role > requester_role
 }
@@ -399,7 +414,8 @@ pub fn workspace_lookup_where() -> String {
 /// member__email__in=[...], is_active=True)` plus `if queryset:` (`:79`).
 /// Ported as observed: truthiness fetches ALL matching rows (with
 /// `select_related("member", "member__avatar_asset")` for the 400
-/// `workspace_users` body) — it is NOT an `EXISTS`.
+/// `workspace_users` body) — it is NOT an `EXISTS`. Requires the `JOIN
+/// users` for the email match.
 pub fn invite_already_member_where() -> String {
     "workspace_members.workspace_id = :ws AND users.email IN (:emails) AND workspace_members.is_active = TRUE AND workspace_members.deleted_at IS NULL".to_owned()
 }
@@ -431,8 +447,9 @@ pub const INVITE_TOKEN_CLAIMS: &[&str] = &["email", "timestamp"];
 
 /// R11/R12/R13 invite lookup (`:145`, `:164`, `:239`):
 /// `.get(pk=:pk, workspace__slug=:slug)`. No responded/accepted check
-/// anywhere on this path. R12/R13 bubble `DoesNotExist` to a 500 (bare
-/// `.get`); R11 inherits the same.
+/// anywhere on this path. R12/R13 render `DoesNotExist` as 404 `{"error":
+/// "The required object does not exist."}` (bare `.get` through the
+/// base-view handler); R11 inherits the same.
 pub fn invite_lookup_where() -> String {
     format!(
         "workspace_member_invites.id = :pk AND workspace_member_invites.workspace_id = {} AND workspace_member_invites.deleted_at IS NULL",
@@ -440,11 +457,12 @@ pub fn invite_lookup_where() -> String {
     )
 }
 
-/// R11/R12/R14 invite delete (`:146`, `:220`, `:303`): `.delete()` is soft
-/// by default (`SoftDeleteModel.delete(soft=True)` stamps `deleted_at` and
-/// enqueues `soft_delete_related_objects`, `db/mixins.py:72-82`; the R14
-/// queryset `.delete()` soft-updates every filtered row,
-/// `mixins.py:48-53`). The task enqueue is owned by the jobs plane.
+/// R11/R12 instance invite delete (`:146`, `:220`):
+/// `SoftDeleteModel.delete(soft=True)` stamps `deleted_at` and runs a full
+/// `save()` (so `updated_at` is stamped too), plus enqueues
+/// `soft_delete_related_objects` (`db/mixins.py:72-82`; the enqueue is owned
+/// by the jobs plane). R14's queryset `.delete()` is a different shape —
+/// see [`my_invites_bulk_soft_delete_sql`].
 pub fn invite_soft_delete_sql() -> String {
     "UPDATE workspace_member_invites SET deleted_at = :now, updated_at = :now WHERE id = :pk"
         .to_owned()
@@ -460,6 +478,14 @@ pub fn invite_soft_delete_sql() -> String {
 /// without a session the token is the ONLY credential).
 pub fn join_token_denied(provided: &str, expected: &str) -> bool {
     provided.is_empty() || provided != expected
+}
+
+/// R12 respond-save (`:177-179`): `accepted = ...; responded_at = now;
+/// save()` → full-row `UPDATE` stamping `updated_at`. Runs only when
+/// `responded_at is None` (`:176`); ported bug 10 is the stuck row this
+/// write leaves behind when the user is missing or rejects.
+pub fn invite_respond_sql() -> String {
+    "UPDATE workspace_member_invites SET accepted = :accepted, responded_at = :now, updated_at = :now WHERE id = :pk".to_owned()
 }
 
 /// R12 user lookup (`:183`): `User.objects.filter(email=invite.email)
@@ -545,11 +571,25 @@ pub fn my_invites_accept_lookup_sql() -> String {
     )
 }
 
+/// R14 bulk soft-delete (`:303`): queryset `.delete()` →
+/// `SoftDeletionQuerySet.delete` (`db/mixins.py:48-53`) → `.update(
+/// deleted_at=now)` over the accept-lookup predicate — `SET deleted_at`
+/// ONLY (`.update()` writes only the named columns, no `updated_at`),
+/// multi-row. Contrast the instance delete ([`invite_soft_delete_sql`]).
+pub fn my_invites_bulk_soft_delete_sql() -> String {
+    format!(
+        "UPDATE workspace_member_invites SET deleted_at = :now WHERE workspace_member_invites.id IN (:pks) AND {}",
+        my_invites_where()
+    )
+}
+
 /// R14 per-invite reactivate (`:270-272`): `UPDATE workspace_members SET
 /// is_active=TRUE, role=:role WHERE workspace_id=:ws AND member=:user` —
-/// no `is_active` filter (active rows are rewritten in place).
+/// no `is_active` filter (active rows are rewritten in place) and no
+/// `updated_at` (`QuerySet.update()` writes only the named columns — same
+/// rule as R18's [`profile_last_workspace_sql`]).
 pub fn my_invite_reactivate_sql() -> String {
-    "UPDATE workspace_members SET is_active = TRUE, role = :role, updated_at = :now WHERE workspace_members.workspace_id = :ws AND workspace_members.member_id = :user AND workspace_members.deleted_at IS NULL".to_owned()
+    "UPDATE workspace_members SET is_active = TRUE, role = :role WHERE workspace_members.workspace_id = :ws AND workspace_members.member_id = :user AND workspace_members.deleted_at IS NULL".to_owned()
 }
 
 /// R14 bulk-create (`:289-300`): `bulk_create(..., ignore_conflicts=True)`
@@ -557,7 +597,8 @@ pub fn my_invite_reactivate_sql() -> String {
 /// R10's [`INVITE_BULK_BATCH_SIZE`]). The update-then-create double-write
 /// covers reactivate (alive row updated above) plus new (inserted here);
 /// rows updated above conflict-skip here (ported bug 9). Invite rows are
-/// then soft-deleted ([`invite_soft_delete_sql`]) and the path answers 204.
+/// then soft-deleted ([`my_invites_bulk_soft_delete_sql`]) and the path
+/// answers 204.
 pub fn my_invite_bulk_insert_sql() -> String {
     "INSERT INTO workspace_members (id, created_at, updated_at, created_by_id, workspace_id, member_id, role) VALUES (:id, :now, :now, :user, :ws, :user, :role) ON CONFLICT DO NOTHING".to_owned()
 }
@@ -566,10 +607,15 @@ pub fn my_invite_bulk_insert_sql() -> String {
 // R15 user join-request list (join_request.py:43-46)
 // ---------------------------------------------------------------------------
 
+/// R15/R17 list order: `WorkspaceJoinRequest.Meta.ordering =
+/// ("-created_at",)` (`db/models/workspace.py:317`).
+pub const JOIN_REQUEST_LIST_ORDER_SQL: &str = "workspace_join_requests.created_at DESC";
+
 /// R15 scope (`:45`): `requester=:user`. Ported bug 14:
 /// `select_related("requester")` joins the requester row back onto a
 /// requester-scoped queryset — a self-join no-op, kept as observed.
-/// List is the inherited `ModelViewSet` action (paginated).
+/// List is the inherited `ModelViewSet` action (paginated) over
+/// [`JOIN_REQUEST_LIST_ORDER_SQL`].
 pub fn own_join_requests_where() -> String {
     "workspace_join_requests.requester_id = :user AND workspace_join_requests.deleted_at IS NULL"
         .to_owned()
@@ -639,9 +685,10 @@ pub fn join_request_unresolved_create_sql() -> String {
 // ---------------------------------------------------------------------------
 
 /// R17 scope (`:172-176`): `workspace__slug=:slug AND status=PENDING` with
-/// `select_related("workspace", "requester")` fetch joins. Non-pending rows
-/// are invisible here, so approve/deny fetch via direct
-/// `get_object_or_404` ([`join_request_fetch_where`]) — ported as observed.
+/// `select_related("workspace", "requester")` fetch joins, ordered by
+/// [`JOIN_REQUEST_LIST_ORDER_SQL`]. Non-pending rows are invisible here,
+/// so approve/deny fetch via direct `get_object_or_404`
+/// ([`join_request_fetch_where`]) — ported as observed.
 pub fn admin_join_requests_where() -> String {
     format!(
         "workspace_join_requests.workspace_id = {} AND workspace_join_requests.status = 'PENDING' AND workspace_join_requests.deleted_at IS NULL",
@@ -655,8 +702,9 @@ pub fn admin_join_requests_where() -> String {
 
 /// R18/R19 fetch (`:188`, `:242`): `get_object_or_404(pk=:pk,
 /// workspace__slug=:slug)` — a direct get with NO status filter (contrast
-/// [`admin_join_requests_where`]) that 404s on missing (contrast R12's bare
-/// `.get` 500).
+/// [`admin_join_requests_where`]) that 404s on missing (contrast R12's
+/// bare `.get`, whose `DoesNotExist` renders the base-view 404 `{"error":
+/// "The required object does not exist."}`).
 pub fn join_request_fetch_where() -> String {
     format!(
         "workspace_join_requests.id = :pk AND workspace_join_requests.workspace_id = {} AND workspace_join_requests.deleted_at IS NULL",
@@ -742,6 +790,7 @@ mod tests {
             member_reactivate_lookup_where(),
             my_invites_where(),
             my_invites_accept_lookup_sql(),
+            my_invites_bulk_soft_delete_sql(),
             my_invite_reactivate_sql(),
             own_join_requests_where(),
             join_request_admin_targets_sql(),
@@ -928,9 +977,11 @@ mod tests {
         let lookup = invite_lookup_where();
         assert!(lookup.contains("workspace_member_invites.id = :pk"));
         assert!(lookup.contains("slug = :slug"));
-        // Soft, not hard: deleted_at stamp.
+        // Soft, not hard: deleted_at stamp. Instance .delete() runs a full
+        // save, so updated_at is stamped too (contrast the R14 bulk shape).
         let delete = invite_soft_delete_sql();
-        assert!(delete.contains("SET deleted_at = :now"));
+        assert!(delete.contains("SET deleted_at = :now, updated_at = :now"));
+        assert!(delete.contains("WHERE id = :pk"));
         assert!(!delete.to_uppercase().starts_with("DELETE FROM"));
     }
 
@@ -940,6 +991,12 @@ mod tests {
         assert!(join_token_denied("", "tok"));
         assert!(join_token_denied("bad", "tok"));
         assert!(!join_token_denied("tok", "tok"));
+        // Respond-save: accepted + responded_at + full-save updated_at.
+        let respond = invite_respond_sql();
+        assert!(
+            respond.contains("SET accepted = :accepted, responded_at = :now, updated_at = :now")
+        );
+        assert!(respond.contains("WHERE id = :pk"));
         // User lookup: exact email, default order, no deleted_at.
         let user = join_user_lookup_sql();
         assert!(user.contains("users.email = :email"));
@@ -971,7 +1028,16 @@ mod tests {
         assert!(lookup.contains("workspace_member_invites.id IN (:pks)"));
         assert!(lookup.contains("workspace_member_invites.email = :email"));
         assert!(lookup.ends_with(&format!("ORDER BY {MY_INVITES_ORDER_SQL}")));
-        assert!(my_invite_reactivate_sql().contains("SET is_active = TRUE, role = :role"));
+        // .update() writes only named columns: no updated_at (like R18).
+        let reactivate = my_invite_reactivate_sql();
+        assert!(reactivate.contains("SET is_active = TRUE, role = :role"));
+        assert!(!reactivate.contains("updated_at"));
+        // Queryset .delete() = SET deleted_at only, over the accept predicate.
+        let bulk_delete = my_invites_bulk_soft_delete_sql();
+        assert!(bulk_delete.contains("SET deleted_at = :now WHERE"));
+        assert!(!bulk_delete.contains("updated_at"));
+        assert!(bulk_delete.contains("workspace_member_invites.id IN (:pks)"));
+        assert!(bulk_delete.contains(&my_invites_where()));
         // Ported bug 12 (second half): bulk sets created_by; update ran first.
         let bulk = my_invite_bulk_insert_sql();
         assert!(bulk.contains("created_by_id"));
@@ -979,9 +1045,23 @@ mod tests {
     }
 
     #[test]
+    fn views_post_view_props_save() {
+        // Full save: view_props + updated_at on the member row.
+        let save = member_view_props_sql();
+        assert!(
+            save.contains("UPDATE workspace_members SET view_props = :props, updated_at = :now")
+        );
+        assert!(save.contains("WHERE id = :pk"));
+    }
+
+    #[test]
     fn r15_own_requests_scope() {
         let scope = own_join_requests_where();
         assert!(scope.contains("workspace_join_requests.requester_id = :user"));
+        assert_eq!(
+            JOIN_REQUEST_LIST_ORDER_SQL,
+            "workspace_join_requests.created_at DESC"
+        );
     }
 
     #[test]
@@ -1017,6 +1097,10 @@ mod tests {
         let scope = admin_join_requests_where();
         assert!(scope.contains("slug = :slug"));
         assert!(scope.contains("workspace_join_requests.status = 'PENDING'"));
+        assert_eq!(
+            JOIN_REQUEST_LIST_ORDER_SQL,
+            "workspace_join_requests.created_at DESC"
+        );
     }
 
     #[test]
