@@ -152,7 +152,14 @@
 //! [`outbox`] ports the per-runner Redis Streams verbs
 //! (`services/outbox.py:139-737`) on top of these models and the
 //! `types::runner_sessions` shapes (PIDASHCONV-550).
+//!
+//! [`machine_outbox`] ports the per-dev-machine twin
+//! (`services/machine_outbox.py:111-393`): group mgmt, enqueue,
+//! drain, read/ack, PEL markers, eviction, command results and
+//! stream delete — no claim/reap/trim, those have no machine side
+//! (PIDASHCONV-551).
 
+pub mod machine_outbox;
 pub mod models;
 pub mod outbox;
 
