@@ -24,6 +24,7 @@
 //! - [`v1_cli_auth`]: api-v1 CLI auth + runner v1 Runner read model (D-22).
 //! - [`v1_cycles_modules`]: api-v1 cycles + modules models (D-20).
 //! - [`v1_projects`]: api-v1 projects/members/states/estimates models (D-19).
+//! - [`runner_runs`]: runner run/chat/dedupe/live-state models (D-15).
 //!
 //! Write paths take a [`context::RequestContext`]; there is no unscoped
 //! handle for writes.
@@ -51,6 +52,7 @@ pub mod migrations;
 pub mod pool;
 pub mod prompting;
 pub mod redis;
+pub mod runner_runs;
 pub mod soft_delete;
 pub mod space;
 pub mod tasks_cleanup;
