@@ -16,11 +16,17 @@
 //! (PIDASHCONV-618); [`routes`] merges its routes — sibling handler
 //! issues extend the merge; merges keep both sides.
 //!
+//! [`handlers_lists`] ports the read-only workspace list family —
+//! labels, states, estimates, modules, cycles (PIDASHCONV-621);
+//! [`routes`] merges its routes — sibling handler issues extend the
+//! merge; merges keep both sides.
+//!
 //! [`handlers_members`] serves the member family (list/retrieve,
 //! partial_update/destroy/leave, views-post, me-get, project-members,
 //! last-visited — PIDASHCONV-616).
 
 pub mod gates;
+pub mod handlers_lists;
 pub mod handlers_members;
 pub mod handlers_prefs;
 pub mod handlers_profile;
@@ -36,7 +42,8 @@ use crate::state::AppState;
 /// (sibling D-24 handler issues extend this merge; merges keep both
 /// sides), merged here for the F-10 overlay seam.
 pub fn routes() -> Router<AppState> {
-    handlers_members::routes()
+    handlers_lists::routes()
+        .merge(handlers_members::routes())
         .merge(handlers_prefs::routes())
         .merge(handlers_profile::routes())
         .merge(handlers_tokens::routes())
