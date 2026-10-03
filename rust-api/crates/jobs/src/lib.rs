@@ -57,8 +57,10 @@ pub mod loop_fire;
 pub mod loop_scan;
 pub mod orchestration;
 pub mod queue;
-/// Approval expiry + runner/session sweeps (D-15 L6a, PIDASHCONV-539):
-/// task bodies + `worker::Registry` handlers over the L4 planners.
+/// Runner task executors (D-15 L6, PIDASHCONV-539/540): the executing
+/// half of `runner/tasks.py` over the L4/L5 planners — approval expiry
+/// + runner/session sweeps (L6a) and dedupe + chat sweeps +
+/// stall-terminal reconcile (L6b).
 pub mod runner_runs;
 pub mod schedule;
 pub mod scheduler;

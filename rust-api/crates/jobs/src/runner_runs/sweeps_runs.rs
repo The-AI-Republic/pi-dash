@@ -2110,8 +2110,18 @@ mod tests {
         // testable with no database.
         let pool =
             sqlx::PgPool::connect_lazy("postgres://localhost:1/unused").expect("lazy pool builds");
+        // L6a's five names only: `TASK_NAMES` also carries L6b's six
+        // since the 539/540 merge, and the sibling register fn owns
+        // those (see `sweeps_chat::registration_owns_all_six_names`).
+        let l6a = [
+            EXPIRE_TASK,
+            MARK_OFFLINE_TASK,
+            SWEEP_IDLE_TASK,
+            SWEEP_STALE_TASK,
+            SWEEP_STREAMS_TASK,
+        ];
         let mut registry = Registry::new();
-        for task in crate::runner_runs::TASK_NAMES {
+        for task in l6a {
             assert!(!registry.owns(task));
         }
         register_sweeps_runs_tasks(
@@ -2120,13 +2130,16 @@ mod tests {
             Arc::new(FakeOutbox::default()),
             Arc::new(FakeEffects::default()),
         );
-        for task in crate::runner_runs::TASK_NAMES {
+        for task in l6a {
             assert!(registry.owns(task), "{task} registered");
         }
-        assert_eq!(crate::runner_runs::TASK_NAMES.len(), 5);
+        assert_eq!(crate::runner_runs::TASK_NAMES.len(), 11);
         assert!(crate::runner_runs::is_runner_runs_task(EXPIRE_TASK));
-        assert!(!crate::runner_runs::is_runner_runs_task(
+        assert!(crate::runner_runs::is_runner_runs_task(
             "runner.reconcile_stalled_runs"
+        ));
+        assert!(!crate::runner_runs::is_runner_runs_task(
+            "runner.no_such_task"
         ));
     }
 }
