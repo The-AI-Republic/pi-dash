@@ -316,12 +316,14 @@ pub async fn get_agent_system_user(
             sqlx::query("RELEASE SAVEPOINT pidash_agent_user")
                 .execute(&mut *conn)
                 .await?;
-            // Django re-runs `get()` here (which may itself miss and
-            // raise when the conflict was email-only); surface that
-            // as `RowNotFound`.
-            let user = find_agent_user(&mut *conn, AGENT_USERNAME)
-                .await?
-                .ok_or(sqlx::Error::RowNotFound)?;
+            // Django re-runs `get()` here; when the conflict was
+            // email-only the re-get misses and Django re-raises the
+            // original `IntegrityError` — so return it, not
+            // `RowNotFound` (which would mislead retry-on-missing
+            // callers into a loop).
+            let Some(user) = find_agent_user(&mut *conn, AGENT_USERNAME).await? else {
+                return Err(e.into());
+            };
             if !user.is_bot {
                 return Err(AgentUserCollisionError.into());
             }
@@ -707,6 +709,47 @@ mod tests {
                 "User 'pi_dash_agent' exists but is not a bot; refusing to author agent activity under a human account."
             ),
             GetAgentUserError::Db(db) => panic!("wrong error: {db:?}"),
+        }
+    }
+
+    /// Email-only conflict: another row holds the agent email under a
+    /// different username. Django's `get_or_create` re-raises the
+    /// original `IntegrityError` when its retry `get()` misses — the
+    /// port returns the 23505 database error, never `RowNotFound`.
+    #[tokio::test]
+    async fn live_agent_user_email_conflict_reraises_unique_violation() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin scratch tx");
+        sqlx::query(USERS_DDL)
+            .execute(&mut *tx)
+            .await
+            .expect("temp users");
+        let now: chrono::DateTime<chrono::Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        sqlx::query(
+            "INSERT INTO users (password, id, username, email, display_name, first_name,
+             last_name, avatar, date_joined, created_at, updated_at, last_location,
+             created_location, is_superuser, is_managed, is_password_expired, is_active,
+             is_staff, is_email_verified, is_password_autoset, is_password_reset_required,
+             token, last_login_ip, last_logout_ip, last_login_medium, last_login_uagent,
+             is_bot, user_timezone, is_email_valid)
+             VALUES ('usable-hash', $1, 'some_human', $2, 'human', 'Hu', 'Man', '',
+             $3, $3, $3, '', '', false, false, false, true, false, false, false, false, '',
+             '', '', 'email', '', false, 'UTC', false)",
+        )
+        .bind(live_uuid("000000005003"))
+        .bind(AGENT_USER_EMAIL)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .expect("seed email holder");
+        let err = get_agent_system_user(&mut tx, now)
+            .await
+            .expect_err("email conflict fails");
+        match err {
+            GetAgentUserError::Db(db) => assert!(is_unique_violation(&db), "got {db:?}"),
+            GetAgentUserError::Collision(_) => panic!("wrong error: collision"),
         }
     }
 }
