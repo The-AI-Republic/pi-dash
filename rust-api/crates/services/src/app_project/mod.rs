@@ -8,6 +8,8 @@
 //! * [`ser_member`] — member / invite serializers (PIDASHCONV-564).
 //! * [`ser_workflow`] — state / estimate serializers (PIDASHCONV-565).
 //! * [`ser_shared`] — shared + nested serializers (PIDASHCONV-566).
+//! * [`tasks`] — task call-sites + invite tokens + `handle_exception`
+//!   table (PIDASHCONV-570).
 //!
 //! Wiring note: the crate root declares `pub mod app_project;`. Sibling
 //! issues add their own `ser_*` siblings to this file (`ser_project`
@@ -30,3 +32,17 @@
 pub mod ser_member;
 pub mod ser_shared;
 pub mod ser_workflow;
+pub mod tasks;
+
+pub use tasks::{
+    detail_body, estimate_point_dumps, handle_exception, invite_create_failure, invite_token,
+    model_activity_on_create, model_activity_on_partial_update, point_destroy_plan,
+    IssueActivityEmit, IssuePointRef, ModelActivityEmit, PointDestroyStep, ProjectAddUserEmailEmit,
+    RecentVisitedEmit, ViewError, WebhookActivityEmit, INTEGRITY_ERROR_BODY,
+    INVITE_JWT_HEADER_JSON, ISSUE_ACTIVITY_KWARG_ORDER, ISSUE_ACTIVITY_TASK,
+    ISSUE_ACTIVITY_UPDATED, KEY_ERROR_BODY, MODEL_ACTIVITY_KWARG_ORDER, MODEL_ACTIVITY_MODEL,
+    MODEL_ACTIVITY_TASK, OBJECT_NOT_FOUND_BODY, PROJECT_ADD_USER_EMAIL_TASK, RECENT_VISITED_ENTITY,
+    RECENT_VISITED_KWARG_ORDER, RECENT_VISITED_TASK, SERVER_ERROR_BODY, VALIDATION_ERROR_BODY,
+    WEBHOOK_ACTIVITY_KWARG_ORDER, WEBHOOK_ACTIVITY_TASK, WEBHOOK_EVENT_PROJECT,
+    WEBHOOK_VERB_DELETED,
+};
