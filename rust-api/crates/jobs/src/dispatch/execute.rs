@@ -579,18 +579,27 @@ pub struct UsageLimits {
 /// classifier as `provider_error`, as the validation error does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LimitError {
-    key: &'static str,
+    key: Option<&'static str>,
 }
 
 impl LimitError {
     fn new(key: &'static str) -> Self {
-        Self { key }
+        Self { key: Some(key) }
+    }
+
+    /// The `limits` container itself is present but not an object
+    /// (`runtime.py:56` raising `AttributeError`).
+    fn not_object() -> Self {
+        Self { key: None }
     }
 }
 
 impl std::fmt::Display for LimitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "plan limits.{} is not a number", self.key)
+        match self.key {
+            Some(key) => write!(f, "plan limits.{key} is not a number"),
+            None => write!(f, "plan limits is not an object"),
+        }
     }
 }
 
@@ -630,18 +639,19 @@ fn limit_for(
     }
 }
 
-/// Usage limits from plan-or-settings (`runtime.py:56-63`). A missing or
-/// non-object `limits` reads as `{}` (`.get("limits", {})`); only a
-/// present `limits` object is consulted per key.
+/// Usage limits from plan-or-settings (`runtime.py:56-63`). Only an
+/// absent `limits` key reads as `{}` (`.get("limits", {})`); a
+/// present-but-non-object `limits` raises in Python (no `.get` on a
+/// list, `None`, ...), so it errors here too — the generic path.
 pub fn usage_limits_for(
     tool_plan: &Value,
     cloud: &CloudAgentSettings,
 ) -> Result<UsageLimits, LimitError> {
     let empty = Map::new();
-    let limits = tool_plan
-        .get("limits")
-        .and_then(Value::as_object)
-        .unwrap_or(&empty);
+    let limits = match tool_plan.get("limits") {
+        None => &empty,
+        Some(value) => value.as_object().ok_or(LimitError::not_object())?,
+    };
     Ok(UsageLimits {
         request_limit: limit_for(limits, "model_requests", cloud.model_request_limit)?,
         tool_calls_limit: limit_for(limits, "tool_calls", cloud.tool_call_limit)?,
@@ -1041,6 +1051,7 @@ pub enum TryError {
 pub enum RunError {
     Db(sqlx::Error),
     Seam(SeamError),
+    MissingProject(MissingProject),
 }
 
 impl std::fmt::Display for RunError {
@@ -1048,6 +1059,7 @@ impl std::fmt::Display for RunError {
         match self {
             RunError::Db(error) => write!(f, "database error: {error}"),
             RunError::Seam(error) => write!(f, "seam error: {error}"),
+            RunError::MissingProject(error) => write!(f, "{error}"),
         }
     }
 }
@@ -1063,6 +1075,12 @@ impl From<sqlx::Error> for RunError {
 impl From<SeamError> for RunError {
     fn from(error: SeamError) -> Self {
         RunError::Seam(error)
+    }
+}
+
+impl From<MissingProject> for RunError {
+    fn from(error: MissingProject) -> Self {
+        RunError::MissingProject(error)
     }
 }
 
@@ -1218,6 +1236,30 @@ pub struct RunContext {
     pub pod_project_id: Uuid,
 }
 
+/// The selected scope leg's project is null (`tasks.py:100-106`):
+/// `work_item_id` (resp. `scheduler_binding_id`) is set but the
+/// joined project is missing — a concurrently deleted row, or a null
+/// `scheduler_bindings.project_id`. A guard-region error: it
+/// propagates as infra, never a terminal row write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingProject {
+    WorkItem,
+    SchedulerBinding,
+}
+
+impl std::fmt::Display for MissingProject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MissingProject::WorkItem => write!(f, "bound work item has no project"),
+            MissingProject::SchedulerBinding => {
+                write!(f, "bound scheduler binding has no project")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MissingProject {}
+
 impl RunContext {
     /// The creator flags for [`user_has_llm_config`].
     pub fn creator_flags(&self) -> UserFlags {
@@ -1229,22 +1271,35 @@ impl RunContext {
 
     /// Which project the guards read (`tasks.py:100-106`): the bound
     /// work item's, else the scheduler binding's, else the pod's.
-    pub fn run_project(&self) -> ProjectRef {
-        let work_item = self.work_item_project_id.map(|project_id| ProjectRef {
-            project_id,
-            workspace_id: self.workspace_id,
-        });
-        let scheduler_binding = self
-            .scheduler_binding_project_id
-            .map(|project_id| ProjectRef {
+    /// Selection is on the `_id` columns, as Python's
+    /// `if run.work_item_id` / `if run.scheduler_binding_id` is: a
+    /// selected-but-null leg errors instead of falling through to the
+    /// pod (Python reads `.project` off the selected row — `None` for
+    /// a null binding project — and raises `AttributeError` on
+    /// `project.id` outside the `try`).
+    pub fn run_project(&self) -> Result<ProjectRef, MissingProject> {
+        let work_item = match (self.work_item_id, self.work_item_project_id) {
+            (Some(_), Some(project_id)) => Some(ProjectRef {
                 project_id,
                 workspace_id: self.workspace_id,
-            });
+            }),
+            (Some(_), None) => return Err(MissingProject::WorkItem),
+            (None, _) => None,
+        };
+        let scheduler_binding = match (self.scheduler_binding_id, self.scheduler_binding_project_id)
+        {
+            (Some(_), Some(project_id)) => Some(ProjectRef {
+                project_id,
+                workspace_id: self.workspace_id,
+            }),
+            (Some(_), None) => return Err(MissingProject::SchedulerBinding),
+            (None, _) => None,
+        };
         let pod = ProjectRef {
             project_id: self.pod_project_id,
             workspace_id: self.workspace_id,
         };
-        resolve_run_project(work_item, scheduler_binding, pod)
+        Ok(resolve_run_project(work_item, scheduler_binding, pod))
     }
 }
 
@@ -1488,9 +1543,12 @@ async fn apply_try_error<S: ExecuteSeams>(
     error: TryError,
 ) -> Result<RunOutcome, RunError> {
     match error {
+        // The arm has no `return`: it falls through to `"failed"`
+        // (`tasks.py:186-189` into 208). Only the row keeps the
+        // `llm_config_missing` code.
         TryError::LlmConfigMissing(message) => {
             fail_run(seams, run_id, CODE_LLM_CONFIG_MISSING, &message).await?;
-            Ok(RunOutcome::LlmConfigMissing)
+            Ok(RunOutcome::Failed)
         }
         TryError::Timeout | TryError::Invoke(InvokeError::Timeout) => {
             fail_run(seams, run_id, CODE_RUN_TIMEOUT, DETAIL_RUN_TIMEOUT).await?;
@@ -1600,6 +1658,10 @@ async fn apply_try_done<S: ExecuteSeams>(
     let failed_once = |error: RunError| match error {
         RunError::Db(error) => TryError::Db(error),
         RunError::Seam(error) => TryError::Seam(error),
+        // Unreachable: terminal writes only fail [`RunError::Db`] /
+        // [`RunError::Seam`]. Classified, like any other unexpected
+        // exception, rather than propagated.
+        RunError::MissingProject(error) => TryError::Seam(SeamError(error.to_string())),
     };
     match done {
         TryDone::Disabled => {
@@ -1705,10 +1767,11 @@ pub fn build_invocation(
     }
 }
 
-/// One model execution (`runtime.py:18-76`): resolve the model, build
-/// the invocation, append `model_started`, invoke under the execution
-/// timeout, and normalize the usage report. Returns the structured
-/// output plus the `llm_model`/`usage` updates pair.
+/// One model execution (`runtime.py:18-76`): resolve the model,
+/// append `model_started`, resolve the limits, build the invocation,
+/// invoke under the execution timeout, and normalize the usage
+/// report. Returns the structured output plus the
+/// `llm_model`/`usage` updates pair.
 pub async fn drive_execute<S: ExecuteSeams>(
     seams: &S,
     pool: &PgPool,
@@ -1733,7 +1796,6 @@ pub async fn drive_execute<S: ExecuteSeams>(
         }
         Err(error) => return Err(TryError::Resolve(error)),
     };
-    let usage_limits = usage_limits_for(&ctx.tool_plan, cloud).map_err(TryError::Limits)?;
     let model_name = model_name_for(&model);
     append_event(
         pool,
@@ -1745,6 +1807,9 @@ pub async fn drive_execute<S: ExecuteSeams>(
     )
     .await
     .map_err(TryError::Db)?;
+    // Limits resolve after the append (`runtime.py:55` before 56-63):
+    // corrupt limits still leave the `model_started` row behind.
+    let usage_limits = usage_limits_for(&ctx.tool_plan, cloud).map_err(TryError::Limits)?;
     let invocation = build_invocation(ctx, model, current_tools, cloud, usage_limits);
     let timeout = std::time::Duration::from_secs(cloud.execution_timeout_secs.max(0) as u64);
     let (output, raw_usage) =
@@ -1802,7 +1867,7 @@ pub async fn drive_run_cloud_agent<S: ExecuteSeams>(
         .await?;
         return Ok(RunOutcome::Unauthorized);
     }
-    let project = ctx.run_project();
+    let project = ctx.run_project()?;
     if !creator_has_project_role(
         pool,
         ctx.created_by_id,
@@ -1854,7 +1919,7 @@ pub async fn drive_run_cloud_agent<S: ExecuteSeams>(
         cancel_run(seams, ctx.id, &ctx.cancel_reason).await?;
         return Ok(RunOutcome::Cancelled);
     }
-    match run_try_region(seams, pool, cloud, &ctx).await {
+    match run_try_region(seams, pool, cloud, &ctx, project).await {
         Ok(done) => apply_try_done(seams, ctx.id, done).await,
         Err(error) => apply_try_error(seams, ctx.id, error).await,
     }
@@ -1862,16 +1927,19 @@ pub async fn drive_run_cloud_agent<S: ExecuteSeams>(
 
 /// The `try:` body (`tasks.py:134-181`): tool refresh, model, rechecks,
 /// counts, payload. Terminal writes happen in [`apply_try_done`].
+/// `project` is the guard's resolution, threaded through: re-resolving
+/// here could only repeat the guard's answer (same context), and a
+/// selected-but-null leg never reaches the region at all.
 async fn run_try_region<S: ExecuteSeams>(
     seams: &S,
     pool: &PgPool,
     cloud: &CloudAgentSettings,
     ctx: &RunContext,
+    project: ProjectRef,
 ) -> Result<TryDone, TryError> {
     // `github_available_for_project` with the async binding probe
     // spelled out: the kill switch short-circuits without touching the
     // database (the ported predicate's own rule, pinned by test).
-    let project = ctx.run_project();
     let github_available = if !cloud.github_tools_enabled {
         false
     } else {
@@ -2720,9 +2788,20 @@ mod tests {
             let plan = json!({"limits": {"tool_calls": bad}});
             assert!(usage_limits_for(&plan, &cloud).is_err(), "errors for {bad}");
         }
-        // Non-object `limits` reads as `{}`.
-        let limits = usage_limits_for(&json!({"limits": [1]}), &cloud).unwrap();
-        assert_eq!(limits.request_limit, Some(25));
+        // Present-but-non-object `limits` errors (Python raises
+        // `AttributeError`: no `.get` on a list, `None`, ...). Only an
+        // absent key reads as `{}`.
+        for bad in [json!([1]), json!(null), json!("x"), json!(7)] {
+            let plan = json!({"limits": bad});
+            assert!(
+                usage_limits_for(&plan, &cloud).is_err(),
+                "errors for limits={bad}"
+            );
+        }
+        assert_eq!(
+            usage_limits_for(&json!({"limits": [1]}), &cloud).unwrap_err(),
+            LimitError::not_object()
+        );
     }
 
     #[test]
@@ -2834,6 +2913,46 @@ mod tests {
     }
 
     #[test]
+    fn run_project_selects_on_id_columns() {
+        // No ids: the pod's project wins.
+        let ctx = run_ctx();
+        assert_eq!(
+            ctx.run_project().expect("pod").project_id,
+            ctx.pod_project_id
+        );
+        // Each selected leg wins in order, on its `_id`.
+        let mut ctx = run_ctx();
+        let (work, binding) = (Uuid::new_v4(), Uuid::new_v4());
+        ctx.work_item_id = Some(Uuid::new_v4());
+        ctx.work_item_project_id = Some(work);
+        ctx.scheduler_binding_id = Some(Uuid::new_v4());
+        ctx.scheduler_binding_project_id = Some(binding);
+        assert_eq!(ctx.run_project().expect("work item").project_id, work);
+        ctx.work_item_id = None;
+        assert_eq!(ctx.run_project().expect("binding").project_id, binding);
+        // Selected-but-null legs error; they never fall through to the
+        // pod (Python raises outside the `try`).
+        let mut ctx = run_ctx();
+        ctx.work_item_id = Some(Uuid::new_v4());
+        ctx.scheduler_binding_id = Some(Uuid::new_v4());
+        ctx.scheduler_binding_project_id = Some(Uuid::new_v4());
+        assert_eq!(ctx.run_project().unwrap_err(), MissingProject::WorkItem);
+        let mut ctx = run_ctx();
+        ctx.scheduler_binding_id = Some(Uuid::new_v4());
+        assert_eq!(
+            ctx.run_project().unwrap_err(),
+            MissingProject::SchedulerBinding
+        );
+        // A project id with no selecting `_id` is not a selection.
+        let mut ctx = run_ctx();
+        ctx.scheduler_binding_project_id = Some(Uuid::new_v4());
+        assert_eq!(
+            ctx.run_project().expect("pod").project_id,
+            ctx.pod_project_id
+        );
+    }
+
+    #[test]
     fn invocation_shape_pins_agent_construction() {
         let cloud = django_cloud_settings();
         let mut ctx = run_ctx();
@@ -2908,7 +3027,8 @@ mod tests {
 
     #[tokio::test]
     async fn try_errors_map_through_the_except_ladder() {
-        // LLMConfigMissing: dedicated arm, verbatim detail.
+        // LLMConfigMissing: dedicated row write, but the arm falls
+        // through to "failed" (`tasks.py:186-189` into 208).
         let seams = FakeSeams::new();
         let run_id = Uuid::new_v4();
         let outcome = apply_try_error(
@@ -2918,7 +3038,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(outcome, RunOutcome::LlmConfigMissing);
+        assert_eq!(outcome, RunOutcome::Failed);
         let calls = seams.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].new_status, "failed");
@@ -3813,7 +3933,10 @@ mod tests {
             assert!(!ctx.creator_is_bot);
             assert!(ctx.workspace_slug.starts_with("l7-ctx-"));
             // No work item / binding: the pod's project wins.
-            assert_eq!(ctx.run_project().project_id, graph.project);
+            assert_eq!(
+                ctx.run_project().expect("project").project_id,
+                graph.project
+            );
             assert!(!creator_is_workspace_member(&pool, graph.user, graph.ws)
                 .await
                 .expect("probe before"));
@@ -3973,6 +4096,52 @@ mod tests {
                 .await
                 .expect("expire ids");
             assert_eq!(ids, vec![expired_id]);
+            teardown(&pool, &graph).await;
+        }
+
+        /// `model_started` lands before limit validation
+        /// (`runtime.py:55` before 56-63): corrupt limits fail the
+        /// execution but leave the event row behind, and never invoke.
+        #[tokio::test]
+        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
+        async fn live_execute_appends_model_started_before_limit_error() {
+            let pool = pool().await;
+            let graph = seed_graph(&pool, "execorder").await;
+            let now = Utc::now();
+            let run_id = seed_run(
+                &pool,
+                &graph,
+                "running",
+                "cloud_agent",
+                now,
+                Some(now),
+                None,
+                "do it",
+                json!({"tools": [], "limits": {"tool_calls": [1]}}),
+                None,
+            )
+            .await;
+            let seams = LiveSeams::new(pool.clone());
+            let cloud = cloud_on();
+            let ctx = fetch_run_context(&pool, run_id).await.expect("context");
+            let error = drive_execute(&seams, &pool, &cloud, &ctx, Vec::new())
+                .await
+                .expect_err("corrupt limits fail");
+            assert!(
+                matches!(error, TryError::Limits(_)),
+                "generic-path limit error"
+            );
+            assert!(
+                seams.invocations.lock().unwrap().is_empty(),
+                "no invocation on limit error"
+            );
+            let kinds: Vec<String> =
+                sqlx::query_scalar("SELECT kind FROM agent_run_event WHERE agent_run_id = $1")
+                    .bind(run_id)
+                    .fetch_all(&pool)
+                    .await
+                    .expect("events");
+            assert_eq!(kinds, vec!["model_started".to_owned()]);
             teardown(&pool, &graph).await;
         }
 
