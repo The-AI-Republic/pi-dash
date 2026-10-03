@@ -215,21 +215,17 @@ pub fn project_lite_to_representation<'a>(row: &'a ProjectLiteRow<'a>) -> Projec
     }
 }
 
-/// The `StateSerializer` `fields = "__all__"` key set (`state.py:10-14`):
-/// every concrete model field — `id` (`BaseModel`, `db/models/base.py:18`),
-/// audit columns (`AuditModel`, `db/mixins.py:17-89`), FKs (`ProjectBaseModel`,
-/// `db/models/project.py:302-304`), then `State`'s own columns in definition
-/// order (`db/models/state.py:93-107`). FK primary keys render as strings;
-/// null FKs render `null`.
+/// The `StateSerializer` `fields = "__all__"` wire keys (`state.py:10-14`),
+/// in live-DRF order (probed `StateSerializer().fields`): `id`, the
+/// concrete columns (`created_at`, `updated_at`, `deleted_at`, then `State`'s
+/// own columns, `db/models/state.py:93-107`), then the forward relations
+/// trailing (`created_by`, `updated_by`, `project`, `workspace`). FK primary
+/// keys render as strings; null FKs render `null`.
 pub const STATE_ALL_FIELDS: [&str; 18] = [
     "id",
     "created_at",
     "updated_at",
-    "created_by",
-    "updated_by",
     "deleted_at",
-    "project",
-    "workspace",
     "name",
     "description",
     "color",
@@ -240,6 +236,10 @@ pub const STATE_ALL_FIELDS: [&str; 18] = [
     "default",
     "external_source",
     "external_id",
+    "created_by",
+    "updated_by",
+    "project",
+    "workspace",
 ];
 
 /// A database row for `State` rendering. Datetimes are pre-rendered DRF
@@ -250,11 +250,7 @@ pub struct StateRow<'a> {
     pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub project: Option<&'a str>,
-    pub workspace: Option<&'a str>,
     pub name: &'a str,
     pub description: &'a str,
     pub color: &'a str,
@@ -265,20 +261,20 @@ pub struct StateRow<'a> {
     pub default: bool,
     pub external_source: Option<&'a str>,
     pub external_id: Option<&'a str>,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub project: Option<&'a str>,
+    pub workspace: Option<&'a str>,
 }
 
 /// `StateSerializer.to_representation` output (`state.py:10-14`,
-/// `fields = "__all__"`).
+/// `fields = "__all__"`), in live-DRF wire order.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StateView<'a> {
     pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub project: Option<&'a str>,
-    pub workspace: Option<&'a str>,
     pub name: &'a str,
     pub description: &'a str,
     pub color: &'a str,
@@ -289,6 +285,10 @@ pub struct StateView<'a> {
     pub default: bool,
     pub external_source: Option<&'a str>,
     pub external_id: Option<&'a str>,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub project: Option<&'a str>,
+    pub workspace: Option<&'a str>,
 }
 
 /// Port of `StateSerializer` (`state.py:10-14`).
@@ -297,11 +297,7 @@ pub fn state_to_representation<'a>(row: &'a StateRow<'a>) -> StateView<'a> {
         id: row.id,
         created_at: row.created_at,
         updated_at: row.updated_at,
-        created_by: row.created_by,
-        updated_by: row.updated_by,
         deleted_at: row.deleted_at,
-        project: row.project,
-        workspace: row.workspace,
         name: row.name,
         description: row.description,
         color: row.color,
@@ -312,6 +308,10 @@ pub fn state_to_representation<'a>(row: &'a StateRow<'a>) -> StateView<'a> {
         default: row.default,
         external_source: row.external_source,
         external_id: row.external_id,
+        created_by: row.created_by,
+        updated_by: row.updated_by,
+        project: row.project,
+        workspace: row.workspace,
     }
 }
 
@@ -408,6 +408,45 @@ mod tests {
         }
     }
 
+    /// Top-level JSON key order of a view's serialization, read off the
+    /// serialized string: struct serialization always emits declaration
+    /// order, while `Value` objects iterate alphabetically.
+    fn serialized_keys<T: serde::Serialize>(value: &T) -> Vec<String> {
+        let rendered = serde_json::to_string(value).expect("serializes");
+        let mut keys = Vec::new();
+        let mut depth = 0usize;
+        let mut chars = rendered.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '{' => {
+                    depth += 1;
+                }
+                '}' => {
+                    depth -= 1;
+                }
+                '"' if depth == 1 => {
+                    let mut key = String::new();
+                    while let Some(&next) = chars.peek() {
+                        chars.next();
+                        if next == '"' {
+                            break;
+                        }
+                        key.push(next);
+                    }
+                    if chars.peek() == Some(&':') {
+                        keys.push(key);
+                    }
+                }
+                _ => {}
+            }
+        }
+        keys
+    }
+
+    fn const_keys<const N: usize>(fields: &[&str; N]) -> Vec<String> {
+        fields.iter().map(|key| key.to_string()).collect()
+    }
+
     /// Field-for-field equality with the golden output plus byte-identical
     /// replay of the canonical form the goldens are stored in.
     fn assert_replay(produced: &Value, expected: &Value) {
@@ -440,7 +479,20 @@ mod tests {
             is_bot: boolean(input, "is_bot"),
             display_name: req(input, "display_name"),
         };
-        let produced = serde_json::to_value(user_lite_to_representation(&row)).expect("serializes");
+        let view = user_lite_to_representation(&row);
+        assert_eq!(
+            serialized_keys(&view),
+            vec![
+                "id",
+                "first_name",
+                "last_name",
+                "avatar",
+                "avatar_url",
+                "is_bot",
+                "display_name"
+            ]
+        );
+        let produced = serde_json::to_value(&view).expect("serializes");
         assert_replay(&produced, output);
     }
 
@@ -480,8 +532,9 @@ mod tests {
             slug: req(input, "slug"),
             id: req(input, "id"),
         };
-        let produced =
-            serde_json::to_value(workspace_lite_to_representation(&row)).expect("serializes");
+        let view = workspace_lite_to_representation(&row);
+        assert_eq!(serialized_keys(&view), vec!["name", "slug", "id"]);
+        let produced = serde_json::to_value(&view).expect("serializes");
         assert_replay(&produced, output);
     }
 
@@ -503,8 +556,20 @@ mod tests {
             emoji: emoji.as_deref(),
             description: req(input, "description"),
         };
-        let produced =
-            serde_json::to_value(project_lite_to_representation(&row)).expect("serializes");
+        let view = project_lite_to_representation(&row);
+        assert_eq!(
+            serialized_keys(&view),
+            vec![
+                "id",
+                "identifier",
+                "name",
+                "cover_image",
+                "icon_prop",
+                "emoji",
+                "description"
+            ]
+        );
+        let produced = serde_json::to_value(&view).expect("serializes");
         assert_replay(&produced, output);
     }
 
@@ -569,7 +634,9 @@ mod tests {
             external_source: external_source.as_deref(),
             external_id: external_id.as_deref(),
         };
-        let produced = serde_json::to_value(state_to_representation(&row)).expect("serializes");
+        let view = state_to_representation(&row);
+        assert_eq!(serialized_keys(&view), const_keys(&STATE_ALL_FIELDS));
+        let produced = serde_json::to_value(&view).expect("serializes");
         // Every golden key replays byte-exact.
         for (key, value) in output.as_object().expect("output object") {
             assert_eq!(produced.get(key), Some(value), "state key {key}");
@@ -585,21 +652,16 @@ mod tests {
 
     #[test]
     fn state_all_key_set_matches_model() {
-        // state.py:10-14 fields=__all__ over State(ProjectBaseModel):
-        // id + AuditModel columns (mixins.py:17-89) + project/workspace
-        // (project.py:302-304) + own columns in definition order
-        // (state.py:93-107).
+        // state.py:10-14 fields=__all__ over State(ProjectBaseModel), in
+        // live-DRF order (probed): id, concrete columns, trailing
+        // relations.
         assert_eq!(
             STATE_ALL_FIELDS,
             [
                 "id",
                 "created_at",
                 "updated_at",
-                "created_by",
-                "updated_by",
                 "deleted_at",
-                "project",
-                "workspace",
                 "name",
                 "description",
                 "color",
@@ -610,6 +672,10 @@ mod tests {
                 "default",
                 "external_source",
                 "external_id",
+                "created_by",
+                "updated_by",
+                "project",
+                "workspace",
             ]
         );
     }
@@ -627,8 +693,9 @@ mod tests {
             color: req(input, "color"),
             group: req(input, "group"),
         };
-        let produced =
-            serde_json::to_value(state_lite_to_representation(&row)).expect("serializes");
+        let view = state_lite_to_representation(&row);
+        assert_eq!(serialized_keys(&view), vec!["id", "name", "color", "group"]);
+        let produced = serde_json::to_value(&view).expect("serializes");
         assert_replay(&produced, output);
     }
 

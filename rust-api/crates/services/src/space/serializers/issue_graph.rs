@@ -26,12 +26,14 @@
 //!
 //! These are pure output shapes plus write-path decision kernels: each
 //! `to_representation` takes a row borrowed from the caller and returns a
-//! `serde::Serialize` view whose fields are the live DRF wire fields in DRF
-//! order (declared fields first, then model definition order). UUID and FK
-//! primary keys render as strings (`PrimaryKeyRelatedField`, read-only); a
-//! null FK renders `null`. Datetimes and dates cross this boundary already
-//! rendered as DRF `iso-8601` strings — formatting owns to the DB edge, so
-//! rendering here is a byte-exact passthrough.
+//! `serde::Serialize` view whose fields are the live DRF wire fields in
+//! live-DRF order: `[pk] + declared(base-first) + concrete columns +
+//! forward relations` (`ModelSerializer.get_default_field_names`, DRF
+//! 3.15.2) — every FK and M2M trails after the last concrete column.
+//! UUID and FK primary keys render as strings (`PrimaryKeyRelatedField`,
+//! read-only); a null FK renders `null`. Datetimes and dates cross this
+//! boundary already rendered as DRF `iso-8601` strings — formatting owns
+//! to the DB edge, so rendering here is a byte-exact passthrough.
 //!
 //! Shape-only no-ops preserved as documentation, not code:
 //! `read_only_fields` (`issue.py:57,66,75,84,93-100,109-116,125-133,146-154,
@@ -215,17 +217,18 @@ pub fn related_issue_to_representation<'a>(row: &'a IssueRelationRow<'a>) -> Iss
     issue_relation_to_representation(row)
 }
 
-/// The `CycleIssue` `fields = "__all__"` key set (`issue.py:87-100`):
-/// `id` + audit columns + `project`/`workspace`, then `CycleIssue`'s own
-/// columns in definition order (`db/models/cycle.py:104-110`: `issue`,
-/// then `cycle`).
+/// The `CycleIssue` `fields = "__all__"` wire keys (`issue.py:87-100`), in
+/// live-DRF order (probed `IssueCycleDetailSerializer().fields` minus the
+/// declared nest): `id`, the concrete audit datetimes, then every column
+/// trailing as relations — `created_by`, `updated_by`, `project`,
+/// `workspace`, `issue`, `cycle` (`db/models/cycle.py:104-110`).
 pub const CYCLE_ISSUE_ALL_FIELDS: [&str; 10] = [
     "id",
     "created_at",
     "updated_at",
+    "deleted_at",
     "created_by",
     "updated_by",
-    "deleted_at",
     "project",
     "workspace",
     "issue",
@@ -237,30 +240,31 @@ pub const CYCLE_ISSUE_ALL_FIELDS: [&str; 10] = [
 #[derive(Debug, Clone, PartialEq)]
 pub struct IssueCycleDetailRow<'a> {
     pub id: &'a str,
+    pub cycle_detail: CycleView<'a>,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
+    pub deleted_at: Option<&'a str>,
     pub created_by: Option<&'a str>,
     pub updated_by: Option<&'a str>,
-    pub deleted_at: Option<&'a str>,
     pub project: &'a str,
     pub workspace: &'a str,
     pub issue: &'a str,
     pub cycle: &'a str,
-    pub cycle_detail: CycleView<'a>,
 }
 
-/// `IssueCycleDetailSerializer.to_representation` output (`issue.py:87-100`):
-/// the declared `cycle_detail` nest (`CycleBaseSerializer(source="cycle")`)
-/// first (DRF `__all__` order), then every `CycleIssue` column.
+/// `IssueCycleDetailSerializer.to_representation` output (`issue.py:87-100`),
+/// in live-DRF wire order (probed): `id`, the declared `cycle_detail` nest
+/// (`CycleBaseSerializer(source="cycle")`), then the concrete datetimes,
+/// then the trailing relations.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IssueCycleDetailView<'a> {
-    pub cycle_detail: CycleView<'a>,
     pub id: &'a str,
+    pub cycle_detail: CycleView<'a>,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
+    pub deleted_at: Option<&'a str>,
     pub created_by: Option<&'a str>,
     pub updated_by: Option<&'a str>,
-    pub deleted_at: Option<&'a str>,
     pub project: &'a str,
     pub workspace: &'a str,
     pub issue: &'a str,
@@ -272,13 +276,13 @@ pub fn issue_cycle_detail_to_representation<'a>(
     row: &'a IssueCycleDetailRow<'a>,
 ) -> IssueCycleDetailView<'a> {
     IssueCycleDetailView {
-        cycle_detail: row.cycle_detail.clone(),
         id: row.id,
+        cycle_detail: row.cycle_detail.clone(),
         created_at: row.created_at,
         updated_at: row.updated_at,
+        deleted_at: row.deleted_at,
         created_by: row.created_by,
         updated_by: row.updated_by,
-        deleted_at: row.deleted_at,
         project: row.project,
         workspace: row.workspace,
         issue: row.issue,
@@ -286,17 +290,18 @@ pub fn issue_cycle_detail_to_representation<'a>(
     }
 }
 
-/// The `ModuleIssue` `fields = "__all__"` key set (`issue.py:103-116`):
-/// `id` + audit columns + `project`/`workspace`, then `ModuleIssue`'s own
-/// columns in definition order (`db/models/module.py:152-154`: `module`,
-/// then `issue`).
+/// The `ModuleIssue` `fields = "__all__"` wire keys (`issue.py:103-116`), in
+/// live-DRF order (probed `IssueModuleDetailSerializer().fields` minus the
+/// declared nest): `id`, the concrete audit datetimes, then every column
+/// trailing as relations — `created_by`, `updated_by`, `project`,
+/// `workspace`, `module`, `issue` (`db/models/module.py:152-154`).
 pub const MODULE_ISSUE_ALL_FIELDS: [&str; 10] = [
     "id",
     "created_at",
     "updated_at",
+    "deleted_at",
     "created_by",
     "updated_by",
-    "deleted_at",
     "project",
     "workspace",
     "module",
@@ -308,31 +313,31 @@ pub const MODULE_ISSUE_ALL_FIELDS: [&str; 10] = [
 #[derive(Debug, Clone, PartialEq)]
 pub struct IssueModuleDetailRow<'a> {
     pub id: &'a str,
+    pub module_detail: ModuleView<'a>,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
+    pub deleted_at: Option<&'a str>,
     pub created_by: Option<&'a str>,
     pub updated_by: Option<&'a str>,
-    pub deleted_at: Option<&'a str>,
     pub project: &'a str,
     pub workspace: &'a str,
     pub module: &'a str,
     pub issue: &'a str,
-    pub module_detail: ModuleView<'a>,
 }
 
 /// `IssueModuleDetailSerializer.to_representation` output
-/// (`issue.py:103-116`): the declared `module_detail` nest
-/// (`ModuleBaseSerializer(source="module")`) first (DRF `__all__` order),
-/// then every `ModuleIssue` column.
+/// (`issue.py:103-116`), in live-DRF wire order (probed): `id`, the
+/// declared `module_detail` nest (`ModuleBaseSerializer(source="module")`),
+/// then the concrete datetimes, then the trailing relations.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IssueModuleDetailView<'a> {
-    pub module_detail: ModuleView<'a>,
     pub id: &'a str,
+    pub module_detail: ModuleView<'a>,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
+    pub deleted_at: Option<&'a str>,
     pub created_by: Option<&'a str>,
     pub updated_by: Option<&'a str>,
-    pub deleted_at: Option<&'a str>,
     pub project: &'a str,
     pub workspace: &'a str,
     pub module: &'a str,
@@ -344,13 +349,13 @@ pub fn issue_module_detail_to_representation<'a>(
     row: &'a IssueModuleDetailRow<'a>,
 ) -> IssueModuleDetailView<'a> {
     IssueModuleDetailView {
-        module_detail: row.module_detail.clone(),
         id: row.id,
+        module_detail: row.module_detail.clone(),
         created_at: row.created_at,
         updated_at: row.updated_at,
+        deleted_at: row.deleted_at,
         created_by: row.created_by,
         updated_by: row.updated_by,
-        deleted_at: row.deleted_at,
         project: row.project,
         workspace: row.workspace,
         module: row.module,
@@ -358,23 +363,24 @@ pub fn issue_module_detail_to_representation<'a>(
     }
 }
 
-/// The `IssueLink` `fields = "__all__"` key set (`issue.py:119-139`):
-/// `id` + audit columns + `project`/`workspace`, then `IssueLink`'s own
-/// columns in definition order (`db/models/issue.py:471-475`: `title`,
-/// `url`, `issue`, `metadata`).
+/// The `IssueLink` `fields = "__all__"` wire keys (`issue.py:119-139`), in
+/// live-DRF order (probed `IssueLinkSerializer().fields` minus the declared
+/// nest): `id`, the concrete columns (`created_at`, `updated_at`,
+/// `deleted_at`, `title`, `url`, `metadata`), then the forward relations
+/// trailing (`created_by`, `updated_by`, `project`, `workspace`, `issue`).
 pub const ISSUE_LINK_ALL_FIELDS: [&str; 12] = [
     "id",
     "created_at",
     "updated_at",
-    "created_by",
-    "updated_by",
     "deleted_at",
-    "project",
-    "workspace",
     "title",
     "url",
-    "issue",
     "metadata",
+    "created_by",
+    "updated_by",
+    "project",
+    "workspace",
+    "issue",
 ];
 
 /// A database row for `IssueLink` rendering. `title` is nullable
@@ -382,56 +388,57 @@ pub const ISSUE_LINK_ALL_FIELDS: [&str; 12] = [
 #[derive(Debug, Clone, PartialEq)]
 pub struct IssueLinkRow<'a> {
     pub id: &'a str,
+    pub created_by_detail: UserLiteView<'a>,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub project: &'a str,
-    pub workspace: &'a str,
     pub title: Option<&'a str>,
     pub url: &'a str,
-    pub issue: &'a str,
     pub metadata: &'a serde_json::Value,
-    pub created_by_detail: UserLiteView<'a>,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub project: &'a str,
+    pub workspace: &'a str,
+    pub issue: &'a str,
 }
 
-/// `IssueLinkSerializer.to_representation` output (`issue.py:119-139`): the
-/// declared `created_by_detail` nest (`UserLiteSerializer(source="created_by")`)
-/// first (DRF `__all__` order), then every `IssueLink` column.
+/// `IssueLinkSerializer.to_representation` output (`issue.py:119-139`), in
+/// live-DRF wire order (probed): `id`, the declared `created_by_detail`
+/// nest (`UserLiteSerializer(source="created_by")`), then the concrete
+/// columns, then the trailing relations.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IssueLinkView<'a> {
-    pub created_by_detail: UserLiteView<'a>,
     pub id: &'a str,
+    pub created_by_detail: UserLiteView<'a>,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub project: &'a str,
-    pub workspace: &'a str,
     pub title: Option<&'a str>,
     pub url: &'a str,
-    pub issue: &'a str,
     pub metadata: &'a serde_json::Value,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub project: &'a str,
+    pub workspace: &'a str,
+    pub issue: &'a str,
 }
 
 /// Port of `IssueLinkSerializer` (`issue.py:119-139`). Field-for-field copy.
 pub fn issue_link_to_representation<'a>(row: &'a IssueLinkRow<'a>) -> IssueLinkView<'a> {
     IssueLinkView {
-        created_by_detail: row.created_by_detail.clone(),
         id: row.id,
+        created_by_detail: row.created_by_detail.clone(),
         created_at: row.created_at,
         updated_at: row.updated_at,
-        created_by: row.created_by,
-        updated_by: row.updated_by,
         deleted_at: row.deleted_at,
-        project: row.project,
-        workspace: row.workspace,
         title: row.title,
         url: row.url,
-        issue: row.issue,
         metadata: row.metadata,
+        created_by: row.created_by,
+        updated_by: row.updated_by,
+        project: row.project,
+        workspace: row.workspace,
+        issue: row.issue,
     }
 }
 
@@ -460,26 +467,19 @@ pub fn check_issue_link_duplicate(url_exists: bool) -> Result<(), DuplicateIssue
     Ok(())
 }
 
-/// The `FileAsset` `fields = "__all__"` key set (`issue.py:142-154`):
-/// `id` (`BaseModel`, `db/models/base.py:18`) + audit columns
-/// (`AuditModel`, `db/mixins.py:16-89`), then `FileAsset`'s own columns in
-/// definition order (`db/models/asset.py:45-62`).
+/// The `FileAsset` `fields = "__all__"` wire keys (`issue.py:142-154`), in
+/// live-DRF order (probed `IssueAttachmentSerializer().fields`): `id`, the
+/// concrete columns (`created_at`, `updated_at`, `deleted_at`, then
+/// `FileAsset`'s own columns, `db/models/asset.py:45-62`), then the forward
+/// relations trailing (`created_by`, `updated_by`, `user`, `workspace`,
+/// `draft_issue`, `project`, `issue`, `comment`, `page`).
 pub const FILE_ASSET_ALL_FIELDS: [&str; 24] = [
     "id",
     "created_at",
     "updated_at",
-    "created_by",
-    "updated_by",
     "deleted_at",
     "attributes",
     "asset",
-    "user",
-    "workspace",
-    "draft_issue",
-    "project",
-    "issue",
-    "comment",
-    "page",
     "entity_type",
     "entity_identifier",
     "is_deleted",
@@ -489,6 +489,15 @@ pub const FILE_ASSET_ALL_FIELDS: [&str; 24] = [
     "size",
     "is_uploaded",
     "storage_metadata",
+    "created_by",
+    "updated_by",
+    "user",
+    "workspace",
+    "draft_issue",
+    "project",
+    "issue",
+    "comment",
+    "page",
 ];
 
 /// A database row for `FileAsset` rendering. Every FK (`user`, `workspace`,
@@ -501,18 +510,9 @@ pub struct IssueAttachmentRow<'a> {
     pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
     pub attributes: &'a serde_json::Value,
     pub asset: &'a str,
-    pub user: Option<&'a str>,
-    pub workspace: Option<&'a str>,
-    pub draft_issue: Option<&'a str>,
-    pub project: Option<&'a str>,
-    pub issue: Option<&'a str>,
-    pub comment: Option<&'a str>,
-    pub page: Option<&'a str>,
     pub entity_type: Option<&'a str>,
     pub entity_identifier: Option<&'a str>,
     pub is_deleted: bool,
@@ -522,28 +522,29 @@ pub struct IssueAttachmentRow<'a> {
     pub size: f64,
     pub is_uploaded: bool,
     pub storage_metadata: Option<&'a serde_json::Value>,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub user: Option<&'a str>,
+    pub workspace: Option<&'a str>,
+    pub draft_issue: Option<&'a str>,
+    pub project: Option<&'a str>,
+    pub issue: Option<&'a str>,
+    pub comment: Option<&'a str>,
+    pub page: Option<&'a str>,
 }
 
 /// `IssueAttachmentSerializer.to_representation` output (`issue.py:142-154`,
-/// `fields = "__all__"`): no declared nests (contrast the app twin, which
-/// adds an `asset_url` extra — port the absence).
+/// `fields = "__all__"`), in live-DRF wire order: no declared nests
+/// (contrast the app twin, which adds an `asset_url` extra — port the
+/// absence).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IssueAttachmentView<'a> {
     pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
     pub attributes: &'a serde_json::Value,
     pub asset: &'a str,
-    pub user: Option<&'a str>,
-    pub workspace: Option<&'a str>,
-    pub draft_issue: Option<&'a str>,
-    pub project: Option<&'a str>,
-    pub issue: Option<&'a str>,
-    pub comment: Option<&'a str>,
-    pub page: Option<&'a str>,
     pub entity_type: Option<&'a str>,
     pub entity_identifier: Option<&'a str>,
     pub is_deleted: bool,
@@ -553,6 +554,15 @@ pub struct IssueAttachmentView<'a> {
     pub size: f64,
     pub is_uploaded: bool,
     pub storage_metadata: Option<&'a serde_json::Value>,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub user: Option<&'a str>,
+    pub workspace: Option<&'a str>,
+    pub draft_issue: Option<&'a str>,
+    pub project: Option<&'a str>,
+    pub issue: Option<&'a str>,
+    pub comment: Option<&'a str>,
+    pub page: Option<&'a str>,
 }
 
 /// Port of `IssueAttachmentSerializer` (`issue.py:142-154`).
@@ -564,18 +574,9 @@ pub fn issue_attachment_to_representation<'a>(
         id: row.id,
         created_at: row.created_at,
         updated_at: row.updated_at,
-        created_by: row.created_by,
-        updated_by: row.updated_by,
         deleted_at: row.deleted_at,
         attributes: row.attributes,
         asset: row.asset,
-        user: row.user,
-        workspace: row.workspace,
-        draft_issue: row.draft_issue,
-        project: row.project,
-        issue: row.issue,
-        comment: row.comment,
-        page: row.page,
         entity_type: row.entity_type,
         entity_identifier: row.entity_identifier,
         is_deleted: row.is_deleted,
@@ -585,6 +586,15 @@ pub fn issue_attachment_to_representation<'a>(
         size: row.size,
         is_uploaded: row.is_uploaded,
         storage_metadata: row.storage_metadata,
+        created_by: row.created_by,
+        updated_by: row.updated_by,
+        user: row.user,
+        workspace: row.workspace,
+        draft_issue: row.draft_issue,
+        project: row.project,
+        issue: row.issue,
+        comment: row.comment,
+        page: row.page,
     }
 }
 
@@ -708,40 +718,6 @@ pub const ISSUE_DECLARED_NESTS: [&str; 14] = [
 #[derive(Debug, Clone, PartialEq)]
 pub struct IssueRow<'a> {
     pub id: &'a str,
-    pub created_at: Option<&'a str>,
-    pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
-    pub deleted_at: Option<&'a str>,
-    pub project: &'a str,
-    pub workspace: &'a str,
-    pub parent: Option<&'a str>,
-    pub state: Option<&'a str>,
-    pub point: Option<i32>,
-    pub estimate_point: Option<&'a str>,
-    pub name: &'a str,
-    pub description_json: &'a serde_json::Value,
-    pub description_html: &'a str,
-    pub description_stripped: Option<&'a str>,
-    pub description_binary: Option<&'a str>,
-    pub priority: &'a str,
-    pub complexity_score: i32,
-    pub start_date: Option<&'a str>,
-    pub target_date: Option<&'a str>,
-    pub assignees: Vec<&'a str>,
-    pub sequence_id: i32,
-    pub labels: Vec<&'a str>,
-    pub sort_order: f64,
-    pub completed_at: Option<&'a str>,
-    pub archived_at: Option<&'a str>,
-    pub is_draft: bool,
-    pub external_source: Option<&'a str>,
-    pub external_id: Option<&'a str>,
-    pub r#type: Option<&'a str>,
-    pub git_work_branch: &'a str,
-    pub created_via: Option<&'a str>,
-    pub assigned_pod: Option<&'a str>,
-    pub agent_executor: Option<&'a str>,
     pub project_detail: ProjectLiteView<'a>,
     pub state_detail: Option<StateView<'a>>,
     pub parent_detail: Option<IssueStateFlatView<'a>>,
@@ -756,14 +732,51 @@ pub struct IssueRow<'a> {
     pub sub_issues_count: i64,
     pub issue_reactions: Vec<IssueReactionView<'a>>,
     pub assigned_pod_detail: Option<PodMiniView<'a>>,
+    pub created_at: Option<&'a str>,
+    pub updated_at: Option<&'a str>,
+    pub deleted_at: Option<&'a str>,
+    pub point: Option<i32>,
+    pub name: &'a str,
+    pub description_json: &'a serde_json::Value,
+    pub description_html: &'a str,
+    pub description_stripped: Option<&'a str>,
+    pub description_binary: Option<&'a str>,
+    pub priority: &'a str,
+    pub complexity_score: i32,
+    pub start_date: Option<&'a str>,
+    pub target_date: Option<&'a str>,
+    pub sequence_id: i32,
+    pub sort_order: f64,
+    pub completed_at: Option<&'a str>,
+    pub archived_at: Option<&'a str>,
+    pub is_draft: bool,
+    pub external_source: Option<&'a str>,
+    pub external_id: Option<&'a str>,
+    pub git_work_branch: &'a str,
+    pub created_via: Option<&'a str>,
+    pub agent_executor: Option<&'a str>,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub project: &'a str,
+    pub workspace: &'a str,
+    pub parent: Option<&'a str>,
+    pub state: Option<&'a str>,
+    pub estimate_point: Option<&'a str>,
+    pub r#type: Option<&'a str>,
+    pub assigned_pod: Option<&'a str>,
+    pub assignees: Vec<&'a str>,
+    pub labels: Vec<&'a str>,
 }
 
-/// `IssueSerializer.to_representation` output (`issue.py:164-201`): the 14
-/// declared fields first (DRF `exclude` order), then every `Issue` column
-/// except `workpad`. `state_detail` is the FULL `StateSerializer` (18-key,
-/// not Lite); `parent_detail` is `IssueStateFlatSerializer(source="parent")`.
+/// `IssueSerializer.to_representation` output (`issue.py:164-201`), in
+/// live-DRF wire order (probed): `id`, the 14 declared fields (DRF
+/// `[pk] + declared + fields + relations`), then the concrete `Issue`
+/// columns, then the trailing relations. `state_detail` is the FULL
+/// `StateSerializer` (18-key, not Lite); `parent_detail` is
+/// `IssueStateFlatSerializer(source="parent")`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IssueView<'a> {
+    pub id: &'a str,
     pub project_detail: ProjectLiteView<'a>,
     pub state_detail: Option<StateView<'a>>,
     pub parent_detail: Option<IssueStateFlatView<'a>>,
@@ -778,18 +791,10 @@ pub struct IssueView<'a> {
     pub sub_issues_count: i64,
     pub issue_reactions: Vec<IssueReactionView<'a>>,
     pub assigned_pod_detail: Option<PodMiniView<'a>>,
-    pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub project: &'a str,
-    pub workspace: &'a str,
-    pub parent: Option<&'a str>,
-    pub state: Option<&'a str>,
     pub point: Option<i32>,
-    pub estimate_point: Option<&'a str>,
     pub name: &'a str,
     pub description_json: &'a serde_json::Value,
     pub description_html: &'a str,
@@ -799,20 +804,27 @@ pub struct IssueView<'a> {
     pub complexity_score: i32,
     pub start_date: Option<&'a str>,
     pub target_date: Option<&'a str>,
-    pub assignees: Vec<&'a str>,
     pub sequence_id: i32,
-    pub labels: Vec<&'a str>,
     pub sort_order: f64,
     pub completed_at: Option<&'a str>,
     pub archived_at: Option<&'a str>,
     pub is_draft: bool,
     pub external_source: Option<&'a str>,
     pub external_id: Option<&'a str>,
-    pub r#type: Option<&'a str>,
     pub git_work_branch: &'a str,
     pub created_via: Option<&'a str>,
-    pub assigned_pod: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub project: &'a str,
+    pub workspace: &'a str,
+    pub parent: Option<&'a str>,
+    pub state: Option<&'a str>,
+    pub estimate_point: Option<&'a str>,
+    pub r#type: Option<&'a str>,
+    pub assigned_pod: Option<&'a str>,
+    pub assignees: Vec<&'a str>,
+    pub labels: Vec<&'a str>,
 }
 
 /// Port of `IssueSerializer` (`issue.py:164-201`). Field-for-field copy;
@@ -821,6 +833,7 @@ pub struct IssueView<'a> {
 /// readers).
 pub fn issue_to_representation<'a>(row: &'a IssueRow<'a>) -> IssueView<'a> {
     IssueView {
+        id: row.id,
         project_detail: row.project_detail.clone(),
         state_detail: row.state_detail.clone(),
         parent_detail: row.parent_detail.clone(),
@@ -835,18 +848,10 @@ pub fn issue_to_representation<'a>(row: &'a IssueRow<'a>) -> IssueView<'a> {
         sub_issues_count: row.sub_issues_count,
         issue_reactions: row.issue_reactions.clone(),
         assigned_pod_detail: row.assigned_pod_detail.clone(),
-        id: row.id,
         created_at: row.created_at,
         updated_at: row.updated_at,
-        created_by: row.created_by,
-        updated_by: row.updated_by,
         deleted_at: row.deleted_at,
-        project: row.project,
-        workspace: row.workspace,
-        parent: row.parent,
-        state: row.state,
         point: row.point,
-        estimate_point: row.estimate_point,
         name: row.name,
         description_json: row.description_json,
         description_html: row.description_html,
@@ -856,20 +861,27 @@ pub fn issue_to_representation<'a>(row: &'a IssueRow<'a>) -> IssueView<'a> {
         complexity_score: row.complexity_score,
         start_date: row.start_date,
         target_date: row.target_date,
-        assignees: row.assignees.clone(),
         sequence_id: row.sequence_id,
-        labels: row.labels.clone(),
         sort_order: row.sort_order,
         completed_at: row.completed_at,
         archived_at: row.archived_at,
         is_draft: row.is_draft,
         external_source: row.external_source,
         external_id: row.external_id,
-        r#type: row.r#type,
         git_work_branch: row.git_work_branch,
         created_via: row.created_via,
-        assigned_pod: row.assigned_pod,
         agent_executor: row.agent_executor,
+        created_by: row.created_by,
+        updated_by: row.updated_by,
+        project: row.project,
+        workspace: row.workspace,
+        parent: row.parent,
+        state: row.state,
+        estimate_point: row.estimate_point,
+        r#type: row.r#type,
+        assigned_pod: row.assigned_pod,
+        assignees: row.assignees.clone(),
+        labels: row.labels.clone(),
     }
 }
 
@@ -975,26 +987,22 @@ pub fn comment_reaction_lite_to_representation<'a>(
     }
 }
 
-/// The `IssueComment` `fields = "__all__"` key set (`issue.py:231-250`):
-/// `id` + audit columns + `project`/`workspace`, then `IssueComment`'s own
-/// columns in definition order (`db/models/issue.py:557-596`).
+/// The `IssueComment` `fields = "__all__"` wire keys (`issue.py:231-250`),
+/// in live-DRF order (probed `IssueCommentSerializer().fields` minus the
+/// declared nests): `id`, the concrete columns (`attachments`/`labels` are
+/// `ArrayField`s, `issue.py:563-566`), then the forward relations trailing
+/// (`created_by`, `updated_by`, `project`, `workspace`, the `description`
+/// one-to-one, `issue`, `actor`, `parent`).
 pub const ISSUE_COMMENT_ALL_FIELDS: [&str; 24] = [
     "id",
     "created_at",
     "updated_at",
-    "created_by",
-    "updated_by",
     "deleted_at",
-    "project",
-    "workspace",
     "comment_stripped",
     "comment_json",
     "comment_html",
-    "description",
     "attachments",
     "labels",
-    "issue",
-    "actor",
     "access",
     "external_source",
     "external_id",
@@ -1002,6 +1010,13 @@ pub const ISSUE_COMMENT_ALL_FIELDS: [&str; 24] = [
     "speaker_label",
     "speaker_agent_run_id",
     "edited_at",
+    "created_by",
+    "updated_by",
+    "project",
+    "workspace",
+    "description",
+    "issue",
+    "actor",
     "parent",
 ];
 
@@ -1016,21 +1031,20 @@ pub const ISSUE_COMMENT_ALL_FIELDS: [&str; 24] = [
 #[derive(Debug, Clone, PartialEq)]
 pub struct IssueCommentRow<'a> {
     pub id: &'a str,
+    pub actor_detail: Option<UserLiteView<'a>>,
+    pub issue_detail: IssueFlatView<'a>,
+    pub project_detail: ProjectLiteView<'a>,
+    pub workspace_detail: WorkspaceLiteView<'a>,
+    pub comment_reactions: Vec<CommentReactionLiteView<'a>>,
+    pub is_member: bool,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub project: &'a str,
-    pub workspace: &'a str,
     pub comment_stripped: &'a str,
     pub comment_json: &'a serde_json::Value,
     pub comment_html: &'a str,
-    pub description: Option<&'a str>,
     pub attachments: Vec<&'a str>,
     pub labels: Vec<&'a str>,
-    pub issue: &'a str,
-    pub actor: Option<&'a str>,
     pub access: &'a str,
     pub external_source: Option<&'a str>,
     pub external_id: Option<&'a str>,
@@ -1038,42 +1052,37 @@ pub struct IssueCommentRow<'a> {
     pub speaker_label: &'a str,
     pub speaker_agent_run_id: Option<&'a str>,
     pub edited_at: Option<&'a str>,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub project: &'a str,
+    pub workspace: &'a str,
+    pub description: Option<&'a str>,
+    pub issue: &'a str,
+    pub actor: Option<&'a str>,
     pub parent: Option<&'a str>,
-    pub actor_detail: Option<UserLiteView<'a>>,
-    pub issue_detail: IssueFlatView<'a>,
-    pub project_detail: ProjectLiteView<'a>,
-    pub workspace_detail: WorkspaceLiteView<'a>,
-    pub comment_reactions: Vec<CommentReactionLiteView<'a>>,
-    pub is_member: bool,
 }
 
-/// `IssueCommentSerializer.to_representation` output (`issue.py:231-250`):
-/// the six declared fields first (DRF `__all__` order), then every
-/// `IssueComment` column.
+/// `IssueCommentSerializer.to_representation` output (`issue.py:231-250`), in
+/// live-DRF wire order (probed): `id`, the six declared fields (DRF
+/// `[pk] + declared + fields + relations`), then the concrete columns,
+/// then the trailing relations.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IssueCommentView<'a> {
+    pub id: &'a str,
     pub actor_detail: Option<UserLiteView<'a>>,
     pub issue_detail: IssueFlatView<'a>,
     pub project_detail: ProjectLiteView<'a>,
     pub workspace_detail: WorkspaceLiteView<'a>,
     pub comment_reactions: Vec<CommentReactionLiteView<'a>>,
     pub is_member: bool,
-    pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
-    pub created_by: Option<&'a str>,
-    pub updated_by: Option<&'a str>,
     pub deleted_at: Option<&'a str>,
-    pub project: &'a str,
-    pub workspace: &'a str,
     pub comment_stripped: &'a str,
     pub comment_json: &'a serde_json::Value,
     pub comment_html: &'a str,
-    pub description: Option<&'a str>,
     pub attachments: Vec<&'a str>,
     pub labels: Vec<&'a str>,
-    pub issue: &'a str,
-    pub actor: Option<&'a str>,
     pub access: &'a str,
     pub external_source: Option<&'a str>,
     pub external_id: Option<&'a str>,
@@ -1081,6 +1090,13 @@ pub struct IssueCommentView<'a> {
     pub speaker_label: &'a str,
     pub speaker_agent_run_id: Option<&'a str>,
     pub edited_at: Option<&'a str>,
+    pub created_by: Option<&'a str>,
+    pub updated_by: Option<&'a str>,
+    pub project: &'a str,
+    pub workspace: &'a str,
+    pub description: Option<&'a str>,
+    pub issue: &'a str,
+    pub actor: Option<&'a str>,
     pub parent: Option<&'a str>,
 }
 
@@ -1088,28 +1104,21 @@ pub struct IssueCommentView<'a> {
 /// Field-for-field copy.
 pub fn issue_comment_to_representation<'a>(row: &'a IssueCommentRow<'a>) -> IssueCommentView<'a> {
     IssueCommentView {
+        id: row.id,
         actor_detail: row.actor_detail.clone(),
         issue_detail: row.issue_detail.clone(),
         project_detail: row.project_detail.clone(),
         workspace_detail: row.workspace_detail.clone(),
         comment_reactions: row.comment_reactions.clone(),
         is_member: row.is_member,
-        id: row.id,
         created_at: row.created_at,
         updated_at: row.updated_at,
-        created_by: row.created_by,
-        updated_by: row.updated_by,
         deleted_at: row.deleted_at,
-        project: row.project,
-        workspace: row.workspace,
         comment_stripped: row.comment_stripped,
         comment_json: row.comment_json,
         comment_html: row.comment_html,
-        description: row.description,
         attachments: row.attachments.clone(),
         labels: row.labels.clone(),
-        issue: row.issue,
-        actor: row.actor,
         access: row.access,
         external_source: row.external_source,
         external_id: row.external_id,
@@ -1117,6 +1126,13 @@ pub fn issue_comment_to_representation<'a>(row: &'a IssueCommentRow<'a>) -> Issu
         speaker_label: row.speaker_label,
         speaker_agent_run_id: row.speaker_agent_run_id,
         edited_at: row.edited_at,
+        created_by: row.created_by,
+        updated_by: row.updated_by,
+        project: row.project,
+        workspace: row.workspace,
+        description: row.description,
+        issue: row.issue,
+        actor: row.actor,
         parent: row.parent,
     }
 }
@@ -1383,22 +1399,24 @@ pub fn plan_update<'a>(plan: &UpdatePlan<'a>) -> UpdateWrites<'a> {
     }
 }
 
-/// The `CommentReaction` `fields = "__all__"` key set (`issue.py:425-429`):
-/// `id` + audit columns + `project`/`workspace`, then own columns in
-/// definition order (`db/models/issue.py:753-760`: `actor`, `comment`,
-/// `reaction`).
+/// The `CommentReaction` `fields = "__all__"` wire keys
+/// (`issue.py:425-429`), in live-DRF order (probed
+/// `CommentReactionSerializer().fields`): `id`, the concrete columns
+/// (`created_at`, `updated_at`, `deleted_at`, `reaction`), then the forward
+/// relations trailing (`created_by`, `updated_by`, `project`, `workspace`,
+/// `actor`, `comment`).
 pub const COMMENT_REACTION_ALL_FIELDS: [&str; 11] = [
     "id",
     "created_at",
     "updated_at",
+    "deleted_at",
+    "reaction",
     "created_by",
     "updated_by",
-    "deleted_at",
     "project",
     "workspace",
     "actor",
     "comment",
-    "reaction",
 ];
 
 /// A database row for `CommentReaction` rendering.
@@ -1407,31 +1425,31 @@ pub struct CommentReactionRow<'a> {
     pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
+    pub deleted_at: Option<&'a str>,
+    pub reaction: &'a str,
     pub created_by: Option<&'a str>,
     pub updated_by: Option<&'a str>,
-    pub deleted_at: Option<&'a str>,
     pub project: &'a str,
     pub workspace: &'a str,
     pub actor: &'a str,
     pub comment: &'a str,
-    pub reaction: &'a str,
 }
 
 /// `CommentReactionSerializer.to_representation` output (`issue.py:425-429`,
-/// `fields = "__all__"`): no declared nests.
+/// `fields = "__all__"`), in live-DRF wire order: no declared nests.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CommentReactionView<'a> {
     pub id: &'a str,
     pub created_at: Option<&'a str>,
     pub updated_at: Option<&'a str>,
+    pub deleted_at: Option<&'a str>,
+    pub reaction: &'a str,
     pub created_by: Option<&'a str>,
     pub updated_by: Option<&'a str>,
-    pub deleted_at: Option<&'a str>,
     pub project: &'a str,
     pub workspace: &'a str,
     pub actor: &'a str,
     pub comment: &'a str,
-    pub reaction: &'a str,
 }
 
 /// Port of `CommentReactionSerializer` (`issue.py:425-429`).
@@ -1443,14 +1461,14 @@ pub fn comment_reaction_to_representation<'a>(
         id: row.id,
         created_at: row.created_at,
         updated_at: row.updated_at,
+        deleted_at: row.deleted_at,
+        reaction: row.reaction,
         created_by: row.created_by,
         updated_by: row.updated_by,
-        deleted_at: row.deleted_at,
         project: row.project,
         workspace: row.workspace,
         actor: row.actor,
         comment: row.comment,
-        reaction: row.reaction,
     }
 }
 
@@ -1617,10 +1635,52 @@ mod tests {
             .collect()
     }
 
-    fn object_keys(value: &Value) -> Vec<String> {
-        let mut keys: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
-        keys.sort();
+    /// Top-level JSON key order of a view's serialization, read off the
+    /// serialized string: struct serialization always emits declaration
+    /// order, while `Value` objects iterate alphabetically.
+    fn serialized_keys<T: serde::Serialize>(value: &T) -> Vec<String> {
+        let rendered = serde_json::to_string(value).expect("serializes");
+        let mut keys = Vec::new();
+        let mut depth = 0usize;
+        let mut chars = rendered.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '{' => {
+                    depth += 1;
+                }
+                '}' => {
+                    depth -= 1;
+                }
+                '"' if depth == 1 => {
+                    let mut key = String::new();
+                    while let Some(&next) = chars.peek() {
+                        chars.next();
+                        if next == '"' {
+                            break;
+                        }
+                        key.push(next);
+                    }
+                    if chars.peek() == Some(&':') {
+                        keys.push(key);
+                    }
+                }
+                _ => {}
+            }
+        }
         keys
+    }
+
+    fn const_keys<const N: usize>(fields: &[&str; N]) -> Vec<String> {
+        fields.iter().map(|key| key.to_string()).collect()
+    }
+
+    /// Wire order for an `__all__`/`exclude` view: `id`, the declared
+    /// nests, then the model body after `id`.
+    fn wire_order<const N: usize>(nests: &[&str], body: &[&str; N]) -> Vec<String> {
+        let mut expected = vec!["id".to_owned()];
+        expected.extend(nests.iter().map(|key| key.to_string()));
+        expected.extend(body[1..].iter().map(|key| key.to_string()));
+        expected
     }
 
     fn sample_project_detail<'a>(id: &'a str, icon: &'a Value) -> ProjectLiteView<'a> {
@@ -1691,19 +1751,10 @@ mod tests {
             state_detail: None,
             project_detail: sample_project_detail("33333333-3333-3333-3333-333333333333", &icon),
         };
-        let produced =
-            serde_json::to_value(issue_state_flat_to_representation(&row)).expect("serializes");
+        let view = issue_state_flat_to_representation(&row);
+        assert_eq!(serialized_keys(&view), const_keys(&ISSUE_STATE_FLAT_FIELDS));
+        let produced = serde_json::to_value(&view).expect("serializes");
         assert_eq!(produced.get("state_detail"), Some(&Value::Null));
-        assert_eq!(
-            object_keys(&produced),
-            vec![
-                "id",
-                "name",
-                "project_detail",
-                "sequence_id",
-                "state_detail"
-            ]
-        );
     }
 
     #[test]
@@ -1714,23 +1765,22 @@ mod tests {
             ISSUE_PROJECT_LITE_FIELDS,
             ["id", "project_detail", "name", "sequence_id"]
         );
-        let produced =
-            serde_json::to_value(issue_project_lite_to_representation(&sample_endpoint_row()))
-                .expect("serializes");
+        let endpoint_row = sample_endpoint_row();
+        let view = issue_project_lite_to_representation(&endpoint_row);
         assert_eq!(
-            object_keys(&produced),
-            vec!["id", "name", "project_detail", "sequence_id"]
+            serialized_keys(&view),
+            const_keys(&ISSUE_PROJECT_LITE_FIELDS)
         );
         assert_eq!(
-            object_keys(&produced["project_detail"]),
+            serialized_keys(&view.project_detail),
             vec![
-                "cover_image",
-                "description",
-                "emoji",
-                "icon_prop",
                 "id",
                 "identifier",
-                "name"
+                "name",
+                "cover_image",
+                "icon_prop",
+                "emoji",
+                "description"
             ]
         );
     }
@@ -1753,19 +1803,15 @@ mod tests {
             issue: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
             id: "ffffffff-ffff-ffff-ffff-ffffffffffff",
         };
-        let outgoing = serde_json::to_value(issue_relation_to_representation(&row)).expect("ok");
-        let incoming = serde_json::to_value(related_issue_to_representation(&row)).expect("ok");
-        assert_eq!(outgoing, incoming);
+        let outgoing_view = issue_relation_to_representation(&row);
+        let incoming_view = related_issue_to_representation(&row);
         assert_eq!(
-            object_keys(&outgoing),
-            vec![
-                "id",
-                "issue",
-                "issue_detail",
-                "related_issue",
-                "relation_type"
-            ]
+            serialized_keys(&outgoing_view),
+            const_keys(&ISSUE_RELATION_FIELDS)
         );
+        let outgoing = serde_json::to_value(&outgoing_view).expect("ok");
+        let incoming = serde_json::to_value(&incoming_view).expect("ok");
+        assert_eq!(outgoing, incoming);
     }
 
     #[test]
@@ -1810,15 +1856,11 @@ mod tests {
             cycle: "55555555-5555-5555-5555-555555555555",
             cycle_detail: super::super::taxonomy::cycle_to_representation(&cycle_source),
         };
-        let produced =
-            serde_json::to_value(issue_cycle_detail_to_representation(&cycle_row)).expect("ok");
-        let mut expected: Vec<String> = CYCLE_ISSUE_ALL_FIELDS
-            .iter()
-            .map(|key| key.to_string())
-            .collect();
-        expected.push("cycle_detail".to_owned());
-        expected.sort();
-        assert_eq!(object_keys(&produced), expected);
+        let cycle_view = issue_cycle_detail_to_representation(&cycle_row);
+        assert_eq!(
+            serialized_keys(&cycle_view),
+            wire_order(&["cycle_detail"], &CYCLE_ISSUE_ALL_FIELDS)
+        );
         let module_source = super::super::taxonomy::ModuleRow {
             id: "66666666-6666-6666-6666-666666666666",
             created_at: None,
@@ -1857,15 +1899,11 @@ mod tests {
             issue: "dddddddd-dddd-dddd-dddd-dddddddddddd",
             module_detail: super::super::taxonomy::module_to_representation(&module_source),
         };
-        let produced =
-            serde_json::to_value(issue_module_detail_to_representation(&module_row)).expect("ok");
-        let mut expected: Vec<String> = MODULE_ISSUE_ALL_FIELDS
-            .iter()
-            .map(|key| key.to_string())
-            .collect();
-        expected.push("module_detail".to_owned());
-        expected.sort();
-        assert_eq!(object_keys(&produced), expected);
+        let module_view = issue_module_detail_to_representation(&module_row);
+        assert_eq!(
+            serialized_keys(&module_view),
+            wire_order(&["module_detail"], &MODULE_ISSUE_ALL_FIELDS)
+        );
     }
 
     #[test]
@@ -1913,14 +1951,11 @@ mod tests {
             metadata: &meta,
             created_by_detail: sample_user(),
         };
-        let produced = serde_json::to_value(issue_link_to_representation(&link_row)).expect("ok");
-        let mut expected: Vec<String> = ISSUE_LINK_ALL_FIELDS
-            .iter()
-            .map(|key| key.to_string())
-            .collect();
-        expected.push("created_by_detail".to_owned());
-        expected.sort();
-        assert_eq!(object_keys(&produced), expected);
+        let link_view = issue_link_to_representation(&link_row);
+        assert_eq!(
+            serialized_keys(&link_view),
+            wire_order(&["created_by_detail"], &ISSUE_LINK_ALL_FIELDS)
+        );
         let attrs = serde_json::json!({});
         let attach_row = IssueAttachmentRow {
             id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
@@ -1948,14 +1983,12 @@ mod tests {
             is_uploaded: true,
             storage_metadata: None,
         };
-        let produced =
-            serde_json::to_value(issue_attachment_to_representation(&attach_row)).expect("ok");
-        let mut expected: Vec<String> = FILE_ASSET_ALL_FIELDS
-            .iter()
-            .map(|key| key.to_string())
-            .collect();
-        expected.sort();
-        assert_eq!(object_keys(&produced), expected);
+        let attach_view = issue_attachment_to_representation(&attach_row);
+        assert_eq!(
+            serialized_keys(&attach_view),
+            const_keys(&FILE_ASSET_ALL_FIELDS)
+        );
+        let produced = serde_json::to_value(&attach_view).expect("ok");
         assert_eq!(produced.get("asset_url"), None);
     }
 
@@ -1975,14 +2008,19 @@ mod tests {
             str_list(case(&golden, "IssueVoteSerializer (space)"), "output_keys"),
             ISSUE_VOTE_FIELDS.map(str::to_owned).to_vec()
         );
-        let reaction = serde_json::to_value(issue_reaction_to_representation(&IssueReactionRow {
+        let reaction_row = IssueReactionRow {
             issue: "dddddddd-dddd-dddd-dddd-dddddddddddd",
             reaction: "heart",
             workspace: "22222222-2222-2222-2222-222222222222",
             project: "33333333-3333-3333-3333-333333333333",
             actor: "11111111-1111-1111-1111-111111111111",
-        }))
-        .expect("ok");
+        };
+        let reaction_view = issue_reaction_to_representation(&reaction_row);
+        assert_eq!(
+            serialized_keys(&reaction_view),
+            const_keys(&ISSUE_REACTION_FIELDS)
+        );
+        let reaction = serde_json::to_value(&reaction_view).expect("ok");
         assert_eq!(
             reaction,
             serde_json::json!({
@@ -1993,14 +2031,16 @@ mod tests {
                 "actor": "11111111-1111-1111-1111-111111111111",
             })
         );
-        let vote = serde_json::to_value(issue_vote_to_representation(&IssueVoteRow {
+        let vote_row = IssueVoteRow {
             issue: "dddddddd-dddd-dddd-dddd-dddddddddddd",
             vote: 1,
             workspace: "22222222-2222-2222-2222-222222222222",
             project: "33333333-3333-3333-3333-333333333333",
             actor: "11111111-1111-1111-1111-111111111111",
-        }))
-        .expect("ok");
+        };
+        let vote_view = issue_vote_to_representation(&vote_row);
+        assert_eq!(serialized_keys(&vote_view), const_keys(&ISSUE_VOTE_FIELDS));
+        let vote = serde_json::to_value(&vote_view).expect("ok");
         assert_eq!(vote.get("vote").and_then(Value::as_i64), Some(1));
         assert_eq!(vote.get("actor_detail"), None);
         assert_eq!(vote.get("id"), None);
@@ -2029,17 +2069,13 @@ mod tests {
         let description = serde_json::json!({});
         let icon = serde_json::json!({"color": "#fff"});
         let row = sample_issue_row(&description, &icon, None);
-        let produced = serde_json::to_value(issue_to_representation(&row)).expect("ok");
+        let view = issue_to_representation(&row);
+        assert_eq!(
+            serialized_keys(&view),
+            wire_order(&ISSUE_DECLARED_NESTS, &ISSUE_MODEL_FIELDS_NO_WORKPAD)
+        );
+        let produced = serde_json::to_value(&view).expect("ok");
         assert_eq!(produced.get("workpad"), None, "workpad MUST NOT render");
-        let mut expected: Vec<String> = ISSUE_MODEL_FIELDS_NO_WORKPAD
-            .iter()
-            .map(|key| key.to_string())
-            .collect();
-        for key in ISSUE_DECLARED_NESTS {
-            expected.push(key.to_owned());
-        }
-        expected.sort();
-        assert_eq!(object_keys(&produced), expected);
         assert_eq!(produced.get("assigned_pod_detail"), Some(&Value::Null));
         assert_eq!(
             produced.get("sub_issues_count").and_then(Value::as_i64),
@@ -2057,11 +2093,12 @@ mod tests {
                 project_identifier: "WEB",
             }),
         );
-        let produced = serde_json::to_value(issue_to_representation(&row)).expect("ok");
+        let view = issue_to_representation(&row);
         assert_eq!(
-            object_keys(&produced["assigned_pod_detail"]),
-            vec!["id", "is_default", "name", "project", "project_identifier"]
+            serialized_keys(view.assigned_pod_detail.as_ref().expect("pod detail")),
+            const_keys(&POD_MINI_FIELDS)
         );
+        let produced = serde_json::to_value(&view).expect("ok");
         assert_eq!(
             produced["assigned_pod_detail"]
                 .get("project_identifier")
@@ -2080,7 +2117,7 @@ mod tests {
             ISSUE_FLAT_FIELDS.map(str::to_owned).to_vec()
         );
         let description = serde_json::json!({});
-        let produced = serde_json::to_value(issue_flat_to_representation(&IssueFlatRow {
+        let flat_row = IssueFlatRow {
             id: "dddddddd-dddd-dddd-dddd-dddddddddddd",
             name: "Flat",
             description_json: &description,
@@ -2091,8 +2128,10 @@ mod tests {
             sequence_id: 3,
             sort_order: 65535.0,
             is_draft: false,
-        }))
-        .expect("ok");
+        };
+        let view = issue_flat_to_representation(&flat_row);
+        assert_eq!(serialized_keys(&view), const_keys(&ISSUE_FLAT_FIELDS));
+        let produced = serde_json::to_value(&view).expect("ok");
         assert_eq!(produced.get("complexity_score"), None);
         assert_eq!(produced.get("sequence_id").and_then(Value::as_i64), Some(3));
     }
@@ -2111,62 +2150,52 @@ mod tests {
             ),
             COMMENT_REACTION_LITE_FIELDS.map(str::to_owned).to_vec()
         );
-        let lite = serde_json::to_value(comment_reaction_lite_to_representation(
-            &CommentReactionLiteRow {
-                id: "cccccccc-cccc-cccc-cccc-cccccccccccc",
-                reaction: "+1",
-                comment: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
-                actor_detail: sample_user(),
-            },
-        ))
-        .expect("ok");
+        let lite_row = CommentReactionLiteRow {
+            id: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            reaction: "+1",
+            comment: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+            actor_detail: sample_user(),
+        };
+        let lite_view = comment_reaction_lite_to_representation(&lite_row);
         assert_eq!(
-            object_keys(&lite["actor_detail"]),
+            serialized_keys(&lite_view),
+            const_keys(&COMMENT_REACTION_LITE_FIELDS)
+        );
+        assert_eq!(
+            serialized_keys(&lite_view.actor_detail),
             vec![
+                "id",
+                "first_name",
+                "last_name",
                 "avatar",
                 "avatar_url",
-                "display_name",
-                "first_name",
-                "id",
                 "is_bot",
-                "last_name"
+                "display_name"
             ]
         );
         let row = sample_comment_row(None);
-        let produced = serde_json::to_value(issue_comment_to_representation(&row)).expect("ok");
+        let view = issue_comment_to_representation(&row);
+        assert_eq!(
+            serialized_keys(&view),
+            wire_order(
+                &[
+                    "actor_detail",
+                    "issue_detail",
+                    "project_detail",
+                    "workspace_detail",
+                    "comment_reactions",
+                    "is_member",
+                ],
+                &ISSUE_COMMENT_ALL_FIELDS
+            )
+        );
+        assert_eq!(
+            serialized_keys(&view.issue_detail),
+            const_keys(&ISSUE_FLAT_FIELDS)
+        );
+        let produced = serde_json::to_value(&view).expect("ok");
         assert_eq!(produced.get("actor"), Some(&Value::Null));
         assert_eq!(produced.get("actor_detail"), Some(&Value::Null));
-        let mut expected: Vec<String> = ISSUE_COMMENT_ALL_FIELDS
-            .iter()
-            .map(|key| key.to_string())
-            .collect();
-        for key in [
-            "actor_detail",
-            "issue_detail",
-            "project_detail",
-            "workspace_detail",
-            "comment_reactions",
-            "is_member",
-        ] {
-            expected.push(key.to_owned());
-        }
-        expected.sort();
-        assert_eq!(object_keys(&produced), expected);
-        assert_eq!(
-            object_keys(&produced["issue_detail"]),
-            vec![
-                "description_html",
-                "description_json",
-                "id",
-                "is_draft",
-                "name",
-                "priority",
-                "sequence_id",
-                "sort_order",
-                "start_date",
-                "target_date",
-            ]
-        );
         assert_eq!(produced.get("is_synced"), None);
     }
 
@@ -2340,27 +2369,24 @@ mod tests {
         // Fixture: CommentReactionSerializer (issue.py:425-429, 11 keys) and
         // IssuePublicSerializer (issue.py:439-464, 14 keys in Meta order).
         let golden = graph_golden();
-        let reaction =
-            serde_json::to_value(comment_reaction_to_representation(&CommentReactionRow {
-                id: "cccccccc-cccc-cccc-cccc-cccccccccccc",
-                created_at: None,
-                updated_at: None,
-                created_by: None,
-                updated_by: None,
-                deleted_at: None,
-                project: "33333333-3333-3333-3333-333333333333",
-                workspace: "22222222-2222-2222-2222-222222222222",
-                actor: "11111111-1111-1111-1111-111111111111",
-                comment: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
-                reaction: "heart",
-            }))
-            .expect("ok");
-        let mut expected: Vec<String> = COMMENT_REACTION_ALL_FIELDS
-            .iter()
-            .map(|key| key.to_string())
-            .collect();
-        expected.sort();
-        assert_eq!(object_keys(&reaction), expected);
+        let reaction_row = CommentReactionRow {
+            id: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            created_at: None,
+            updated_at: None,
+            created_by: None,
+            updated_by: None,
+            deleted_at: None,
+            project: "33333333-3333-3333-3333-333333333333",
+            workspace: "22222222-2222-2222-2222-222222222222",
+            actor: "11111111-1111-1111-1111-111111111111",
+            comment: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+            reaction: "heart",
+        };
+        let reaction_view = comment_reaction_to_representation(&reaction_row);
+        assert_eq!(
+            serialized_keys(&reaction_view),
+            const_keys(&COMMENT_REACTION_ALL_FIELDS)
+        );
         assert_eq!(
             str_list(
                 case(&golden, "IssuePublicSerializer (space)"),
@@ -2368,7 +2394,7 @@ mod tests {
             ),
             ISSUE_PUBLIC_FIELDS.map(str::to_owned).to_vec()
         );
-        let public = serde_json::to_value(issue_public_to_representation(&IssuePublicRow {
+        let public_row = IssuePublicRow {
             id: "dddddddd-dddd-dddd-dddd-dddddddddddd",
             name: "Public",
             sequence_id: 7,
@@ -2383,27 +2409,13 @@ mod tests {
             created_by: None,
             label_ids: Vec::new(),
             assignee_ids: Vec::new(),
-        }))
-        .expect("ok");
+        };
+        let public_view = issue_public_to_representation(&public_row);
         assert_eq!(
-            object_keys(&public),
-            vec![
-                "assignee_ids",
-                "created_by",
-                "id",
-                "label_ids",
-                "module_ids",
-                "name",
-                "priority",
-                "project",
-                "reactions",
-                "sequence_id",
-                "state",
-                "target_date",
-                "votes",
-                "workspace",
-            ]
+            serialized_keys(&public_view),
+            const_keys(&ISSUE_PUBLIC_FIELDS)
         );
+        let public = serde_json::to_value(&public_view).expect("ok");
         assert_eq!(public.get("description_html"), None);
         assert_eq!(public.get("state_detail"), None);
     }
@@ -2417,12 +2429,14 @@ mod tests {
             str_list(case(&golden, "LabelLiteSerializer"), "output_keys"),
             vec!["id", "name", "color"]
         );
-        let produced = serde_json::to_value(label_lite_to_representation(&LabelLiteRow {
+        let lite_row = LabelLiteRow {
             id: "77777777-7777-7777-7777-777777777777",
             name: "Bug",
             color: "#ff0000",
-        }))
-        .expect("ok");
+        };
+        let view = label_lite_to_representation(&lite_row);
+        assert_eq!(serialized_keys(&view), vec!["id", "name", "color"]);
+        let produced = serde_json::to_value(&view).expect("ok");
         assert_eq!(
             produced,
             serde_json::json!({
