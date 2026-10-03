@@ -209,10 +209,9 @@ fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // default-analytics, project-stats (PIDASHCONV-399; gates:
         // PIDASHCONV-358) in `app_analytics`; D-30 page favorites +
         // description (PIDASHCONV-332) + state ops (PIDASHCONV-328)
-        // in `app_pages`; D-36 scheduler definitions (PIDASHCONV-633)
-        // + occurrences (PIDASHCONV-635) in `app_scheduler` (sibling
-        // 634 extends that module's
-        // merge, keeping both sides); sibling handler issues
+        // in `app_pages`; D-36 scheduler definitions (PIDASHCONV-633) +
+        // scheduler bindings (PIDASHCONV-634) + occurrences
+        // (PIDASHCONV-635) in `app_scheduler`; sibling handler issues
         // extend the merge; merges keep both sides).
         RouteGroup::App => crate::app_issues::routes()
             .merge(crate::app_views_search::routes())
