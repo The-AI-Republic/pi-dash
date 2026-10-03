@@ -57,7 +57,7 @@
 //! | `mark_pel_drained` / `clear_session_marker` | `Ok(())` | `Err` | — |
 //! | `is_pel_drained` | `Ok(false)` | `Err` | — |
 //! | `set_command_result` | warn + `Ok(())` | `Err` | — |
-//! | `get_command_result` | `Ok(None)` | `Err` | corrupt → `Ok(None)` |
+//! | `get_command_result` | `Ok(None)` | `Err` | corrupt/`null` → `Ok(None)`; non-UTF-8 → `Err(InvalidUtf8)` |
 //! | `publish_session_eviction` | `Ok(())` | `Err` | — |
 //! | `delete_machine_stream` | `Ok(())` | `Err` | — |
 //!
@@ -85,8 +85,9 @@
 //! `get_command_result` returns whatever `json.loads` parses —
 //! `Option<Value>`, since Python's `Optional[Dict]` annotation does
 //! not stop a non-object literal passing through. Missing keys,
-//! empty values, undecodable bytes (`UnicodeDecodeError` is a
-//! `ValueError`) and corrupt payloads all read as `None`. One known
+//! empty values, a stored JSON `null` and corrupt payloads all read
+//! as `None`; undecodable bytes raise (`UnicodeDecodeError`
+//! propagates — the `.decode()` sits outside the `try`). One known
 //! edge: bare `NaN`/`Infinity` literals (storable only from Python,
 //! via non-finite floats — `serde_json::Number` cannot hold them)
 //! read as corrupt (`None`) here where Python re-parses them.
@@ -161,7 +162,8 @@ pub enum MachineOutboxError {
     Decode(#[from] DecodeError),
 
     /// Non-UTF-8 bytes where Python's `.decode()` would raise: drain
-    /// field bytes (`machine_outbox.py:213-218`).
+    /// field bytes (`machine_outbox.py:213-218`) and command-result
+    /// values (`machine_outbox.py:362-363`).
     #[error("invalid utf-8: {0}")]
     InvalidUtf8(#[from] std::str::Utf8Error),
 
@@ -847,8 +849,9 @@ pub async fn set_command_result(
 }
 
 /// Read a machine-command result (`machine_outbox.py:355-367`):
-/// whatever `json.loads` parses, `None` for missing keys, empty
-/// values and corrupt (or undecodable) payloads.
+/// whatever `json.loads` parses; `None` for missing keys, empty
+/// values, a stored JSON `null` and corrupt payloads. Non-UTF-8
+/// bytes raise, like Python's `.decode()` outside the `try`.
 pub async fn get_command_result(
     client: Option<&redis::Client>,
     request_id: &str,
@@ -874,13 +877,15 @@ pub async fn get_command_result(
     if raw.is_empty() {
         return Ok(None);
     }
-    // Non-UTF-8 bytes raise UnicodeDecodeError in Python — a
-    // ValueError subclass, so the corrupt read is None, never Err.
-    let text = match std::str::from_utf8(raw) {
-        Ok(text) => text,
-        Err(_) => return Ok(None),
-    };
-    Ok(serde_json::from_str(text).ok())
+    // Non-UTF-8 bytes raise `UnicodeDecodeError` in Python: the
+    // `.decode()` sits outside `get_command_result`'s `try`
+    // (`machine_outbox.py:362-364`), so the error propagates.
+    let text = std::str::from_utf8(raw)?;
+    // A stored JSON `null` parses to `None` — the same unknown
+    // read as a missing key, never `Some`.
+    Ok(serde_json::from_str::<Value>(text)
+        .ok()
+        .filter(|v| !v.is_null()))
 }
 
 /// Publish a session-eviction notice
@@ -1730,6 +1735,7 @@ mod tests {
             resp_str("{corrupt"),
             resp_bytes(&[0xff, 0xfe]),
             resp_bytes(b""),
+            resp_str("null"),
         ]);
         set_command_result(Some(&client), &req, &payload)
             .await
@@ -1754,12 +1760,12 @@ mod tests {
                 .expect("corrupt"),
             None
         );
-        assert_eq!(
-            get_command_result(Some(&client), &req)
-                .await
-                .expect("bad utf-8"),
-            None,
-            "undecodable bytes read as corrupt, never Err"
+        assert!(
+            matches!(
+                get_command_result(Some(&client), &req).await,
+                Err(MachineOutboxError::InvalidUtf8(_))
+            ),
+            "undecodable bytes raise: Python's .decode() is outside the try"
         );
         assert_eq!(
             get_command_result(Some(&client), &req)
@@ -1767,6 +1773,11 @@ mod tests {
                 .expect("empty"),
             None,
             "empty values are falsy, like `if not raw`"
+        );
+        assert_eq!(
+            get_command_result(Some(&client), &req).await.expect("null"),
+            None,
+            "a stored JSON null parses to None, like a missing key"
         );
         let fx = fixture();
         let trace = &fx["command_result"];
