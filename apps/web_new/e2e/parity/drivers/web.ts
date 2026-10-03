@@ -2117,26 +2117,15 @@ export class WebDriver implements ParityDriver {
           .catch(() => null)) ?? ""
       ).split("\n")[0] ?? "";
     const countMatch = /(\d+)\s+Work items/.exec(text);
-    // The zoom switcher renders one entry per zoom level; the active one
-    // carries the pill marker.
+    // The zoom switcher renders one clickable div per zoom level (exact
+    // label text, cursor-pointer); the active one carries the pill marker.
     const views: string[] = [];
     for (const view of ["Week", "Month", "Quarter"] as const) {
-      if ((await root.getByRole("button", { name: view, exact: true }).count()) > 0) views.push(view);
+      const entry = root.locator(`xpath=.//div[normalize-space(.)='${view}' and contains(@class,'cursor-pointer')]`);
+      if ((await entry.count()) > 0) views.push(view);
     }
     const hasToday = (await root.getByRole("button", { name: "Today", exact: true }).count()) > 0;
-    const buttons = root.locator(":scope button");
-    const buttonCount = await buttons.count();
-    let hasFullscreen = false;
-    for (let index = 0; index < buttonCount; index += 1) {
-      const label = (
-        (await buttons
-          .nth(index)
-          .innerText()
-          .catch(() => null)) ?? ""
-      ).trim();
-      // The fullscreen toggle is the header's trailing icon-only button.
-      if (label === "") hasFullscreen = true;
-    }
+    const hasFullscreen = (await this.ganttFullscreenButton().count()) > 0;
     return { count: countMatch ? Number(countMatch[1]) : null, views, hasToday, hasFullscreen };
   }
 
@@ -2159,22 +2148,18 @@ export class WebDriver implements ParityDriver {
       .replace(/\s+/g, " ");
     if (/^\d+\s*-\s*\d+/.test(first)) return "Month";
     if (/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i.test(first)) return "Quarter";
-    if (/^(Su|M|T|W|Th|F|Sa)\b/i.test(first)) return "Week";
+    // Week cells glue the weekday to the date ("Su31"), so no word
+    // boundary follows the name. Month/Quarter match first, keeping the
+    // bare prefixes unambiguous.
+    if (/^(Su|Mo|Tu|We|Th|Fr|Sa|M|T|W|F)/i.test(first)) return "Week";
     return "unknown";
   }
 
   async ganttSetZoom(view: GanttZoom): Promise<void> {
-    const root = this.ganttChartRoot();
-    const entry = root.getByRole("button", { name: view, exact: true }).first();
-    if ((await entry.count()) === 0) {
-      // Select-style switcher: open the current value, then pick the entry.
-      const current = await this.ganttActiveZoom();
-      if (current === "unknown") throw new Error("[parity] timeline zoom switcher not found.");
-      await root.getByRole("button", { name: current, exact: true }).first().click({ timeout: WebDriver.WAIT_MS });
-      await this.page.getByRole("option", { name: view, exact: true }).first().click({ timeout: WebDriver.WAIT_MS });
-    } else {
-      await entry.click({ timeout: WebDriver.WAIT_MS });
-    }
+    const entry = this.ganttChartRoot()
+      .locator(`xpath=.//div[normalize-space(.)='${view}' and contains(@class,'cursor-pointer')]`)
+      .first();
+    await entry.click({ timeout: WebDriver.WAIT_MS });
     await this.boardSettle("zoom switch", async () => (await this.ganttActiveZoom()) === view);
   }
 
@@ -2242,14 +2227,10 @@ export class WebDriver implements ParityDriver {
     await this.ganttChartRoot()
       .getByRole("button", { name: "Today", exact: true })
       .click({ timeout: WebDriver.WAIT_MS });
-    const viewport = this.page.viewportSize() ?? { width: 1280, height: 720 };
-    await this.boardSettle("today re-center", async () => {
-      const rects = await this.ganttTodayRects();
-      if (rects.length === 0) return false;
-      const widest = rects.reduce((a, b) => (b.right - b.left > a.right - a.left ? b : a));
-      const center = (widest.left + widest.right) / 2;
-      return Math.abs(center - viewport.width / 2) < 150;
-    });
+    // Today restores the standard scroll offset with the marker in view;
+    // the marker lands off-center (about 275px right of it), so settle on
+    // visibility, not centering.
+    await this.boardSettle("today re-center", async () => this.ganttTodayVisible());
   }
 
   async ganttTodayVisible(): Promise<boolean> {
@@ -2262,25 +2243,18 @@ export class WebDriver implements ParityDriver {
     return (await this.ganttContainer().locator('div[class*="bg-accent-primary/20"]').count()) > 0;
   }
 
+  private ganttFullscreenButton(): Locator {
+    // The header (count + zoom + Today + fullscreen) is the timeline
+    // container's preceding sibling in both inline and portal modes, and
+    // the toggle is its only bordered icon button. Never match page-wide:
+    // other overlays carry empty-text buttons past the chart in DOM order.
+    return this.ganttContainer().locator("xpath=preceding-sibling::div//button[contains(@class,'border-subtle')]");
+  }
+
   async ganttToggleFullscreen(): Promise<void> {
-    const root = this.ganttChartRoot();
     const before = await this.ganttFullscreenActive();
-    const buttons = root.locator(":scope button");
-    const count = await buttons.count();
-    for (let index = count - 1; index >= 0; index -= 1) {
-      const label = (
-        (await buttons
-          .nth(index)
-          .innerText()
-          .catch(() => null)) ?? ""
-      ).trim();
-      if (label === "") {
-        await buttons.nth(index).click({ timeout: WebDriver.WAIT_MS });
-        await this.boardSettle("fullscreen toggle", async () => (await this.ganttFullscreenActive()) !== before);
-        return;
-      }
-    }
-    throw new Error("[parity] fullscreen toggle not found.");
+    await this.ganttFullscreenButton().first().click({ timeout: WebDriver.WAIT_MS });
+    await this.boardSettle("fullscreen toggle", async () => (await this.ganttFullscreenActive()) !== before);
   }
 
   async ganttFullscreenActive(): Promise<boolean> {
@@ -2288,14 +2262,14 @@ export class WebDriver implements ParityDriver {
   }
 
   async ganttTimelineWidth(): Promise<number> {
+    // The scrollable content width minus the sticky sidebar: day columns
+    // grow when the infinite range extends, the sidebar never does.
     return await this.page.evaluate(() => {
       const container = document.querySelector("#gantt-container");
+      const sidebar = document.querySelector("#gantt-sidebar");
       if (!(container instanceof HTMLElement)) return 0;
-      const items = [...container.querySelectorAll("div")].find((element) => {
-        const width = (element as HTMLElement).style?.width ?? "";
-        return /^\d+px$/.test(width) && element.children.length > 0;
-      }) as HTMLElement | undefined;
-      return items ? Math.round(items.getBoundingClientRect().width) : 0;
+      const side = sidebar instanceof HTMLElement ? sidebar.getBoundingClientRect().width : 0;
+      return Math.round(container.scrollWidth - side);
     });
   }
 
@@ -2339,7 +2313,10 @@ export class WebDriver implements ParityDriver {
   }
 
   private ganttSidebarRowDuration(link: Locator): Locator {
-    return link.locator("xpath=../..").locator(":scope > div.flex-shrink-0");
+    // The duration cell is the row's trailing flex-shrink-0 div, a sibling
+    // of the link's own wrapper. Anchor on the nearest row ancestor so a
+    // dated row's duration can never leak into an undated row's read.
+    return link.locator("xpath=ancestor::div[contains(@class,'px-page-x')][1]//div[contains(@class,'flex-shrink-0')]");
   }
 
   async ganttSidebarRows(): Promise<GanttSidebarRow[]> {
@@ -2415,13 +2392,29 @@ export class WebDriver implements ParityDriver {
   }
 
   async ganttBarExists(issueName: string): Promise<boolean> {
-    // Dated bars take a positive-width positioned box; undated rows keep
-    // a zero-width placeholder, whether mounted or virtualized away.
+    // Dated bars carry a positive style width; undated rows mount a
+    // full-row invisible overlay with no width style, so only the style
+    // tells them apart.
     const issueId = await this.ganttIssueIdByName(issueName);
     const bar = this.ganttBar(issueId);
     if ((await bar.count()) === 0) return false;
-    const box = await bar.boundingBox();
-    return !!box && box.width > 0;
+    const width = await bar.evaluate((element) => (element as HTMLElement).style.width);
+    const px = /^(-?\d+(?:\.\d+)?)px$/.exec(width ?? "");
+    return !!px && Number(px[1]) > 0;
+  }
+
+  async ganttBarOffset(issueName: string): Promise<{ marginLeft: number; width: number }> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const bar = this.ganttBar(issueId);
+    if ((await bar.count()) === 0) return { marginLeft: 0, width: 0 };
+    return await bar.evaluate((element) => {
+      const style = (element as HTMLElement).style;
+      const px = (value: string): number => {
+        const match = /^(-?\d+(?:\.\d+)?)px$/.exec(value ?? "");
+        return match ? Number(match[1]) : 0;
+      };
+      return { marginLeft: px(style.marginLeft), width: px(style.width) };
+    });
   }
 
   private ganttBarHandle(issueId: string, side: "left" | "right"): Locator {
@@ -2430,25 +2423,88 @@ export class WebDriver implements ParityDriver {
     return bar.locator(`div.cursor-col-resize[class*="${marker}"]`).first();
   }
 
+  private async ganttClearDragSpan(
+    measure: () => Promise<{ fromX: number; ontoX: number; y: number }>
+  ): Promise<{ from: { x: number; y: number }; onto: { x: number; y: number } }> {
+    // Raw bar drags must grab on the bar (clear of the sticky sidebar)
+    // and drop inside the viewport, or the release is lost and the commit
+    // never fires. Scroll until the whole span sits in the clear band.
+    const viewport = this.page.viewportSize() ?? { width: 1280, height: 720 };
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const side = await this.ganttSidebar().boundingBox();
+      const minX = (side ? side.x + side.width : 360) + 24;
+      const maxX = viewport.width - 24;
+      const { fromX, ontoX, y } = await measure();
+      const lo = Math.min(fromX, ontoX);
+      const hi = Math.max(fromX, ontoX);
+      if (lo >= minX && hi <= maxX) return { from: { x: fromX, y }, onto: { x: ontoX, y } };
+      const shift = lo < minX ? lo - minX - 120 : hi - maxX + 120;
+      await this.ganttScrollTo((await this.ganttScrollLeft()) + shift);
+    }
+    throw new Error("[parity] could not clear room for the timeline drag.");
+  }
+
+  private async ganttBarDragEngaged(
+    bar: Locator,
+    read: (element: HTMLElement) => string,
+    before: string,
+    from: { x: number; y: number },
+    onto: { x: number; y: number }
+  ): Promise<void> {
+    await this.page.mouse.move(from.x, from.y);
+    await this.page.mouse.down();
+    // Probe three quarters across: day snapping can swallow a half-day
+    // midpoint for single-day drags, but never a three-quarter one.
+    await this.page.mouse.move(from.x + (onto.x - from.x) * 0.75, from.y, { steps: 6 });
+    await this.page.waitForTimeout(500);
+    // The app live-updates the bar mid-drag; no change means the grab
+    // missed (sidebar cover, virtualized placeholder) and no commit will
+    // follow, so fail loudly instead of settling on a phantom drag.
+    const mid = await bar.evaluate((element) => read(element as HTMLElement));
+    if (mid === before) {
+      await this.page.mouse.up();
+      throw new Error("[parity] bar drag did not engage; the grab missed the bar.");
+    }
+    await this.page.mouse.move(onto.x, onto.y, { steps: 6 });
+    await this.page.mouse.up();
+  }
+
   async ganttDragBar(issueName: string, dayDelta: number): Promise<void> {
     if (dayDelta === 0) throw new Error("[parity] bar drag needs a nonzero day delta.");
     const issueId = await this.ganttIssueIdByName(issueName);
     const bar = this.ganttBar(issueId);
     const pxPerDay = await this.ganttDayWidth();
     await bar.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
-    const box = await bar.boundingBox();
-    if (!box) throw new Error("[parity] bar has no box.");
+    const { from, onto } = await this.ganttClearDragSpan(async () => {
+      const box = await bar.boundingBox();
+      if (!box) throw new Error("[parity] bar has no box.");
+      const fromX = box.x + box.width / 2;
+      return { fromX, ontoX: fromX + dayDelta * pxPerDay, y: box.y + box.height / 2 };
+    });
     const before = await bar.evaluate((element) => (element as HTMLElement).style.marginLeft);
-    const from = WebDriver.boxCenter(box);
-    const onto = { x: from.x + dayDelta * pxPerDay, y: from.y };
+    await this.ganttBarDragEngaged(bar, (element) => element.style.marginLeft, before, from, onto);
+    // No post-drop UI settle: the bar snaps back while the server persists
+    // (NEWFRONT-161). The scenario asserts the persisted server dates and
+    // pins the stale UI separately.
+  }
+
+  async ganttAttemptBarMove(issueName: string, dayDelta: number): Promise<void> {
+    if (dayDelta === 0) throw new Error("[parity] bar drag needs a nonzero day delta.");
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const bar = this.ganttBar(issueId);
+    const pxPerDay = await this.ganttDayWidth();
+    await bar.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    const { from, onto } = await this.ganttClearDragSpan(async () => {
+      const box = await bar.boundingBox();
+      if (!box) throw new Error("[parity] bar has no box.");
+      const fromX = box.x + box.width / 2;
+      return { fromX, ontoX: fromX + dayDelta * pxPerDay, y: box.y + box.height / 2 };
+    });
     await this.page.mouse.move(from.x, from.y);
     await this.page.mouse.down();
     await this.page.mouse.move(onto.x, onto.y, { steps: 12 });
     await this.page.mouse.up();
-    await this.boardSettle(
-      "bar move",
-      async () => (await bar.evaluate((element) => (element as HTMLElement).style.marginLeft)) !== before
-    );
+    await this.page.waitForTimeout(3_000);
   }
 
   async ganttResizeBar(issueName: string, side: "left" | "right", dayDelta: number): Promise<void> {
@@ -2459,28 +2515,41 @@ export class WebDriver implements ParityDriver {
     await bar.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
     const handle = this.ganttBarHandle(issueId, side);
     await handle.waitFor({ timeout: WebDriver.WAIT_MS });
-    const box = await handle.boundingBox();
-    if (!box) throw new Error("[parity] resize handle has no box.");
+    const { from, onto } = await this.ganttClearDragSpan(async () => {
+      const box = await handle.boundingBox();
+      if (!box) throw new Error("[parity] resize handle has no box.");
+      const fromX = box.x + box.width / 2;
+      return { fromX, ontoX: fromX + dayDelta * pxPerDay, y: box.y + box.height / 2 };
+    });
     const before = await bar.evaluate((element) => (element as HTMLElement).style.width);
-    const from = WebDriver.boxCenter(box);
-    const onto = { x: from.x + dayDelta * pxPerDay, y: from.y };
-    await this.page.mouse.move(from.x, from.y);
-    await this.page.mouse.down();
-    await this.page.mouse.move(onto.x, onto.y, { steps: 12 });
-    await this.page.mouse.up();
-    await this.boardSettle(
-      "bar resize",
-      async () => (await bar.evaluate((element) => (element as HTMLElement).style.width)) !== before
-    );
+    await this.ganttBarDragEngaged(bar, (element) => element.style.width, before, from, onto);
   }
 
   async ganttResizePreview(issueName: string, side: "left" | "right"): Promise<string | null> {
     const issueId = await this.ganttIssueIdByName(issueName);
+    const bar = this.ganttBar(issueId);
     const handle = this.ganttBarHandle(issueId, side);
     if ((await handle.count()) === 0) return null;
-    await handle.hover({ timeout: WebDriver.WAIT_MS });
-    await this.page.waitForTimeout(600);
-    const pill = this.ganttBar(issueId).locator("div.bg-accent-subtle").first();
+    await bar.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    // The bar's own sticky name label covers the handle center and the
+    // sidebar can cover a freshly scrolled bar, so clear the handle past
+    // the sidebar and hover its exposed outer strip with the raw mouse.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const box = await handle.boundingBox();
+      const sideBox = await this.ganttSidebar().boundingBox();
+      if (!box || !sideBox) return null;
+      if (box.x >= sideBox.x + sideBox.width + 4) break;
+      await this.ganttScrollTo((await this.ganttScrollLeft()) + (box.x - sideBox.x - sideBox.width - 120));
+    }
+    const box = await handle.boundingBox();
+    if (!box) return null;
+    const at =
+      side === "left"
+        ? { x: box.x + 1, y: box.y + box.height / 2 }
+        : { x: box.x + box.width - 1, y: box.y + box.height / 2 };
+    await this.page.mouse.move(at.x, at.y);
+    await this.page.waitForTimeout(800);
+    const pill = bar.locator("div.bg-accent-subtle").first();
     if ((await pill.count()) === 0) return null;
     if (!(await pill.isVisible())) return null;
     return (await pill.innerText()).trim() || null;
@@ -2491,37 +2560,38 @@ export class WebDriver implements ParityDriver {
     return (await this.ganttBar(issueId).locator("div.cursor-col-resize").count()) > 0;
   }
 
-  private ganttRowOf(issueId: string): Locator {
-    // A bar wrapper always mounts inside its timeline row, dated or not;
-    // the row is the nearest full-width ancestor.
-    return this.ganttBar(issueId).locator("xpath=ancestor::div[contains(@class,'min-w-full')][1]");
+  private async ganttChartPointForRow(issueName: string, dayOffset: number): Promise<{ x: number; y: number }> {
+    // Bars live in an overlay layer, rows in a sibling layer, so chart
+    // rows cannot be resolved from bars. Sidebar rows align vertically
+    // with chart rows, and day columns start past the sticky sidebar.
+    const pxPerDay = await this.ganttDayWidth();
+    const link = await this.ganttSidebarLinkByName(issueName);
+    await link.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    const linkBox = await link.boundingBox();
+    const sidebarBox = await this.ganttSidebar().boundingBox();
+    if (!linkBox || !sidebarBox) throw new Error("[parity] timeline row has no box.");
+    return {
+      x: sidebarBox.x + sidebarBox.width + dayOffset * pxPerDay,
+      y: linkBox.y + linkBox.height / 2,
+    };
   }
 
   async ganttRowAddVisible(issueName: string): Promise<boolean> {
-    const issueId = await this.ganttIssueIdByName(issueName);
-    const row = this.ganttRowOf(issueId);
-    await row.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
-    await row.hover({ timeout: WebDriver.WAIT_MS });
-    await this.page.waitForTimeout(600);
-    const add = row.locator("button.absolute").first();
+    const at = await this.ganttChartPointForRow(issueName, 2);
+    await this.page.mouse.move(at.x, at.y);
+    await this.page.waitForTimeout(800);
+    // The "+" mounts under the cursor on row hover; dated rows and guests
+    // render no add layer at all.
+    const add = this.ganttContainer().locator("button.absolute").first();
     if ((await add.count()) === 0) return false;
     return await add.isVisible();
   }
 
   async ganttAddBlock(issueName: string, dayOffset: number): Promise<void> {
-    const issueId = await this.ganttIssueIdByName(issueName);
-    const pxPerDay = await this.ganttDayWidth();
-    const row = this.ganttRowOf(issueId);
-    await row.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
-    const sidebarBox = await this.ganttSidebar().boundingBox();
-    const rowBox = await row.boundingBox();
-    if (!sidebarBox || !rowBox) throw new Error("[parity] add-block row has no box.");
-    const at = {
-      x: sidebarBox.x + sidebarBox.width + dayOffset * pxPerDay,
-      y: rowBox.y + rowBox.height / 2,
-    };
+    const at = await this.ganttChartPointForRow(issueName, dayOffset);
     await this.page.mouse.move(at.x, at.y);
-    await this.page.waitForTimeout(600);
+    const add = this.ganttContainer().locator("button.absolute").first();
+    await add.waitFor({ timeout: WebDriver.WAIT_MS });
     await this.page.mouse.click(at.x, at.y);
     await this.boardSettle("add block", async () => this.ganttBarExists(issueName));
   }
@@ -2586,16 +2656,33 @@ export class WebDriver implements ParityDriver {
     await this.boardSettle("bar peek", async () => (await this.issuePeekTitle()) === issueName);
   }
 
+  private async ganttScrollArrowIndex(issueName: string): Promise<number | null> {
+    // One sticky arrow per off-screen bar, mounted in its chart row; rows
+    // carry no id, so match the arrow overlapping the sidebar link's band.
+    const link = await this.ganttSidebarLinkByName(issueName);
+    const linkBox = await link.boundingBox();
+    if (!linkBox) return null;
+    const targetY = linkBox.y + linkBox.height / 2;
+    return await this.page.evaluate((bandY) => {
+      const arrows = [...document.querySelectorAll("#gantt-container button.sticky")];
+      const index = arrows.findIndex((arrow) => {
+        const rect = (arrow as HTMLElement).getBoundingClientRect();
+        return rect.width > 0 && bandY >= rect.y - 12 && bandY <= rect.y + rect.height + 12;
+      });
+      return index >= 0 ? index : null;
+    }, targetY);
+  }
+
   async ganttScrollArrowVisible(issueName: string): Promise<boolean> {
-    const issueId = await this.ganttIssueIdByName(issueName);
-    const arrow = this.ganttRowOf(issueId).locator("button.sticky").first();
-    if ((await arrow.count()) === 0) return false;
-    return await arrow.isVisible();
+    const index = await this.ganttScrollArrowIndex(issueName);
+    if (index === null) return false;
+    return await this.ganttContainer().locator("button.sticky").nth(index).isVisible();
   }
 
   async ganttClickScrollArrow(issueName: string): Promise<void> {
-    const issueId = await this.ganttIssueIdByName(issueName);
-    await this.ganttRowOf(issueId).locator("button.sticky").first().click({ timeout: WebDriver.WAIT_MS });
+    const index = await this.ganttScrollArrowIndex(issueName);
+    if (index === null) throw new Error(`[parity] no scroll arrow for ${JSON.stringify(issueName)}.`);
+    await this.ganttContainer().locator("button.sticky").nth(index).click({ timeout: WebDriver.WAIT_MS });
     await this.boardSettle("scroll to block", async () => this.ganttBarInView(issueName));
   }
 
@@ -2625,9 +2712,63 @@ export class WebDriver implements ParityDriver {
     });
     try {
       await this.page.reload();
-      const deadline = Date.now() + 60_000;
+      const deadline = Date.now() + 90_000;
+      let seenSkeletons = false;
+      let seenLabel = false;
       for (;;) {
-        if (await this.ganttSidebarLoading()) return true;
+        if (await this.ganttSidebarLoading().catch(() => false)) seenSkeletons = true;
+        // The header renders a Loading label (no count) until blocks load;
+        // the switcher proves the header itself has mounted.
+        const header = await this.ganttHeader().catch(() => null);
+        if (header && header.views.length > 0 && header.count === null) seenLabel = true;
+        if (seenSkeletons && seenLabel) return true;
+        if (Date.now() > deadline) return false;
+        await this.page.waitForTimeout(250);
+      }
+    } finally {
+      await this.page.unroute(pattern);
+    }
+  }
+
+  async ganttEmptyVisible(): Promise<boolean> {
+    // Projects without issues render the first-run empty state instead of
+    // the chart, with the layout switcher still marking gantt active.
+    const heading = this.page.getByRole("heading", { name: "Start with your first work item." });
+    if ((await heading.count()) === 0) return false;
+    return await heading.first().isVisible();
+  }
+
+  async ganttLoadMoreObservedOnScroll(): Promise<boolean> {
+    // Trip the infinite-scroll sentinel on a 100+ issue timeline: the
+    // delayed page-two fetch holds the pulsing placeholder up for the poll.
+    const pattern = "**/api/**/issues**";
+    await this.page.route(pattern, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+      await route.continue();
+    });
+    try {
+      await this.page.reload();
+      await this.ganttOpenTimeline();
+      // Page one must skeleton first (proves the delayed fetch started),
+      // then settle, before scrolling can trip the page-two sentinel.
+      const spin = Date.now() + 120_000;
+      for (;;) {
+        if (await this.ganttSidebarLoading().catch(() => false)) break;
+        if (Date.now() > spin) return false;
+        await this.page.waitForTimeout(250);
+      }
+      const settled = Date.now() + 120_000;
+      for (;;) {
+        if (!(await this.ganttSidebarLoading().catch(() => true))) break;
+        if (Date.now() > settled) return false;
+        await this.page.waitForTimeout(500);
+      }
+      await this.ganttContainer().evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+      });
+      const deadline = Date.now() + 90_000;
+      for (;;) {
+        if (await this.ganttLoadMoreVisible().catch(() => false)) return true;
         if (Date.now() > deadline) return false;
         await this.page.waitForTimeout(250);
       }
