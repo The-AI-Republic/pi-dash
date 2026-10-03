@@ -357,6 +357,10 @@ export class WebDriver implements ParityDriver {
   }
 
   private signedInPath(url: string): boolean {
+    // A fresh page reports about:blank (pathname "blank"), which the test
+    // below would misread as a signed-in workspace path and skip the whole
+    // sign-in; only real http(s) URLs can be signed-in paths.
+    if (!url.startsWith("http://") && !url.startsWith("https://")) return false;
     const pathname = new URL(url).pathname;
     return pathname !== "/" && !pathname.startsWith("/auth") && !pathname.startsWith("/sign");
   }
