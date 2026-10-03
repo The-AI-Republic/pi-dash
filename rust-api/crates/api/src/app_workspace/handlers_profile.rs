@@ -721,7 +721,7 @@ fn group_expression(field: &str) -> Result<String, Denial> {
         "issue_module__module_id" => "issue_module.module_id".to_owned(),
         "state_id" => "issue.state_id".to_owned(),
         "priority" => "issue.priority".to_owned(),
-        "cycle_id" => "(SELECT ci.cycle_id FROM cycle_issues ci WHERE ci.issue_id = issue.id AND ci.deleted_at IS NULL LIMIT 1)".to_owned(),
+        "cycle_id" => "(SELECT ci.cycle_id FROM cycle_issues ci WHERE ci.issue_id = issue.id AND ci.deleted_at IS NULL ORDER BY ci.created_at DESC LIMIT 1)".to_owned(),
         "project_id" => "issue.project_id".to_owned(),
         "state__group" => "state.\"group\"".to_owned(),
         "target_date" => "issue.target_date".to_owned(),
@@ -922,11 +922,22 @@ async fn user_profile_issues(
         )
         .await;
     }
-    profile_flat_response(&pool, &filtered, &key_expr, direction, per_page, cursor).await
+    profile_flat_response(
+        &pool,
+        &filtered,
+        &key_expr,
+        direction,
+        per_page,
+        cursor,
+        total_count,
+    )
+    .await
 }
 
 /// Plain `paginate` branch (`user.py:243-250`): distinct rows, the
 /// rewritten order key `NULLS LAST` plus `-created_at`, offset window.
+/// The total over the pre-annotation set arrives from the caller (the
+/// `deepcopy` at `:157`), like the grouped branch — no second count.
 async fn profile_flat_response(
     pool: &sqlx::PgPool,
     filtered: &FilteredSet,
@@ -934,6 +945,7 @@ async fn profile_flat_response(
     direction: &str,
     per_page: i64,
     cursor: crate::paginator::Cursor,
+    total_count: i64,
 ) -> HandlerResult {
     use crate::paginator::{
         apply_offset_window, max_hits, next_cursor, offset_window, prev_cursor,
@@ -954,10 +966,6 @@ async fn profile_flat_response(
         .map_err(page_denial)?
         .into_iter()
         .collect();
-    let total_count = {
-        let sql = format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where);
-        fetch_count(pool, &sql, filtered.values.clone()).await?
-    };
     let next = next_cursor(limit, window.page, has_more);
     let prev = prev_cursor(limit, window.page);
     let timezone = chrono_tz::UTC;
@@ -984,6 +992,29 @@ async fn profile_flat_response(
     ))
 }
 
+/// Totals statement for one group level: the bucket expression plus the
+/// filtered distinct-id count, grouped by the bucket (pilot
+/// `group_total_pairs`). The `GROUP BY 1` is load-bearing: without it
+/// Postgres rejects the plain select item beside the aggregate (42803).
+fn group_totals_sql(from_where: &str, group_expr: &str, count_filter: &str) -> String {
+    format!(
+        "SELECT COALESCE(({group_expr})::text, 'None') AS bucket, COUNT(DISTINCT issue.id) FILTER (WHERE {count_filter}) AS n {from_where} GROUP BY 1"
+    )
+}
+
+/// Totals statement for the nested sub level, grouped by both buckets
+/// (pilot `sub_total_pairs`).
+fn sub_totals_sql(
+    from_where: &str,
+    group_expr: &str,
+    sub_expr: &str,
+    count_filter: &str,
+) -> String {
+    format!(
+        "SELECT COALESCE(({group_expr})::text, 'None') AS bucket, COALESCE(({sub_expr})::text, 'None') AS sub, COUNT(DISTINCT issue.id) FILTER (WHERE {count_filter}) AS n {from_where} GROUP BY 1, 2"
+    )
+}
+
 /// `(group, filtered count)` pairs for the totals dict
 /// (`GroupedOffsetPaginator.__get_total_queryset`, `paginator.py:297-303`),
 /// via [`fetch_json_rows`] (no local binder needed).
@@ -993,10 +1024,7 @@ async fn profile_group_total_pairs(
     group_expr: &str,
     count_filter: &str,
 ) -> Result<Vec<(String, i64)>, Denial> {
-    let sql = format!(
-        "SELECT COALESCE(({group_expr})::text, 'None') AS bucket, COUNT(DISTINCT issue.id) FILTER (WHERE {count_filter}) AS n {}",
-        filtered.from_where,
-    );
+    let sql = group_totals_sql(&filtered.from_where, group_expr, count_filter);
     let rows = fetch_json_rows(pool, &sql, filtered.values.clone()).await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -1022,10 +1050,7 @@ async fn profile_sub_total_pairs(
     sub_expr: &str,
     count_filter: &str,
 ) -> Result<Vec<(String, String, i64)>, Denial> {
-    let sql = format!(
-        "SELECT COALESCE(({group_expr})::text, 'None') AS bucket, COALESCE(({sub_expr})::text, 'None') AS sub, COUNT(DISTINCT issue.id) FILTER (WHERE {count_filter}) AS n {}",
-        filtered.from_where,
-    );
+    let sql = sub_totals_sql(&filtered.from_where, group_expr, sub_expr, count_filter);
     let rows = fetch_json_rows(pool, &sql, filtered.values.clone()).await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -2714,6 +2739,58 @@ mod tests {
                 .contains("issue.id IN (SELECT i.id FROM issues i"),
             "{}",
             filtered.from_where
+        );
+    }
+
+    #[test]
+    fn group_totals_statements_carry_group_by() {
+        use crate::app_issues::OneOrMany;
+        let uid = uuid::Uuid::nil();
+        let viewer = uuid::Uuid::max();
+        let mut query = QueryMap::new();
+        query.insert("priority".to_owned(), OneOrMany::One("high".to_owned()));
+        let filtered = profile_filtered_set(
+            &uid,
+            "acme",
+            &viewer,
+            &query,
+            Some("priority"),
+            Some("state__group"),
+        )
+        .expect("filtered set");
+        let count_filter = qp::grouped_count_filter_sql("issue");
+        let group_expr = group_expression("priority").expect("group expr");
+        let sub_expr = group_expression("state__group").expect("sub expr");
+        let group_sql = group_totals_sql(&filtered.from_where, &group_expr, &count_filter);
+        let sub_sql = sub_totals_sql(&filtered.from_where, &group_expr, &sub_expr, &count_filter);
+        // The plain bucket select(s) beside the COUNT aggregate require
+        // the GROUP BY, or Postgres rejects the statement (42803).
+        assert!(group_sql.ends_with("GROUP BY 1"), "{group_sql}");
+        assert!(!group_sql.contains("GROUP BY 1,"), "{group_sql}");
+        assert!(sub_sql.ends_with("GROUP BY 1, 2"), "{sub_sql}");
+        for statement in [&group_sql, &sub_sql] {
+            assert_eq!(statement.matches("COUNT(").count(), 1, "{statement}");
+            assert_holders_continuous(statement, &filtered.values);
+            assert_parens_balanced(statement);
+        }
+        // No `SELECT , COUNT` shape: exactly the bucket item(s) precede
+        // the aggregate.
+        let head = group_sql.split("COUNT(").next().expect("head");
+        assert_eq!(head.matches(" AS bucket,").count(), 1, "{head}");
+        let sub_head = sub_sql.split("COUNT(").next().expect("sub head");
+        assert_eq!(sub_head.matches(" AS bucket,").count(), 1, "{sub_head}");
+        assert_eq!(sub_head.matches(" AS sub,").count(), 1, "{sub_head}");
+    }
+
+    #[test]
+    fn cycle_group_expression_matches_annotated_twin() {
+        let expr = group_expression("cycle_id").expect("cycle expr");
+        // Same pick as the QRY-C `cycle_id` annotation (`CycleIssue.Meta`
+        // ordering): without the ORDER BY the LIMIT 1 is nondeterministic
+        // over several live links.
+        assert_eq!(
+            expr,
+            "(SELECT ci.cycle_id FROM cycle_issues ci WHERE ci.issue_id = issue.id AND ci.deleted_at IS NULL ORDER BY ci.created_at DESC LIMIT 1)"
         );
     }
 
