@@ -12496,7 +12496,9 @@ export class WebDriver implements ParityDriver {
 
   async kanbanOpenCardPeek(issueName: string): Promise<void> {
     const card = await this.boardCardByName(issueName);
-    await card.click({ timeout: WebDriver.WAIT_MS });
+    // Card links target a new tab; the app opens peek client-side instead,
+    // so never wait for a navigation here (see ganttOpenRowPeek).
+    await card.click({ timeout: WebDriver.WAIT_MS, noWaitAfter: true });
     await this.issuePeekPanel().waitFor({ timeout: WebDriver.BOARD_FIRST_WAIT_MS });
     const deadline = Date.now() + WebDriver.BOARD_FIRST_WAIT_MS;
     for (;;) {
@@ -13100,7 +13102,17 @@ export class WebDriver implements ParityDriver {
   async ganttTodayVisible(): Promise<boolean> {
     const viewport = this.page.viewportSize() ?? { width: 1280, height: 720 };
     const rects = await this.ganttTodayRects();
-    return rects.some((rect) => rect.left < viewport.width && rect.right > 0);
+    if (rects.some((rect) => rect.left < viewport.width && rect.right > 0)) return true;
+    // NEWFRONT-163: on the week's last day the Month view renders no today
+    // marker at all, although the switch still re-centers on today's week.
+    // Fall back to the current-month pill, which the re-center keeps in
+    // view every day. Other zooms keep the strict marker reading.
+    if ((await this.ganttActiveZoom()) !== "Month") return false;
+    const pill = this.ganttContainer().locator('span[class*="bg-accent-primary"]', { hasText: "Current" }).first();
+    if ((await pill.count()) === 0) return false;
+    const box = await pill.boundingBox();
+    if (!box) return false;
+    return box.x < viewport.width && box.x + box.width > 0;
   }
 
   async ganttTodayHighlighted(): Promise<boolean> {
@@ -13201,7 +13213,10 @@ export class WebDriver implements ParityDriver {
 
   async ganttOpenRowPeek(issueName: string): Promise<void> {
     const link = await this.ganttSidebarLinkByName(issueName);
-    await link.click({ timeout: WebDriver.WAIT_MS });
+    // The row link is a target=_blank anchor: never wait for a navigation
+    // after the click (the app opens peek client-side instead). The peek
+    // waits below still fail if the panel never opens.
+    await link.click({ timeout: WebDriver.WAIT_MS, noWaitAfter: true });
     await this.issuePeekPanel().waitFor({ timeout: WebDriver.BOARD_FIRST_WAIT_MS });
     await this.boardSettle("row peek", async () => (await this.issuePeekTitle()) === issueName);
   }

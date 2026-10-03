@@ -109,6 +109,16 @@ function isoDay(offset: number): string {
   return at.toISOString().slice(0, 10);
 }
 
+/**
+ * Whether today is the start-of-week-relative last weekday, on which the
+ * old app drops the Month today-week highlight (NEWFRONT-163). The spec
+ * and the browser share the host clock, so the local weekday agrees with
+ * the app's own `new Date()`.
+ */
+function monthHighlightDeadDay(startOfWeek: number): boolean {
+  return (new Date().getDay() + 7 - startOfWeek) % 7 === 6;
+}
+
 test(
   specTitle(["ISS-044"], "gantt timeline layout with sidebar and bars"),
   { tag: specTags(["ISS-044"]) },
@@ -175,6 +185,9 @@ test(
       const week = await driver.ganttDayWidth();
       await driver.ganttSetZoom("Month");
       expect(await driver.ganttActiveZoom()).toBe("Month");
+      // On the week's last day the Month week marker is missing
+      // (NEWFRONT-163); the reader falls back to the Current-month pill,
+      // which the re-center keeps in view every day.
       expect(await driver.ganttTodayVisible()).toBe(true);
       const month = await driver.ganttDayWidth();
       await driver.ganttSetZoom("Quarter");
@@ -234,10 +247,33 @@ test(
     });
 
     await test.step("every zoom highlights the current column", async () => {
+      // NEWFRONT-163: the Month week highlight is missing on the week's
+      // last day; Quarter marks the current month every day.
+      const deadDay = monthHighlightDeadDay(await serverProfileStartOfWeek(ctx.user.cookie));
       for (const zoom of ["Month", "Quarter"] as const) {
         await driver.ganttSetZoom(zoom);
-        expect(await driver.ganttTodayHighlighted()).toBe(true);
+        expect(await driver.ganttTodayHighlighted()).toBe(zoom === "Month" ? !deadDay : true);
       }
+    });
+
+    await test.step("cleanup restores the seed preferences", async () => {
+      await restoreTimeline(seed, seed.projectId, ctx);
+    });
+  }
+);
+
+test(
+  specTitle(["ISS-046"], "bug: month zoom drops the today highlight on the week's last day (NEWFRONT-163)"),
+  { tag: specTags(["ISS-046"]) },
+  async ({ driver, seed }) => {
+    const ctx = await openTimeline(driver, seed, seed.projectId);
+    await expect.poll(() => driver.ganttSidebarRows(), { timeout: 120_000 }).toHaveLength(3);
+    const deadDay = monthHighlightDeadDay(await serverProfileStartOfWeek(ctx.user.cookie));
+
+    await test.step("month marks today except on the dead day", async () => {
+      await driver.ganttSetZoom("Month");
+      expect(await driver.ganttActiveZoom()).toBe("Month");
+      expect(await driver.ganttTodayHighlighted()).toBe(!deadDay);
     });
 
     await test.step("cleanup restores the seed preferences", async () => {
