@@ -443,6 +443,195 @@ export class WebNewDriver implements ParityDriver {
     return todo("rulesIntakeTriageVisible");
   }
 
+  // Shell chrome (NEWFRONT-126): skeleton throws until the shell area lands.
+  async openWorkspaceHome(): Promise<void> {
+    return todo("openWorkspaceHome");
+  }
+
+  async openProjectsList(): Promise<void> {
+    return todo("openProjectsList");
+  }
+
+  async openProjectTab(): Promise<void> {
+    return todo("openProjectTab");
+  }
+
+  async sidebarPresent(): Promise<boolean> {
+    return todo("sidebarPresent");
+  }
+
+  async sidebarWidth(): Promise<number | null> {
+    return todo("sidebarWidth");
+  }
+
+  async portalPresent(): Promise<boolean> {
+    return todo("portalPresent");
+  }
+
+  async railPresent(): Promise<boolean> {
+    return todo("railPresent");
+  }
+
+  async contentPaddingLeft(): Promise<number | null> {
+    return todo("contentPaddingLeft");
+  }
+
+  async projectTabs(): Promise<Array<{ name: string; href: string }>> {
+    return todo("projectTabs");
+  }
+
+  async activeTabName(): Promise<string | null> {
+    return todo("activeTabName");
+  }
+
+  async editionBadgePresent(): Promise<boolean> {
+    return todo("editionBadgePresent");
+  }
+
+  async desktopUpdatePresent(): Promise<boolean> {
+    return todo("desktopUpdatePresent");
+  }
+
+  async upgradePillCount(): Promise<number> {
+    return todo("upgradePillCount");
+  }
+
+  async topBarControls(): Promise<{
+    workspaceMenu: boolean;
+    sidebarToggle: boolean;
+    search: boolean;
+    inbox: boolean;
+    help: boolean;
+    starLink: boolean;
+    accountFallback: boolean;
+  }> {
+    return todo("topBarControls");
+  }
+
+  async toggleSidebar(): Promise<void> {
+    return todo("toggleSidebar");
+  }
+
+  async openPersonalizeDialog(): Promise<void> {
+    return todo("openPersonalizeDialog");
+  }
+
+  async personalizeDialogOpen(): Promise<boolean> {
+    return todo("personalizeDialogOpen");
+  }
+
+  async personalItemChecked(): Promise<boolean | null> {
+    return todo("personalItemChecked");
+  }
+
+  async setPersonalItemEnabled(): Promise<void> {
+    return todo("setPersonalItemEnabled");
+  }
+
+  async movePersonalItem(): Promise<void> {
+    return todo("movePersonalItem");
+  }
+
+  async personalItemNames(): Promise<string[]> {
+    return todo("personalItemNames");
+  }
+
+  async projectNavMode(): Promise<"ACCORDION" | "TABBED" | null> {
+    return todo("projectNavMode");
+  }
+
+  async setProjectNavMode(): Promise<void> {
+    return todo("setProjectNavMode");
+  }
+
+  async projectCapInput(): Promise<string | null> {
+    return todo("projectCapInput");
+  }
+
+  async projectCapEnabled(): Promise<boolean | null> {
+    return todo("projectCapEnabled");
+  }
+
+  async setProjectCap(): Promise<void> {
+    return todo("setProjectCap");
+  }
+
+  async projectHeaderText(): Promise<string | null> {
+    return todo("projectHeaderText");
+  }
+
+  async projectHeaderTruncated(): Promise<boolean> {
+    return todo("projectHeaderTruncated");
+  }
+
+  async openProjectSwitcher(): Promise<void> {
+    return todo("openProjectSwitcher");
+  }
+
+  async switcherOptionNames(): Promise<string[]> {
+    return todo("switcherOptionNames");
+  }
+
+  async chooseSwitcherOption(): Promise<void> {
+    return todo("chooseSwitcherOption");
+  }
+
+  async openProjectActions(): Promise<void> {
+    return todo("openProjectActions");
+  }
+
+  async projectActionNames(): Promise<string[]> {
+    return todo("projectActionNames");
+  }
+
+  async clickProjectAction(): Promise<void> {
+    return todo("clickProjectAction");
+  }
+
+  async readClipboardText(): Promise<string> {
+    return todo("readClipboardText");
+  }
+
+  async toastText(): Promise<string | null> {
+    return todo("toastText");
+  }
+
+  async rightClickTab(): Promise<void> {
+    return todo("rightClickTab");
+  }
+
+  async contextMenuItems(): Promise<string[]> {
+    return todo("contextMenuItems");
+  }
+
+  async clickContextMenuItem(): Promise<void> {
+    return todo("clickContextMenuItem");
+  }
+
+  async openOverflowMenu(): Promise<void> {
+    return todo("openOverflowMenu");
+  }
+
+  async overflowTriggerPresent(): Promise<boolean> {
+    return todo("overflowTriggerPresent");
+  }
+
+  async overflowRowNames(): Promise<string[]> {
+    return todo("overflowRowNames");
+  }
+
+  async restoreOverflowTab(): Promise<void> {
+    return todo("restoreOverflowTab");
+  }
+
+  async setViewportSize(): Promise<void> {
+    return todo("setViewportSize");
+  }
+
+  async openNotifications(): Promise<void> {
+    return todo("openNotifications");
+  }
+
   // --- Issues bulk-ops / modal / drafts stubs (NEWFRONT-120).
   async selectionCheckboxCount(): Promise<number> {
     return todo("selectionCheckboxCount");
@@ -1243,6 +1432,82 @@ export class WebNewDriver implements ParityDriver {
   }
   async commentAndRunDisabled(): Promise<boolean> {
     return todo("commentAndRunDisabled");
+  }
+
+  async sidebarBrandVisible(): Promise<boolean> {
+    return todo("sidebarBrandVisible");
+  }
+
+  async sidebarQuickActionNames(): Promise<string[]> {
+    return todo("sidebarQuickActionNames");
+  }
+
+  async sidebarAccountButtonCount(): Promise<number> {
+    return todo("sidebarAccountButtonCount");
+  }
+
+  async dragSidebarGripBy(): Promise<void> {
+    return todo("dragSidebarGripBy");
+  }
+
+  async doubleClickSidebarGrip(): Promise<void> {
+    return todo("doubleClickSidebarGrip");
+  }
+
+  async hoverCollapsedEdge(): Promise<void> {
+    return todo("hoverCollapsedEdge");
+  }
+
+  async clickOutsideSidebar(): Promise<void> {
+    return todo("clickOutsideSidebar");
+  }
+
+  async sidebarEntryVisible(): Promise<boolean> {
+    return todo("sidebarEntryVisible");
+  }
+
+  async projectCapTypeText(): Promise<void> {
+    return todo("projectCapTypeText");
+  }
+
+  async projectCapFill(): Promise<void> {
+    return todo("projectCapFill");
+  }
+
+  async projectCapMinErrorVisible(): Promise<boolean> {
+    return todo("projectCapMinErrorVisible");
+  }
+
+  async railSettingsEntryPresent(): Promise<boolean> {
+    return todo("railSettingsEntryPresent");
+  }
+
+  async railContextMenuText(): Promise<string> {
+    return todo("railContextMenuText");
+  }
+
+  async inboxDotPresent(): Promise<boolean> {
+    return todo("inboxDotPresent");
+  }
+
+  async hoverProjectHeader(): Promise<void> {
+    return todo("hoverProjectHeader");
+  }
+
+  async projectNameVisibleCount(): Promise<number> {
+    return todo("projectNameVisibleCount");
+  }
+
+  async projectActionDialogHeading(): Promise<string | null> {
+    return todo("projectActionDialogHeading");
+  }
+
+  async activeCyclesHeaderVisible(): Promise<boolean> {
+    return todo("activeCyclesHeaderVisible");
+  }
+
+  async errorNoticeVisible(): Promise<boolean> {
+    return todo("errorNoticeVisible");
   }
 
   // Activity feed stubs (NEWFRONT-114). Mirror of the interface additions;

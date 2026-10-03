@@ -1225,6 +1225,147 @@ export interface ParityDriver {
   typeText(text: string): Promise<void>;
   /** Accessible name of the currently focused control, or null. */
   focusedControlName(): Promise<string | null>;
+
+  /** Open the workspace home dashboard; requires an authenticated session. */
+  openWorkspaceHome(workspaceSlug: string): Promise<void>;
+  /** Open the workspace projects list; requires an authenticated session. */
+  openProjectsList(workspaceSlug: string): Promise<void>;
+  /** Open one project tab (for example "issues"); requires an authenticated session. */
+  openProjectTab(workspaceSlug: string, projectId: string, tab: string): Promise<void>;
+  /** True while the persistent app sidebar is mounted on the current page. */
+  sidebarPresent(): Promise<boolean>;
+  /** Sidebar width in CSS pixels, or null while the sidebar is unmounted. */
+  sidebarWidth(): Promise<number | null>;
+  /** True while the full-screen overlay portal slot exists on the page. */
+  portalPresent(): Promise<boolean>;
+  /** True while the far-left app rail strip is rendered. */
+  railPresent(): Promise<boolean>;
+  /** Computed left padding in pixels of the content holder, or null without the chrome. */
+  contentPaddingLeft(): Promise<number | null>;
+  /** Names plus hrefs of the project tabs rendered in the tab strip, in order. */
+  projectTabs(): Promise<Array<{ name: string; href: string }>>;
+  /** Name of the currently highlighted project tab, or null when none is. */
+  activeTabName(): Promise<string | null>;
+  /** True while the cloud edition badge is rendered. */
+  editionBadgePresent(): Promise<boolean>;
+  /** True while the desktop update control is rendered in the sidebar. */
+  desktopUpdatePresent(): Promise<boolean>;
+  /** How many upgrade pills ("Pro" markers) are visible right now. */
+  upgradePillCount(): Promise<number>;
+  /**
+   * Which top-bar controls are currently visible: the workspace menu, the
+   * sidebar toggle, the command search box, the inbox link, the help menu,
+   * the repository star link, and the compact account fallback.
+   */
+  topBarControls(): Promise<{
+    workspaceMenu: boolean;
+    sidebarToggle: boolean;
+    search: boolean;
+    inbox: boolean;
+    help: boolean;
+    starLink: boolean;
+    accountFallback: boolean;
+  }>;
+  /** Click the sidebar toggle in the top bar. */
+  toggleSidebar(): Promise<void>;
+  /** Click the sidebar personalization control to open its dialog. */
+  openPersonalizeDialog(): Promise<void>;
+  /** True while the sidebar personalization dialog is open. */
+  personalizeDialogOpen(): Promise<boolean>;
+  /** Checked state of a personal entry ("Your work", "Drafts") in the open dialog. */
+  personalItemChecked(name: string): Promise<boolean | null>;
+  /** Flip a personal entry checkbox in the open dialog. */
+  setPersonalItemEnabled(name: string, enabled: boolean): Promise<void>;
+  /** Drag one personal entry onto another to reorder them in the open dialog. */
+  movePersonalItem(dragged: string, target: string): Promise<void>;
+  /** Names of the personal entries in dialog order. */
+  personalItemNames(): Promise<string[]>;
+  /** Which project-list rendering mode ("ACCORDION" or "TABBED") is selected. */
+  projectNavMode(): Promise<"ACCORDION" | "TABBED" | null>;
+  /** Select a project-list rendering mode in the open dialog. */
+  setProjectNavMode(mode: "ACCORDION" | "TABBED"): Promise<void>;
+  /** Current value of the listed-projects count input, or null when hidden. */
+  projectCapInput(): Promise<string | null>;
+  /** Whether the listed-projects cap is currently enabled, or null when hidden. */
+  projectCapEnabled(): Promise<boolean | null>;
+  /** Toggle the listed-projects cap and optionally set its count. */
+  setProjectCap(enabled: boolean, count?: number): Promise<void>;
+  /** Text of the project header button in the tab strip. */
+  projectHeaderText(): Promise<string | null>;
+  /** True while the header name is visually truncated with an ellipsis. */
+  projectHeaderTruncated(): Promise<boolean>;
+  /** Open the project switcher dropdown from the tab strip header. */
+  openProjectSwitcher(): Promise<void>;
+  /** Names of the projects offered by the open switcher. */
+  switcherOptionNames(): Promise<string[]>;
+  /** Pick a project from the open switcher. */
+  chooseSwitcherOption(name: string): Promise<void>;
+  /** Open the quick-actions menu beside the project header. */
+  openProjectActions(): Promise<void>;
+  /** Entries offered by the open quick-actions menu. */
+  projectActionNames(): Promise<string[]>;
+  /** Click a quick-actions menu entry. */
+  clickProjectAction(name: string): Promise<void>;
+  /** Read back text the app wrote to the clipboard (copy-location flows). */
+  readClipboardText(): Promise<string>;
+  /** Most recent toast notice text, or null when none is showing. */
+  toastText(): Promise<string | null>;
+  /** Right-click a visible project tab to summon its context menu. */
+  rightClickTab(name: string): Promise<void>;
+  /** Entries offered by the open tab context menu. */
+  contextMenuItems(): Promise<string[]>;
+  /** Click a tab context menu entry. */
+  clickContextMenuItem(name: string): Promise<void>;
+  /** Open the tab strip overflow menu. */
+  openOverflowMenu(): Promise<void>;
+  /** True while the tab strip overflow trigger is laid out on the page. */
+  overflowTriggerPresent(): Promise<boolean>;
+  /** Rows listed in the open overflow menu. */
+  overflowRowNames(): Promise<string[]>;
+  /** Restore a user-hidden tab from the open overflow menu. */
+  restoreOverflowTab(name: string): Promise<void>;
+  /** Resize the browser viewport (responsive and overflow scenarios). */
+  setViewportSize(width: number, height: number): Promise<void>;
+  /** Open the workspace notifications page (the app sidebar stays unmounted there). */
+  openNotifications(workspaceSlug: string): Promise<void>;
+  /** True while the sidebar header shows the product brand. */
+  sidebarBrandVisible(): Promise<boolean>;
+  /** Names of the quick-action buttons carried by the sidebar header. */
+  sidebarQuickActionNames(): Promise<string[]>;
+  /** How many account controls the sidebar currently renders. */
+  sidebarAccountButtonCount(): Promise<number>;
+  /** Drag the sidebar resize grip horizontally by the given pixels. */
+  dragSidebarGripBy(dx: number): Promise<void>;
+  /** Double-click the sidebar resize grip (collapse gesture). */
+  doubleClickSidebarGrip(): Promise<void>;
+  /** Hover the collapsed left edge where a peek overlay would appear. */
+  hoverCollapsedEdge(): Promise<void>;
+  /** Click content outside the floating sidebar (outside-tap gesture). */
+  clickOutsideSidebar(): Promise<void>;
+  /** True while a personal entry with this name shows in the sidebar. */
+  sidebarEntryVisible(name: string): Promise<boolean>;
+  /** Type text at the end of the listed-projects count input. */
+  projectCapTypeText(text: string): Promise<void>;
+  /** Replace the listed-projects count input with the given value. */
+  projectCapFill(value: string): Promise<void>;
+  /** True while the count input flags a below-minimum value inline. */
+  projectCapMinErrorVisible(): Promise<boolean>;
+  /** True while a rail settings entry links anywhere on the page. */
+  railSettingsEntryPresent(): Promise<boolean>;
+  /** Context-menu text summoned from the left-edge rail zone. */
+  railContextMenuText(): Promise<string>;
+  /** True while the inbox link carries an unread dot. */
+  inboxDotPresent(): Promise<boolean>;
+  /** Hover the project header button (hover-reveal gesture). */
+  hoverProjectHeader(): Promise<void>;
+  /** How many visible matches of a project name the page shows. */
+  projectNameVisibleCount(name: string): Promise<number>;
+  /** Heading of the dialog the last project action opened, or null. */
+  projectActionDialogHeading(): Promise<string | null>;
+  /** True while the paywalled Cycles page header is visible. */
+  activeCyclesHeaderVisible(): Promise<boolean>;
+  /** True while the generic error notice shows (bare-address flows). */
+  errorNoticeVisible(): Promise<boolean>;
 }
 
 /** Overflow-menu option keys the rules specs exercise (stable keys, not labels). */

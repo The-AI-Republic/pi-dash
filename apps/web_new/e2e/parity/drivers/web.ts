@@ -8,6 +8,13 @@
 // moves to the password step, and the password submit posts the native
 // form, landing in the workspace. Later oracle issues extend this driver
 // (never fork it) as new areas need new actions.
+// Shell-chrome extension (NEWFRONT-126): every selector below was observed
+// on the running old app, never copied from its sources. Stable landmarks
+// come from element ids and accessible names; three icon-only controls
+// prefer data-testid hooks when a build carries them and otherwise fall
+// back to structural reads (icon glyph, header position) proven
+// element-identical on the oracle. Tab reads scope to the nested
+// workspace main so sidebar rows and issue rows never leak in.
 import { expect, type Locator, type Page } from "@playwright/test";
 import type {
   ParityBrowserCookie,
@@ -279,41 +286,81 @@ export class WebDriver implements ParityDriver {
 
   async signInWithPassword(email: string, password: string): Promise<void> {
     // The dev server occasionally swallows a submit, so every pass is
-    // retried whole until the workspace landing is confirmed.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    // retried whole until the workspace landing is confirmed. The scratch
+    // stack also throttles anonymous calls per host IP, and every agent on
+    // this host shares that bucket, so back off quietly between passes.
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
         await this.signInAttempt(email, password);
         return;
       } catch {
-        // Still on entry or a swallowed submit: run the pass again.
+        if (attempt === 2) break;
+        await this.page.waitForTimeout(25_000);
       }
     }
-    await this.signInAttempt(email, password);
+    try {
+      await this.signInAttempt(email, password);
+    } catch {
+      throw new Error("[parity] sign-in never landed in the workspace.");
+    }
   }
 
   private async signInAttempt(email: string, password: string): Promise<void> {
     const page = this.page;
     if (this.signedInPath(page.url())) return;
     await page.goto("/");
+    // Settle for whichever of the three entry states arrives. A retry
+    // after a partially completed attempt lands here already signed in
+    // (the session cookie survived even though the chrome wait below
+    // timed out), so the sign-in card never renders. And when the shared
+    // anonymous bucket is empty the app parks on its startup-error page
+    // instead of rendering anything. Fail fast on the error page so the
+    // retry loop, not a minute-long placeholder wait, spends the budget.
+    const emailField = page.getByPlaceholder("name@company.com").first();
+    const sidebar = page.locator("#main-sidebar");
+    const bootError = page.getByText("didn't start up correctly");
+    const deadline = Date.now() + 60_000;
+    let settled: "signed-in" | "sign-in-card" | null = null;
+    while (Date.now() < deadline) {
+      if ((await sidebar.count()) > 0) {
+        settled = "signed-in";
+        break;
+      }
+      if ((await bootError.count()) > 0) throw new Error("[parity] oracle boot throttled; retrying.");
+      if ((await emailField.count()) > 0) {
+        settled = "sign-in-card";
+        break;
+      }
+      await page.waitForTimeout(1_000);
+    }
+    if (settled === "signed-in") return;
+    if (settled === null) throw new Error("[parity] sign-in card never rendered.");
     // The shared email submit waits out a throttled email-check minute
     // (rate-limit banner instead of advancing) and resubmits; a bare
     // fill-and-click here would burn the whole test budget retrying
     // into 429s under concurrent parity runs.
     await this.submitAuthEmail(email);
     const passwordField = page.getByPlaceholder("Enter password");
-    await passwordField.waitFor({ timeout: WebDriver.WAIT_MS });
+    await passwordField.waitFor({ timeout: 30_000 });
     await passwordField.fill(password);
     const passwordForm = page.locator("form", { has: passwordField });
     // The old app posts the native form, so this ends in a full page load.
-    // Wait for the navigation itself: a URL regex also matches the bare
-    // origin ("//host/"), which would return before the sign-in POST lands.
+    // Wait for the workspace chrome rather than any URL change: the
+    // password-step URL already satisfies a path matcher, so a URL wait
+    // would resolve before the login POST answers and the next navigation
+    // would cancel it, losing the session. Generous timeout: under shared
+    // stack contention the cold boot after login can take a while.
     await Promise.all([
-      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: WebDriver.WAIT_MS }),
+      page.locator("#main-sidebar").waitFor({ state: "attached", timeout: 90_000 }),
       this.submitOf(passwordForm).click(),
     ]);
   }
 
   private signedInPath(url: string): boolean {
+    // A fresh page reports about:blank (pathname "blank"), which the test
+    // below would misread as a signed-in workspace path and skip the whole
+    // sign-in; only real http(s) URLs can be signed-in paths.
+    if (!url.startsWith("http://") && !url.startsWith("https://")) return false;
     const pathname = new URL(url).pathname;
     return pathname !== "/" && !pathname.startsWith("/auth") && !pathname.startsWith("/sign");
   }
@@ -4260,6 +4307,493 @@ export class WebDriver implements ParityDriver {
     return btn.isDisabled().catch(() => true);
   }
 
+  // Shell chrome (NEWFRONT-126). The old app boots its workspace shell from
+  // full page loads, and a load occasionally lands on the signed-out entry
+  // with a next_path hint before the session read resolves; loads also
+  // self-heal back, so navigation retries the load until the sidebar mounts.
+  private async gotoShell(url: string): Promise<void> {
+    const page = this.page;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await page.goto(url);
+      await page.waitForLoadState("domcontentloaded");
+      try {
+        // Attached, not visible: a collapsed sidebar is in the DOM at zero
+        // width, and navigation must still count it as mounted.
+        await page.locator("#main-sidebar").waitFor({ state: "attached", timeout: 45_000 });
+        return;
+      } catch {
+        if (attempt === 2) throw new Error(`[parity] sidebar never mounted at ${url}.`);
+      }
+    }
+  }
+
+  async openWorkspaceHome(workspaceSlug: string): Promise<void> {
+    await this.gotoShell(`/${workspaceSlug}/`);
+  }
+
+  async openProjectsList(workspaceSlug: string): Promise<void> {
+    await this.gotoShell(`/${workspaceSlug}/projects`);
+  }
+
+  async openProjectTab(workspaceSlug: string, projectId: string, tab: string): Promise<void> {
+    await this.gotoShell(`/${workspaceSlug}/projects/${projectId}/${tab}`);
+  }
+
+  /** The mounted sidebar (the peek twin carries no id, so it never matches). */
+  private sidebar(): Locator {
+    return this.page.locator("#main-sidebar");
+  }
+
+  /** The workspace content main nested inside the page main. */
+  private shellMain(): Locator {
+    return this.page.locator("main main");
+  }
+
+  /** Tab strip region: the bar holding the project switcher and tab links. */
+  private tabStrip(): Locator {
+    return this.shellMain().first();
+  }
+
+  async sidebarPresent(): Promise<boolean> {
+    return (await this.sidebar().count()) > 0;
+  }
+
+  async sidebarWidth(): Promise<number | null> {
+    if ((await this.sidebar().count()) === 0) return null;
+    const box = await this.sidebar().boundingBox();
+    if (box === null) return null;
+    // A collapsed sidebar keeps a one-pixel border in its box; report that
+    // as closed so callers read a clean open/closed signal.
+    const width = Math.round(box.width);
+    return width <= 1 ? 0 : width;
+  }
+
+  async portalPresent(): Promise<boolean> {
+    return (await this.page.locator("#full-screen-portal").count()) > 0;
+  }
+
+  /**
+   * The rail renders only when the build enables it, and its settings entry
+   * is a link to the workspace settings address that always mounts outside
+   * the sidebar in either display mode — no label text or class names needed.
+   */
+  async railPresent(): Promise<boolean> {
+    return await this.page.evaluate(() => {
+      const sidebar = document.querySelector("#main-sidebar");
+      return [...document.querySelectorAll<HTMLAnchorElement>('a[href$="/settings"]')].some(
+        (link) => sidebar === null || !sidebar.contains(link)
+      );
+    });
+  }
+
+  /**
+   * Computed left padding of the content holder: the top bar's row sibling
+   * holds the optional rail ahead of the content, which always renders last,
+   * so climbing from each inbox link to the ancestor whose next sibling
+   * contains the page main lands on that holder without class names. The
+   * rail branch drops its gutter to zero while the suppressed build keeps
+   * the full padding; null when the chrome is absent.
+   */
+  async contentPaddingLeft(): Promise<number | null> {
+    return await this.page.evaluate(() => {
+      const mains = [...document.querySelectorAll("main")];
+      const inner = mains.length > 1 ? mains[mains.length - 1] : null;
+      if (inner === null) return null;
+      const inboxes = [...document.querySelectorAll<HTMLAnchorElement>('a[href$="/notifications/"]')];
+      for (const inbox of inboxes) {
+        let cursor = inbox.parentElement;
+        while (cursor !== null) {
+          const row = cursor.nextElementSibling;
+          if (row !== null && row.contains(inner)) {
+            const content = row.lastElementChild;
+            if (content === null) return null;
+            return Number.parseFloat(getComputedStyle(content).paddingLeft) || 0;
+          }
+          cursor = cursor.parentElement;
+        }
+      }
+      return null;
+    });
+  }
+
+  /**
+   * Tabs of the strip in order, deduplicated by destination: the strip also
+   * renders a hidden measuring copy of every tab for overflow math, and the
+   * page content links the same project with trailing slashes, so the first
+   * hit per slash-free href is the visible tab. Scoped to the workspace main
+   * so sidebar and issue rows stay out.
+   */
+  async projectTabs(): Promise<Array<{ name: string; href: string }>> {
+    const links = this.shellMain().locator('a[href*="/projects/"]:visible');
+    const count = await links.count();
+    const seen = new Set<string>();
+    const tabs: Array<{ name: string; href: string }> = [];
+    for (let i = 0; i < count; i++) {
+      const href = (await links.nth(i).getAttribute("href")) ?? "";
+      const name = ((await links.nth(i).textContent()) ?? "").trim().replace(/\s+/g, " ");
+      // Strip destinations never trail a slash; page content links the
+      // same project with one, and those content links are never tabs.
+      if (href === "" || href.endsWith("/") || name === "") continue;
+      const key = href;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      tabs.push({ name, href });
+    }
+    return tabs;
+  }
+
+  /**
+   * Name of the visually highlighted tab, read from the underline bar the
+   * strip renders ahead of the active entry's content — never computed from
+   * the address, so nested routes, detail pages and bare addresses report
+   * what the app actually highlights (or null when it highlights nothing).
+   */
+  async activeTabName(): Promise<string | null> {
+    // Document scope, never the shell main: shell-less pages (the not-found
+    // page has no nested main) must report null fast instead of hanging an
+    // empty locator's auto-wait until the test times out.
+    return await this.page.evaluate(() => {
+      const links = [...document.querySelectorAll<HTMLAnchorElement>('a[href*="/projects/"]')].filter((a) => {
+        if (a.closest(".opacity-0")) return false;
+        const raw = a.getAttribute("href") ?? "";
+        if (raw.endsWith("/")) return false;
+        const parts = new URL(raw, document.baseURI).pathname.split("/").filter((p) => p.length > 0);
+        return parts.length === 4 && parts[1] === "projects";
+      });
+      for (const link of links) {
+        let el: HTMLElement | null = link.parentElement;
+        for (let depth = 0; depth < 8 && el !== null && el !== document.body; depth++) {
+          if (el.tagName === "DIV") {
+            const kids = [...el.children];
+            const barFirst = kids.length > 0 && kids[0].tagName === "SPAN";
+            const bodyFollows = kids.some((k) => k.tagName === "DIV" && k.contains(link));
+            if (barFirst && bodyFollows) {
+              const name = (link.textContent ?? "").trim().replace(/\s+/g, " ");
+              return name === "" ? null : name;
+            }
+          }
+          el = el.parentElement;
+        }
+      }
+      return null;
+    });
+  }
+
+  async editionBadgePresent(): Promise<boolean> {
+    return (await this.page.getByRole("button", { name: "Community" }).count()) > 0;
+  }
+
+  async desktopUpdatePresent(): Promise<boolean> {
+    return (
+      (await this.sidebar()
+        .getByRole("button", { name: /update/i })
+        .count()) > 0
+    );
+  }
+
+  async upgradePillCount(): Promise<number> {
+    return await this.page.getByText("Pro", { exact: true }).count();
+  }
+
+  async topBarControls(): Promise<{
+    workspaceMenu: boolean;
+    sidebarToggle: boolean;
+    search: boolean;
+    inbox: boolean;
+    help: boolean;
+    starLink: boolean;
+    accountFallback: boolean;
+  }> {
+    const page = this.page;
+    const starLink = (await page.getByRole("link", { name: "Star us on GitHub" }).count()) > 0;
+    const workspaceMenu = (await page.getByRole("button", { name: "Open workspace switcher" }).count()) > 0;
+    const sidebarToggle = (await this.sidebarToggleButton().count()) > 0;
+    const search = (await page.locator('input[placeholder*="Search" i], input[type="search"]').count()) > 0;
+    const inbox = (await page.locator('a[href*="/notifications"]').count()) > 0;
+    // The help trigger carries a question-mark icon found nowhere else.
+    const help = (await page.locator("button:has(svg.lucide-circle-help)").count()) > 0;
+    // The compact account control renders after the star link inside the
+    // same action group; the sidebar hosts its own account card outside
+    // that group, so the sibling-scoped lookup never confuses the two.
+    let accountFallback = false;
+    if (starLink) {
+      const afterStar = page
+        .getByRole("link", { name: "Star us on GitHub" })
+        .locator('xpath=following-sibling::*//button[@aria-haspopup="menu"]');
+      accountFallback = (await afterStar.count()) > 0;
+    }
+    return { workspaceMenu, sidebarToggle, search, inbox, help, starLink, accountFallback };
+  }
+
+  /**
+   * The collapse toggle is an unlabeled icon button carrying the panel-left
+   * glyph; prefer the testid when a build carries one, and fall back to the
+   * glyph otherwise. Both resolve to the same control.
+   */
+  private sidebarToggleButton(): Locator {
+    return this.page.locator('[data-testid="sidebar-toggle"], button:has(svg.lucide-panel-left)');
+  }
+
+  /**
+   * The personalize trigger is the unlabeled preferences button heading the
+   * sidebar beside the product wordmark: the first control in the sidebar.
+   * Prefer the testid when a build carries one, and fall back to that
+   * position otherwise.
+   */
+  private personalizeButton(): Locator {
+    return this.sidebar().locator('[data-testid="personalize-nav"], button').first();
+  }
+
+  async toggleSidebar(): Promise<void> {
+    await this.sidebarToggleButton().first().click();
+  }
+
+  async openPersonalizeDialog(): Promise<void> {
+    await this.personalizeButton().click();
+    await this.page.getByRole("heading", { name: "Customize navigation" }).waitFor({ timeout: 15_000 });
+  }
+
+  async personalizeDialogOpen(): Promise<boolean> {
+    return (await this.page.getByRole("heading", { name: "Customize navigation" }).count()) > 0;
+  }
+
+  private personalItemRow(name: string): Locator {
+    const dialog = this.page.locator('[role="dialog"]');
+    // Anchor on the row's text label: a bare text match also hits the row
+    // containers (their icons carry no text), and climbing from an outer
+    // match lands on the first checkbox of the whole list instead of this
+    // row's. Each label is unique, so the climb from it reaches this row.
+    return dialog.locator(`xpath=.//label[normalize-space(.)="${name}"]/ancestor::div[.//input[@type="checkbox"]][1]`);
+  }
+
+  private dialogCheckbox(name: string): Locator {
+    return this.personalItemRow(name).locator('xpath=.//input[@type="checkbox"]');
+  }
+
+  async movePersonalItem(dragged: string, target: string): Promise<void> {
+    const source = this.personalItemRow(dragged);
+    const dest = this.personalItemRow(target);
+    const box = await dest.boundingBox();
+    // The list resolves a drop to the target row's nearest edge, and a
+    // drop on the row's vertical center can resolve to its top edge,
+    // which computes back to the dragged row's own slot (a no-op move).
+    // Land near the target's bottom edge to move past it instead.
+    const targetPosition = box === null ? undefined : { x: box.width / 2, y: box.height - 4 };
+    await source.dragTo(dest, { targetPosition });
+  }
+
+  async personalItemNames(): Promise<string[]> {
+    const dialog = this.page.locator('[role="dialog"]');
+    const labels = dialog.locator('xpath=.//label[normalize-space(.)="Your work" or normalize-space(.)="Drafts"]');
+    const texts = await labels.allTextContents();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+
+  async personalItemChecked(name: string): Promise<boolean | null> {
+    const box = this.dialogCheckbox(name);
+    if ((await box.count()) === 0) return null;
+    return await box.first().isChecked();
+  }
+
+  async setPersonalItemEnabled(name: string, enabled: boolean): Promise<void> {
+    const box = this.dialogCheckbox(name).first();
+    await box.scrollIntoViewIfNeeded();
+    const checked = await box.isChecked();
+    if (checked !== enabled) await box.click({ force: true });
+  }
+
+  async projectNavMode(): Promise<"ACCORDION" | "TABBED" | null> {
+    const dialog = this.page.locator('[role="dialog"]');
+    if ((await dialog.getByRole("radio", { name: "Accordion sidebar navigation" }).count()) === 0) return null;
+    const tabbed = dialog.getByRole("radio", { name: "Tabbed Navigation" });
+    return (await tabbed.isChecked()) ? "TABBED" : "ACCORDION";
+  }
+
+  async setProjectNavMode(mode: "ACCORDION" | "TABBED"): Promise<void> {
+    const dialog = this.page.locator('[role="dialog"]');
+    await dialog
+      .getByRole("radio", { name: mode === "TABBED" ? "Tabbed Navigation" : "Accordion sidebar navigation" })
+      .check({ force: true });
+  }
+
+  async projectCapInput(): Promise<string | null> {
+    const dialog = this.page.locator('[role="dialog"]');
+    const toggle = dialog.getByRole("checkbox", { name: "Show limited projects on sidebar" });
+    if ((await toggle.count()) === 0) return null;
+    if (!(await toggle.isChecked())) return null;
+    const input = dialog.locator('input[type="number"]');
+    if ((await input.count()) === 0) return null;
+    return await input.first().inputValue();
+  }
+
+  async projectCapEnabled(): Promise<boolean | null> {
+    const dialog = this.page.locator('[role="dialog"]');
+    const toggle = dialog.getByRole("checkbox", { name: "Show limited projects on sidebar" });
+    if ((await toggle.count()) === 0) return null;
+    return await toggle.isChecked();
+  }
+
+  async setProjectCap(enabled: boolean, count?: number): Promise<void> {
+    const dialog = this.page.locator('[role="dialog"]');
+    const toggle = dialog.getByRole("checkbox", { name: "Show limited projects on sidebar" });
+    const checked = await toggle.isChecked();
+    if (checked !== enabled) await toggle.click({ force: true });
+    if (enabled && count !== undefined) {
+      const input = dialog.locator('input[type="number"]').first();
+      await input.fill(String(count));
+    }
+  }
+
+  async projectHeaderText(): Promise<string | null> {
+    const switcher = this.shellMain().locator('button[aria-haspopup="listbox"]').first();
+    if ((await switcher.count()) === 0) return null;
+    return ((await switcher.textContent()) ?? "").trim().replace(/\s+/g, " ") || null;
+  }
+
+  /**
+   * The header name sits in a width-capped truncating line: when the name
+   * is long, its scrollable width exceeds its laid-out width while the
+   * computed overflow hides the rest behind an ellipsis.
+   */
+  async projectHeaderTruncated(): Promise<boolean> {
+    // Count-guard first: evaluate on an empty locator auto-waits instead of
+    // rejecting, so the catch below never fires and the test would hang.
+    const line = this.shellMain().locator('button[aria-haspopup="listbox"] p').first();
+    if ((await line.count()) === 0) return false;
+    return await line
+      .evaluate((el) => {
+        const style = getComputedStyle(el);
+        return el.scrollWidth > el.clientWidth && style.textOverflow === "ellipsis";
+      })
+      .catch(() => false);
+  }
+
+  async openProjectSwitcher(): Promise<void> {
+    await this.shellMain().locator('button[aria-haspopup="listbox"]').first().click();
+  }
+
+  async switcherOptionNames(): Promise<string[]> {
+    const options = this.page.getByRole("option");
+    const texts = await options.allTextContents();
+    return texts.map((t) => t.trim().replace(/\s+/g, " ")).filter((t) => t.length > 0);
+  }
+
+  async chooseSwitcherOption(name: string): Promise<void> {
+    await this.page.getByRole("option", { name }).click();
+  }
+
+  async openProjectActions(): Promise<void> {
+    // The quick-actions trigger is a span wrapping the horizontal-ellipsis
+    // glyph; prefer the testid when a build carries one, and fall back to
+    // the glyph otherwise. The overflow trigger is a button, so the span
+    // scope never confuses the two.
+    await this.shellMain()
+      .locator('[data-testid="project-actions-trigger"], span:has(> svg.lucide-ellipsis)')
+      .first()
+      .click();
+  }
+
+  async projectActionNames(): Promise<string[]> {
+    const items = this.page.getByRole("menuitem");
+    const texts = await items.allTextContents();
+    return texts.map((t) => t.trim().replace(/\s+/g, " ")).filter((t) => t.length > 0);
+  }
+
+  async clickProjectAction(name: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name }).click();
+  }
+
+  async readClipboardText(): Promise<string> {
+    return await this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async toastText(): Promise<string | null> {
+    const region = this.page.locator('[aria-label="Notifications"]');
+    if ((await region.count()) === 0) return null;
+    const text = ((await region.first().textContent()) ?? "").trim().replace(/\s+/g, " ");
+    return text === "" ? null : text;
+  }
+
+  async rightClickTab(name: string): Promise<void> {
+    await this.shellMain().getByRole("link", { name, exact: true }).click({ button: "right" });
+  }
+
+  async contextMenuItems(): Promise<string[]> {
+    // Radix renders menu items at the document level while the menu is
+    // open; closed app menus unmount their items, so the open menu owns
+    // every item on the page.
+    const texts = await this.page.getByRole("menuitem").allTextContents();
+    return texts.map((t) => t.trim().replace(/\s+/g, " ")).filter((t) => t.length > 0);
+  }
+
+  async clickContextMenuItem(name: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name }).first().click();
+  }
+
+  /**
+   * The overflow trigger is the horizontal-ellipsis button inside the tab
+   * list: the tabs container is the first div after the header switcher
+   * whose subtree holds tab links, and the trigger is that container's
+   * ellipsis button. Scoping to the container matters because page content
+   * below the strip renders its own ellipsis menu buttons (issue rows show
+   * them at narrow widths), which a document-wide following search would
+   * mistake for the trigger. Only single-segment project destinations count
+   * as tabs: page content links the same project with trailing slashes
+   * (rejected by the final-character check, since XPath 1.0 has no
+   * ends-with) and deeper paths (rejected by the slash count). The svg test
+   * uses local-name because a bare `svg` step only matches the null
+   * namespace while rendered icons live in the SVG namespace. One locator
+   * resolves the trigger directly, so there is no snapshot index to go stale
+   * between a read and its click.
+   */
+  private overflowTrigger(): Locator {
+    const tabLink =
+      'a[contains(@href,"/projects/")][substring(@href,string-length(@href))!="/"][string-length(@href)-string-length(translate(@href,"/",""))=4][not(ancestor::div[contains(@class,"opacity-0")])]';
+    const ellipsisButton =
+      'button[.//*[local-name()="svg"][contains(@class,"lucide-ellipsis")]][not(@aria-haspopup="listbox")][not(ancestor::div[contains(@class,"opacity-0")])]';
+    return this.tabStrip().locator(
+      `xpath=.//button[@aria-haspopup="listbox"]/following::div[.//${tabLink}][not(ancestor-or-self::div[contains(@class,"opacity-0")])][1]//${ellipsisButton}`
+    );
+  }
+
+  async openOverflowMenu(): Promise<void> {
+    const trigger = this.overflowTrigger();
+    if ((await trigger.count()) === 0) throw new Error("[parity] no tab overflow trigger on this page.");
+    await trigger.click();
+  }
+
+  async overflowTriggerPresent(): Promise<boolean> {
+    const trigger = this.overflowTrigger();
+    if ((await trigger.count()) === 0) return false;
+    return await trigger.first().isVisible();
+  }
+
+  async overflowRowNames(): Promise<string[]> {
+    const menu = this.page.locator('[role="menu"]');
+    const texts = await menu
+      .getByRole("menuitem")
+      .allTextContents()
+      .catch(() => [] as string[]);
+    return texts.map((t) => t.trim().replace(/\s+/g, " ")).filter((t) => t.length > 0);
+  }
+
+  async restoreOverflowTab(name: string): Promise<void> {
+    const menu = this.page.locator('[role="menu"]');
+    const row = menu.getByRole("menuitem", { name: new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) });
+    // The restore control only shows on row hover.
+    await row.hover();
+    await row.getByTitle("Show").click();
+  }
+
+  async setViewportSize(width: number, height: number): Promise<void> {
+    await this.page.setViewportSize({ width, height });
+  }
+
+  async openNotifications(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/notifications/`);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
   // Activity feed (NEWFRONT-114). All reads scope from the user-visible
   // "Activity" heading: its parent is the header row (title plus the
   // worklog/sort/filter icon buttons, in that DOM order) and its
@@ -6167,5 +6701,124 @@ export class WebDriver implements ParityDriver {
       if (active.tagName === "BODY") return null;
       return active.tagName.toLowerCase();
     });
+  }
+
+  async sidebarBrandVisible(): Promise<boolean> {
+    const brand = this.sidebar().getByText("Pi Dash", { exact: true }).first();
+    return (await brand.count()) > 0 && (await brand.isVisible());
+  }
+
+  async sidebarQuickActionNames(): Promise<string[]> {
+    const texts = await this.sidebar().getByRole("button").allTextContents();
+    return texts.map((t) => t.trim().replace(/\s+/g, " ")).filter((t) => t.length > 0);
+  }
+
+  async sidebarAccountButtonCount(): Promise<number> {
+    return await this.sidebar().getByRole("button").filter({ hasText: "@" }).count();
+  }
+
+  /** The resize grip on the sidebar's right edge. */
+  private sidebarGrip(): Locator {
+    return this.page.getByRole("separator", { name: "Resize sidebar" }).first();
+  }
+
+  async dragSidebarGripBy(dx: number): Promise<void> {
+    const grip = this.sidebarGrip();
+    const box = await grip.boundingBox();
+    if (box === null) throw new Error("[parity] sidebar resize grip has no layout box.");
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await this.page.mouse.move(x, y);
+    await this.page.mouse.down();
+    await this.page.mouse.move(x + dx, y, { steps: 10 });
+    await this.page.mouse.up();
+  }
+
+  async doubleClickSidebarGrip(): Promise<void> {
+    const grip = this.sidebarGrip();
+    const box = await grip.boundingBox();
+    if (box === null) throw new Error("[parity] sidebar resize grip has no layout box.");
+    // Offset down the edge: the grip's own center can sit under the
+    // header row, while the edge below it takes the collapse gesture.
+    await this.page.mouse.dblclick(box.x + box.width / 2, box.y + 100);
+  }
+
+  async hoverCollapsedEdge(): Promise<void> {
+    await this.page.mouse.move(4, 400);
+  }
+
+  async clickOutsideSidebar(): Promise<void> {
+    // Raw mouse event: the floating shell animates under the cursor, which
+    // defeats actionability checks, while the outside detector only needs
+    // the press itself.
+    await this.page.mouse.click(450, 400);
+  }
+
+  async sidebarEntryVisible(name: string): Promise<boolean> {
+    return (await this.sidebar().innerText()).includes(name);
+  }
+
+  /** The listed-projects count input inside the open dialog. */
+  private projectCapField(): Locator {
+    return this.page.locator('[role="dialog"]').locator('input[type="number"]').first();
+  }
+
+  async projectCapTypeText(text: string): Promise<void> {
+    const input = this.projectCapField();
+    await input.click();
+    await input.press("End");
+    for (const char of text) await input.press(char);
+  }
+
+  async projectCapFill(value: string): Promise<void> {
+    await this.projectCapField().fill(value);
+  }
+
+  async projectCapMinErrorVisible(): Promise<boolean> {
+    const error = this.page.locator('[role="dialog"]').getByText("Minimum value is 1");
+    return (await error.count()) > 0 && (await error.first().isVisible());
+  }
+
+  async railSettingsEntryPresent(): Promise<boolean> {
+    return (await this.page.getByRole("link", { name: "Settings", exact: true }).count()) > 0;
+  }
+
+  async railContextMenuText(): Promise<string> {
+    await this.page.mouse.click(8, 400, { button: "right" });
+    await this.page.waitForTimeout(1000);
+    return (await this.page.locator("#context-menu-portal").textContent()) ?? "";
+  }
+
+  async inboxDotPresent(): Promise<boolean> {
+    // The dot is a span nested inside the inbox link's icon wrapper and
+    // mounts only with unread notifications, so the icon subtree carries no
+    // span while the inbox is empty.
+    return (await this.page.locator('a[href$="/notifications/"] div span').count()) > 0;
+  }
+
+  async hoverProjectHeader(): Promise<void> {
+    await this.shellMain().locator('button[aria-haspopup="listbox"]').first().hover();
+  }
+
+  async projectNameVisibleCount(name: string): Promise<number> {
+    return await this.page.getByText(name, { exact: false }).count();
+  }
+
+  async projectActionDialogHeading(): Promise<string | null> {
+    // The dialog root is a zero-size wrapper around fixed panels, so the
+    // heading inside the panel is the visible proof it opened.
+    const heading = this.page.locator('[role="dialog"]').getByRole("heading").first();
+    if ((await heading.count()) === 0) return null;
+    return ((await heading.textContent()) ?? "").trim().replace(/\s+/g, " ") || null;
+  }
+
+  async activeCyclesHeaderVisible(): Promise<boolean> {
+    const header = this.page.getByText("Active cycles", { exact: false }).first();
+    return (await header.count()) > 0 && (await header.isVisible());
+  }
+
+  async errorNoticeVisible(): Promise<boolean> {
+    const notice = this.page.getByText("Something went wrong");
+    return (await notice.count()) > 0 && (await notice.first().isVisible());
   }
 }
