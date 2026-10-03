@@ -1399,16 +1399,6 @@ export async function createAccountSession(
   return header;
 }
 
-/** Mark the session's user onboarded (same call the onboarding finish makes). */
-export async function setOnboarded(sessionCookie: string, apiBase: string = apiBaseFromEnv()): Promise<void> {
-  const res = await fetch(`${apiBase}/api/users/me/onboard/`, {
-    method: "PATCH",
-    headers: { "content-type": "application/json", cookie: sessionCookie },
-    body: JSON.stringify({ is_onboarded: true }),
-  });
-  if (!res.ok) throw new Error(`[parity] onboard call failed with HTTP ${res.status}.`);
-}
-
 /** Whether the session still identifies a user (false after sign-out/expiry/deactivation). */
 export async function sessionValid(sessionCookie: string, apiBase: string = apiBaseFromEnv()): Promise<boolean> {
   const res = await fetch(`${apiBase}/api/users/me/`, { headers: { cookie: sessionCookie } });
