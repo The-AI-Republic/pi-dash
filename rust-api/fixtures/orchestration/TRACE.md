@@ -193,3 +193,57 @@ the no-dispatch path use the same trick. Dependent `D` is `FX3A-1`.
   lists) plus the cap case — 101 blockers (1 open + 100 completed)
   yield a 100-item list headed by the open one while
   `has_open_blockers` stays true over the full set.
+
+## FX-ORCH-04 relations (DB + pure)
+
+Generator `/tmp/fx_orch_04.py` against scratch database
+`pidash_524_scratch` (workspace `fx4-workspace`, projects `FX4A`/`FX4B`,
+`FX4X` in `fx4-other`; `relate`/`unrelate` run under
+`impersonate(actor)` since `BaseModel.save` resolves audit fields from
+crum; `issue_activity.delay` mocked with the epoch frozen, the
+soft-delete cascade task stubbed — both are out-of-scope
+D-10/`bgtasks` infra, never recorded).
+
+- `fx04_relations/relation_types.golden.json` —
+  `orchestration/relations.py:55-66` (`RELATION_TYPES` order),
+  `:70` (`REVERSE_TYPES`), `:74` (`GROUP_LIMIT`),
+  `:81-85` (`validate_relation_type`: strip/lower normalisation +
+  error string verbatim), `:92-97` (`_stored_edge` matrix over all
+  10 types), `:100-114` (`_type_from` matrix: 6 forward-stored ×
+  both viewpoints + 4 legacy reverse-stored × both viewpoints).
+- `fx04_relations/resolve_refs.golden.json` —
+  `orchestration/relations.py:138-163` (`resolve_refs`): UUID +
+  `PROJ-123` hits, `iexact` project match, whitespace strip,
+  request-order `found`, unresolved passthrough (unknown UUID,
+  unknown project, non-ref, empty string, unknown sequence).
+- `fx04_relations/relate.before_after.json` —
+  `orchestration/relations.py:117-120` (`_pair_rows`), `:123-135`
+  (`_log_activity`), `:166-177` (`_check_targets`), `:180-232`
+  (`relate`): live pair-table before/after, created-result golden,
+  created-row shape (stored type, ends, source project/workspace,
+  `created_by=actor`, `updated_by=NULL` — `BaseModel.save` leaves
+  `updated_by` empty on insert), unchanged golden, 2-cycle
+  conflict golden, different-type conflict golden, self-relation
+  and cross-workspace error strings, and the created-activity
+  `delay` kwargs (`type`, `requested_data`, `actor_id`,
+  `issue_id`, `project_id`, `current_instance=null`, frozen
+  `epoch`, `notification=true`).
+- `fx04_relations/relate_race.golden.json` —
+  `orchestration/relations.py:196-213`: the `IntegrityError`
+  re-read branch, exercised live by hiding the pre-created pair
+  from the first `_pair_rows` call so the real unique
+  constraint raises and the except branch re-reads → `unchanged`.
+- `fx04_relations/unrelate.golden.json` —
+  `orchestration/relations.py:235-266` (`unrelate`): wrong-type
+  `not_related` with the row left live (exact-type-only rule),
+  removed golden with `deleted_at` set, repeat `not_related`,
+  reverse-name removal (`blocking` from the other side), and the
+  two deleted-activity `delay` kwargs (per-target log with
+  `current_instance={"relation_type": …}`).
+- `fx04_relations/grouped_relations.golden.json` —
+  `orchestration/relations.py:72-74` (`GROUP_LIMIT`), `:269-277`
+  (`_item`), `:280-313` (`grouped_relations`): all 10 keys always
+  present, sort by (project identifier, `sequence_id`), legacy
+  stored-reversed row normalised, self-edge and cross-workspace
+  rows excluded, visibility narrowing (`FX4B` target dropped for
+  the `FX4A`-only member), and the 101-target cap (100 items).
