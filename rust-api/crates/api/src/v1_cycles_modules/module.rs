@@ -2245,16 +2245,7 @@ fn map_body_error(error: super::body::BodyError) -> Denial {
 /// multipart arrives as its text map, JSON keeps the existing serde path
 /// over the decoded text (no empty shortcut: CL>0 with empty decoded text
 /// is the EOF `ParseError`). The files map carries uploads per key.
-fn parse_body_ct(
-    headers: &HeaderMap,
-    body: &[u8],
-) -> Result<
-    (
-        serde_json::Map<String, Value>,
-        BTreeMap<String, Vec<super::body::FilePart>>,
-    ),
-    Denial,
-> {
+fn parse_body_ct(headers: &HeaderMap, body: &[u8]) -> Result<super::body::FormMaps, Denial> {
     match super::body::negotiate_body(headers, body, &super::body::MODULE_BODY_SPEC)
         .map_err(map_body_error)?
     {
@@ -2303,13 +2294,7 @@ fn parse_json_map(raw: &[u8]) -> Result<serde_json::Map<String, Value>, Denial> 
 fn parse_object_or_500_ct(
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<
-    (
-        serde_json::Map<String, Value>,
-        BTreeMap<String, Vec<super::body::FilePart>>,
-    ),
-    Denial,
-> {
+) -> Result<super::body::FormMaps, Denial> {
     match super::body::negotiate_body(headers, body, &super::body::MODULE_BODY_SPEC)
         .map_err(map_body_error)?
     {
@@ -2772,7 +2757,7 @@ pub async fn coerce_write(
     pool: &PgPool,
     body: &serde_json::Map<String, Value>,
     partial: bool,
-    files: &BTreeMap<String, Vec<super::body::FilePart>>,
+    files: &super::body::FilesMap,
 ) -> Result<ModuleWrite, Denial> {
     use pidash_services::v1_cycles_modules::module_shapes as shapes;
     let mut errors: Vec<(String, String)> = Vec::new();

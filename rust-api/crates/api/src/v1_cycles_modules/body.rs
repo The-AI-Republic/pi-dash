@@ -76,6 +76,13 @@ pub struct FilePart {
     pub bytes: Vec<u8>,
 }
 
+/// Uploads per key, in arrival order (DRF merges files into
+/// `request.data`, so `in` checks consult this map too).
+pub type FilesMap = BTreeMap<String, Vec<FilePart>>;
+
+/// A negotiated form/multipart body: the text map plus uploads per key.
+pub type FormMaps = (Map<String, Value>, FilesMap);
+
 /// A negotiated non-JSON body: text values plus uploaded files.
 ///
 /// Mirrors DRF's `_full_data` (`data.copy().update(files)` — Django's
@@ -88,7 +95,7 @@ pub struct FormBody {
     /// `Map<String, Value>`.
     pub texts: BTreeMap<String, Vec<String>>,
     /// File values per key, in arrival order.
-    pub files: BTreeMap<String, Vec<FilePart>>,
+    pub files: FilesMap,
 }
 
 impl FormBody {
@@ -120,7 +127,7 @@ pub enum NegotiatedBody {
     /// `request.data`, so `in` checks must consult both maps).
     Form {
         map: Map<String, Value>,
-        files: BTreeMap<String, Vec<FilePart>>,
+        files: FilesMap,
     },
 }
 
@@ -391,7 +398,7 @@ enum SupportedCharset {
 }
 
 /// Resolve a `charset=` parameter the way `request._set_content_type_params`
-/// + `codecs.lookup` do: `normalize_encoding` (non-alphanumerics collapse
+/// plus `codecs.lookup` do: `normalize_encoding` (non-alphanumerics collapse
 /// to `_`, non-ASCII alphanumerics vanish), lowercase (the C builtins match
 /// case-insensitively on every platform), then the `encodings.aliases`
 /// table for the five supported families. Anything else is utf-8.
@@ -728,7 +735,7 @@ fn decode_oneshot_utf16(body: &[u8], big_endian: Option<bool>) -> Option<String>
     // consume every byte; odd tails and lone surrogates fail (and the
     // form layer falls back to latin-1).
     let bom_len = if big_endian.is_some() { 0 } else { 2 };
-    if body.len() < bom_len || (body.len() - bom_len) % 2 != 0 {
+    if body.len() < bom_len || !(body.len() - bom_len).is_multiple_of(2) {
         return None;
     }
     let (units, _) = split_utf16_units(body, big_endian).ok()?;
@@ -1018,7 +1025,7 @@ fn valid_multipart_boundary(boundary: &str) -> bool {
 }
 
 /// The part loop (`MultipartParser.parse` + `Parser` + `InterBoundaryIter`
-/// + `BoundaryIter`): split the stream at every `--boundary` occurrence,
+/// plus `BoundaryIter`): split the stream at every `--boundary` occurrence,
 /// strip one trailing CRLF from each part, parse `<=1024`-byte headers,
 /// and assemble fields/files with Django's counting.
 fn parse_multipart_parts(
@@ -1070,11 +1077,10 @@ fn parse_multipart_parts(
                 let key = decode_oneshot_replace(&name, *charset);
                 let mut value = data;
                 if item_transfer_is_base64(content) {
-                    match binascii_b64decode(&value) {
-                        Ok(decoded) => value = decoded,
-                        // Fields are lenient: undecodable base64 keeps the
-                        // raw bytes (`P33` probe).
-                        Err(_) => {}
+                    // Fields are lenient: undecodable base64 keeps the
+                    // raw bytes (`P33` probe).
+                    if let Ok(decoded) = binascii_b64decode(&value) {
+                        value = decoded;
                     }
                 }
                 form.texts
@@ -1239,7 +1245,10 @@ fn item_transfer_is_base64(content: &[u8]) -> bool {
 /// `name: value` main segment, so the returned main value is lowercase
 /// (matching Django's stored `meta_data`); param values keep their case.
 /// Lines without a colon yield the empty name (skipped by the caller).
-fn parse_header_line(line: &str) -> (String, Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>) {
+/// The triple is (field name, raw value, parameters).
+type ParsedHeaderLine = (String, Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>);
+
+fn parse_header_line(line: &str) -> ParsedHeaderLine {
     let (main, params) = parse_header_parameters(line);
     let Some((name, value)) = main.split_once(':') else {
         return (String::new(), Vec::new(), Vec::new());
@@ -1535,7 +1544,8 @@ mod codec_tests {
                 "{name}"
             );
         }
-        for name in ["utf-32-be"] {
+        {
+            let name = "utf-32-be";
             assert_eq!(
                 charset_to_supported(name),
                 SupportedCharset::Utf32Be,

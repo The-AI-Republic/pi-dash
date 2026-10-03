@@ -2684,13 +2684,11 @@ fn jobject_from_form_map(map: &serde_json::Map<String, Value>) -> JObject {
 fn parse_body_value_ct(
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<(JVal, BTreeMap<String, Vec<super::body::FilePart>>), Denial> {
+) -> Result<(JVal, super::body::FilesMap), Denial> {
     match super::body::negotiate_body(headers, body, &super::body::CYCLE_BODY_SPEC)
         .map_err(map_body_error)?
     {
-        super::body::NegotiatedBody::Empty => {
-            Ok((JVal::Object(JObject::new()), BTreeMap::new()))
-        }
+        super::body::NegotiatedBody::Empty => Ok((JVal::Object(JObject::new()), BTreeMap::new())),
         super::body::NegotiatedBody::JsonText(text) => {
             parse_body_value(text.as_bytes()).map(|value| (value, BTreeMap::new()))
         }
@@ -2704,13 +2702,7 @@ fn parse_body_value_ct(
 fn parse_object_or_500_ct(
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<
-    (
-        JObject,
-        BTreeMap<String, Vec<super::body::FilePart>>,
-    ),
-    Denial,
-> {
+) -> Result<(JObject, super::body::FilesMap), Denial> {
     match super::body::negotiate_body(headers, body, &super::body::CYCLE_BODY_SPEC)
         .map_err(map_body_error)?
     {
@@ -4187,7 +4179,7 @@ pub async fn coerce_write(
     body: &JObject,
     partial: bool,
     user_timezone: &Tz,
-    files: &BTreeMap<String, Vec<super::body::FilePart>>,
+    files: &super::body::FilesMap,
 ) -> Result<CycleWrite, Denial> {
     let mut errors: Vec<(String, String)> = Vec::new();
     let mut write = CycleWrite::default();
@@ -5332,10 +5324,7 @@ pub async fn create_cycle_inner(
 /// 500. (All six non-dict shapes verified live against Django.)
 /// Content-negotiated [`completed_gate`]: dict bodies consult uploads
 /// too for the `sort_order` membership check (PIDASHCONV-627).
-fn completed_gate_ct(
-    value: &JVal,
-    files: &BTreeMap<String, Vec<super::body::FilePart>>,
-) -> Result<(), Denial> {
+fn completed_gate_ct(value: &JVal, files: &super::body::FilesMap) -> Result<(), Denial> {
     if matches!(value, JVal::Object(_)) && files.contains_key("sort_order") {
         return Ok(());
     }
