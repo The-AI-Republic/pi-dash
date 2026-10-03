@@ -419,7 +419,9 @@ fn render_dt(value: &DateTime<Utc>, timezone: &Tz) -> Result<String, Denial> {
 
 /// Parse the request body the way DRF does for JSON writes: empty → `{}`;
 /// malformed → `ParseError` 400; non-object JSON → the attribute errors
-/// the view/serializer code hits (500 envelope).
+/// the view/serializer code hits (500 envelope). Only for the quick-link
+/// paths, whose `to_internal_value` override calls `.get` before DRF's
+/// mapping check.
 fn parse_body_object(raw: &[u8]) -> Result<Map<String, Value>, Denial> {
     if raw.is_empty() {
         return Ok(Map::new());
@@ -429,6 +431,48 @@ fn parse_body_object(raw: &[u8]) -> Result<Map<String, Value>, Denial> {
         Ok(_) => Err(Denial::ServerError),
         Err(error) => Err(Denial::BadDetail(format!("JSON parse error - {error}"))),
     }
+}
+
+/// Parse the request body for the serializers without a
+/// `to_internal_value` override (sticky, home-pref, user-props): empty →
+/// `{}`; malformed → `ParseError` 400; non-object JSON → the
+/// `non_field_errors` 400 (`serializers.py`, verified live).
+fn parse_body_dict(raw: &[u8]) -> Result<Map<String, Value>, Box<Response>> {
+    if raw.is_empty() {
+        return Ok(Map::new());
+    }
+    match serde_json::from_slice::<Value>(raw) {
+        Ok(Value::Object(map)) => Ok(map),
+        Ok(value) => Err(Box::new(json_response(
+            StatusCode::BAD_REQUEST,
+            non_dict_body(&value),
+        ))),
+        Err(error) => Err(Box::new(
+            Denial::BadDetail(format!("JSON parse error - {error}")).into_response(),
+        )),
+    }
+}
+
+/// The `non_field_errors` body for a non-dict write body: `null` is `No
+/// data provided`, everything else names its JSON kind.
+fn non_dict_body(value: &Value) -> String {
+    if matches!(value, Value::Null) {
+        return r#"{"non_field_errors":["No data provided"]}"#.to_owned();
+    }
+    let kind = match value {
+        Value::Array(_) => "list",
+        Value::String(_) => "str",
+        Value::Number(number) => {
+            if number.is_f64() {
+                "float"
+            } else {
+                "int"
+            }
+        }
+        Value::Bool(_) => "bool",
+        Value::Null | Value::Object(_) => unreachable!("handled above"),
+    };
+    format!("{{\"non_field_errors\":[\"Invalid data. Expected a dictionary, but got {kind}.\"]}}")
 }
 
 /// Parse the request body for the sidebar PATCH: empty → `{}` (which
@@ -727,7 +771,7 @@ enum IntCheck {
 }
 
 fn drf_int_to_internal(value: &Value) -> IntCheck {
-    if matches!(value, Value::String(text) if text.len() > 1000) {
+    if matches!(value, Value::String(text) if text.chars().count() > 1000) {
         return IntCheck::TooLarge;
     }
     let text = match value {
@@ -853,10 +897,29 @@ fn is_strict_digit_run(text: &str) -> bool {
     !prev_underscore
 }
 
+/// `f64::MAX` as an exact decimal expansion: Python converts integer
+/// literals up to this magnitude and raises `OverflowError` past it
+/// (while a huge-exponent *string* parses to `inf` and stays valid).
+const F64_MAX_DIGITS: &str = "179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368";
+
+/// `float()` over an integer literal's exact digits: `Some` up to
+/// `f64::MAX`, `None` past it (`OverflowError`).
+fn float_from_int_digits(digits: &str) -> Option<f64> {
+    let abs = digits.strip_prefix('-').unwrap_or(digits);
+    let abs = abs.trim_start_matches('0');
+    if abs.is_empty() {
+        return Some(0.0);
+    }
+    if abs.len() > F64_MAX_DIGITS.len()
+        || (abs.len() == F64_MAX_DIGITS.len() && abs > F64_MAX_DIGITS)
+    {
+        return None;
+    }
+    digits.parse::<f64>().ok()
+}
+
 /// `FloatField.to_internal_value`: the 1000-char guard, then `float()`.
-/// An integer literal past `u64` is the `overflow` branch (`float(huge)`
-/// raises `OverflowError`, while an overflowing exponent string parses to
-/// `inf` and stays valid).
+/// An integer literal past `f64::MAX` is the `overflow` branch.
 enum FloatCheck {
     Value(f64),
     Invalid,
@@ -865,7 +928,7 @@ enum FloatCheck {
 }
 
 fn drf_float_to_internal(value: &Value) -> FloatCheck {
-    if matches!(value, Value::String(text) if text.len() > 1000) {
+    if matches!(value, Value::String(text) if text.chars().count() > 1000) {
         return FloatCheck::TooLarge;
     }
     match value {
@@ -878,10 +941,13 @@ fn drf_float_to_internal(value: &Value) -> FloatCheck {
                 FloatCheck::Value(uint as f64)
             } else {
                 match split_json_number(number) {
-                    // Beyond int range: integer syntax overflows
-                    // (`float(huge)` raises), float syntax parses
-                    // (possibly to `inf`, accepted).
-                    JsonNum::Int(_) => FloatCheck::Overflow,
+                    // Beyond int range: integer syntax converts up to
+                    // `f64::MAX` (`float(huge)` raises past it), float
+                    // syntax parses (possibly to `inf`, accepted).
+                    JsonNum::Int(digits) => match float_from_int_digits(&digits) {
+                        Some(float) => FloatCheck::Value(float),
+                        None => FloatCheck::Overflow,
+                    },
                     JsonNum::Float(float) => FloatCheck::Value(float),
                 }
             }
@@ -895,8 +961,8 @@ fn drf_float_to_internal(value: &Value) -> FloatCheck {
 }
 
 /// Raw `float()` for the sidebar PATCH (no serializer, no length guard):
-/// `None`/lists/dicts are `TypeError`, bad strings are `ValueError` —
-/// both 500; huge ints are `OverflowError` — also 500.
+/// `None`/lists/dicts are `TypeError`, bad strings are `ValueError`,
+/// ints past `f64::MAX` are `OverflowError` — all 500.
 fn raw_float_to_f64(value: &Value) -> Result<f64, ()> {
     match value {
         Value::Bool(true) => Ok(1.0),
@@ -908,7 +974,7 @@ fn raw_float_to_f64(value: &Value) -> Result<f64, ()> {
                 Ok(uint as f64)
             } else {
                 match split_json_number(number) {
-                    JsonNum::Int(_) => Err(()),
+                    JsonNum::Int(digits) => float_from_int_digits(&digits).ok_or(()),
                     JsonNum::Float(float) => Ok(float),
                 }
             }
@@ -1400,14 +1466,13 @@ fn parse_fallback_offset(text: &str) -> Option<i32> {
 
 /// `DateTimeField.to_internal_value` + `enforce_timezone` (`USE_TZ`,
 /// current zone = the actor's): naive values attach the actor zone
-/// (gaps fail `make_aware`, folds take the first side); aware values
-/// keep their instant. Shifts past year 9999/0001 are the `overflow`
-/// branch.
+/// (gaps take the pre-transition offset, folds the first side —
+/// `fold=0`); aware values keep their instant. Shifts past year
+/// 9999/0001 are the `overflow` branch.
 #[derive(Debug)]
 enum DtCheck {
     Value(DateTime<Utc>),
     Invalid,
-    MakeAware,
     Overflow,
 }
 
@@ -1433,69 +1498,103 @@ fn drf_datetime_to_internal(value: &Value, timezone: &Tz) -> DtCheck {
             match timezone.from_local_datetime(&parsed.naive) {
                 LocalResult::Single(aware) => DtCheck::Value(aware.with_timezone(&Utc)),
                 LocalResult::Ambiguous(first, _) => DtCheck::Value(first.with_timezone(&Utc)),
-                LocalResult::None => DtCheck::MakeAware,
+                // Gap wall time: Django's zoneinfo `make_aware` attaches
+                // the pre-transition offset (`fold=0`) — it never errors —
+                // so walk back for the nearest valid wall and shift the
+                // original wall by its offset.
+                LocalResult::None => match pre_transition_offset(timezone, &parsed.naive) {
+                    Some(offset_secs) => match parsed
+                        .naive
+                        .checked_sub_signed(chrono::Duration::seconds(offset_secs))
+                    {
+                        Some(shifted) => DtCheck::Value(
+                            chrono::DateTime::from_naive_utc_and_offset(shifted, Utc),
+                        ),
+                        None => DtCheck::Overflow,
+                    },
+                    None => DtCheck::Overflow,
+                },
             }
         }
     }
 }
 
-fn make_aware_msg(timezone: &Tz) -> String {
-    format!("Invalid datetime for the timezone \"{timezone}\".")
+/// The offset a gap wall takes: the pre-transition side. Walk back for
+/// the nearest valid wall (real gaps run ≤ 24h; 72h is plenty) and take
+/// its earliest offset.
+fn pre_transition_offset(timezone: &Tz, naive: &chrono::NaiveDateTime) -> Option<i64> {
+    use chrono::{LocalResult, TimeZone};
+    let mut probe = *naive;
+    for _ in 0..144 {
+        probe = probe.checked_sub_signed(chrono::Duration::minutes(30))?;
+        match timezone.from_local_datetime(&probe) {
+            LocalResult::Single(local) => {
+                return Some((local.naive_local() - local.naive_utc()).num_seconds());
+            }
+            LocalResult::Ambiguous(early, _) => {
+                return Some((early.naive_local() - early.naive_utc()).num_seconds());
+            }
+            LocalResult::None => {}
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
 // PK + choice ladders
 // ---------------------------------------------------------------------------
 
-/// `PrimaryKeyRelatedField.to_internal_value` shape (`relations.py`):
-/// bools are `incorrect_type`; strings must be UUIDs (malformed ones
-/// raise Django `ValidationError` → the whole-request 400, not a field
-/// error); `0` dies in the database (500); other ints convert via
-/// `uuid.UUID(int=…)` (out of range → `incorrect_type`); floats and
-/// containers raise `AttributeError` (500).
+/// `PrimaryKeyRelatedField.to_internal_value` shape (`relations.py`,
+/// verified live on the pinned stack): `RelatedField.run_validation`
+/// forces `""` to `None` (valid, sets `NULL`); bools are
+/// `incorrect_type`; ints convert via `uuid.UUID(int=…)` (`0` is the nil
+/// UUID, negatives and `>u128` fail the parse); every other miss —
+/// malformed strings, floats, containers, out-of-range ints — is the
+/// Django `ValidationError` per-field message `“…” is not a valid UUID.`
+/// (curly quotes), never a whole-request branch.
 enum PkCheck {
     Uuid(Uuid),
-    Blank,
+    Null,
     IncorrectType(String),
-    PayloadNotValid,
-    ServerError,
+    InvalidUuid(String),
+}
+
+fn invalid_uuid_msg(rendered: &str) -> String {
+    format!("\u{201c}{rendered}\u{201d} is not a valid UUID.")
 }
 
 fn check_pk_shape(value: &Value) -> PkCheck {
     match value {
-        Value::Null => PkCheck::Blank,
+        Value::Null => PkCheck::Null,
         Value::Bool(_) => PkCheck::IncorrectType("bool".to_owned()),
         Value::String(text) => {
             if text.is_empty() {
-                return PkCheck::Blank;
+                return PkCheck::Null;
             }
             match text.parse::<Uuid>() {
                 Ok(id) => PkCheck::Uuid(id),
-                Err(_) => PkCheck::PayloadNotValid,
+                Err(_) => PkCheck::InvalidUuid(invalid_uuid_msg(text)),
             }
         }
         Value::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                if int == 0 {
-                    return PkCheck::ServerError;
-                }
-                if int < 0 {
-                    return PkCheck::IncorrectType("int".to_owned());
-                }
-                PkCheck::Uuid(Uuid::from_u128(int as u128))
-            } else if let Some(uint) = number.as_u64() {
-                if uint == 0 {
-                    return PkCheck::ServerError;
-                }
-                PkCheck::Uuid(Uuid::from_u128(u128::from(uint)))
-            } else if number.is_f64() {
-                PkCheck::ServerError
-            } else {
-                PkCheck::IncorrectType("int".to_owned())
+            if number.is_f64() {
+                let rendered = match split_json_number(number) {
+                    JsonNum::Float(float) => crate::paginator::py_float_str(float),
+                    JsonNum::Int(digits) => digits,
+                };
+                return PkCheck::InvalidUuid(invalid_uuid_msg(&rendered));
+            }
+            // Integer syntax, exact digits (`arbitrary_precision`):
+            // the `u128` range converts, negatives and huge magnitudes fail.
+            let digits = number.to_string();
+            match digits.parse::<u128>().map(Uuid::from_u128) {
+                Ok(id) => PkCheck::Uuid(id),
+                Err(_) => PkCheck::InvalidUuid(invalid_uuid_msg(&digits)),
             }
         }
-        Value::Array(_) => PkCheck::ServerError,
-        Value::Object(_) => PkCheck::ServerError,
+        Value::Array(_) | Value::Object(_) => {
+            PkCheck::InvalidUuid(invalid_uuid_msg(&py_str(value)))
+        }
     }
 }
 
@@ -1662,12 +1761,10 @@ struct QuickLinkInput {
 }
 
 /// What write validation can fail with: field errors (400), an
-/// object-level `validate()` body (400), Django `ValidationError` from a
-/// malformed FK (whole-request 400), or an uncaught error (500).
+/// object-level `validate()` body (400), or an uncaught error (500).
 enum WriteInvalid {
     Fields(FieldErrors),
     Object(Value),
-    PayloadNotValid,
     ServerError,
 }
 
@@ -1678,9 +1775,6 @@ impl WriteInvalid {
                 json_response(StatusCode::BAD_REQUEST, render_field_errors(&errors))
             }
             WriteInvalid::Object(body) => json_response(StatusCode::BAD_REQUEST, body.to_string()),
-            WriteInvalid::PayloadNotValid => {
-                Denial::BadError(INVALID_DETAIL_MSG.to_owned()).into_response()
-            }
             WriteInvalid::ServerError => Denial::ServerError.into_response(),
         }
     }
@@ -1718,9 +1812,6 @@ async fn validate_quick_link_body(
                 DtCheck::Value(dt) => deleted_at = Some(Some(dt)),
                 DtCheck::Invalid => {
                     push_field_msg(&mut errors, "deleted_at", datetime_invalid_msg())
-                }
-                DtCheck::MakeAware => {
-                    push_field_msg(&mut errors, "deleted_at", make_aware_msg(timezone));
                 }
                 DtCheck::Overflow => {
                     push_field_msg(
@@ -1793,31 +1884,27 @@ async fn validate_quick_link_body(
         let Some(value) = data.get(field) else {
             continue;
         };
-        // Null is allowed (`null=True`).
-        if value.is_null() {
+        // Null is allowed (`null=True`); `""` also lands here
+        // (`RelatedField` forces it to `None`).
+        let id = match check_pk_shape(value) {
+            PkCheck::Uuid(id) => Some(id),
+            PkCheck::Null => None,
+            PkCheck::IncorrectType(dtype) => {
+                push_field_msg(&mut errors, field, pk_incorrect_type_msg(&dtype));
+                continue;
+            }
+            PkCheck::InvalidUuid(message) => {
+                push_field_msg(&mut errors, field, message);
+                continue;
+            }
+        };
+        let Some(id) = id else {
             match field {
                 "created_by" => created_by = Some(None),
                 "updated_by" => updated_by = Some(None),
                 _ => project = Some(None),
             }
             continue;
-        }
-        if matches!(value, Value::String(text) if text.is_empty()) {
-            push_field_msg(&mut errors, field, BLANK_MSG.to_owned());
-            continue;
-        }
-        let id = match check_pk_shape(value) {
-            PkCheck::Uuid(id) => id,
-            PkCheck::Blank => {
-                push_field_msg(&mut errors, field, BLANK_MSG.to_owned());
-                continue;
-            }
-            PkCheck::IncorrectType(dtype) => {
-                push_field_msg(&mut errors, field, pk_incorrect_type_msg(&dtype));
-                continue;
-            }
-            PkCheck::PayloadNotValid => return Err(WriteInvalid::PayloadNotValid),
-            PkCheck::ServerError => return Err(WriteInvalid::ServerError),
         };
         // Existence through the default manager (projects soft-delete
         // scoped, users plain).
@@ -2046,6 +2133,8 @@ async fn quick_link_partial_update(
     let gate = gate_for("PATCH", "workspaces/<slug>/quick-links/<pk>/");
     let facts = fetch_allow_facts(&pool, &slug, &user_id, gate_roles(&gate), false).await?;
     check_gate(&gate, &slug, &facts)?;
+    // Zone activation precedes the view body (`TimezoneMixin.initial`).
+    let timezone = actor_timezone(&pool, &user_id).await?;
     let row: Option<QuickLinkRow> = sqlx::query_as(
         r#"SELECT l.id, l.created_at, l.updated_at, l.deleted_at, l.title, l.url,
                   l.metadata, l.created_by_id, l.updated_by_id, l.workspace_id,
@@ -2066,7 +2155,6 @@ async fn quick_link_partial_update(
             QUICK_LINK_PATCH_MISSING_BODY.to_owned(),
         ));
     };
-    let timezone = actor_timezone(&pool, &user_id).await?;
     let data = match parse_body_object(&body) {
         Ok(data) => data,
         Err(denial) => return Err(denial),
@@ -2170,6 +2258,8 @@ async fn quick_link_retrieve(
     let gate = gate_for("GET", "workspaces/<slug>/quick-links/<pk>/");
     let facts = fetch_allow_facts(&pool, &slug, &user_id, gate_roles(&gate), false).await?;
     check_gate(&gate, &slug, &facts)?;
+    // Zone activation precedes the view body (`TimezoneMixin.initial`).
+    let timezone = actor_timezone(&pool, &user_id).await?;
     let row: Option<QuickLinkRow> = sqlx::query_as(
         r#"SELECT l.id, l.created_at, l.updated_at, l.deleted_at, l.title, l.url,
                   l.metadata, l.created_by_id, l.updated_by_id, l.workspace_id,
@@ -2190,7 +2280,6 @@ async fn quick_link_retrieve(
             QUICK_LINK_RETRIEVE_MISSING_BODY.to_owned(),
         ));
     };
-    let timezone = actor_timezone(&pool, &user_id).await?;
     Ok(json_response(
         StatusCode::OK,
         render_quick_link(&row, &timezone)?,
@@ -2342,9 +2431,6 @@ async fn validate_sticky_body(
                 DtCheck::Invalid => {
                     push_field_msg(&mut errors, "deleted_at", datetime_invalid_msg())
                 }
-                DtCheck::MakeAware => {
-                    push_field_msg(&mut errors, "deleted_at", make_aware_msg(timezone));
-                }
                 DtCheck::Overflow => {
                     push_field_msg(
                         &mut errors,
@@ -2469,29 +2555,26 @@ async fn validate_sticky_body(
         let Some(value) = data.get(field) else {
             continue;
         };
-        if value.is_null() {
+        // Null is allowed (`null=True`); `""` also lands here
+        // (`RelatedField` forces it to `None`).
+        let id = match check_pk_shape(value) {
+            PkCheck::Uuid(id) => Some(id),
+            PkCheck::Null => None,
+            PkCheck::IncorrectType(dtype) => {
+                push_field_msg(&mut errors, field, pk_incorrect_type_msg(&dtype));
+                continue;
+            }
+            PkCheck::InvalidUuid(message) => {
+                push_field_msg(&mut errors, field, message);
+                continue;
+            }
+        };
+        let Some(id) = id else {
             match field {
                 "created_by" => created_by = Some(None),
                 _ => updated_by = Some(None),
             }
             continue;
-        }
-        if matches!(value, Value::String(text) if text.is_empty()) {
-            push_field_msg(&mut errors, field, BLANK_MSG.to_owned());
-            continue;
-        }
-        let id = match check_pk_shape(value) {
-            PkCheck::Uuid(id) => id,
-            PkCheck::Blank => {
-                push_field_msg(&mut errors, field, BLANK_MSG.to_owned());
-                continue;
-            }
-            PkCheck::IncorrectType(dtype) => {
-                push_field_msg(&mut errors, field, pk_incorrect_type_msg(&dtype));
-                continue;
-            }
-            PkCheck::PayloadNotValid => return Err(WriteInvalid::PayloadNotValid),
-            PkCheck::ServerError => return Err(WriteInvalid::ServerError),
         };
         let row: Option<(Uuid,)> = sqlx::query_as(r#"SELECT u.id FROM users u WHERE u.id = $1"#)
             .bind(id)
@@ -2714,9 +2797,9 @@ async fn sticky_create(
     check_gate(&gate, &slug, &facts)?;
     let workspace_id = resolve_workspace_id(&pool, &slug).await?;
     let timezone = actor_timezone(&pool, &user_id).await?;
-    let data = match parse_body_object(&body) {
+    let data = match parse_body_dict(&body) {
         Ok(data) => data,
-        Err(denial) => return Err(denial),
+        Err(response) => return Ok(*response),
     };
     let input = match validate_sticky_body(&pool, &data, false, &timezone).await {
         Ok(input) => input,
@@ -2849,12 +2932,13 @@ async fn sticky_list(
     .fetch_one(&pool)
     .await
     .map_err(|_| Denial::ServerError)?;
+    // `-sort_order` (`queries_extras::STICKY_LIST_ORDER_SQL`), spelled with
+    // the `s` alias this query uses (the unaliased fragment is a 42P01).
     let fetch: Vec<StickyRow> = sqlx::query_as(&format!(
         r#"SELECT {STICKY_SELECT} FROM stickies s JOIN workspaces w ON w.id = s.workspace_id
            WHERE w.slug = $1 AND s.owner_id = $2 AND s.deleted_at IS NULL
            AND ($3::text IS NULL OR s.description_stripped ILIKE $3)
-           ORDER BY {} LIMIT $4 OFFSET $5"#,
-        queries_extras::STICKY_LIST_ORDER_SQL,
+           ORDER BY s.sort_order DESC LIMIT $4 OFFSET $5"#,
     ))
     .bind(&slug)
     .bind(user_id)
@@ -2888,6 +2972,8 @@ async fn sticky_retrieve(
     // No decorator on this action: any signed-in user reaches the body.
     let user_id = actor_user_id(extension)?;
     let pk = parse_uuid_or_invalid(&pk_raw)?;
+    // Zone activation precedes the view body (`TimezoneMixin.initial`).
+    let timezone = actor_timezone(&pool, &user_id).await?;
     let row: Option<StickyRow> = sqlx::query_as(&format!(
         r#"SELECT {STICKY_SELECT} FROM stickies s JOIN workspaces w ON w.id = s.workspace_id
            WHERE s.id = $1 AND w.slug = $2 AND s.owner_id = $3 AND s.deleted_at IS NULL
@@ -2905,7 +2991,6 @@ async fn sticky_retrieve(
             STICKY_NOT_FOUND_BODY.to_owned(),
         ));
     };
-    let timezone = actor_timezone(&pool, &user_id).await?;
     Ok(json_response(
         StatusCode::OK,
         render_sticky(&row, &timezone)?,
@@ -2942,6 +3027,8 @@ async fn sticky_partial_update(
     let is_creator = sticky_creator_fact(&pool, &pk, &user_id).await?;
     let facts = fetch_allow_facts(&pool, &slug, &user_id, gate_roles(&gate), is_creator).await?;
     check_gate(&gate, &slug, &facts)?;
+    // Zone activation precedes the view body (`TimezoneMixin.initial`).
+    let timezone = actor_timezone(&pool, &user_id).await?;
     let row: Option<StickyRow> = sqlx::query_as(&format!(
         r#"SELECT {STICKY_SELECT} FROM stickies s JOIN workspaces w ON w.id = s.workspace_id
            WHERE s.id = $1 AND w.slug = $2 AND s.owner_id = $3 AND s.deleted_at IS NULL
@@ -2959,10 +3046,9 @@ async fn sticky_partial_update(
             STICKY_NOT_FOUND_BODY.to_owned(),
         ));
     };
-    let timezone = actor_timezone(&pool, &user_id).await?;
-    let data = match parse_body_object(&body) {
+    let data = match parse_body_dict(&body) {
         Ok(data) => data,
-        Err(denial) => return Err(denial),
+        Err(response) => return Ok(*response),
     };
     let input = match validate_sticky_body(&pool, &data, true, &timezone).await {
         Ok(input) => input,
@@ -3268,9 +3354,9 @@ async fn home_pref_patch(
             HOME_PREF_PATCH_MISSING_BODY.to_owned(),
         ));
     };
-    let data = match parse_body_object(&body) {
+    let data = match parse_body_dict(&body) {
         Ok(data) => data,
-        Err(denial) => return Err(denial),
+        Err(response) => return Ok(*response),
     };
     let input = match validate_home_pref_body(&data) {
         Ok(input) => input,
@@ -3643,10 +3729,11 @@ async fn fetch_issue_visit(
     let Some((id, name, state, priority, issue_type, sequence_id, project_id)) = row else {
         return Ok(None);
     };
-    // `get_assignees` (`:271-272`): live through-rows, `-created_at`.
+    // `get_assignees` (`:271-272`): a `User` queryset, so the order is
+    // `User.Meta.ordering` (`-created_at`), not the through-row clock.
     let assignees: Vec<(Uuid,)> = sqlx::query_as(
-        r#"SELECT a.assignee_id FROM issue_assignees a
-           WHERE a.issue_id = $1 AND a.deleted_at IS NULL ORDER BY a.created_at DESC"#,
+        r#"SELECT a.assignee_id FROM issue_assignees a JOIN users u ON u.id = a.assignee_id
+           WHERE a.issue_id = $1 AND a.deleted_at IS NULL ORDER BY u.created_at DESC"#,
     )
     .bind(id)
     .fetch_all(pool)
@@ -3830,9 +3917,6 @@ async fn validate_user_props_body(
                 DtCheck::Invalid => {
                     push_field_msg(&mut errors, "deleted_at", datetime_invalid_msg())
                 }
-                DtCheck::MakeAware => {
-                    push_field_msg(&mut errors, "deleted_at", make_aware_msg(timezone));
-                }
                 DtCheck::Overflow => {
                     push_field_msg(
                         &mut errors,
@@ -3893,15 +3977,10 @@ async fn validate_user_props_body(
                 "navigation_control_preference",
                 NULL_MSG.to_owned(),
             );
-        } else if matches!(value, Value::String(text) if text.is_empty()) {
-            push_field_msg(
-                &mut errors,
-                "navigation_control_preference",
-                BLANK_MSG.to_owned(),
-            );
         } else {
             // A `ChoiceField` (the model declares `choices=`): `str(data)`
-            // looked up verbatim — no trimming, no length check.
+            // looked up verbatim — no trimming, no length check, and no
+            // blank arm (`""` fails `invalid_choice` like any other miss).
             let choices = [
                 NavigationControlPreference::Accordion.as_str(),
                 NavigationControlPreference::Tabbed.as_str(),
@@ -3918,29 +3997,26 @@ async fn validate_user_props_body(
         let Some(value) = body.get(field) else {
             continue;
         };
-        if value.is_null() {
+        // Null is allowed (`null=True`); `""` also lands here
+        // (`RelatedField` forces it to `None`).
+        let id = match check_pk_shape(value) {
+            PkCheck::Uuid(id) => Some(id),
+            PkCheck::Null => None,
+            PkCheck::IncorrectType(dtype) => {
+                push_field_msg(&mut errors, field, pk_incorrect_type_msg(&dtype));
+                continue;
+            }
+            PkCheck::InvalidUuid(message) => {
+                push_field_msg(&mut errors, field, message);
+                continue;
+            }
+        };
+        let Some(id) = id else {
             match field {
                 "created_by" => created_by = Some(None),
                 _ => updated_by = Some(None),
             }
             continue;
-        }
-        if matches!(value, Value::String(text) if text.is_empty()) {
-            push_field_msg(&mut errors, field, BLANK_MSG.to_owned());
-            continue;
-        }
-        let id = match check_pk_shape(value) {
-            PkCheck::Uuid(id) => id,
-            PkCheck::Blank => {
-                push_field_msg(&mut errors, field, BLANK_MSG.to_owned());
-                continue;
-            }
-            PkCheck::IncorrectType(dtype) => {
-                push_field_msg(&mut errors, field, pk_incorrect_type_msg(&dtype));
-                continue;
-            }
-            PkCheck::PayloadNotValid => return Err(WriteInvalid::PayloadNotValid),
-            PkCheck::ServerError => return Err(WriteInvalid::ServerError),
         };
         let row: Option<(Uuid,)> = sqlx::query_as(r#"SELECT u.id FROM users u WHERE u.id = $1"#)
             .bind(id)
@@ -4151,9 +4227,9 @@ async fn user_props_patch(
     let workspace_id = resolve_workspace_id(&pool, &slug).await?;
     let timezone = actor_timezone(&pool, &user_id).await?;
     let current = get_or_create_user_props(&pool, &user_id, &workspace_id).await?;
-    let data = match parse_body_object(&body) {
+    let data = match parse_body_dict(&body) {
         Ok(data) => data,
-        Err(denial) => return Err(denial),
+        Err(response) => return Ok(*response),
     };
     let input = match validate_user_props_body(&pool, &data, &timezone).await {
         Ok(input) => input,
@@ -4417,7 +4493,13 @@ mod tests {
         let inf_exp: Value = serde_json::from_str("1e1000").unwrap();
         assert_eq!(value(&inf_exp), "inf");
         assert_eq!(value(&json!("x".repeat(1001))), "too-large");
-        let huge: Value = serde_json::from_str(&"9".repeat(60)).unwrap();
+        // `float(int)` converts up to `f64::MAX` — only past-309-digit
+        // magnitudes are `overflow` (`float(10**60)` is `1e60`, valid).
+        let big: Value = serde_json::from_str(&"9".repeat(60)).unwrap();
+        assert_eq!(value(&big), "1e60");
+        let past_u64: Value = serde_json::from_str("18446744073709551617").unwrap();
+        assert_eq!(value(&past_u64), "1.8446744073709552e19");
+        let huge: Value = serde_json::from_str(&"9".repeat(400)).unwrap();
         assert_eq!(value(&huge), "overflow");
         assert_eq!(value(&json!([1.0])), "invalid");
         assert_eq!(FLOAT_MSG, "A valid number is required.");
@@ -4435,7 +4517,6 @@ mod tests {
         let instant = |text: &str| match drf_datetime_to_internal(&json!(text), &utc) {
             DtCheck::Value(dt) => dt.to_string(),
             DtCheck::Invalid => "invalid".to_owned(),
-            DtCheck::MakeAware => "make-aware".to_owned(),
             DtCheck::Overflow => "overflow".to_owned(),
         };
         // Accepted (wall time == UTC instant under the UTC zone).
@@ -4557,15 +4638,12 @@ mod tests {
             DtCheck::Value(dt) => assert_eq!(dt.to_string(), "2024-01-01 15:00:00 UTC"),
             other => panic!("expected value, got {other:?}"),
         }
-        // The spring-forward gap fails `make_aware`.
+        // The spring-forward gap takes the pre-transition offset
+        // (`fold=0` — Django never errors here).
         match drf_datetime_to_internal(&json!("2024-03-10T02:30:00"), &york) {
-            DtCheck::MakeAware => {}
-            other => panic!("expected make-aware, got {other:?}"),
+            DtCheck::Value(dt) => assert_eq!(dt.to_string(), "2024-03-10 07:30:00 UTC"),
+            other => panic!("expected value, got {other:?}"),
         }
-        assert_eq!(
-            make_aware_msg(&york),
-            "Invalid datetime for the timezone \"America/New_York\"."
-        );
         // The fall-back fold takes the first side (EDT).
         match drf_datetime_to_internal(&json!("2024-11-03T01:30:00"), &york) {
             DtCheck::Value(dt) => assert_eq!(dt.to_string(), "2024-11-03 05:30:00 UTC"),
@@ -4583,29 +4661,56 @@ mod tests {
     fn pk_ladder() {
         let shape = |input: &Value| match check_pk_shape(input) {
             PkCheck::Uuid(id) => format!("uuid:{id}"),
-            PkCheck::Blank => "blank".to_owned(),
+            PkCheck::Null => "null".to_owned(),
             PkCheck::IncorrectType(dtype) => format!("type:{dtype}"),
-            PkCheck::PayloadNotValid => "payload".to_owned(),
-            PkCheck::ServerError => "server".to_owned(),
+            PkCheck::InvalidUuid(message) => format!("invalid:{message}"),
         };
         assert_eq!(
             shape(&json!("12345678-1234-5678-1234-567812345678")),
             "uuid:12345678-1234-5678-1234-567812345678"
         );
-        assert_eq!(shape(&json!("xyz")), "payload");
+        // `""` is forced to `None` (valid); only bools are `incorrect_type`.
+        assert_eq!(shape(&json!("")), "null");
+        assert_eq!(shape(&Value::Null), "null");
         assert_eq!(shape(&json!(true)), "type:bool");
-        assert_eq!(shape(&json!("")), "blank");
-        assert_eq!(shape(&json!(0)), "server");
+        // `uuid.UUID(int=…)`: `0` is the nil UUID (existence-checked later).
+        assert_eq!(
+            shape(&json!(0)),
+            "uuid:00000000-0000-0000-0000-000000000000"
+        );
         assert_eq!(
             shape(&json!(5)),
             "uuid:00000000-0000-0000-0000-000000000005"
         );
-        assert_eq!(shape(&json!(-1)), "type:int");
+        // Every other miss is the Django per-field message (curly quotes).
+        assert_eq!(
+            shape(&json!("xyz")),
+            "invalid:\u{201c}xyz\u{201d} is not a valid UUID."
+        );
+        assert_eq!(
+            shape(&json!(-1)),
+            "invalid:\u{201c}-1\u{201d} is not a valid UUID."
+        );
         let huge: Value = serde_json::from_str(&"9".repeat(40)).unwrap();
-        assert_eq!(shape(&huge), "type:int");
-        assert_eq!(shape(&json!(4.5)), "server");
-        assert_eq!(shape(&json!([1])), "server");
-        assert_eq!(shape(&json!({"a": 1})), "server");
+        assert_eq!(
+            shape(&huge),
+            format!(
+                "invalid:\u{201c}{}\u{201d} is not a valid UUID.",
+                "9".repeat(40)
+            )
+        );
+        assert_eq!(
+            shape(&json!(4.5)),
+            "invalid:\u{201c}4.5\u{201d} is not a valid UUID."
+        );
+        assert_eq!(
+            shape(&json!([1])),
+            "invalid:\u{201c}[1]\u{201d} is not a valid UUID."
+        );
+        assert_eq!(
+            shape(&json!({"a": 1})),
+            "invalid:\u{201c}{'a': 1}\u{201d} is not a valid UUID."
+        );
         assert_eq!(
             pk_does_not_exist_msg(&json!("abc")),
             "Invalid pk \"abc\" - object does not exist."
@@ -4613,6 +4718,10 @@ mod tests {
         assert_eq!(
             pk_does_not_exist_msg(&json!(5)),
             "Invalid pk \"5\" - object does not exist."
+        );
+        assert_eq!(
+            pk_does_not_exist_msg(&json!(0)),
+            "Invalid pk \"0\" - object does not exist."
         );
         assert_eq!(
             pk_incorrect_type_msg("bool"),
@@ -4623,6 +4732,11 @@ mod tests {
     #[test]
     fn choice_ladder() {
         let choices = ["ACCORDION", "TABBED"];
+        // `ChoiceField` has no blank arm: `""` is `invalid_choice`.
+        assert_eq!(
+            check_choice(&json!(""), &choices),
+            Err("\"\" is not a valid choice.".to_owned())
+        );
         assert_eq!(check_choice(&json!("ACCORDION"), &choices), Ok("ACCORDION"));
         assert_eq!(
             check_choice(&json!("accordion"), &choices),
@@ -4680,7 +4794,9 @@ mod tests {
         assert!(raw_float_to_f64(&json!("nan")).unwrap().is_nan());
         let inf_exp: Value = serde_json::from_str("1e1000").unwrap();
         assert_eq!(raw_float_to_f64(&inf_exp), Ok(f64::INFINITY));
-        let huge: Value = serde_json::from_str(&"9".repeat(60)).unwrap();
+        let big: Value = serde_json::from_str(&"9".repeat(60)).unwrap();
+        assert_eq!(raw_float_to_f64(&big), Ok(1e60));
+        let huge: Value = serde_json::from_str(&"9".repeat(400)).unwrap();
         assert!(raw_float_to_f64(&huge).is_err());
         for invalid in [json!("abc"), json!([1.0]), json!({"a": 1})] {
             assert!(raw_float_to_f64(&invalid).is_err(), "{invalid}");
@@ -4719,10 +4835,16 @@ mod tests {
         assert_eq!(render_json_float(1e15), "1000000000000000.0");
         assert_eq!(render_json_float(0.1 + 0.2), "0.30000000000000004");
         assert_eq!(render_json_float(5e-324), "5e-324");
-        assert_eq!(render_json_float(1.7976931348623157e308), "1.7976931348623157e+308");
+        assert_eq!(
+            render_json_float(1.7976931348623157e308),
+            "1.7976931348623157e+308"
+        );
         assert_eq!(render_json_float(2.5e-7), "2.5e-07");
         assert_eq!(render_json_float(1e21), "1e+21");
-        assert_eq!(render_json_float(123456789012345680.0), "1.2345678901234568e+17");
+        assert_eq!(
+            render_json_float(123456789012345680.0),
+            "1.2345678901234568e+17"
+        );
         assert_eq!(render_json_float(1.23456789012345), "1.23456789012345");
         assert_eq!(render_json_float(123456.789), "123456.789");
         assert_eq!(render_json_float(0.0001), "0.0001");
@@ -4928,6 +5050,50 @@ mod tests {
             parse_uuid_or_invalid("xyz"),
             Err(Denial::BadError(_))
         ));
+    }
+
+    /// Non-dict write bodies on the override-less serializers (sticky,
+    /// home-pref, user-props): the `non_field_errors` 400, never a 500.
+    #[tokio::test]
+    async fn non_dict_bodies() {
+        assert!(parse_body_dict(&[]).unwrap().is_empty());
+        assert!(parse_body_dict(br#"{"a":1}"#).is_ok());
+        assert_eq!(
+            non_dict_body(&Value::Null),
+            r#"{"non_field_errors":["No data provided"]}"#
+        );
+        let cases: &[(&[u8], &str)] = &[
+            (
+                br#"[1]"#,
+                r#"{"non_field_errors":["Invalid data. Expected a dictionary, but got list."]}"#,
+            ),
+            (
+                br#""s""#,
+                r#"{"non_field_errors":["Invalid data. Expected a dictionary, but got str."]}"#,
+            ),
+            (
+                br#"5"#,
+                r#"{"non_field_errors":["Invalid data. Expected a dictionary, but got int."]}"#,
+            ),
+            (
+                br#"5.0"#,
+                r#"{"non_field_errors":["Invalid data. Expected a dictionary, but got float."]}"#,
+            ),
+            (
+                br#"true"#,
+                r#"{"non_field_errors":["Invalid data. Expected a dictionary, but got bool."]}"#,
+            ),
+            (br#"null"#, r#"{"non_field_errors":["No data provided"]}"#),
+        ];
+        for (raw, body) in cases {
+            let response = parse_body_dict(raw).expect_err("non-dict body");
+            let response = *response;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            assert_eq!(bytes.as_ref(), body.as_bytes());
+        }
     }
 
     /// Every owned method resolves a gate row (no `panic!` at request
