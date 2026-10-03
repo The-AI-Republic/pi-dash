@@ -733,11 +733,19 @@ test(
     await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(2);
 
     await test.step("scalar fields move to the destination column", async () => {
+      const id = await issueIdByName(seed, seed.projectId, owner.cookie, alpha);
+      const sortBefore = (await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).sortOrder;
       await driver.kanbanDragCardToColumnEnd(alpha, doneName);
       await expect.poll(() => driver.kanbanColumnCards(doneName), { timeout: 60_000 }).toContain(alpha);
-      const id = await issueIdByName(seed, seed.projectId, owner.cookie, alpha);
       expect((await serverIssueDetails(seed.workspaceSlug, seed.projectId, id, owner.cookie)).stateId).toBe(doneId);
-      await serverPatchIssue(seed.workspaceSlug, seed.projectId, id, { state_id: home.id }, owner.cookie);
+      // Restore both fields: later seed scenarios assume the pristine order.
+      await serverPatchIssue(
+        seed.workspaceSlug,
+        seed.projectId,
+        id,
+        { state_id: home.id, sort_order: sortBefore },
+        owner.cookie
+      );
     });
 
     await test.step("a disallowed grouping warns and moves nothing", async () => {
