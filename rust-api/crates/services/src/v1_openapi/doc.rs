@@ -15,8 +15,9 @@
 //! `description`/`security`/`requestBody`/`externalDocs`, which
 //! drf-spectacular emits conditionally, are neither captured nor pinned and
 //! are omitted (minimal disposition: route coverage, not byte-identity).
-//! `parameters: null` in the fixture means Django omitted the key
-//! (`openapi.py:93-94` `if parameters:`), so the builder omits it too.
+//! `parameters: null` / `summary: null` in the fixture mean Django omitted
+//! the key (`openapi.py:93` `if parameters:`, `openapi.py:85` `if summary:`),
+//! so the builder omits it too.
 //!
 //! Renderers: [`render_json`] (4-space pretty, like DRF's `JSONRenderer`
 //! with `OpenApiJsonRenderer.get_indent or 4`) and [`render_yaml`] (minimal
@@ -55,10 +56,10 @@ pub fn build_document() -> Value {
                 .and_then(|ops| ops.get(*method))
                 .cloned()
                 .expect("route table matches essentials");
-            if op.get("parameters").is_some_and(Value::is_null) {
-                op.as_object_mut()
-                    .expect("operation is a map")
-                    .remove("parameters");
+            for key in ["parameters", "summary"] {
+                if op.get(key).is_some_and(Value::is_null) {
+                    op.as_object_mut().expect("operation is a map").remove(key);
+                }
             }
             item.insert((*method).to_string(), op);
         }
@@ -16649,27 +16650,36 @@ mod tests {
     }
 
     #[test]
-    fn null_parameters_omitted() {
+    fn null_parameters_and_summary_omitted() {
         let essentials = essentials();
         let essentials = essentials.as_object().unwrap();
         let doc = build_document();
         let paths = doc["paths"].as_object().unwrap();
-        let mut omitted = 0;
+        let mut omitted_parameters = 0;
+        let mut omitted_summaries = 0;
         for (path, item) in paths {
             for (method, op) in item.as_object().unwrap() {
                 let essential = essentials
                     .get(path.as_str())
                     .and_then(|ops| ops.get(method.as_str()))
                     .unwrap_or_else(|| panic!("{path} {method}"));
+                for key in ["parameters", "summary"] {
+                    if essential.get(key).is_some_and(Value::is_null) {
+                        assert!(op.get(key).is_none(), "{path} {method} {key}");
+                    } else {
+                        assert_eq!(op[key], essential[key], "{path} {method} {key}");
+                    }
+                }
                 if essential.get("parameters").is_some_and(Value::is_null) {
-                    assert!(op.get("parameters").is_none(), "{path} {method}");
-                    omitted += 1;
-                } else {
-                    assert_eq!(op["parameters"], essential["parameters"], "{path} {method}");
+                    omitted_parameters += 1;
+                }
+                if essential.get("summary").is_some_and(Value::is_null) {
+                    omitted_summaries += 1;
                 }
             }
         }
-        assert_eq!(omitted, 16);
+        assert_eq!(omitted_parameters, 16);
+        assert_eq!(omitted_summaries, 95);
     }
 
     #[test]
