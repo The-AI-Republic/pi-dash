@@ -191,7 +191,7 @@ pub const AGENT_RUN_TABLE: &str = "agent_run";
 /// `NON_TERMINAL_STATUSES` value (`runner/services/matcher.py:54-66`,
 /// pinned by D13-F8 `wire_pins.json#non_terminal_statuses`; D-12 owns
 /// the set, D-13 pins the constant only — no D-14/D-12 code needed).
-/// Tuple order is the `status__in` bind order (`$3`-`$10`).
+/// Tuple order is the `status__in` bind order (`$4`-`$11`).
 pub const NON_TERMINAL_STATUSES: &[&str] = &[
     "queued",
     "assigned",
@@ -403,8 +403,9 @@ pub const MACHINE_REVOKE_UPDATE_FIELDS: &[&str] = &["revoked_at", "updated_at"];
 ///
 /// Runs ONLY when `revoked_at` was NULL (QUIRK-conditional-machine-write).
 /// `machine.save(update_fields=["revoked_at", "updated_at"])`:
-/// `$1`/`$2` = the single `now()` (bound twice — `auto_now` uses the
-/// same timestamp), `$3` = machine id.
+/// `$1` = the view's `now()`, `$2` = the `auto_now` `pre_save` value
+/// (a fresh `timezone.now()` at save time, microseconds after `$1`),
+/// `$3` = machine id.
 pub fn machine_revoke_sql() -> String {
     "UPDATE \"dev_machine\" SET \"revoked_at\" = $1, \"updated_at\" = $2 \
      WHERE \"dev_machine\".\"id\" = $3"
