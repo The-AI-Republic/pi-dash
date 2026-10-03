@@ -635,6 +635,10 @@ export class WebNewDriver implements ParityDriver {
     return todo("kanbanBoardScroll");
   }
 
+  async kanbanColumnScroll(_columnName: string): Promise<{ x: number; y: number }> {
+    return todo("kanbanColumnScroll");
+  }
+
   async kanbanDragHoldNearEdge(
     _sourceName: string,
     _edge: "left" | "right" | "top" | "bottom",

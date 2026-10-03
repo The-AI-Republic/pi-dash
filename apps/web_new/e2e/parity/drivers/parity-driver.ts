@@ -426,11 +426,14 @@ export interface ParityDriver {
   kanbanCellHasLoadMore(columnName: string, laneName: string): Promise<boolean>;
   /** Activate one swimlane cell's load-more entry; resolves once it settles. */
   kanbanCellLoadMore(columnName: string, laneName: string): Promise<void>;
-  /** Current scroll offsets of the board container. */
+  /** Current scroll offsets of the board container (the horizontal scroller). */
   kanbanBoardScroll(): Promise<{ x: number; y: number }>;
+  /** Current scroll offsets of one column's own vertical scroller. */
+  kanbanColumnScroll(columnName: string): Promise<{ x: number; y: number }>;
   /**
    * Press on a card and hold it near one board edge for holdMs, then
-   * release. Callers compare kanbanBoardScroll before/after to observe
+   * release. Callers compare kanbanBoardScroll (horizontal holds) or
+   * kanbanColumnScroll (vertical holds) before/after to observe
    * auto-scroll; the release may move the card.
    */
   kanbanDragHoldNearEdge(sourceName: string, edge: "left" | "right" | "top" | "bottom", holdMs: number): Promise<void>;

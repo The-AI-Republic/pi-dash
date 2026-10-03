@@ -1332,9 +1332,15 @@ export class WebDriver implements ParityDriver {
 
   async kanbanBoardVisible(): Promise<boolean> {
     // Kanban column bodies carry ids of the shape {group}__{subgroup};
-    // no other layout renders such ids.
+    // no other layout renders such ids. A fully collapsed board unmounts
+    // every body but keeps the column shells (flat mode) or the lane bars
+    // (swimlane mode), so those count as rendered too.
     const columns = this.boardMain().locator('div[id*="__"]');
-    if ((await columns.count()) === 0) return false;
+    if ((await columns.count()) === 0) {
+      const shells = await this.boardFlatColumnOuters().count();
+      const bars = await this.kanbanLaneBars().count();
+      if (shells === 0 && bars === 0) return false;
+    }
     return (await this.page.locator("#gantt-container").count()) === 0;
   }
 
@@ -1478,23 +1484,29 @@ export class WebDriver implements ParityDriver {
     return { issueId: parts[1] ?? "", groupId: parts[2] ?? "", subGroupId: parts.slice(3).join("_") };
   }
 
-  private boardCardName(card: Locator): Locator {
-    return card.locator("div.text-body-sm-medium > span").first();
-  }
-
   private async boardCardByName(issueName: string): Promise<Locator> {
+    // One evaluate per poll for the whole board: serial innerText round
+    // trips race the virtualized window (shells mount, churn, and unmount
+    // mid-read), and innerText depends on render state where textContent
+    // reads DOM truth. Placeholder shells carry no name span and read as
+    // "". Lane columns also load lazily after their headers mount, so a
+    // just-opened board may need a beat before the card has content.
     const cards = this.boardCardLinks();
-    const count = await cards.count();
-    for (let index = 0; index < count; index += 1) {
-      const card = cards.nth(index);
-      if (
-        (await this.boardCardName(card)
-          .innerText()
-          .catch(() => null)) === issueName
-      )
-        return card;
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const index = await cards.evaluateAll((els, wanted) => {
+        for (let i = 0; i < els.length; i += 1) {
+          const name = els[i]?.querySelector("div.text-body-sm-medium > span")?.textContent?.trim() ?? "";
+          if (name === wanted) return i;
+        }
+        return -1;
+      }, issueName);
+      if (index >= 0) return cards.nth(index);
+      if (Date.now() > deadline) {
+        throw new Error(`[parity] no kanban card titled ${JSON.stringify(issueName)}.`);
+      }
+      await this.page.waitForTimeout(1_000);
     }
-    throw new Error(`[parity] no kanban card titled ${JSON.stringify(issueName)}.`);
   }
 
   async kanbanCards(): Promise<KanbanCard[]> {
@@ -1993,13 +2005,13 @@ export class WebDriver implements ParityDriver {
 
   async kanbanCellCards(columnName: string, laneName: string): Promise<string[]> {
     const cell = await this.kanbanSwimlaneCell(columnName, laneName);
-    const cards = cell.locator('a[id^="issue_"]');
-    const count = await cards.count();
-    const names: string[] = [];
-    for (let index = 0; index < count; index += 1) {
-      names.push(await this.boardCardName(cards.nth(index)).innerText());
-    }
-    return names;
+    // One evaluate for the whole cell: same virtualization churn as the
+    // column reader; placeholder shells read as "".
+    return cell
+      .locator('a[id^="issue_"]')
+      .evaluateAll((cards) =>
+        cards.map((card) => card.querySelector("div.text-body-sm-medium > span")?.textContent?.trim() ?? "")
+      );
   }
 
   async kanbanCellHasLoadMore(columnName: string, laneName: string): Promise<boolean> {
@@ -2020,11 +2032,34 @@ export class WebDriver implements ParityDriver {
   }
 
   async kanbanBoardScroll(): Promise<{ x: number; y: number }> {
+    // The board container is the innermost ancestor that both overflows
+    // horizontally and actually scrolls (overflow-x auto/scroll): an inner
+    // sizing wrapper overflows without scrolling and always reads 0.
     return await this.page.evaluate(() => {
-      const probe = document.querySelector('div[id*="__"]');
+      const probe = document.querySelector('main div[id*="__"]') ?? document.querySelector("main");
       let node: HTMLElement | null = probe instanceof HTMLElement ? probe : null;
       while (node) {
-        if (node.scrollWidth > node.clientWidth + 4 || node.scrollHeight > node.clientHeight + 4) {
+        const axis = window.getComputedStyle(node).overflowX;
+        if (node.scrollWidth > node.clientWidth + 4 && (axis === "auto" || axis === "scroll")) {
+          return { x: node.scrollLeft, y: node.scrollTop };
+        }
+        node = node.parentElement;
+      }
+      return { x: 0, y: 0 };
+    });
+  }
+
+  async kanbanColumnScroll(columnName: string): Promise<{ x: number; y: number }> {
+    const outer = await this.boardFlatColumnOuterByName(columnName);
+    return await outer.evaluate((root) => {
+      const body = root.querySelector('div[id*="__"]');
+      let node: HTMLElement | null = body instanceof HTMLElement ? body : root;
+      while (node && root.contains(node)) {
+        const axis = window.getComputedStyle(node).overflowY;
+        if (
+          (node.scrollHeight > node.clientHeight + 4 || node.scrollWidth > node.clientWidth + 4) &&
+          (axis === "auto" || axis === "scroll")
+        ) {
           return { x: node.scrollLeft, y: node.scrollTop };
         }
         node = node.parentElement;
@@ -2044,14 +2079,18 @@ export class WebDriver implements ParityDriver {
     if (!sourceBox) throw new Error("[parity] edge-hold card has no box.");
     const from = WebDriver.boxCenter(sourceBox);
     const margin = 12;
+    // Holds track the grabbed card's own axis so the cursor stays over its
+    // column (vertical holds) or its row band (horizontal holds); a centered
+    // hold can land over a short neighbor column with no room to scroll.
+    const clamp = (value: number, max: number): number => Math.min(Math.max(value, margin), max - margin);
     const onto =
       edge === "left"
-        ? { x: margin, y: viewport.height / 2 }
+        ? { x: margin, y: clamp(from.y, viewport.height) }
         : edge === "right"
-          ? { x: viewport.width - margin, y: viewport.height / 2 }
+          ? { x: viewport.width - margin, y: clamp(from.y, viewport.height) }
           : edge === "top"
-            ? { x: viewport.width / 2, y: margin }
-            : { x: viewport.width / 2, y: viewport.height - margin };
+            ? { x: clamp(from.x, viewport.width), y: margin }
+            : { x: clamp(from.x, viewport.width), y: viewport.height - margin };
     await this.page.mouse.move(from.x, from.y);
     await this.page.mouse.down();
     await this.page.mouse.move(onto.x, onto.y, { steps: 10 });
