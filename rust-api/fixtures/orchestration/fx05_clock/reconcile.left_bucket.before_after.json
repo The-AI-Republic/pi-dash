@@ -1,0 +1,60 @@
+{
+  "_trace": "orchestration/scheduling.py:451-459 (_on_left_bucket); :279-282 (_stop_clock)",
+  "_method": "live reconcile on pidash_524_scratch; clock frozen 2026-06-01T12:00Z, random.seed(52405) per event, states set via queryset update (orchestration Issue signals disconnected)",
+  "cases": {
+    "L1_left_bucket_dormant_keeps_pool": {
+      "before": {
+        "used": 4,
+        "granted": 3,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": true,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "left_bucket()",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "dormant"
+      },
+      "after": {
+        "used": 4,
+        "granted": 3,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "left_ticking_state",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-10"
+    },
+    "L2_left_bucket_no_ticker": {
+      "before": null,
+      "event": "left_bucket()",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "no-ticker"
+      },
+      "after": null,
+      "issue": "FX5-11"
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "_trace": "orchestration/relations.py:138-163 (resolve_refs)",
+  "_method": "live resolve_refs on pidash_524_scratch; pool = live FX4 workspace issues",
+  "input_refs": [
+    "99999999-aaaa-bbbb-cccc-000000004103",
+    "FX4A-1",
+    "fx4a-2",
+    "FX4B-1",
+    "  FX4A-3  ",
+    "12345678-1234-1234-1234-123456789abc",
+    "NOPE-9",
+    "not-a-ref",
+    "",
+    "FX4A-999"
+  ],
+  "found_identifiers_in_order": [
+    "FX4A-3",
+    "FX4A-1",
+    "FX4A-2",
+    "FX4B-1",
+    "FX4A-3"
+  ],
+  "found_ids": [
+    "99999999-aaaa-bbbb-cccc-000000004103",
+    "99999999-aaaa-bbbb-cccc-000000004101",
+    "99999999-aaaa-bbbb-cccc-000000004102",
+    "99999999-aaaa-bbbb-cccc-000000004104",
+    "99999999-aaaa-bbbb-cccc-000000004103"
+  ],
+  "unresolved_passthrough": [
+    "12345678-1234-1234-1234-123456789abc",
+    "NOPE-9",
+    "not-a-ref",
+    "",
+    "FX4A-999"
+  ]
+}

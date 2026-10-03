@@ -1,0 +1,389 @@
+{
+  "_trace": "orchestration/scheduling.py:521-534 (_on_human_run_requested); :537-580 (_on_retick: guards 550-563, grant 559-565, paused 566-572, queue vs retime 573-578)",
+  "_method": "live reconcile on pidash_524_scratch; clock frozen 2026-06-01T12:00Z, random.seed(52405) per event, states set via queryset update (orchestration Issue signals disconnected); pool 10, infinite pool on FX5I (-1)",
+  "cases": {
+    "H1_human_run_free": {
+      "before": {
+        "used": 4,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "terminal_signal",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "human_run_requested()",
+      "decision": {
+        "dispatch_now": true,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "dispatch-now"
+      },
+      "after": {
+        "used": 4,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T15:01:45.493780+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-27"
+    },
+    "H2_human_run_busy": {
+      "before": {
+        "used": 4,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "human_run_requested(actor, trigger=comment_and_run)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": true,
+        "parked": false,
+        "granted": false,
+        "reason": "free-entry-queued"
+      },
+      "after": {
+        "used": 4,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": true,
+        "pending_entry_free": true,
+        "pending_entry_actor": "fx5-actor@example.com",
+        "pending_entry_trigger": "comment_and_run",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-28"
+    },
+    "H3_human_run_no_run_wanted": {
+      "before": {
+        "used": 4,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "terminal_signal",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "human_run_requested(want_run=False)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "retimed"
+      },
+      "after": {
+        "used": 4,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T15:01:45.493780+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-29"
+    },
+    "T1_retick_grant_dispatch": {
+      "before": {
+        "used": 10,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "cap_hit",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "retick()",
+      "decision": {
+        "dispatch_now": true,
+        "queued": false,
+        "parked": false,
+        "granted": true,
+        "reason": "granted"
+      },
+      "after": {
+        "used": 10,
+        "granted": 10,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T15:01:45.493780+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-30"
+    },
+    "T2a_retick_no_ticker": {
+      "before": null,
+      "event": "retick()",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "no_ticker"
+      },
+      "after": null,
+      "issue": "FX5-31"
+    },
+    "T2b_retick_not_ticking_state": {
+      "before": {
+        "used": 10,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "retick()",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "not_ticking_state"
+      },
+      "after": {
+        "used": 10,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-32"
+    },
+    "T2c_retick_budget_not_exhausted": {
+      "before": {
+        "used": 2,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "retick()",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "budget_not_exhausted"
+      },
+      "after": {
+        "used": 2,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-33"
+    },
+    "T2d_retick_infinite_pool": {
+      "before": {
+        "used": 999,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "retick()",
+      "note": "cap_reached() is never true on an infinite pool, so the budget_not_exhausted guard returns first; the pool == -1 check (:560-563) is unreachable by construction",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "budget_not_exhausted"
+      },
+      "after": {
+        "used": 999,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5I-1"
+    },
+    "T4_retick_busy": {
+      "before": {
+        "used": 10,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "cap_hit",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "retick(actor=fx5-actor)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": true,
+        "parked": false,
+        "granted": true,
+        "reason": "granted"
+      },
+      "after": {
+        "used": 10,
+        "granted": 10,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": true,
+        "pending_entry_free": true,
+        "pending_entry_actor": "fx5-actor@example.com",
+        "pending_entry_trigger": "run_ai",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-34"
+    },
+    "T5_retick_from_paused": {
+      "before": {
+        "used": 10,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "cap_hit",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "retick()",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": true,
+        "reason": "granted-from-paused"
+      },
+      "after": {
+        "used": 10,
+        "granted": 10,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "cap_hit",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-35"
+    }
+  }
+}

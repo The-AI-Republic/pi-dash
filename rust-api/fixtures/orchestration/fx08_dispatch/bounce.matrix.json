@@ -1,0 +1,401 @@
+{
+  "_trace": "orchestration/scheduling.py:1029-1125 (_bounce_issue_no_eligible_runner); bodies :1064-1077; target :1082-1109; explicit disarm :1115-1116; comment :1118-1125",
+  "_method": "live bounce on pidash_524_scratch; frozen clock; orchestration Issue signals CONNECTED so the state move disarms the ticker through the real fire_state_transition (production truth); bodies recorded verbatim (comment_html); bounce reasons captured from the scheduling logger",
+  "cases": {
+    "B1_body_no_llm_config": {
+      "issue": "FX8-9",
+      "reason": "no-llm-config",
+      "triggered_by": "tick",
+      "before": {
+        "state": "In Progress",
+        "ticker": {
+          "used": 2,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": true,
+          "disarm_reason": "",
+          "next_run_at": "2026-06-01T12:00:00+00:00",
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "after": {
+        "state": "BacklogHi",
+        "ticker": {
+          "used": 2,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "left_ticking_state",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "comments_added": 1,
+      "comment_html": [
+        "<p><strong>Agent run skipped \u2014 no AI provider configured.</strong></p><p>This project uses the Pi Dash Cloud Agent, which runs against the triggering user's AI provider. Configure one in Pi Dash AI settings, or assign this issue to a member who has one configured.</p>"
+      ],
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008110 reason=no-llm-config triggered_by=tick"
+        },
+        {
+          "level": "INFO",
+          "message": "agent_ticker: reconcile issue=88888888-aaaa-bbbb-cccc-000000008110 event=left_bucket -> dispatch_now=False queued=False parked=False reason=dormant"
+        }
+      ]
+    },
+    "B2_body_default": {
+      "issue": "FX8-10",
+      "reason": "no-eligible-runner",
+      "triggered_by": "tick",
+      "before": {
+        "state": "In Progress",
+        "ticker": {
+          "used": 2,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": true,
+          "disarm_reason": "",
+          "next_run_at": "2026-06-01T12:00:00+00:00",
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "after": {
+        "state": "BacklogHi",
+        "ticker": {
+          "used": 2,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "left_ticking_state",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "comments_added": 1,
+      "comment_html": [
+        "<p><strong>Agent run skipped \u2014 no eligible runner.</strong></p><p>No runner is registered in this pod that can serve this issue. Add a runner under your account, or assign this issue to a workspace member whose runner is registered here.</p>"
+      ],
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008111 reason=no-eligible-runner triggered_by=tick"
+        },
+        {
+          "level": "INFO",
+          "message": "agent_ticker: reconcile issue=88888888-aaaa-bbbb-cccc-000000008111 event=left_bucket -> dispatch_now=False queued=False parked=False reason=dormant"
+        }
+      ]
+    },
+    "B2b_body_managed_reason": {
+      "issue": "FX8-11",
+      "reason": "no-managed-runner",
+      "triggered_by": "tick",
+      "before": {
+        "state": "In Progress",
+        "ticker": null
+      },
+      "after": {
+        "state": "BacklogHi",
+        "ticker": null
+      },
+      "comments_added": 1,
+      "comment_html": [
+        "<p><strong>Agent run skipped \u2014 no eligible runner.</strong></p><p>No runner is registered in this pod that can serve this issue. Add a runner under your account, or assign this issue to a workspace member whose runner is registered here.</p>"
+      ],
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008112 reason=no-managed-runner triggered_by=tick"
+        },
+        {
+          "level": "INFO",
+          "message": "agent_ticker: reconcile issue=88888888-aaaa-bbbb-cccc-000000008112 event=left_bucket -> dispatch_now=False queued=False parked=False reason=no-ticker"
+        }
+      ]
+    },
+    "B3a_default_beats_sequence": {
+      "issue": "FX8-12",
+      "reason": "no-eligible-runner",
+      "triggered_by": "tick",
+      "before": {
+        "state": "In Progress",
+        "ticker": null
+      },
+      "after": {
+        "state": "BacklogHi",
+        "ticker": null
+      },
+      "comments_added": 1,
+      "comment_html": [
+        "<p><strong>Agent run skipped \u2014 no eligible runner.</strong></p><p>No runner is registered in this pod that can serve this issue. Add a runner under your account, or assign this issue to a workspace member whose runner is registered here.</p>"
+      ],
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008113 reason=no-eligible-runner triggered_by=tick"
+        },
+        {
+          "level": "INFO",
+          "message": "agent_ticker: reconcile issue=88888888-aaaa-bbbb-cccc-000000008113 event=left_bucket -> dispatch_now=False queued=False parked=False reason=no-ticker"
+        }
+      ]
+    },
+    "B3b_sequence_order": {
+      "issue": "FX8-13",
+      "reason": "no-eligible-runner",
+      "triggered_by": "tick",
+      "before": {
+        "state": "In Progress",
+        "ticker": null
+      },
+      "after": {
+        "state": "BacklogLo",
+        "ticker": null
+      },
+      "comments_added": 1,
+      "comment_html": [
+        "<p><strong>Agent run skipped \u2014 no eligible runner.</strong></p><p>No runner is registered in this pod that can serve this issue. Add a runner under your account, or assign this issue to a workspace member whose runner is registered here.</p>"
+      ],
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008114 reason=no-eligible-runner triggered_by=tick"
+        },
+        {
+          "level": "INFO",
+          "message": "agent_ticker: reconcile issue=88888888-aaaa-bbbb-cccc-000000008114 event=left_bucket -> dispatch_now=False queued=False parked=False reason=no-ticker"
+        }
+      ]
+    },
+    "B4_default_state_fallback": {
+      "issue": "FX8B-2",
+      "reason": "no-eligible-runner",
+      "triggered_by": "tick",
+      "before": {
+        "state": "In Progress",
+        "ticker": null
+      },
+      "after": {
+        "state": "Todo",
+        "ticker": null
+      },
+      "comments_added": 1,
+      "comment_html": [
+        "<p><strong>Agent run skipped \u2014 no eligible runner.</strong></p><p>No runner is registered in this pod that can serve this issue. Add a runner under your account, or assign this issue to a workspace member whose runner is registered here.</p>"
+      ],
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008115 reason=no-eligible-runner triggered_by=tick"
+        },
+        {
+          "level": "INFO",
+          "message": "agent_ticker: reconcile issue=88888888-aaaa-bbbb-cccc-000000008115 event=left_bucket -> dispatch_now=False queued=False parked=False reason=no-ticker"
+        }
+      ]
+    },
+    "B5_ticking_fallback_unbouncable": {
+      "issue": "FX8B-3",
+      "reason": "no-eligible-runner",
+      "triggered_by": "tick",
+      "before": {
+        "state": "In Progress",
+        "ticker": {
+          "used": 2,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": true,
+          "disarm_reason": "",
+          "next_run_at": "2026-06-01T12:00:00+00:00",
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "after": {
+        "state": "In Progress",
+        "ticker": {
+          "used": 2,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "left_ticking_state",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "comments_added": 1,
+      "comment_html": [
+        "<p><strong>Agent run skipped \u2014 no eligible runner.</strong></p><p>No runner is registered in this pod that can serve this issue. Add a runner under your account, or assign this issue to a workspace member whose runner is registered here.</p>"
+      ],
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008116 reason=no-eligible-runner triggered_by=tick"
+        },
+        {
+          "level": "WARNING",
+          "message": "agent_dispatch: no safe backlog target for project=88888888-aaaa-bbbb-cccc-000000000808; issue=88888888-aaaa-bbbb-cccc-000000008116 stays in current state, ticker disarmed"
+        },
+        {
+          "level": "INFO",
+          "message": "agent_ticker: disarmed issue=88888888-aaaa-bbbb-cccc-000000008116 reason=left_ticking_state"
+        }
+      ]
+    },
+    "B6_no_target_unbouncable": {
+      "issue": "FX8B-4",
+      "reason": "no-eligible-runner",
+      "triggered_by": "tick",
+      "before": {
+        "state": "In Progress",
+        "ticker": {
+          "used": 2,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": true,
+          "disarm_reason": "",
+          "next_run_at": "2026-06-01T12:00:00+00:00",
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "after": {
+        "state": "In Progress",
+        "ticker": {
+          "used": 2,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "left_ticking_state",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "comments_added": 1,
+      "comment_html": [
+        "<p><strong>Agent run skipped \u2014 no eligible runner.</strong></p><p>No runner is registered in this pod that can serve this issue. Add a runner under your account, or assign this issue to a workspace member whose runner is registered here.</p>"
+      ],
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008117 reason=no-eligible-runner triggered_by=tick"
+        },
+        {
+          "level": "WARNING",
+          "message": "agent_dispatch: no safe backlog target for project=88888888-aaaa-bbbb-cccc-000000000808; issue=88888888-aaaa-bbbb-cccc-000000008117 stays in current state, ticker disarmed"
+        },
+        {
+          "level": "INFO",
+          "message": "agent_ticker: disarmed issue=88888888-aaaa-bbbb-cccc-000000008117 reason=left_ticking_state"
+        }
+      ]
+    },
+    "B7_already_backlog": {
+      "issue": "FX8-14",
+      "reason": "no-eligible-runner",
+      "triggered_by": "tick",
+      "before": {
+        "state": "BacklogLo",
+        "ticker": null
+      },
+      "after": {
+        "state": "BacklogLo",
+        "ticker": null
+      },
+      "comments_added": 1,
+      "comment_html": [
+        "<p><strong>Agent run skipped \u2014 no eligible runner.</strong></p><p>No runner is registered in this pod that can serve this issue. Add a runner under your account, or assign this issue to a workspace member whose runner is registered here.</p>"
+      ],
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008118 reason=no-eligible-runner triggered_by=tick"
+        }
+      ]
+    },
+    "B8_atomic_rollback": {
+      "issue": "FX8-15",
+      "seam": "IssueComment.objects.create raises RuntimeError('fx8-boom')",
+      "raised": "RuntimeError: fx8-boom",
+      "state_before": "In Progress",
+      "state_after": "In Progress",
+      "comments": 0,
+      "ticker_after": {
+        "used": 2,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      }
+    },
+    "B9_comment_row": {
+      "issue": "FX8-16",
+      "triggered_by": "run_ai",
+      "row": {
+        "actor": "agent@example.com",
+        "speaker_type": "agent",
+        "comment_html": "<p><strong>Agent run skipped \u2014 no eligible runner.</strong></p><p>No runner is registered in this pod that can serve this issue. Add a runner under your account, or assign this issue to a workspace member whose runner is registered here.</p>",
+        "comment_stripped": "Agent run skipped \u2014 no eligible runner.No runner is registered in this pod that can serve this issue. Add a runner under your account, or assign this issue to a workspace member whose runner is registered here.",
+        "project": "FX8",
+        "workspace": "fx8-ws",
+        "issue": "FX8-16"
+      }
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "_trace": "orchestration/workpad.py:29-32 (AGENT_* constants), :35-41 (AgentUserCollisionError), :44-71 (get_agent_system_user: get_or_create 53-61, unusable password 62-65, collision refusal 66-70)",
+  "_method": "live get_agent_system_user on pidash_524_scratch; collision via a human row holding the reserved username",
+  "constants": {
+    "AGENT_USERNAME": "pi_dash_agent",
+    "AGENT_USER_EMAIL": "agent@example.com",
+    "AGENT_USER_FIRST_NAME": "Pi Dash",
+    "AGENT_USER_LAST_NAME": "Agent"
+  },
+  "created_row": {
+    "username": "pi_dash_agent",
+    "email": "agent@example.com",
+    "first_name": "Pi Dash",
+    "last_name": "Agent",
+    "is_bot": true,
+    "has_usable_password": false
+  },
+  "exists_returns_same_pk": true,
+  "collision_error": "User 'pi_dash_agent' exists but is not a bot; refusing to author agent activity under a human account.",
+  "collision_error_type": "AgentUserCollisionError"
+}

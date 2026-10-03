@@ -1,0 +1,14 @@
+{
+  "_trace": "orchestration/workpad.py:74-76 (get_workpad), :79-84 (set_workpad incl. update_fields)",
+  "_method": "live get/set_workpad on pidash_524_scratch; set UPDATE captured via CaptureQueriesContext",
+  "fresh_issue_db_value": "",
+  "get_fresh": "",
+  "get_none_attr": "",
+  "after_set": "## Agent Workpad\n\n- implementing\n",
+  "after_overwrite": "second",
+  "after_clear": "",
+  "set_none_yields": "",
+  "set_update_sql": [
+    "UPDATE \"issues\" SET \"updated_at\" = '2026-10-03 12:00:00+00:00'::timestamptz, \"workpad\" = '## Agent Workpad\n\n- implementing\n' WHERE \"issues\".\"id\" = '11111111222233334444000000003020'::uuid"
+  ]
+}

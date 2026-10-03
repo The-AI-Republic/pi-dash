@@ -1,0 +1,125 @@
+{
+  "_trace": "orchestration/scheduling.py:955-1026 (preflight_eligibility_or_bounce); cloud :981-986; managed :988-1016; local :1018-1026",
+  "_method": "live preflight on pidash_524_scratch; frozen clock; real effective_executor_for_issue + local matcher; D-11/managed seams (user_has_llm_config, managed_runner_is_enabled, managed_llm_profile, enrolled_managed_runners) scripted per case; bounce reasons captured from the scheduling logger (issue pks are fixed seeds)",
+  "cases": {
+    "F1_cloud_llm_ok": {
+      "issue": "FX8-1",
+      "executor": "cloud_agent",
+      "seam": "user_has_llm_config -> True",
+      "result": true,
+      "comments": 0,
+      "logs": []
+    },
+    "F2_cloud_no_llm": {
+      "issue": "FX8-2",
+      "executor": "cloud_agent",
+      "seam": "user_has_llm_config -> False",
+      "result": false,
+      "issue_state_after": "BacklogHi",
+      "comment_head": "<p><strong>Agent run skipped \u2014 no AI provider configured.</strong></p><p>This pr",
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008102 reason=no-llm-config triggered_by=tick"
+        },
+        {
+          "level": "INFO",
+          "message": "agent_ticker: reconcile issue=88888888-aaaa-bbbb-cccc-000000008102 event=left_bucket -> dispatch_now=False queued=False parked=False reason=no-ticker"
+        }
+      ]
+    },
+    "F3a_managed_no_creator": {
+      "issue": "FX8-3",
+      "executor": "managed_runner",
+      "creator": null,
+      "result": false,
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008103 reason=no-managed-runner triggered_by=tick"
+        },
+        {
+          "level": "INFO",
+          "message": "agent_ticker: reconcile issue=88888888-aaaa-bbbb-cccc-000000008103 event=left_bucket -> dispatch_now=False queued=False parked=False reason=no-ticker"
+        }
+      ]
+    },
+    "F3b_managed_disabled": {
+      "issue": "FX8-4",
+      "seam": "managed_runner_is_enabled -> False",
+      "result": false,
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008104 reason=managed_runner_disabled triggered_by=tick"
+        },
+        {
+          "level": "INFO",
+          "message": "agent_ticker: reconcile issue=88888888-aaaa-bbbb-cccc-000000008104 event=left_bucket -> dispatch_now=False queued=False parked=False reason=no-ticker"
+        }
+      ]
+    },
+    "F3c_managed_no_profile": {
+      "issue": "FX8-5",
+      "seam": "managed_llm_profile -> unavailable/llm_config_missing",
+      "result": false,
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008105 reason=llm_config_missing triggered_by=tick"
+        },
+        {
+          "level": "INFO",
+          "message": "agent_ticker: reconcile issue=88888888-aaaa-bbbb-cccc-000000008105 event=left_bucket -> dispatch_now=False queued=False parked=False reason=no-ticker"
+        }
+      ]
+    },
+    "F3d_managed_not_enrolled": {
+      "issue": "FX8-6",
+      "seam": "enrolled_managed_runners.exists -> False",
+      "result": false,
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008106 reason=no-managed-runner triggered_by=tick"
+        },
+        {
+          "level": "INFO",
+          "message": "agent_ticker: reconcile issue=88888888-aaaa-bbbb-cccc-000000008106 event=left_bucket -> dispatch_now=False queued=False parked=False reason=no-ticker"
+        }
+      ]
+    },
+    "F3e_managed_all_pass": {
+      "issue": "FX8-7",
+      "result": true,
+      "comments": 0,
+      "logs": []
+    },
+    "F4a_local_runner_match": {
+      "issue": "FX8-8",
+      "executor": "local_runner",
+      "pod": "FX8_pod_1",
+      "creator": "fx8-creator@example.com",
+      "result": true,
+      "comments": 0,
+      "logs": []
+    },
+    "F4b_local_no_runner": {
+      "issue": "FX8B-1",
+      "pod": "FX8B_pod_1",
+      "runners_in_pod": 0,
+      "result": false,
+      "issue_state_after": "In Progress",
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008109 reason=no-eligible-runner triggered_by=tick"
+        },
+        {
+          "level": "WARNING",
+          "message": "agent_dispatch: no safe backlog target for project=88888888-aaaa-bbbb-cccc-000000000808; issue=88888888-aaaa-bbbb-cccc-000000008109 stays in current state, ticker disarmed"
+        }
+      ]
+    }
+  }
+}

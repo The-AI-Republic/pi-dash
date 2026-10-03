@@ -1,0 +1,485 @@
+{
+  "_trace": "orchestration/scheduling.py:1349-1469 (maybe_apply_deferred_pause); guards :1368-1415; Paused lookup :1417-1431; lock re-checks + move :1436-1463",
+  "_method": "live maybe_apply_deferred_pause on pidash_524_scratch; frozen clock; signals CONNECTED (the Paused move fires the real leave-bucket transition); bot updated_by read back verbatim; the lock re-checks are concurrency-only \u2014 the happy path passes them single-threaded and their False branches are noted, not injected",
+  "cases": {
+    "U1_no_work_item": {
+      "run": "run-U1-orphan",
+      "result": false,
+      "logs": []
+    },
+    "U2_no_ticker": {
+      "run": "run-U2",
+      "issue": "FX8-49",
+      "before": {
+        "state": "In Progress",
+        "ticker": null
+      },
+      "result": false,
+      "after": {
+        "state": "In Progress",
+        "updated_by": null,
+        "ticker": null
+      },
+      "logs": []
+    },
+    "U3_ticker_enabled": {
+      "run": "run-U3",
+      "issue": "FX8-50",
+      "before": {
+        "state": "In Progress",
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": true,
+          "disarm_reason": "",
+          "next_run_at": "2026-06-01T12:00:00+00:00",
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "result": false,
+      "after": {
+        "state": "In Progress",
+        "updated_by": null,
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": true,
+          "disarm_reason": "",
+          "next_run_at": "2026-06-01T12:00:00+00:00",
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "logs": []
+    },
+    "U4_pending_entry": {
+      "run": "run-U4",
+      "issue": "FX8-51",
+      "before": {
+        "state": "In Progress",
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "cap_hit",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": true,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "result": false,
+      "after": {
+        "state": "In Progress",
+        "updated_by": null,
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "cap_hit",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": true,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "logs": []
+    },
+    "U5_pool_spent": {
+      "run": "run-U5",
+      "issue": "FX8-52",
+      "before": {
+        "state": "In Progress",
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "pool_spent",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "result": false,
+      "after": {
+        "state": "In Progress",
+        "updated_by": null,
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "pool_spent",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "logs": []
+    },
+    "U6_no_state": {
+      "run": "run-U6",
+      "issue": "FX8-53",
+      "before": {
+        "state": null,
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "cap_hit",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "result": false,
+      "after": {
+        "state": null,
+        "updated_by": null,
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "cap_hit",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "logs": []
+    },
+    "U7_done_state": {
+      "run": "run-U7",
+      "issue": "FX8-54",
+      "before": {
+        "state": "Done",
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "cap_hit",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "result": false,
+      "after": {
+        "state": "Done",
+        "updated_by": null,
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "cap_hit",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "logs": []
+    },
+    "U8_review_no_autopause": {
+      "run": "run-U8",
+      "issue": "FX8-55",
+      "before": {
+        "state": "In Review",
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "cap_hit",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "result": false,
+      "after": {
+        "state": "In Review",
+        "updated_by": null,
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "cap_hit",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "agent_ticker: review cap hit for issue=88888888-aaaa-bbbb-cccc-000000008170 \u2014 leaving it in place, no auto-pause"
+        }
+      ]
+    },
+    "U9_other_active_run": {
+      "run": "run-U9-ended",
+      "issue": "FX8-56",
+      "before": {
+        "state": "In Progress",
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "cap_hit",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "result": false,
+      "after": {
+        "state": "In Progress",
+        "updated_by": null,
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "cap_hit",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "logs": []
+    },
+    "U10_no_paused_state": {
+      "run": "run-U10",
+      "issue": "FX8B-8",
+      "before": {
+        "state": "In Progress",
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "cap_hit",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "result": false,
+      "after": {
+        "state": "In Progress",
+        "updated_by": null,
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "cap_hit",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "logs": [
+        {
+          "level": "WARNING",
+          "message": "agent_ticker: cannot auto-pause issue=88888888-aaaa-bbbb-cccc-000000008172 \u2014 no Paused state in project"
+        }
+      ]
+    },
+    "U11_paused": {
+      "run": "run-U11",
+      "issue": "FX8-57",
+      "before": {
+        "state": "In Progress",
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "cap_hit",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "result": true,
+      "after": {
+        "state": "Paused",
+        "updated_by": null,
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "left_ticking_state",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "agent_ticker: reconcile issue=88888888-aaaa-bbbb-cccc-000000008173 event=left_bucket -> dispatch_now=False queued=False parked=False reason=dormant"
+        },
+        {
+          "level": "INFO",
+          "message": "agent_ticker: auto-paused issue=88888888-aaaa-bbbb-cccc-000000008173 after cap hit"
+        }
+      ]
+    },
+    "U12_self_active_allowed": {
+      "run": "run-U12",
+      "issue": "FX8-58",
+      "before": {
+        "state": "In Progress",
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "cap_hit",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "result": true,
+      "after": {
+        "state": "Paused",
+        "updated_by": null,
+        "ticker": {
+          "used": 10,
+          "granted": 0,
+          "waited": 0,
+          "user_disabled": false,
+          "enabled": false,
+          "disarm_reason": "left_ticking_state",
+          "next_run_at": null,
+          "last_tick_at": null,
+          "pending_entry": false,
+          "pending_entry_free": false,
+          "pending_entry_actor": null,
+          "pending_entry_trigger": "",
+          "resume_parent_run": null
+        }
+      },
+      "logs": [
+        {
+          "level": "INFO",
+          "message": "agent_ticker: reconcile issue=88888888-aaaa-bbbb-cccc-000000008174 event=left_bucket -> dispatch_now=False queued=False parked=False reason=dormant"
+        },
+        {
+          "level": "INFO",
+          "message": "agent_ticker: auto-paused issue=88888888-aaaa-bbbb-cccc-000000008174 after cap hit"
+        }
+      ]
+    }
+  },
+  "_lock_rechecks": "scheduling.py:1442-1451 re-reads the ticker under select_for_update (enabled flip / reason flip) and :1455-1459 re-reads the issue row (racing transition); all three return False on mismatch. Single-threaded they re-read the same row, so U11 passes them and their False branches are reachable only under concurrency \u2014 recorded from code reading, not injected."
+}

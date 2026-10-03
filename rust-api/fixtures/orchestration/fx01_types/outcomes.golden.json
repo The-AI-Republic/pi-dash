@@ -1,0 +1,290 @@
+{
+  "OUTCOME_PROGRESSED": "progressed",
+  "OUTCOME_WAITING_ON_HUMAN": "waiting_on_human",
+  "OUTCOME_WAITING_ON_EXTERNAL": "waiting_on_external",
+  "OUTCOME_DONE": "done",
+  "OUTCOME_BLOCKED": "blocked",
+  "RUN_OUTCOMES": [
+    "blocked",
+    "done",
+    "progressed",
+    "waiting_on_external",
+    "waiting_on_human"
+  ],
+  "STOPPING_OUTCOMES": [
+    "blocked",
+    "done",
+    "waiting_on_human"
+  ],
+  "_LEGACY_OUTCOME_ALIASES": {
+    "completed": "done",
+    "paused": "waiting_on_human"
+  },
+  "default_outcome_for_kind": [
+    {
+      "phase_kind": "",
+      "result": "progressed"
+    },
+    {
+      "phase_kind": "coding-task",
+      "result": "progressed"
+    },
+    {
+      "phase_kind": "review",
+      "result": "done"
+    },
+    {
+      "phase_kind": "test",
+      "result": "done"
+    },
+    {
+      "phase_kind": "other-kind",
+      "result": "done"
+    }
+  ],
+  "normalize_outcome": [
+    {
+      "value": "progressed",
+      "phase_kind": "",
+      "result": "progressed"
+    },
+    {
+      "value": "waiting_on_human",
+      "phase_kind": "",
+      "result": "waiting_on_human"
+    },
+    {
+      "value": "waiting_on_external",
+      "phase_kind": "",
+      "result": "waiting_on_external"
+    },
+    {
+      "value": "done",
+      "phase_kind": "",
+      "result": "done"
+    },
+    {
+      "value": "blocked",
+      "phase_kind": "",
+      "result": "blocked"
+    },
+    {
+      "value": "Done",
+      "phase_kind": "",
+      "result": "done"
+    },
+    {
+      "value": "  progressed  ",
+      "phase_kind": "",
+      "result": "progressed"
+    },
+    {
+      "value": "BLOCKED",
+      "phase_kind": "",
+      "result": "blocked"
+    },
+    {
+      "value": "Waiting_On_Human",
+      "phase_kind": "",
+      "result": "waiting_on_human"
+    },
+    {
+      "value": "noop",
+      "phase_kind": "",
+      "result": "progressed"
+    },
+    {
+      "value": "noop",
+      "phase_kind": "coding-task",
+      "result": "progressed"
+    },
+    {
+      "value": "noop",
+      "phase_kind": "review",
+      "result": "done"
+    },
+    {
+      "value": "noop",
+      "phase_kind": "test",
+      "result": "done"
+    },
+    {
+      "value": "noop",
+      "phase_kind": "other-kind",
+      "result": "done"
+    },
+    {
+      "value": "NOOP",
+      "phase_kind": "",
+      "result": "progressed"
+    },
+    {
+      "value": "NOOP",
+      "phase_kind": "coding-task",
+      "result": "progressed"
+    },
+    {
+      "value": "NOOP",
+      "phase_kind": "review",
+      "result": "done"
+    },
+    {
+      "value": "NOOP",
+      "phase_kind": "test",
+      "result": "done"
+    },
+    {
+      "value": "NOOP",
+      "phase_kind": "other-kind",
+      "result": "done"
+    },
+    {
+      "value": "completed",
+      "phase_kind": "",
+      "result": "done"
+    },
+    {
+      "value": "Completed",
+      "phase_kind": "",
+      "result": "done"
+    },
+    {
+      "value": "paused",
+      "phase_kind": "",
+      "result": "waiting_on_human"
+    },
+    {
+      "value": " Paused ",
+      "phase_kind": "",
+      "result": "waiting_on_human"
+    },
+    {
+      "value": "bogus-outcome",
+      "phase_kind": "",
+      "result": null
+    },
+    {
+      "value": "",
+      "phase_kind": "",
+      "result": null
+    },
+    {
+      "value": "   ",
+      "phase_kind": "",
+      "result": null
+    },
+    {
+      "value": "None",
+      "value_type": "NoneType",
+      "phase_kind": "",
+      "result": null
+    },
+    {
+      "value": "123",
+      "value_type": "int",
+      "phase_kind": "",
+      "result": null
+    },
+    {
+      "value": "4.5",
+      "value_type": "float",
+      "phase_kind": "",
+      "result": null
+    },
+    {
+      "value": "{}",
+      "value_type": "dict",
+      "phase_kind": "",
+      "result": null
+    },
+    {
+      "value": "[]",
+      "value_type": "list",
+      "phase_kind": "",
+      "result": null
+    },
+    {
+      "value": "True",
+      "value_type": "bool",
+      "phase_kind": "",
+      "result": null
+    },
+    {
+      "value": "b'done'",
+      "value_type": "bytes",
+      "phase_kind": "",
+      "result": null
+    }
+  ],
+  "outcome_for_run": [
+    {
+      "done_payload": {
+        "status": "progressed"
+      },
+      "phase_kind": "",
+      "result": "progressed"
+    },
+    {
+      "done_payload": {
+        "status": "done"
+      },
+      "phase_kind": "review",
+      "result": "done"
+    },
+    {
+      "done_payload": {
+        "status": "noop"
+      },
+      "phase_kind": "",
+      "result": "progressed"
+    },
+    {
+      "done_payload": {
+        "status": "noop"
+      },
+      "phase_kind": "review",
+      "result": "done"
+    },
+    {
+      "done_payload": {
+        "status": "completed"
+      },
+      "phase_kind": "",
+      "result": "done"
+    },
+    {
+      "done_payload": {
+        "status": "bogus"
+      },
+      "phase_kind": "",
+      "result": null
+    },
+    {
+      "done_payload": {},
+      "phase_kind": "",
+      "result": null
+    },
+    {
+      "done_payload": null,
+      "phase_kind": "",
+      "result": null
+    },
+    {
+      "done_payload": "not-a-dict",
+      "phase_kind": "",
+      "result": null
+    },
+    {
+      "done_payload": 5,
+      "phase_kind": "",
+      "result": null
+    },
+    {
+      "done_payload": {
+        "status": null
+      },
+      "phase_kind": "",
+      "result": null
+    }
+  ]
+}

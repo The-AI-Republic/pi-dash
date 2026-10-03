@@ -1,0 +1,104 @@
+{
+  "minimal": {
+    "input": {
+      "status": "completed"
+    },
+    "output": {
+      "status": "completed",
+      "summary": "",
+      "state_transition": {
+        "requested_group": null,
+        "reason": null
+      },
+      "changes": {
+        "branch": null,
+        "commits": [],
+        "files_touched": [],
+        "pr_url": null
+      },
+      "validation": {
+        "acceptance_all_met": null,
+        "ran": [],
+        "notes": null
+      },
+      "progress": {
+        "phase": null,
+        "checkpoints": {}
+      },
+      "autonomy": {
+        "score": 0,
+        "type": "none",
+        "reason": "",
+        "question_for_human": null,
+        "safe_to_continue": true
+      },
+      "blockers": []
+    }
+  },
+  "rich": {
+    "input": {
+      "status": "paused",
+      "summary": "need input",
+      "autonomy": {
+        "score": 7,
+        "type": "decision",
+        "question_for_human": "q?"
+      },
+      "changes": {
+        "branch": "b",
+        "commits": [
+          "c1"
+        ]
+      },
+      "validation": {
+        "ran": [
+          "pytest"
+        ]
+      },
+      "progress": {
+        "phase": "implementing"
+      },
+      "blockers": [
+        "PIDASHCONV-1"
+      ],
+      "extra_unknown_key": "dropped"
+    },
+    "output": {
+      "status": "paused",
+      "summary": "need input",
+      "state_transition": {
+        "requested_group": null,
+        "reason": null
+      },
+      "changes": {
+        "branch": "b",
+        "commits": [
+          "c1"
+        ],
+        "files_touched": [],
+        "pr_url": null
+      },
+      "validation": {
+        "acceptance_all_met": null,
+        "ran": [
+          "pytest"
+        ],
+        "notes": null
+      },
+      "progress": {
+        "phase": "implementing",
+        "checkpoints": {}
+      },
+      "autonomy": {
+        "score": 7,
+        "type": "decision",
+        "reason": "",
+        "question_for_human": "q?",
+        "safe_to_continue": true
+      },
+      "blockers": [
+        "PIDASHCONV-1"
+      ]
+    }
+  }
+}

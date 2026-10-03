@@ -1,0 +1,593 @@
+{
+  "_trace": "orchestration/scheduling.py:462-518 (_on_run_ended: kind guard 476-482, no-yield defaults 484-496, pending kept 498-501, stopping 503-510, keep-ticking 512-518); kind_for is identity on template_name (prompting/recipes.py:142-152, out of scope)",
+  "_method": "live reconcile on pidash_524_scratch; clock frozen 2026-06-01T12:00Z, random.seed(52405) per event, states set via queryset update (orchestration Issue signals disconnected)",
+  "cases": {
+    "R1_stopping_done": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "run_ended(review run, status=done)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "done:stopped"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "terminal_signal",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-12"
+    },
+    "R1_stopping_blocked": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "run_ended(review run, status=blocked)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "blocked:stopped"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "terminal_signal",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-13"
+    },
+    "R1_stopping_waiting_on_human": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "run_ended(review run, status=waiting_on_human)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "waiting_on_human:stopped"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "terminal_signal",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-14"
+    },
+    "R2_continuing_progressed": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "run_ended(coding-task run, status=progressed)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "progressed:keep-ticking"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T15:01:45.493780+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-15"
+    },
+    "R2_continuing_waiting_on_external": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "run_ended(coding-task run, status=waiting_on_external)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "waiting_on_external:keep-ticking"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T15:01:45.493780+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-16"
+    },
+    "R2c_continuing_keeps_next_run_at": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "run_ended(coding-task run, status=progressed)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "progressed:keep-ticking"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-17"
+    },
+    "R3_stage_moved_on_guard": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": true,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "run_ended(coding-task run w/ done, issue now In Review)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "stage-moved-on"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": true,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-18"
+    },
+    "R4a_no_yield_completed_coding": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "run_ended(completed coding-task, no status)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "progressed:keep-ticking"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-19"
+    },
+    "R4b_no_yield_completed_review": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "run_ended(completed review, no status)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "done:stopped"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "terminal_signal",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-20"
+    },
+    "R4c_no_yield_paused_awaiting": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "run_ended(paused_awaiting_input, no payload)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "waiting_on_human:stopped"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "terminal_signal",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-21"
+    },
+    "R4d_no_yield_failed": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "run_ended(failed, no payload)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "progressed:keep-ticking"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-22"
+    },
+    "R5_pending_entry_kept": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": true,
+        "pending_entry_free": true,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "run_ended(review run w/ done, pending entry set)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "done:pending-entry-kept"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": true,
+        "pending_entry_free": true,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-23"
+    },
+    "R6_prior_cap_hit_preserved": {
+      "before": {
+        "used": 10,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "cap_hit",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "run_ended(coding-task run w/ done, clock cap_hit)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "done:already-stopped"
+      },
+      "after": {
+        "used": 10,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "cap_hit",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-24"
+    },
+    "R7_not_in_bucket": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "event": "run_ended(done run, issue Done)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "not-in-bucket"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "issue": "FX5-25"
+    },
+    "R8_no_ticker": {
+      "before": null,
+      "event": "run_ended(done run, no ticker)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "no-ticker"
+      },
+      "after": null,
+      "issue": "FX5-26"
+    }
+  }
+}
