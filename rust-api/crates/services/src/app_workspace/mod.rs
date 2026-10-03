@@ -6,6 +6,8 @@
 //! (this module) for the services layer, bottom-up:
 //!
 //! * [`ser_workspace`] — workspace + member serializers (PIDASHCONV-600).
+//! * [`ser_user`] — user serializers: shapes, name guards, me-settings
+//!   (PIDASHCONV-603, F-W24-04).
 //! * [`ser_invite`] — invite + join-request + theme/props serializers
 //!   (`workspace.py:110-194`, PIDASHCONV-601).
 //! * [`ser_account_token`] — profile + account + API-token + favorite
@@ -41,8 +43,9 @@
 //! `TRACE.md`), F-W24-07 (`models/workspace_prefs.columns.json`, incl. the
 //! `UserFavorite` part), F-W24-08 (`models/user_token.columns.json`),
 //! F-W24-09 (`queries/core.sql` + `queries/core.rows.json`), and
-//! F-W24-10 (`queries/membership.sql` + `.rows.json`); the goldens are
-//! the Done-when oracles for this layer.
+//! F-W24-10 (`queries/membership.sql` + `.rows.json`), and F-W24-04
+//! (`rust-api/fixtures/app_workspace/` `serializers/user.golden.json`);
+//! the goldens are the Done-when oracles for this layer.
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 //!
@@ -56,4 +59,5 @@ pub mod queries_membership;
 pub mod ser_account_token;
 pub mod ser_extras;
 pub mod ser_invite;
+pub mod ser_user;
 pub mod ser_workspace;
