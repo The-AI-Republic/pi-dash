@@ -402,3 +402,75 @@ issues / users use fixed seeded UUIDs. Every service call runs under
   H5 active-run-wins; H7 guards (unknown run / non-terminal /
   no marker → `None`); H8 executor-fallback `LOCAL_RUNNER` row;
   H9 active-race returns existing; H6 no target pod → `None`.
+
+## FX-ORCH-07 entries (DB)
+
+Generator `/tmp/fx_orch_07.py` against `pidash_524_scratch` (frozen
+clock 2026-06-01T12:00Z, `random.seed(52407)` before each entry call,
+`fx7-` slugs, fixed seeded UUIDs for projects / states / issues /
+users / bindings, run.id normalized to `<run-id>`). Real reconcile +
+preflight + builders + composer (migrate-seeded templates) except
+where a case stubs a seam (named per case); `dispatch_after_commit` +
+`on_commit` captured. Transition cases set the issue row to `to_state`
+before calling (post-save truth, as the signal would see it) and pass
+`actor=None` so the creator falls back to `issue.created_by`.
+Regeneration is byte-identical (verified).
+
+- `fx07_entries/transition.matrix.json` —
+  `orchestration/service.py:180-300` (`handle_issue_state_transition`):
+  T1 leave-bucket (dormant + `not-a-trigger-state`); T2
+  non-trigger (no clock event); T3 `dispatch_immediate=False`
+  (clock updated, no run); T4 agent move into a spent pool
+  (`pool-spent`; cap = pool + granted + waited); T5/T5b
+  entry-queued (human free with actor memory / agent counting);
+  T6a reconcile reason surfacing (`ticking-disabled`); T6b bare
+  `no-dispatch` (stubbed — every real enter/move path sets a
+  reason); T7 `active-run-exists` (injected — busy always
+  queues through the real reconcile, so the guard is a true
+  race net); T8 `no-creator`; T9 `no-pod-available`;
+  T10 `no-eligible-runner` (real bounce fired; only the reason
+  + landing `Backlog` state + comment head recorded — the bounce
+  matrix is FX-ORCH-08); T11a created DB before/after
+  (`state_transition` / `coding-task`); T11b cross-stage
+  In Progress → In Review (ticker `resume_parent_run` captures
+  the impl run, fresh review run with `parent=None`, review
+  phase kind).
+- `fx07_entries/comment.matrix.json` —
+  `orchestration/service.py:341-346`
+  (`CONTINUATION_ELIGIBLE_GROUPS`), `:349-440`
+  (`handle_issue_comment`): M1 `no-actor`; M2 `bot-comment`;
+  M3 `state-not-eligible`; M4 `no-prior-run`; M5 `coalesced`
+  (into the QUEUED follow-up); M6 `no-pod-available`;
+  M7 `entry-queued` (run in flight, clock queues);
+  M8 `prior-run-active` with rollback (custom `Grooming`
+  state: eligible group, non-ticking name — ticker byte-identical
+  before/after); M9 created DB before/after (`comment_and_run`,
+  parent + pin, clock retimed); M10 builder-no-run rollback
+  (stubbed executor failure — ticker untouched, no run).
+- `fx07_entries/scheduler_dispatch.before_after.json` —
+  `orchestration/service.py:846-1001`
+  (`dispatch_scheduler_run`): S1 created DB before/after
+  (`work_item=None`, `parent=None`, binding linked, `scheduler`
+  trigger, `run_config={}`, dispatch captured); S1b live pod
+  override honored; S2a soft-deleted override → default;
+  S2b cross-project override → default; S3 no-pod string
+  verbatim (`no default pod for project <uuid>`);
+  S4a–d cloud creator chain (chain real, D-11/F-06 seams
+  scripted, chosen actor captured via a spy `execution_fields`:
+  actor wins / bot skipped / no-LLM skipped / no-role skipped);
+  S5 cloud `no current human execution principal`; S5b local
+  `None` actor → real agent system user; S6 outcome-mode
+  refusal string verbatim; S7 admission-error FAILED run
+  returned with `error=None`; S8 render-failure FAILED run
+  returned with `error=None`; S9 executor-unavailable
+  `(None, reason)`.
+- `fx07_entries/signals.golden.json` —
+  `orchestration/signals.py:37-52` (flag constants verbatim),
+  `:61-71` (`capture_prior_state`: new → `None`, existing →
+  DB `state_id`, missing row → `None`), `:74-107`
+  (`fire_state_transition`: G4 no-transition no-op, G5 exact
+  handler args with flag defaults, G5b per-instance flag
+  overrides, G5c `to_state=None` passthrough, G6 raise →
+  swallowed with counter `0→1` and the `ERROR` log record
+  verbatim incl. exception), `:110-116` (`_lookup_state`:
+  `None`/existing/missing → `None`).
