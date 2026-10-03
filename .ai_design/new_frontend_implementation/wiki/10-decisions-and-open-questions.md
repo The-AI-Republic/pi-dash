@@ -28,11 +28,18 @@
 
 | # | Question | Owner |
 |---|---|---|
-| Q1 | License for the new tree and exact header text | human · NEWFRONT-2 |
-| Q2 | Legal review of the reference-not-source process; whether some areas need split spec/implementation runs | human · NEWFRONT-3 |
 | Q4 | Real-time issue updates: is there a server push channel today beyond runner/assistant SSE? Parity requires whatever live behavior `apps/web` has. | investigated by NEWFRONT-27 |
 | Q5 | Annotate internal Django views for OpenAPI (`@extend_schema`) so contracts can be generated later? | human |
 | Q9 | Similarity-check threshold (starting value ≥ 50 duplicated tokens) | set by NEWFRONT-13 |
+
+## Deferred (not blocking)
+
+Deferred by the owner on 2026-10-02 together with the wider AGPL question. These are **not blockers**: no issue waits on them and work continues without them. Until Q1 is decided, new files keep the placeholder header from F-01.
+
+| # | Question | Owner |
+|---|---|---|
+| Q1 | License for the new tree and exact header text | human · NEWFRONT-2 (Backlog) |
+| Q2 | Legal review of the reference-not-source process; whether some areas need split spec/implementation runs | human · NEWFRONT-3 (Backlog) |
 
 ## Risks to keep in mind
 

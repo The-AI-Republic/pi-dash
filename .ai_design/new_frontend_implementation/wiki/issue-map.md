@@ -5,8 +5,8 @@ Generated when the project was set up (2026-09-29). Pi Dash is the source of tru
 | Key | Issue | Title | Blocked by |
 |---|---|---|---|
 | RULEBOOK | NEWFRONT-1 | Rulebook: build apps/web_new (independent code, full functional parity) |  |
-| H-license | NEWFRONT-2 | Decision: license for the new frontend and the file header text |  |
-| H-legal | NEWFRONT-3 | Decision: legal review of the reference-not-source process |  |
+| H-license | NEWFRONT-2 | Decision: license for the new frontend and the file header text | deferred 2026-10-02, not a blocker |
+| H-legal | NEWFRONT-3 | Decision: legal review of the reference-not-source process | deferred 2026-10-02, not a blocker |
 | H-scope | NEWFRONT-4 | Decision: are apps/admin and apps/space in scope? |  |
 | H-visual | NEWFRONT-5 | Decision: visual design direction (tokens, type, density, shell and issue mockups) |  |
 | H-telemetry | NEWFRONT-6 | Decision: telemetry in the new app |  |
@@ -25,7 +25,7 @@ Generated when the project was set up (2026-09-29). Pi Dash is the source of tru
 | F-08 | NEWFRONT-19 | F-08: parity harness — seeded stack, driver interface, drivers/web, parity report | NEWFRONT-12 |
 | F-09 | NEWFRONT-20 | F-09: web coexistence — migrated-route list, Caddy routing, cross-app links | NEWFRONT-17 |
 | F-10 | NEWFRONT-21 | F-10: baseline and performance CI (web load, desktop startup) | NEWFRONT-17, NEWFRONT-18 |
-| F-11 | NEWFRONT-22 | F-11: apply the final license header | NEWFRONT-12, NEWFRONT-2 |
+| F-11 | NEWFRONT-22 | F-11: apply the final license header | NEWFRONT-12 (NEWFRONT-2 deferred, not a blocker) |
 | I-auth | NEWFRONT-23 | Inventory: Auth, sign-up, invitations, onboarding, create workspace |  |
 | O-auth | NEWFRONT-24 | Oracle scenarios: Auth, sign-up, invitations, onboarding, create workspace | NEWFRONT-23, NEWFRONT-19 |
 | I-shell | NEWFRONT-25 | Inventory: Workspace shell, home, projects list, command palette / Power K, search |  |
@@ -102,8 +102,9 @@ Generated when the project was set up (2026-09-29). Pi Dash is the source of tru
 | E-admin | NEWFRONT-98 | Epic: Instance admin (god-mode): general, email, auth providers, AI, images, loop, workspaces | NEWFRONT-95, NEWFRONT-10, NEWFRONT-17, NEWFRONT-20 |
 | E-space | NEWFRONT-99 | Epic: Public boards (space): published project boards and public issue view | NEWFRONT-97, NEWFRONT-10, NEWFRONT-17, NEWFRONT-20, NEWFRONT-71 |
 | M-01 | NEWFRONT-92 | M-01: switch the desktop app to apps/web_new; remove desktop-overlay | NEWFRONT-69, NEWFRONT-70, NEWFRONT-71, NEWFRONT-72, NEWFRONT-73, NEWFRONT-74, NEWFRONT-75, NEWFRONT-76, NEWFRONT-77, NEWFRONT-18, NEWFRONT-21 |
-| M-02 | NEWFRONT-93 | M-02: remove apps/web, apps/admin, apps/space and the old frontend packages | NEWFRONT-69, NEWFRONT-70, NEWFRONT-71, NEWFRONT-72, NEWFRONT-73, NEWFRONT-74, NEWFRONT-75, NEWFRONT-76, NEWFRONT-77, NEWFRONT-78, NEWFRONT-79, NEWFRONT-80, NEWFRONT-81, NEWFRONT-82, NEWFRONT-83, NEWFRONT-84, NEWFRONT-85, NEWFRONT-86, NEWFRONT-87, NEWFRONT-88, NEWFRONT-89, NEWFRONT-90, NEWFRONT-91, NEWFRONT-98, NEWFRONT-99, NEWFRONT-92, NEWFRONT-11, NEWFRONT-3 |
+| M-02 | NEWFRONT-93 | M-02: remove apps/web, apps/admin, apps/space and the old frontend packages | NEWFRONT-69, NEWFRONT-70, NEWFRONT-71, NEWFRONT-72, NEWFRONT-73, NEWFRONT-74, NEWFRONT-75, NEWFRONT-76, NEWFRONT-77, NEWFRONT-78, NEWFRONT-79, NEWFRONT-80, NEWFRONT-81, NEWFRONT-82, NEWFRONT-83, NEWFRONT-84, NEWFRONT-85, NEWFRONT-86, NEWFRONT-87, NEWFRONT-88, NEWFRONT-89, NEWFRONT-90, NEWFRONT-91, NEWFRONT-98, NEWFRONT-99, NEWFRONT-92, NEWFRONT-11 (NEWFRONT-3 deferred, not a blocker) |
 | F-12 | NEWFRONT-102 | F-12: similarity check — exclude AI Republic's own code from the old-code corpus |  |
 | AUDIT | NEWFRONT-103 | Coverage audit: every route, component, service method and shortcut of the old frontends is in some inventory | all 25 inventory issues (blocks NEWFRONT-8, -9, -10) |
 | D17-API | NEWFRONT-104 | Pages API: serve child pages to the web app (nested pages, D17) | — (blocks NEWFRONT-83) |
 | F-12 | NEWFRONT-102 | F-12: similarity check — exclude AI Republic own code | — (blocks NEWFRONT-74, -75, -77) |
+| AMEND | NEWFRONT-156 | Inventory amendments: make inventories match target behavior from in-flight main PRs | — (blocks NEWFRONT-69, -70, -71, -73, -74, -75, -77, -88, -89, -90, -91, -98, -99) |
