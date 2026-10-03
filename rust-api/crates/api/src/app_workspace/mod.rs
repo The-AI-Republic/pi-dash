@@ -7,12 +7,13 @@
 //! decorators (F-W24-13, PIDASHCONV-613) over the F-06 kernel for the
 //! D-24 handler issues (PIDASHCONV-615…624) to decide through.
 //!
-//! Route registration and handlers belong to those handler issues;
-//! this module only declares the guard layer they wire through, not a
-//! stub — sibling issues extend it; merges keep both sides.
+//! Route registration and handlers belong to those handler issues:
+//! each owns one `handlers_*.rs` module exposing `routes()`, merged
+//! below (sibling issues extend the merge; merges keep both sides).
 
 pub mod gates;
 pub mod handlers_prefs;
+pub mod handlers_tokens;
 pub mod handlers_user_extras;
 
 use axum::Router;
@@ -23,5 +24,7 @@ use crate::state::AppState;
 /// (sibling D-24 handler issues extend this merge; merges keep both
 /// sides), merged here for the F-10 overlay seam.
 pub fn routes() -> Router<AppState> {
-    handlers_prefs::routes().merge(handlers_user_extras::routes())
+    handlers_prefs::routes()
+        .merge(handlers_tokens::routes())
+        .merge(handlers_user_extras::routes())
 }
