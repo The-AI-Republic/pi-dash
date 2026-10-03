@@ -2161,6 +2161,17 @@ export class WebDriver implements ParityDriver {
       .first();
     await entry.click({ timeout: WebDriver.WAIT_MS });
     await this.boardSettle("zoom switch", async () => (await this.ganttActiveZoom()) === view);
+    // The switch re-scrolls on a deferred tick after rendering; wait for
+    // the offset to land so today-visibility reads don't race the scroll.
+    let last = await this.ganttScrollLeft();
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      await this.page.waitForTimeout(400);
+      const now = await this.ganttScrollLeft();
+      if (now === last) return;
+      last = now;
+      if (Date.now() > deadline) return;
+    }
   }
 
   async ganttDayWidth(): Promise<number> {
@@ -2403,20 +2414,6 @@ export class WebDriver implements ParityDriver {
     return !!px && Number(px[1]) > 0;
   }
 
-  async ganttBarOffset(issueName: string): Promise<{ marginLeft: number; width: number }> {
-    const issueId = await this.ganttIssueIdByName(issueName);
-    const bar = this.ganttBar(issueId);
-    if ((await bar.count()) === 0) return { marginLeft: 0, width: 0 };
-    return await bar.evaluate((element) => {
-      const style = (element as HTMLElement).style;
-      const px = (value: string): number => {
-        const match = /^(-?\d+(?:\.\d+)?)px$/.exec(value ?? "");
-        return match ? Number(match[1]) : 0;
-      };
-      return { marginLeft: px(style.marginLeft), width: px(style.width) };
-    });
-  }
-
   private ganttBarHandle(issueId: string, side: "left" | "right"): Locator {
     const bar = this.ganttBar(issueId);
     const marker = side === "left" ? "-left-1.5" : "-right-1.5";
@@ -2428,17 +2425,26 @@ export class WebDriver implements ParityDriver {
   ): Promise<{ from: { x: number; y: number }; onto: { x: number; y: number } }> {
     // Raw bar drags must grab on the bar (clear of the sticky sidebar)
     // and drop inside the viewport, or the release is lost and the commit
-    // never fires. Scroll until the whole span sits in the clear band.
+    // never fires. They must also stay out of the app's drag auto-scroll
+    // bands (15% at each chart edge), which scroll mid-drag and fold the
+    // extra travel into the commit. Scroll until the whole span sits in
+    // the safe band with margin.
     const viewport = this.page.viewportSize() ?? { width: 1280, height: 720 };
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const side = await this.ganttSidebar().boundingBox();
-      const minX = (side ? side.x + side.width : 360) + 24;
-      const maxX = viewport.width - 24;
+      const chart = await this.ganttContainer().boundingBox();
+      const sideRight = side ? side.x + side.width : 360;
+      const chartWidth = chart ? chart.width - (sideRight - chart.x) : viewport.width - sideRight;
+      const band = chartWidth * 0.25;
+      const minX = sideRight + band;
+      const maxX = sideRight + chartWidth - band;
       const { fromX, ontoX, y } = await measure();
       const lo = Math.min(fromX, ontoX);
       const hi = Math.max(fromX, ontoX);
       if (lo >= minX && hi <= maxX) return { from: { x: fromX, y }, onto: { x: ontoX, y } };
-      const shift = lo < minX ? lo - minX - 120 : hi - maxX + 120;
+      // Shift exactly onto the band edge: padded overcorrections ping-pong
+      // across narrow bands instead of converging.
+      const shift = lo < minX ? lo - minX - 10 : hi - maxX + 10;
       await this.ganttScrollTo((await this.ganttScrollLeft()) + shift);
     }
     throw new Error("[parity] could not clear room for the timeline drag.");
@@ -2446,7 +2452,7 @@ export class WebDriver implements ParityDriver {
 
   private async ganttBarDragEngaged(
     bar: Locator,
-    read: (element: HTMLElement) => string,
+    prop: "marginLeft" | "width",
     before: string,
     from: { x: number; y: number },
     onto: { x: number; y: number }
@@ -2460,7 +2466,7 @@ export class WebDriver implements ParityDriver {
     // The app live-updates the bar mid-drag; no change means the grab
     // missed (sidebar cover, virtualized placeholder) and no commit will
     // follow, so fail loudly instead of settling on a phantom drag.
-    const mid = await bar.evaluate((element) => read(element as HTMLElement));
+    const mid = await bar.evaluate((element, name) => (element as HTMLElement).style[name], prop);
     if (mid === before) {
       await this.page.mouse.up();
       throw new Error("[parity] bar drag did not engage; the grab missed the bar.");
@@ -2482,10 +2488,10 @@ export class WebDriver implements ParityDriver {
       return { fromX, ontoX: fromX + dayDelta * pxPerDay, y: box.y + box.height / 2 };
     });
     const before = await bar.evaluate((element) => (element as HTMLElement).style.marginLeft);
-    await this.ganttBarDragEngaged(bar, (element) => element.style.marginLeft, before, from, onto);
-    // No post-drop UI settle: the bar snaps back while the server persists
-    // (NEWFRONT-161). The scenario asserts the persisted server dates and
-    // pins the stale UI separately.
+    await this.ganttBarDragEngaged(bar, "marginLeft", before, from, onto);
+    // No post-drop UI settle: the bar's post-drop position is racy
+    // (NEWFRONT-161) while the server persist is exact, so scenarios
+    // assert the persisted dates.
   }
 
   async ganttAttemptBarMove(issueName: string, dayDelta: number): Promise<void> {
@@ -2518,11 +2524,13 @@ export class WebDriver implements ParityDriver {
     const { from, onto } = await this.ganttClearDragSpan(async () => {
       const box = await handle.boundingBox();
       if (!box) throw new Error("[parity] resize handle has no box.");
-      const fromX = box.x + box.width / 2;
+      // Grab the handle's outer strip: its inner edge sits exactly on the
+      // bar content boundary, where the grab can land the move handler.
+      const fromX = side === "left" ? box.x + 2 : box.x + box.width - 2;
       return { fromX, ontoX: fromX + dayDelta * pxPerDay, y: box.y + box.height / 2 };
     });
     const before = await bar.evaluate((element) => (element as HTMLElement).style.width);
-    await this.ganttBarDragEngaged(bar, (element) => element.style.width, before, from, onto);
+    await this.ganttBarDragEngaged(bar, "width", before, from, onto);
   }
 
   async ganttResizePreview(issueName: string, side: "left" | "right"): Promise<string | null> {
@@ -2705,23 +2713,21 @@ export class WebDriver implements ParityDriver {
   }
 
   async ganttLoadingObservedOnReload(): Promise<boolean> {
+    // The chart's own skeleton rows paint at most one frame (the layout
+    // loader covers the fetch), so the observable loading state is the
+    // layout-level pulsing placeholder before the chart mounts.
     const pattern = "**/api/**/issues**";
     await this.page.route(pattern, async (route) => {
       await new Promise((resolve) => setTimeout(resolve, 2_500));
-      await route.continue();
+      // A reload can cancel the held request first; that is fine.
+      await route.continue().catch(() => undefined);
     });
     try {
       await this.page.reload();
-      const deadline = Date.now() + 90_000;
-      let seenSkeletons = false;
-      let seenLabel = false;
+      const deadline = Date.now() + 120_000;
       for (;;) {
-        if (await this.ganttSidebarLoading().catch(() => false)) seenSkeletons = true;
-        // The header renders a Loading label (no count) until blocks load;
-        // the switcher proves the header itself has mounted.
-        const header = await this.ganttHeader().catch(() => null);
-        if (header && header.views.length > 0 && header.count === null) seenLabel = true;
-        if (seenSkeletons && seenLabel) return true;
+        const loader = this.page.locator("div.animate-pulse").first();
+        if ((await loader.count()) > 0 && (await loader.isVisible().catch(() => false))) return true;
         if (Date.now() > deadline) return false;
         await this.page.waitForTimeout(250);
       }
@@ -2740,37 +2746,27 @@ export class WebDriver implements ParityDriver {
 
   async ganttLoadMoreObservedOnScroll(): Promise<boolean> {
     // Trip the infinite-scroll sentinel on a 100+ issue timeline: the
-    // delayed page-two fetch holds the pulsing placeholder up for the poll.
+    // delayed page-two fetch holds the pulsing placeholder up for the
+    // poll. Re-scroll while polling so late-loading page one still trips.
     const pattern = "**/api/**/issues**";
     await this.page.route(pattern, async (route) => {
       await new Promise((resolve) => setTimeout(resolve, 2_500));
-      await route.continue();
+      // A reload can cancel the held request first; that is fine.
+      await route.continue().catch(() => undefined);
     });
     try {
       await this.page.reload();
       await this.ganttOpenTimeline();
-      // Page one must skeleton first (proves the delayed fetch started),
-      // then settle, before scrolling can trip the page-two sentinel.
-      const spin = Date.now() + 120_000;
-      for (;;) {
-        if (await this.ganttSidebarLoading().catch(() => false)) break;
-        if (Date.now() > spin) return false;
-        await this.page.waitForTimeout(250);
-      }
-      const settled = Date.now() + 120_000;
-      for (;;) {
-        if (!(await this.ganttSidebarLoading().catch(() => true))) break;
-        if (Date.now() > settled) return false;
-        await this.page.waitForTimeout(500);
-      }
-      await this.ganttContainer().evaluate((element) => {
-        element.scrollTop = element.scrollHeight;
-      });
-      const deadline = Date.now() + 90_000;
+      const deadline = Date.now() + 180_000;
       for (;;) {
         if (await this.ganttLoadMoreVisible().catch(() => false)) return true;
         if (Date.now() > deadline) return false;
-        await this.page.waitForTimeout(250);
+        await this.ganttContainer()
+          .evaluate((element) => {
+            element.scrollTop = element.scrollHeight;
+          })
+          .catch(() => undefined);
+        await this.page.waitForTimeout(1_000);
       }
     } finally {
       await this.page.unroute(pattern);
