@@ -11,16 +11,24 @@
 //!   `GithubPullRequestLink`, `GitCodeReviewLink`, `FileAsset` (reuse)
 //!   (PIDASHCONV-645).
 //!
-//! Sibling models issues (PIDASHCONV-646/647) add their own `models_*.rs`
-//! files here and re-export their row structs below next to
+//! * [`models_engage`] — `IssueComment`, `CommentReaction`,
+//!   `IssueReaction`, `IssueVote`, `IssueSubscriber` (PIDASHCONV-646).
+//!
+//! The sibling models issue (PIDASHCONV-647) adds its own `models_*.rs`
+//! file here and re-exports its row structs below next to
 //! [`models_core`]'s.
 
 pub mod models_core;
+pub mod models_engage;
 pub mod models_links;
 
 pub use models_core::{
     issue::Issue, issue_assignee::IssueAssignee, issue_label::IssueLabel, label::Label,
     project_user_property::ProjectUserProperty, OnDelete,
+};
+pub use models_engage::{
+    comment_reaction::CommentReaction, issue_comment::IssueComment, issue_reaction::IssueReaction,
+    issue_subscriber::IssueSubscriber, issue_vote::IssueVote,
 };
 pub use models_links::{
     file_asset::FileAsset, git_code_review_link::GitCodeReviewLink,
